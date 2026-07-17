@@ -13,6 +13,23 @@ import type { PanelGeometry, PanelKind } from "../../types/state.js";
 
 export { LABEL_W };
 
+/** CSS class of the resizeable worker-lanes scroll box. */
+export const LANES_VIEWPORT_CLASS = "d9-lanes-viewport";
+
+/**
+ * Width (CSS px) of the worker-lanes box vertical scrollbar, measured live, or 0
+ * when the box is absent / uses overlay scrollbars. The lanes box (not the track
+ * column) owns the scrollbar that every track's draw area must clear, so ALL
+ * tracks reserve this as their right gutter and their time axes line up with the
+ * lanes. `scrollbar-gutter: stable` on the box keeps this constant regardless of
+ * whether the box is currently scrolling, so alignment never flickers.
+ */
+export function lanesScrollbarWidth(columnEl: HTMLElement): number {
+  const box = columnEl.querySelector<HTMLElement>(`.${LANES_VIEWPORT_CLASS}`);
+  if (!box) return 0;
+  return Math.max(0, box.offsetWidth - box.clientWidth);
+}
+
 /**
  * Every track slot in the unified column, in top-to-bottom render order.
  * "timeline" and "lanes" are the two structural tracks above the analysis

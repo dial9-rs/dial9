@@ -10,6 +10,15 @@
 // nothing outside lib/trace ever imports the core module; ./analysis.ts does
 // the same for trace_analysis.js.
 
+// FIRST import: seeds the `TraceDecoder`/`TraceParser` browser globals the
+// frozen core resolves at runtime. loadTraceOnMainThread runs the core parser
+// on the page's main thread, where (unlike Node or the worker bundle) nothing
+// else establishes `globalThis.TraceDecoder`; without this the first parse
+// throws "TraceDecoder not found".
+import "./core-globals.js";
+import { ColumnarEvents } from "./columnar-events.js";
+import { ColumnarCpuSamples } from "./columnar-cpu-samples.js";
+import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import {
   EVENT_TYPES,
   OFF_WORKER_WORKER_ID,
@@ -382,6 +391,181 @@ export function loadTraceInWorker(
     if (opts.headers !== undefined) request.headers = opts.headers;
     port.postMessage(request);
   }
+
+  return {
+    done,
+    abort: (): void => {
+      controller.abort();
+    },
+  };
+}
+
+/**
+ * Main-thread equivalent of loadTraceInWorker: fetch + gunzip + parse on the
+ * CALLING thread and write the parsed trace into `store`'s `trace` slice,
+ * exposing the SAME WorkerTraceLoad handle (done/abort) so it is a drop-in for
+ * the worker loader at the page's startLoad seam.
+ *
+ * Why this exists: loadTraceInWorker parses off-thread but must
+ * structured-CLONE the entire ParsedTrace (13M+ events, several Maps) back
+ * across the worker boundary on completion (worker/body.ts posts `trace` by
+ * clone; only the raw buffer transfers zero-copy). For a large trace that
+ * clone is a second full copy of the object graph and blows the worker's
+ * memory budget ("Data cannot be cloned, out of memory"). Parsing here builds
+ * the graph in place with ZERO clone - the legacy (pre-worker) behavior - so
+ * peak memory is one copy, not two.
+ *
+ * Responsiveness: the core parser yields to the event loop on a wall-clock
+ * paint throttle (~5x/s) while firing onParseProgress, so the progress line
+ * still updates and the tab is not fully frozen during the parse. There is no
+ * off-thread parallelism, which is the accepted trade for not cloning; the
+ * separate columnar-representation work is what would cut the parse cost
+ * itself.
+ *
+ * Abort: cooperative. The fetch is cancelled via the shared AbortController;
+ * a compute-bound parse cannot be force-killed (no worker to terminate), so
+ * onParseProgress throws AbortError at the next yield, unwinding the parse.
+ * The store is never touched once aborted.
+ */
+export function loadTraceOnMainThread(
+  store: TraceSliceStore,
+  urls: string | readonly string[],
+  opts: WorkerLoadOptions = {}
+): WorkerTraceLoad {
+  const list = Array.isArray(urls) ? (urls as readonly string[]) : [urls as string];
+  const controller = new AbortController();
+  let settled = false;
+
+  let resolveDone!: (result: WorkerLoadResult) => void;
+  let rejectDone!: (error: unknown) => void;
+  const done = new Promise<WorkerLoadResult>((resolve, reject) => {
+    resolveDone = resolve;
+    rejectDone = reject;
+  });
+  done.catch(() => {});
+
+  const settle = (fn: () => void): void => {
+    if (settled) return;
+    settled = true;
+    fn();
+  };
+
+  controller.signal.addEventListener(
+    "abort",
+    () => {
+      settle(() => {
+        rejectDone(new DOMException("trace load aborted", "AbortError"));
+      });
+    },
+    { once: true }
+  );
+
+  if (opts.signal !== undefined) {
+    if (opts.signal.aborted) {
+      controller.abort();
+    } else {
+      opts.signal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+    }
+  }
+
+  const startMs = performance.now();
+  const mode: "stream" | "buffered" = canStreamDecode() ? "stream" : "buffered";
+  let eventCount = 0;
+  let fetchDoneMs: number | null = null;
+
+  const emit = (
+    phase: "fetching" | "parsing",
+    bytesRead: number,
+    totalBytes: number | null
+  ): void => {
+    opts.onProgress?.({
+      phase,
+      mode,
+      urlCount: list.length,
+      bytesRead,
+      totalBytes,
+      eventCount,
+      startMs,
+      elapsedMs: performance.now() - startMs,
+    });
+  };
+
+  // The parser calls this synchronously at each 100KB/paint-throttle gate;
+  // throwing here is the only lever to unwind a compute-bound parse on abort.
+  const onParseProgress = (p: {
+    bytesRead: number;
+    totalBytes: number | null;
+    eventCount: number;
+  }): void => {
+    if (controller.signal.aborted) {
+      throw new DOMException("trace load aborted", "AbortError");
+    }
+    eventCount = p.eventCount;
+    emit("parsing", p.bytesRead, p.totalBytes);
+  };
+
+  const fetchOpts: FetchOptions = { signal: controller.signal };
+  if (opts.headers !== undefined) fetchOpts.headers = opts.headers;
+  // Columnar event store: the parser writes events into typed-array columns
+  // instead of ~13M fat objects, so peak memory drops ~7x and the parse no
+  // longer GC-thrashes. A fresh store per load (incl. Set/Clear-Range reparse).
+  // Columnar span-event store: SpanEnter/Exit/Close custom events (the ~2.3 GB
+  // of fat span objects that stall a 13M-event parse) route into typed columns;
+  // non-span custom events stay fat. buildSpanDataColumnar reads the columns.
+  const spanEventSink = new ColumnarSpanEvents();
+  const parseOpts: ParseOptions = {
+    onParseProgress,
+    eventSink: new ColumnarEvents(),
+    cpuSampleSink: new ColumnarCpuSamples(),
+    spanEventSink,
+  };
+  if (opts.maxEvents !== undefined) parseOpts.maxEvents = opts.maxEvents;
+  if (opts.startTime !== undefined) parseOpts.startTime = opts.startTime;
+  if (opts.endTime !== undefined) parseOpts.endTime = opts.endTime;
+
+  const run = async (): Promise<{ trace: ParsedTrace; buffer: ArrayBuffer }> => {
+    if (mode === "stream") {
+      emit("parsing", 0, null);
+      return streamTraceWithCapture(list, fetchOpts, parseOpts);
+    }
+    emit("fetching", 0, null);
+    const buffer = await fetchTraces([...list], fetchOpts);
+    fetchDoneMs = performance.now();
+    emit("parsing", 0, buffer.byteLength);
+    const trace = await parseTrace(buffer, parseOpts);
+    return { trace, buffer };
+  };
+
+  run()
+    .then(({ trace, buffer }) => {
+      // Attach the columnar span-event store; buildSpanDataColumnar reads it
+      // instead of the (now non-span-only) fat customEvents array.
+      (trace as { spanEvents?: ColumnarSpanEvents }).spanEvents = spanEventSink;
+      settle(() => {
+        store.update("trace", { trace });
+        const timing: TraceWorkerTiming = {
+          startMs,
+          fetchDoneMs,
+          parseDoneMs: performance.now(),
+          mode,
+          events: trace.events.length,
+          bytes: buffer.byteLength,
+        };
+        resolveDone({ trace, buffer, mode, timing });
+      });
+    })
+    .catch((err: unknown) => {
+      settle(() => {
+        const e = err as { message?: unknown; name?: unknown } | null;
+        const error = new Error(
+          typeof e?.message === "string" ? e.message : String(err)
+        );
+        error.name = typeof e?.name === "string" ? e.name : "Error";
+        rejectDone(error);
+      });
+    });
 
   return {
     done,

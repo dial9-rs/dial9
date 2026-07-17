@@ -9,11 +9,12 @@
 // clobbers it. It is modal while the drop zone / loading view is up
 // (pointer-events block the trace behind); when only the drag overlay shows it
 // is click-through so the `drop` still reaches the document listener. Loading
-// itself runs in the trace worker (loadTraceInWorker); this module only
+// itself runs on the main thread (loadTraceOnMainThread) so the parsed trace
+// is never structured-cloned across a worker boundary; this module only
 // surfaces it.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
-import { loadTraceInWorker, Dial9Creds } from "../../lib/trace/index.js";
+import { loadTraceOnMainThread, Dial9Creds } from "../../lib/trace/index.js";
 import type { ReparseRange } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { EscCascade } from "./esc-cascade.js";
@@ -102,7 +103,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     hasTrace: () => store.getState().trace.trace !== null,
     startLoad:
       options.startLoad ??
-      ((urls, opts) => loadTraceInWorker(store, urls, opts)),
+      ((urls, opts) => loadTraceOnMainThread(store, urls, opts)),
     confirm: options.confirm ?? ((message) => window.confirm(message)),
     onError: options.onError,
     onChange: renderLayer,

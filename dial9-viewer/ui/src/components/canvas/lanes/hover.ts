@@ -3,6 +3,7 @@
 // helper, not a linear per-mousemove scan.
 
 import { findContainingSpan, findSpanAt } from "../../../lib/trace/query.js";
+import type { ColumnarSpans } from "../../../lib/trace/columnar-spans.js";
 import type {
   ActiveSpan,
   BlockInPlaceGap,
@@ -58,8 +59,11 @@ export interface LaneHoverInput {
   workerId: number;
   ns: number;
   spans: WorkerLane;
-  /** All completed spans, start-sorted (span detail + span-in-poll count). */
+  /** All completed spans, start-sorted (span detail + span-in-poll count).
+   * EMPTY on the columnar path - read `columnarSpans` instead. */
   allSpans: readonly TracingSpan[];
+  /** Columnar span store (main-thread path); span lookups dispatch on it. */
+  columnarSpans?: ColumnarSpans;
   /** Global injection-queue series {t, global}, sorted by t. */
   queueSamples: readonly { t: number; global: number }[];
   /** This worker's local-queue series {t, local}, sorted by t. */
@@ -165,13 +169,29 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
     // Spans whose segments run entirely inside this poll on this worker.
     let spanCount = 0;
     const spanNames: Record<string, number> = {};
-    for (const sp of input.allSpans) {
-      if (sp.start > hitPoll.end) break; // start-sorted: nothing later overlaps
-      if (sp.end < hitPoll.start) continue;
-      for (const seg of sp.segments) {
-        if (seg.workerId === workerId && seg.start >= hitPoll.start && seg.end <= hitPoll.end) {
-          spanCount++;
-          spanNames[sp.spanName] = (spanNames[sp.spanName] ?? 0) + 1;
+    const cs = input.columnarSpans;
+    if (cs) {
+      for (let r = 0; r < cs.length; r++) {
+        if (cs.start[r] > hitPoll.end) break; // start-sorted
+        if (cs.end[r] < hitPoll.start) continue;
+        const lo = cs.segOff[r], hi = cs.segOff[r + 1];
+        for (let j = lo; j < hi; j++) {
+          if (cs.segWorker[j] === workerId && cs.segStart[j] >= hitPoll.start && cs.segEnd[j] <= hitPoll.end) {
+            spanCount++;
+            const nm = cs.spanNameAt(r);
+            spanNames[nm] = (spanNames[nm] ?? 0) + 1;
+          }
+        }
+      }
+    } else {
+      for (const sp of input.allSpans) {
+        if (sp.start > hitPoll.end) break; // start-sorted: nothing later overlaps
+        if (sp.end < hitPoll.start) continue;
+        for (const seg of sp.segments) {
+          if (seg.workerId === workerId && seg.start >= hitPoll.start && seg.end <= hitPoll.end) {
+            spanCount++;
+            spanNames[sp.spanName] = (spanNames[sp.spanName] ?? 0) + 1;
+          }
         }
       }
     }
@@ -193,16 +213,16 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
 
   // Span detail: outermost span with a segment on this worker at `ns`.
   let span: HoverSpanInfo | null = null;
-  const hitSpan = findContainingSpan(input.allSpans, workerId, ns);
+  const hitSpan = findContainingSpan(input.allSpans, workerId, ns, input.columnarSpans);
   if (hitSpan) {
     let parentName: string | null = null;
     if (hitSpan.parentSpanId != null) {
-      const parent = input.allSpans.find(
-        (s) =>
-          s.spanId === hitSpan.parentSpanId &&
-          s.start <= hitSpan.start &&
-          s.end >= hitSpan.end,
-      );
+      const cs2 = input.columnarSpans;
+      const parent = cs2
+        ? (() => { const r = cs2.spanIdToRow.get(hitSpan.parentSpanId!); if (r === undefined) return undefined; const p = cs2.at(r); return p.start <= hitSpan.start && p.end >= hitSpan.end ? p : undefined; })()
+        : input.allSpans.find(
+            (s) => s.spanId === hitSpan.parentSpanId && s.start <= hitSpan.start && s.end >= hitSpan.end,
+          );
       parentName = parent ? parent.spanName : null;
     }
     span = {

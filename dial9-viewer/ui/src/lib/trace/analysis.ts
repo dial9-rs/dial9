@@ -18,7 +18,6 @@ export {
   buildProcessCpuUsageSeries,
   buildRuntimeFilterData,
   buildSpanData,
-  buildWorkerSpans,
   collectDescendants,
   computePollWakes,
   computeRuntimeGroups,
@@ -30,6 +29,29 @@ export {
   hasCpuProfileSamples,
   selectSpanRenderSet,
 } from "../../../trace_analysis.js";
+
+// buildWorkerSpans is DISPATCHED, not a pure re-export: the frozen core version
+// retains event objects (incompatible with the columnar event store the new
+// viewer uses), so a columnar `trace.events` is routed to the columnar
+// reimplementation. A fat `events` array (legacy pages, node tests) keeps the
+// byte-identical frozen path.
+import { buildWorkerSpans as frozenBuildWorkerSpans } from "../../../trace_analysis.js";
+import { ColumnarEvents } from "./columnar-events.js";
+import { buildWorkerSpansColumnar } from "./worker-spans-columnar.js";
+import type { BlockInPlaceGap, WorkerSpansResult } from "../../../trace_analysis.js";
+import type { TraceEvent } from "../../../trace_parser.js";
+
+export function buildWorkerSpans(
+  events: readonly TraceEvent[] | ColumnarEvents,
+  workerIds: readonly number[],
+  maxTs: number,
+  blockInPlaceGaps?: readonly BlockInPlaceGap[]
+): WorkerSpansResult {
+  if (events instanceof ColumnarEvents) {
+    return buildWorkerSpansColumnar(events, workerIds, maxTs, blockInPlaceGaps);
+  }
+  return frozenBuildWorkerSpans(events, workerIds, maxTs, blockInPlaceGaps);
+}
 
 export type {
   ActiveSpan,

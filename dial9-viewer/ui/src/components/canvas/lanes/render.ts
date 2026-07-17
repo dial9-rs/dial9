@@ -38,11 +38,23 @@ import {
   type StrokeStyleSpec,
 } from "../../../lib/canvas/stroke.js";
 import { pollColor } from "../../../lib/canvas/palette.js";
+import { laneRowLayout } from "../../../lib/canvas/layout.js";
+import type { LaneRowLayout } from "../../../lib/canvas/layout.js";
 import { findSpanAt } from "../../../lib/trace/query.js";
+import type { WorkerLaneView } from "../../../lib/trace/columnar-worker-spans.js";
 
 /** The per-lane reference height. Band offsets below are expressed against
  *  this and scaled to the real row height. */
 export const LANE_REF_H = 60;
+
+/** The FIXED per-worker row height. Rows no longer flex to fit the track: N
+ *  workers stack at LANE_ROW_H each and the lanes box scrolls, so 64+ workers
+ *  stay legible + clickable instead of collapsing to slivers. Equal to
+ *  LANE_REF_H so the band scale factor is 1. */
+export const LANE_ROW_H = 60;
+
+/** Runtime-group header band height (drawn only when >1 runtime group). */
+export const RUNTIME_HEADER_H = 24;
 
 /** The minimal 2D-context surface renderLanes needs (Node-testable). */
 export interface LaneDrawContext extends StrokePathContext {
@@ -92,29 +104,36 @@ export interface LanesRenderInput {
 export interface LanesLayout {
   /** Shared ns<->x mapping (labelW-shifted; we subtract labelW for local x). */
   time: TimePanelLayout;
-  /** Total canvas height in CSS px (divided evenly across workers). */
+  /** Visible canvas height in CSS px (the resizeable lanes box; the canvas is
+   *  sized to this, NOT to the full stacked content - the content scrolls). */
   height: number;
   /**
-   * Px reserved at the BOTTOM for the overlaid legend, so the last worker row
-   * is never hidden under it. Worker rows lay out into `height - bottomInset`;
-   * the full `height` is still cleared. Default 0.
+   * The runtime-aware vertical stack (fixed-height worker rows + optional
+   * headers), lanes-local before scroll. Omit for a headerless fixed-height
+   * stack over `input.workerIds` (used by unit tests + the single-runtime
+   * fallback).
    */
-  bottomInset?: number;
+  rowLayout?: LaneRowLayout;
+  /** Scroll offset of the lanes box (px). Rows draw at `row.y - scrollTop` and
+   *  the canvas bounds clip anything scrolled past its edges. Default 0. */
+  scrollTop?: number;
 }
 
 const spanDur = (s: { start: number; end: number }): number => s.end - s.start;
 
 /** First index whose span could be visible (end >= viewStart); binary search
- *  over a start-sorted, non-overlapping span array. */
+ *  over a start-sorted, non-overlapping span list. Reads via `.at(i)` so a
+ *  columnar lane view backs it (arrays' `.at` returns the same element `[i]`
+ *  would). */
 function firstVisible(
-  spans: readonly { start: number; end: number }[],
+  spans: { readonly length: number; at(i: number): { start: number; end: number } | undefined },
   viewStart: number,
 ): number {
   let lo = 0;
   let hi = spans.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (spans[mid]!.end < viewStart) lo = mid + 1;
+    if (spans.at(mid)!.end < viewStart) lo = mid + 1;
     else hi = mid - 1;
   }
   return lo;
@@ -205,14 +224,25 @@ export function renderLanes(
   layout: LanesLayout,
 ): void {
   const drawW = layout.time.drawW;
-  const totalH = layout.height;
+  const viewportH = layout.height;
   const n = input.workerIds.length;
-  // Worker rows lay out above the reserved legend band; the full canvas is
-  // still cleared to totalH below so no stale pixels show through it.
-  const drawableH = totalH - (layout.bottomInset ?? 0);
-  if (drawW <= 0 || drawableH <= 0 || n === 0) return;
+  if (drawW <= 0 || viewportH <= 0 || n === 0) return;
 
-  const laneH = drawableH / n;
+  const scrollTop = layout.scrollTop ?? 0;
+  // Fixed row height (no divide-by-N collapse); sf = 1 since LANE_ROW_H ==
+  // LANE_REF_H, but keep it derived so the reference can change independently.
+  const laneH = LANE_ROW_H;
+  const sf = laneH / LANE_REF_H;
+  // Rows: the runtime-aware stack, or a single headerless group over the flat
+  // worker list (unit tests / single-runtime fallback).
+  const rowLayout =
+    layout.rowLayout ??
+    laneRowLayout(
+      [{ name: "", inferred: true, workerIds: [...input.workerIds] }],
+      laneH,
+      RUNTIME_HEADER_H,
+    );
+
   const labelW = layout.time.labelW;
   const nsToX = (ns: number): number => layout.time.nsToPanelX(ns) - labelW;
   const { viewStart, viewEnd } = input;
@@ -221,14 +251,26 @@ export function renderLanes(
   // key and stroke ONCE each at the end.
   const batcher = makeStrokeBatcher();
 
-  ctx.clearRect(0, 0, drawW, totalH);
+  ctx.clearRect(0, 0, drawW, viewportH);
 
-  for (let row = 0; row < n; row++) {
-    const workerId = input.workerIds[row]!;
+  const viewBot = scrollTop + viewportH;
+  for (const r of rowLayout.rows) {
+    // Cull rows fully outside the visible scroll window; partially-visible rows
+    // draw at a negative/overflowing top and the canvas bounds clip them.
+    if (r.y + r.height <= scrollTop || r.y >= viewBot) continue;
+    const top = r.y - scrollTop;
+
+    if (r.kind === "header") {
+      drawRuntimeHeader(ctx, r, drawW, top);
+      continue;
+    }
+
+    const workerId = r.workerId;
     const spans = input.workerSpans[workerId];
     if (!spans) continue;
-    const top = row * laneH;
-    const sf = laneH / LANE_REF_H;
+    // Per-row batcher key: the worker's flat index keeps style keys unique +
+    // stable across frames so ticks dedupe within a lane, not across lanes.
+    const row = r.index;
     // Band geometry scaled from the 60px reference.
     const bandTop = top + 10 * sf;
     const bandH = 20 * sf;
@@ -238,7 +280,7 @@ export function renderLanes(
 
     drawLaneBackground(ctx, spans, input, nsToX, drawW, top, laneH, sf);
     drawBlockInPlaceGaps(ctx, batcher, row, input, workerId, nsToX, drawW, top, laneH, sf);
-    drawParks(ctx, spans.parks, input, nsToX, drawW, top, laneH, sf);
+    drawParks(ctx, spans, input, nsToX, drawW, top, laneH, sf);
     drawPolls(ctx, batcher, row, spans, input, nsToX, drawW, bandTop, bandH);
     drawCpuTicks(ctx, spans.cpuSampleTimes, viewStart, viewEnd, nsToX, drawW, bandTop, bandH);
     drawSchedTriangles(ctx, spans.polls, input, nsToX, bandTop, bandH);
@@ -259,6 +301,29 @@ export function renderLanes(
   drawStrokeBatches(ctx, batcher.batches(), strokeStyleOf);
 }
 
+/**
+ * Draw a runtime-group header band across the draw area: a tinted strip with the
+ * runtime name + worker count. Only reached when a trace has more than one
+ * runtime group (e.g. two traces opened together).
+ */
+function drawRuntimeHeader(
+  ctx: LaneDrawContext,
+  row: { name: string; inferred: boolean; workerCount: number; height: number },
+  drawW: number,
+  top: number,
+): void {
+  ctx.fillStyle = "#1b2036";
+  ctx.fillRect(0, top, drawW, row.height);
+  const label = row.inferred ? `${row.name} runtime` : `runtime: ${row.name}`;
+  const count = `${row.workerCount} worker${row.workerCount === 1 ? "" : "s"}`;
+  ctx.fillStyle = "#aeb6e0";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText(label, 8, top + row.height - 8);
+  ctx.fillStyle = "#6b73a0";
+  ctx.fillText(count, drawW - 90, top + row.height - 8);
+}
+
 function drawLaneBackground(
   ctx: LaneDrawContext,
   spans: WorkerLane,
@@ -276,15 +341,20 @@ function drawLaneBackground(
   // CPU scheduling tint: one representative active per pixel column, longest
   // wins. Only when the trace carries CPU time.
   if (!input.hasCpuTime) return;
-  const startIdx = firstVisible(spans.actives, input.viewStart);
-  const reps = pixelDownsampleSpans(
-    spans.actives as ActiveSpan[],
-    startIdx,
-    input.viewStart,
-    input.viewEnd,
-    drawW,
-    spanDur,
-  );
+  const cstore = (spans as Partial<WorkerLaneView>).store;
+  let reps: ActiveSpan[];
+  if (cstore) {
+    const w = (spans as WorkerLaneView).w;
+    const startIdx = cstore.firstVisibleActive(w, input.viewStart);
+    reps = cstore.downsampleActives(
+      w, startIdx, input.viewStart, input.viewEnd, drawW,
+    ) as unknown as ActiveSpan[];
+  } else {
+    const startIdx = firstVisible(spans.actives, input.viewStart);
+    reps = pixelDownsampleSpans(
+      spans.actives as ActiveSpan[], startIdx, input.viewStart, input.viewEnd, drawW, spanDur,
+    );
+  }
   for (const s of reps) {
     const x1 = Math.max(0, nsToX(s.start));
     const x2 = Math.min(drawW, nsToX(s.end));
@@ -334,7 +404,7 @@ function drawBlockInPlaceGaps(
 
 function drawParks(
   ctx: LaneDrawContext,
-  parks: readonly ParkSpan[],
+  spans: WorkerLane,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   drawW: number,
@@ -342,15 +412,20 @@ function drawParks(
   laneH: number,
   sf: number,
 ): void {
-  const startIdx = firstVisible(parks, input.viewStart);
-  const reps = pixelDownsampleSpans(
-    parks as ParkSpan[],
-    startIdx,
-    input.viewStart,
-    input.viewEnd,
-    drawW,
-    spanDur,
-  );
+  const cstore = (spans as Partial<WorkerLaneView>).store;
+  let reps: ParkSpan[];
+  if (cstore) {
+    const w = (spans as WorkerLaneView).w;
+    const startIdx = cstore.firstVisiblePark(w, input.viewStart);
+    reps = cstore.downsampleParks(
+      w, startIdx, input.viewStart, input.viewEnd, drawW,
+    ) as unknown as ParkSpan[];
+  } else {
+    const startIdx = firstVisible(spans.parks, input.viewStart);
+    reps = pixelDownsampleSpans(
+      spans.parks as ParkSpan[], startIdx, input.viewStart, input.viewEnd, drawW, spanDur,
+    );
+  }
   const accentH = 4 * sf;
   for (const s of reps) {
     const x1 = Math.max(0, nsToX(s.start));
@@ -398,21 +473,29 @@ function drawPolls(
   bandH: number,
 ): void {
   const { viewStart, viewEnd, selectedTaskId } = input;
-  const pollStart = firstVisible(spans.polls, viewStart);
-  // Representative weighting: latest starter wins a column (an unbiased colour
-  // sample, not the worst-case red); a selected task's polls force-win so a
-  // short selected poll can't vanish.
-  const weight = selectedTaskId
-    ? (s: PollSpan): number => (s.taskId === selectedTaskId ? Infinity : s.start)
-    : (s: PollSpan): number => s.start;
-  const reps = pixelDownsampleSpans(
-    spans.polls as PollSpan[],
-    pollStart,
-    viewStart,
-    viewEnd,
-    drawW,
-    weight,
-  );
+  const cstore = (spans as Partial<WorkerLaneView>).store;
+  let pollStart: number;
+  let reps: PollSpan[];
+  if (cstore) {
+    // Columnar path: the store binary-searches + LOD-downsamples the poll
+    // columns for the viewport, materializing only the <= drawW representatives.
+    const w = (spans as WorkerLaneView).w;
+    pollStart = cstore.firstVisiblePoll(w, viewStart);
+    reps = cstore.downsamplePolls(
+      w, pollStart, viewStart, viewEnd, drawW, selectedTaskId ?? null,
+    ) as unknown as PollSpan[];
+  } else {
+    pollStart = firstVisible(spans.polls, viewStart);
+    // Representative weighting: latest starter wins a column (an unbiased colour
+    // sample, not the worst-case red); a selected task's polls force-win so a
+    // short selected poll can't vanish.
+    const weight = selectedTaskId
+      ? (s: PollSpan): number => (s.taskId === selectedTaskId ? Infinity : s.start)
+      : (s: PollSpan): number => s.start;
+    reps = pixelDownsampleSpans(
+      spans.polls as PollSpan[], pollStart, viewStart, viewEnd, drawW, weight,
+    );
+  }
 
   const drawCoalesced = (color: (s: PollSpan) => string | null): void => {
     const merge = makeBarCoalescer((x, w, fill) => {
@@ -439,9 +522,10 @@ function drawPolls(
     drawCoalesced((s) => pollColor(s.start, s.end));
   }
 
-  // Open-ended poll markers - dashed right edge, batched.
+  // Open-ended poll markers - dashed right edge, batched. Reads via .at(i) so a
+  // columnar view backs it (bounded: breaks once start passes viewEnd).
   for (let i = pollStart; i < spans.polls.length; i++) {
-    const s = spans.polls[i]!;
+    const s = spans.polls.at(i)!;
     if (s.start > viewEnd) break;
     if (!s.openEnded) continue;
     const x2 = Math.min(drawW, nsToX(s.end));
@@ -518,7 +602,7 @@ function drawSchedTriangles(
   const yTop = bandTop + bandH + 1;
   const yBot = bandTop + bandH + 7;
   for (let i = pollStart; i < polls.length; i++) {
-    const s = polls[i]!;
+    const s = polls.at(i)!;
     if (s.start > viewEnd) break;
     if (!s.schedSamples) continue;
     for (const sample of s.schedSamples) {
@@ -549,7 +633,7 @@ function drawWakerHighlight(
   const pollStart = firstVisible(polls, viewStart);
   ctx.fillStyle = "#ff8a65";
   for (let i = pollStart; i < polls.length; i++) {
-    const s = polls[i]!;
+    const s = polls.at(i)!;
     if (s.start > viewEnd) break;
     if (s.taskId !== waker) continue;
     const x1 = Math.max(0, nsToX(s.start));

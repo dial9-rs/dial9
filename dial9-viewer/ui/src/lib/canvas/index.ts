@@ -6,11 +6,15 @@
 
 export {
   LABEL_W,
+  laneRowLayout,
   laneStackGeometry,
   panelGeometry,
   timePanelLayout,
+  workerAtLaneY,
 } from "./layout.js";
 export type {
+  LaneRow,
+  LaneRowLayout,
   PanelGeometryOpts,
   TimePanelLayout,
   TimePanelLayoutOpts,

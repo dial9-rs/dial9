@@ -16,12 +16,20 @@ import type { StoreState } from "../../../types/state.js";
 import { createCanvasSizer } from "../../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../../lib/canvas/dpr.js";
 import { makeColorDimmer } from "../../../lib/canvas/palette.js";
-import { TRACKS, trackGeometry } from "../../../pages/viewer/track-layout.js";
+import { laneRowLayout } from "../../../lib/canvas/layout.js";
+import type { LaneRowLayout } from "../../../lib/canvas/layout.js";
+import {
+  TRACKS,
+  lanesScrollbarWidth,
+  trackGeometry,
+} from "../../../pages/viewer/track-layout.js";
 import type { TrackId } from "../../../pages/viewer/track-layout.js";
 import { claimTrack } from "../../../pages/viewer/track-renderers.js";
 import { deriveLaneData } from "./data.js";
 import type { LaneData } from "./data.js";
 import {
+  LANE_ROW_H,
+  RUNTIME_HEADER_H,
   type LaneDrawContext,
   type LanesRenderInput,
   renderLanes,
@@ -30,6 +38,15 @@ import {
 import { ensureLanesLegend, mountLanesLegend } from "./legend.js";
 
 const LANES_TRACK_ID: TrackId = "lanes";
+
+/** Drag-resize clamp bounds for the lanes box (CSS px). */
+const MIN_LANES_H = 80;
+const MAX_LANES_VH = 0.7;
+
+function clampLanesHeight(h: number): number {
+  const maxH = typeof window !== "undefined" ? window.innerHeight * MAX_LANES_VH : Infinity;
+  return Math.round(Math.max(MIN_LANES_H, Math.min(maxH, h)));
+}
 
 export interface MountedLanes {
   /** Force one redraw (used after mount / on resize). */
@@ -66,24 +83,31 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     );
   }
 
+  function lanesBox(): HTMLElement | null {
+    return trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
+  }
+
   function draw(): void {
     const state = store.getState() as StoreState;
     const data = laneData();
     if (!data || data.workerIds.length === 0) return;
     const canvas = laneCanvas();
-    if (!canvas) return;
+    const box = lanesBox();
+    if (!canvas || !box) return;
     // Re-attach the legend if a shell re-render replaced the gutter subtree
     // (idempotent no-op once present).
     ensureLanesLegend(trackColumn);
+    ensureScrollListener(box);
 
     const track = TRACKS.find((t) => t.id === LANES_TRACK_ID);
     if (!track) return;
 
     // Batch the column measure once per frame: the shell reads layout in the
-    // same tick; here we read our own canvas host's width + scrollbar.
+    // same tick; here we read our own canvas host's width + the LANES-BOX
+    // scrollbar (the gutter every track reserves so axes align).
     const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
     const pw = trackColumn.clientWidth;
-    const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
+    const scrollbarW = lanesScrollbarWidth(trackColumn);
     const geometry = trackGeometry(track, {
       pw,
       scrollbarW,
@@ -94,12 +118,24 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const drawW = geometry.time.drawW;
     if (drawW <= 0) return;
 
+    // The visible box height (the resizeable window); the canvas is sized to it,
+    // NOT to the full stacked content - the content scrolls behind it.
+    const viewportH = box.clientHeight;
+    if (viewportH <= 0) return;
+
+    // Fixed-height runtime-aware stack (headers only when >1 runtime group).
+    const rowLayout = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
+    // Size the inner spacer so the box scrolls exactly the overflow past the
+    // window (the sticky canvas occupies the first `viewportH` of flow).
+    setSpacerHeight(box, Math.max(0, rowLayout.contentHeight - viewportH));
+    const scrollTop = box.scrollTop;
+
     // Own the canvas's DPR backing store (resize only on geometry change).
     if (sizer === null || sizerCanvas !== canvas) {
       sizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
       sizerCanvas = canvas;
     }
-    const ctx = sizer.ensure(drawW, track.height, dpr) as unknown as LaneDrawContext;
+    const ctx = sizer.ensure(drawW, viewportH, dpr) as unknown as LaneDrawContext;
 
     const sel = state.selection;
     const selectedSpanIds = sel.spanFocus ? sel.spanFocus.chain : EMPTY_SET;
@@ -128,20 +164,86 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       sharedMaxQ,
       dimmer,
     };
-    // Reserve the overlaid legend's height at the bottom so worker rows never
-    // hide under it. Measured live (the legend wraps to more lines at narrow
-    // widths); +6 for its bottom offset + a small gap.
-    const legendEl = trackColumn.querySelector<HTMLElement>(".d9-lanes-legend");
-    const bottomInset = legendEl ? legendEl.offsetHeight + 6 : 0;
     renderLanes(ctx, input, {
       time: geometry.time,
-      height: track.height,
-      bottomInset,
+      height: viewportH,
+      rowLayout,
+      scrollTop,
     });
   }
 
+  // ── Inner scroll: redraw the visible row window on box scroll ─────────────
+
+  let scrolledBox: HTMLElement | null = null;
+  let scrollRaf = 0;
+  const onBoxScroll = (): void => {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => {
+      scrollRaf = 0;
+      draw();
+    });
+  };
+  function ensureScrollListener(box: HTMLElement): void {
+    if (scrolledBox === box) return;
+    scrolledBox?.removeEventListener("scroll", onBoxScroll);
+    box.addEventListener("scroll", onBoxScroll, { passive: true });
+    scrolledBox = box;
+  }
+  function setSpacerHeight(box: HTMLElement, h: number): void {
+    const spacer = box.querySelector<HTMLElement>(".d9-lanes-spacer");
+    if (spacer) spacer.style.height = `${h}px`;
+  }
+
+  // ── Drag-resize the box (mirrors the inspector width resize) ──────────────
+
+  let dragging = false;
+  let pendingH = 0;
+  function boxTop(): number {
+    const box = lanesBox();
+    return box ? box.getBoundingClientRect().top : 0;
+  }
+  function onResizeDown(e: MouseEvent): void {
+    e.preventDefault();
+    dragging = true;
+    trackColumn.ownerDocument.body.style.userSelect = "none";
+    trackColumn.ownerDocument.body.style.cursor = "row-resize";
+    win.addEventListener("mousemove", onResizeMove);
+    win.addEventListener("mouseup", onResizeUp);
+  }
+  function onResizeMove(e: MouseEvent): void {
+    if (!dragging) return;
+    pendingH = clampLanesHeight(e.clientY - boxTop());
+    // Live: size the box + redraw ONLY the lanes canvas (draw() reads the live
+    // box.clientHeight). Deliberately not through the store - a shell re-render
+    // would reset the box height from the not-yet-updated viewmodel and fight
+    // this. The store (and its trackPrefs persistence) commit once on mouseup.
+    const box = lanesBox();
+    if (box) box.style.height = `${pendingH}px`;
+    draw();
+  }
+  function onResizeUp(): void {
+    if (!dragging) return;
+    dragging = false;
+    trackColumn.ownerDocument.body.style.userSelect = "";
+    trackColumn.ownerDocument.body.style.cursor = "";
+    win.removeEventListener("mousemove", onResizeMove);
+    win.removeEventListener("mouseup", onResizeUp);
+    // Commit once: the viewmodel now matches the box, and the uiPrefs ->
+    // trackPrefs subscriber persists the final height.
+    if (pendingH > 0 && pendingH !== (store.getState() as StoreState).uiPrefs.lanesViewportHeight) {
+      store.update("uiPrefs", { lanesViewportHeight: pendingH });
+    }
+  }
+  const doc = trackColumn.ownerDocument;
+  const win = doc.defaultView ?? window;
+  const onColumnDown = (e: MouseEvent): void => {
+    if ((e.target as Element | null)?.closest?.(".d9-lanes-resize")) onResizeDown(e);
+  };
+  trackColumn.addEventListener("mousedown", onColumnDown);
+
   // Only the slices the lanes actually read - NOT uiPrefs (legend chips filter
-  // spans/events, not lanes). A uiPrefs-only change never redraws the lanes.
+  // spans/events, not lanes). A uiPrefs-only change never redraws the lanes; the
+  // resize poke goes through the viewport channel.
   const unsubscribe = store.subscribe(["trace", "viewport", "selection"], () => draw());
 
   // First paint if a trace is already resident; otherwise the subscription
@@ -154,6 +256,11 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       unsubscribe();
       releaseClaim();
       disposeLegend();
+      scrolledBox?.removeEventListener("scroll", onBoxScroll);
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      trackColumn.removeEventListener("mousedown", onColumnDown);
+      win.removeEventListener("mousemove", onResizeMove);
+      win.removeEventListener("mouseup", onResizeUp);
     },
   };
 }

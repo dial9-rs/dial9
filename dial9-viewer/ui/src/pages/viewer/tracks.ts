@@ -15,7 +15,7 @@ import { html, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
 import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, trackGeometry } from "./track-layout.js";
+import { LABEL_W, lanesScrollbarWidth, trackGeometry } from "./track-layout.js";
 import type { TrackId, TrackSpec } from "./track-layout.js";
 import {
   COLLAPSED_TRACK_H,
@@ -57,6 +57,9 @@ export interface TracksViewModel {
    */
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
+  /** Height (CSS px) of the worker-lanes scroll box. The lanes row sizes its
+   *  viewport to this; the user drag-resizes it via the lanes bottom gutter. */
+  lanesViewportHeight: number;
 }
 
 /**
@@ -122,6 +125,7 @@ export function tracksTemplate(
           const eff = effectiveTrack(t, vm.collapsed);
           const inner = innerRow(
             eff,
+            vm,
             spansTrack,
             taskDetailTrack,
             eventsTrack,
@@ -147,11 +151,13 @@ export function tracksTemplate(
  */
 function innerRow(
   t: TrackSpec,
+  vm: TracksViewModel,
   spansTrack?: SpansTrackController,
   taskDetailTrack?: TaskDetailTrackController,
   eventsTrack?: EventsTrackController,
   queueTrack?: QueueTrackController,
 ): TemplateResult {
+  if (t.id === "lanes") return lanesTrackRow(t, vm.lanesViewportHeight);
   if (t.id === "spans" && spansTrack !== undefined) return spansTrack.rowTemplate(t);
   if (t.id === "queue" && queueTrack !== undefined) return queueTrack.rowTemplate(t);
   if (t.id === "task-detail" && taskDetailTrack !== undefined) {
@@ -159,6 +165,45 @@ function innerRow(
   }
   if (t.id === "events" && eventsTrack !== undefined) return eventsTrack.rowTemplate(t);
   return defaultTrackRow(t);
+}
+
+/**
+ * The worker-lanes row: a fixed-height scroll box the user can drag-resize. The
+ * "Workers" label sits in the LABEL_W gutter; the box (`.d9-lanes-viewport`)
+ * holds the sticky lanes canvas over a `.d9-lanes-spacer` whose height (set by
+ * the lanes mount) makes the box scroll when the stacked rows exceed the box.
+ * The `.d9-track-canvas-wrap` wrapper is the legend's overlay anchor (kept so
+ * the legend pins to the box bottom, not the scrolling content), and the bottom
+ * `.d9-lanes-resize` gutter is the drag target the lanes mount wires.
+ */
+function lanesTrackRow(t: TrackSpec, viewportHeight: number): TemplateResult {
+  return html`
+    <div class="d9-track d9-track--lanes" data-track-id=${t.id}>
+      <div class="d9-lanes-head">
+        <div class="d9-track-label" id="d9-track-label-lanes">
+          <span class="d9-track-name">${t.label}</span>
+        </div>
+        <div class="d9-track-canvas-wrap">
+          <div class="d9-lanes-viewport" style="height:${viewportHeight}px">
+            <canvas
+              class="d9-track-canvas d9-lanes-canvas"
+              data-track-canvas=${t.id}
+              aria-labelledby="d9-track-label-lanes"
+              role="img"
+            ></canvas>
+            <div class="d9-lanes-spacer" aria-hidden="true"></div>
+          </div>
+        </div>
+      </div>
+      <div
+        class="d9-lanes-resize"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize the workers lane"
+        title="Drag to resize the workers lane"
+      ></div>
+    </div>
+  `;
 }
 
 // ── Track management overlay: collapse caret + reorder grip ────────────────
@@ -302,11 +347,11 @@ export function sizeTracks(
   queueTrack?: QueueTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
-  // Full column width and the scrollbar gutter (so the draw area's right edge
-  // matches the lanes' scrollable region). offsetWidth includes the scrollbar;
-  // clientWidth excludes it.
+  // Full column width and the LANES-BOX scrollbar gutter, so every track's draw
+  // area right edge lines up with the worker-lanes draw area (the box owns the
+  // scrollbar, not the column).
   const pw = columnEl.clientWidth;
-  const scrollbarW = Math.max(0, columnEl.offsetWidth - columnEl.clientWidth);
+  const scrollbarW = lanesScrollbarWidth(columnEl);
   const out: TrackSizing[] = [];
   for (const track of visibleTracks(vm)) {
     // A collapsed track is label-only: its drawing body is hidden by CSS

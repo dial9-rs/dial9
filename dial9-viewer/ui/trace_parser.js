@@ -28,6 +28,23 @@
         throw new Error(`Invalid number: ${v}`);
     }
 
+    /**
+     * Intern a callchain frame address to its "0x…" hex string, deduped per
+     * parse. Callchains across millions of samples/dumps/allocs share very few
+     * distinct addresses (same code paths), so caching the hex string collapses
+     * millions of identical strings to a handful. Same output as the inline
+     * `"0x" + BigInt(addr).toString(16)` — purely a memory (retained-string)
+     * optimization; retrocompat-neutral (a missing callchain still yields []).
+     */
+    function internHex(cache, addr) {
+        let s = cache.get(addr);
+        if (s === undefined) {
+            s = "0x" + BigInt(addr).toString(16);
+            cache.set(addr, s);
+        }
+        return s;
+    }
+
     /** Decompress gzip data if detected, otherwise return as-is. */
     async function maybeGunzip(buf) {
         const b = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
@@ -649,14 +666,22 @@
             startTime,
             endTime,
             hasTimeFilter,
-            events: [],
+            // Optional pluggable event store. Defaults to a plain array (legacy
+            // behavior). The new viewer passes a columnar sink
+            // (src/lib/trace/columnar-events.ts) whose `.push(event)` writes the
+            // event's fields into typed-array columns and drops the object, so a
+            // large trace never materializes millions of fat event objects.
+            events: (options && options.eventSink) || [],
             spawnLocations: new Map(),
             taskSpawnLocs: new Map(),
             taskSpawnTimes: new Map(),
             taskTerminateTimes: new Map(),
             taskInstrumented: new Map(), // taskId -> bool (true if spawned via TelemetryHandle::spawn)
             callframeSymbols: new Map(),
-            cpuSamples: [],
+            // Optional columnar cpu-sample sink (src/lib/trace/columnar-cpu-samples.ts).
+            // Its `.pushSample(...)` stores callchains in a flat pool; without it a
+            // plain array of fat samples (legacy behavior).
+            cpuSamples: (options && options.cpuSampleSink) || [],
             allocEvents: [],
             freeEvents: [],
             memoryOverflows: [],
@@ -666,8 +691,15 @@
             segmentMetadata: new Map(), // latest segment metadata key → value
             taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
             customEvents: [], // unrecognized event types: {name, timestamp, fields}
+            // Optional columnar sink for SPAN custom events (SpanEnter/Exit/Close):
+            // when supplied, those route into typed columns instead of the fat
+            // customEvents array (buildSpanData reads them). Mirrors eventSink /
+            // cpuSampleSink. null => all custom events stay fat (unchanged).
+            spanEventSink: (options && options.spanEventSink) || null,
             // { monotonicNs, realtimeNs } anchors used to recover wall clock.
             clockSyncAnchors: [],
+            // Per-parse callchain-address -> hex-string cache (see internHex).
+            hexIntern: new Map(),
             legacySegmentMetaWallNs: null,
             // Smallest monotonic ts seen across all event frames.
             // Used as the monotonic timestamp for the legacy synthesized anchor.
@@ -729,6 +761,7 @@
         const segmentMetadata = state.segmentMetadata;
         const taskDumps = state.taskDumps;
         const customEvents = state.customEvents;
+        const spanEventSink = state.spanEventSink;
         const clockSyncAnchors = state.clockSyncAnchors;
 
         switch (frame.name) {
@@ -738,6 +771,10 @@
                 const taskId = num(v.task_id);
                 if (taskId && spawnLoc && !taskSpawnLocs.has(taskId)) {
                     taskSpawnLocs.set(taskId, spawnLoc);
+                }
+                if (events.pushEvent) {
+                    events.pushEvent(0, ts, num(v.worker_id), num(v.local_queue), 0, 0, 0, taskId, spawnLoc, undefined, undefined, undefined);
+                    break;
                 }
                 events.push({
                     eventType: 0,
@@ -754,6 +791,10 @@
                 break;
             }
             case "PollEndEvent":
+                if (events.pushEvent) {
+                    events.pushEvent(1, ts, num(v.worker_id), 0, 0, 0, 0, 0, null, undefined, undefined, undefined);
+                    break;
+                }
                 events.push({
                     eventType: 1,
                     timestamp: ts,
@@ -770,6 +811,10 @@
             case "WorkerParkEvent":
                 if (v.tid != null)
                     tidToWorker.set(num(v.tid), num(v.worker_id));
+                if (events.pushEvent) {
+                    events.pushEvent(2, ts, num(v.worker_id), num(v.local_queue), 0, num(v.cpu_time_ns), 0, 0, null, v.tid != null ? num(v.tid) : undefined, undefined, undefined);
+                    break;
+                }
                 events.push({
                     eventType: 2,
                     timestamp: ts,
@@ -789,6 +834,10 @@
             case "WorkerUnparkEvent":
                 if (v.tid != null)
                     tidToWorker.set(num(v.tid), num(v.worker_id));
+                if (events.pushEvent) {
+                    events.pushEvent(3, ts, num(v.worker_id), num(v.local_queue), 0, num(v.cpu_time_ns), v.sched_wait_ns == null ? null : num(v.sched_wait_ns), 0, null, v.tid != null ? num(v.tid) : undefined, undefined, undefined);
+                    break;
+                }
                 events.push({
                     eventType: 3,
                     timestamp: ts,
@@ -811,6 +860,10 @@
                 });
                 break;
             case "QueueSampleEvent":
+                if (events.pushEvent) {
+                    events.pushEvent(4, ts, 0, 0, num(v.global_queue), 0, 0, 0, null, undefined, undefined, undefined);
+                    break;
+                }
                 events.push({
                     eventType: 4,
                     timestamp: ts,
@@ -838,6 +891,10 @@
                 taskTerminateTimes.set(num(v.task_id), ts);
                 break;
             case "WakeEventEvent":
+                if (events.pushEvent) {
+                    events.pushEvent(9, ts, num(v.target_worker), 0, 0, 0, 0, 0, null, undefined, num(v.waker_task_id), num(v.woken_task_id));
+                    break;
+                }
                 events.push({
                     eventType: 9,
                     timestamp: ts,
@@ -855,21 +912,34 @@
                 });
                 break;
             case "CpuSampleEvent": {
-                const chain = (v.callchain || []).map(
-                    (addr) => "0x" + BigInt(addr).toString(16),
-                );
                 // `cpu` is encoded as OptionalVarint: null when the backend could
                 // not determine the CPU. Varints decode as strings for BigInt safety;
                 // CPU ids always fit in a Number.
                 const cpu = v.cpu == null ? null : Number(v.cpu);
-                cpuSamples.push({
-                    timestamp: ts,
-                    workerId: num(v.worker_id),
-                    tid: num(v.tid),
-                    source: num(v.source),
-                    callchain: chain,
-                    cpu,
-                });
+                if (cpuSamples.pushSample) {
+                    // Columnar sink: pass the RAW callchain (no per-sample hex
+                    // array); the sink interns frames into its flat pool.
+                    cpuSamples.pushSample(
+                        ts,
+                        num(v.worker_id),
+                        num(v.tid),
+                        num(v.source),
+                        v.callchain || [],
+                        cpu,
+                    );
+                } else {
+                    const chain = (v.callchain || []).map(
+                        (addr) => internHex(state.hexIntern, addr),
+                    );
+                    cpuSamples.push({
+                        timestamp: ts,
+                        workerId: num(v.worker_id),
+                        tid: num(v.tid),
+                        source: num(v.source),
+                        callchain: chain,
+                        cpu,
+                    });
+                }
                 const tn = v.thread_name;
                 if (tn) {
                     threadNames.set(num(v.tid), tn);
@@ -879,7 +949,7 @@
             case "TaskDumpEvent": {
                 const taskId = num(v.task_id);
                 const chain = (v.callchain || []).map(
-                    (addr) => "0x" + BigInt(addr).toString(16),
+                    (addr) => internHex(state.hexIntern, addr),
                 );
                 if (!taskDumps.has(taskId)) taskDumps.set(taskId, []);
                 taskDumps.get(taskId).push({ timestamp: ts, callchain: chain });
@@ -887,7 +957,7 @@
             }
             case "AllocEvent": {
                 const chain = (v.callchain || []).map(
-                    (addr) => "0x" + BigInt(addr).toString(16),
+                    (addr) => internHex(state.hexIntern, addr),
                 );
                 allocEvents.push({
                     timestamp: ts,
@@ -977,14 +1047,18 @@
                 break;
             }
             default: {
-                // Unrecognized event type: capture as a custom event
+                // Unrecognized event type: capture as a custom event. Span
+                // events (SpanEnter/Exit/Close) route to the columnar
+                // spanEventSink when present; everything else stays fat.
                 if (ts != null) {
-                    customEvents.push({
-                        name: frame.name,
-                        timestamp: ts,
-                        fields: v,
-                        units: dec.schemas.get(frame.typeId)?.units || null,
-                    });
+                    if (!(spanEventSink && spanEventSink.pushIfSpan(frame.name, ts, v))) {
+                        customEvents.push({
+                            name: frame.name,
+                            timestamp: ts,
+                            fields: v,
+                            units: dec.schemas.get(frame.typeId)?.units || null,
+                        });
+                    }
                 }
                 break;
             }
@@ -1006,7 +1080,7 @@
             taskTerminateTimes,
             taskInstrumented,
             callframeSymbols,
-            cpuSamples,
+            cpuSamples: cpuSamplesSink,
             allocEvents,
             freeEvents,
             memoryOverflows,
@@ -1022,6 +1096,15 @@
             endTime,
             hasTimeFilter,
         } = state;
+
+        // A columnar cpu-sample sink exposes its materialized samples via
+        // `.samples`; the rest of finalize (tid->worker resolution, block-in-place
+        // gap rewrite, and the returned ParsedTrace.cpuSamples) works on that plain
+        // array. A legacy plain-array sink IS the array.
+        const cpuSamples =
+            cpuSamplesSink && cpuSamplesSink.samples !== undefined
+                ? cpuSamplesSink.samples
+                : cpuSamplesSink;
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
         // time + earliest monotonic event timestamp. This is best-effort only.
@@ -1055,10 +1138,18 @@
         // Keep the historical event-only bounds for runtime analysis consumers.
         let evMinTs = Infinity,
             evMaxTs = -Infinity;
-        for (let i = 0; i < events.length; i++) {
-            const t = events[i].timestamp;
-            if (t < evMinTs) evMinTs = t;
-            if (t > evMaxTs) evMaxTs = t;
+        if (typeof events.minTs === "number" && typeof events.maxTs === "number") {
+            // A columnar event sink (src/lib/trace/columnar-events.ts) tracks its
+            // own ts bounds during push; it has no numeric index (events[i]),
+            // so read the bounds it accumulated.
+            evMinTs = events.minTs;
+            evMaxTs = events.maxTs;
+        } else {
+            for (let i = 0; i < events.length; i++) {
+                const t = events[i].timestamp;
+                if (t < evMinTs) evMinTs = t;
+                if (t > evMaxTs) evMaxTs = t;
+            }
         }
 
         // Second pass: derive worker attribution from WorkerPark/WorkerUnpark

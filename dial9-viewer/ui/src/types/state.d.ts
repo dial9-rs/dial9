@@ -234,6 +234,13 @@ export interface UiPrefsSlice {
   /** Stack-sidebar width in CSS px (drag-resizable). */
   sidebarWidth: number;
   /**
+   * Height in CSS px of the worker-lanes box (the scroll container holding the
+   * fixed-height worker rows). Drag-resizable via the lanes bottom gutter and
+   * persisted (dial9.viewer.trackPrefs). Rows are a fixed height and the box
+   * scrolls internally, so this only sizes the visible window.
+   */
+  lanesViewportHeight: number;
+  /**
    * Legend chip toggles: span / custom-event names currently selected for
    * display filtering. Empty set = no name filter.
    */

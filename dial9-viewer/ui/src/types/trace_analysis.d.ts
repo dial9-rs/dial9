@@ -352,8 +352,12 @@ declare module "*/trace_analysis.js" {
   }
 
   export interface SpanData {
-    /** All completed spans, sorted by start. */
+    /** All completed spans, sorted by start. EMPTY on the columnar path (read
+     * `columnarSpans` instead); populated only on the fat/worker path. */
     allSpans: TracingSpan[];
+    /** Columnar span store on the main-thread path (undefined on the fat path).
+     * When present, `allSpans` is empty and consumers read spans from here. */
+    columnarSpans?: import("../lib/trace/columnar-spans.js").ColumnarSpans;
     spanMeta: Map<
       string,
       {

@@ -80,6 +80,7 @@ function viewModel(state: StoreState): ShellViewModel {
     // Track management: the order + collapse map the track column reads.
     trackOrder: state.uiPrefs.trackOrder,
     collapsed: state.uiPrefs.collapsed,
+    lanesViewportHeight: state.uiPrefs.lanesViewportHeight,
   };
 }
 

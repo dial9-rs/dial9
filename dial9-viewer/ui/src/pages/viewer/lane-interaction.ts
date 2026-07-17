@@ -14,8 +14,10 @@
 // opens for that range is the region panel's. A lane click on a poll with
 // samples returns openStackFor, which drives the inspector's Poll Detail.
 
-import { LABEL_W, timePanelLayout } from "../../lib/canvas/layout.js";
+import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
+import { LANE_ROW_H, RUNTIME_HEADER_H } from "../../components/canvas/lanes/render.js";
+import { lanesScrollbarWidth } from "./track-layout.js";
 import { createPointerMachine } from "../../lib/interact/pointer.js";
 import type { PointerCommand } from "../../lib/interact/pointer.js";
 import { createKbSelectionMachine } from "../../lib/interact/kb-selection.js";
@@ -89,7 +91,7 @@ export function mountLaneInteraction(
   function readColumnGeom(): ColumnGeom {
     const rect = trackColumn.getBoundingClientRect();
     const pw = trackColumn.clientWidth;
-    const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
+    const scrollbarW = lanesScrollbarWidth(trackColumn);
     const { viewStart, viewEnd } = store.getState().viewport;
     return {
       layout: timePanelLayout({ pw, scrollbarW, viewStart, viewEnd }),
@@ -105,15 +107,17 @@ export function mountLaneInteraction(
     return geom.layout.panelXToNs(clamped);
   }
 
-  /** Worker id under `clientY` on the lanes canvas, or null when off the lanes. */
-  function workerAtClientY(clientY: number, workerIds: readonly number[]): number | null {
-    const canvas = trackColumn.querySelector<HTMLElement>('canvas[data-track-canvas="lanes"]');
-    const n = workerIds.length;
-    if (canvas === null || n === 0) return null;
-    const rect = canvas.getBoundingClientRect();
+  /** Worker id under `clientY` in the lanes box, or null when off the lanes /
+   *  over a runtime header. Fixed-height rows + the box scrollTop, resolved
+   *  through the shared row layout so click matches what the renderer drew. */
+  function workerAtClientY(clientY: number, data: LaneData): number | null {
+    const box = trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
+    if (box === null || data.workerIds.length === 0) return null;
+    const rect = box.getBoundingClientRect();
     if (clientY < rect.top || clientY >= rect.bottom || rect.height <= 0) return null;
-    const idx = Math.floor(((clientY - rect.top) / rect.height) * n);
-    return workerIds[idx] ?? null;
+    const localY = clientY - rect.top + box.scrollTop;
+    const rowLayout = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
+    return workerAtLaneY(rowLayout, localY);
   }
 
   // ── command executor (shared by both machines) ──────────────────────────
@@ -165,6 +169,8 @@ export function mountLaneInteraction(
     // swallows the matching mouseup, so a pan started here would never be
     // released and would keep panning after the drop. Never start a pan on it.
     if ((e.target as Element | null)?.closest?.(".d9-track-manage-strip")) return;
+    // The lanes resize gutter owns its own drag (the lanes mount): never pan.
+    if ((e.target as Element | null)?.closest?.(".d9-lanes-resize")) return;
     // A mousedown pre-empts an in-flight keyboard selection.
     if (kbSel.active()) runCommands(kbSel.clear());
     const state = store.getState() as StoreState;
@@ -213,10 +219,10 @@ export function mountLaneInteraction(
     if ((e.target as Element | null)?.closest?.(`.${CONTROLS_CLASS}`)) return;
     const data = laneData();
     if (data === null) return;
-    // Restrict task/span selection to clicks over the lanes canvas.
-    const lanesCanvas = trackColumn.querySelector<HTMLElement>('canvas[data-track-canvas="lanes"]');
-    if (lanesCanvas === null) return;
-    const laneRect = lanesCanvas.getBoundingClientRect();
+    // Restrict task/span selection to clicks over the lanes box.
+    const box = trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
+    if (box === null) return;
+    const laneRect = box.getBoundingClientRect();
     if (e.clientY < laneRect.top || e.clientY > laneRect.bottom) return;
 
     const geom = readColumnGeom();
@@ -227,7 +233,7 @@ export function mountLaneInteraction(
       return;
     }
     const ns = geom.layout.panelXToNs(mouseXCol);
-    const workerId = workerAtClientY(e.clientY, data.workerIds);
+    const workerId = workerAtClientY(e.clientY, data);
     if (workerId === null) {
       store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
       return;
@@ -238,6 +244,7 @@ export function mountLaneInteraction(
       ns,
       polls,
       allSpans: data.allSpans,
+      columnarSpans: data.columnarSpans,
       spanById: data.spanByIdSingle,
       currentSelectedTaskId: store.getState().selection.selectedTaskId,
     });

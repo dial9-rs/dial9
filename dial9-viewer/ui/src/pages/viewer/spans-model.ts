@@ -26,12 +26,14 @@ import {
 } from "../../lib/trace/index.js";
 import type {
   CustomTraceEvent,
+  DecodedFieldValue,
   SpanData,
   SpanLayoutBucket,
   TracingSpan,
   UnmatchedSpan,
   WorkerLane,
 } from "../../lib/trace/index.js";
+import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { SelectionSlice } from "../../types/state.js";
 
 // ── Trace-invariant span data ────────────────────────────────────────────
@@ -51,6 +53,9 @@ export interface SpanNameMeta {
  */
 export interface SpanTrackData {
   allSpans: readonly TracingSpan[];
+  /** Columnar span store (main-thread path); scan/window fns dispatch on it.
+   * When set, `allSpans` is empty. */
+  columnarSpans?: ColumnarSpans;
   spanMeta: SpanData["spanMeta"];
   childrenByParent: SpanData["childrenByParent"];
   /** Spans with an enter but no exit - the truncation/incompleteness surface,
@@ -86,6 +91,7 @@ export const EMPTY_SPAN_TRACK_DATA: SpanTrackData = {
 export function computeSpanTrackData(
   customEvents: readonly CustomTraceEvent[] | null | undefined,
   workerSpans?: Record<number, WorkerLane>,
+  precomputedSpanData?: SpanData,
 ): SpanTrackData {
   if (customEvents == null || customEvents.length === 0) {
     return EMPTY_SPAN_TRACK_DATA;
@@ -93,26 +99,35 @@ export function computeSpanTrackData(
   // With workerSpans, each span's active segments are reconstructed from its
   // owning task's polls (idle gaps materialize, activeNs is on-CPU time) and
   // its taskId is resolved; without it, the coarse on-wire segments are kept.
-  const data = buildSpanData(customEvents, workerSpans);
-  if (data.allSpans.length === 0 && data.unmatchedSpans.length === 0) {
+  // The viewer passes `precomputedSpanData` (shared with the lanes derivation)
+  // so buildSpanData runs once per trace instead of once per span consumer.
+  const data = precomputedSpanData ?? buildSpanData(customEvents, workerSpans);
+  const cs = data.columnarSpans;
+  const spanCount = cs ? cs.length : data.allSpans.length;
+  if (spanCount === 0 && data.unmatchedSpans.length === 0) {
     return EMPTY_SPAN_TRACK_DATA;
   }
 
+  // Name set + per-name duration lists. On the columnar path scan the columns
+  // (spanName id + start/end) - no span materialization.
   const names = new Set<string>();
   const durationsByName = new Map<string, number[]>();
-  for (const s of data.allSpans) {
-    names.add(s.spanName);
-    let durs = durationsByName.get(s.spanName);
-    if (durs === undefined) {
-      durs = [];
-      durationsByName.set(s.spanName, durs);
-    }
-    durs.push(s.end - s.start);
+  const addDur = (spanName: string, dur: number): void => {
+    names.add(spanName);
+    let durs = durationsByName.get(spanName);
+    if (durs === undefined) { durs = []; durationsByName.set(spanName, durs); }
+    durs.push(dur);
+  };
+  if (cs) {
+    for (let r = 0; r < cs.length; r++) addDur(cs.spanNameAt(r), cs.end[r] - cs.start[r]);
+  } else {
+    for (const s of data.allSpans) addDur(s.spanName, s.end - s.start);
   }
   for (const durs of durationsByName.values()) durs.sort((a, b) => a - b);
 
   return {
     allSpans: data.allSpans,
+    columnarSpans: cs,
     spanMeta: data.spanMeta,
     childrenByParent: data.childrenByParent,
     unmatchedSpans: data.unmatchedSpans,
@@ -226,8 +241,22 @@ export function filterVisibleSpans(
   viewEnd: number,
   filter: SpanFilterState,
 ): TracingSpan[] {
-  const hi = upperBoundByStart(data.allSpans, viewEnd);
+  const cs = data.columnarSpans;
   const out: TracingSpan[] = [];
+  if (cs) {
+    // Right edge: binary search the start column. Left edge: prefix scan reading
+    // the end column (cheap), materializing a span only for a viewport survivor.
+    let lo = 0, hiB = cs.length;
+    while (lo < hiB) { const m = (lo + hiB) >> 1; if (cs.start[m] <= viewEnd) lo = m + 1; else hiB = m; }
+    for (let i = 0; i < lo; i++) {
+      if (cs.end[i] < viewStart) continue;
+      const s = cs.at(i);
+      if (!spanMatchesFilter(s, filter, data.durationsByName)) continue;
+      out.push(s);
+    }
+    return out;
+  }
+  const hi = upperBoundByStart(data.allSpans, viewEnd);
   for (let i = 0; i < hi; i++) {
     const s = data.allSpans[i]!;
     if (s.end < viewStart) continue;
@@ -397,7 +426,10 @@ export function buildSpanRenderModel(opts: SpanRenderModelOpts): SpanRenderModel
 
   let info: string;
   if (hasFocus) {
-    const focused = data.allSpans.find((s) => s.spanId === focusedSpanId);
+    const cs = data.columnarSpans;
+    let focused: TracingSpan | undefined;
+    if (cs) { const r = cs.spanIdToRow.get(focusedSpanId!); focused = r === undefined ? undefined : cs.at(r); }
+    else focused = data.allSpans.find((s) => s.spanId === focusedSpanId);
     info = focused
       ? focusInfoLine(focused, data.durationsByName)
       : `${renderSet.length} spans · ${layout.buckets.length} clusters (focused)`;
@@ -429,11 +461,14 @@ export function spanFocusChain(
   data: SpanTrackData,
 ): Set<string> {
   const chain = new Set<string>([spanId]);
-  const first = data.spanMeta.get(spanId);
-  let parentId = first?.parentSpanId ?? null;
+  const cs = data.columnarSpans;
+  const parentOf = cs
+    ? (id: string): string | null => { const r = cs.spanIdToRow.get(id); return r === undefined ? null : cs.parentSpanIdAt(r); }
+    : (id: string): string | null => data.spanMeta.get(id)?.parentSpanId ?? null;
+  let parentId = parentOf(spanId);
   while (parentId != null && !chain.has(parentId)) {
     chain.add(parentId);
-    parentId = data.spanMeta.get(parentId)?.parentSpanId ?? null;
+    parentId = parentOf(parentId);
   }
   return chain;
 }
@@ -515,10 +550,19 @@ export function spanLabelModel(
   data: SpanTrackData,
 ): SpanLabelModel | null {
   if (focusedSpanId == null) return null;
-  const meta = data.spanMeta.get(focusedSpanId);
-  const span = data.allSpans.find((s) => s.spanId === focusedSpanId);
-  const fields = span?.fields ?? meta?.fields ?? {};
-  const name = meta?.spanName ?? span?.spanName ?? "Span";
+  const cs = data.columnarSpans;
+  let fields: Record<string, DecodedFieldValue>;
+  let name: string;
+  if (cs) {
+    const r = cs.spanIdToRow.get(focusedSpanId);
+    fields = r === undefined ? {} : cs.fieldsAt(r);
+    name = r === undefined ? "Span" : cs.spanNameAt(r);
+  } else {
+    const meta = data.spanMeta.get(focusedSpanId);
+    const span = data.allSpans.find((s) => s.spanId === focusedSpanId);
+    fields = span?.fields ?? meta?.fields ?? {};
+    name = meta?.spanName ?? span?.spanName ?? "Span";
+  }
   const rows: SpanFieldRow[] = Object.entries(fields).map(([key, value]) => ({
     key,
     display: formatFieldValue(value),

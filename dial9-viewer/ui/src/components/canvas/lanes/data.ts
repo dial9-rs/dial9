@@ -15,8 +15,16 @@ import {
   computeRuntimeGroups,
   spansById as buildSpanByIdSingle,
 } from "../../../lib/trace/index.js";
+import type { SpanData, WorkerSpansResult } from "../../../lib/trace/index.js";
+import { ColumnarEvents } from "../../../lib/trace/columnar-events.js";
+import { buildWorkerSpansColumnarStore } from "../../../lib/trace/worker-spans-columnar.js";
+import { buildSpanDataColumnar } from "../../../lib/trace/span-data-columnar.js";
+import type { ColumnarWorkerSpans } from "../../../lib/trace/columnar-worker-spans.js";
+import { LazySpansById, LazySpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
+import type { ColumnarSpans, SpanByIdMulti, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type {
   ParsedTrace,
+  RuntimeGroup,
   TracingSpan,
   WorkerLane,
   WorkerWake,
@@ -26,18 +34,26 @@ import type {
 export interface LaneData {
   /** Worker ids in render order (runtime-group order, single-runtime = sorted). */
   workerIds: number[];
+  /** The runtime groups in render order. One group (single-runtime) is the
+   *  common case; the renderer draws headers only when there is more than one. */
+  runtimeGroups: RuntimeGroup[];
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, WorkerLane>;
   /** Per-worker local-queue samples, sorted by t. */
   workerQueueSamples: Record<number, { t: number; local: number }[]>;
   /** Wake events indexed by target worker. */
   wakesByWorker: Record<number, WorkerWake[]>;
-  /** span id -> every span instance sharing it (highlight lookup, no scan). */
-  spansById: Map<string, TracingSpan[]>;
-  /** All completed spans, start-sorted (containing-span lookup). */
+  /** span id -> every span instance sharing it (highlight lookup, no scan). A
+   * real Map on the fat path; a lazy store-backed adapter on the columnar path. */
+  spansById: SpanByIdMulti;
+  /** All completed spans, start-sorted (containing-span lookup). EMPTY on the
+   * columnar path - read `columnarSpans` instead. */
   allSpans: TracingSpan[];
-  /** span id -> a single span, for the ancestor walk. */
-  spanByIdSingle: Map<string, TracingSpan>;
+  /** span id -> a single span, for the ancestor walk (Map | lazy adapter). */
+  spanByIdSingle: SpanByIdSingle;
+  /** Columnar span store on the main-thread path; scan/window consumers dispatch
+   * on it. Undefined on the fat/worker path. */
+  columnarSpans?: ColumnarSpans;
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
@@ -48,6 +64,13 @@ export interface LaneData {
  *  runtime groups so grouped lanes render in group order; single-runtime
  *  traces stay simple-sorted. */
 export function deriveWorkerIds(trace: ParsedTrace): number[] {
+  return deriveRuntimeGroups(trace).flatMap((g) => g.workerIds);
+}
+
+/** The runtime groups in render order: scan non-queue/non-wake events for the
+ *  worker set, then group by runtime. A single-runtime trace yields one group;
+ *  the lanes renderer draws headers only when there is more than one. */
+export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
   const set = new Set<number>();
   for (const e of trace.events) {
     if (e.eventType === EVENT_TYPES.QueueSample || e.eventType === EVENT_TYPES.WakeEvent) {
@@ -56,8 +79,7 @@ export function deriveWorkerIds(trace: ParsedTrace): number[] {
     set.add(e.workerId);
   }
   const sorted = [...set].sort((a, b) => a - b);
-  const groups = computeRuntimeGroups(sorted, trace.runtimeWorkers);
-  return groups.flatMap((g) => g.workerIds);
+  return computeRuntimeGroups(sorted, trace.runtimeWorkers);
 }
 
 /**
@@ -66,41 +88,148 @@ export function deriveWorkerIds(trace: ParsedTrace): number[] {
  * indices) + attachCpuSamples, and builds the span-id index from the span
  * data. Call once per trace and cache (store.derived over the `trace` slice).
  */
-export function deriveLaneData(trace: ParsedTrace): LaneData {
-  const workerIds = deriveWorkerIds(trace);
-  const maxTs = trace.maxTs ?? 0;
-  const spanResult = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    maxTs,
-    trace.blockInPlaceGaps,
-  );
-  const workerSpans = spanResult.workerSpans;
-  if (trace.cpuSamples.length > 0) {
-    attachCpuSamples(trace.cpuSamples, workerSpans);
+const workerSpansCache = new WeakMap<ParsedTrace, WorkerSpansResult>();
+
+/**
+ * buildWorkerSpans computed ONCE per trace and shared across EVERY eager
+ * load-frame consumer (lanes, spans/queue/events tracks, minimap POIs, issues
+ * rail, task detail). Each used to rebuild it independently -> 7 full
+ * O(events) span reconstructions on the single load frame, each ~1.9 GB for a
+ * 13M-event trace and each retained in its own cache. Sharing one collapses
+ * that to a single reconstruction.
+ *
+ * SAFETY: attachCpuSamples - the ONLY cross-consumer mutation - is applied
+ * HERE, once, so the shared result carries cpu samples for the consumers that
+ * render them (lanes, rail, overlay) while read-only consumers (minimap, queue,
+ * spans/events tracks, task detail) simply ignore the extra poll fields. Its
+ * writes are deterministic (sample.spawnLoc/inPoll on the shared trace.cpuSamples
+ * take the same values every run), so attaching once reproduces the old
+ * per-consumer result. buildWorkerSpans output is a per-worker dict keyed by the
+ * event workers, independent of worker-id ORDER, and every caller derives the
+ * same worker-id SET (or a subset it only reads back), so one result is correct
+ * for all.
+ */
+export function sharedWorkerSpans(trace: ParsedTrace): WorkerSpansResult {
+  let r = workerSpansCache.get(trace);
+  if (r === undefined) {
+    const ev = trace.events;
+    if (ev instanceof ColumnarEvents) {
+      // Big-trace (main-thread) path: build the typed-array span store DIRECTLY
+      // (no fat poll/park/active objects) and hand render/models columnar lane
+      // VIEWS. The worker path (plain-array events) is untouched below.
+      const built = buildWorkerSpansColumnarStore(
+        ev, deriveWorkerIds(trace), trace.maxTs ?? 0, trace.blockInPlaceGaps,
+      );
+      if (trace.cpuSamples && trace.cpuSamples.length > 0) {
+        built.store.attachCpuSamples(trace.cpuSamples);
+      }
+      columnarStoreCache.set(trace, built.store);
+      r = {
+        workerSpans: built.store.workerLanes(),
+        perWorker: {},
+        queueSamples: built.queueSamples,
+        workerQueueSamples: built.workerQueueSamples,
+        maxLocalQueue: built.maxLocalQueue,
+        wakesByTask: built.wakesByTask,
+        wakesByWorker: built.wakesByWorker,
+      } as unknown as WorkerSpansResult;
+    } else {
+      r = buildWorkerSpans(
+        trace.events,
+        deriveWorkerIds(trace),
+        trace.maxTs ?? 0,
+        trace.blockInPlaceGaps,
+      );
+      // Guard cpuSamples: a real ParsedTrace always has the array, but some
+      // consumers previously never touched it (minimap/queue/task-detail), so
+      // their unit-test mock traces omit it.
+      if (trace.cpuSamples && trace.cpuSamples.length > 0) {
+        attachCpuSamples(trace.cpuSamples, r.workerSpans);
+      }
+    }
+    workerSpansCache.set(trace, r);
   }
+  return r;
+}
+
+/** The columnar span store for a trace, when it loaded on the main-thread
+ * columnar path (undefined for the worker/fat path). Set by sharedWorkerSpans;
+ * read by sharedSpanData to build span data over columns. */
+const columnarStoreCache = new WeakMap<ParsedTrace, ColumnarWorkerSpans>();
+
+/**
+ * The columnar worker-span store for a trace, or undefined on the fat/worker
+ * path. Ensures the shared reconstruction has run. POI/minimap detectors use it
+ * to scan raw columns instead of materializing the flyweight lane views (which
+ * the frozen filterPointsOfInterest / computeSchedulingDelays would do).
+ */
+export function columnarWorkerStoreFor(trace: ParsedTrace): ColumnarWorkerSpans | undefined {
+  sharedWorkerSpans(trace);
+  return columnarStoreCache.get(trace);
+}
+
+const spanDataCache = new WeakMap<ParsedTrace, SpanData>();
+
+/**
+ * buildSpanData (tracing-span reconstruction from customEvents) computed ONCE
+ * per trace and shared across the lanes + spans-track + overlay derivations,
+ * which previously each rebuilt it (~0.9 GB of span objects per copy for a
+ * 13M-event trace). buildSpanData is read-only over its inputs and its output
+ * spans are never mutated cross-consumer, so one result is safe to share.
+ */
+export function sharedSpanData(trace: ParsedTrace): SpanData {
+  let r = spanDataCache.get(trace);
+  if (r === undefined) {
+    // Ensure the worker spans (and, on the columnar path, the store) are built.
+    const workerSpans = sharedWorkerSpans(trace).workerSpans;
+    const store = columnarStoreCache.get(trace);
+    const spanEvents = trace.spanEvents;
+    r =
+      store && spanEvents
+        ? buildSpanDataColumnar(spanEvents, store)
+        : buildSpanData(trace.customEvents, workerSpans);
+    spanDataCache.set(trace, r);
+  }
+  return r;
+}
+
+export function deriveLaneData(trace: ParsedTrace): LaneData {
+  const runtimeGroups = deriveRuntimeGroups(trace);
+  const workerIds = runtimeGroups.flatMap((g) => g.workerIds);
+  const spanResult = sharedWorkerSpans(trace);
+  const workerSpans = spanResult.workerSpans;
 
   // Span-id index: id -> every instance (recycled ids highlight every
-  // instance, but O(1) lookup instead of a full allSpans scan).
-  const spanData = buildSpanData(trace.customEvents, workerSpans);
-  const spansById = new Map<string, TracingSpan[]>();
-  for (const s of spanData.allSpans) {
-    let bucket = spansById.get(s.spanId);
-    if (!bucket) {
-      bucket = [];
-      spansById.set(s.spanId, bucket);
+  // instance, but O(1) lookup instead of a full allSpans scan). On the columnar
+  // path these are lazy adapters over the store (no 982K view maps built).
+  const spanData = sharedSpanData(trace);
+  const cs = spanData.columnarSpans;
+  let spansById: SpanByIdMulti;
+  let spanByIdSingle: SpanByIdSingle;
+  if (cs) {
+    spansById = new LazySpansById(cs);
+    spanByIdSingle = new LazySpanByIdSingle(cs);
+  } else {
+    const m = new Map<string, TracingSpan[]>();
+    for (const s of spanData.allSpans) {
+      let bucket = m.get(s.spanId);
+      if (!bucket) { bucket = []; m.set(s.spanId, bucket); }
+      bucket.push(s);
     }
-    bucket.push(s);
+    spansById = m;
+    spanByIdSingle = buildSpanByIdSingle(spanData.allSpans);
   }
 
   return {
     workerIds,
+    runtimeGroups,
     workerSpans,
     workerQueueSamples: spanResult.workerQueueSamples,
     wakesByWorker: spanResult.wakesByWorker,
     spansById,
     allSpans: spanData.allSpans,
-    spanByIdSingle: buildSpanByIdSingle(spanData.allSpans),
+    spanByIdSingle,
+    columnarSpans: cs,
     hasCpuTime: trace.hasCpuTime,
     hasSchedWait: trace.hasSchedWait,
     hasTaskTracking: trace.hasTaskTracking,

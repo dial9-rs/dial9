@@ -173,10 +173,13 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
 /** localStorage key for the serialized track prefs. */
 export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
 
-/** The persisted shape: the manageable order + the collapse map. */
+/** The persisted shape: the manageable order + the collapse map + the lanes box
+ *  height. `lanesHeight` is optional so prefs written before it existed still
+ *  parse (the store keeps its default when absent). */
 export interface TrackPrefs {
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
+  lanesHeight?: number;
 }
 
 const memoryFallback = new Map<string, string>();
@@ -218,17 +221,23 @@ export function loadTrackPrefs(): TrackPrefs | null {
         if (typeof v === "boolean") collapsed[k] = v;
       }
     }
-    return { trackOrder, collapsed };
+    const lh = (obj as { lanesHeight?: unknown }).lanesHeight;
+    const lanesHeight = typeof lh === "number" && Number.isFinite(lh) && lh > 0 ? lh : undefined;
+    return { trackOrder, collapsed, ...(lanesHeight !== undefined ? { lanesHeight } : {}) };
   } catch {
     return null;
   }
 }
 
-/** Persist track prefs (order + collapse map) to localStorage. */
+/** Persist track prefs (order + collapse map + lanes box height) to localStorage. */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
   storageSet(
     TRACK_PREFS_STORAGE_KEY,
-    JSON.stringify({ trackOrder: prefs.trackOrder, collapsed: prefs.collapsed }),
+    JSON.stringify({
+      trackOrder: prefs.trackOrder,
+      collapsed: prefs.collapsed,
+      ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
+    }),
   );
 }
 
@@ -244,6 +253,8 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
   store.update("uiPrefs", {
     trackOrder: prefs.trackOrder,
     collapsed: prefs.collapsed,
+    // Only override the store default when a height was actually stored.
+    ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
   });
 }
 
@@ -256,7 +267,7 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
  */
 export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
   return store.subscribe(["uiPrefs"], (state) => {
-    const { trackOrder, collapsed } = state.uiPrefs;
-    saveTrackPrefs({ trackOrder, collapsed });
+    const { trackOrder, collapsed, lanesViewportHeight } = state.uiPrefs;
+    saveTrackPrefs({ trackOrder, collapsed, lanesHeight: lanesViewportHeight });
   });
 }

@@ -186,6 +186,7 @@ const initialState: StoreState = {
     trackOrder: ["queue", "cpu", "spans", "events"],
     collapsed: { cpu: true, queue: false },
     sidebarWidth: 400,
+    lanesViewportHeight: 220,
     selectedSpanNames: new Set(),
     selectedEventNames: new Set(),
     spanFilter: "",

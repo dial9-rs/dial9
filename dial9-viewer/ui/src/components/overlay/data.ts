@@ -9,28 +9,34 @@
 // load (wired through store.derived over the `trace` slice), NOT a per-frame
 // cost.
 
+import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
 import {
-  attachCpuSamples,
-  buildActiveTaskTimeline,
-  buildSpanData,
-  buildWorkerSpans,
-} from "../../lib/trace/index.js";
-import { deriveWorkerIds } from "../canvas/lanes/data.js";
+  deriveRuntimeGroups,
+  sharedSpanData,
+  sharedWorkerSpans,
+} from "../canvas/lanes/data.js";
 import type {
   BlockInPlaceGap,
   ParsedTrace,
+  RuntimeGroup,
   TracingSpan,
   WorkerLane,
 } from "../../types/trace.js";
+import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 
 /** Everything the hover channel needs beyond per-frame viewport/selection. */
 export interface OverlayData {
   /** Worker ids in render order (same order the lanes stack, for y-mapping). */
   workerIds: number[];
+  /** Runtime groups in render order (for the fixed-height + header y-mapping). */
+  runtimeGroups: RuntimeGroup[];
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, WorkerLane>;
-  /** All completed spans, start-sorted (span detail + span-in-poll count). */
+  /** All completed spans, start-sorted (span detail + span-in-poll count).
+   * EMPTY on the columnar path - read `columnarSpans`. */
   allSpans: TracingSpan[];
+  /** Columnar span store (main-thread path); hover span lookups dispatch on it. */
+  columnarSpans?: ColumnarSpans;
   /** Per-worker local-queue series, sorted by t (local Q). */
   workerQueueSamples: Record<number, { t: number; local: number }[]>;
   /** Global injection-queue series, sorted by t (tooltip Global Q). */
@@ -50,20 +56,12 @@ export interface OverlayData {
  * the `trace` slice) - never per frame.
  */
 export function deriveOverlayData(trace: ParsedTrace): OverlayData {
-  const workerIds = deriveWorkerIds(trace);
-  const maxTs = trace.maxTs ?? 0;
-  const spanResult = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    maxTs,
-    trace.blockInPlaceGaps,
-  );
+  const runtimeGroups = deriveRuntimeGroups(trace);
+  const workerIds = runtimeGroups.flatMap((g) => g.workerIds);
+  const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
-  if (trace.cpuSamples.length > 0) {
-    attachCpuSamples(trace.cpuSamples, workerSpans);
-  }
 
-  const spanData = buildSpanData(trace.customEvents, workerSpans);
+  const spanData = sharedSpanData(trace);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,
@@ -71,8 +69,10 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
 
   return {
     workerIds,
+    runtimeGroups,
     workerSpans,
     allSpans: spanData.allSpans,
+    columnarSpans: spanData.columnarSpans,
     workerQueueSamples: spanResult.workerQueueSamples,
     queueSamples: spanResult.queueSamples,
     activeTaskSamples: timeline.activeTaskSamples,

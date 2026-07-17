@@ -20,7 +20,6 @@ import { classMap } from "lit-html/directives/class-map.js";
 import { createCanvasSizer, makeColorAssigner } from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
 import {
-  buildWorkerSpans,
   formatFieldValue,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
@@ -29,6 +28,7 @@ import type {
   TracingSpan,
   WorkerLane,
 } from "../../lib/trace/index.js";
+import { sharedSpanData, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import type { TrackSpec } from "./track-layout.js";
@@ -88,12 +88,15 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
   // Trace-invariant span data: recomputed only when the trace slice changes.
   // The worker poll lanes reconstruct each span's active/idle segments and
   // resolve its owning task, so the spans carry taskId directly.
-  const spanData = store.derived(["trace"], (s) =>
-    computeSpanTrackData(
-      s.trace.trace?.customEvents,
-      buildWorkerLanes(s.trace.trace),
-    ),
-  );
+  const spanData = store.derived(["trace"], (s) => {
+    const t = s.trace.trace;
+    return computeSpanTrackData(
+      t?.customEvents,
+      buildWorkerLanes(t),
+      // Shared buildSpanData output (computed once per trace with the lanes).
+      t ? sharedSpanData(t) : undefined,
+    );
+  });
 
   // Stable name -> color assignment for this track's lifetime.
   const colorOf = makeColorAssigner();
@@ -172,9 +175,17 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     }
     let spans: TracingSpan[] = [];
     if (isFilterActive(filter)) {
-      spans = data.allSpans.filter((sp) =>
-        spanMatchesFilter(sp, filter, data.durationsByName),
-      );
+      const cs = data.columnarSpans;
+      if (cs) {
+        // Rows are start-sorted; materialize only the matches (transient, on a
+        // filter/nav action).
+        for (let r = 0; r < cs.length; r++) {
+          const s = cs.at(r);
+          if (spanMatchesFilter(s, filter, data.durationsByName)) spans.push(s);
+        }
+      } else {
+        spans = data.allSpans.filter((sp) => spanMatchesFilter(sp, filter, data.durationsByName));
+      }
       spans.sort((a, b) => a.start - b.start);
     }
     navMatches = { data, key, spans };
@@ -214,7 +225,10 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
       return;
     }
     const chain = spanFocusChain(spanId, data);
-    const taskId = data.allSpans.find((sp) => sp.spanId === spanId)?.taskId ?? null;
+    const cs = data.columnarSpans;
+    const taskId = cs
+      ? (() => { const r = cs.spanIdToRow.get(spanId); return r === undefined ? null : cs.taskIdAt(r); })()
+      : data.allSpans.find((sp) => sp.spanId === spanId)?.taskId ?? null;
     const patch: Partial<StoreState["selection"]> = {
       focusedSpanId: spanId,
       spanFocus: { spanId, chain },
@@ -585,9 +599,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
  *  events. */
 function buildWorkerLanes(trace: ParsedTrace | null): Record<number, WorkerLane> {
   if (trace === null || trace.maxTs === null) return {};
-  const workerIds = [...new Set(trace.tidToWorker.values())];
-  return buildWorkerSpans(trace.events, workerIds, trace.maxTs, trace.blockInPlaceGaps)
-    .workerSpans;
+  return sharedWorkerSpans(trace).workerSpans;
 }
 
 /** Most-frequent-first "name xN" list, for cluster tooltips. */

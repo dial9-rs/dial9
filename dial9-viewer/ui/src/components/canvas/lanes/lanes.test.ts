@@ -3,11 +3,14 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  LANE_ROW_H,
+  RUNTIME_HEADER_H,
   renderLanes,
   sharedVisibleMaxQueue,
   type LaneDrawContext,
   type LanesRenderInput,
 } from "./render.js";
+import { laneRowLayout } from "../../../lib/canvas/layout.js";
 import { resolveLaneClick } from "./click.js";
 import { assembleLaneHover } from "./hover.js";
 import type { PollSpan, TracingSpan, WorkerLane } from "../../../types/trace.js";
@@ -182,6 +185,93 @@ describe("renderLanes: pixel-bounded fills (downsample+coalesce)", () => {
     // fires at most once for that style (then reset once) - not 10k times.
     expect(rec.setLineDashes).toBeLessThanOrEqual(2);
     expect(rec.strokes).toBeLessThanOrEqual(3); // openpoll + separator (+reset)
+  });
+});
+
+describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
+  // Each worker gets queue samples so its lane emits a "q:" label when drawn -
+  // a cheap per-drawn-row marker to count.
+  function workersInput(ids: number[]): LanesRenderInput {
+    const workerSpans: Record<number, WorkerLane> = {};
+    const workerQueueSamples: Record<number, { t: number; local: number }[]> = {};
+    for (const id of ids) {
+      workerSpans[id] = emptyLane();
+      workerQueueSamples[id] = [
+        { t: 0, local: 1 },
+        { t: 1000, local: 2 },
+      ];
+    }
+    return baseInput({
+      workerIds: ids,
+      workerSpans,
+      workerQueueSamples,
+      viewStart: 0,
+      viewEnd: 1000,
+      sharedMaxQ: 2,
+    });
+  }
+  const flatRows = (ids: number[]) =>
+    laneRowLayout([{ name: "", inferred: true, workerIds: ids }], LANE_ROW_H, RUNTIME_HEADER_H);
+  const qLabelCount = (texts: string[]) => texts.filter((t) => t.startsWith("q:")).length;
+
+  it("draws every worker at LANE_ROW_H when the box fits them all", () => {
+    const ids = [10, 11, 12, 13];
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, workersInput(ids), {
+      time: layout(0, 1000, 300),
+      height: ids.length * LANE_ROW_H, // 240 - fits all 4
+      rowLayout: flatRows(ids),
+      scrollTop: 0,
+    });
+    expect(qLabelCount(rec.fillTexts)).toBe(4);
+  });
+
+  it("only draws the rows inside the scroll window (virtualized)", () => {
+    const ids = [10, 11, 12, 13];
+    const rec = recordingCtx();
+    // A 120px box shows exactly 2 fixed 60px rows.
+    renderLanes(rec.ctx, workersInput(ids), {
+      time: layout(0, 1000, 300),
+      height: 120,
+      rowLayout: flatRows(ids),
+      scrollTop: 0,
+    });
+    expect(qLabelCount(rec.fillTexts)).toBe(2);
+  });
+
+  it("shifts the drawn window by scrollTop", () => {
+    const ids = [10, 11, 12, 13];
+    // Scrolled past the first two rows: rows 2 + 3 are the visible window.
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, workersInput(ids), {
+      time: layout(0, 1000, 300),
+      height: 120,
+      rowLayout: flatRows(ids),
+      scrollTop: 120,
+    });
+    expect(qLabelCount(rec.fillTexts)).toBe(2);
+  });
+
+  it("draws a runtime header band with name + worker count per group", () => {
+    const rows = laneRowLayout(
+      [
+        { name: "a", inferred: false, workerIds: [0, 1] },
+        { name: "b", inferred: false, workerIds: [2] },
+      ],
+      LANE_ROW_H,
+      RUNTIME_HEADER_H,
+    );
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, workersInput([0, 1, 2]), {
+      time: layout(0, 1000, 300),
+      height: 300, // fits both headers + all workers
+      rowLayout: rows,
+      scrollTop: 0,
+    });
+    expect(rec.fillTexts).toContain("runtime: a");
+    expect(rec.fillTexts).toContain("runtime: b");
+    expect(rec.fillTexts).toContain("2 workers");
+    expect(rec.fillTexts).toContain("1 worker");
   });
 });
 

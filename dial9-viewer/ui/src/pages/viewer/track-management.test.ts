@@ -313,6 +313,44 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(prefs?.trackOrder).toEqual(["queue", "cpu", "spans", "events"]);
     expect(prefs?.collapsed["queue"]).toBe(true);
   });
+
+  it("persists + restores the lanes box height across a fresh store", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    const s1 = manualScheduler();
+    const dispose = mountTrackPrefsPersistence(s1.store);
+    s1.store.update("uiPrefs", { lanesViewportHeight: 312 });
+    s1.flush(); // subscriber writes to localStorage
+    dispose();
+
+    const s2 = createViewerStore({ scheduler: () => {} });
+    expect(uiPrefs(s2).lanesViewportHeight).toBe(200); // store default before hydrate
+    hydrateTrackPrefs(s2);
+    expect(uiPrefs(s2).lanesViewportHeight).toBe(312);
+  });
+
+  it("keeps the store default when no lanes height was stored", () => {
+    const ls = fakeLocalStorage();
+    // A pref blob from before lanesHeight existed: order/collapse only.
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({ trackOrder: ["cpu"], collapsed: {} }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    expect(loadTrackPrefs()?.lanesHeight).toBeUndefined();
+    const store = createViewerStore({ scheduler: () => {} });
+    hydrateTrackPrefs(store);
+    expect(uiPrefs(store).lanesViewportHeight).toBe(200); // untouched default
+  });
+
+  it("rejects a non-positive stored lanes height", () => {
+    const ls = fakeLocalStorage();
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({ trackOrder: [], collapsed: {}, lanesHeight: 0 }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    expect(loadTrackPrefs()?.lanesHeight).toBeUndefined();
+  });
 });
 
 describe("collapse height + re-expand windowing obligation", () => {

@@ -8,24 +8,35 @@
 import "./core-globals.js";
 import { enclosingSpans } from "../../../trace_analysis.js";
 import type { PollSpan, TracingSpan } from "../../../trace_analysis.js";
+import type { ColumnarSpans } from "./columnar-spans.js";
 
 export { enclosingSpans };
+
+/** Minimal random-access span list: `{length, at(i)}`. Plain (readonly) arrays
+ * satisfy it as-is, and the columnar lane view implements it over typed-array
+ * columns - so the binary-search helpers work on both the worker (fat) path and
+ * the main-thread columnar path with no per-call branching. */
+export interface SpanList<S> {
+  readonly length: number;
+  at(index: number): S | undefined;
+}
 
 /**
  * Binary search for the span containing a given timestamp. Spans must be
  * non-overlapping and sorted by start time (the shape buildWorkerSpans
  * produces for polls/parks/actives). Returns null when no span contains
- * `ns`.
+ * `ns`. Reads via `.at(i)` so a columnar view can back it (identical behavior
+ * on plain arrays, whose `.at` returns the same element `[i]` would).
  */
 export function findSpanAt<S extends { start: number; end: number }>(
-  spans: readonly S[],
+  spans: SpanList<S>,
   ns: number
 ): S | null {
   let lo = 0;
   let hi = spans.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const s = spans[mid]!;
+    const s = spans.at(mid)!;
     if (s.end < ns) lo = mid + 1;
     else if (s.start > ns) hi = mid - 1;
     else return s;
@@ -50,13 +61,26 @@ export function taskAt(
 /**
  * Find a span whose time range contains `ns` AND which has a segment
  * actively executing on `workerId` at `ns` - the span under a lane click.
- * First match in allSpans order (sorted by start).
+ * First match in allSpans order (sorted by start). On the columnar path scans
+ * the store columns (segments CSR), materializing only the match.
  */
 export function findContainingSpan(
   allSpans: readonly TracingSpan[],
   workerId: number,
-  ns: number
+  ns: number,
+  columnarSpans?: ColumnarSpans
 ): TracingSpan | null {
+  if (columnarSpans) {
+    const cs = columnarSpans;
+    for (let r = 0; r < cs.length; r++) {
+      if (cs.end[r] < ns || cs.start[r] > ns) continue;
+      const lo = cs.segOff[r], hi = cs.segOff[r + 1];
+      for (let j = lo; j < hi; j++) {
+        if (cs.segWorker[j] === workerId && cs.segStart[j] <= ns && cs.segEnd[j] >= ns) return cs.at(r);
+      }
+    }
+    return null;
+  }
   for (const s of allSpans) {
     if (s.end < ns || s.start > ns) continue;
     for (const seg of s.segments) {
@@ -66,6 +90,32 @@ export function findContainingSpan(
     }
   }
   return null;
+}
+
+/** Columnar port of the frozen enclosingSpans: spans with a segment covering
+ * (ev.fields.worker_id, ev.timestamp), sorted by depth then start. Scans the
+ * segments CSR, materializing only matches. */
+export function enclosingSpansColumnar(
+  cs: ColumnarSpans,
+  ev: { timestamp: number; fields?: Record<string, unknown> }
+): TracingSpan[] {
+  const f = ev?.fields ?? {};
+  if (f.worker_id == null) return [];
+  const wid = Number(f.worker_id);
+  if (!Number.isFinite(wid)) return [];
+  const ts = ev.timestamp;
+  const out: TracingSpan[] = [];
+  for (let r = 0; r < cs.length; r++) {
+    const lo = cs.segOff[r], hi = cs.segOff[r + 1];
+    for (let j = lo; j < hi; j++) {
+      if (cs.segWorker[j] === wid && cs.segStart[j] <= ts && cs.segEnd[j] >= ts) {
+        out.push(cs.at(r) as unknown as TracingSpan);
+        break;
+      }
+    }
+  }
+  out.sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
+  return out;
 }
 
 /** Build the spanId -> span index the ancestor walk reads. */
@@ -103,7 +153,8 @@ export interface SpanAncestry {
  */
 export function spanAncestryAt(
   span: TracingSpan,
-  byId: ReadonlyMap<string, TracingSpan>,
+  // {get} subset so a lazy columnar adapter (LazySpanByIdSingle) works too.
+  byId: { get(spanId: string): TracingSpan | undefined },
   ns: number
 ): SpanAncestry {
   let cur = span;

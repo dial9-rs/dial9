@@ -15,8 +15,8 @@
 
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
-import { buildActiveTaskTimeline, buildWorkerSpans } from "../../lib/trace/index.js";
-import { deriveWorkerIds } from "../../components/canvas/lanes/data.js";
+import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
+import { deriveWorkerIds, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
 
@@ -95,12 +95,7 @@ export const EMPTY_QUEUE_DATA: QueueData = {
 export function computeQueueData(trace: ParsedTrace | null): QueueData {
   if (trace === null || trace.maxTs === null) return EMPTY_QUEUE_DATA;
   const workerIds = deriveWorkerIds(trace);
-  const spanResult = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    trace.maxTs,
-    trace.blockInPlaceGaps,
-  );
+  const spanResult = sharedWorkerSpans(trace);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,

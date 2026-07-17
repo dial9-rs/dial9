@@ -6,6 +6,7 @@
 
 import {
   OFF_WORKER_WORKER_ID,
+  findSpanAt,
   formatFrame,
   formatHumanDuration,
   symbolizeChain,
@@ -269,17 +270,11 @@ function spawnLocAt(
   if (wId == null) return null;
   const lane = workerSpans[wId];
   if (!lane || lane.polls.length === 0) return null;
-  const polls = lane.polls;
-  let lo = 0;
-  let hi = polls.length - 1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if ((polls[mid]?.start ?? 0) <= timestamp) lo = mid + 1;
-    else hi = mid - 1;
-  }
-  const cand = hi >= 0 ? polls[hi] : undefined;
-  if (cand && timestamp <= cand.end) return cand.spawnLoc;
-  return null;
+  // findSpanAt: rightmost start <= timestamp, then confirm timestamp <= end -
+  // identical to the previous inline search, and accessor-based so a columnar
+  // lane view backs it.
+  const cand = findSpanAt(lane.polls, timestamp);
+  return cand ? cand.spawnLoc : null;
 }
 
 /**

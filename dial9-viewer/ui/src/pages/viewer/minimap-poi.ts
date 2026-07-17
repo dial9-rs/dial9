@@ -14,10 +14,10 @@
 
 import {
   EVENT_TYPES,
-  buildWorkerSpans,
   computeSchedulingDelays,
   filterPointsOfInterest,
 } from "../../lib/trace/index.js";
+import { sharedWorkerSpans, columnarWorkerStoreFor } from "../../components/canvas/lanes/data.js";
 import type {
   ParsedTrace,
   PointOfInterest,
@@ -60,20 +60,19 @@ function lifecycleWorkerIds(trace: ParsedTrace): number[] {
 export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   const workerIds = lifecycleWorkerIds(trace);
   if (workerIds.length === 0) return [];
-  const maxTs = trace.maxTs ?? 0;
 
-  const spanResult = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    maxTs,
-    trace.blockInPlaceGaps,
-  );
+  // Shared reconstruction. The minimap's detectors (long-poll, sched,
+  // wake-delay, uninstrumented) read the spans READ-ONLY and never touch cpu
+  // samples, so the shared result (with attachCpuSamples already applied once)
+  // yields identical ticks without a second full reconstruction.
+  const spanResult = sharedWorkerSpans(trace);
   const workerSpans: Record<number, WorkerLane> = spanResult.workerSpans;
-  const schedDelays = computeSchedulingDelays(
-    workerSpans,
-    workerIds,
-    spanResult.wakesByTask,
-  );
+  // Columnar path: raw-column detectors instead of the fat filterPointsOfInterest
+  // over flyweight views (which materializes every poll).
+  const store = columnarWorkerStoreFor(trace);
+  const schedDelays = store
+    ? store.schedulingDelays(workerIds, spanResult.wakesByTask as never)
+    : computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);
 
   // Applicable detectors: long-poll always; the sched-derived ones only when
   // the trace carries sched-wait data; uninstrumented only when the trace
@@ -89,17 +88,14 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   const seen = new Set<string>();
   const out: MinimapPoi[] = [];
   for (const type of types) {
-    const pois: PointOfInterest[] = filterPointsOfInterest(
-      type,
-      workerSpans,
-      workerIds,
-      schedDelays,
-      {
-        hasSchedWait: trace.hasSchedWait,
-        sortByWorst: true,
-        taskInstrumented: trace.taskInstrumented,
-      },
-    );
+    const opts = {
+      hasSchedWait: trace.hasSchedWait,
+      sortByWorst: true,
+      taskInstrumented: trace.taskInstrumented,
+    };
+    const pois: PointOfInterest[] = store
+      ? store.pointsOfInterest(type, workerIds, schedDelays, opts)
+      : filterPointsOfInterest(type, workerSpans, workerIds, schedDelays, opts);
     for (const p of pois) {
       const dedupeKey = `${p.time}:${p.worker}:${p.type}`;
       if (seen.has(dedupeKey)) continue;

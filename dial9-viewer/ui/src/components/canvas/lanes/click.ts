@@ -9,6 +9,7 @@
 
 import { findContainingSpan, spanAncestryAt, taskAt } from "../../../lib/trace/query.js";
 import type { PollSpan, TracingSpan } from "../../../types/trace.js";
+import type { ColumnarSpans, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { SpanFocus } from "../../../types/state.js";
 
 /** Everything the resolver needs, pulled from LaneData + current selection. */
@@ -19,10 +20,14 @@ export interface LaneClickInput {
   ns: number;
   /** The clicked worker's polls (LaneData.workerSpans[workerId].polls). */
   polls: readonly PollSpan[];
-  /** All completed spans, start-sorted (LaneData.allSpans). */
+  /** All completed spans, start-sorted (LaneData.allSpans). EMPTY on the
+   * columnar path - read `columnarSpans`. */
   allSpans: readonly TracingSpan[];
-  /** span id -> span, for the ancestor walk (LaneData.spanByIdSingle). */
-  spanById: ReadonlyMap<string, TracingSpan>;
+  /** Columnar span store (main-thread path); the containing-span lookup uses it. */
+  columnarSpans?: ColumnarSpans;
+  /** span id -> span, for the ancestor walk (LaneData.spanByIdSingle - a Map on
+   * the fat path, a lazy store adapter on the columnar path). */
+  spanById: SpanByIdSingle;
   /** The currently-selected task (selection.selectedTaskId), for toggle. */
   currentSelectedTaskId: number | null;
 }
@@ -66,7 +71,7 @@ export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
 
   // Outermost containing span on this worker + ancestor chain.
   let spanFocus: SpanFocus | null = null;
-  const containing = findContainingSpan(input.allSpans, input.workerId, input.ns);
+  const containing = findContainingSpan(input.allSpans, input.workerId, input.ns, input.columnarSpans);
   if (containing) {
     const ancestry = spanAncestryAt(containing, input.spanById, input.ns);
     spanFocus = { spanId: ancestry.outermost.spanId, chain: ancestry.ids };

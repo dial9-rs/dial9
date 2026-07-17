@@ -561,6 +561,7 @@ export function mountInspector(
       {
         allEvents: d.customEvents,
         allSpans: d.laneData?.allSpans ?? [],
+        columnarSpans: d.laneData?.columnarSpans,
         taskOf: taskResolver(),
         fmtTs,
         fmtDelta,

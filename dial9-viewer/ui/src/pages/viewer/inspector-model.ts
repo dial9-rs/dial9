@@ -7,10 +7,12 @@
 import {
   deduplicateSamples,
   enclosingSpans,
+  enclosingSpansColumnar,
   formatFrame,
   formatFieldValue,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
+import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type {
   CallframeSymbols,
   CustomTraceEvent,
@@ -308,6 +310,8 @@ export interface RelatedView {
 export interface RelatedContext {
   allEvents: readonly CustomTraceEvent[];
   allSpans: readonly TracingSpan[];
+  /** Columnar span store (main-thread path); enclosingSpans dispatches on it. */
+  columnarSpans?: ColumnarSpans;
   /** Resolve the enclosing task for an event (events-model resolveTaskForEvent). */
   taskOf: (ev: CustomTraceEvent) => number | null;
   fmtTs: (ns: number) => string;
@@ -406,7 +410,9 @@ export function buildRelated(
 ): RelatedView {
   const sections: RelatedSection[] = [];
   const taskId = ctx.taskOf(ev);
-  const spans = ctx.allSpans.length ? enclosingSpans(ctx.allSpans, ev) : [];
+  const spans = ctx.columnarSpans
+    ? enclosingSpansColumnar(ctx.columnarSpans, ev)
+    : (ctx.allSpans.length ? enclosingSpans(ctx.allSpans, ev) : []);
   const innerSpan = spans.length ? spans[spans.length - 1]! : null;
 
   // Field correlation, only when the value links to other events.

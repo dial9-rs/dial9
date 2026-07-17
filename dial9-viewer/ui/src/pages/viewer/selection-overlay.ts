@@ -15,6 +15,7 @@
 import { assertInScheduledRender } from "../../store/store.js";
 import { timePanelLayout } from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
+import { lanesScrollbarWidth } from "./track-layout.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { SelectionSlice, TransientSlice } from "../../types/state.js";
 
@@ -124,7 +125,7 @@ export function mountSelectionOverlay(
     // Read geometry once: column width + the lanes-matching scrollbar gutter,
     // then the shared layout - identical inputs to the lanes/overlay.
     const pw = trackColumn.clientWidth;
-    const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
+    const scrollbarW = lanesScrollbarWidth(trackColumn);
     const { viewStart, viewEnd } = state.viewport;
     if (viewEnd <= viewStart) {
       el.style.display = "none";

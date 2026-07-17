@@ -10,12 +10,12 @@
 
 import {
   EVENT_TYPES,
-  attachCpuSamples,
-  buildWorkerSpans,
   computeSchedulingDelays,
   filterPointsOfInterest,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
+import { sharedWorkerSpans, columnarWorkerStoreFor } from "../../components/canvas/lanes/data.js";
+import type { ColumnarWorkerSpans } from "../../lib/trace/columnar-worker-spans.js";
 import type {
   ParsedTrace,
   ParkSpan,
@@ -85,6 +85,9 @@ export interface PoiSource {
   schedDelays: SchedDelay[];
   hasSchedWait: boolean;
   taskInstrumented: Map<number, boolean>;
+  /** Columnar store on the main-thread path; detectors scan its raw columns
+   * instead of the fat filterPointsOfInterest over the flyweight views. */
+  store?: ColumnarWorkerSpans;
   /** Lazy per-filter detector output cache (keyed by filter type). */
   readonly _byFilter: Map<PointOfInterestType, PointOfInterest[]>;
 }
@@ -115,30 +118,25 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
   if (source !== undefined) return source;
 
   const workerIds = deriveWorkerIds(trace);
-  const maxTs = trace.maxTs ?? 0;
-  const spanResult = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    maxTs,
-    trace.blockInPlaceGaps,
-  );
+  // Shared reconstruction (buildWorkerSpans + attachCpuSamples applied once);
+  // the "cpu-sampled" detector reads the already-attached poll samples.
+  const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
-  // Attach CPU/sched samples so the "cpu-sampled" detector sees them.
-  if (trace.cpuSamples.length > 0) {
-    attachCpuSamples(trace.cpuSamples, workerSpans);
-  }
-  const schedDelays = computeSchedulingDelays(
-    workerSpans,
-    workerIds,
-    spanResult.wakesByTask,
-  );
+  // Columnar path: compute scheduling delays over raw columns (the frozen
+  // computeSchedulingDelays would materialize every poll from the flyweight
+  // views). Falls back to the frozen path when there is no store.
+  const store = columnarWorkerStoreFor(trace);
+  const schedDelays = store
+    ? store.schedulingDelays(workerIds, spanResult.wakesByTask as never)
+    : computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);
 
   source = {
     workerIds,
     workerSpans,
-    schedDelays,
+    schedDelays: schedDelays as SchedDelay[],
     hasSchedWait: trace.hasSchedWait,
     taskInstrumented: trace.taskInstrumented,
+    store,
     _byFilter: new Map(),
   };
   sourceCache.set(trace, source);
@@ -157,17 +155,14 @@ export function poisForFilter(
 ): PointOfInterest[] {
   let list = source._byFilter.get(filter);
   if (list !== undefined) return list;
-  list = filterPointsOfInterest(
-    filter,
-    source.workerSpans,
-    source.workerIds,
-    source.schedDelays,
-    {
-      hasSchedWait: source.hasSchedWait,
-      sortByWorst: true,
-      taskInstrumented: source.taskInstrumented,
-    },
-  );
+  const opts = {
+    hasSchedWait: source.hasSchedWait,
+    sortByWorst: true,
+    taskInstrumented: source.taskInstrumented,
+  };
+  list = source.store
+    ? source.store.pointsOfInterest(filter, source.workerIds, source.schedDelays, opts)
+    : filterPointsOfInterest(filter, source.workerSpans, source.workerIds, source.schedDelays, opts);
   source._byFilter.set(filter, list);
   return list;
 }

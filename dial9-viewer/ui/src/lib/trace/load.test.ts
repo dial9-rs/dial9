@@ -11,10 +11,12 @@ import {
   canStreamDecode,
   loadTrace,
   loadTraceBuffered,
+  loadTraceOnMainThread,
   loadTraceStreamed,
   objectTraceUrls,
   parseTraceBuffer,
 } from "./load.js";
+import type { ParsedTrace } from "./load.js";
 
 // ── Fixtures: the demo trace, raw and gzipped, fully in memory ──────────
 
@@ -168,6 +170,60 @@ describe("loadTrace mode selection", () => {
     installFetchMock({ "/a": rawTrace });
     const { mode } = await loadTrace("/a");
     expect(mode).toBe(canStreamDecode() ? "stream" : "buffered");
+  });
+});
+
+// ── Main-thread loader (no worker clone) ─────────────────────────────────
+
+describe("loadTraceOnMainThread", () => {
+  function fakeStore(): {
+    updates: { trace: ParsedTrace }[];
+    update(slice: "trace", patch: { trace: ParsedTrace }): void;
+  } {
+    const updates: { trace: ParsedTrace }[] = [];
+    return {
+      updates,
+      update(_slice, patch): void {
+        updates.push(patch);
+      },
+    };
+  }
+
+  it("parses on the caller thread, writes the store slice, resolves with timing", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const store = fakeStore();
+    const result = await loadTraceOnMainThread(store, ["/t.bin"], {}).done;
+    expect(store.updates).toHaveLength(1);
+    expect(store.updates[0].trace.events.length).toBe(singleEvents);
+    // The resolved trace IS the one written to the store (same identity, no clone).
+    expect(result.trace).toBe(store.updates[0].trace);
+    expect(result.mode).toBe(canStreamDecode() ? "stream" : "buffered");
+    expect(result.timing.events).toBe(singleEvents);
+    expect(result.buffer.byteLength).toBe(rawTrace.length);
+  });
+
+  it("forwards parse progress with a growing event count", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const store = fakeStore();
+    let sawParsing = false;
+    let maxEvents = 0;
+    await loadTraceOnMainThread(store, ["/t.bin"], {
+      onProgress: (p): void => {
+        if (p.phase === "parsing") sawParsing = true;
+        maxEvents = Math.max(maxEvents, p.eventCount);
+      },
+    }).done;
+    expect(sawParsing).toBe(true);
+    expect(maxEvents).toBeGreaterThan(0);
+  });
+
+  it("abort() rejects with AbortError and never touches the store", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const store = fakeStore();
+    const load = loadTraceOnMainThread(store, ["/t.bin"], {});
+    load.abort();
+    await expect(load.done).rejects.toMatchObject({ name: "AbortError" });
+    expect(store.updates).toHaveLength(0);
   });
 });
 

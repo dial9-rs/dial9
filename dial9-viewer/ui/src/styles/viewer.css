@@ -433,6 +433,51 @@ body {
 }
 .d9-track-canvas { display: block; }
 
+/* ── Worker-lanes box: fixed-height rows in a resizeable inner-scroll box ── */
+/* The lanes track stacks its label + scroll box in a row, then a resize gutter
+   below. Rows are a FIXED height and the box scrolls internally, so 64+ workers
+   stay legible/clickable instead of collapsing to slivers. Drag-resize (the mount
+   wires it) never animates, so the box tracks the pointer 1:1. */
+.d9-track--lanes {
+    flex-direction: column;
+    overflow: visible;
+    transition: none;
+}
+.d9-lanes-head { display: flex; align-items: stretch; }
+.d9-track--lanes .d9-track-canvas-wrap {
+    display: block;
+    position: relative;
+}
+.d9-lanes-viewport {
+    width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* Reserve the scrollbar gutter always, so its width is constant and every
+       track's reserved right gutter (lanesScrollbarWidth) keeps the time axes
+       aligned whether or not the box is currently scrolling. */
+    scrollbar-gutter: stable;
+    position: relative;
+    background: var(--d9-bg-track);
+}
+/* The canvas is virtualized: sized to the visible box and pinned to its top,
+   while the spacer supplies the scrollable range. The mount redraws the visible
+   row window on scroll. */
+.d9-lanes-viewport > .d9-track-canvas {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: block;
+}
+.d9-lanes-spacer { width: 1px; flex: none; }
+.d9-lanes-resize {
+    height: 6px;
+    flex: none;
+    cursor: row-resize;
+    background: transparent;
+    border-top: 1px solid var(--d9-border);
+}
+.d9-lanes-resize:hover { background: var(--d9-accent); }
+
 /* ── Track management: collapse caret + drag-reorder grip (the fold
    BEHAVIOR survives, one-line-fold presentation retired). The affordances
    overlay a reserved strip at the LEFT edge of the

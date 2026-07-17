@@ -59,6 +59,7 @@ function initialViewerState(): StoreState {
       trackOrder: [],
       collapsed: {},
       sidebarWidth: 320,
+      lanesViewportHeight: 200,
       selectedSpanNames: new Set(),
       selectedEventNames: new Set(),
       spanFilter: "",

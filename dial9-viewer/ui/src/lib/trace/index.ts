@@ -46,6 +46,7 @@ export {
   loadTrace,
   loadTraceBuffered,
   loadTraceInWorker,
+  loadTraceOnMainThread,
   loadTraceStreamed,
   objectTraceUrls,
   parseTraceBuffer,
@@ -144,13 +145,14 @@ export type { ReparseRange } from "./reparse.js";
 export {
   SPAN_ANCESTRY_CYCLE_LIMIT,
   enclosingSpans,
+  enclosingSpansColumnar,
   findContainingSpan,
   findSpanAt,
   spanAncestryAt,
   spansById,
   taskAt,
 } from "./query.js";
-export type { SpanAncestry } from "./query.js";
+export type { SpanAncestry, SpanList } from "./query.js";
 
 // analysis.ts - the trace_analysis.js facade.
 export {

@@ -20,8 +20,10 @@
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, TimePanelLayout } from "../../types/state.js";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, timePanelLayout } from "../../lib/canvas/layout.js";
+import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
+import { LANE_ROW_H, RUNTIME_HEADER_H } from "../canvas/lanes/render.js";
 import { deriveAxisInputs, fmtAxisTick } from "../../pages/viewer/axis.js";
+import { lanesScrollbarWidth } from "../../pages/viewer/track-layout.js";
 import { assembleLaneHover } from "../canvas/lanes/index.js";
 import type { LaneHoverInput } from "../canvas/lanes/hover.js";
 import { deriveOverlayData, type OverlayData } from "./data.js";
@@ -53,7 +55,7 @@ function columnGeometry(
   viewEnd: number,
 ): ColumnGeometry {
   const pw = trackColumn.clientWidth;
-  const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
+  const scrollbarW = lanesScrollbarWidth(trackColumn);
   // Height must cover the tracks so the crosshair spans them even when scrolled,
   // but must NOT read trackColumn.scrollHeight: this overlay is an absolutely
   // positioned child, so it contributes to scrollHeight itself - sizing to
@@ -72,18 +74,20 @@ function columnGeometry(
   };
 }
 
-/** Worker id under `clientY` on the lanes track, or null when off the lanes. */
+/** Worker id under `clientY` in the lanes box, or null when off the lanes / over
+ *  a runtime header. Fixed-height rows + box scrollTop, resolved through the same
+ *  shared row layout the renderer + click use so hover never drifts from them. */
 function workerAtClientY(
-  lanesCanvas: HTMLElement,
+  box: HTMLElement,
   clientY: number,
-  workerIds: readonly number[],
+  data: OverlayData,
 ): number | null {
-  const n = workerIds.length;
-  if (n === 0) return null;
-  const rect = lanesCanvas.getBoundingClientRect();
+  if (data.workerIds.length === 0) return null;
+  const rect = box.getBoundingClientRect();
   if (clientY < rect.top || clientY >= rect.bottom || rect.height <= 0) return null;
-  const idx = Math.floor(((clientY - rect.top) / rect.height) * n);
-  return workerIds[idx] ?? null;
+  const localY = clientY - rect.top + box.scrollTop;
+  const rowLayout = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
+  return workerAtLaneY(rowLayout, localY);
 }
 
 /**
@@ -184,6 +188,7 @@ export function mountOverlay(
             ns: req.ns,
             spans,
             allSpans: data.allSpans,
+            columnarSpans: data.columnarSpans,
             queueSamples: data.queueSamples,
             localQueueSamples: data.workerQueueSamples[req.workerId] ?? [],
             activeTaskSamples: data.activeTaskSamples,
@@ -234,8 +239,8 @@ export function mountOverlay(
     }
 
     const ns = geom.layout.panelXToNs(mouseX);
-    const lanesCanvas = trackColumn.querySelector<HTMLElement>('canvas[data-track-canvas="lanes"]');
-    const workerId = lanesCanvas ? workerAtClientY(lanesCanvas, e.clientY, data.workerIds) : null;
+    const lanesBox = trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
+    const workerId = lanesBox ? workerAtClientY(lanesBox, e.clientY, data) : null;
 
     const readout = computeAtCursorReadout(
       data,

@@ -201,6 +201,14 @@ declare module "*/trace_parser.js" {
     /** Latest segment-metadata key -> value. */
     segmentMetadata: Map<string, string>;
     customEvents: CustomTraceEvent[];
+    /**
+     * Columnar SPAN custom events (SpanEnter/Exit/Close), present only on the
+     * main-thread columnar load path (spanEventSink). When set, span events are
+     * NOT in `customEvents` (which then holds only non-span custom events) and
+     * buildSpanDataColumnar reads them. Undefined on the fat/worker path, where
+     * span events remain inside `customEvents`.
+     */
+    spanEvents?: import("../lib/trace/columnar-span-events.js").ColumnarSpanEvents;
     /** task id -> async stack captures, sorted by timestamp. */
     taskDumps: Map<number, TaskDump[]>;
     clockSyncAnchors: ClockSyncAnchor[];
@@ -233,6 +241,32 @@ declare module "*/trace_parser.js" {
     startTime?: number;
     endTime?: number;
     onParseProgress?: (progress: ParseProgress & DirParseProgress) => void;
+    /**
+     * Optional pluggable event store, used in place of the default plain array
+     * for `state.events`. The new viewer passes a columnar sink
+     * (src/lib/trace/columnar-events.ts ColumnarEvents) whose `.push(event)`
+     * writes fields into typed-array columns and drops the object, so a large
+     * trace never materializes millions of fat event objects. Its `.push`,
+     * `.length`, iterator and (via the sink's own bounds) ts range must satisfy
+     * what finalizeParse + deriveBlockInPlaceGaps read.
+     */
+    eventSink?: unknown;
+    /**
+     * Optional columnar cpu-sample sink (src/lib/trace/columnar-cpu-samples.ts
+     * ColumnarCpuSamples). Its `.pushSample(...)` stores each sample's callchain
+     * in a flat frame-index pool instead of a per-sample hex array, so a
+     * perf-capture trace's cpuSamples drop from ~2.3 GB to ~0.5 GB. Defaults to
+     * a plain array of fat samples.
+     */
+    cpuSampleSink?: unknown;
+    /**
+     * Optional columnar sink for SPAN custom events (src/lib/trace/
+     * columnar-span-events.ts ColumnarSpanEvents). Its `.pushIfSpan(name, ts, v)`
+     * routes SpanEnter/Exit/Close events into typed columns (the ~2.3 GB of fat
+     * span-event objects on a heavily-instrumented trace); non-span custom events
+     * stay in the fat customEvents array. buildSpanDataColumnar reads the columns.
+     */
+    spanEventSink?: unknown;
     /** Directory parsing only (Node). */
     cache?: boolean;
     parallel?: boolean;

@@ -23,7 +23,6 @@
 
 import {
   EVENT_TYPES,
-  buildWorkerSpans,
   computePollWakes,
   computeRuntimeGroups,
   formatHumanDuration,
@@ -31,11 +30,14 @@ import {
 import type {
   ParsedTrace,
   PollSpan,
+  SpanList,
   TaskDump,
   TaskWake,
   WorkerLane,
 } from "../../lib/trace/index.js";
 import { pixelCoverage } from "../../lib/canvas/index.js";
+import { sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
+import type { ColumnarWorkerSpans } from "../../lib/trace/columnar-worker-spans.js";
 
 // ── Trace-invariant poll source (buildWorkerSpans, keyed by trace) ────────
 
@@ -92,12 +94,7 @@ export function collectWorkerIds(trace: ParsedTrace): number[] {
 export function buildTaskPollSource(trace: ParsedTrace | null): TaskPollSource {
   if (trace === null || trace.maxTs === null) return EMPTY_TASK_POLL_SOURCE;
   const workerIds = collectWorkerIds(trace);
-  const result = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    trace.maxTs,
-    trace.blockInPlaceGaps,
-  );
+  const result = sharedWorkerSpans(trace);
   return {
     workerIds,
     workerSpans: result.workerSpans,
@@ -217,16 +214,29 @@ export function computeTaskDetailData(
 ): TaskDetailData {
   if (taskId === null || trace === null) return EMPTY_TASK_DETAIL_DATA;
 
-  // Collect all polls for this task across all workers, sorted by start.
-  const polls: PollSpan[] = [];
+  // Collect all polls for this task across all workers, sorted by start. On the
+  // columnar path scan the raw taskId columns (materializing only this task's
+  // polls) instead of iterating every flyweight lane view. The store rides on
+  // the lane views themselves, so we read it from `source` (no trace re-derive).
+  let store: ColumnarWorkerSpans | undefined;
   for (const w of source.workerIds) {
-    const lane = source.workerSpans[w];
-    if (lane === undefined) continue;
-    for (const s of lane.polls) {
-      if (s.taskId === taskId) polls.push(s);
-    }
+    const lane = source.workerSpans[w] as { store?: ColumnarWorkerSpans } | undefined;
+    if (lane?.store) { store = lane.store; break; }
   }
-  polls.sort((a, b) => a.start - b.start);
+  let polls: PollSpan[];
+  if (store) {
+    polls = store.pollsForTask(taskId) as unknown as PollSpan[];
+  } else {
+    polls = [];
+    for (const w of source.workerIds) {
+      const lane = source.workerSpans[w];
+      if (lane === undefined) continue;
+      for (const s of lane.polls) {
+        if (s.taskId === taskId) polls.push(s);
+      }
+    }
+    polls.sort((a, b) => a.start - b.start);
+  }
   if (polls.length < 1) return EMPTY_TASK_DETAIL_DATA;
 
   const wakes = source.wakesByTask[taskId] ?? [];
@@ -419,14 +429,14 @@ export interface TaskDetailRenderOpts {
  * polled millions of times never walks the whole array's head per frame.
  */
 export function firstVisibleByEnd(
-  polls: readonly PollSpan[],
+  polls: SpanList<PollSpan>,
   viewStart: number,
 ): number {
   let lo = 0;
   let hi = polls.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (polls[mid]!.end < viewStart) lo = mid + 1;
+    if (polls.at(mid)!.end < viewStart) lo = mid + 1;
     else hi = mid - 1;
   }
   return lo;

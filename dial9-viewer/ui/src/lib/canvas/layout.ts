@@ -20,6 +20,7 @@ import type {
   PanelGeometry,
   PanelKind,
 } from "../../types/state.js";
+import type { RuntimeGroup } from "../../types/trace.js";
 
 export type { TimePanelLayout };
 
@@ -101,4 +102,86 @@ export function laneStackGeometry(
     y: index * laneHeight,
     height: laneHeight,
   }));
+}
+
+/** A row in the vertical lanes stack: a fixed-height worker row, or a runtime
+ *  group header band. `y`/`height` are lanes-local CSS px (before scroll). */
+export type LaneRow =
+  | {
+      kind: "worker";
+      workerId: number;
+      /** Position in the flat worker order (top = 0), for callers that key by it. */
+      index: number;
+      y: number;
+      height: number;
+    }
+  | {
+      kind: "header";
+      name: string;
+      /** True for the inferred default ("main") runtime (label reads differently). */
+      inferred: boolean;
+      workerCount: number;
+      y: number;
+      height: number;
+    };
+
+export interface LaneRowLayout {
+  /** Interleaved header + worker rows, top to bottom. */
+  rows: LaneRow[];
+  /** Total stacked height (last row's `y + height`); the scroll content height. */
+  contentHeight: number;
+}
+
+/**
+ * The runtime-aware vertical layout of the lanes stack: each runtime group emits
+ * a header row (only when there is MORE than one group - the single-runtime
+ * common case stays header-free) followed by its workers at fixed `rowH`.
+ * Cumulative `y` runs top to bottom. This is the ONE source of lane vertical
+ * geometry - the renderer draws from it and both hit-tests resolve against it,
+ * so a fixed row height + headers can never drift between draw and click.
+ */
+export function laneRowLayout(
+  groups: readonly RuntimeGroup[],
+  rowH: number,
+  headerH: number,
+): LaneRowLayout {
+  const rows: LaneRow[] = [];
+  const showHeaders = groups.length > 1;
+  let y = 0;
+  let index = 0;
+  for (const g of groups) {
+    if (showHeaders) {
+      rows.push({
+        kind: "header",
+        name: g.name,
+        inferred: g.inferred,
+        workerCount: g.workerIds.length,
+        y,
+        height: headerH,
+      });
+      y += headerH;
+    }
+    for (const workerId of g.workerIds) {
+      rows.push({ kind: "worker", workerId, index, y, height: rowH });
+      y += rowH;
+      index++;
+    }
+  }
+  return { rows, contentHeight: y };
+}
+
+/**
+ * Resolve a lanes-local y (client y minus the viewport top PLUS the box
+ * scrollTop) to the worker id whose row contains it, or null when the point is
+ * over a header band or past the content. Linear over the rows (a lanes stack is
+ * small); shared by the click + hover hit-tests so both honor the same
+ * fixed-height + header geometry.
+ */
+export function workerAtLaneY(rowLayout: LaneRowLayout, localY: number): number | null {
+  if (localY < 0) return null;
+  for (const row of rowLayout.rows) {
+    if (localY < row.y || localY >= row.y + row.height) continue;
+    return row.kind === "worker" ? row.workerId : null;
+  }
+  return null;
 }

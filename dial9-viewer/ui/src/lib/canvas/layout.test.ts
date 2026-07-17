@@ -8,7 +8,16 @@ import {
   timePanelLayout,
   panelGeometry,
   laneStackGeometry,
+  laneRowLayout,
+  workerAtLaneY,
 } from "./layout.js";
+import type { RuntimeGroup } from "../../types/trace.js";
+
+const group = (name: string, workerIds: number[], inferred = false): RuntimeGroup => ({
+  name,
+  workerIds,
+  inferred,
+});
 
 describe("timePanelLayout", () => {
   it("known case: pw=1200, sb=17 -> drawW=1083, axis spans [100, 1183]", () => {
@@ -121,5 +130,65 @@ describe("laneStackGeometry", () => {
 
   it("empty worker set -> empty stack", () => {
     expect(laneStackGeometry([], 60)).toEqual([]);
+  });
+});
+
+describe("laneRowLayout", () => {
+  it("single runtime group -> no header, fixed-height worker rows", () => {
+    const { rows, contentHeight } = laneRowLayout([group("main", [3, 0, 7], true)], 60, 24);
+    expect(rows).toEqual([
+      { kind: "worker", workerId: 3, index: 0, y: 0, height: 60 },
+      { kind: "worker", workerId: 0, index: 1, y: 60, height: 60 },
+      { kind: "worker", workerId: 7, index: 2, y: 120, height: 60 },
+    ]);
+    expect(contentHeight).toBe(180);
+  });
+
+  it("multiple groups -> a header before each group, cumulative y", () => {
+    const { rows, contentHeight } = laneRowLayout(
+      [group("a", [0, 1]), group("b", [2])],
+      60,
+      24,
+    );
+    expect(rows).toEqual([
+      { kind: "header", name: "a", inferred: false, workerCount: 2, y: 0, height: 24 },
+      { kind: "worker", workerId: 0, index: 0, y: 24, height: 60 },
+      { kind: "worker", workerId: 1, index: 1, y: 84, height: 60 },
+      { kind: "header", name: "b", inferred: false, workerCount: 1, y: 144, height: 24 },
+      { kind: "worker", workerId: 2, index: 2, y: 168, height: 60 },
+    ]);
+    // 2 headers (24) + 3 workers (60) = 228.
+    expect(contentHeight).toBe(228);
+  });
+
+  it("no groups -> empty stack", () => {
+    expect(laneRowLayout([], 60, 24)).toEqual({ rows: [], contentHeight: 0 });
+  });
+});
+
+describe("workerAtLaneY", () => {
+  const single = laneRowLayout([group("main", [5, 6, 7], true)], 60, 24);
+  const grouped = laneRowLayout([group("a", [0, 1]), group("b", [2])], 60, 24);
+
+  it("resolves the worker whose fixed row contains the lanes-local y", () => {
+    expect(workerAtLaneY(single, 0)).toBe(5); // top of row 0
+    expect(workerAtLaneY(single, 59)).toBe(5); // bottom of row 0
+    expect(workerAtLaneY(single, 60)).toBe(6); // top of row 1
+    expect(workerAtLaneY(single, 130)).toBe(7); // inside row 2
+  });
+
+  it("accounts for a scroll offset already folded into localY", () => {
+    // localY = clientY - viewportTop + scrollTop. Scrolled 100px: the point 10px
+    // below the box top lands at lanes-local 110 -> worker 6 (row [60,120)).
+    expect(workerAtLaneY(single, 110)).toBe(6);
+  });
+
+  it("returns null over a runtime header band and past the content", () => {
+    expect(workerAtLaneY(grouped, 10)).toBeNull(); // header "a" band [0,24)
+    expect(workerAtLaneY(grouped, 24)).toBe(0); // first worker after header
+    expect(workerAtLaneY(grouped, 150)).toBeNull(); // header "b" band [144,168)
+    expect(workerAtLaneY(grouped, 168)).toBe(2); // worker under header "b"
+    expect(workerAtLaneY(grouped, 10_000)).toBeNull(); // past the content
+    expect(workerAtLaneY(single, -1)).toBeNull(); // above the content
   });
 });

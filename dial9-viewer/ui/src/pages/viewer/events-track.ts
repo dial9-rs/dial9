@@ -22,7 +22,8 @@ import { repeat } from "lit-html/directives/repeat.js";
 import { classMap } from "lit-html/directives/class-map.js";
 import { createCanvasSizer, makeColorAssigner } from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
-import { buildWorkerSpans, formatFieldValue } from "../../lib/trace/index.js";
+import { formatFieldValue } from "../../lib/trace/index.js";
+import { sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
 import type {
   CustomTraceEvent,
   ParsedTrace,
@@ -461,12 +462,7 @@ export function dispatchHoverEvent(store: ViewerStore, ts: number | null): void 
 function buildWorkerLaneData(trace: ParsedTrace | null): WorkerLaneData {
   if (trace === null || trace.maxTs === null) return { lanes: {}, workerIds: [] };
   const workerIds = [...new Set(trace.tidToWorker.values())];
-  const lanes = buildWorkerSpans(
-    trace.events,
-    workerIds,
-    trace.maxTs,
-    trace.blockInPlaceGaps,
-  ).workerSpans;
+  const lanes = sharedWorkerSpans(trace).workerSpans;
   return { lanes, workerIds };
 }
 

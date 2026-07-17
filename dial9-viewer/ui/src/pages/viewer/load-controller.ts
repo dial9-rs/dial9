@@ -17,10 +17,10 @@
 //     (canDismiss), so Esc AND the visible close control return to the trace;
 //     reopening is just another requestNewFile().
 //
-// The load itself runs in the trace worker (loadTraceInWorker), injected as
-// `startLoad` so tests drive a scripted handle. File drops feed the worker as
-// an object URL (the core sniffs the gzip magic on the fetched blob, so both
-// .bin and .bin.gz decode).
+// The load itself is injected as `startLoad` (default:
+// loadTraceOnMainThread) so tests drive a scripted handle. File drops feed
+// the loader an object URL (the core sniffs the gzip magic on the fetched
+// blob, so both .bin and .bin.gz decode).
 
 import { ESC_PRIORITY } from "./esc-cascade.js";
 import type { EscapableSurface } from "./esc-cascade.js";
