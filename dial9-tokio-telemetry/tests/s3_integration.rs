@@ -35,7 +35,12 @@ fn worker_thread_starts_and_stops_cleanly() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
 
-    let writer = DiskBuffer::new(trace_dir.path(), 1024, 10 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(1024)
+        .max_total_size(10 * 1024)
+        .build()
+        .unwrap();
     let (s3_config, client) = dummy_s3(s3_root.path());
 
     let traced = recorder(writer)
@@ -60,7 +65,12 @@ fn graceful_shutdown_seals_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
 
-    let writer = DiskBuffer::new(trace_dir.path(), 1024, 10 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(1024)
+        .max_total_size(10 * 1024)
+        .build()
+        .unwrap();
     let (s3_config, client) = dummy_s3(s3_root.path());
 
     let traced = recorder(writer)
@@ -100,7 +110,12 @@ fn end_to_end_trace_to_s3_roundtrip() {
     let client = fake_s3_client(s3_root.path());
 
     // Small max_file_size to force rotation quickly
-    let mut writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
+    let mut writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
+        .unwrap();
     writer.update_segment_metadata(vec![("custom-metadata".to_string(), "value".to_string())]);
 
     let s3_config = S3Config::builder()
@@ -274,7 +289,12 @@ fn region_auto_detection_corrects_wrong_client_region() {
             .build(),
     );
 
-    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
+        .unwrap();
 
     // Do NOT set .region() — force auto-detection.
     let s3_config = S3Config::builder()
@@ -383,7 +403,12 @@ fn stress_test_all_segments_uploaded_and_valid() {
     // Small segments to force rotations, but not so many that drain takes forever.
     let segment_size = 64 * 1024;
     let total_size = 2 * 1024 * 1024; // 2 MB disk budget
-    let writer = DiskBuffer::new(trace_dir.path(), segment_size, total_size).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(segment_size)
+        .max_total_size(total_size)
+        .build()
+        .unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("stress-bucket")
@@ -592,7 +617,12 @@ fn graceful_shutdown_completes_when_s3_hangs() {
     let client = fake_s3_client_hanging(s3_root.path());
 
     // Small segments to force rotation quickly.
-    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
+        .unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("hang-bucket")
@@ -659,7 +689,12 @@ fn stress_test_with_s3_failures() {
 
     let segment_size = 64 * 1024;
     let total_size = 2 * 1024 * 1024;
-    let writer = DiskBuffer::new(trace_dir.path(), segment_size, total_size).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(segment_size)
+        .max_total_size(total_size)
+        .build()
+        .unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("flaky-bucket")
@@ -737,7 +772,12 @@ fn permanently_broken_s3_produces_failure_metrics() {
     std::fs::create_dir_all(s3_root.path().join("broken-bucket")).unwrap();
     let client = fake_s3_client_always_failing(s3_root.path());
 
-    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
+        .unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("broken-bucket")

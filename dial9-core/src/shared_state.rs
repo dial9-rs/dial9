@@ -33,17 +33,19 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(start_time_ns: u64) -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
-            collector: Arc::new(CentralCollector::new()),
-            start_time_ns,
-            next_worker_id: AtomicU64::new(0),
-            drain_epoch: AtomicU64::new(0),
-            tl_buffers: Mutex::new(Vec::new()),
-            sources: Mutex::new(Vec::new()),
-            #[cfg(feature = "pipeline")]
-            dump_trigger: std::sync::OnceLock::new(),
+    crate::test_util_pub! {
+        fn new(start_time_ns: u64) -> Self {
+            Self {
+                enabled: AtomicBool::new(false),
+                collector: Arc::new(CentralCollector::new()),
+                start_time_ns,
+                next_worker_id: AtomicU64::new(0),
+                drain_epoch: AtomicU64::new(0),
+                tl_buffers: Mutex::new(Vec::new()),
+                sources: Mutex::new(Vec::new()),
+                #[cfg(feature = "pipeline")]
+                dump_trigger: std::sync::OnceLock::new(),
+            }
         }
     }
 

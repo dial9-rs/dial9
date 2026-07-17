@@ -36,7 +36,12 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     // Small segments to force rotation so the worker has segments to process.
     // Large total size so segments aren't evicted before the worker processes them.
-    let writer = DiskBuffer::new(trace_dir.path(), 4 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(4 * 1024)
+        .max_total_size(10 * 1024 * 1024)
+        .build()
+        .unwrap();
 
     let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))

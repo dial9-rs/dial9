@@ -119,7 +119,11 @@ fn main() -> std::io::Result<()> {
 
     std::fs::create_dir_all(&trace_dir)?;
 
-    let writer = DiskBuffer::new(&trace_dir, args.segment_size, args.total_size)?;
+    let writer = DiskBuffer::builder()
+        .base_path(&trace_dir)
+        .max_file_size(args.segment_size)
+        .max_total_size(args.total_size)
+        .build()?;
 
     let s3_config = S3Config::builder()
         .bucket(&args.bucket)

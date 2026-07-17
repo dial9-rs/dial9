@@ -7,7 +7,12 @@ use std::time::Duration;
 fn guard_drop_produces_sealed_bin_files() {
     let dir = tempfile::tempdir().unwrap();
 
-    let writer = DiskBuffer::new(dir.path(), 1024, 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(dir.path())
+        .max_file_size(1024)
+        .max_total_size(1024 * 1024)
+        .build()
+        .unwrap();
     let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);

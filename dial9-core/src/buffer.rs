@@ -239,22 +239,6 @@ enum WriterState {
 
 #[bon::bon]
 impl SegmentWriter<Disk> {
-    /// Create a new rotating writer. For additional options like `segment_metadata`,
-    /// use [`DiskBuffer::builder()`].
-    pub fn new(
-        base_path: impl Into<PathBuf>,
-        max_file_size: u64,
-        max_total_size: u64,
-    ) -> std::io::Result<Self> {
-        Self::create(
-            base_path,
-            max_file_size,
-            max_total_size,
-            DEFAULT_ROTATION_PERIOD,
-            SegmentMetadata::default(),
-        )
-    }
-
     /// Create a `DiskBufferBuilder` for advanced configuration.
     ///
     /// When `max_file_size` is omitted, it defaults to
@@ -1136,7 +1120,12 @@ mod tests {
     #[test]
     fn test_rotating_writer_creation() {
         let dir = TempDir::new().unwrap();
-        let mut writer = DiskBuffer::new(dir.path(), 1024, 4096).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024)
+            .max_total_size(4096)
+            .build()
+            .unwrap();
         writer.finalize().unwrap();
 
         // No real events were written, so finalize removes the empty segment.
@@ -1156,7 +1145,12 @@ mod tests {
         let base = dir.path().join("trace");
         // Set max_file_size to fit ~1 event so rotation triggers quickly
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         for _ in 0..3 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1184,7 +1178,12 @@ mod tests {
         let one_event = single_event_file_size();
         let max_file_size = one_event;
         let max_total_size = max_file_size * 3;
-        let mut writer = DiskBuffer::new(dir.path(), max_file_size, max_total_size).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(max_file_size)
+            .max_total_size(max_total_size)
+            .build()
+            .unwrap();
 
         for _ in 0..10 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1206,7 +1205,12 @@ mod tests {
         // Small file size to force rotation, total budget fits ~1 file
         let max_file_size = one_event;
         let max_total_size = one_event + 5;
-        let mut writer = DiskBuffer::new(dir.path(), max_file_size, max_total_size).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(max_file_size)
+            .max_total_size(max_total_size)
+            .build()
+            .unwrap();
 
         for _ in 0..100 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1248,7 +1252,12 @@ mod tests {
         let max_file_size = 200;
         let num_files = 100u64;
         let max_total_size = max_file_size * num_files;
-        let mut writer = DiskBuffer::new(dir.path(), max_file_size, max_total_size).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(max_file_size)
+            .max_total_size(max_total_size)
+            .build()
+            .unwrap();
 
         // Write many batches. The batch size doesn't divide evenly into
         // (max_file_size - header), so each file wastes a few bytes. After
@@ -1273,7 +1282,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         for _ in 0..5 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1304,7 +1318,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         for _ in 0..3 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1330,7 +1349,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         for _ in 0..3 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1355,7 +1379,12 @@ mod tests {
     fn test_flush_after_stop() {
         let dir = TempDir::new().unwrap();
         // Total budget smaller than one file — stops immediately
-        let mut writer = DiskBuffer::new(dir.path(), 10_000, 50).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(10_000)
+            .max_total_size(50)
+            .build()
+            .unwrap();
 
         for _ in 0..5 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1370,7 +1399,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         for _ in 0..3 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1394,7 +1428,12 @@ mod tests {
         let base = dir.path().join("trace");
         let one_event = single_event_file_size();
         // Exactly fits one event file — second event triggers rotation
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         for _ in 0..2 {
             writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1418,7 +1457,12 @@ mod tests {
     #[test]
     fn test_active_suffix_while_writing() {
         let dir = TempDir::new().unwrap();
-        let mut writer = DiskBuffer::new(dir.path(), 1024, 100000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024)
+            .max_total_size(100000)
+            .build()
+            .unwrap();
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
@@ -1433,7 +1477,12 @@ mod tests {
     fn test_rotation_seals_previous_file() {
         let dir = TempDir::new().unwrap();
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         // Write 2 events — triggers rotation after first
         writer.write_encoded_batch(&test_batch()).unwrap();
@@ -1462,7 +1511,12 @@ mod tests {
     #[test]
     fn test_finalize_renames_current_file() {
         let dir = TempDir::new().unwrap();
-        let mut writer = DiskBuffer::new(dir.path(), 1024, 100000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024)
+            .max_total_size(100000)
+            .build()
+            .unwrap();
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.finalize().unwrap();
 
@@ -1480,7 +1534,12 @@ mod tests {
     fn test_finalize_removes_empty_segment_after_rotation() {
         let dir = TempDir::new().unwrap();
         // Small max_file_size so one event triggers rotation.
-        let mut writer = DiskBuffer::new(dir.path(), 1, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
         // Write an event — this fills segment 0 and triggers rotation to segment 1.
         writer.write_encoded_batch(&test_batch()).unwrap();
         // Segment 0 is sealed, segment 1 is active with only header + metadata.
@@ -1723,7 +1782,12 @@ mod tests {
         let max_file_size = one_event;
         // Budget fits many files so segment 0 is not immediately evicted.
         let max_total_size = max_file_size * 100;
-        let mut writer = DiskBuffer::new(dir.path(), max_file_size, max_total_size).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(max_file_size)
+            .max_total_size(max_total_size)
+            .build()
+            .unwrap();
 
         // Write two batches: the first fills segment 0, the second triggers
         // rotation (sealing segment 0 as trace.0.bin) and starts segment 1.
@@ -1768,7 +1832,12 @@ mod tests {
             max_total_size < one_event,
             "test setup: budget must be smaller than a single segment"
         );
-        let mut writer = DiskBuffer::new(dir.path(), max_file_size, max_total_size).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(max_file_size)
+            .max_total_size(max_total_size)
+            .build()
+            .unwrap();
 
         writer.write_encoded_batch(&test_batch()).unwrap();
         // The lone active segment already exceeds the total budget.
@@ -1998,7 +2067,12 @@ mod tests {
     #[test]
     fn test_new_uses_default_rotation_period() {
         let dir = TempDir::new().unwrap();
-        let writer = DiskBuffer::new(dir.path(), 1024, 100_000).unwrap();
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
         assert_eq!(writer.rotation_period, DEFAULT_ROTATION_PERIOD);
     }
 
@@ -2278,7 +2352,12 @@ mod tests {
     fn test_update_segment_metadata_appears_in_trace() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
-        let mut writer = DiskBuffer::new(dir.path(), 100_000, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(100_000)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         // Simulate the recorder builder setting S3 metadata
         writer.update_segment_metadata(vec![
@@ -2320,7 +2399,12 @@ mod tests {
     fn test_merge_preserves_s3_metadata_across_runtime_updates() {
         let dir = TempDir::new().unwrap();
         let one_event = single_event_file_size();
-        let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         // Step 1: S3 metadata set (like the recorder builder)
         writer.update_segment_metadata(vec![
@@ -2378,7 +2462,12 @@ mod tests {
     fn test_update_segment_metadata_no_op_when_unchanged() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
-        let mut writer = DiskBuffer::new(dir.path(), 100_000, 100_000).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(100_000)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
 
         let entries = vec![("k".into(), "v".into())];
         writer.update_segment_metadata(entries.clone());
@@ -2620,7 +2709,12 @@ mod tests {
         // Lifetime 1: write a few sealed segments.
         let one_event = single_event_file_size();
         {
-            let mut w = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
+            let mut w = DiskBuffer::builder()
+                .base_path(dir.path())
+                .max_file_size(one_event)
+                .max_total_size(100_000)
+                .build()
+                .unwrap();
             for _ in 0..4 {
                 w.write_encoded_batch(&test_batch()).unwrap();
             }
@@ -2636,7 +2730,12 @@ mod tests {
 
         // Lifetime 2: shrink the budget so existing artifacts must be evicted.
         let new_budget = one_event + 1; // fits ~1 retained segment + the new active one
-        let writer = DiskBuffer::new(dir.path(), one_event, new_budget).unwrap();
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(new_budget)
+            .build()
+            .unwrap();
         // Discovery + immediate evict_oldest should have shed older segments.
         assert!(
             total_disk_usage(dir.path()) <= new_budget,
@@ -2663,7 +2762,12 @@ mod tests {
         let orphan = dir.path().join("trace.99.bin.active");
         std::fs::write(&orphan, b"orphaned").unwrap();
 
-        let _w = DiskBuffer::new(dir.path(), 1024, 100_000).unwrap();
+        let _w = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024)
+            .max_total_size(100_000)
+            .build()
+            .unwrap();
         assert!(
             !orphan.exists(),
             "stale .active should be discarded on construction"
@@ -2682,7 +2786,12 @@ mod tests {
         std::fs::write(&gz, vec![0u8; 1024]).unwrap();
 
         // Budget too small for both. Restart must evict the whole family.
-        let _w = DiskBuffer::new(dir.path(), 100_000, 100).unwrap();
+        let _w = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(100_000)
+            .max_total_size(100)
+            .build()
+            .unwrap();
         assert!(!bin.exists(), ".bin should be evicted under restart budget");
         assert!(!gz.exists(), ".bin.gz must be evicted with its .bin family");
     }
@@ -2694,7 +2803,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let one_event = single_event_file_size();
         let max_total_size = one_event * 2;
-        let mut writer = DiskBuffer::new(dir.path(), one_event, max_total_size).unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(one_event)
+            .max_total_size(max_total_size)
+            .build()
+            .unwrap();
 
         for _ in 0..10 {
             writer.write_encoded_batch(&test_batch()).unwrap();

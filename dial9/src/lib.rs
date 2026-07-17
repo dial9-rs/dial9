@@ -85,9 +85,9 @@ pub mod analysis {
 }
 
 #[cfg(feature = "tokio")]
-mod config;
+mod env_config;
 #[cfg(feature = "tokio")]
-pub use config::recorder_from_env;
+pub use env_config::recorder_from_env;
 
 #[cfg(feature = "tokio")]
 use crate::core::{BufferMode, SegmentWriter};

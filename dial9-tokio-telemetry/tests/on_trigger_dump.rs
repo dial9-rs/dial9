@@ -232,7 +232,12 @@ fn lookforward_dump_captures_post_trigger_segments() {
 fn lookforward_dump_resolves_after_deadline() {
     let trace_dir = tempfile::tempdir().unwrap();
 
-    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
+        .unwrap();
 
     let traced = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
@@ -318,7 +323,12 @@ fn shutdown_truncates_open_lookforward_dump() {
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
+        .unwrap();
 
     let traced = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))

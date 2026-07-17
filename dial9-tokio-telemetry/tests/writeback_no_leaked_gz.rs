@@ -31,7 +31,12 @@ fn eviction_cleans_up_processed_gz_segments() {
     let max_number_files = 4;
     let max_total_size = max_number_files * max_file_size; // 16 KiB total ⇒ ~4 segments before eviction
 
-    let writer = DiskBuffer::new(trace_dir.path(), max_file_size, max_total_size).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(max_file_size)
+        .max_total_size(max_total_size)
+        .build()
+        .unwrap();
 
     let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())

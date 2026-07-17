@@ -15,7 +15,12 @@ use std::io::Read;
 fn graceful_shutdown_produces_clean_gzip_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
 
-    let writer = DiskBuffer::new(trace_dir.path(), 512 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512 * 1024)
+        .max_total_size(10 * 1024 * 1024)
+        .build()
+        .unwrap();
 
     let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())

@@ -42,7 +42,12 @@ async fn cpu_task(_id: usize) {
 fn generate_no_wake_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
 
-    let writer = DiskBuffer::new(dir, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(dir)
+        .max_file_size(4 * 1024)
+        .max_total_size(50 * 1024 * 1024)
+        .build()
+        .unwrap();
     let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(Duration::from_millis(50))
@@ -70,7 +75,12 @@ fn generate_no_wake_events(dir: &PathBuf) {
 fn generate_good_trace(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
 
-    let writer = DiskBuffer::new(dir, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(dir)
+        .max_file_size(4 * 1024)
+        .max_total_size(50 * 1024 * 1024)
+        .build()
+        .unwrap();
     let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
@@ -99,7 +109,12 @@ fn generate_good_trace(dir: &PathBuf) {
 fn generate_no_sched_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
 
-    let writer = DiskBuffer::new(dir, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(dir)
+        .max_file_size(4 * 1024)
+        .max_total_size(50 * 1024 * 1024)
+        .build()
+        .unwrap();
     let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()
