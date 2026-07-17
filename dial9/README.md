@@ -698,7 +698,7 @@ cargo binstall dial9
 
 ## Usage
 
-The binary has two subcommands: `serve` and `agents`. Run `dial9 --help` or `dial9 <subcommand> --help` for full options.
+The binary has several subcommands: `serve`, `agents`, `trace-shape`, and `report`. Run `dial9 --help` or `dial9 <subcommand> --help` for full options.
 
 ### `serve`
 
@@ -738,6 +738,38 @@ If you use [Symposium](https://symposium.dev), skills auto-install when your pro
 ```bash
 cargo agents sync
 ```
+
+### `trace-shape`
+
+Extracts sanitized structural fingerprints ("shapes") from traces, or generates
+synthetic traces from shapes. Useful for sharing trace structure with raw
+payloads, labels, and identifiers removed.
+
+```bash
+# Sanitize directly into a synthetic trace, bypassing shape JSON (recommended for large traces)
+dial9 trace-shape synthesize /tmp/traces/trace.bin synthetic.bin --repeat 3
+
+# Extract a portable shape (accepts gzip trace input)
+dial9 trace-shape extract /tmp/traces/trace.bin shape.json
+
+# Generate a synthetic trace from a previously extracted shape
+dial9 trace-shape generate shape.json synthetic.bin --repeat 3
+```
+
+The `synthesize` operation keeps the sanitized replay template in memory and
+writes the synthetic binary directly. It uses the same validation and privacy
+transformations as the two-step workflow, but does not serialize or reparse the
+verbose per-event JSON representation.
+
+**Privacy caveat:** Shape extraction applies deterministic transformations to
+remove string contents, byte payloads, custom names, and exact timestamps. Small
+structural integers (e.g. `worker_id`, task counts) are intentionally preserved.
+This is **not an anonymization or security boundary**. Exact booleans, small
+quantized integers, and already-round floats survive. Shapes intentionally
+**retain sensitive operational structure** including relative timing, event
+ordering, cardinality, byte payload sizes, stack depths, value magnitude
+distributions, and inter-event correlations. Synthetic traces should be treated
+as confidential operational data.
 
 ## License
 

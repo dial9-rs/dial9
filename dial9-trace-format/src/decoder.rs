@@ -239,6 +239,20 @@ impl<'a> Decoder<'a> {
         self.version
     }
 
+    /// Returns the current byte offset within the input data.
+    ///
+    /// After `next_frame()` returns `Ok(None)`, this should equal `data_len()`
+    /// for a well-formed, non-truncated trace. A mismatch indicates trailing
+    /// bytes that could not be decoded.
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// Returns the total length of the input data slice.
+    pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
     pub fn string_pool(&self) -> &StringPool {
         &self.string_pool
     }
@@ -985,6 +999,7 @@ mod tests {
         let mut dec = Decoder::new(&data).unwrap();
         // Should consume all reset headers and return None (no actual frames)
         assert!(dec.next_frame().unwrap().is_none());
+        assert_eq!(dec.position(), data.len());
     }
 
     /// Regression: many consecutive TimestampReset frames must not stack-overflow.
