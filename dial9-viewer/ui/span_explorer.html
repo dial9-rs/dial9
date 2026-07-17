@@ -78,6 +78,16 @@
   .exemplars table.exemplar-table code { color: #79c0ff; }
   .exemplars table.exemplar-table tr.jump { cursor: pointer; }
   .exemplars table.exemplar-table tr.jump:hover { background: #1c2128; }
+  /* Per-row time-composition mini-bar: same categories/colors as the aggregate
+     composition legend, scoped to a single exemplar instance. */
+  .exemplars .ex-comp-bar { display: inline-flex; width: 120px; height: 10px; border-radius: 2px;
+    overflow: hidden; background: #21262d; vertical-align: middle; }
+  .exemplars .ex-comp-bar .seg { height: 100%; }
+  /* Generic attribute chips: key=value pairs for whatever metadata the row has. */
+  .exemplars td.attrs { white-space: normal; max-width: 360px; }
+  .exemplars .attr-chip { display: inline-block; background: #21262d; border-radius: 3px;
+    padding: 1px 6px; margin: 1px 4px 1px 0; color: #8b949e; }
+  .exemplars .attr-chip b { color: #adbac7; font-weight: 600; }
   /* Clickable max value in the detail header */
   .detail-header .meta a.max-jump { color: #79c0ff; text-decoration: none; font-weight: 600; }
   .detail-header .meta a.max-jump:hover { text-decoration: underline; }
@@ -720,12 +730,20 @@
       return;
     }
 
-    // Show a Host column only when exemplars span more than one host.
+    // Columns adapt to whatever per-instance metadata the exemplars actually
+    // carry: a Host column only when they span more than one host, a Composition
+    // column only when at least one has composition data, and an Attributes
+    // column only when at least one has attributes. Nothing is hardcoded beyond
+    // the always-present identity columns (#, Duration, Callsite).
     const multiHost = new Set(exemplars.map((e) => e.host || "")).size > 1;
+    const anyComposition = exemplars.some((e) => e.composition != null);
+    const anyAttributes = exemplars.some((e) => Array.isArray(e.attributes) && e.attributes.length > 0);
     const table = document.createElement("table");
     table.className = "exemplar-table";
     let head = "<thead><tr><th>#</th><th>Duration</th><th>Callsite</th>";
     if (multiHost) head += "<th>Host</th>";
+    if (anyComposition) head += "<th>Time composition</th>";
+    if (anyAttributes) head += "<th>Attributes</th>";
     head += "</tr></thead>";
     const rows = exemplars
       .map((ex, i) => {
@@ -739,6 +757,8 @@
           `<td class="dur">${esc(SE.fmtNs(ex.elapsed_ns))}</td>` +
           `<td><code>${callsite}</code></td>`;
         if (multiHost) cells += `<td class="host">${esc(ex.host || "")}</td>`;
+        if (anyComposition) cells += `<td>${exemplarCompositionCell(ex)}</td>`;
+        if (anyAttributes) cells += `<td class="attrs">${exemplarAttributesCell(ex)}</td>`;
         if (url) {
           return `<tr class="jump" title="Open the viewer focused on this span instance" ` +
             `onclick="window.open('${esc(url).replace(/'/g, "&#39;")}','_blank')">${cells}</tr>`;
@@ -749,6 +769,37 @@
     table.innerHTML = head + "<tbody>" + rows + "</tbody>";
     wrap.appendChild(table);
     container.appendChild(wrap);
+  }
+
+  // Render one exemplar's five-way time composition as a compact stacked bar
+  // with a per-category tooltip. Reuses SE.computeTimeComposition (the same
+  // categories/colors as the aggregate legend) by wrapping the instance's own
+  // composition object. Returns an em-dash when this instance has none.
+  function exemplarCompositionCell(ex) {
+    if (ex.composition == null) return '<span class="muted">—</span>';
+    const comp = SE.computeTimeComposition({ composition: ex.composition }, null);
+    const segs = comp.categories
+      .filter((cat) => cat.frac > 0)
+      .map((cat) =>
+        `<div class="seg" style="width:${(cat.frac * 100).toFixed(1)}%;background:${cat.color}" ` +
+        `title="${esc(cat.label)}: ${esc(SE.fmtNs(cat.ns))} (${(cat.frac * 100).toFixed(1)}%)"></div>`
+      )
+      .join("");
+    const tip = comp.categories
+      .filter((cat) => cat.frac > 0)
+      .map((cat) => `${cat.label} ${(cat.frac * 100).toFixed(0)}%`)
+      .join(" · ");
+    return `<span class="ex-comp-bar" title="${esc(tip)}">${segs}</span>`;
+  }
+
+  // Render one exemplar's attributes as generic key=value chips, in the order
+  // the backend supplied them. Returns an em-dash when this instance has none.
+  function exemplarAttributesCell(ex) {
+    const attrs = Array.isArray(ex.attributes) ? ex.attributes : [];
+    if (attrs.length === 0) return '<span class="muted">—</span>';
+    return attrs
+      .map((a) => `<span class="attr-chip"><b>${esc(a.key)}</b>=${esc(a.value)}</span>`)
+      .join("");
   }
 
   // ── Streaming ───────────────────────────────────────────────────────────────

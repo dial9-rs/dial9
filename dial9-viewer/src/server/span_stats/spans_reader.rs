@@ -10,7 +10,7 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 
-use super::SlowExemplar;
+use super::{ExemplarAttribute, SlowExemplar, TimeComposition};
 
 pub(super) struct SpanStatsRow {
     pub span_type_uid: [u8; 16],
@@ -157,19 +157,6 @@ impl SpansBatchReader {
             let mut span_type_uid = [0; 16];
             span_type_uid.copy_from_slice(type_uid_arr.value(row_index));
 
-            let exemplar = span_uid_col
-                .filter(|array| !array.is_null(row_index))
-                .map(|uid_arr| SlowExemplar {
-                    elapsed_ns,
-                    span_uid: hex::encode(uid_arr.value(row_index)),
-                    callsite_file: optional_string(file_col, row_index),
-                    callsite_line: optional_u32(line_col, row_index),
-                    host: optional_string(host_col, row_index).unwrap_or_default(),
-                    start_ns: optional_i64(start_ns_col, row_index).unwrap_or(0),
-                    end_ns: end_ns.unwrap_or(0),
-                    source_key: optional_string(source_key_col, row_index).unwrap_or_default(),
-                });
-
             let composition =
                 unknown_col
                     .filter(|array| !array.is_null(row_index))
@@ -181,6 +168,40 @@ impl SpansBatchReader {
                         unknown_ns: unknown_arr.value(row_index),
                     });
 
+            let attributes = attributes_col
+                .map(|array| parse_map_column(array, row_index))
+                .unwrap_or_default();
+
+            // Attach this instance's own metadata (composition + attributes) to
+            // the exemplar so the viewer can show each instance's makeup, not
+            // just the span type's aggregate.
+            let exemplar = span_uid_col
+                .filter(|array| !array.is_null(row_index))
+                .map(|uid_arr| SlowExemplar {
+                    elapsed_ns,
+                    span_uid: hex::encode(uid_arr.value(row_index)),
+                    callsite_file: optional_string(file_col, row_index),
+                    callsite_line: optional_u32(line_col, row_index),
+                    host: optional_string(host_col, row_index).unwrap_or_default(),
+                    start_ns: optional_i64(start_ns_col, row_index).unwrap_or(0),
+                    end_ns: end_ns.unwrap_or(0),
+                    source_key: optional_string(source_key_col, row_index).unwrap_or_default(),
+                    composition: composition.as_ref().map(|c| TimeComposition {
+                        on_cpu_ns: c.on_cpu_ns,
+                        blocked_ns: c.blocked_ns,
+                        async_wait_ns: c.async_wait_ns,
+                        scheduler_delay_ns: c.scheduler_delay_ns,
+                        unknown_ns: c.unknown_ns,
+                    }),
+                    attributes: attributes
+                        .iter()
+                        .map(|(key, value)| ExemplarAttribute {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect(),
+                });
+
             consume(SpanStatsRow {
                 span_type_uid,
                 kind: kind_arr.value(row_index).to_string(),
@@ -190,9 +211,7 @@ impl SpansBatchReader {
                 callsite_line: optional_u32(line_col, row_index),
                 elapsed_ns,
                 exemplar,
-                attributes: attributes_col
-                    .map(|array| parse_map_column(array, row_index))
-                    .unwrap_or_default(),
+                attributes,
                 composition,
                 details_complete: optional_bool(details_complete_col, row_index),
             });

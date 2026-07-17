@@ -188,6 +188,12 @@ pub struct TimeComposition {
 }
 
 /// A slow exemplar: one of the longest instances with source coordinates.
+///
+/// Beyond the jump-link coordinates, an exemplar carries whatever per-instance
+/// metadata the spans part had for it — the five-way time composition and any
+/// attributes — so the viewer can show the makeup of each individual instance
+/// (not just the span type's aggregate). Both are optional/empty when the
+/// source part lacked the data, and are omitted from the wire in that case.
 #[derive(Debug, Clone, Serialize)]
 pub struct SlowExemplar {
     pub elapsed_ns: i64,
@@ -205,6 +211,22 @@ pub struct SlowExemplar {
     /// Source trace file key this instance came from, so the viewer can load the
     /// right object (`/api/object?key=…`). Empty when the column is unavailable.
     pub source_key: String,
+    /// This instance's own five-way time composition. `None` when the source
+    /// part had no composition columns for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composition: Option<TimeComposition>,
+    /// This instance's own attributes (key/value pairs), in first-seen order.
+    /// Empty when the source part carried no attributes for it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<ExemplarAttribute>,
+}
+
+/// One key/value attribute of a single span instance. Serialized as an object
+/// so the viewer can render arbitrary metadata generically.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExemplarAttribute {
+    pub key: String,
+    pub value: String,
 }
 
 /// An attribute facet: top values for one attribute key.
@@ -1484,6 +1506,46 @@ mod tests {
             );
             assert_eq!(ex.source_key, "test", "exemplar source_key populated");
         }
+        // Each exemplar carries its own per-instance time composition. These rows
+        // set only unknown_ns (= elapsed_ns), so composition is present and its
+        // unknown bucket equals the instance's elapsed time.
+        for ex in &st.slow_exemplars {
+            let comp = ex
+                .composition
+                .as_ref()
+                .expect("exemplar carries per-instance composition");
+            assert_eq!(comp.unknown_ns, ex.elapsed_ns);
+            assert_eq!(comp.on_cpu_ns, 0);
+        }
+    }
+
+    #[test]
+    fn slow_exemplars_carry_per_instance_attributes() {
+        let data = make_spans_parquet_with_attrs(&[(
+            0,
+            50,
+            50,
+            "A",
+            "h1",
+            true,
+            vec![
+                ("route".to_string(), "/checkout".to_string()),
+                ("status".to_string(), "500".to_string()),
+            ],
+        )]);
+
+        let mut accum = SpanStatsAccum::new(None, None);
+        accum.merge_spans_part(data).unwrap();
+
+        let st = &accum.snapshot().span_types[0];
+        let ex = &st.slow_exemplars[0];
+        let attrs: Vec<(&str, &str)> = ex
+            .attributes
+            .iter()
+            .map(|a| (a.key.as_str(), a.value.as_str()))
+            .collect();
+        assert!(attrs.contains(&("route", "/checkout")));
+        assert!(attrs.contains(&("status", "500")));
     }
 
     #[test]
