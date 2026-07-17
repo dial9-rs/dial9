@@ -210,7 +210,6 @@ fn measure(mode: Mode) -> Sample {
                     })
                     .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .graceful_shutdown(Duration::from_secs(30))
                     .build()
                     .expect("build (disk)");
                 // Keep tmp alive for the duration; leak it intentionally so
@@ -234,7 +233,6 @@ fn measure(mode: Mode) -> Sample {
                     })
                     .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .graceful_shutdown(Duration::from_secs(30))
                     .build()
                     .expect("build (disk+cpu)");
                 std::mem::forget(tmp);
@@ -253,7 +251,6 @@ fn measure(mode: Mode) -> Sample {
                     })
                     .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .graceful_shutdown(Duration::from_secs(30))
                     .build()
                     .expect("build (mem)")
             }
@@ -271,7 +268,6 @@ fn measure(mode: Mode) -> Sample {
                     })
                     .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .graceful_shutdown(Duration::from_secs(30))
                     .build()
                     .expect("build (mem+cpu)")
             }
@@ -282,7 +278,7 @@ fn measure(mode: Mode) -> Sample {
             .runtime()
             .block_on(workload(handle, tasks_done.clone()));
         let steady = ALLOC.peak();
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(30));
         steady
     };
 

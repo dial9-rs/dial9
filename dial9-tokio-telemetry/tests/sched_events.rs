@@ -40,7 +40,7 @@ fn sched_events_capture_context_switches() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -94,7 +94,6 @@ fn sched_events_sampling_reduces_count() {
             t.worker_threads(num_workers as usize);
         })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .graceful_shutdown(Duration::from_secs(5))
         .build()
         .unwrap();
 
@@ -119,7 +118,7 @@ fn sched_events_sampling_reduces_count() {
     // Snapshot again while the worker threads are still alive.
     let after = common::snapshot_task_switches();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

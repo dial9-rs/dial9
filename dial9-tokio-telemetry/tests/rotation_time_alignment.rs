@@ -132,7 +132,6 @@ fn rotated_segments_have_bounded_time_overlap() {
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
         })
-        .graceful_shutdown(Duration::from_secs(5))
         .build()
         .unwrap();
 
@@ -166,7 +165,7 @@ fn rotated_segments_have_bounded_time_overlap() {
     });
 
     drop(runtime);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let flush_metrics = render_queue.entries();
     eprintln!("flush-thread metrics ({} entries):", flush_metrics.len());

@@ -7,6 +7,7 @@ use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
     MemoryBuffer, ProcessResourceUsageConfig, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
 };
+use std::time::Duration;
 
 #[test]
 fn traced_runtime_records_process_resource_usage() {
@@ -21,7 +22,7 @@ fn traced_runtime_records_process_resource_usage() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);
@@ -53,7 +54,7 @@ fn traced_runtime_does_not_record_process_resource_usage_by_default() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);

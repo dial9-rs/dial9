@@ -56,7 +56,7 @@ fn task_dump_emitted_for_long_sleep() {
         join.await.unwrap();
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -102,7 +102,7 @@ fn no_task_dump_for_short_sleep() {
         join.await.unwrap();
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -142,7 +142,7 @@ fn task_dump_does_not_produce_extra_events() {
             });
             join.await.unwrap();
         });
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let b = batches.lock().unwrap();
         let events: Vec<DumpEvent> = decode_all(&b);
@@ -197,7 +197,7 @@ fn spawn_with_joinset_emits_task_dump() {
         while set.join_next().await.is_some() {}
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);

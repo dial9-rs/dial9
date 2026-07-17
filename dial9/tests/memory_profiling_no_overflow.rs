@@ -60,7 +60,7 @@ fn no_overflow_event_when_ring_has_capacity() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<OverflowEvent> = decode_all(&batches);

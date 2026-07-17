@@ -230,8 +230,7 @@ fn main() -> std::io::Result<()> {
         .with_tokio(move |t| {
             t.worker_threads(worker_threads);
         })
-        .with_task_tracking(true)
-        .graceful_shutdown(Duration::from_secs(5));
+        .with_task_tracking(true);
     if !args.no_task_dumps {
         traced_builder = traced_builder.with_task_dumps(
             TaskDumpConfig::builder()
@@ -372,7 +371,7 @@ fn main() -> std::io::Result<()> {
 
     // graceful_shutdown drops the runtime so worker threads flush their
     // thread-local telemetry buffers, then drains the background worker.
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     Ok(())
 }

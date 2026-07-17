@@ -5,6 +5,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Tagged union over the events this test cares about.
 #[derive(Debug, Deserialize)]
@@ -47,7 +48,7 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<ParkOrUnpark> = decode_all(&batches);

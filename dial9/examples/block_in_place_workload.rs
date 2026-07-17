@@ -62,7 +62,6 @@ fn main() {
             t.worker_threads(4);
         })
         .with_task_tracking(true)
-        .graceful_shutdown(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -90,7 +89,7 @@ fn main() {
     });
 
     // Graceful shutdown seals the final segment and runs symbolization.
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(10));
 
     println!("Trace written to block_in_place_trace/trace.*.bin");
 }

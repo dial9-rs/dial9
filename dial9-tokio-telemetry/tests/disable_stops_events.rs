@@ -220,7 +220,6 @@ fn disable_stops_segment_rotation() {
         .with_tokio(|t| {
             t.worker_threads(2);
         })
-        .graceful_shutdown(Duration::from_secs(2))
         .build()
         .unwrap();
 
@@ -276,7 +275,7 @@ fn disable_stops_segment_rotation() {
         segments_after_wait.saturating_sub(segments_after_disable),
     );
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// After `disable()`, re-enabling with `enable()` should resume event production.

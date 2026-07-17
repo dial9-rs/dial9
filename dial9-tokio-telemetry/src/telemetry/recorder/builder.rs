@@ -275,29 +275,33 @@ impl TracedRuntime {
         })
     }
 
-    /// Drop the primary runtime, then drain the background worker within the
-    /// configured timeout (set via
-    /// [`TracedRuntimeBuilder::graceful_shutdown`](super::TracedRuntimeBuilder::graceful_shutdown),
-    /// default 1s; `None` skips the drain).
+    /// Drop the primary runtime, then drain the background worker within
+    /// `timeout`.
     ///
     /// **Call this after any runtimes you attached with
     /// [`trace_runtime`](Self::trace_runtime) have been dropped**, so their
-    /// worker threads have flushed. Consumes the recorder; a no-op when disabled.
-    /// This is what `#[dial9::main]` calls. Best-effort — drain errors are
-    /// logged at `error!`. To skip the drain entirely, just drop the recorder.
-    pub fn graceful_shutdown(self) {
-        let timeout = self.graceful_shutdown_timeout;
+    /// worker threads have flushed. Consumes the runtime, a no-op when disabled.
+    /// Best-effort: drain errors are logged at `error!`. To skip the drain
+    /// entirely, just drop the runtime.
+    pub fn graceful_shutdown(self, timeout: Duration) {
         let Self {
             runtime, recorder, ..
         } = self;
         // Drop the runtime first so Tokio workers exit and flush before the
         // recorder seals the final segment.
         drop(runtime);
-        if let (Some(timeout), Some(s)) = (timeout, recorder)
+        if let Some(s) = recorder
             && let Err(e) = s.graceful_shutdown(timeout)
         {
             tracing::error!(target: "dial9_telemetry", error = %e, "dial9 graceful shutdown failed");
         }
+    }
+
+    /// The worker-drain deadline configured on the builder,
+    /// or `None` when [`disable_graceful_shutdown`](super::TracedRuntimeBuilder::disable_graceful_shutdown)
+    /// was set.
+    pub fn graceful_shutdown_timeout(&self) -> Option<Duration> {
+        self.graceful_shutdown_timeout
     }
 
     // ── Internal accessors for RuntimeAttach ──────────────────────
@@ -312,10 +316,5 @@ impl TracedRuntime {
 
     pub(crate) fn session_handle(&self) -> Option<&Dial9Handle> {
         self.recorder.as_ref().map(|s| s.handle())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn configured_graceful_shutdown_timeout(&self) -> Option<Duration> {
-        self.graceful_shutdown_timeout
     }
 }

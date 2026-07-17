@@ -66,7 +66,7 @@ fn spawn_with_joinset_emits_wake_events() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<SpawnEvent> = decode_all(&b);
@@ -160,7 +160,7 @@ fn spawn_with_returns_closure_value() {
         assert_eq!(value, 42);
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// `Dial9TokioHandle::spawn_with` composes with `JoinSet::spawn_on`
@@ -228,7 +228,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
 
     drop(rt_a);
     drop(rt_b);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let task_id_a = task_id_a.lock().unwrap().expect("task id a captured");
     let task_id_b = task_id_b.lock().unwrap().expect("task id b captured");

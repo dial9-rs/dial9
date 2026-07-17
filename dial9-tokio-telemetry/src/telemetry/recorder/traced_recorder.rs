@@ -563,7 +563,7 @@ mod tests {
     fn graceful_shutdown_defaults_to_one_second() {
         let traced = TracedRuntimeBuilder::<Disk>::disabled().build().unwrap();
         assert_eq!(
-            traced.configured_graceful_shutdown_timeout(),
+            traced.graceful_shutdown_timeout(),
             Some(Duration::from_secs(1))
         );
     }
@@ -575,7 +575,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(
-            traced.configured_graceful_shutdown_timeout(),
+            traced.graceful_shutdown_timeout(),
             Some(Duration::from_secs(7))
         );
     }
@@ -586,7 +586,7 @@ mod tests {
             .disable_graceful_shutdown()
             .build()
             .unwrap();
-        assert_eq!(traced.configured_graceful_shutdown_timeout(), None);
+        assert_eq!(traced.graceful_shutdown_timeout(), None);
     }
 
     // A `TracedRuntime` can attach a second runtime to the same recorder via

@@ -95,7 +95,7 @@ fn main() -> std::io::Result<()> {
     }
     println!("All cores finished.\n");
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     // ── Read back the trace and verify ──────────────────────────────────
 

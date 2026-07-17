@@ -70,7 +70,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     assert!(
         ALLOC_COUNT.load(Ordering::Relaxed) > 0,

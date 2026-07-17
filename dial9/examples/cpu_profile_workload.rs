@@ -57,7 +57,6 @@ fn main() {
             t.worker_threads(4);
         })
         .with_task_tracking(true)
-        .graceful_shutdown(Duration::from_secs(30))
         .build()
         .unwrap();
 
@@ -75,7 +74,7 @@ fn main() {
     // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
     // (worker exits without draining), so we must use graceful_shutdown here.
     eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(30));
 
     // Read back and report
     eprintln!("\n=== Reading trace from {segment_path} ===");

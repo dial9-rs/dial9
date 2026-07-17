@@ -154,7 +154,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -194,7 +194,7 @@ fn task_terminate_events_are_captured() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

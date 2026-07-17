@@ -31,7 +31,6 @@ fn main() -> std::io::Result<()> {
             t.worker_threads(2);
         })
         .with_runtime_name("main")
-        .graceful_shutdown(Duration::from_secs(5))
         .build()?;
 
     // Secondary runtime for background I/O, sharing the same recorder.
@@ -79,7 +78,7 @@ fn main() -> std::io::Result<()> {
 
     // Drop the attached runtime before shutdown so worker threads flush their buffers.
     drop(io_rt);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     println!("\nTrace files in {trace_dir}/:");
     for entry in std::fs::read_dir(trace_dir)? {

@@ -77,7 +77,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     let perf_fds_after = count_perf_fds();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     // Only worker threads should have perf fds. Before the fix, we'd see
     // ~50 new perf fds (one per blocking thread). After the fix, the count
@@ -127,7 +127,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
             "expected perf fds while runtime is running, got 0"
         );
 
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     let perf_fds_after = count_perf_fds();

@@ -355,7 +355,7 @@ mod tests {
             .unwrap();
         });
 
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
@@ -444,7 +444,7 @@ mod tests {
             "user Tokio hooks should not be installed when Tokio instrumentation is disabled"
         );
 
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let events = if raw.is_empty() {
@@ -666,7 +666,7 @@ mod tests {
 
         // Drop runtimes, then guard to flush
         drop(runtime_b);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -749,7 +749,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         drop(runtime_b);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         // Read all sealed trace files and collect SegmentMetadata entries.
         let mut all_metadata: Vec<std::collections::HashMap<String, String>> = Vec::new();
@@ -849,7 +849,7 @@ mod tests {
         // Blocks until the flush thread polls every source one final time, writes
         // the segment metadata, and seals the segment, so both runtimes are
         // guaranteed to be in the sealed trace once this returns.
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let mut saw_first = false;
         let mut saw_second = false;
@@ -927,7 +927,7 @@ mod tests {
         });
 
         drop(runtime_b);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -1152,7 +1152,7 @@ mod tests {
             .build()
             .unwrap();
         assert!(traced.is_enabled());
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     #[test]
@@ -1171,7 +1171,7 @@ mod tests {
         });
 
         drop(runtime);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     #[test]
@@ -1197,7 +1197,7 @@ mod tests {
         });
 
         drop(runtime);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
@@ -1258,7 +1258,7 @@ mod tests {
 
         drop(runtime_a);
         drop(runtime_b);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -1312,7 +1312,7 @@ mod tests {
         );
 
         drop(runtime);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
@@ -1372,7 +1372,7 @@ mod tests {
 
         drop(rt_a);
         drop(rt_b);
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     // ---------------------------------------------------------------
@@ -1430,7 +1430,7 @@ mod tests {
             .build()
             .unwrap();
         assert!(!traced.is_enabled());
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     /// Regression test for issue #400: multi-runtime callers must be able to
@@ -1448,6 +1448,6 @@ mod tests {
             .expect("recorder with s3 uploader must build");
 
         assert!(traced.is_enabled());
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 }

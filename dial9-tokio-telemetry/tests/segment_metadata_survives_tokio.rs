@@ -18,14 +18,13 @@ fn core_segment_metadata_survives_with_tokio() {
         .with_tokio(|t| {
             t.worker_threads(1);
         })
-        .graceful_shutdown(Duration::from_secs(5))
         .build()
         .unwrap();
 
     traced.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(50)).await;
     });
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let mut found = false;
     let files: Vec<_> = std::fs::read_dir(dir.path())

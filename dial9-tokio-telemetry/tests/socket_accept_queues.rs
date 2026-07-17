@@ -30,7 +30,7 @@ fn traced_runtime_records_socket_accept_queue_snapshot() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
     drop(client);
     drop(listener);
 
@@ -74,7 +74,7 @@ fn traced_runtime_does_not_record_socket_accept_queues_by_default() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
     drop(client);
     drop(listener);
 

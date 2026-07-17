@@ -150,7 +150,6 @@ fn main() -> std::io::Result<()> {
         })
         .with_task_tracking(true)
         .with_s3_uploader(s3_config)
-        .graceful_shutdown(Duration::from_secs(30))
         .build()?;
 
     let handle = traced.handle();
@@ -241,7 +240,7 @@ fn main() -> std::io::Result<()> {
     });
 
     eprintln!("Calling graceful_shutdown...");
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(30));
     eprintln!("Done.");
 
     // Count uploaded objects in S3

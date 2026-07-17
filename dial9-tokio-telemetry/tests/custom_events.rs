@@ -7,6 +7,7 @@ use dial9_tokio_telemetry::telemetry::{
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
+use std::time::Duration;
 
 #[derive(Debug, serde::Deserialize, TraceEvent)]
 struct QueuedEvent {
@@ -54,7 +55,7 @@ fn traced_runtime_records_custom_events_callback_events() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
@@ -93,7 +94,7 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
 
     drop(runtime);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);

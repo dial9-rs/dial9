@@ -148,7 +148,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// A look-forward window keeps the dump open and captures a segment sealed
@@ -174,7 +174,6 @@ fn lookforward_dump_captures_post_trigger_segments() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_dump_trigger(|_| {})
-        .graceful_shutdown(Duration::from_secs(2))
         .build()
         .unwrap();
 
@@ -197,7 +196,7 @@ fn lookforward_dump_captures_post_trigger_segments() {
     wait_for_uploaded_segment(traced.runtime(), &client, "test-bucket");
 
     // Resolve via shutdown rather than the wall-clock deadline.
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(2));
 
     let check_rt = assertion_runtime();
     let receipt = check_rt.block_on(fut).unwrap();
@@ -268,7 +267,7 @@ fn lookforward_dump_resolves_after_deadline() {
         "receipt resolves only after the forward deadline"
     );
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// Off-S3 pipelines dump to disk: the receipt works, but there is no
@@ -311,7 +310,7 @@ fn off_s3_pipeline_dumps_without_manifest() {
         .count();
     assert!(gz_count >= 1, "dumped segments written back to disk");
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// Shutting down with a look-forward dump still open resolves the awaited
@@ -338,7 +337,6 @@ fn shutdown_truncates_open_lookforward_dump() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client)
         .with_dump_trigger(|_| {})
-        .graceful_shutdown(Duration::from_secs(2))
         .build()
         .unwrap();
 
@@ -353,7 +351,7 @@ fn shutdown_truncates_open_lookforward_dump() {
         .into_future();
     drive_workload(traced.runtime());
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(2));
 
     let receipt = assertion_runtime()
         .block_on(fut)

@@ -55,7 +55,6 @@ fn generate_no_wake_events(dir: &PathBuf) {
             t.worker_threads(4);
         })
         .with_task_tracking(true)
-        .graceful_shutdown(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -68,7 +67,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(10));
 }
 
 /// Generate a fully-configured "good" trace for comparison.
@@ -89,7 +88,6 @@ fn generate_good_trace(dir: &PathBuf) {
             t.worker_threads(4);
         })
         .with_task_tracking(true)
-        .graceful_shutdown(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -102,7 +100,7 @@ fn generate_good_trace(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(10));
 }
 
 /// Generate a trace with CPU profiling but NO sched events.
@@ -123,7 +121,6 @@ fn generate_no_sched_events(dir: &PathBuf) {
             t.worker_threads(4);
         })
         .with_task_tracking(true)
-        .graceful_shutdown(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -136,7 +133,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(10));
 }
 
 fn main() {

@@ -74,7 +74,6 @@ fn main() -> std::io::Result<()> {
         })
         .with_task_tracking(true)
         .with_custom_pipeline(|p| p.pipe(PrintProcessor))
-        .graceful_shutdown(Duration::from_secs(5))
         .build()?;
 
     traced.runtime().block_on(async {
@@ -82,7 +81,7 @@ fn main() -> std::io::Result<()> {
         workload().await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
     println!("Done.");
     Ok(())
 }

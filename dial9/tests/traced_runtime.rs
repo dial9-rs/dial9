@@ -5,6 +5,7 @@
 use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderSourceExt};
 use dial9_trace_format::decoder::Decoder;
+use std::time::Duration;
 
 #[test]
 fn recorder_with_tokio_records_poll_events() {
@@ -34,7 +35,7 @@ fn recorder_with_tokio_records_poll_events() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
     let mut decoder = Decoder::new(&bytes).expect("valid trace");
@@ -72,7 +73,7 @@ fn recorder_with_tokio_disabled_runs_plainly() {
 
     let out = traced.block_on(async { 1 + 1 });
     assert_eq!(out, 2);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// On-demand dump mode on the `with_tokio` path: the trigger must be reachable
@@ -95,7 +96,7 @@ fn recorder_with_tokio_dump_trigger_reachable() {
         );
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// The builder is `TryInto<TracedRuntime>`, so `#[dial9::main]` (which calls
@@ -106,7 +107,7 @@ fn traced_recorder_is_macro_compatible() {
     let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
     let builder = recorder(writer).with_tokio(|_| {});
     let traced = dial9::TracedRuntime::try_new(builder).expect("try_into TracedRuntime");
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// `recorder_or_disabled` runs the Tokio configurator on the downgrade path
@@ -164,7 +165,7 @@ fn recorder_or_disabled_accepts_in_memory_writer() {
         "a valid in-memory writer must stay enabled"
     );
     assert_eq!(traced.block_on(async { 5u32 }), 5);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// The downgrade path is generic too: an in-memory writer failure falls back to
@@ -187,7 +188,7 @@ fn recorder_or_disabled_downgrades_on_in_memory_writer_failure() {
         "in-memory writer failure must downgrade to a disabled runtime"
     );
     assert_eq!(traced.block_on(async { 9u32 }), 9);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 #[test]
@@ -235,7 +236,7 @@ fn source_registered_after_with_tokio_is_recorded() {
     traced.block_on(async {
         tokio::task::yield_now().await;
     });
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
     let mut decoder = Decoder::new(&bytes).expect("valid trace");
@@ -277,5 +278,5 @@ fn on_recording_start_fires_on_tokio_path() {
         ran.load(Ordering::SeqCst),
         "on_recording_start should fire when the tokio recorder enables at build"
     );
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }

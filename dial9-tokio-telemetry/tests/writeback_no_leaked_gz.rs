@@ -44,7 +44,6 @@ fn eviction_cleans_up_processed_gz_segments() {
         .with_tokio(|t| {
             t.worker_threads(2);
         })
-        .graceful_shutdown(Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -68,7 +67,7 @@ fn eviction_cleans_up_processed_gz_segments() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(10));
 
     // Collect all trace-related files in the directory.
     let mut bin_files = Vec::new();

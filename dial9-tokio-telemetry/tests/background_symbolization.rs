@@ -12,6 +12,7 @@ use dial9_tokio_telemetry::telemetry::{
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::time::Duration;
 
 /// Burn CPU in a tight loop to generate stack samples.
 ///
@@ -68,7 +69,7 @@ fn background_symbolization_produces_symbol_table_entries() {
     });
 
     // Graceful shutdown: seals final segment, worker drains all remaining.
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).

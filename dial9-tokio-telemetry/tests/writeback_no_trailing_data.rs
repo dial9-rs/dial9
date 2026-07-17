@@ -10,6 +10,7 @@ use dial9_tokio_telemetry::telemetry::{
 };
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::time::Duration;
 
 #[test]
 fn graceful_shutdown_produces_clean_gzip_segments() {
@@ -51,7 +52,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {

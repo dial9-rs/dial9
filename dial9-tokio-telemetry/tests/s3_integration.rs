@@ -80,11 +80,10 @@ fn graceful_shutdown_seals_segments() {
         })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .graceful_shutdown(std::time::Duration::from_secs(1))
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let active_files: Vec<_> = std::fs::read_dir(trace_dir.path())
         .unwrap()
@@ -134,7 +133,6 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .with_runtime_name("test-runtime")
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .graceful_shutdown(Duration::from_secs(1))
         .build()
         .unwrap();
 
@@ -151,7 +149,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     // List objects in the bucket — should have at least one uploaded segment
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -311,7 +309,6 @@ fn region_auto_detection_corrects_wrong_client_region() {
         })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .graceful_shutdown(Duration::from_secs(1))
         .build()
         .unwrap();
 
@@ -321,7 +318,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     // Verify objects were uploaded despite the wrong initial region.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -440,7 +437,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
 
     // Generate load for 1 second — enough to produce several segments at 64KB each.
     traced.runtime().block_on(async {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         loop {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -462,7 +459,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
         // citizen" that loses data rather than blocking the application.
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     // List all uploaded objects.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -651,7 +648,7 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         for _ in 0..50 {
             handle.spawn(async { tokio::task::yield_now().await });
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     });
 
     let test_deadline = std::time::Duration::from_secs(10);
@@ -659,7 +656,7 @@ fn graceful_shutdown_completes_when_s3_hangs() {
     // Drain on a worker thread so a hung shutdown can't wedge the test.
     let (tx, rx) = std::sync::mpsc::channel();
     let t = std::thread::spawn(move || {
-        traced.graceful_shutdown();
+        traced.graceful_shutdown(Duration::from_secs(5));
         let _ = tx.send(());
     });
 
@@ -719,7 +716,7 @@ fn stress_test_with_s3_failures() {
     let handle = traced.handle();
 
     traced.runtime().block_on(async {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         loop {
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -737,7 +734,7 @@ fn stress_test_with_s3_failures() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     // Verify some objects landed in S3 despite failures.
     let verify_client = fake_s3_client(s3_root.path());
@@ -823,7 +820,7 @@ fn permanently_broken_s3_produces_failure_metrics() {
         }
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let entries = inspector.entries();
     // Filter to pipeline metrics only (FlushMetrics entries don't have Failure/Success keys).
@@ -879,7 +876,6 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_dump_trigger(|_| {})
-        .graceful_shutdown(Duration::from_secs(5))
         .build()
         .unwrap();
 
@@ -940,7 +936,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         "receipt names the manifest key"
     );
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     // The manifest object exists and lists the produced segment keys.
     let manifest_bytes = list_rt.block_on(async {

@@ -97,7 +97,11 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
         #vis fn #name() #ret {
             let __dial9_rt = ::dial9::TracedRuntime::new(#config_call);
             let __dial9_out = __dial9_rt.block_on(async move { #(#body_stmts)* });
-            __dial9_rt.graceful_shutdown();
+            if let Some(__dial9_timeout) = __dial9_rt.graceful_shutdown_timeout() {
+                __dial9_rt.graceful_shutdown(__dial9_timeout);
+            } else {
+                drop(__dial9_rt);
+            }
             __dial9_out
         }
     })

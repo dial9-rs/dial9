@@ -45,7 +45,7 @@ fn hook_captures_sampled_allocations() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

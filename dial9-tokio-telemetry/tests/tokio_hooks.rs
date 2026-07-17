@@ -1,4 +1,5 @@
 use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
+use std::time::Duration;
 
 mod common;
 use std::sync::Arc;
@@ -136,7 +137,7 @@ fn each_runtime_gets_own_hooks() {
 
     drop(runtime_a);
     drop(runtime_b);
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 #[test]

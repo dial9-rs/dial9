@@ -3,12 +3,11 @@
 
 mod bmf;
 
-#[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -104,7 +103,7 @@ fn main() {
     });
     let wall = start.elapsed();
 
-    traced.graceful_shutdown();
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let rps = TOTAL_REQUESTS as f64 / wall.as_secs_f64();
     let mut report = bmf::Report::new();
