@@ -12,6 +12,7 @@ const {
   latencyHeat,
   workerShareHeat,
   busynessHeat,
+  hostBusyPct,
   canRefineMore,
 } = require("./tokio_stats_api.js");
 
@@ -25,6 +26,19 @@ function assertEq(actual, expected, desc) {
   } else {
     console.log(
       `✗ ${desc}\n    expected: ${JSON.stringify(expected)}\n    actual:   ${JSON.stringify(actual)}`,
+    );
+    failed++;
+  }
+}
+
+// Float-tolerant variant for computed percentages.
+function assertClose(actual, expected, desc, eps = 1e-9) {
+  if (Math.abs(actual - expected) <= eps) {
+    console.log(`✓ ${desc}`);
+    passed++;
+  } else {
+    console.log(
+      `✗ ${desc}\n    expected: ~${JSON.stringify(expected)}\n    actual:   ${JSON.stringify(actual)}`,
     );
     failed++;
   }
@@ -186,6 +200,36 @@ assertEq(busynessHeat(50), "#d29922", "50% busy is amber (moderately loaded)");
 assertEq(busynessHeat(75), "#d29922", "75% busy is amber");
 assertEq(busynessHeat(80), "#f85149", "80% busy is red (near-saturated)");
 assertEq(busynessHeat(99), "#f85149", "99% busy is red");
+
+// ── hostBusyPct ──
+// A host's busyness is the MEAN of its workers' busy_pct, not Σ busy_ns over a
+// single span. It must stay bounded and match the average of the per-worker
+// rows shown on expand.
+assertClose(
+  hostBusyPct([{ busy_pct: 40 }, { busy_pct: 60 }]),
+  50,
+  "two workers -> mean of their busy_pct",
+);
+assertClose(hostBusyPct([{ busy_pct: 73.25 }]), 73.25, "single worker -> its own busy_pct");
+// rcoh's case: 64 workers each 1/64 saturated must read ~1.56%, NOT 100%.
+{
+  const workers = Array.from({ length: 64 }, () => ({ busy_pct: 100 / 64 }));
+  assertClose(hostBusyPct(workers), 100 / 64, "64 workers each 1/64 busy -> ~1.56%, not 100%");
+}
+// The mean can never exceed the workers' own (bounded) busyness, so a host of
+// fully-saturated workers is 100% — never over.
+{
+  const workers = Array.from({ length: 8 }, () => ({ busy_pct: 100 }));
+  assertClose(hostBusyPct(workers), 100, "all workers 100% busy -> host 100% (never over)");
+}
+// Degenerate / defensive inputs.
+assertEq(hostBusyPct([]), 0, "no workers -> 0 (no NaN)");
+assertEq(hostBusyPct(undefined), 0, "undefined workers -> 0");
+assertClose(
+  hostBusyPct([{ busy_pct: 50 }, {}]),
+  25,
+  "missing busy_pct counts as 0 in the mean (not NaN)",
+);
 
 // ── canRefineMore ──
 assertEq(canRefineMore({ files_matched: 480, files_folded: 24 }), true, "folded < matched -> more");

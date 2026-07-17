@@ -114,6 +114,26 @@ function busynessHeat(busyPct) {
   return "#3fb950"; // green — has headroom
 }
 
+// Aggregate a host's busyness from its workers' individual `busy_pct` values.
+//
+// A runtime's busyness is the MEAN of its workers' busyness, not Σ busy_ns over
+// any single span. Two reasons the naive form is wrong:
+//   - Different denominators: each worker's busy_pct uses that worker's OWN
+//     observed span (see worker_activity in tokio_stats.rs), so summing the
+//     numerators over one worker's span is a category error.
+//   - Unbounded / misleading: Σ busy_ns / max(span) can exceed 100%, and a
+//     64-worker runtime where each worker is 1/64 saturated would read as
+//     "100% saturated" — the opposite of the truth. The mean reads ~1.6%.
+// The mean is bounded by the per-worker values (each ≤ ~100%) and equals the
+// average of the per-worker rows shown when the host is expanded, so the number
+// stays verifiable by eye. Returns 0 for a host with no workers.
+function hostBusyPct(workers) {
+  const ws = workers || [];
+  if (!ws.length) return 0;
+  const sum = ws.reduce((s, w) => s + (Number(w.busy_pct) || 0), 0);
+  return sum / ws.length;
+}
+
 // Whether a coverage block still has matched files left to fold (so "Load more"
 // can deepen the sample). False when fully folded or coverage is absent.
 function canRefineMore(coverage) {
@@ -130,6 +150,7 @@ if (typeof module !== "undefined" && module.exports) {
     latencyHeat,
     workerShareHeat,
     busynessHeat,
+    hostBusyPct,
     canRefineMore,
   };
 }

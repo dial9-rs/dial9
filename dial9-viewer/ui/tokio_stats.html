@@ -422,9 +422,12 @@
   }
 
   // "Worker activity": per-host busyness summary with expandable per-worker
-  // detail. Busyness = sum(poll durations) / worker's observed time span.
-  // One row per host (runtime), click to expand individual workers. Each worker
-  // row shows a verification breakdown: busy_ns / span_ns = busy_pct.
+  // detail. Per-worker busyness = sum(poll durations) / worker's observed time
+  // span; a host's busyness is the mean of its workers' busyness (bounded, and
+  // equal to the average of the per-worker rows shown on expand — see
+  // hostBusyPct). One row per host (runtime), click to expand individual
+  // workers. Each worker row shows a verification breakdown: busy_ns / span_ns
+  // = busy_pct.
   let workerSortKey = "busy_pct"; // sort key for host rows
   let workerSortDesc = true;
   let expandedHosts = new Set(); // hosts whose worker details are visible
@@ -441,17 +444,17 @@
       hostMap[h].push(w);
     }
 
-    // Compute per-host aggregates.
+    // Compute per-host aggregates. Busyness is the MEAN of the workers'
+    // individual busy_pct (see hostBusyPct) — NOT Σ busy_ns / max(span), which
+    // is unbounded and would show a 64-worker runtime that is 1/64 saturated
+    // per worker as "100% saturated".
     const hostRows = Object.entries(hostMap).map(([host, ws]) => {
       const totalPolls = ws.reduce((s, w) => s + w.total_polls, 0);
-      const busyNs = ws.reduce((s, w) => s + w.busy_ns, 0);
       const notablePolls = ws.reduce((s, w) => s + w.notable_polls, 0);
-      const maxSpanNs = Math.max(...ws.map(w => w.span_ns || 0));
-      const busyPct = maxSpanNs > 0 ? (busyNs / maxSpanNs) * 100 : 0;
+      const busyPct = hostBusyPct(ws);
       const worstPollNs = Math.max(...ws.map(w => w.worst_poll_ns || 0));
-      const worstWorker = ws.reduce((best, w) => w.worst_poll_ns > (best.worst_poll_ns || 0) ? w : best, ws[0]);
       const pollSharePct = ws.reduce((s, w) => s + w.poll_share_pct, 0);
-      return { host, workers: ws, totalPolls, busyNs, notablePolls, maxSpanNs, busyPct, worstPollNs, worstWorker, pollSharePct, numWorkers: ws.length };
+      return { host, workers: ws, totalPolls, notablePolls, busyPct, worstPollNs, pollSharePct, numWorkers: ws.length };
     });
 
     // Sort host rows.
@@ -467,7 +470,7 @@
     const th = (label, key) => `<th style="cursor:pointer" onclick="sortWorkers('${key}')">${label}${sortInd(key)}</th>`;
 
     let html = `<h3 style="margin:20px 0 8px">⚙️ Worker activity</h3>
-      <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">${totalWorkers} workers across ${numHosts} host${numHosts > 1 ? "s" : ""} — busyness = Σ poll durations / observed span. Click a host row to expand individual workers.</p>
+      <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">${totalWorkers} workers across ${numHosts} host${numHosts > 1 ? "s" : ""} — per-worker busyness = Σ poll durations / observed span; a host's busyness is the mean across its workers. Click a host row to expand individual workers.</p>
       <table><thead><tr>
         ${th("Host", "host")}${th("Workers", "numWorkers")}${th("Busy", "busyPct")}<th>Bar</th>${th("Polls", "totalPolls")}${th("Share", "pollSharePct")}${th("Notable", "notablePolls")}${th("Worst poll", "worstPollNs")}
       </tr></thead><tbody>`;
@@ -483,9 +486,14 @@
       const worstDur = hr.worstPollNs > 0
         ? `<span style="color:${latencyHeat(hr.worstPollNs)};font-weight:600">${formatDuration(hr.worstPollNs)}</span>`
         : "—";
+      // Pass the host through a data-attribute (read back via this.dataset.host),
+      // never interpolated into the inline handler's JS: a host containing a
+      // quote would break `toggleWorkerHost('…')`. escapeHtml is the right (and
+      // sufficient) escaping for both the attribute value and the cell text —
+      // same pattern as openExemplar's data-url.
       const hostLabel = escapeHtml(hr.host);
 
-      html += `<tr style="cursor:pointer;font-weight:600" onclick="toggleWorkerHost('${hostLabel}')">
+      html += `<tr style="cursor:pointer;font-weight:600" data-host="${hostLabel}" onclick="toggleWorkerHost(this.dataset.host)">
         <td>${toggle} ${hostLabel}</td>
         <td>${hr.numWorkers}</td>
         <td><span style="color:${busyColor}">${busyFmt}</span></td>
