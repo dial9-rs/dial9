@@ -1,17 +1,4 @@
-//! The main crate for dial9 telemetry.
-//!
-//! Most applications want the `tokio` feature: `#[dial9::main]`, `TracedRuntime`,
-//! `spawn`, and the `recorder(w).with_tokio(..)` builder. Library authors who
-//! only need to record events into a trace can use the always-available core API
-//! ([`recorder`](fn@recorder), [`Dial9Handle`], [`record_event`],
-//! [`Source`](crate::core::Source)) without pulling in Tokio.
-//!
-//! Extension points, implementing a [`Source`](crate::core::Source), custom encoders
-//! and processors and the segment worker, can be accessed via the [`core`] module.
-//!
-//! Profiling (`cpu-profiling`, `memory-profiling`), the tracing-subscriber
-//! layer, and S3 upload are behind feature gates. The viewer CLI ships in the
-//! `dial9` binary (the `cli` feature, on by default).
+#![doc = include_str!("../README.md")]
 
 // Core recording API
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
