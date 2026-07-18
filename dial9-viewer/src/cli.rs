@@ -72,8 +72,9 @@ enum Commands {
         #[arg(long)]
         agg_output_dir: Option<PathBuf>,
 
-        /// Output S3 bucket for the aggregator's Parquet part-files. Defaults to
-        /// the source `--bucket`. May target a different bucket/account/region.
+        /// Optional S3 bucket for persistent aggregator Parquet part-files. For
+        /// S3/BYOC aggregation, leaving this unset uses a process-local temporary
+        /// directory and never writes to the source bucket.
         #[arg(long)]
         agg_output_bucket: Option<String>,
 

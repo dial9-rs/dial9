@@ -195,7 +195,13 @@ impl<F: Future> Future for TaskDumped<F> {
                 if *this.just_captured {
                     *this.just_captured = false;
                 } else {
-                    this.frames.capture(this.inner.as_mut(), cx);
+                    let repoll_result = this.frames.capture(this.inner.as_mut(), cx);
+                    // In rare circumstances, repoll will now be ready.
+                    if repoll_result.is_ready() {
+                        this.frames.clear();
+                        *this.pending_capture_ts = None;
+                        return repoll_result;
+                    }
                     *this.just_captured = true;
                     let poll_end = crate::telemetry::recorder::poll_start_ts_monotonic();
                     *this.pending_capture_ts = NonZeroU64::new(poll_end);
@@ -276,8 +282,11 @@ impl FrameBuf {
     }
 
     /// Capture backtraces at yield points by re-polling `inner` under the
-    /// real waker inside `trace_with`.
-    fn capture<F: Future>(&mut self, inner: Pin<&mut F>, cx: &mut Context<'_>) {
+    /// real waker inside `trace_with`, returning that re-poll's result.
+    ///
+    /// The re-poll can complete `inner`; that `Ready` is returned so the caller
+    /// can adopt it.
+    fn capture<F: Future>(&mut self, inner: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
         if self.ips.capacity() == 0 {
             self.ips.reserve(FRAME_BUF_INITIAL_CAPACITY);
         }
@@ -288,9 +297,10 @@ impl FrameBuf {
 
         // `trace_with`'s outer closure is `FnOnce`; `Option::take` moves the
         // pinned reference in without requiring a `Copy` bound or unsafe.
+        let mut result = Poll::Pending;
         tokio::runtime::dump::trace_with(
             || {
-                let _ = inner.poll(cx);
+                result = inner.poll(cx);
             },
             |meta| {
                 let ip_start = ips.len();
@@ -306,6 +316,7 @@ impl FrameBuf {
                 });
             },
         );
+        result
     }
 }
 

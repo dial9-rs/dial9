@@ -73,6 +73,29 @@ Unguarded logging in loops causes log spam that degrades observability and can i
 
 ## Testing
 
+### Local viewer server
+
+For local server testing, run the viewer from the repository root with:
+
+```bash
+cargo run -p dial9-viewer -- serve --port 3003 --local --dev
+```
+
+When testing on-demand aggregation, prefer a release build so Parquet encoding
+and trace decoding behave at representative speed:
+
+```bash
+cargo run --release -p dial9-viewer -- serve --port 3003 --local --dev
+```
+
+This is the recommended workflow: `--local` enables readable workstation logs,
+`--dev` serves UI assets directly from `dial9-viewer/ui`, and omitting
+`--agg-output-bucket` keeps on-demand S3/BYOC aggregate rollups in a
+process-local temporary directory. Source credentials therefore need only read
+access, and the temporary rollups are removed when the server exits. Open
+`http://127.0.0.1:3003/`; use `/tmp/dial9-viewer-3003.log` when running it in the
+background during agent-driven testing.
+
 - Behavior changes should include focused tests that fail without the change; if tests are not practical, state why.
 - For Rust behavior changes, run `cargo nextest run`.
 - For final verification of Rust changes, run `cargo nextest run --stress-duration 20s`. The package is expected to have no flaky tests; report any apparent flake instead of ignoring it.
