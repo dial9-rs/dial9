@@ -249,20 +249,23 @@ impl Future for CompletesOnSecondPoll {
 fn task_dump_capture_repoll_does_not_cause_poll_after_ready() {
     let (capture, _batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+            t.enable_all();
+        })
         .with_task_tracking(true)
         .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    let handle = guard.tokio_handle(runtime.handle());
-    let result = runtime.block_on(async { handle.spawn(CompletesOnSecondPoll { polls: 0 }).await });
+    let handle = traced.handle();
+    let result = traced
+        .runtime()
+        .block_on(async { handle.spawn(CompletesOnSecondPoll { polls: 0 }).await });
 
-    drop(runtime);
-    let _ = guard.graceful_shutdown(Duration::from_secs(1));
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     assert!(
         result.is_ok(),
