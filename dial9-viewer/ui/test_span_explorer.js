@@ -155,6 +155,35 @@ assertEq(
   assert(nsMid >= 2000000 && nsMid <= 2000001, "spanPxToNs: x=mid → boundary between bars");
 }
 
+// ── durationAtPercentile / spanNsToPx ──
+{
+  // 30 instances across three log buckets, 10 each.
+  const bars = [
+    { lo_ns: 1000000, hi_ns: 2000000, count: 10 },
+    { lo_ns: 2000000, hi_ns: 4000000, count: 10 },
+    { lo_ns: 4000000, hi_ns: 8000000, count: 10 },
+  ];
+  // p0 → floor of first bar; p100 → ceiling of last bar.
+  assertEq(SE.durationAtPercentile(bars, 0), 1000000, "durationAtPercentile: p0 = min");
+  assertEq(SE.durationAtPercentile(bars, 100), 8000000, "durationAtPercentile: p100 = max");
+  // p50 lands at the 15th instance → halfway (by count) into the 2nd bar, which
+  // on the log axis is its geometric midpoint: 2ms·√2 ≈ 2.83ms.
+  const p50 = SE.durationAtPercentile(bars, 50);
+  assert(Math.abs(p50 - 2000000 * Math.SQRT2) < 5, "durationAtPercentile: p50 = geometric mid of 2nd bucket");
+  // durationAtPercentile is the inverse of percentileForDuration (round-trip).
+  const p90 = SE.durationAtPercentile(bars, 90);
+  assert(Math.abs(SE.percentileForDuration(bars, p90) - 90) < 1e-4, "percentile/duration round-trip at p90");
+  assertEq(SE.durationAtPercentile([], 50), null, "durationAtPercentile: empty → null");
+
+  // spanNsToPx is the inverse of spanPxToNs on the same axis.
+  const W = 300;
+  const midNs = SE.spanPxToNs(bars, W, 150);
+  assert(Math.abs(SE.spanNsToPx(bars, W, midNs) - 150) < 1e-4, "spanNsToPx: inverts spanPxToNs at mid");
+  assertEq(SE.spanNsToPx(bars, W, 500000), 0, "spanNsToPx: below min clamps to 0");
+  assertEq(SE.spanNsToPx(bars, W, 16000000), W, "spanNsToPx: above max clamps to width");
+  assertEq(SE.spanNsToPx([], W, 5), null, "spanNsToPx: empty → null");
+}
+
 // ── spanBrushToBand ──
 {
   const bars = [
@@ -246,6 +275,47 @@ assertEq(
   assertEq(comp.categories[0].frac, 1.0, "computeTimeComposition on_cpu only: on_cpu frac = 1.0");
   assertEq(comp.categories[4].frac, 0, "computeTimeComposition on_cpu only: unknown frac = 0");
   assertEq(comp.categories[4].ns, 0, "computeTimeComposition on_cpu only: unknown ns = 0");
+}
+
+// ── equal-weighted composition (per-instance fractions) ──
+{
+  // The motivating case: 10 short spans that are ~100% on-CPU, plus ONE long
+  // span that is ~100% async-wait. Time-weighted, the single long span's ns
+  // dominates; equal-weighted, on-CPU should be the ~91% majority (10 of 11
+  // instances). The backend provides instance_count + per-category frac sums.
+  //   - on_cpu_frac_sum ≈ 10 (ten instances each 100% on-CPU)
+  //   - async_wait_frac_sum ≈ 1 (one instance 100% wait)
+  //   - instance_count = 11
+  const st = {
+    histogram: [
+      { lo_ns: 1000, hi_ns: 2000, count: 10 },
+      { lo_ns: 200000000, hi_ns: 400000000, count: 1 },
+    ],
+    composition: {
+      on_cpu_ns: 15000,          // 10 × ~1500ns
+      blocked_ns: 0,
+      async_wait_ns: 200000000,  // one 200ms wait dominates the ns total
+      scheduler_delay_ns: 0,
+      unknown_ns: 0,
+      instance_count: 11,
+      on_cpu_frac_sum: 10,
+      blocked_frac_sum: 0,
+      async_wait_frac_sum: 1,
+      scheduler_delay_frac_sum: 0,
+      unknown_frac_sum: 0,
+    },
+  };
+  const comp = SE.computeTimeComposition(st, null);
+  assertEq(comp.weighting, "equal", "equal-weighted: reports equal weighting when instance data present");
+  const onCpu = comp.categories.find((c) => c.key === "on_cpu");
+  const wait = comp.categories.find((c) => c.key === "async_wait");
+  // Equal-weighted share: on-CPU is 10/11 ≈ 0.909, NOT the ~0% a time-weighted
+  // view would show (15000 / 200015000).
+  assert(Math.abs(onCpu.frac - 10 / 11) < 1e-9, "equal-weighted: on-CPU ≈ 10/11 (not dominated by long span)");
+  assert(Math.abs(wait.frac - 1 / 11) < 1e-9, "equal-weighted: async-wait ≈ 1/11");
+  // Actual total time is still preserved (task 3), and mean per instance.
+  assertEq(wait.ns, 200000000, "equal-weighted: preserves actual total wait ns");
+  assert(Math.abs(onCpu.meanNs - 15000 / 11) < 1e-6, "equal-weighted: meanNs = total / instance_count");
 }
 
 // ── band-scoped composition (composition_histogram) ──
@@ -510,20 +580,86 @@ assertEq(
     "exemplarsInBand: no bounds preserves all candidates",
   );
 }
+
+// ── percentileForDuration / fmtPercentile ──
+{
+  // 30 instances: 10 in [1ms,2ms), 10 in [2ms,4ms), 10 in [4ms,8ms).
+  const hist = [
+    { lo_ns: 1000000, hi_ns: 2000000, count: 10 },
+    { lo_ns: 2000000, hi_ns: 4000000, count: 10 },
+    { lo_ns: 4000000, hi_ns: 8000000, count: 10 },
+  ];
+  // A value at/above the top bar's ceiling → 100th percentile.
+  assertEq(SE.percentileForDuration(hist, 8000000), 100, "percentileForDuration: at max → 100");
+  // A value at the boundary between bar 1 and bar 2 → 1/3 below.
+  const pMid = SE.percentileForDuration(hist, 2000000);
+  assert(Math.abs(pMid - 100 / 3) < 1e-6, "percentileForDuration: bar boundary → cumulative fraction");
+  // A value below the smallest bar → 0.
+  assertEq(SE.percentileForDuration(hist, 500000), 0, "percentileForDuration: below min → 0");
+  // Interpolates within a bar (geometric midpoint of first bar ≈ 5% of total).
+  const pGeoMid = SE.percentileForDuration(hist, Math.sqrt(1000000 * 2000000));
+  assert(Math.abs(pGeoMid - 100 / 6) < 1e-6, "percentileForDuration: geometric interpolation within a bar");
+  // Empty / invalid inputs.
+  assertEq(SE.percentileForDuration([], 5), null, "percentileForDuration: no histogram → null");
+  assertEq(SE.percentileForDuration(hist, null), null, "percentileForDuration: null duration → null");
+
+  // fmtPercentile formatting bands.
+  assertEq(SE.fmtPercentile(null), "—", "fmtPercentile: null → dash");
+  assertEq(SE.fmtPercentile(50), "p50", "fmtPercentile: mid → pNN");
+  assertEq(SE.fmtPercentile(99.9), "p99.9", "fmtPercentile: high tail keeps one decimal");
+  assertEq(SE.fmtPercentile(99.99), "p99.99", "fmtPercentile: extreme tail keeps two decimals");
+}
+
+// ── collectExemplarAttributeKeys / exemplarAttrValue ──
+{
+  const exemplars = [
+    { attributes: [{ key: "request_id", value: "r1" }, { key: "status_code", value: "500" }] },
+    { attributes: [{ key: "status_code", value: "200" }, { key: "region", value: "pdx" }] },
+    { attributes: [] },
+    {},
+  ];
+  assertEq(
+    SE.collectExemplarAttributeKeys(exemplars).join(","),
+    "request_id,status_code,region",
+    "collectExemplarAttributeKeys: union in first-seen order, no dupes",
+  );
+  assertEq(SE.collectExemplarAttributeKeys([]).length, 0, "collectExemplarAttributeKeys: empty → none");
+  assertEq(SE.exemplarAttrValue(exemplars[0], "status_code"), "500", "exemplarAttrValue: present");
+  assertEq(SE.exemplarAttrValue(exemplars[0], "region"), null, "exemplarAttrValue: absent key → null");
+  assertEq(SE.exemplarAttrValue({}, "x"), null, "exemplarAttrValue: no attributes → null");
+}
+
+// ── columnIsDegenerate (auto-hide uniform columns) ──
+{
+  const rows = [{ h: "a" }, { h: "a" }, { h: "b" }];
+  const same = [{ h: "a" }, { h: "a" }, { h: "a" }];
+  const empty = [{}, { h: "" }, { h: null }];
+  const get = (r) => r.h;
+  assertEq(SE.columnIsDegenerate(same, get), true, "columnIsDegenerate: all same → true");
+  assertEq(SE.columnIsDegenerate(empty, get), true, "columnIsDegenerate: all empty/missing → true");
+  assertEq(SE.columnIsDegenerate(rows, get), false, "columnIsDegenerate: differing values → false");
+  // Single row can't establish uniformity (a 1-row table keeps its columns).
+  assertEq(SE.columnIsDegenerate([{ h: "a" }], get), false, "columnIsDegenerate: single row → false");
+  assertEq(SE.columnIsDegenerate([], get), false, "columnIsDegenerate: empty rows → false");
+  // Numeric vs string that stringify equal are treated as equal.
+  assertEq(SE.columnIsDegenerate([{ h: 500 }, { h: "500" }], get), true, "columnIsDegenerate: 500 == '500'");
+  // A mix of empty and non-empty is NOT degenerate.
+  assertEq(SE.columnIsDegenerate([{ h: "a" }, {}], get), false, "columnIsDegenerate: empty + value → false");
+}
 // ── TIME_CATEGORIES ──
 
 // ── mergeSelectedExemplarSnapshot ──
 {
   const current = [
-    { span_type_uid: "selected", count: 100, p99_ns: 900, slow_exemplars: [{ elapsed_ns: 900 }] },
-    { span_type_uid: "other", count: 50, slow_exemplars: [{ elapsed_ns: 500 }] },
+    { span_type_uid: "selected", count: 100, p99_ns: 900, exemplars: [{ elapsed_ns: 900 }] },
+    { span_type_uid: "other", count: 50, exemplars: [{ elapsed_ns: 500 }] },
   ];
   const incomingPartial = [
     {
       span_type_uid: "selected",
       count: 3,
       p99_ns: 30,
-      slow_exemplars: [{ elapsed_ns: 25 }],
+      exemplars: [{ elapsed_ns: 25 }],
       selected_duration_count: 3,
     },
   ];
@@ -532,7 +668,7 @@ assertEq(
   assertEq(merged.spanTypes.length, 2, "mergeSelectedExemplarSnapshot: preserves catalog rows");
   assertEq(merged.spanTypes[0].count, 100, "mergeSelectedExemplarSnapshot: preserves complete count");
   assertEq(merged.spanTypes[0].p99_ns, 900, "mergeSelectedExemplarSnapshot: preserves complete percentiles");
-  assertEq(merged.spanTypes[0].slow_exemplars[0].elapsed_ns, 25, "mergeSelectedExemplarSnapshot: patches exemplars");
+  assertEq(merged.spanTypes[0].exemplars[0].elapsed_ns, 25, "mergeSelectedExemplarSnapshot: patches exemplars");
   assertEq(merged.spanTypes[0].selected_duration_count, 3, "mergeSelectedExemplarSnapshot: patches exact count");
   assert(merged.spanTypes[1] === current[1], "mergeSelectedExemplarSnapshot: leaves unrelated type untouched");
 
@@ -560,17 +696,17 @@ assertEq(
 // ── sameSpanCatalogStatistics ──
 {
   const complete = [
-    { span_type_uid: "a", count: 10, histogram: [{ lo_ns: 1, hi_ns: 2, count: 10 }], slow_exemplars: [{ elapsed_ns: 2 }] },
+    { span_type_uid: "a", count: 10, histogram: [{ lo_ns: 1, hi_ns: 2, count: 10 }], exemplars: [{ elapsed_ns: 2 }] },
   ];
   const exemplarOnlyChange = [
-    { span_type_uid: "a", count: 10, histogram: [{ lo_ns: 1, hi_ns: 2, count: 10 }], slow_exemplars: [{ elapsed_ns: 1 }], selected_duration_count: 4 },
+    { span_type_uid: "a", count: 10, histogram: [{ lo_ns: 1, hi_ns: 2, count: 10 }], exemplars: [{ elapsed_ns: 1 }], selected_duration_count: 4 },
   ];
   assert(
     SE.sameSpanCatalogStatistics(complete, exemplarOnlyChange),
     "sameSpanCatalogStatistics: ignores query-scoped exemplar fields",
   );
   const refined = [
-    { span_type_uid: "a", count: 11, histogram: [{ lo_ns: 1, hi_ns: 2, count: 11 }], slow_exemplars: [] },
+    { span_type_uid: "a", count: 11, histogram: [{ lo_ns: 1, hi_ns: 2, count: 11 }], exemplars: [] },
   ];
   assert(
     !SE.sameSpanCatalogStatistics(complete, refined),
@@ -706,6 +842,47 @@ assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown
     catalog[0].span_type_uid !== catalog[1].span_type_uid,
     "buildSpanCatalog: __ schema types receive distinct callsite keys",
   );
+}
+
+// ── Attribute filters ──
+{
+  // parse: split on first '=', drop malformed (no '=' or empty key)
+  const parsed = SE.parseAttrFilterParams([
+    "status_code=500",
+    "url=/a?b=c",
+    "noequals",
+    "=emptykey",
+  ]);
+  assertEq(parsed.length, 2, "parseAttrFilterParams: keeps only well-formed entries");
+  assertEq(parsed[0].key, "status_code", "parseAttrFilterParams: key");
+  assertEq(parsed[0].value, "500", "parseAttrFilterParams: value");
+  assertEq(parsed[1].value, "/a?b=c", "parseAttrFilterParams: value may contain '='");
+
+  // round-trip through format
+  assertEq(
+    JSON.stringify(SE.formatAttrFilterParams(parsed)),
+    JSON.stringify(["status_code=500", "url=/a?b=c"]),
+    "formatAttrFilterParams: round-trips key=value",
+  );
+
+  // has / add / remove are pure and dedupe
+  assert(SE.hasAttrFilter(parsed, "status_code", "500"), "hasAttrFilter: present");
+  assert(!SE.hasAttrFilter(parsed, "status_code", "200"), "hasAttrFilter: absent value");
+  const added = SE.addAttrFilter(parsed, "host", "h1");
+  assertEq(added.length, 3, "addAttrFilter: appends new filter");
+  assertEq(
+    SE.addAttrFilter(parsed, "status_code", "500").length,
+    parsed.length,
+    "addAttrFilter: no duplicate for existing pair",
+  );
+  const removed = SE.removeAttrFilter(added, "status_code", "500");
+  assertEq(removed.length, 2, "removeAttrFilter: drops the matching pair");
+  assert(
+    !SE.hasAttrFilter(removed, "status_code", "500"),
+    "removeAttrFilter: pair gone afterwards",
+  );
+  // Original array is not mutated (pure helpers).
+  assertEq(parsed.length, 2, "attr filter helpers do not mutate input");
 }
 
 // ── Demo trace integration test ──

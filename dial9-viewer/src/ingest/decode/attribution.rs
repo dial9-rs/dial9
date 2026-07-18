@@ -8,7 +8,7 @@
 //! intervals — never to lifecycle envelopes. An async span that is exited
 //! (waiting) must NOT claim samples that fire during its idle gap.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::clock::{ClockOffset, WallNs};
 use super::spans::interval_pairing::MonoInterval;
@@ -41,10 +41,20 @@ pub(crate) fn attribute_samples_to_spans(
 
     let to_wall = |mono: super::clock::MonoNs| mono.to_wall_or_raw(clock_offset);
 
+    // Index resolved spans by uid once so the per-interval lookup below is O(1).
+    // Previously this was `resolved_spans.iter().position(...)` per legacy
+    // interval — an O(spans × intervals) scan that dominated attribution time on
+    // span-heavy files (seconds on a 325k-span-event segment).
+    let span_idx_by_uid: FxHashMap<[u8; 16], usize> = resolved_spans
+        .iter()
+        .enumerate()
+        .map(|(idx, span)| (span.span_uid, idx))
+        .collect();
+
     // Legacy intervals are computed with synthetic instance_ids.
     for (synthetic_instance_id, intervals) in legacy_intervals {
         let target_uid = compute_span_uid(boot_id, *synthetic_instance_id);
-        if let Some(span_idx) = resolved_spans.iter().position(|s| s.span_uid == target_uid) {
+        if let Some(&span_idx) = span_idx_by_uid.get(&target_uid) {
             for &(enter_ts, exit_ts) in intervals {
                 all_intervals.push(SpanInterval {
                     start_wall: to_wall(enter_ts),
@@ -68,6 +78,9 @@ pub(crate) fn attribute_samples_to_spans(
 
     let mut active: Vec<usize> = Vec::new(); // indices into all_intervals
     let mut interval_cursor: usize = 0;
+    // Reused per-sample dedup set (cleared each iteration) so a sample enclosed
+    // by many overlapping intervals dedups span indices in O(1), not O(active).
+    let mut seen_span_indices: FxHashSet<usize> = FxHashSet::default();
 
     for &sample_idx in &sample_order {
         let ts = WallNs(samples[sample_idx].timestamp_ns);
@@ -83,17 +96,20 @@ pub(crate) fn attribute_samples_to_spans(
         // Prune expired intervals from active set (end_wall <= ts).
         active.retain(|&iv_idx| all_intervals[iv_idx].end_wall > ts);
 
-        // Attribute the sample to all active intervals (dedup by span_idx).
-        let mut seen_span_indices: Vec<usize> = Vec::new();
+        // Attribute the sample to all active intervals (dedup by span_idx). A
+        // hash set, not `Vec::contains` in the loop — a sample enclosed by A
+        // active intervals otherwise costs O(A²) (the dedup scan grows with the
+        // active set), which cost tens of seconds on files with many overlapping
+        // long-lived spans.
+        seen_span_indices.clear();
         for &iv_idx in &active {
             let iv = &all_intervals[iv_idx];
             debug_assert!(iv.start_wall <= ts && iv.end_wall > ts);
 
             // Dedup: skip if we already attributed this span index.
-            if seen_span_indices.contains(&iv.span_idx) {
+            if !seen_span_indices.insert(iv.span_idx) {
                 continue;
             }
-            seen_span_indices.push(iv.span_idx);
 
             // Sample is within this entered interval.
             if samples[sample_idx].source == SOURCE_CPU_PROFILE {

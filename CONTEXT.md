@@ -171,6 +171,55 @@ the biggest differences — ranked both by **percentage** delta and by
 later toggle, not the primary layout (self-normalized side-by-side widths are
 more legible than delta-color on one tree).
 
+**Diff vocabulary**:
+Every quantity shown is one of a few **diffable types**, and each type has one
+canonical A-vs-B rendering, reused across all [[view]]s so a p99 diff looks and
+behaves the same in the spans table, a flamegraph tooltip, and the
+[[significant-difference]] rail:
+
+| Diffable type | Examples | Canonical diff rendering |
+|---|---|---|
+| **Scalar** | p50/p95/p99, count, mean poll, `db_time` metric | **Dumbbell** — A-dot ● and B-dot ● on one shared (log) axis, joined by a colored bar; length+direction = the change |
+| **Distribution** | a span type's duration histogram | **Overlaid/mirrored histograms** or a per-bucket **difference histogram** (B−A, diverging) — the whole shift, not 3 percentiles |
+| **Set membership** | which span types / frames exist | **new / gone** badges |
+| **Tree** | call graph; nested time-attribution | **delta-colored flame/icicle** |
+
+Consequence: a spans/tokio [[view]] is **not two tables** (here-is-A,
+here-is-B); it is **one aligned table** — one row per identity (union of A and
+B), each cell rendering its quantity's diff primitive. The row *is* the diff.
+Sorting by change-magnitude merges the table with the
+[[significant-difference]] rail for tabular views.
+_Avoid_: side-by-side A/B tables (that is "show both", not "show the
+difference" — the failure mode this vocabulary exists to kill).
+
+**Time-attribution is a metric bag, not necessarily a tree**:
+"Where did a span's elapsed time go" generalizes beyond the fixed five-way
+breakdown (on-cpu / sync-block / async-wait / sched-delay / unknown). The
+right conception: a span carries a **bag of measured quantities**; the subset
+that are *durations* (`db_time`, `on_cpu`, a child span's contribution) are
+what "composition" is made of. A `db_time` **metric attached to the span** is
+the easy, always-available case (→ scalar dumbbell diff); a nested
+parent/child **tree** is the richer case when containment exists (→ delta-tree
+diff). The diff engine does not distinguish them — it diffs numbers grouped by
+identity; the tree is a *rendering* choice for when the numbers nest, not a
+separate diffable type. So the fixed five-way bar folds into this: it is just
+the shallowest projection. This lets "my p99 is slow *because* db.query is
+slow" read straight out of the A-vs-B diff, since B is already the p99 tail.
+
+Two honesty/scope constraints:
+- **Mandatory `unknown`.** Any duration decomposition is
+  [[source-file]]-bounded (no global span-graph reconstruction). It must
+  always carry an explicit `unknown` node and never be fabricated to sum to
+  100%. The on-cpu portion falls out of the enriched sample scan
+  (`enclosing_spans` depth 0–2); the by-child *wall-time* split is the bounded
+  part.
+- **Aggregate diff ≠ per-instance correlation.** The A-vs-B diff gives the
+  *aggregate* claim ("the slow bucket spends proportionally more time in
+  db.query"), which needs no new machinery because B = the tail. Genuine
+  *per-instance* correlation ("elapsed correlates with db_time span-by-span")
+  is a **separate, deferred** capability — it needs per-span joins that fight
+  the source-file-bounded model. Not a v1 blocker.
+
 **Unsymbolized frames excluded from diff**:
 Frames whose addresses did not resolve to a symbol are **excluded** from the
 diff coloring and the [[significant-difference]] listing. Unsymbolized frames

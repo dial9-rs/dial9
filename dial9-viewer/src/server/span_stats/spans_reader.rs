@@ -10,7 +10,7 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 
-use super::{ExemplarAttribute, SlowExemplar, TimeComposition};
+use super::{Exemplar, ExemplarAttribute, TimeComposition};
 
 pub(super) struct SpanStatsRow {
     pub span_type_uid: [u8; 16],
@@ -20,7 +20,7 @@ pub(super) struct SpanStatsRow {
     pub callsite_file: Option<String>,
     pub callsite_line: Option<u32>,
     pub elapsed_ns: i64,
-    pub exemplar: Option<SlowExemplar>,
+    pub exemplar: Option<Exemplar>,
     pub attributes: Vec<(String, String)>,
     pub composition: Option<RowComposition>,
     pub details_complete: Option<bool>,
@@ -177,7 +177,7 @@ impl SpansBatchReader {
             // just the span type's aggregate.
             let exemplar = span_uid_col
                 .filter(|array| !array.is_null(row_index))
-                .map(|uid_arr| SlowExemplar {
+                .map(|uid_arr| Exemplar {
                     elapsed_ns,
                     span_uid: hex::encode(uid_arr.value(row_index)),
                     callsite_file: optional_string(file_col, row_index),
@@ -186,12 +186,21 @@ impl SpansBatchReader {
                     start_ns: optional_i64(start_ns_col, row_index).unwrap_or(0),
                     end_ns: end_ns.unwrap_or(0),
                     source_key: optional_string(source_key_col, row_index).unwrap_or_default(),
+                    // A single instance's composition needs no equal-weighting,
+                    // so the per-instance fraction fields stay zero (omitted on
+                    // the wire).
                     composition: composition.as_ref().map(|c| TimeComposition {
                         on_cpu_ns: c.on_cpu_ns,
                         blocked_ns: c.blocked_ns,
                         async_wait_ns: c.async_wait_ns,
                         scheduler_delay_ns: c.scheduler_delay_ns,
                         unknown_ns: c.unknown_ns,
+                        instance_count: 0,
+                        on_cpu_frac_sum: 0.0,
+                        blocked_frac_sum: 0.0,
+                        async_wait_frac_sum: 0.0,
+                        scheduler_delay_frac_sum: 0.0,
+                        unknown_frac_sum: 0.0,
                     }),
                     attributes: attributes
                         .iter()

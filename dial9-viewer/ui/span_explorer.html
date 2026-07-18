@@ -43,6 +43,11 @@
   .histogram-wrap svg { display: block; cursor: crosshair; }
   .histogram-axis { position: relative; height: 1.2em; margin-top: 2px; font-size: 0.68em; color: #8a8aa0; }
   .histogram-hint { font-size: 0.66em; color: #6a6a80; margin-top: 2px; }
+  /* Percentile guide lines (P50/P90/P99/P99.9) over the duration histogram. */
+  .histogram-wrap svg .pctile-line { stroke: #f0f6fc; stroke-opacity: 0.55; stroke-width: 1;
+    stroke-dasharray: 2 2; pointer-events: none; }
+  .histogram-wrap svg .pctile-label { fill: #c9d1d9; font-size: 8px; font-weight: 600;
+    paint-order: stroke; stroke: #0d1117; stroke-width: 2px; pointer-events: none; }
 
   /* Time composition bar */
   .composition-wrap { flex-shrink: 0; padding: 8px 0; }
@@ -65,29 +70,76 @@
   .fg-links .blocking { background: #e63946; color: #fff; }
   .fg-links a:hover { opacity: 0.85; }
 
-  /* Slow exemplars: a table of the longest instances; rows deep-link to the
-     viewer focused on that span (like the Tokio-stats exemplar tables). */
+  /* Exemplars: a table of representative instances. A per-row Jump button
+     deep-links to the viewer focused on that span (like the Tokio-stats
+     exemplar tables); the row itself is not clickable. */
   .exemplars { padding: 8px 0; font-size: 0.8em; color: #aaa; flex-shrink: 0; overflow-x: auto; }
   .exemplars .label { font-weight: 600; margin-bottom: 4px; }
+  /* Column show/hide menu. */
+  .exemplars .col-menu { position: relative; display: inline-block; margin-bottom: 6px; }
+  .exemplars .col-menu-btn { background: #21262d; color: #adbac7; border: 1px solid #30363d;
+    border-radius: 3px; padding: 2px 8px; font-size: 1em; cursor: pointer; }
+  .exemplars .col-menu-btn:hover { border-color: #388bfd; }
+  .exemplars .col-menu-list { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 2px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); min-width: 160px; max-height: 260px; overflow-y: auto; }
+  .exemplars .col-menu-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px;
+    color: #c9d1d9; cursor: pointer; border-radius: 3px; white-space: nowrap; }
+  .exemplars .col-menu-item:hover { background: #21262d; }
+  .exemplars .col-menu-item input { cursor: pointer; }
+  .exemplars .col-menu-auto { color: #6e7681; font-style: italic; }
+  .exemplars .col-menu-reset { display: block; width: 100%; margin-top: 4px; padding: 3px 6px;
+    background: transparent; border: none; border-top: 1px solid #21262d; color: #79c0ff;
+    cursor: pointer; text-align: left; font-size: 1em; }
+  .exemplars .col-menu-reset:hover { color: #adbac7; }
   .exemplars table.exemplar-table { width: auto; min-width: 320px; border-collapse: collapse; font-size: 0.95em; }
   .exemplars table.exemplar-table th { position: static; background: transparent; cursor: default; padding: 3px 12px 3px 0; color: #8b949e; font-weight: 600; text-align: left; }
   .exemplars table.exemplar-table td { padding: 3px 12px 3px 0; border-bottom: 1px solid #21262d; white-space: nowrap; }
   .exemplars table.exemplar-table td.dur { color: #e6edf3; font-weight: 600; }
+  .exemplars table.exemplar-table td.pctile { color: #8b949e; font-variant-numeric: tabular-nums; }
   .exemplars table.exemplar-table td.host { color: #8b949e; }
   .exemplars table.exemplar-table td.muted, .exemplars .muted { color: #6e7681; }
   .exemplars table.exemplar-table code { color: #79c0ff; }
-  .exemplars table.exemplar-table tr.jump { cursor: pointer; }
-  .exemplars table.exemplar-table tr.jump:hover { background: #1c2128; }
+  /* Jump-to-source button (replaces whole-row click). */
+  .exemplars td.jump-cell { padding-right: 8px; }
+  .exemplars .jump-btn { background: #21262d; color: #79c0ff; border: 1px solid #30363d;
+    border-radius: 3px; padding: 1px 7px; font-size: 0.9em; cursor: pointer; white-space: nowrap; }
+  .exemplars .jump-btn:hover:not(:disabled) { border-color: #388bfd; background: #1c2a3a; }
+  .exemplars .jump-btn:disabled { opacity: 0.4; cursor: default; }
   /* Per-row time-composition mini-bar: same categories/colors as the aggregate
-     composition legend, scoped to a single exemplar instance. */
-  .exemplars .ex-comp-bar { display: inline-flex; width: 120px; height: 10px; border-radius: 2px;
+     composition legend, scoped to a single exemplar instance. Wide enough to
+     print the time inside sufficiently large segments. */
+  .exemplars .ex-comp-bar { display: inline-flex; width: 200px; height: 16px; border-radius: 2px;
     overflow: hidden; background: #21262d; vertical-align: middle; }
-  .exemplars .ex-comp-bar .seg { height: 100%; }
-  /* Generic attribute chips: key=value pairs for whatever metadata the row has. */
-  .exemplars td.attrs { white-space: normal; max-width: 360px; }
-  .exemplars .attr-chip { display: inline-block; background: #21262d; border-radius: 3px;
-    padding: 1px 6px; margin: 1px 4px 1px 0; color: #8b949e; }
-  .exemplars .attr-chip b { color: #adbac7; font-weight: 600; }
+  .exemplars .ex-comp-bar .seg { height: 100%; display: flex; align-items: center;
+    justify-content: center; overflow: hidden; min-width: 0; }
+  /* Inline time label shown only inside sufficiently wide mini-bar segments. */
+  .exemplars .ex-comp-bar .seg-label { font-size: 9px; font-weight: 600; color: #fff; white-space: nowrap;
+    padding: 0 2px; text-shadow: 0 0 2px rgba(0,0,0,0.75), 0 0 1px rgba(0,0,0,0.9); pointer-events: none; }
+  /* Attribute columns: one per attribute key. The value toggles a filter on
+     click; a small copy button copies the raw value. */
+  .exemplars td.attr-cell { color: #adbac7; }
+  .exemplars .attr-val { cursor: pointer; border-bottom: 1px dotted #30363d; }
+  .exemplars .attr-val:hover { color: #79c0ff; border-bottom-color: #388bfd; }
+  .exemplars .attr-val.active { color: #79c0ff; font-weight: 600; border-bottom: 1px solid #388bfd; }
+  .exemplars .attr-val.inert { cursor: default; border-bottom: none; }
+  .exemplars .attr-val.inert:hover { color: #adbac7; }
+  .exemplars .attr-copy { margin-left: 5px; background: transparent; border: none; color: #6e7681;
+    cursor: pointer; font-size: 1em; padding: 0 2px; vertical-align: baseline; }
+  .exemplars .attr-copy:hover { color: #79c0ff; }
+  .exemplars .attr-copy.copied { color: #3fb950; }
+
+  /* Active attribute-filter bar. */
+  .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    padding: 6px 16px; background: #0d1117; border-bottom: 1px solid #21262d; font-size: 0.8em; }
+  .filter-bar .fb-label { color: #8b949e; font-weight: 600; }
+  .filter-bar .fb-chip { display: inline-flex; align-items: center; gap: 6px;
+    background: #163050; border: 1px solid #388bfd; border-radius: 3px; padding: 2px 6px; color: #adbac7; }
+  .filter-bar .fb-chip b { color: #79c0ff; font-weight: 600; }
+  .filter-bar .fb-chip .fb-x { cursor: pointer; color: #8b949e; font-weight: 700; }
+  .filter-bar .fb-chip .fb-x:hover { color: #f85149; }
+  .filter-bar .fb-clear { cursor: pointer; color: #8b949e; text-decoration: underline; }
+  .filter-bar .fb-clear:hover { color: #adbac7; }
   /* Clickable max value in the detail header */
   .detail-header .meta a.max-jump { color: #79c0ff; text-decoration: none; font-weight: 600; }
   .detail-header .meta a.max-jump:hover { text-decoration: underline; }
@@ -131,6 +183,9 @@
   <span style="flex:1"></span>
   <button class="secondary" id="btn-copylink">Copy link</button>
 </div>
+
+<!-- Active attribute filters (populated by JS); hidden when none active. -->
+<div class="filter-bar" id="filter-bar" style="display:none"></div>
 
 <div class="main" id="main">
   <div class="loading" id="loading"><div class="spinner"></div>Loading span statistics…</div>
@@ -203,6 +258,16 @@
   let selectedUid = params.get("span_type_uid") || null;
   let bandMinNs = params.get("min_span_ns") != null ? Number(params.get("min_span_ns")) : null;
   let bandMaxNs = params.get("max_span_ns") != null ? Number(params.get("max_span_ns")) : null;
+  // Active attribute filters: [{key, value}]. Each is an exact key=value match;
+  // multiple are ANDed. Parsed from repeated ?attr=key=value URL params.
+  let attrFilters = SE.parseAttrFilterParams(params.getAll("attr"));
+  // Explicit per-column visibility overrides for the exemplar table, by column
+  // id → true (force shown) / false (force hidden). Columns with no entry follow
+  // the auto rule: a column is auto-hidden when every visible exemplar has the
+  // same value (or all are empty), since it then adds no information. Persisted
+  // so the choice survives streaming re-renders and page reloads.
+  const EXEMPLAR_COL_STORE = "dial9.spanExplorer.exemplarColOverrides";
+  let exemplarColOverrides = loadExemplarColOverrides();
   let lastCoverage = null;
   let exemplarRefreshPending = false;
   let streamToken = 0;
@@ -218,7 +283,7 @@
     return `${bandMinNs == null ? "" : bandMinNs}:${bandMaxNs == null ? "" : bandMaxNs}`;
   }
 
-  function buildApiUrl() {
+  function buildApiUrl(mode) {
     const u = new URL("/api/span-stats", window.location.origin);
     if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
     if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
@@ -234,7 +299,13 @@
     // catalog statistics remain unchanged.
     if (bandMinNs != null) u.searchParams.set("min_span_ns", String(bandMinNs));
     if (bandMaxNs != null) u.searchParams.set("max_span_ns", String(bandMaxNs));
+    // Attribute filters narrow the whole aggregate server-side (counts,
+    // histograms, composition, exemplars).
+    for (const a of SE.formatAttrFilterParams(attrFilters)) u.searchParams.append("attr", a);
     SE.setMaxFilesParam(u.searchParams, maxFiles);
+    // An exemplar refetch (duration-band change / span-type reselect) reads only
+    // already-folded spans parts — it must not parse any additional raw files.
+    if (mode === "exemplars") u.searchParams.set("exemplars_only", "true");
     return u;
   }
 
@@ -256,6 +327,7 @@
     if (selectedUid) p.set("span_type_uid", selectedUid);
     if (bandMinNs != null) p.set("min_span_ns", String(bandMinNs));
     if (bandMaxNs != null) p.set("max_span_ns", String(bandMaxNs));
+    for (const a of SE.formatAttrFilterParams(attrFilters)) p.append("attr", a);
     SE.setMaxFilesParam(p, maxFiles);
     history.replaceState(null, "", window.location.pathname + "?" + p.toString());
   }
@@ -269,7 +341,7 @@
   function invalidateSelectedExemplarData() {
     spanTypes = spanTypes.map((st) => {
       if (st.span_type_uid !== selectedUid) return st;
-      const next = Object.assign({}, st, { slow_exemplars: [] });
+      const next = Object.assign({}, st, { exemplars: [] });
       delete next.selected_duration_count;
       return next;
     });
@@ -344,12 +416,12 @@
     detailPanel.innerHTML = "";
 
     // Header. The `max` value is clickable when we have a slow exemplar to jump
-    // to — the slowest exemplar (slow_exemplars[0], sorted desc) is the max
+    // to — the slowest exemplar (exemplars[0], sorted desc) is the max
     // instance. Clicking pans/zooms the viewer to that span via focus_* params.
     const scope = exemplarScope(st);
     const exemplarCandidates = exemplarRefreshPending
       ? []
-      : SE.exemplarsInBand(st.slow_exemplars, bandMinNs, bandMaxNs);
+      : SE.exemplarsInBand(st.exemplars, bandMinNs, bandMaxNs);
     const slowest = exemplarCandidates.length > 0 ? exemplarCandidates[0] : null;
     const hasDurationBand = bandMinNs != null || bandMaxNs != null;
     // The header's max value is an all-instances statistic, so never attach an
@@ -398,6 +470,13 @@
   const HIST_H = 50;
   let histDragging = false;
 
+  // Build an SVG <title> child (native hover tooltip) with the given text.
+  function titleEl(NS, text) {
+    const t = document.createElementNS(NS, "title");
+    t.textContent = text;
+    return t;
+  }
+
   function renderHistogram(container, histogram) {
     const bars = SE.normalizeSpanHistogram(histogram);
     if (bars.length === 0) {
@@ -427,6 +506,42 @@
       rect.setAttribute("height", h);
       rect.setAttribute("fill", banded ? (inBand ? "#6c63ff" : "#3a3a5a") : "#6c63ff");
       svg.appendChild(rect);
+    }
+
+    // Percentile markers: vertical guide lines at P50/P90/P99/P99.9 so it's
+    // obvious where the bulk vs. the tail of the distribution sits. Positions
+    // are derived from the histogram itself (same log axis as the bars), so they
+    // line up with the columns. Labels are nudged to stay inside the viewport.
+    const PERCENTILES = [
+      { p: 50, label: "P50" },
+      { p: 90, label: "P90" },
+      { p: 99, label: "P99" },
+      { p: 99.9, label: "P99.9" },
+    ];
+    for (const { p, label } of PERCENTILES) {
+      const ns = SE.durationAtPercentile(bars, p);
+      if (ns == null) continue;
+      const x = SE.spanNsToPx(bars, W, ns);
+      if (x == null) continue;
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("x1", x);
+      line.setAttribute("x2", x);
+      line.setAttribute("y1", "0");
+      line.setAttribute("y2", HIST_H);
+      line.setAttribute("class", "pctile-line");
+      line.appendChild(titleEl(NS, `${label}: ${SE.fmtNs(ns)}`));
+      svg.appendChild(line);
+
+      const text = document.createElementNS(NS, "text");
+      // Anchor near the line, flipping side near the right edge so it stays visible.
+      const nearRight = x > W - 40;
+      text.setAttribute("x", nearRight ? x - 3 : x + 3);
+      text.setAttribute("y", "9");
+      text.setAttribute("text-anchor", nearRight ? "end" : "start");
+      text.setAttribute("class", "pctile-label");
+      text.textContent = label;
+      text.appendChild(titleEl(NS, `${label}: ${SE.fmtNs(ns)}`));
+      svg.appendChild(text);
     }
 
     // Brush overlay
@@ -476,12 +591,16 @@
       if (band) {
         bandMinNs = band.min_ns;
         bandMaxNs = band.max_ns;
+        // Refetch bounded exemplar candidates. Client filtering alone cannot
+        // recover lower-band spans from the backend's global top-N list — the
+        // backend re-selects exemplars *within* the band. This is an
+        // exemplar-only (`exemplars_only=true`) stream: it reads the already-folded
+        // spans part-files and parses NO additional raw trace files, so it is
+        // cheap and never triggers the refine loop.
         if (!rawTraceParam) invalidateSelectedExemplarData();
         exemplarRefreshPending = !rawTraceParam;
         updateBrowserUrl();
         renderDetail();
-        // Refetch bounded exemplar candidates. Client filtering alone cannot
-        // recover lower-band spans from the backend's global top-five list.
         if (!rawTraceParam) startStreaming("exemplars");
       }
     });
@@ -516,7 +635,7 @@
     // Hint
     const hint = document.createElement("div");
     hint.className = "histogram-hint";
-    hint.textContent = `tallest bar = ${maxCount.toLocaleString()} instances · drag to select a duration band`;
+    hint.textContent = `tallest bar = ${maxCount.toLocaleString()} instances · dashed lines mark P50/P90/P99/P99.9 · drag to select a duration band`;
     container.appendChild(hint);
   }
 
@@ -567,12 +686,14 @@
     const wrap = document.createElement("div");
     wrap.className = "composition-wrap";
 
-    // Label
+    // Label. When we have equal-weighted data, say so — it's the key caveat:
+    // percentages are the mean per-instance share (each span counts once), so a
+    // few very long spans don't dominate. "time-weighted" is the older fallback.
     const label = document.createElement("div");
     label.style.cssText = "font-size:0.8em;color:#aaa;margin-bottom:4px;font-weight:600";
-    label.textContent = bandScoped
-      ? "Time composition (estimated, selected band)"
-      : "Time composition (estimated)";
+    const scopeWord = bandScoped ? ", selected band" : "";
+    const weightWord = comp.weighting === "equal" ? ", per-instance avg" : "";
+    label.textContent = `Time composition (estimated${scopeWord}${weightWord})`;
     const isFallback = comp.categories.length === 1 && comp.categories[0].key === "unknown" && !st.composition;
     if (isFallback) {
       label.innerHTML += '<span class="partial-badge">awaiting per-category data</span>';
@@ -599,7 +720,8 @@
     }
     wrap.appendChild(bar);
 
-    // Legend — one item per category with its share (percent) and duration, so
+    // Legend — one item per category showing its share (percent), the mean time
+    // per instance (when known), and the actual total time across instances, so
     // the breakdown is readable numerically, not just by bar width. Categories
     // with zero time are dimmed rather than hidden so the legend stays stable.
     const byKey = new Map(comp.categories.map((c) => [c.key, c]));
@@ -609,15 +731,23 @@
       const c = byKey.get(cat.key);
       const frac = c ? c.frac : 0;
       const ns = c ? c.ns : 0;
+      const meanNs = c ? c.meanNs : null;
       const item = document.createElement("span");
       item.className = "item";
       if (frac <= 0) item.style.opacity = "0.4";
       const pct = (frac * 100).toFixed(frac > 0 && frac < 0.001 ? 2 : 1);
+      // Prefer the mean-per-instance duration next to the percent (it matches the
+      // equal-weighted share); fall back to total when no instance count. The
+      // total is always available in the tooltip.
+      const primaryNs = meanNs != null ? meanNs : ns;
+      const primaryLabel = meanNs != null ? `${SE.fmtNs(meanNs)}/span` : SE.fmtNs(ns);
       item.innerHTML =
         `<span class="swatch" style="background:${cat.color}"></span>` +
         `${cat.label} <span class="legend-pct">${pct}%</span>` +
-        (ns > 0 ? ` <span class="legend-ns">(${SE.fmtNs(ns)})</span>` : "");
-      item.title = `${cat.label}: ${SE.fmtNs(ns)} (${pct}%)`;
+        (primaryNs > 0 ? ` <span class="legend-ns">(${primaryLabel})</span>` : "");
+      item.title = meanNs != null
+        ? `${cat.label}: ${pct}% · ${SE.fmtNs(meanNs)} per span · ${SE.fmtNs(ns)} total`
+        : `${cat.label}: ${pct}% · ${SE.fmtNs(ns)} total`;
       legend.appendChild(item);
 
     }
@@ -703,12 +833,139 @@
     };
   }
 
-  // Render the slow exemplars as a table (like the Tokio-stats exemplar tables).
-  // Each row deep-links to the viewer focused on that exact span instance via
-  // focus_* params. In raw-trace mode (or with no source_key) rows are inert.
+  // ── Exemplar-table column visibility ────────────────────────────────────────
+
+  // Load persisted explicit overrides ({id: true|false}). Best-effort: any
+  // storage/parse error yields no overrides (pure auto behavior).
+  function loadExemplarColOverrides() {
+    try {
+      const raw = window.localStorage.getItem(EXEMPLAR_COL_STORE);
+      if (!raw) return {};
+      const obj = JSON.parse(raw);
+      return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function persistExemplarColOverrides() {
+    try {
+      window.localStorage.setItem(EXEMPLAR_COL_STORE, JSON.stringify(exemplarColOverrides));
+    } catch (e) { /* storage unavailable; keep in-memory only */ }
+  }
+
+  // Set (true=force show, false=force hide) or clear (undefined=follow auto) a
+  // column's explicit override.
+  function setColOverride(id, value) {
+    if (value === undefined) delete exemplarColOverrides[id];
+    else exemplarColOverrides[id] = value;
+    persistExemplarColOverrides();
+  }
+
+  // Effective visibility for a column: an explicit override wins; otherwise a
+  // column with a `degenValue` extractor auto-hides when it's degenerate (every
+  // exemplar shares one value, or all empty — see SE.columnIsDegenerate).
+  // Returns { hidden, auto } so the menu can label auto-hidden columns distinctly
+  // from ones the user hid. Columns without `degenValue` (Duration, %ile) never
+  // auto-hide.
+  function colVisibility(col, exemplars) {
+    if (col.hideable === false) return { hidden: false, auto: false };
+    const override = exemplarColOverrides[col.id];
+    if (override === true) return { hidden: false, auto: false };
+    if (override === false) return { hidden: true, auto: false };
+    if (col.degenValue && SE.columnIsDegenerate(exemplars, col.degenValue)) {
+      return { hidden: true, auto: true };
+    }
+    return { hidden: false, auto: false };
+  }
+
+  // A "Columns ▾" control listing every hideable column with a checkbox
+  // reflecting its effective visibility. Toggling sets an explicit override and
+  // re-renders; "Reset to auto" clears overrides so degenerate columns hide
+  // again automatically. Auto-hidden columns are labeled as such.
+  function renderColumnMenu(columns, exemplars) {
+    const hideable = columns.filter((c) => c.hideable !== false);
+    const states = hideable.map((c) => ({ col: c, vis: colVisibility(c, exemplars) }));
+    const hiddenCount = states.filter((s) => s.vis.hidden).length;
+    const hasOverrides = hideable.some((c) => exemplarColOverrides[c.id] !== undefined);
+
+    const box = document.createElement("div");
+    box.className = "col-menu";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "col-menu-btn";
+    btn.textContent = hiddenCount > 0 ? `Columns (${hiddenCount} hidden) ▾` : "Columns ▾";
+    box.appendChild(btn);
+
+    const menu = document.createElement("div");
+    menu.className = "col-menu-list";
+    menu.style.display = "none";
+    for (const { col, vis } of states) {
+      const item = document.createElement("label");
+      item.className = "col-menu-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !vis.hidden;
+      cb.addEventListener("change", () => {
+        // Record an explicit choice (overriding any auto behavior).
+        setColOverride(col.id, cb.checked ? true : false);
+        renderDetail();
+      });
+      item.appendChild(cb);
+      item.appendChild(document.createTextNode(" " + (col.label || col.id)));
+      if (vis.auto) {
+        const hint = document.createElement("span");
+        hint.className = "col-menu-auto";
+        hint.textContent = " (auto-hidden)";
+        item.appendChild(hint);
+      }
+      menu.appendChild(item);
+    }
+    // Clearing overrides restores the automatic degenerate-column hiding.
+    if (hasOverrides) {
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "col-menu-reset";
+      reset.textContent = "Reset to auto";
+      reset.addEventListener("click", () => {
+        for (const c of hideable) setColOverride(c.id, undefined);
+        renderDetail();
+      });
+      menu.appendChild(reset);
+    }
+    box.appendChild(menu);
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.style.display !== "none";
+      menu.style.display = open ? "none" : "block";
+      if (!open) {
+        // Close on the next outside click.
+        const onDoc = (ev) => {
+          if (!box.contains(ev.target)) {
+            menu.style.display = "none";
+            document.removeEventListener("click", onDoc);
+          }
+        };
+        setTimeout(() => document.addEventListener("click", onDoc), 0);
+      }
+    });
+    return box;
+  }
+
+  // Render the exemplars as a table (like the Tokio-stats exemplar tables).
+  // A dedicated "Jump" button per row deep-links to the viewer focused on that
+  // exact span instance (the row itself is NOT clickable, so attribute
+  // filter/copy actions don't accidentally navigate away). In raw-trace mode
+  // (or with no source_key) the jump button is disabled.
+  //
+  // Attributes render as first-class columns (one per attribute key), since
+  // exemplars of a type almost always share the same keys. Each attribute cell
+  // offers filter-toggle and copy actions. Any non-core column can be hidden via
+  // the "Columns" menu; the choice persists across renders and reloads.
   function renderExemplars(container, st) {
     const hasBand = bandMinNs != null || bandMaxNs != null;
-    const exemplars = SE.exemplarsInBand(st.slow_exemplars, bandMinNs, bandMaxNs);
+    const exemplars = SE.exemplarsInBand(st.exemplars, bandMinNs, bandMaxNs);
     if (exemplars.length === 0 && !hasBand) return;
     const scope = exemplarScope(st);
     const wrap = document.createElement("div");
@@ -716,8 +973,8 @@
     const label = document.createElement("div");
     label.className = "label";
     label.textContent = hasBand
-      ? "Slow exemplars in selected band (click a row to open the span in the viewer):"
-      : "Slow exemplars (click a row to open the span in the viewer):";
+      ? "Exemplars in selected band:"
+      : "Exemplars:";
     wrap.appendChild(label);
     if (exemplars.length === 0) {
       const empty = document.createElement("div");
@@ -730,45 +987,112 @@
       return;
     }
 
-    // Columns adapt to whatever per-instance metadata the exemplars actually
-    // carry: a Host column only when they span more than one host, a Composition
-    // column only when at least one has composition data, and an Attributes
-    // column only when at least one has attributes. Nothing is hardcoded beyond
-    // the always-present identity columns (#, Duration, Callsite).
-    const multiHost = new Set(exemplars.map((e) => e.host || "")).size > 1;
+    // Columns adapt to whatever per-instance metadata the exemplars carry: a
+    // Host column, a Composition column when at least one has composition data,
+    // and one column PER attribute key present across the exemplars.
+    // Always-present columns: Jump, #, Duration, %ile, Callsite. Each column is a
+    // descriptor so the header, the per-row cell, and the show/hide menu stay in
+    // sync. `degenValue` (when present) lets a column auto-hide once every row
+    // shares the same value — see colVisibility/columnIsDegenerate.
     const anyComposition = exemplars.some((e) => e.composition != null);
-    const anyAttributes = exemplars.some((e) => Array.isArray(e.attributes) && e.attributes.length > 0);
-    const table = document.createElement("table");
-    table.className = "exemplar-table";
-    let head = "<thead><tr><th>#</th><th>Duration</th><th>Callsite</th>";
-    if (multiHost) head += "<th>Host</th>";
-    if (anyComposition) head += "<th>Time composition</th>";
-    if (anyAttributes) head += "<th>Attributes</th>";
-    head += "</tr></thead>";
-    const rows = exemplars
-      .map((ex, i) => {
-        const url = rawTraceParam ? "" : SE.exemplarViewerUrl(ex, scope);
-        const callsite =
-          ex.callsite_file != null
+    const attrKeys = SE.collectExemplarAttributeKeys(exemplars);
+
+    // `hideable: false` columns (the Jump button and the row index) are core
+    // navigation and always shown. Everything else can be toggled off, and
+    // columns with a `degenValue` auto-hide when uniform.
+    const columns = [
+      { id: "jump", th: "", hideable: false, cell: (ex) => {
+          const url = rawTraceParam ? "" : SE.exemplarViewerUrl(ex, scope);
+          const jump = url
+            ? `<button class="jump-btn" data-jump-url="${esc(url)}" ` +
+              `title="Open the viewer focused on this span instance">Jump ↗</button>`
+            : `<button class="jump-btn" disabled title="No source available">Jump ↗</button>`;
+          return `<td class="jump-cell">${jump}</td>`;
+        } },
+      { id: "index", th: "#", hideable: false, cell: (ex, i) => `<td class="muted">${i + 1}</td>` },
+      // Duration and %ile have no degenValue: they're informative even when the
+      // (bounded) exemplars happen to be close in value, and never all-empty.
+      { id: "duration", th: "Duration", label: "Duration",
+        cell: (ex) => `<td class="dur">${esc(SE.fmtNs(ex.elapsed_ns))}</td>` },
+      { id: "pctile", th: "<span title=\"Where this instance falls in the span type's duration distribution\">%ile</span>",
+        label: "%ile",
+        cell: (ex) => {
+          const pctile = SE.percentileForDuration(st.histogram, ex.elapsed_ns);
+          return `<td class="pctile" title="${pctile == null ? "" : "approx " + pctile.toFixed(2) + "th percentile"}">${esc(SE.fmtPercentile(pctile))}</td>`;
+        } },
+      { id: "callsite", th: "Callsite", label: "Callsite",
+        degenValue: (ex) => (ex.callsite_file != null
+          ? ex.callsite_file + ":" + (ex.callsite_line != null ? ex.callsite_line : "")
+          : ""),
+        cell: (ex) => {
+          const callsite = ex.callsite_file != null
             ? esc(ex.callsite_file.split("/").pop() + (ex.callsite_line != null ? ":" + ex.callsite_line : ""))
             : "<span class=\"muted\">—</span>";
-        let cells =
-          `<td class="muted">${i + 1}</td>` +
-          `<td class="dur">${esc(SE.fmtNs(ex.elapsed_ns))}</td>` +
-          `<td><code>${callsite}</code></td>`;
-        if (multiHost) cells += `<td class="host">${esc(ex.host || "")}</td>`;
-        if (anyComposition) cells += `<td>${exemplarCompositionCell(ex)}</td>`;
-        if (anyAttributes) cells += `<td class="attrs">${exemplarAttributesCell(ex)}</td>`;
-        if (url) {
-          return `<tr class="jump" title="Open the viewer focused on this span instance" ` +
-            `onclick="window.open('${esc(url).replace(/'/g, "&#39;")}','_blank')">${cells}</tr>`;
-        }
-        return `<tr class="inert">${cells}</tr>`;
-      })
+          return `<td><code>${callsite}</code></td>`;
+        } },
+      { id: "host", th: "Host", label: "Host",
+        degenValue: (ex) => ex.host || "",
+        cell: (ex) => `<td class="host">${esc(ex.host || "")}</td>` },
+    ];
+    if (anyComposition) {
+      // Composition's degenValue is the rounded percentage split, so exemplars
+      // with effectively identical breakdowns collapse the column.
+      columns.push({ id: "composition", th: "Time composition", label: "Time composition",
+        degenValue: (ex) => compositionSignature(ex),
+        cell: (ex) => `<td>${exemplarCompositionCell(ex)}</td>` });
+    }
+    for (const key of attrKeys) {
+      // Attribute columns share one id namespace ("attr:<key>") so an override
+      // for a key persists across renders even as the visible attribute set
+      // changes. They auto-hide when every exemplar has the same (or no) value.
+      columns.push({ id: "attr:" + key, th: esc(key), label: key,
+        degenValue: (ex) => SE.exemplarAttrValue(ex, key),
+        cell: (ex) => exemplarAttrCell(ex, key) });
+    }
+
+    // Column show/hide control (reflects auto-hidden + explicitly toggled state).
+    wrap.appendChild(renderColumnMenu(columns, exemplars));
+
+    const visible = columns.filter((c) => !colVisibility(c, exemplars).hidden);
+    const table = document.createElement("table");
+    table.className = "exemplar-table";
+    const head = "<thead><tr>" + visible.map((c) => `<th>${c.th}</th>`).join("") + "</tr></thead>";
+    const rows = exemplars
+      .map((ex, i) => "<tr>" + visible.map((c) => c.cell(ex, i)).join("") + "</tr>")
       .join("");
     table.innerHTML = head + "<tbody>" + rows + "</tbody>";
+    // Delegated clicks for the interactive cells:
+    //  - Jump button   → open the viewer on that span instance.
+    //  - Attribute value → toggle a whole-view filter for that key=value.
+    //  - Copy button    → copy the attribute value to the clipboard.
+    table.addEventListener("click", (e) => {
+      const jumpBtn = e.target.closest(".jump-btn[data-jump-url]");
+      if (jumpBtn) {
+        window.open(jumpBtn.dataset.jumpUrl, "_blank");
+        return;
+      }
+      const copyBtn = e.target.closest(".attr-copy[data-copy-value]");
+      if (copyBtn) {
+        copyToClipboard(copyBtn.dataset.copyValue, copyBtn);
+        return;
+      }
+      const filterEl = e.target.closest(".attr-val[data-attr-key]");
+      if (filterEl && !rawTraceParam) {
+        toggleAttrFilter(filterEl.dataset.attrKey, filterEl.dataset.attrValue);
+      }
+    });
     wrap.appendChild(table);
     container.appendChild(wrap);
+  }
+
+  // A coarse signature of an exemplar's composition (rounded per-category
+  // percentages) used only to decide whether the Time-composition column is
+  // degenerate. Two exemplars with effectively the same breakdown share a
+  // signature; missing composition yields "" so all-missing collapses too.
+  function compositionSignature(ex) {
+    if (ex.composition == null) return "";
+    const comp = SE.computeTimeComposition({ composition: ex.composition }, null);
+    return comp.categories.map((c) => Math.round(c.frac * 100)).join(",");
   }
 
   // Render one exemplar's five-way time composition as a compact stacked bar
@@ -780,26 +1104,105 @@
     const comp = SE.computeTimeComposition({ composition: ex.composition }, null);
     const segs = comp.categories
       .filter((cat) => cat.frac > 0)
-      .map((cat) =>
-        `<div class="seg" style="width:${(cat.frac * 100).toFixed(1)}%;background:${cat.color}" ` +
-        `title="${esc(cat.label)}: ${esc(SE.fmtNs(cat.ns))} (${(cat.frac * 100).toFixed(1)}%)"></div>`
-      )
+      .map((cat) => {
+        // Write the time inside the segment when it's at least 20% wide;
+        // narrower segments hide it (tooltip still carries the detail).
+        const inner = cat.frac >= 0.2 && cat.ns > 0
+          ? `<span class="seg-label">${esc(SE.fmtNs(cat.ns))}</span>`
+          : "";
+        return `<div class="seg" style="width:${(cat.frac * 100).toFixed(1)}%;background:${cat.color}" ` +
+          `title="${esc(cat.label)}: ${esc(SE.fmtNs(cat.ns))} (${(cat.frac * 100).toFixed(1)}%)">${inner}</div>`;
+      })
       .join("");
     const tip = comp.categories
       .filter((cat) => cat.frac > 0)
-      .map((cat) => `${cat.label} ${(cat.frac * 100).toFixed(0)}%`)
+      .map((cat) => `${cat.label} ${SE.fmtNs(cat.ns)} (${(cat.frac * 100).toFixed(0)}%)`)
       .join(" · ");
     return `<span class="ex-comp-bar" title="${esc(tip)}">${segs}</span>`;
   }
 
-  // Render one exemplar's attributes as generic key=value chips, in the order
-  // the backend supplied them. Returns an em-dash when this instance has none.
-  function exemplarAttributesCell(ex) {
-    const attrs = Array.isArray(ex.attributes) ? ex.attributes : [];
-    if (attrs.length === 0) return '<span class="muted">—</span>';
-    return attrs
-      .map((a) => `<span class="attr-chip"><b>${esc(a.key)}</b>=${esc(a.value)}</span>`)
-      .join("");
+  // Render one exemplar's value for a single attribute key as a table cell. The
+  // value text toggles a whole-view filter on click (backend mode only); a small
+  // copy button copies the raw value. Absent values render as a muted dash.
+  function exemplarAttrCell(ex, key) {
+    const value = SE.exemplarAttrValue(ex, key);
+    if (value == null) return '<td class="attr-cell"><span class="muted">—</span></td>';
+    const active = SE.hasAttrFilter(attrFilters, key, value) ? " active" : "";
+    const filterTitle = rawTraceParam
+      ? "Attribute filtering requires the aggregation backend"
+      : (active ? "Remove this filter" : `Filter to ${key}=${value}`);
+    const valSpan =
+      `<span class="attr-val${active}${rawTraceParam ? " inert" : ""}" ` +
+      `data-attr-key="${esc(key)}" data-attr-value="${esc(value)}" ` +
+      `title="${esc(filterTitle)}">${esc(value)}</span>`;
+    const copyBtn =
+      `<button class="attr-copy" data-copy-value="${esc(value)}" title="Copy value">⧉</button>`;
+    return `<td class="attr-cell">${valSpan}${copyBtn}</td>`;
+  }
+
+  // Copy text to the clipboard, giving brief visual feedback on the button.
+  function copyToClipboard(text, btn) {
+    const done = () => {
+      if (!btn) return;
+      const orig = btn.textContent;
+      btn.textContent = "✓";
+      btn.classList.add("copied");
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => window.prompt("Copy:", text));
+    } else {
+      window.prompt("Copy:", text);
+    }
+  }
+
+  // ── Attribute filters ───────────────────────────────────────────────────────
+
+  // Apply the current attrFilters: persist to the URL and re-fetch the whole
+  // catalog (filters narrow counts/histograms/composition/exemplars server-side).
+  function applyAttrFilters() {
+    updateBrowserUrl();
+    renderFilterBar();
+    if (!rawTraceParam) startStreaming();
+  }
+
+  function toggleAttrFilter(key, value) {
+    if (rawTraceParam) return; // no backend to re-query in raw mode
+    attrFilters = SE.hasAttrFilter(attrFilters, key, value)
+      ? SE.removeAttrFilter(attrFilters, key, value)
+      : SE.addAttrFilter(attrFilters, key, value);
+    applyAttrFilters();
+  }
+
+  // Render the active-filter bar; hidden when there are no filters.
+  function renderFilterBar() {
+    const bar = document.getElementById("filter-bar");
+    if (!attrFilters || attrFilters.length === 0) {
+      bar.style.display = "none";
+      bar.innerHTML = "";
+      return;
+    }
+    bar.style.display = "flex";
+    bar.innerHTML = "";
+    const label = document.createElement("span");
+    label.className = "fb-label";
+    label.textContent = "Attribute filters:";
+    bar.appendChild(label);
+    for (const f of attrFilters) {
+      const chip = document.createElement("span");
+      chip.className = "fb-chip";
+      chip.innerHTML = `<b>${esc(f.key)}</b>=${esc(f.value)} <span class="fb-x" title="Remove">×</span>`;
+      chip.querySelector(".fb-x").addEventListener("click", () => toggleAttrFilter(f.key, f.value));
+      bar.appendChild(chip);
+    }
+    const clear = document.createElement("span");
+    clear.className = "fb-clear";
+    clear.textContent = "clear all";
+    clear.addEventListener("click", () => {
+      attrFilters = [];
+      applyAttrFilters();
+    });
+    bar.appendChild(clear);
   }
 
   // ── Streaming ───────────────────────────────────────────────────────────────
@@ -819,6 +1222,9 @@
   }
 
   function startStreaming(mode = "replace") {
+    // An explicit query (Apply → "replace", Load more → "refine") is a fresh
+    // user intent that clears any prior Stop latch. Exemplar-only refetches do
+    // not clear it — they are incidental and must stay suppressed after a Stop.
     const baselineFilesFolded = (mode === "refine" || mode === "exemplars") && lastCoverage
       ? lastCoverage.files_folded
       : 0;
@@ -843,7 +1249,7 @@
     let exemplarSnapshotAdopted = false;
     let gotEvent = false;
 
-    Dial9Sse.openSse(buildApiUrl(), {
+    Dial9Sse.openSse(buildApiUrl(mode), {
       headers: credHeaders,
       signal: abortCtl.signal,
       onEvent: (resp) => {
@@ -1019,6 +1425,9 @@
   });
 
   // ── Init ────────────────────────────────────────────────────────────────────
+
+  // Reflect any attribute filters carried in the URL before the first fetch.
+  renderFilterBar();
 
   // Raw trace mode: ?trace=demo-trace.bin loads a local trace file directly,
   // parses it client-side, and builds a span catalog without any backend.

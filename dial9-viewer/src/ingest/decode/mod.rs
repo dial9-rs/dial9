@@ -35,7 +35,9 @@ use rustc_hash::FxHashMap;
 use spans::span_builder;
 use spans::{interval_pairing, legacy};
 
-pub use types::{DecodeResult, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan};
+pub use types::{
+    DecodeResult, DecodeStats, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan,
+};
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
 const SOURCE_CPU_PROFILE: u8 = 0;
@@ -89,6 +91,22 @@ fn is_date(s: &str) -> bool {
 /// Returns the resolved samples and a map of stack_id → frame names for the
 /// stacks dictionary.
 pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeResult> {
+    decode_samples_with_stats(data, source_key).map(|(result, _stats)| result)
+}
+
+/// Like [`decode_samples`], but also returns per-phase [`DecodeStats`] so the
+/// fold pipeline can emit a per-file timing metric. The extra bookkeeping is a
+/// handful of `Instant::now()` calls and counter reads — negligible against the
+/// decode itself — so this is the real implementation and [`decode_samples`]
+/// delegates to it.
+pub fn decode_samples_with_stats(
+    data: &[u8],
+    source_key: &str,
+) -> anyhow::Result<(DecodeResult, types::DecodeStats)> {
+    use std::time::Instant;
+    let mut stats = types::DecodeStats::default();
+
+    let t_wire = Instant::now();
     let events::DecodedTrace {
         interner,
         mut addr_to_keys,
@@ -99,17 +117,30 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
         legacy_exits,
         legacy_closes,
     } = events::decode_trace(data, source_key)?;
+    stats.wire_decode = t_wire.elapsed();
+    stats.span_events_decoded =
+        (legacy_enters.len() + legacy_exits.len() + legacy_closes.len()) as u64;
+    // Total events off the wire: the timestamp-sorted event stream (samples +
+    // park/unpark + poll start/end) plus the span events, which are collected
+    // separately and never enter `events`.
+    stats.events_decoded = events.len() as u64 + stats.span_events_decoded;
 
     tracing::info!("sorting {} events", events.len());
     // Sort events by timestamp for correct worker_id inference.
+    let t_sort = Instant::now();
     events.sort_unstable_by_key(|e| e.timestamp_ns());
 
     // Pre-sort symbol entries by inline depth.
     for entries in addr_to_keys.values_mut() {
         entries.sort_unstable_by_key(|(d, _)| *d);
     }
+    stats.sort_events = t_sort.elapsed();
 
+    let t_polls = Instant::now();
     let mut poll_timeline = polls::PollTimeline::reconstruct(&events);
+    stats.poll_reconstruct = t_polls.elapsed();
+
+    let t_samples = Instant::now();
 
     let mut stacks_dict: FxHashMap<[u8; 16], Vec<String>> = FxHashMap::default();
     let mut stack_cache: FxHashMap<Vec<u64>, [u8; 16]> = FxHashMap::default();
@@ -193,6 +224,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
 
     let resolved_polls =
         poll_timeline.resolved(clock_offset, &parsed_host, &parsed_service, &parsed_date);
+    stats.sample_resolve = t_samples.elapsed();
 
     // ── Stage 2: Reconstruct tracing spans from enter/exit/close events ──────
     //
@@ -214,10 +246,11 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     //   SpanCloseEvent                           → span_id (only)
     //
     // Reconstruction strategy:
-    // - Use raw span_id as the local identity key
+    // - Segment each span_id's lifecycle at close boundaries so recycled ids
+    //   don't merge distinct spans into one long-lived row
     // - Synthesize a deterministic instance_id from span_id + first-enter timestamp
     //   to avoid collisions when IDs are recycled
-    // - Pair enter/exit by span_id alone (NOT worker_id): async tasks migrate
+    // - Pair enter/exit by (span_id, segment), NOT worker_id: async tasks migrate
     //   workers across .await, so worker_id is not a stable pairing key.
     // - Parse target/name/file/line from the SpanEnter schema name
     // - Lifecycle start = first observed enter (conservative)
@@ -227,6 +260,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     let mut legacy_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>> =
         FxHashMap::default();
 
+    let t_spans = std::time::Instant::now();
     if !legacy_enters.is_empty() || !legacy_closes.is_empty() {
         let legacy_resolution = resolve_legacy_spans(
             &legacy_enters,
@@ -243,6 +277,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
         legacy_intervals = legacy_resolution.instance_intervals;
         resolved_spans.extend(legacy_resolution.spans);
     }
+    stats.span_resolve = t_spans.elapsed();
 
     // ── Stage 3: Attribute samples to spans using entered intervals ──────────
     //
@@ -254,6 +289,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     // intervals — never to lifecycle envelopes. An async span that is exited
     // (waiting) must NOT claim samples that fire during its idle gap.
 
+    let t_attr = std::time::Instant::now();
     attribution::attribute_samples_to_spans(
         &mut samples,
         &mut resolved_spans,
@@ -261,12 +297,16 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
         &boot_id,
         clock_offset,
     );
+    stats.sample_attribution = t_attr.elapsed();
 
     Ok((
-        samples,
-        stacks_dict.into_iter().collect(),
-        resolved_polls,
-        resolved_spans,
+        (
+            samples,
+            stacks_dict.into_iter().collect(),
+            resolved_polls,
+            resolved_spans,
+        ),
+        stats,
     ))
 }
 
@@ -370,10 +410,10 @@ struct SpanResolution {
 /// - Parsing target/name/file/line from SpanEnter schema names
 /// - Task-based CPU/wait attribution when polls are available
 ///
-/// Recycled ID policy: all enters/exits for the same span_id are merged
-/// conservatively into one span instance. Within a single trace segment
-/// (typically 60s), the same span_id almost always represents the same
-/// logical span. A close event marks the lifecycle end.
+/// Recycled ID policy: a span_id's lifecycle is segmented at close boundaries.
+/// Tracing recycles a span_id only after its span closes, so each close-
+/// delimited cycle of enters/exits is its own span instance. This keeps short
+/// spans that reuse a span_id from collapsing into one long merged span.
 #[allow(clippy::too_many_arguments)]
 fn resolve_legacy_spans(
     legacy_enters: &[(String, LegacySpanEnterEvent)],
@@ -1182,6 +1222,109 @@ mod tests {
         assert_eq!(span.observed_active_wall_ns, 100);
     }
 
+    /// User-attached span fields (e.g. `request_id`, `status_code`) that are not
+    /// part of the base identity/lifecycle set must be surfaced as span
+    /// attributes, mirroring the live viewer's `buildSpanData`. Exit-event
+    /// attributes override enter-event attributes for the same span.
+    #[test]
+    fn test_legacy_span_captures_user_attributes() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        // Enter carries request_id (String) and status_code (Varint) alongside
+        // the base fields. Exit carries an updated status_code.
+        let enter_schema = Schema::new(
+            "SpanEnter:svc::routes::handle:src/routes.rs:7",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+                FieldDef::new("request_id", FieldType::String),
+                FieldDef::new("status_code", FieldType::Varint),
+            ],
+        );
+        let exit_schema = Schema::new(
+            "SpanExit:svc::routes::handle:src/routes.rs:7",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+                FieldDef::new("request_id", FieldType::String),
+                FieldDef::new("status_code", FieldType::Varint),
+            ],
+        );
+        let close_schema = Schema::new(
+            "SpanCloseEvent",
+            vec![FieldDef::new("span_id", FieldType::Varint)],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+        enc.write_event(
+            &enter_schema,
+            &[
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::Varint(1),
+                FieldValue::None,
+                FieldValue::String("handle".to_string()),
+                FieldValue::String("5d051ec2-999b-4a25-93b6-0f9cf83fa8b2".to_string()),
+                FieldValue::Varint(0), // status not yet known at enter
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &exit_schema,
+            &[
+                FieldValue::Varint(200),
+                FieldValue::Varint(0),
+                FieldValue::Varint(1),
+                FieldValue::String("handle".to_string()),
+                FieldValue::String("5d051ec2-999b-4a25-93b6-0f9cf83fa8b2".to_string()),
+                FieldValue::Varint(500), // final status known at exit
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &close_schema,
+            &[FieldValue::Varint(250), FieldValue::Varint(1)],
+        )
+        .unwrap();
+
+        let (_, _, _, spans) =
+            decode_samples(&enc.into_inner(), "2026-07-17/1746/svc/host/boot/0.bin").unwrap();
+        assert_eq!(spans.len(), 1);
+        let attrs: std::collections::HashMap<&str, &str> = spans[0]
+            .attributes
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            attrs.get("request_id"),
+            Some(&"5d051ec2-999b-4a25-93b6-0f9cf83fa8b2")
+        );
+        // Exit attributes win: final status_code=500, not the enter's 0.
+        assert_eq!(attrs.get("status_code"), Some(&"500"));
+        // Base identity/lifecycle fields are not surfaced as attributes.
+        assert!(!attrs.contains_key("worker_id"));
+        assert!(!attrs.contains_key("span_id"));
+        assert!(!attrs.contains_key("span_name"));
+    }
+
     /// Wire-order regression: equal monotonic timestamps are ordered by the
     /// shared decode sequence, not by event kind. An exit encoded before its
     /// enter must remain two unmatched events rather than becoming a balanced
@@ -1837,15 +1980,129 @@ mod tests {
         )
         .unwrap();
 
-        // The old format reuses span_id=1 — but within the same file the first
-        // enter establishes the context. One close event per unique span_id means
-        // we produce one row. This is conservative: we merge all enters/exits
-        // for the same span_id into one span instance.
+        // One enter/exit/close cycle for span_id=1 produces one row.
         let data = enc.into_inner();
         let (_, _, _, spans) = decode_samples(&data, "test/path/boot/0.bin").unwrap();
 
         // Should produce exactly one span (one close event for span_id=1).
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].identity_quality, "legacy");
+    }
+
+    /// Regression: tracing recycles a `span_id` only after its span closes, so a
+    /// `SpanCloseEvent` marks that id "done". When the same span_id is reused for
+    /// several short-lived spans across a segment, each close-delimited cycle
+    /// must become its OWN row with its own short elapsed — NOT one merged row
+    /// whose lifecycle spans the first enter to the last close.
+    ///
+    /// Before the fix, a 1ms request span whose id was reused across a 14.5s
+    /// window decoded as a single 14.5s span. This test encodes two reuses of
+    /// span_id=1, each a 100ns span 10s apart, and asserts two ~100ns rows
+    /// rather than one ~10s row.
+    #[test]
+    fn test_legacy_recycled_span_ids_are_close_delimited() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        let enter_schema = Schema::new(
+            "SpanEnter:app::request::handle:src/lib.rs:10",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let exit_schema = Schema::new(
+            "SpanExit:app::request::handle:src/lib.rs:10",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let close_schema = Schema::new(
+            "SpanCloseEvent",
+            vec![FieldDef::new("span_id", FieldType::Varint)],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+
+        // Two distinct 100ns spans sharing the recycled span_id=1, 10s apart.
+        // Cycle A: enter@1_000, exit@1_100, close@1_100.
+        // Cycle B: enter@10_000_001_000, exit@10_000_001_100, close@10_000_001_100.
+        let enter = |enc: &mut Encoder, ts: u64| {
+            enc.write_event(
+                &enter_schema,
+                &[
+                    FieldValue::Varint(ts),
+                    FieldValue::Varint(0),
+                    FieldValue::Varint(1),
+                    FieldValue::None,
+                    FieldValue::String("handle".to_string()),
+                ],
+            )
+            .unwrap();
+        };
+        let exit = |enc: &mut Encoder, ts: u64| {
+            enc.write_event(
+                &exit_schema,
+                &[
+                    FieldValue::Varint(ts),
+                    FieldValue::Varint(0),
+                    FieldValue::Varint(1),
+                    FieldValue::String("handle".to_string()),
+                ],
+            )
+            .unwrap();
+        };
+        let close = |enc: &mut Encoder, ts: u64| {
+            enc.write_event(
+                &close_schema,
+                &[FieldValue::Varint(ts), FieldValue::Varint(1)],
+            )
+            .unwrap();
+        };
+
+        enter(&mut enc, 1_000);
+        exit(&mut enc, 1_100);
+        close(&mut enc, 1_100);
+        enter(&mut enc, 10_000_001_000);
+        exit(&mut enc, 10_000_001_100);
+        close(&mut enc, 10_000_001_100);
+
+        let data = enc.into_inner();
+        let (_, _, _, mut spans) = decode_samples(&data, "test/path/boot/0.bin").unwrap();
+
+        assert_eq!(
+            spans.len(),
+            2,
+            "each close-delimited reuse of a recycled span_id must be its own span"
+        );
+        spans.sort_by_key(|s| s.start_ns);
+        for span in &spans {
+            assert_eq!(
+                span.elapsed_ns, 100,
+                "each instance must keep its own short lifecycle, not the 10s span between reuses"
+            );
+            assert_eq!(span.observed_active_wall_ns, 100);
+            assert_eq!(span.name, "handle");
+        }
+        // The two instances have distinct identities despite the shared span_id.
+        assert_ne!(spans[0].span_uid, spans[1].span_uid);
     }
 }

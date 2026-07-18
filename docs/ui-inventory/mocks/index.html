@@ -27,6 +27,11 @@
     <p>Today's layout untouched; exactly three additions: panels auto-expanded to fill the void, minimap strip, status bar with URL state. The cheapest credible fix; comparison baseline.</p>
     <div class="refs">fixes: S1 S3(partial) S8 · hold C inside to compare</div></a>
   </div>
+  <div class="card"><a href="concept-diff-first.html">
+    <h2>Diff-first unified view (interactive)</h2>
+    <p>Every view compares two Selections A vs B; a single flamegraph is the B=∅ case. Inspect→Compare split into two synced panels, Flamegraph/Spans/Tokio as views over one selection, pop-out compare with NOT-P complement, coverage-symmetry gating, and a significant-differences table. Drives the CONTEXT.md "Unified diff-first view" model.</p>
+    <div class="refs">design: CONTEXT.md · ADR-0004/0005 · click Compare, switch views, simulate fold</div></a>
+  </div>
   <div class="card"><a href="keyboard.html">
     <h2>Track A - Keyboard model (interactive)</h2>
     <p>Behavioral mock you can actually drive: / search palette over tasks/spans/POIs, n/p POI stepping, g goto-time, z zoom-undo, f fit, unified ?. Try the keys.</p>

@@ -138,6 +138,62 @@ function spanBrushToBand(bars, width, x0, x1) {
   };
 }
 
+// Inverse of spanPxToNs: map a duration (ns) to a pixel x within the histogram,
+// using the same geometric (log) interpolation inside the containing column.
+// Durations at/below the first bar clamp to x=0; at/above the last bar clamp to
+// x=width. Returns null when there is no histogram. Used to place percentile
+// markers on the same axis the bars are drawn on.
+function spanNsToPx(bars, width, ns) {
+  const { cols } = spanHistogramLayout(bars, width, 0);
+  const n = cols.length;
+  if (n === 0 || width <= 0 || ns == null) return null;
+  const colW = width / n;
+  const target = Number(ns);
+  if (target <= cols[0].lo_ns) return 0;
+  const last = cols[n - 1];
+  if (target >= last.hi_ns) return width;
+  for (let i = 0; i < n; i++) {
+    const c = cols[i];
+    if (target >= c.lo_ns && target <= c.hi_ns) {
+      const lo = c.lo_ns > 0 ? c.lo_ns : 1;
+      const hi = c.hi_ns > 0 ? c.hi_ns : 1;
+      const frac = Math.log(target / lo) / Math.log(hi / lo);
+      return i * colW + Math.max(0, Math.min(1, frac)) * colW;
+    }
+  }
+  // Target sits in a gap between non-contiguous bars: snap to the column start
+  // of the first bar whose floor exceeds it.
+  for (let i = 0; i < n; i++) {
+    if (target < cols[i].lo_ns) return i * colW;
+  }
+  return width;
+}
+
+// Estimate the duration (ns) at a given percentile p (0..100) from the count
+// histogram: the inverse of percentileForDuration. Walks cumulative bar counts
+// to the bar containing the target rank, then interpolates geometrically within
+// it. Returns null when there is no histogram. Used to draw P50/P99/P99.9 hints.
+function durationAtPercentile(bars, p) {
+  const norm = normalizeSpanHistogram(bars);
+  if (norm.length === 0) return null;
+  const total = norm.reduce((s, b) => s + b.count, 0);
+  if (total <= 0) return null;
+  const target = (p / 100) * total;
+  let cumulative = 0;
+  for (const b of norm) {
+    if (cumulative + b.count >= target) {
+      // The target rank falls within this bar. Interpolate its position on the
+      // log axis by how far into the bar's count the target lies.
+      const within = b.count > 0 ? (target - cumulative) / b.count : 0;
+      const lo = b.lo_ns > 0 ? b.lo_ns : 1;
+      const hi = b.hi_ns > 0 ? b.hi_ns : 1;
+      return Math.round(lo * Math.pow(hi / lo, Math.max(0, Math.min(1, within))));
+    }
+    cumulative += b.count;
+  }
+  return norm[norm.length - 1].hi_ns;
+}
+
 // Count instances within a duration band from the histogram.
 function countInBand(bars, minNs, maxNs) {
   let count = 0;
@@ -148,6 +204,98 @@ function countInBand(bars, minNs, maxNs) {
     }
   }
   return count;
+}
+
+// Estimate the percentile rank (0..100) of a duration within a span type's
+// duration histogram: the fraction of instances whose duration is <= `ns`.
+// Uses the cumulative bar counts, interpolating geometrically within the
+// containing bar (matching spanPxToNs's log-scale treatment). Returns null when
+// there is no histogram to rank against.
+//
+// This answers "where does this exemplar sit in the broader distribution?" — a
+// 200ms instance in a type whose p99 is 190ms lands around p99+.
+function percentileForDuration(bars, ns) {
+  const norm = normalizeSpanHistogram(bars);
+  if (norm.length === 0 || ns == null || !Number.isFinite(Number(ns))) return null;
+  const target = Number(ns);
+  const total = norm.reduce((s, b) => s + b.count, 0);
+  if (total <= 0) return null;
+  let below = 0;
+  for (const b of norm) {
+    if (target >= b.hi_ns) {
+      // Entire bar is at or below the target duration.
+      below += b.count;
+      continue;
+    }
+    if (target <= b.lo_ns) {
+      // Target is at/under this bar's floor; no more counts are below it.
+      break;
+    }
+    // Target falls inside this bar. Interpolate its position within the bar on
+    // a log (geometric) axis, matching how the histogram maps pixels↔duration.
+    const lo = b.lo_ns > 0 ? b.lo_ns : 1;
+    const hi = b.hi_ns > 0 ? b.hi_ns : 1;
+    const frac = Math.log(target / lo) / Math.log(hi / lo);
+    below += b.count * Math.max(0, Math.min(1, frac));
+    break;
+  }
+  return (below / total) * 100;
+}
+
+// Format a percentile rank (0..100) as a compact "pNN" / "pNN.N" label. Values
+// very close to 100 keep more precision (p99.9) since that's where the
+// interesting tail lives. Returns "—" for null.
+function fmtPercentile(p) {
+  if (p == null || !Number.isFinite(Number(p))) return "—";
+  const v = Number(p);
+  if (v >= 99.95) return "p" + Math.min(99.99, v).toFixed(2).replace(/0$/, "");
+  if (v >= 99.5) return "p" + v.toFixed(1);
+  if (v >= 10) return "p" + Math.round(v);
+  return "p" + v.toFixed(v < 1 ? 1 : 0);
+}
+
+// Collect the union of attribute keys across a set of exemplars, in first-seen
+// order. Used to render attributes as a table with one column per key (rather
+// than per-row chips), since exemplars of a span type almost always share keys.
+function collectExemplarAttributeKeys(exemplars) {
+  const keys = [];
+  const seen = new Set();
+  for (const ex of exemplars || []) {
+    for (const a of (ex && ex.attributes) || []) {
+      if (a && a.key != null && !seen.has(a.key)) {
+        seen.add(a.key);
+        keys.push(a.key);
+      }
+    }
+  }
+  return keys;
+}
+
+// Look up an exemplar's value for an attribute key, or null when absent.
+function exemplarAttrValue(ex, key) {
+  const attrs = (ex && ex.attributes) || [];
+  for (const a of attrs) {
+    if (a && a.key === key) return a.value;
+  }
+  return null;
+}
+
+// Decide whether a column carries no distinguishing information across a set of
+// rows: every row maps (via `valueOf`) to the same value, or all are empty.
+// `null`/`undefined`/`""` all normalize to the empty string, so an all-missing
+// column counts as degenerate. Requires at least 2 rows — a single row can't
+// establish uniformity, and a 1-row table shouldn't hide its columns. Used to
+// auto-hide uniform exemplar-table columns (host, callsite, attributes, …).
+function columnIsDegenerate(rows, valueOf) {
+  if (!Array.isArray(rows) || rows.length < 2 || typeof valueOf !== "function") return false;
+  let first;
+  for (let i = 0; i < rows.length; i++) {
+    const v = valueOf(rows[i]);
+    const norm = v == null || v === "" ? "" : String(v);
+    if (i === 0) first = norm;
+    else if (norm !== first) return false;
+  }
+  return true;
 }
 
 // ── Five-way time composition ────────────────────────────────────────────────
@@ -164,14 +312,21 @@ const TIME_CATEGORIES = [
 ];
 
 // Sum the `composition_histogram` buckets that fall inside a brushed duration
-// band into a single `{on_cpu_ns, ...}` object, using the same overlap rule as
-// the count histogram (a bucket is in-band when hi_ns > min && lo_ns < max).
-// Returns null when there is no per-bucket composition data. `min`/`max` may be
-// null (open-ended); a null band on both ends sums every bucket.
+// band into a single composition object, using the same overlap rule as the
+// count histogram (a bucket is in-band when hi_ns > min && lo_ns < max).
+// Accumulates both the raw ns totals and the per-instance fraction sums +
+// instance count, so callers can show actual time AND an equal-weighted
+// (per-instance) breakdown. Returns null when there is no per-bucket data.
+// `min`/`max` may be null (open-ended); a null band on both ends sums all.
 function bandComposition(spanType, min_ns, max_ns) {
   const buckets = spanType.composition_histogram;
   if (!Array.isArray(buckets) || buckets.length === 0) return null;
-  const acc = { on_cpu_ns: 0, blocked_ns: 0, async_wait_ns: 0, scheduler_delay_ns: 0, unknown_ns: 0 };
+  const acc = {
+    on_cpu_ns: 0, blocked_ns: 0, async_wait_ns: 0, scheduler_delay_ns: 0, unknown_ns: 0,
+    instance_count: 0,
+    on_cpu_frac_sum: 0, blocked_frac_sum: 0, async_wait_frac_sum: 0,
+    scheduler_delay_frac_sum: 0, unknown_frac_sum: 0,
+  };
   for (const b of buckets) {
     const lo = Number(b.lo_ns);
     const hi = Number(b.hi_ns);
@@ -182,23 +337,33 @@ function bandComposition(spanType, min_ns, max_ns) {
     acc.async_wait_ns += Number(b.async_wait_ns) || 0;
     acc.scheduler_delay_ns += Number(b.scheduler_delay_ns) || 0;
     acc.unknown_ns += Number(b.unknown_ns) || 0;
+    acc.instance_count += Number(b.instance_count) || 0;
+    acc.on_cpu_frac_sum += Number(b.on_cpu_frac_sum) || 0;
+    acc.blocked_frac_sum += Number(b.blocked_frac_sum) || 0;
+    acc.async_wait_frac_sum += Number(b.async_wait_frac_sum) || 0;
+    acc.scheduler_delay_frac_sum += Number(b.scheduler_delay_frac_sum) || 0;
+    acc.unknown_frac_sum += Number(b.unknown_frac_sum) || 0;
   }
   return acc;
 }
 
-// Compute the five-way composition from a SpanTypeStats response. When the
-// backend returns `composition` (an object with `on_cpu_ns`, `blocked_ns`,
-// `async_wait_ns`, `scheduler_delay_ns`, `unknown_ns`), we use those summed
-// values directly. Unknown is always preserved explicitly — even when zero —
-// so the UI communicates that the category was evaluated rather than hidden.
+// Compute the five-way composition from a SpanTypeStats response.
 //
-// When a duration `band` ({min_ns, max_ns}, either may be null) is supplied and
-// the backend returned `composition_histogram`, the composition is scoped to the
-// buckets inside the band — so it tracks the histogram brush. Without a band (or
-// without per-bucket data) the whole-type `composition` total is used.
+// Each returned category carries:
+//   - `frac`: the share for the bar/percentage. When the backend supplies
+//     per-instance fraction sums + `instance_count`, this is the EQUAL-WEIGHTED
+//     mean share (each span instance counts once), so a handful of very long
+//     spans no longer dominate the picture. Without that data we fall back to
+//     the ns-weighted share.
+//   - `ns`: the actual total time spent in the category across instances.
+//   - `meanNs`: the mean time per instance (ns / instance_count) when known.
+//   - `weighting`: "equal" or "time", so the UI can label what it's showing.
 //
-// Falls back to a histogram-estimated total with a single "Unknown" bar when
-// `composition` is absent (older backends / partial data).
+// When a duration `band` is supplied and the backend returned
+// `composition_histogram`, composition is scoped to the buckets inside the band
+// (tracking the histogram brush); otherwise the whole-type total is used.
+// Falls back to a histogram-estimated single "Unknown" bar when `composition`
+// is absent (older backends / partial data).
 function computeTimeComposition(spanType, band) {
   let comp = spanType.composition;
   // Band-scoped composition takes precedence when available.
@@ -207,24 +372,57 @@ function computeTimeComposition(spanType, band) {
     if (scoped) comp = scoped;
   }
   if (comp && typeof comp === "object") {
-    const on_cpu = Number(comp.on_cpu_ns) || 0;
-    const blocked = Number(comp.blocked_ns) || 0;
-    const async_wait = Number(comp.async_wait_ns) || 0;
-    const sched_delay = Number(comp.scheduler_delay_ns) || 0;
-    const unknown = Number(comp.unknown_ns) || 0;
-    const total = on_cpu + blocked + async_wait + sched_delay + unknown;
-    if (total <= 0) {
+    const ns = {
+      on_cpu: Number(comp.on_cpu_ns) || 0,
+      blocked: Number(comp.blocked_ns) || 0,
+      async_wait: Number(comp.async_wait_ns) || 0,
+      sched_delay: Number(comp.scheduler_delay_ns) || 0,
+      unknown: Number(comp.unknown_ns) || 0,
+    };
+    const totalNs = ns.on_cpu + ns.blocked + ns.async_wait + ns.sched_delay + ns.unknown;
+
+    // Equal-weighted fractions when the backend provided them.
+    const instanceCount = Number(comp.instance_count) || 0;
+    const fracSum = {
+      on_cpu: Number(comp.on_cpu_frac_sum) || 0,
+      blocked: Number(comp.blocked_frac_sum) || 0,
+      async_wait: Number(comp.async_wait_frac_sum) || 0,
+      sched_delay: Number(comp.scheduler_delay_frac_sum) || 0,
+      unknown: Number(comp.unknown_frac_sum) || 0,
+    };
+    const equalWeighted = instanceCount > 0;
+
+    if (totalNs <= 0 && !equalWeighted) {
       // All zeros — degenerate; show a zero-width Unknown bar.
-      return { total_ns: 0, categories: [{ key: "unknown", label: "Unknown", color: "#6c757d", ns: 0, frac: 1.0 }] };
+      return {
+        total_ns: 0,
+        instance_count: instanceCount,
+        weighting: equalWeighted ? "equal" : "time",
+        categories: [{ key: "unknown", label: "Unknown", color: "#6c757d", ns: 0, frac: 1.0, meanNs: null }],
+      };
     }
-    const cats = [
-      { key: "on_cpu", label: "On CPU", color: "#ff6b35", ns: on_cpu, frac: on_cpu / total },
-      { key: "blocked", label: "Blocked", color: "#e63946", ns: blocked, frac: blocked / total },
-      { key: "async_wait", label: "Async wait (not ready)", color: "#457b9d", ns: async_wait, frac: async_wait / total },
-      { key: "sched_delay", label: "Scheduling delay", color: "#f4a261", ns: sched_delay, frac: sched_delay / total },
-      { key: "unknown", label: "Unknown", color: "#6c757d", ns: unknown, frac: unknown / total },
-    ];
-    return { total_ns: total, categories: cats };
+
+    // Bar share: equal-weighted mean fraction if available, else ns share.
+    const share = (key) => {
+      if (equalWeighted) return fracSum[key] / instanceCount;
+      return totalNs > 0 ? ns[key] / totalNs : 0;
+    };
+    const meanNs = (key) => (instanceCount > 0 ? ns[key] / instanceCount : null);
+
+    const cats = TIME_CATEGORIES.map((cat) => ({
+      key: cat.key,
+      label: cat.label,
+      color: cat.color,
+      ns: ns[cat.key],
+      frac: share(cat.key),
+      meanNs: meanNs(cat.key),
+    }));
+    return {
+      total_ns: totalNs,
+      instance_count: instanceCount,
+      weighting: equalWeighted ? "equal" : "time",
+      categories: cats,
+    };
   }
 
   // Fallback: no backend composition data. Approximate total elapsed from the
@@ -236,8 +434,10 @@ function computeTimeComposition(spanType, band) {
 
   return {
     total_ns: totalElapsed,
+    instance_count: 0,
+    weighting: "time",
     categories: [
-      { key: "unknown", label: "Unknown", color: "#6c757d", ns: totalElapsed, frac: 1.0 },
+      { key: "unknown", label: "Unknown", color: "#6c757d", ns: totalElapsed, frac: 1.0, meanNs: null },
     ],
   };
 }
@@ -253,6 +453,43 @@ function spanTypeQuality(spanType) {
   const total = c + p;
   if (total === 0) return null;
   return c / total;
+}
+
+// ── Attribute filters ────────────────────────────────────────────────────────
+
+// Parse repeated `attr=key=value` URL params into [{key, value}] filters.
+// Mirrors the server's parse_attr_filters: split on the FIRST '='; the value may
+// contain further '='. Entries with an empty key or no '=' are dropped (the UI
+// only ever produces well-formed values, so this is just defensive).
+function parseAttrFilterParams(rawList) {
+  const out = [];
+  for (const raw of rawList || []) {
+    const eq = raw.indexOf("=");
+    if (eq <= 0) continue; // no '=' or empty key
+    out.push({ key: raw.slice(0, eq), value: raw.slice(eq + 1) });
+  }
+  return out;
+}
+
+// Serialize [{key, value}] filters back to `key=value` strings for URL params.
+function formatAttrFilterParams(filters) {
+  return (filters || []).map((f) => `${f.key}=${f.value}`);
+}
+
+// True when a filter for this exact key/value pair is already active.
+function hasAttrFilter(filters, key, value) {
+  return (filters || []).some((f) => f.key === key && f.value === value);
+}
+
+// Append a key/value filter if not already present; returns a new array.
+function addAttrFilter(filters, key, value) {
+  if (hasAttrFilter(filters, key, value)) return filters.slice();
+  return (filters || []).concat([{ key, value }]);
+}
+
+// Remove the filter matching this key/value pair; returns a new array.
+function removeAttrFilter(filters, key, value) {
+  return (filters || []).filter((f) => !(f.key === key && f.value === value));
 }
 
 // ── URL / deep-link helpers ──────────────────────────────────────────────────
@@ -348,7 +585,7 @@ function mergeSelectedExemplarSnapshot(currentTypes, incomingTypes, selectedUid)
     spanTypes: current.map((spanType) =>
       spanType.span_type_uid === selectedUid
         ? Object.assign({}, spanType, {
-            slow_exemplars: selected.slow_exemplars || [],
+            exemplars: selected.exemplars || [],
             selected_duration_count: selected.selected_duration_count,
           })
         : spanType
@@ -366,7 +603,7 @@ function sameSpanCatalogStatistics(leftTypes, rightTypes) {
     return types
       .map((spanType) => {
         const copy = Object.assign({}, spanType);
-        delete copy.slow_exemplars;
+        delete copy.exemplars;
         delete copy.selected_duration_count;
         return copy;
       })
@@ -392,7 +629,7 @@ function exemplarRequestMatches(requestUid, requestScopeKey, currentUid, current
 // a hard parse filter that would drop every surrounding event and load an empty
 // page for a narrow single-span window). We never emit start/end here.
 //
-// `exemplar` is a SlowExemplar: { start_ns, end_ns, source_key, host, ... }.
+// `exemplar` is a Exemplar: { start_ns, end_ns, source_key, host, ... }.
 // `scope` carries the page scope: { bucket, region, service, spanName } (the
 // exemplar's own host takes precedence — exemplars can come from different
 // hosts). `spanName`, when given, is forwarded as `focus_span_name` so the
@@ -649,7 +886,9 @@ var SpanExplorer = {
   normalizeSpanHistogram,
   spanHistogramLayout,
   spanPxToNs,
+  spanNsToPx,
   spanBrushToBand,
+  durationAtPercentile,
   countInBand,
   TIME_CATEGORIES,
   computeTimeComposition,
@@ -659,6 +898,11 @@ var SpanExplorer = {
   decodeSpanExplorerState,
   flamegraphUrl,
   exemplarsInBand,
+  percentileForDuration,
+  fmtPercentile,
+  collectExemplarAttributeKeys,
+  exemplarAttrValue,
+  columnIsDegenerate,
   mergeSelectedExemplarSnapshot,
   exemplarRequestMatches,
   sameSpanCatalogStatistics,
@@ -666,6 +910,11 @@ var SpanExplorer = {
   parseSpanEventName,
   buildSpanCatalog,
   buildLogHistogram,
+  parseAttrFilterParams,
+  formatAttrFilterParams,
+  hasAttrFilter,
+  addAttrFilter,
+  removeAttrFilter,
 };
 
 if (typeof module !== "undefined" && module.exports) {

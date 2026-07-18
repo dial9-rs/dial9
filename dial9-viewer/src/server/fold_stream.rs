@@ -220,12 +220,37 @@ pub(crate) fn drive<S>(
 where
     S: FoldSink + Send + 'static,
 {
+    drive_with_options(agg, resolved, limits, sink, false)
+}
+
+/// Like [`drive`], but when `seed_only` is true the fold work-list is empty:
+/// the stream seeds from already-folded part-files and closes, parsing NO
+/// additional raw trace files. Used by the span-stats duration-band exemplar
+/// refetch, which re-selects exemplars from spans already in Parquet and must
+/// not trigger any new folding.
+pub(crate) fn drive_with_options<S>(
+    agg: AggContext,
+    resolved: Resolved,
+    limits: FoldLimits,
+    sink: S,
+    seed_only: bool,
+) -> impl Stream<Item = Result<Event, Infallible>> + use<S>
+where
+    S: FoldSink + Send + 'static,
+{
     let agg = Arc::new(agg);
 
     // `Box::pin` so the fold stream is `Unpin` and we can `.next()` it inside the
     // `unfold` step. Bounded concurrency comes from the shared `FoldLimits`.
+    // In seed-only mode the work-list is empty, so the `Folding` phase closes
+    // immediately after seeding without folding any unfolded file.
+    let fold_worklist = if seed_only {
+        Vec::new()
+    } else {
+        resolved.unfolded_capped()
+    };
     let folds: BoxStream<'static, FoldOutcome> =
-        refine::fold_stream(Arc::clone(&agg), limits, resolved.unfolded_capped()).boxed();
+        refine::fold_stream(Arc::clone(&agg), limits, fold_worklist).boxed();
 
     let seed_keys = resolved.folded_matching_full_keys();
     let driver = Driver {
@@ -288,7 +313,7 @@ mod tests {
     use axum::response::sse::Event;
     use futures::StreamExt;
 
-    use super::{FoldSink, PartOutcome, coverage_from, drive, seed_batch_end};
+    use super::{FoldSink, PartOutcome, coverage_from, drive, drive_with_options, seed_batch_end};
     use crate::ingest::aggregate::{self, AggContext, FoldLimits};
     use crate::ingest::refine::{FoldErrors, Folded, Resolved};
     use crate::storage::{LocalBackend, StorageBackend};
@@ -411,7 +436,7 @@ mod tests {
             failed_key: full_keys[1].clone(),
         };
 
-        let events: Vec<_> = drive(agg, resolved, FoldLimits::new(1, 1), sink)
+        let events: Vec<_> = drive(agg, resolved, FoldLimits::new(1, 1, 1), sink)
             .collect()
             .await;
 
@@ -434,6 +459,91 @@ mod tests {
             *snapshots.lock().unwrap(),
             vec![(1, 1), (3, 1), (4, 1)],
             "coverage grows cumulatively and excludes failed, duplicate, and out-of-scope parts"
+        );
+    }
+
+    /// A sink that records whether `fold_one` (new fold work) is ever invoked.
+    struct FoldCountingSink {
+        fold_one_calls: Arc<Mutex<usize>>,
+    }
+
+    impl FoldSink for FoldCountingSink {
+        async fn seed_batch(
+            &mut self,
+            _agg: &AggContext,
+            full_keys: &[String],
+        ) -> Vec<PartOutcome> {
+            full_keys
+                .iter()
+                .map(|full_key| PartOutcome::Folded {
+                    leaf: aggregate::part_leaf_of(full_key),
+                })
+                .collect()
+        }
+
+        async fn fold_one(&mut self, _agg: &AggContext, _folded: &Folded) -> PartOutcome {
+            *self.fold_one_calls.lock().unwrap() += 1;
+            PartOutcome::Failed {
+                key: "unexpected".to_string(),
+                error: "fold_one must not run in seed-only mode".to_string(),
+            }
+        }
+
+        fn snapshot_event(
+            &self,
+            resolved: &Resolved,
+            files_folded: usize,
+            hosts_folded: usize,
+            errors: &FoldErrors,
+        ) -> Event {
+            let _ = coverage_from(resolved, files_folded, hosts_folded, errors, files_folded);
+            Event::default()
+        }
+    }
+
+    /// Seed-only mode must never fold an unfolded capped file — it reads only the
+    /// already-folded parts. This backs the span-stats duration-band exemplar
+    /// refetch, which must parse no additional raw traces.
+    #[tokio::test]
+    async fn seed_only_never_folds_unfolded_capped_files() {
+        // One folded file (seeded) and one UNfolded capped file (would be folded
+        // in normal mode). Seed-only must skip the latter entirely.
+        let folded_full = "s3://bucket/2026-01-01/0000/svc/host-0/boot/0.bin".to_string();
+        let unfolded_full = "s3://bucket/2026-01-01/0000/svc/host-1/boot/1.bin".to_string();
+        let capped = vec![
+            ("raw-0".to_string(), folded_full.clone()),
+            ("raw-1".to_string(), unfolded_full.clone()),
+        ];
+        let folded: std::collections::HashSet<String> = [aggregate::part_leaf_of(&folded_full)]
+            .into_iter()
+            .collect();
+        let resolved = Resolved::for_test(capped, folded);
+
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
+        let agg = AggContext {
+            source: Arc::clone(&backend),
+            output: backend,
+            source_bucket: String::new(),
+            source_is_local: true,
+            output_bucket: String::new(),
+            output_prefix: "test".to_string(),
+            source_prefixes: Vec::new(),
+            segment_duration_secs: 60,
+        };
+        let fold_one_calls = Arc::new(Mutex::new(0usize));
+        let sink = FoldCountingSink {
+            fold_one_calls: Arc::clone(&fold_one_calls),
+        };
+
+        let _events: Vec<_> =
+            drive_with_options(agg, resolved, FoldLimits::new(1, 1, 1), sink, true)
+                .collect()
+                .await;
+
+        assert_eq!(
+            *fold_one_calls.lock().unwrap(),
+            0,
+            "seed-only mode must not fold the unfolded capped file"
         );
     }
 }

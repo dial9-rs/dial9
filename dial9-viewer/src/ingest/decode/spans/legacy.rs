@@ -7,18 +7,20 @@
 //! - `SpanCloseEvent` with only: span_id
 //!
 //! Reconstruction strategy:
-//! - Pair enters/exits by `span_id` alone (NOT worker_id): a task can migrate
-//!   workers between its enter and exit, so the worker is not a stable lane.
-//! - For each span_id that has a close event, synthesize a deterministic
-//!   instance_id from span_id + first-enter timestamp.
+//! - Segment a span_id's lifecycle at close boundaries: tracing recycles a
+//!   `span_id` only after its span closes, so a `SpanCloseEvent` marks the id
+//!   "done" and the next enter with that recycled id begins a NEW instance.
+//!   Each close-delimited segment becomes one row. Without this, every reuse of
+//!   a span_id collapses into one span whose lifecycle runs from the first enter
+//!   to the last close (e.g. a 1ms request span decoded as a 14.5s span).
+//! - Pair enters/exits by `(span_id, segment)` — NOT worker_id: a task can
+//!   migrate workers between its enter and exit, so the worker is not a stable
+//!   lane.
+//! - Synthesize a deterministic instance_id from span_id + first-enter
+//!   timestamp; distinct segments have distinct first enters, so distinct ids.
 //! - Parse target/name/file/line from the SpanEnter schema name.
 //! - Lifecycle start = first observed enter (conservative).
 //! - details_complete = false, identity_quality = "legacy", loss_observable = false.
-//! - Handle recycled IDs conservatively: all enters/exits for the same span_id
-//!   are merged into one span instance. This is the intended compatibility
-//!   policy — the old producer reuses span_ids within a process, but within a
-//!   single trace segment (typically 60s), the same span_id almost always
-//!   represents the same logical span. A close event marks the lifecycle end.
 //! - When the span's owning Tokio task can be resolved (the poll on the enter
 //!   worker covering the enter timestamp), split the entered wall time into
 //!   estimated on-CPU (poll overlap) vs async wait (in-task gaps between polls).
@@ -56,7 +58,89 @@ pub(crate) fn resolve_legacy_spans(
     service: &str,
     date: &str,
 ) -> LegacyResolution {
-    // Collect metadata from first enter event per span_id.
+    // ── Close-delimited segmentation ─────────────────────────────────────────
+    //
+    // Tracing recycles a `span_id` after its span closes, so a `SpanCloseEvent`
+    // marks that `span_id` "done": the next enter carrying the same (recycled)
+    // id begins a *new* logical span instance. Without this, every reuse of a
+    // span_id across the segment collapses into one row whose lifecycle spans
+    // from the first enter to the last close (e.g. a 1ms request span decoded as
+    // a 14.5s span covering the whole window).
+    //
+    // We therefore assign each enter/exit/close a per-span_id *segment ordinal*.
+    // Walking a span_id's lifecycle events in wire order, a close is assigned to
+    // the current segment (it terminates it) and then bumps the ordinal for
+    // everything that follows. All downstream grouping keys become
+    // `(span_id, segment)` rather than bare `span_id`.
+    #[derive(Clone, Copy)]
+    enum LifecycleKind {
+        Enter,
+        Exit,
+        Close,
+    }
+    let mut timelines: FxHashMap<u64, Vec<(u64, u64, LifecycleKind)>> = FxHashMap::default();
+    for (_schema_name, enter) in legacy_enters {
+        timelines.entry(enter.span_id).or_default().push((
+            enter.timestamp_ns,
+            enter.decode_sequence,
+            LifecycleKind::Enter,
+        ));
+    }
+    for (_schema_name, exit) in legacy_exits {
+        timelines.entry(exit.span_id).or_default().push((
+            exit.timestamp_ns,
+            exit.decode_sequence,
+            LifecycleKind::Exit,
+        ));
+    }
+    for close in legacy_closes {
+        timelines.entry(close.span_id).or_default().push((
+            close.timestamp_ns,
+            close.decode_sequence,
+            LifecycleKind::Close,
+        ));
+    }
+
+    // decode_sequence (globally unique per enter/exit) → segment ordinal.
+    let mut enter_exit_segment: FxHashMap<u64, u32> = FxHashMap::default();
+    // (span_id, segment) → close timestamp terminating that segment.
+    let mut close_timestamps: FxHashMap<(u64, u32), u64> = FxHashMap::default();
+    for (span_id, mut events) in timelines {
+        // Order by (timestamp, decode_sequence): the same tie-break the pairer
+        // uses, so a close never splits an enter/exit that shares its timestamp
+        // but was encoded after it.
+        events.sort_unstable_by_key(|&(ts, seq, _)| (ts, seq));
+        let mut segment: u32 = 0;
+        for (ts, seq, kind) in events {
+            match kind {
+                LifecycleKind::Enter | LifecycleKind::Exit => {
+                    enter_exit_segment.insert(seq, segment);
+                }
+                LifecycleKind::Close => {
+                    // The close belongs to the current segment and ends it.
+                    // Later closes with no intervening enter form empty segments
+                    // (dropped below). Keep the latest close per segment.
+                    close_timestamps
+                        .entry((span_id, segment))
+                        .and_modify(|existing| *existing = (*existing).max(ts))
+                        .or_insert(ts);
+                    segment = segment.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    // Segment ordinal for an enter/exit, looked up by its globally-unique wire
+    // decode_sequence. Events without an assigned segment (should not happen —
+    // every enter/exit is walked above) default to segment 0.
+    let segment_of = |decode_sequence: u64| -> u32 {
+        enter_exit_segment
+            .get(&decode_sequence)
+            .copied()
+            .unwrap_or(0)
+    };
+
+    // Collect metadata from the first enter event per (span_id, segment).
     struct SpanContext {
         schema_info: LegacySpanSchemaInfo,
         /// Schema-level type name, distinct from the dynamic runtime span_name.
@@ -68,11 +152,16 @@ pub(crate) fn resolve_legacy_spans(
         /// enter/exit pairing, which is span_id-only.
         first_enter_worker: u64,
         parent_span_id: Option<u64>,
+        /// User-attached attributes (e.g. `request_id`, `status_code`) captured
+        /// from the span's enter event. Exit-event attributes override these
+        /// (mirroring the live viewer), applied in a later pass.
+        attributes: Vec<(String, String)>,
     }
-    let mut span_contexts: FxHashMap<u64, SpanContext> = FxHashMap::default();
+    let mut span_contexts: FxHashMap<(u64, u32), SpanContext> = FxHashMap::default();
 
     for (schema_name, enter) in legacy_enters {
-        span_contexts.entry(enter.span_id).or_insert_with(|| {
+        let key = (enter.span_id, segment_of(enter.decode_sequence));
+        span_contexts.entry(key).or_insert_with(|| {
             let parsed_schema = parse_legacy_span_schema_name(schema_name);
             let type_name = parsed_schema.as_ref().map(|info| info.name.clone());
             let schema_info = parsed_schema.unwrap_or(LegacySpanSchemaInfo {
@@ -91,14 +180,28 @@ pub(crate) fn resolve_legacy_spans(
                 first_enter_ts: enter.timestamp_ns,
                 first_enter_worker: enter.worker_id,
                 parent_span_id: enter.parent_span_id.filter(|&id| id > 0),
+                attributes: enter.attributes.clone(),
             }
         });
     }
 
-    // Build a per-span_id enter/exit timeline for LIFO pairing using the
-    // unified interval pairer.
+    // Exit-event attributes override enter attributes for the same span
+    // instance, so close-time values (e.g. a `status_code` known only at exit)
+    // win. This matches the viewer's `buildSpanData`, which replaces a span's
+    // fields with its exit fields when present.
+    for (_schema_name, exit) in legacy_exits {
+        if !exit.attributes.is_empty() {
+            let key = (exit.span_id, segment_of(exit.decode_sequence));
+            if let Some(ctx) = span_contexts.get_mut(&key) {
+                ctx.attributes = exit.attributes.clone();
+            }
+        }
+    }
+
+    // Build a per-(span_id, segment) enter/exit timeline for LIFO pairing using
+    // the unified interval pairer.
     //
-    // The pairing key is `span_id` ALONE — deliberately NOT `(span_id,
+    // The pairing key omits `worker_id` — deliberately NOT `(span_id,
     // worker_id)`. An async span can enter on one worker and exit on another
     // when its task migrates between workers across an `.await`. Keying on the
     // worker would push the enter onto one worker's stack and look for the exit
@@ -107,7 +210,7 @@ pub(crate) fn resolve_legacy_spans(
     //
     // Decode sequences come directly from the shared wire decoder, so ties
     // preserve the actual interleaving between legacy enters and exits.
-    let mut pairing_events: Vec<PairingEvent<u64>> =
+    let mut pairing_events: Vec<PairingEvent<(u64, u32)>> =
         Vec::with_capacity(legacy_enters.len() + legacy_exits.len());
 
     for (_schema_name, enter) in legacy_enters {
@@ -115,7 +218,7 @@ pub(crate) fn resolve_legacy_spans(
             timestamp: MonoNs(enter.timestamp_ns),
             decode_sequence: enter.decode_sequence,
             is_enter: true,
-            group_key: enter.span_id,
+            group_key: (enter.span_id, segment_of(enter.decode_sequence)),
         });
     }
     for (_schema_name, exit) in legacy_exits {
@@ -123,39 +226,29 @@ pub(crate) fn resolve_legacy_spans(
             timestamp: MonoNs(exit.timestamp_ns),
             decode_sequence: exit.decode_sequence,
             is_enter: false,
-            group_key: exit.span_id,
+            group_key: (exit.span_id, segment_of(exit.decode_sequence)),
         });
     }
 
     let pairing_results = interval_pairing::pair_intervals(&mut pairing_events);
 
-    // Rebuild the per-span_id interval map and unmatched accounting from results.
-    let mut local_intervals: FxHashMap<u64, Vec<MonoInterval>> = FxHashMap::default();
-    let mut unmatched_exits_map: FxHashMap<u64, u32> = FxHashMap::default();
-    let mut unmatched_enters_map: FxHashMap<u64, u32> = FxHashMap::default();
-    for (span_id, result) in &pairing_results {
+    // Rebuild the per-(span_id, segment) interval map and unmatched accounting.
+    let mut local_intervals: FxHashMap<(u64, u32), Vec<MonoInterval>> = FxHashMap::default();
+    let mut unmatched_exits_map: FxHashMap<(u64, u32), u32> = FxHashMap::default();
+    let mut unmatched_enters_map: FxHashMap<(u64, u32), u32> = FxHashMap::default();
+    for (key, result) in &pairing_results {
         if !result.intervals.is_empty() {
             local_intervals
-                .entry(*span_id)
+                .entry(*key)
                 .or_default()
                 .extend_from_slice(&result.intervals);
         }
         if result.unmatched_exits > 0 {
-            *unmatched_exits_map.entry(*span_id).or_insert(0) += result.unmatched_exits;
+            *unmatched_exits_map.entry(*key).or_insert(0) += result.unmatched_exits;
         }
         if result.unmatched_enters > 0 {
-            *unmatched_enters_map.entry(*span_id).or_insert(0) += result.unmatched_enters;
+            *unmatched_enters_map.entry(*key).or_insert(0) += result.unmatched_enters;
         }
-    }
-
-    // Build a close timestamp map: span_id → close timestamp.
-    let mut close_timestamps: FxHashMap<u64, u64> = FxHashMap::default();
-    for close in legacy_closes {
-        // Use the latest close timestamp for each span_id (conservative).
-        close_timestamps
-            .entry(close.span_id)
-            .and_modify(|ts| *ts = (*ts).max(close.timestamp_ns))
-            .or_insert(close.timestamp_ns);
     }
 
     // ── Poll indices for task-based CPU/wait attribution ─────────────────────
@@ -186,24 +279,62 @@ pub(crate) fn resolve_legacy_spans(
         u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
     };
 
-    // Build ResolvedSpan rows for each span_id that has EITHER a close event
-    // or local intervals (we produce a row even without a close when we have
-    // balanced enter/exit pairs).
+    // Resolve a parent (span_id, segment) instance from a bare parent span_id
+    // and the child's start timestamp: pick the parent segment whose first
+    // enter is the latest one at or before the child's start. This selects the
+    // parent instance that was live when the child began, since a recycled
+    // parent span_id may have several segments across the file.
+    // Per parent span_id: its segments' first-enter timestamps, SORTED. A single
+    // span_id may be recycled into many close-delimited segments (a hot parent
+    // span reused thousands of times), so `resolve_parent_start` must binary
+    // search rather than linear-scan — a linear scan per child is O(children ×
+    // parent_segments), which is quadratic when one parent id dominates and cost
+    // tens of seconds of span resolution on a real 900k-span-event file.
+    let parent_first_enters: FxHashMap<u64, Vec<u64>> = {
+        let mut map: FxHashMap<u64, Vec<u64>> = FxHashMap::default();
+        for (&(span_id, _segment), ctx) in &span_contexts {
+            map.entry(span_id).or_default().push(ctx.first_enter_ts);
+        }
+        for enters in map.values_mut() {
+            enters.sort_unstable();
+        }
+        map
+    };
+    let resolve_parent_start = |parent_id: u64, child_start_ts: u64| -> u64 {
+        parent_first_enters
+            .get(&parent_id)
+            .and_then(|enters| {
+                // Largest first_enter_ts <= child_start_ts: the parent instance
+                // live when the child began. `partition_point` gives the count of
+                // elements <= child_start_ts; the one before it is the answer.
+                let idx = enters.partition_point(|&ts| ts <= child_start_ts);
+                idx.checked_sub(1).map(|i| enters[i])
+            })
+            .unwrap_or(0)
+    };
+
+    // Build ResolvedSpan rows for each (span_id, segment) that has EITHER a
+    // close event or local intervals (we produce a row even without a close
+    // when we have balanced enter/exit pairs).
     let mut resolved_spans: Vec<ResolvedSpan> = Vec::new();
     let mut resolved_intervals: FxHashMap<u64, Vec<MonoInterval>> = FxHashMap::default();
 
-    // Collect all span_ids that have either a close or intervals.
-    let mut all_span_ids: Vec<u64> = close_timestamps.keys().copied().collect();
-    for &span_id in local_intervals.keys() {
-        if !all_span_ids.contains(&span_id) {
-            all_span_ids.push(span_id);
+    // Collect all (span_id, segment) keys that have either a close or intervals.
+    // Dedup via a set, not `Vec::contains` in a loop — the latter is
+    // O(keys²) and dominated span resolution on span-heavy files (seconds on a
+    // 325k-span-event segment).
+    let mut all_keys: Vec<(u64, u32)> = close_timestamps.keys().copied().collect();
+    let mut seen_keys: rustc_hash::FxHashSet<(u64, u32)> = all_keys.iter().copied().collect();
+    for &key in local_intervals.keys() {
+        if seen_keys.insert(key) {
+            all_keys.push(key);
         }
     }
 
-    for &span_id in &all_span_ids {
-        let ctx = span_contexts.get(&span_id);
-        let intervals = local_intervals.get(&span_id);
-        let close_ts = close_timestamps.get(&span_id).copied();
+    for &key @ (span_id, _segment) in &all_keys {
+        let ctx = span_contexts.get(&key);
+        let intervals = local_intervals.get(&key);
+        let close_ts = close_timestamps.get(&key).copied();
 
         // Skip spans with no context at all (no enters, no close).
         if ctx.is_none() && close_ts.is_none() && intervals.is_none() {
@@ -250,21 +381,22 @@ pub(crate) fn resolve_legacy_spans(
             flags &= !0b0100;
         }
 
+        // The synthetic instance_id keys on span_id + first_enter_ts, so
+        // distinct segments (each with its own first enter) get distinct ids.
         let instance_id = synthetic_instance_id(span_id, start_ts);
 
-        // Parent uid (if parent_span_id known from enters)
+        // Parent uid (if parent_span_id known from enters). The parent's
+        // instance_id is derived from the parent segment live at the child's
+        // start, matching how this span's own instance_id was computed.
         let parent_span_uid = ctx.and_then(|c| c.parent_span_id).map(|parent_id| {
-            let parent_start = span_contexts
-                .get(&parent_id)
-                .map(|p| p.first_enter_ts)
-                .unwrap_or(0);
+            let parent_start = resolve_parent_start(parent_id, start_ts);
             let parent_instance = synthetic_instance_id(parent_id, parent_start);
             compute_span_uid(boot_id, parent_instance)
         });
 
         // Propagate unmatched counts from the pairer.
-        let unmatched_exits = unmatched_exits_map.get(&span_id).copied().unwrap_or(0);
-        let unmatched_enters = unmatched_enters_map.get(&span_id).copied().unwrap_or(0);
+        let unmatched_exits = unmatched_exits_map.get(&key).copied().unwrap_or(0);
+        let unmatched_enters = unmatched_enters_map.get(&key).copied().unwrap_or(0);
 
         let type_name = ctx.and_then(|context| context.type_name.clone());
         let candidate = SpanCandidate {
@@ -293,7 +425,7 @@ pub(crate) fn resolve_legacy_spans(
             scheduler_delay_ns: None,
             attribution_flags: flags,
             parent_span_uid,
-            attributes: Vec::new(), // Old format doesn't carry close-time attributes
+            attributes: ctx.map(|c| c.attributes.clone()).unwrap_or_default(),
             source_key: source_key.to_string(),
             host: host.to_string(),
             service: service.to_string(),

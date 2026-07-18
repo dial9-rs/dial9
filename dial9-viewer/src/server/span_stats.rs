@@ -65,11 +65,54 @@ pub struct SpanStatsParams {
     /// by occurrence time and are not narrowed by these bounds.
     pub min_span_ns: Option<i64>,
     pub max_span_ns: Option<i64>,
+    /// Attribute equality filters, each `key=value`. When present, only span
+    /// instances whose attributes contain ALL of these exact key/value pairs
+    /// are counted — a full filter narrowing counts, histograms, composition,
+    /// and exemplars alike (unlike `min_span_ns`/`max_span_ns`, which scope only
+    /// exemplar selection). Repeat the param to AND multiple constraints.
+    #[serde(default)]
+    pub attr: Vec<String>,
     pub max_files: Option<usize>,
     pub bucket: Option<String>,
     pub prefix: Option<String>,
     /// Region for ambient-credential S3 reads, carried by browse deep links.
     pub aws_region: Option<String>,
+    /// Seed-only mode: read ONLY the already-folded spans part-files and skip
+    /// all new fold work. Set by the UI's duration-band exemplar refetch, which
+    /// re-selects exemplars within the band from spans that are already in
+    /// Parquet — it must never parse additional raw trace files. Without this,
+    /// every band drag re-drove the full fold pipeline over the scope's
+    /// unfolded files.
+    #[serde(default)]
+    pub exemplars_only: bool,
+}
+
+/// A parsed attribute equality filter: an instance matches when it has an
+/// attribute whose key and value both equal these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttrFilter {
+    key: String,
+    value: String,
+}
+
+/// Parse `attr` query params of the form `key=value` into [`AttrFilter`]s. The
+/// value may itself contain `=` (split only on the first). An empty key is
+/// rejected; a missing `=` is rejected. Empty input yields no filters.
+fn parse_attr_filters(raw: &[String]) -> Result<Vec<AttrFilter>, String> {
+    let mut filters = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let Some((key, value)) = entry.split_once('=') else {
+            return Err(format!("invalid attr filter {entry:?}: expected key=value"));
+        };
+        if key.is_empty() {
+            return Err(format!("invalid attr filter {entry:?}: empty key"));
+        }
+        filters.push(AttrFilter {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(filters)
 }
 
 /// One span type's aggregated statistics.
@@ -104,7 +147,7 @@ pub struct SpanTypeStats {
     pub details_complete_count: u64,
     pub partial_count: u64,
     /// Bounded slow exemplars (longest durations with source coordinates).
-    pub slow_exemplars: Vec<SlowExemplar>,
+    pub exemplars: Vec<Exemplar>,
     /// Exact number of instances inside the requested exemplar-duration bounds.
     /// Absent when no duration bounds were requested.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,9 +208,25 @@ pub struct CompositionBucket {
     pub async_wait_ns: i64,
     pub scheduler_delay_ns: i64,
     pub unknown_ns: i64,
+    /// Number of instances in this bucket that contributed composition data.
+    /// Divides the `*_frac_sum` fields to yield an equal-weighted (per-instance)
+    /// mean composition, which avoids a few very long spans dominating the
+    /// aggregate the way the raw `*_ns` sums do.
+    pub instance_count: u64,
+    /// Sum over this bucket's instances of each category's fraction of that
+    /// instance's own elapsed time. `on_cpu_frac_sum / instance_count` is the
+    /// mean share of on-CPU time across instances (each weighted equally).
+    pub on_cpu_frac_sum: f64,
+    pub blocked_frac_sum: f64,
+    pub async_wait_frac_sum: f64,
+    pub scheduler_delay_frac_sum: f64,
+    pub unknown_frac_sum: f64,
 }
 
-/// Per-bucket accumulator for the five-way composition sums.
+/// Per-bucket accumulator for the five-way composition sums. Tracks both the
+/// raw nanosecond totals (for showing actual time) and the per-instance
+/// fraction sums (for equal-weighted percentages that don't overweight long
+/// spans).
 #[derive(Clone, Default)]
 struct CompSums {
     on_cpu_ns: i64,
@@ -175,9 +234,24 @@ struct CompSums {
     async_wait_ns: i64,
     scheduler_delay_ns: i64,
     unknown_ns: i64,
+    /// Instances contributing composition to this bucket.
+    instance_count: u64,
+    /// Sum of per-instance category fractions (each instance's cat_ns/elapsed_ns).
+    on_cpu_frac_sum: f64,
+    blocked_frac_sum: f64,
+    async_wait_frac_sum: f64,
+    scheduler_delay_frac_sum: f64,
+    unknown_frac_sum: f64,
 }
 
 /// Summed five-way time composition across all instances of a span type.
+///
+/// Carries both the raw nanosecond totals (actual time spent per category) and
+/// an equal-weighted breakdown (`instance_count` + per-category `*_frac_sum`).
+/// The client shows fair per-instance percentages from the fractions and the
+/// real time totals from the ns fields. The `*_frac_sum`/`instance_count`
+/// fields are absent (skipped) on exemplar-scoped compositions, which describe
+/// a single instance and need no averaging.
 #[derive(Debug, Clone, Serialize)]
 pub struct TimeComposition {
     pub on_cpu_ns: i64,
@@ -185,6 +259,26 @@ pub struct TimeComposition {
     pub async_wait_ns: i64,
     pub scheduler_delay_ns: i64,
     pub unknown_ns: i64,
+    /// Instances that contributed composition data (for equal-weighted means).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub instance_count: u64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub on_cpu_frac_sum: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub blocked_frac_sum: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub async_wait_frac_sum: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub scheduler_delay_frac_sum: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub unknown_frac_sum: f64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// A slow exemplar: one of the longest instances with source coordinates.
@@ -195,7 +289,7 @@ pub struct TimeComposition {
 /// (not just the span type's aggregate). Both are optional/empty when the
 /// source part lacked the data, and are omitted from the wire in that case.
 #[derive(Debug, Clone, Serialize)]
-pub struct SlowExemplar {
+pub struct Exemplar {
     pub elapsed_ns: i64,
     pub span_uid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,6 +404,9 @@ pub async fn get_span_stats(
         ));
     }
 
+    let attr_filters =
+        parse_attr_filters(&params.attr).map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+
     let Some(agg) = state
         .agg_context_for(
             params.bucket.as_deref(),
@@ -348,14 +445,15 @@ pub async fn get_span_stats(
         None,
     );
 
+    let accum = SpanStatsAccum::new(params.start_ns, params.end_ns)
+        .with_exemplar_bounds(params.min_span_ns, params.max_span_ns)
+        .with_attr_filters(attr_filters);
     let stream = span_stats_stream(
         agg,
         resolved,
         state.fold_limits.clone(),
-        params.start_ns,
-        params.end_ns,
-        params.min_span_ns,
-        params.max_span_ns,
+        accum,
+        params.exemplars_only,
     );
     Ok((
         Extension(op),
@@ -441,7 +539,7 @@ struct SpanTypeAccum {
     details_complete_count: u64,
     partial_count: u64,
     /// Bounded slow exemplars (min-heap by elapsed_ns, capped at MAX_EXEMPLARS).
-    slow_exemplars: Vec<SlowExemplar>,
+    exemplars: Vec<Exemplar>,
     /// Exact matching-instance count when exemplar duration bounds are active.
     selected_duration_count: Option<u64>,
     /// Attribute facets: key → bounded distinct value tracker.
@@ -477,14 +575,14 @@ impl SpanTypeAccum {
             has_composition: false,
             details_complete_count: 0,
             partial_count: 0,
-            slow_exemplars: Vec::new(),
+            exemplars: Vec::new(),
             selected_duration_count: None,
             attribute_accums: HashMap::new(),
             attribute_keys_overflow: false,
         }
     }
 
-    fn record(&mut self, elapsed_ns: i64, exemplar: Option<SlowExemplar>) {
+    fn record(&mut self, elapsed_ns: i64, exemplar: Option<Exemplar>) {
         self.count += 1;
         // Update min/max
         self.min_ns = Some(self.min_ns.map_or(elapsed_ns, |m| m.min(elapsed_ns)));
@@ -498,17 +596,17 @@ impl SpanTypeAccum {
             .or_insert(0) += 1;
         // Maintain bounded slow exemplars
         if let Some(ex) = exemplar {
-            if self.slow_exemplars.len() < MAX_EXEMPLARS {
-                self.slow_exemplars.push(ex);
+            if self.exemplars.len() < MAX_EXEMPLARS {
+                self.exemplars.push(ex);
             } else if let Some(min_pos) = self
-                .slow_exemplars
+                .exemplars
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, e)| e.elapsed_ns)
                 .map(|(i, _)| i)
-                && ex.elapsed_ns > self.slow_exemplars[min_pos].elapsed_ns
+                && ex.elapsed_ns > self.exemplars[min_pos].elapsed_ns
             {
-                self.slow_exemplars[min_pos] = ex;
+                self.exemplars[min_pos] = ex;
             }
         }
     }
@@ -580,13 +678,36 @@ impl SpanTypeAccum {
             })
             .collect();
 
+        // Aggregate the per-instance fraction sums + counts across all buckets so
+        // the whole-type composition can also be shown equal-weighted (not just
+        // the raw ns totals, which a few long spans would dominate).
         let composition = if self.has_composition {
+            let mut instance_count = 0u64;
+            let mut on_cpu_frac_sum = 0.0;
+            let mut blocked_frac_sum = 0.0;
+            let mut async_wait_frac_sum = 0.0;
+            let mut scheduler_delay_frac_sum = 0.0;
+            let mut unknown_frac_sum = 0.0;
+            for s in self.composition_by_bucket.values() {
+                instance_count += s.instance_count;
+                on_cpu_frac_sum += s.on_cpu_frac_sum;
+                blocked_frac_sum += s.blocked_frac_sum;
+                async_wait_frac_sum += s.async_wait_frac_sum;
+                scheduler_delay_frac_sum += s.scheduler_delay_frac_sum;
+                unknown_frac_sum += s.unknown_frac_sum;
+            }
             Some(TimeComposition {
                 on_cpu_ns: self.on_cpu_ns_sum,
                 blocked_ns: self.blocked_ns_sum,
                 async_wait_ns: self.async_wait_ns_sum,
                 scheduler_delay_ns: self.scheduler_delay_ns_sum,
                 unknown_ns: self.unknown_ns_sum,
+                instance_count,
+                on_cpu_frac_sum,
+                blocked_frac_sum,
+                async_wait_frac_sum,
+                scheduler_delay_frac_sum,
+                unknown_frac_sum,
             })
         } else {
             None
@@ -609,11 +730,17 @@ impl SpanTypeAccum {
                     async_wait_ns: s.async_wait_ns,
                     scheduler_delay_ns: s.scheduler_delay_ns,
                     unknown_ns: s.unknown_ns,
+                    instance_count: s.instance_count,
+                    on_cpu_frac_sum: s.on_cpu_frac_sum,
+                    blocked_frac_sum: s.blocked_frac_sum,
+                    async_wait_frac_sum: s.async_wait_frac_sum,
+                    scheduler_delay_frac_sum: s.scheduler_delay_frac_sum,
+                    unknown_frac_sum: s.unknown_frac_sum,
                 }
             })
             .collect();
 
-        let mut exemplars = self.slow_exemplars.clone();
+        let mut exemplars = self.exemplars.clone();
         exemplars.sort_by_key(|e| std::cmp::Reverse(e.elapsed_ns));
 
         let attribute_facets: Vec<AttributeFacet> = self
@@ -640,7 +767,7 @@ impl SpanTypeAccum {
             composition_histogram,
             details_complete_count: self.details_complete_count,
             partial_count: self.partial_count,
-            slow_exemplars: exemplars,
+            exemplars,
             selected_duration_count: self.selected_duration_count,
             attribute_facets,
             attribute_keys_overflow: self.attribute_keys_overflow,
@@ -661,6 +788,9 @@ struct SpanStatsAccum {
     /// Inclusive duration bounds applied only to bounded exemplar selection.
     exemplar_min_ns: Option<i64>,
     exemplar_max_ns: Option<i64>,
+    /// Attribute equality filters (ANDed). A row is dropped entirely unless its
+    /// attributes contain every one of these key/value pairs. Empty = no filter.
+    attr_filters: Vec<AttrFilter>,
     /// Total instances whose type was dropped because MAX_SPAN_TYPES was reached.
     types_overflow_instances: u64,
 }
@@ -673,6 +803,7 @@ impl SpanStatsAccum {
             end_ns,
             exemplar_min_ns: None,
             exemplar_max_ns: None,
+            attr_filters: Vec::new(),
             types_overflow_instances: 0,
         }
     }
@@ -681,6 +812,20 @@ impl SpanStatsAccum {
         self.exemplar_min_ns = min_ns;
         self.exemplar_max_ns = max_ns;
         self
+    }
+
+    fn with_attr_filters(mut self, filters: Vec<AttrFilter>) -> Self {
+        self.attr_filters = filters;
+        self
+    }
+
+    /// Whether a row's attributes satisfy all active attribute filters.
+    fn attrs_match(&self, attributes: &[(String, String)]) -> bool {
+        self.attr_filters.iter().all(|filter| {
+            attributes
+                .iter()
+                .any(|(key, value)| key == &filter.key && value == &filter.value)
+        })
     }
 
     fn exemplar_matches(&self, elapsed_ns: i64) -> bool {
@@ -713,6 +858,11 @@ impl SpanStatsAccum {
             composition,
             details_complete,
         } = row;
+        // Attribute filters narrow the entire aggregate: a non-matching row
+        // contributes to no counts, histograms, composition, or exemplars.
+        if !self.attrs_match(&attributes) {
+            return;
+        }
         let has_exemplar_bounds = self.exemplar_min_ns.is_some() || self.exemplar_max_ns.is_some();
         let matches_exemplar_bounds = self.exemplar_matches(elapsed_ns);
         let exemplar = exemplar.filter(|_| matches_exemplar_bounds);
@@ -746,6 +896,17 @@ impl SpanStatsAccum {
             entry.async_wait_ns_sum += composition.async_wait_ns;
             entry.scheduler_delay_ns_sum += composition.scheduler_delay_ns;
 
+            // Per-instance fractions for equal-weighted composition. Dividing by
+            // this instance's own classified total (not elapsed_ns) keeps the
+            // five fractions summing to 1 even when unknown_ns already absorbs
+            // any elapsed-vs-classified slack (see span_builder's five-way
+            // invariant). A zero-total instance contributes nothing.
+            let classified_total = composition.on_cpu_ns
+                + composition.blocked_ns
+                + composition.async_wait_ns
+                + composition.scheduler_delay_ns
+                + composition.unknown_ns;
+
             let bucket = entry
                 .composition_by_bucket
                 .entry(hist_bucket_key(elapsed_ns))
@@ -755,6 +916,16 @@ impl SpanStatsAccum {
             bucket.blocked_ns += composition.blocked_ns;
             bucket.async_wait_ns += composition.async_wait_ns;
             bucket.scheduler_delay_ns += composition.scheduler_delay_ns;
+
+            if classified_total > 0 {
+                let total = classified_total as f64;
+                bucket.instance_count += 1;
+                bucket.on_cpu_frac_sum += composition.on_cpu_ns as f64 / total;
+                bucket.blocked_frac_sum += composition.blocked_ns as f64 / total;
+                bucket.async_wait_frac_sum += composition.async_wait_ns as f64 / total;
+                bucket.scheduler_delay_frac_sum += composition.scheduler_delay_ns as f64 / total;
+                bucket.unknown_frac_sum += composition.unknown_ns as f64 / total;
+            }
         }
 
         if let Some(details_complete) = details_complete {
@@ -915,14 +1086,10 @@ fn span_stats_stream(
     agg: AggContext,
     resolved: Resolved,
     limits: FoldLimits,
-    start_ns: Option<i64>,
-    end_ns: Option<i64>,
-    exemplar_min_ns: Option<i64>,
-    exemplar_max_ns: Option<i64>,
+    accum: SpanStatsAccum,
+    seed_only: bool,
 ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
-    let accum = SpanStatsAccum::new(start_ns, end_ns)
-        .with_exemplar_bounds(exemplar_min_ns, exemplar_max_ns);
-    fold_stream::drive(agg, resolved, limits, SpanStatsSink { accum })
+    fold_stream::drive_with_options(agg, resolved, limits, SpanStatsSink { accum }, seed_only)
 }
 
 #[cfg(test)]
@@ -1383,6 +1550,28 @@ mod tests {
         assert_eq!(comp.on_cpu_ns, 1000);
         assert_eq!(comp.async_wait_ns, 1_050_000);
 
+        // Equal-weighted fractions: each of the two instances is 100% of a
+        // single category, so the frac sums are 1.0 each and instance_count=2.
+        // This is what lets the client show a per-instance-fair breakdown
+        // (on-CPU 50%, wait 50%) instead of the ns-weighted ~0.1%/99.9% split
+        // that a single long span forces.
+        assert_eq!(comp.instance_count, 2);
+        assert!((comp.on_cpu_frac_sum - 1.0).abs() < 1e-9);
+        assert!((comp.async_wait_frac_sum - 1.0).abs() < 1e-9);
+        let equal_on_cpu = comp.on_cpu_frac_sum / comp.instance_count as f64;
+        assert!(
+            (equal_on_cpu - 0.5).abs() < 1e-9,
+            "equal-weighted on-CPU share is 50%, not the ns-weighted ~0.1%"
+        );
+        // Per-bucket frac sums: each single-instance bucket contributes 1.0.
+        let short_fracs = st
+            .composition_histogram
+            .iter()
+            .find(|b| b.lo_ns <= 1000 && b.hi_ns > 1000)
+            .unwrap();
+        assert_eq!(short_fracs.instance_count, 1);
+        assert!((short_fracs.on_cpu_frac_sum - 1.0).abs() < 1e-9);
+
         // Per-bucket: two distinct buckets, each single-category.
         assert_eq!(
             st.composition_histogram.len(),
@@ -1420,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn slow_exemplars_bounded_with_source_coords() {
+    fn exemplars_bounded_with_source_coords() {
         use crate::ingest::decode::ResolvedSpan;
         use crate::ingest::parquet_writer::write_spans;
 
@@ -1482,22 +1671,22 @@ mod tests {
         let st = &snap.span_types[0];
         assert_eq!(st.count, count as u64);
         assert_eq!(
-            st.slow_exemplars.len(),
+            st.exemplars.len(),
             MAX_EXEMPLARS,
             "exemplars must be bounded to MAX_EXEMPLARS"
         );
         // Exemplars sorted descending by elapsed_ns
-        for w in st.slow_exemplars.windows(2) {
+        for w in st.exemplars.windows(2) {
             assert!(w[0].elapsed_ns >= w[1].elapsed_ns);
         }
         // Each exemplar should have source coordinates
-        for ex in &st.slow_exemplars {
+        for ex in &st.exemplars {
             assert!(ex.callsite_file.is_some());
             assert!(ex.callsite_line.is_some());
         }
         // Each exemplar carries the jump-link coordinates: start/end wall clock
         // (start_ns=1000 for all rows, end_ns = start + elapsed) and source_key.
-        for ex in &st.slow_exemplars {
+        for ex in &st.exemplars {
             assert_eq!(ex.start_ns, 1000, "exemplar start_ns populated");
             assert_eq!(
                 ex.end_ns,
@@ -1509,7 +1698,7 @@ mod tests {
         // Each exemplar carries its own per-instance time composition. These rows
         // set only unknown_ns (= elapsed_ns), so composition is present and its
         // unknown bucket equals the instance's elapsed time.
-        for ex in &st.slow_exemplars {
+        for ex in &st.exemplars {
             let comp = ex
                 .composition
                 .as_ref()
@@ -1520,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn slow_exemplars_carry_per_instance_attributes() {
+    fn exemplars_carry_per_instance_attributes() {
         let data = make_spans_parquet_with_attrs(&[(
             0,
             50,
@@ -1538,7 +1727,7 @@ mod tests {
         accum.merge_spans_part(data).unwrap();
 
         let st = &accum.snapshot().span_types[0];
-        let ex = &st.slow_exemplars[0];
+        let ex = &st.exemplars[0];
         let attrs: Vec<(&str, &str)> = ex
             .attributes
             .iter()
@@ -1546,6 +1735,122 @@ mod tests {
             .collect();
         assert!(attrs.contains(&("route", "/checkout")));
         assert!(attrs.contains(&("status", "500")));
+    }
+
+    #[test]
+    fn parse_attr_filters_valid_and_invalid() {
+        // key=value, value may contain '='
+        let ok =
+            parse_attr_filters(&["status_code=500".to_string(), "url=/a?b=c".to_string()]).unwrap();
+        assert_eq!(
+            ok,
+            vec![
+                AttrFilter {
+                    key: "status_code".to_string(),
+                    value: "500".to_string()
+                },
+                AttrFilter {
+                    key: "url".to_string(),
+                    value: "/a?b=c".to_string()
+                },
+            ]
+        );
+        // Empty value is allowed (matches attributes whose value is "").
+        assert_eq!(
+            parse_attr_filters(&["k=".to_string()]).unwrap(),
+            vec![AttrFilter {
+                key: "k".to_string(),
+                value: String::new()
+            }]
+        );
+        // No '=' is rejected; empty key is rejected.
+        assert!(parse_attr_filters(&["noequals".to_string()]).is_err());
+        assert!(parse_attr_filters(&["=v".to_string()]).is_err());
+    }
+
+    #[test]
+    fn attr_filter_narrows_counts_and_exemplars() {
+        // Three "A" spans: two with status_code=500, one with status_code=200.
+        let s500 = || vec![("status_code".to_string(), "500".to_string())];
+        let s200 = || vec![("status_code".to_string(), "200".to_string())];
+        let data = make_spans_parquet_with_attrs(&[
+            (0, 10, 10, "A", "h1", true, s500()),
+            (0, 20, 20, "A", "h1", true, s500()),
+            (0, 30, 30, "A", "h1", true, s200()),
+        ]);
+
+        // No filter: all three counted.
+        let mut all = SpanStatsAccum::new(None, None);
+        all.merge_spans_part(data.clone()).unwrap();
+        assert_eq!(all.snapshot().span_types[0].count, 3);
+
+        // Filter status_code=500: only the two matching instances counted, and
+        // every exemplar carries the matching value.
+        let mut filtered = SpanStatsAccum::new(None, None).with_attr_filters(vec![AttrFilter {
+            key: "status_code".to_string(),
+            value: "500".to_string(),
+        }]);
+        filtered.merge_spans_part(data.clone()).unwrap();
+        let st = &filtered.snapshot().span_types[0];
+        assert_eq!(st.count, 2, "attr filter narrows total count");
+        assert!(
+            st.exemplars.iter().all(|ex| ex
+                .attributes
+                .iter()
+                .any(|a| a.key == "status_code" && a.value == "500")),
+            "every surviving exemplar matches the filter"
+        );
+
+        // A value that matches nothing yields no span types at all.
+        let mut none = SpanStatsAccum::new(None, None).with_attr_filters(vec![AttrFilter {
+            key: "status_code".to_string(),
+            value: "418".to_string(),
+        }]);
+        none.merge_spans_part(data).unwrap();
+        assert!(none.snapshot().span_types.is_empty());
+    }
+
+    #[test]
+    fn attr_filters_are_anded() {
+        let data = make_spans_parquet_with_attrs(&[
+            (
+                0,
+                10,
+                10,
+                "A",
+                "h1",
+                true,
+                vec![
+                    ("status_code".to_string(), "500".to_string()),
+                    ("route".to_string(), "/checkout".to_string()),
+                ],
+            ),
+            (
+                0,
+                20,
+                20,
+                "A",
+                "h1",
+                true,
+                vec![
+                    ("status_code".to_string(), "500".to_string()),
+                    ("route".to_string(), "/cart".to_string()),
+                ],
+            ),
+        ]);
+        let mut accum = SpanStatsAccum::new(None, None).with_attr_filters(vec![
+            AttrFilter {
+                key: "status_code".to_string(),
+                value: "500".to_string(),
+            },
+            AttrFilter {
+                key: "route".to_string(),
+                value: "/checkout".to_string(),
+            },
+        ]);
+        accum.merge_spans_part(data).unwrap();
+        let st = &accum.snapshot().span_types[0];
+        assert_eq!(st.count, 1, "both attr filters must match (AND semantics)");
     }
 
     #[test]
@@ -1570,7 +1875,7 @@ mod tests {
         assert_eq!(stats.selected_duration_count, Some(3));
         assert_eq!(
             stats
-                .slow_exemplars
+                .exemplars
                 .iter()
                 .map(|exemplar| exemplar.elapsed_ns)
                 .collect::<Vec<_>>(),

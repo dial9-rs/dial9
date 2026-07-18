@@ -40,7 +40,7 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// (`{output_prefix}/v{N}/…`). Bump when changing *what* we persist and we want
 /// a deliberate recompute; reads/writes then target a fresh empty tree that
 /// repopulates lazily. The old tree is abandoned and GC'd out-of-band.
-pub(crate) const SAMPLES_FORMAT_VERSION: u32 = 5;
+pub const SAMPLES_FORMAT_VERSION: u32 = 6;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this
@@ -302,15 +302,25 @@ fn full_source_key(source_is_local: bool, source_bucket: &str, key: &str) -> Str
 /// Without this, N concurrent polls each running their own bounded batch could
 /// still oversubscribe the box by a factor of N.
 ///
-/// The two stages are bounded independently because they bottleneck on
-/// different resources:
+/// The stages are bounded independently because they bottleneck on different
+/// resources:
 ///
-/// - [`fetch`](Self::fetch): network-bound source GETs (~37–50 MB each). These
-///   spend almost all their time waiting on the network, so we run them at high
-///   concurrency (~2× available parallelism by default).
+/// - [`fetch`](Self::fetch): network-bound source GETs (~37–50 MB compressed
+///   each). Mostly waiting on the network; bounded by `inflight` in practice
+///   (a fetch can't start without an inflight permit).
 /// - [`cpu`](Self::cpu): gunzip + decode + parquet-encode, run on blocking
-///   threads. Sized to ~= available parallelism so concurrent folds don't
-///   oversubscribe the cores and inflate every fold's wall time.
+///   threads. This is the dominant memory consumer — decoding one segment
+///   expands to >1 GB of transient structures — so it is capped by a small
+///   ABSOLUTE number ([`MAX_DECODE_CONCURRENCY`]), NOT by core count. Scaling it
+///   with cores is what OOM-killed a 64-core box.
+/// - [`inflight`](Self::inflight): the total number of folds that may hold a
+///   fetched-but-not-yet-written segment buffer at once. This is the memory
+///   backstop: [`fold_one`] releases the fetch permit before acquiring the CPU
+///   permit (so network and CPU overlap), which means a decoded-slower-than-
+///   fetched work-list would otherwise let downloaded buffers pile up without
+///   bound between the two stages — thousands of them for a broad scope,
+///   OOM-killing the process. Holding one inflight permit across the *whole*
+///   fold caps the resident segment buffers regardless of work-list size.
 ///
 /// Part-file writes (small, network-bound) run ungated: they are cheap relative
 /// to the fetch and we don't want to hold a CPU permit across their I/O.
@@ -320,27 +330,58 @@ pub(crate) struct FoldLimits {
     pub fetch: Arc<Semaphore>,
     /// Bounds concurrent decode/encode work (CPU-bound).
     pub cpu: Arc<Semaphore>,
+    /// Bounds concurrently in-flight folds (memory backstop; held fetch→write).
+    pub inflight: Arc<Semaphore>,
 }
 
 impl FoldLimits {
     /// Construct with explicit permit counts. Each is clamped to at least 1 so a
-    /// zero never deadlocks the pipeline.
-    pub(crate) fn new(fetch_permits: usize, cpu_permits: usize) -> Self {
+    /// zero never deadlocks the pipeline. `inflight` bounds resident segment
+    /// buffers and must be ≥ `fetch` (a fetch can't proceed without an inflight
+    /// permit, so a smaller inflight would cap effective fetch concurrency).
+    pub(crate) fn new(fetch_permits: usize, cpu_permits: usize, inflight_permits: usize) -> Self {
         Self {
             fetch: Arc::new(Semaphore::new(fetch_permits.max(1))),
             cpu: Arc::new(Semaphore::new(cpu_permits.max(1))),
+            inflight: Arc::new(Semaphore::new(inflight_permits.max(1))),
         }
     }
 
-    /// Default sizing derived from available CPU parallelism: fetch at 2×
-    /// parallelism (network-bound, mostly waiting), CPU at 1× parallelism.
+    /// Default sizing.
+    ///
+    /// Memory — not cores — is the binding constraint on a fold, so the
+    /// memory-bound stages use small ABSOLUTE caps rather than scaling with
+    /// parallelism (an earlier core-scaled sizing OOM-killed a 64-core box:
+    /// 64 concurrent decodes × ~1.5 GB each ≈ 96 GB):
+    ///
+    /// - `cpu` (decode/encode) is the real memory lever: decoding one segment
+    ///   expands ~1.3M events to well over 1 GB of transient structures. Capped
+    ///   at [`MAX_DECODE_CONCURRENCY`] so peak decode memory is bounded to roughly
+    ///   that many segments regardless of core count, then further limited to the
+    ///   available parallelism on small boxes.
+    /// - `inflight` (whole-fold, memory backstop) bounds how many fetched
+    ///   segment buffers are resident; a small multiple of the decode cap gives
+    ///   fetch a little runway ahead of decode without unbounded pile-up.
+    /// - `fetch` (network) can safely exceed the memory caps since a GET only
+    ///   holds a compressed (~40 MB) buffer, but it never needs to exceed
+    ///   `inflight` (a fetch can't start without an inflight permit).
     pub(crate) fn from_available_parallelism() -> Self {
         let par = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self::new(par * 2, par)
+        let cpu = par.min(MAX_DECODE_CONCURRENCY);
+        let inflight = cpu * 2;
+        let fetch = inflight;
+        Self::new(fetch, cpu, inflight)
     }
 }
+
+/// Hard ceiling on concurrent segment decodes. Each decode transiently holds
+/// over a gigabyte (a ~1.3M-event segment expanded in memory), so this count
+/// times ~1.5 GB is roughly the fold pipeline's peak decode memory. Deliberately
+/// small and core-independent: adding cores speeds each decode but must not
+/// multiply the memory high-water mark.
+const MAX_DECODE_CONCURRENCY: usize = 6;
 
 impl Default for FoldLimits {
     fn default() -> Self {
@@ -354,6 +395,19 @@ struct EncodedParts {
     dict_buf: Vec<u8>,
     polls_buf: Vec<u8>,
     spans_buf: Vec<u8>,
+    /// CPU-stage timing/count breakdown, threaded out to the per-file metric.
+    cpu_stats: CpuStageStats,
+}
+
+/// Timing and size breakdown of the CPU stage ([`decode_and_encode`]), surfaced
+/// to the per-file [`FoldFileMetrics`] so the fold's cost is attributable to
+/// gunzip vs. the individual decode phases vs. parquet encode.
+#[derive(Default)]
+struct CpuStageStats {
+    decompressed_bytes: u64,
+    gunzip: std::time::Duration,
+    parquet_encode: std::time::Duration,
+    decode: crate::ingest::decode::DecodeStats,
 }
 
 /// CPU-bound stage of a fold: gunzip + decode + parquet-encode over
@@ -362,12 +416,22 @@ struct EncodedParts {
 /// network-bound fetch and write stages. (The parquet encode previously ran on
 /// the async executor thread; moving it here keeps CPU work off the runtime.)
 fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedParts> {
+    use std::time::Instant;
+    let mut cpu_stats = CpuStageStats::default();
+
+    let t_gunzip = Instant::now();
     let raw = maybe_gunzip(bytes);
-    let (samples, stacks, polls, spans) = decode::decode_samples(&raw, full_key)
-        .map_err(|e| anyhow::anyhow!("decode {full_key}: {e}"))?;
+    cpu_stats.gunzip = t_gunzip.elapsed();
+    cpu_stats.decompressed_bytes = raw.len() as u64;
+
+    let ((samples, stacks, polls, spans), decode_stats) =
+        decode::decode_samples_with_stats(&raw, full_key)
+            .map_err(|e| anyhow::anyhow!("decode {full_key}: {e}"))?;
+    cpu_stats.decode = decode_stats;
 
     // Always encode the samples part-file, even with zero rows: its existence is
     // the record that this file is folded, so it is never re-fetched.
+    let t_encode = Instant::now();
     let metadata = HashMap::new();
     let mut samples_buf = Vec::new();
     parquet_writer::write_samples(&mut samples_buf, &samples, &metadata)?;
@@ -382,12 +446,14 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
     // Write spans part-file (may be empty for files with no tracing spans).
     let mut spans_buf = Vec::new();
     parquet_writer::write_spans(&mut spans_buf, &spans)?;
+    cpu_stats.parquet_encode = t_encode.elapsed();
 
     Ok(EncodedParts {
         samples_buf,
         dict_buf,
         polls_buf,
         spans_buf,
+        cpu_stats,
     })
 }
 
@@ -444,18 +510,49 @@ pub(crate) async fn fold_one(
     raw_key: &str,
     limits: &FoldLimits,
 ) -> anyhow::Result<()> {
+    use std::time::Instant;
+    // One per-file metric per fold: assemble phase timings as we go, emit once on
+    // the way out (success or failure). See `FoldFileMetrics`.
+    let mut metric = crate::server::metrics::FoldFileMetricsBuilder::new();
+    let t_total = Instant::now();
+    // Emit-on-exit helper so every early return still publishes what we measured.
+    let emit = |mut metric: crate::server::metrics::FoldFileMetricsBuilder,
+                total: std::time::Duration,
+                failed: bool| {
+        metric.total(total).failed(failed);
+        metric.emit();
+    };
+
+    // Memory backstop — held across the WHOLE fold (fetch → decode → write), so
+    // the number of resident ~40 MB segment buffers is bounded regardless of how
+    // many files the work-list spawned. Without this, fetch (fast, network) races
+    // ahead of decode (slow, CPU) and downloaded buffers pile up between the two
+    // stages, OOM-killing the process on a broad scope. Acquired before the fetch
+    // permit so a fold doesn't occupy fetch concurrency while waiting for memory.
+    let _inflight = limits
+        .inflight
+        .acquire()
+        .await
+        .expect("inflight semaphore is never closed");
+
     // Stage 1 — fetch (network-bound). Permit held only for the duration of the GET.
+    let t_fetch = Instant::now();
     let bytes = {
         let _permit = limits
             .fetch
             .acquire()
             .await
             .expect("fetch semaphore is never closed");
-        agg.source
-            .get_object(&agg.source_bucket, raw_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("fetch {raw_key}: {e}"))?
+        match agg.source.get_object(&agg.source_bucket, raw_key).await {
+            Ok(b) => b,
+            Err(e) => {
+                emit(metric, t_total.elapsed(), true);
+                return Err(anyhow::anyhow!("fetch {raw_key}: {e}"));
+            }
+        }
     };
+    metric.fetch(t_fetch.elapsed());
+    metric.source_bytes(bytes.len() as u64);
 
     // Stage 2 — decode + encode (CPU-bound) on a blocking thread, gated so
     // concurrent folds don't oversubscribe the cores.
@@ -467,20 +564,42 @@ pub(crate) async fn fold_one(
             .acquire()
             .await
             .expect("cpu semaphore is never closed");
-        tokio::task::spawn_blocking(move || decode_and_encode(&bytes, &decode_key))
-            .await
-            .map_err(|e| anyhow::anyhow!("decode task panicked: {e}"))??
+        match tokio::task::spawn_blocking(move || decode_and_encode(&bytes, &decode_key)).await {
+            Ok(Ok(encoded)) => encoded,
+            Ok(Err(e)) => {
+                emit(metric, t_total.elapsed(), true);
+                return Err(e);
+            }
+            Err(e) => {
+                emit(metric, t_total.elapsed(), true);
+                return Err(anyhow::anyhow!("decode task panicked: {e}"));
+            }
+        }
     };
+    // Fold the CPU-stage breakdown into the metric before `encoded` is consumed
+    // by the writer.
+    let cpu = &encoded.cpu_stats;
+    metric
+        .gunzip(cpu.gunzip)
+        .decompressed_bytes(cpu.decompressed_bytes)
+        .decode_phases(&cpu.decode)
+        .parquet_encode(cpu.parquet_encode);
 
     // Stage 3 — write part-files (small, network-bound). Ungated.
-    write_parts(
+    let t_write = Instant::now();
+    let write_result = write_parts(
         &*agg.output,
         &agg.output_bucket,
         &agg.output_prefix,
         &full_key,
         encoded,
     )
-    .await
+    .await;
+    metric.write_parts(t_write.elapsed());
+
+    let failed = write_result.is_err();
+    emit(metric, t_total.elapsed(), failed);
+    write_result
 }
 
 /// LIST the folded set for one source bucket: the source-file leaf hashes that
@@ -1447,7 +1566,153 @@ pub struct AggContext {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
     use super::*;
+    use crate::storage::StorageError;
+
+    /// A source backend that records the peak number of `get_object` calls
+    /// running at once, so a test can assert the in-flight fold cap holds. Each
+    /// GET holds the "in-flight" state briefly (a yield-heavy spin) so overlap is
+    /// observable, then returns junk bytes (decode fails downstream — the test
+    /// only cares about fetch-stage concurrency).
+    #[derive(Default)]
+    struct ConcurrencyProbe {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StorageBackend for ConcurrencyProbe {
+        fn list_buckets(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn list_objects(
+            &self,
+            _bucket: &str,
+            _prefix: &str,
+            _cap: usize,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::storage::ListPage, StorageError>> + Send + '_>>
+        {
+            Box::pin(async { Err(StorageError::NotFound("unused".into())) })
+        }
+        fn list_objects_all(
+            &self,
+            _bucket: &str,
+            _prefix: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn list_prefixes(
+            &self,
+            _bucket: &str,
+            _prefix: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn get_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(cur, Ordering::SeqCst);
+                // Hold the in-flight window open across several executor turns so
+                // concurrent folds actually overlap here.
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                // Junk bytes: fold_one's decode stage fails, but only AFTER the
+                // fetch — which is all this probe measures.
+                Ok(vec![0u8; 8])
+            })
+        }
+        fn put_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _data: Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// The in-flight cap bounds how many folds hold a fetched segment buffer at
+    /// once — the memory backstop against a broad scope OOM-killing the process.
+    /// Even with a high fetch permit count, concurrent `fold_one`s must never run
+    /// more source GETs simultaneously than `inflight` allows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inflight_cap_bounds_concurrent_fetches() {
+        use std::sync::atomic::Ordering;
+
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let agg = AggContext {
+            source: probe.clone() as Arc<dyn StorageBackend>,
+            output: probe.clone() as Arc<dyn StorageBackend>,
+            source_bucket: "src".to_string(),
+            source_is_local: false,
+            output_bucket: "out".to_string(),
+            output_prefix: "flamegraph-data".to_string(),
+            source_prefixes: vec![],
+            segment_duration_secs: 60,
+        };
+
+        // fetch permits high (32) but inflight capped low (3): the inflight cap
+        // must be the binding constraint on concurrent fetches.
+        const INFLIGHT: usize = 3;
+        let limits = FoldLimits::new(32, 8, INFLIGHT);
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..64 {
+            let agg = agg.clone();
+            let limits = limits.clone();
+            tasks.spawn(async move {
+                // Decode fails on junk bytes; we don't care about the result,
+                // only that the fetch obeyed the in-flight cap.
+                let _ = fold_one(&agg, &format!("raw-{i}"), &limits).await;
+            });
+        }
+        while tasks.join_next().await.is_some() {}
+
+        let peak = probe.peak.load(Ordering::SeqCst);
+        assert!(peak > 0, "probe should have observed fetches");
+        assert!(
+            peak <= INFLIGHT,
+            "peak concurrent fetches {peak} exceeded the in-flight cap {INFLIGHT}"
+        );
+    }
+
+    /// Regression guard for the OOM: the default fold sizing must NOT scale the
+    /// memory-bound decode stage with core count. On a big box the decode cap has
+    /// to stay small and absolute — a 64-core machine running 64 concurrent
+    /// ~1.5 GB decodes is ~96 GB and gets OOM-killed. `cpu` is the decode gate and
+    /// must never exceed MAX_DECODE_CONCURRENCY regardless of parallelism.
+    #[test]
+    fn default_fold_limits_do_not_scale_decode_with_cores() {
+        let limits = FoldLimits::from_available_parallelism();
+        assert!(
+            limits.cpu.available_permits() <= MAX_DECODE_CONCURRENCY,
+            "decode concurrency {} must stay within the absolute cap {MAX_DECODE_CONCURRENCY}",
+            limits.cpu.available_permits()
+        );
+        // The whole-fold (memory backstop) cap is a small multiple of the decode
+        // cap, and fetch never needs to exceed inflight.
+        assert!(
+            limits.inflight.available_permits() <= MAX_DECODE_CONCURRENCY * 2,
+            "inflight {} should stay a small multiple of the decode cap",
+            limits.inflight.available_permits()
+        );
+        assert!(
+            limits.fetch.available_permits() <= limits.inflight.available_permits(),
+            "fetch must not exceed inflight (a fetch needs an inflight permit)"
+        );
+    }
 
     #[test]
     fn sample_filter_source_and_thread() {
@@ -1665,9 +1930,11 @@ mod tests {
         let sk = "s3://bkt/2026-06-19/1300/shale/host-a/boot-1/1-0.bin.gz";
         let pk = samples_part_key("flamegraph-data", sk);
         // Output is namespaced by source bucket, then partitioned by scope.
-        assert!(pk.starts_with(
-            "flamegraph-data/v5/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
-        ));
+        // Reference the version constant so bumping it doesn't break this test.
+        let expected_prefix = format!(
+            "flamegraph-data/v{SAMPLES_FORMAT_VERSION}/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
+        );
+        assert!(pk.starts_with(&expected_prefix));
         assert!(pk.ends_with(".parquet"));
         // Leaf is the content hash, idempotent across calls.
         assert_eq!(pk, samples_part_key("flamegraph-data", sk));

@@ -171,3 +171,31 @@ pub type DecodeResult = (
     Vec<ResolvedPoll>,
     Vec<ResolvedSpan>,
 );
+
+/// Per-phase timing and counts for one `decode_samples` call, returned by
+/// [`super::decode_samples_with_stats`]. Purely observational — used by the fold
+/// pipeline to emit a per-file metric so we can see where decode time goes
+/// (wire decode vs. poll reconstruction vs. span resolution vs. attribution)
+/// without a profiler. Durations are wall-clock for each phase, measured in
+/// sequence, so they sum (modulo rounding) to the total decode time.
+#[derive(Debug, Clone, Default)]
+pub struct DecodeStats {
+    /// Total events decoded off the wire (samples + park/unpark + poll
+    /// start/end + span enter/exit/close). The headline "how big is this file"
+    /// number.
+    pub events_decoded: u64,
+    /// Legacy span enter + exit + close events (subset of `events_decoded`).
+    pub span_events_decoded: u64,
+    /// Phase: one-pass wire decode (`decode_trace`).
+    pub wire_decode: std::time::Duration,
+    /// Phase: sort the event vector by timestamp.
+    pub sort_events: std::time::Duration,
+    /// Phase: reconstruct the poll timeline from park/unpark/poll events.
+    pub poll_reconstruct: std::time::Duration,
+    /// Phase: the sample loop (symbolication + per-sample poll attribution).
+    pub sample_resolve: std::time::Duration,
+    /// Phase: legacy span reconstruction (`resolve_legacy_spans`).
+    pub span_resolve: std::time::Duration,
+    /// Phase: sweep-line sample→span attribution.
+    pub sample_attribution: std::time::Duration,
+}

@@ -1246,11 +1246,14 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
 
     // The output bucket should contain exactly `files_folded` samples part-files
     // (one per folded source file) — no duplicates from re-polling. The output
-    // is namespaced by source bucket: `…/v5/bucket={src}/samples/…`.
+    // is namespaced by source bucket: `…/v{VERSION}/bucket={src}/samples/…`.
+    let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
     let listed = uploader
         .list_objects_v2()
         .bucket("out-bucket")
-        .prefix("flamegraph-data/v5/bucket=src-bucket/samples/")
+        .prefix(format!(
+            "flamegraph-data/v{version}/bucket=src-bucket/samples/"
+        ))
         .send()
         .await
         .unwrap();

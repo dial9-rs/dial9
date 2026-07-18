@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Diff-first unified view</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0d111c; --bg2:#111725; --panel:#141b2b; --panel2:#1a2233;
+  --line:#242e46; --line2:#2f3b58;
+  --ink:#e4eaf6; --dim:#93a0bd; --faint:#5e6b88;
+  --A:#31c9c0;         /* selection A — cool teal */
+  --A-dim:#1c6b68;
+  --B:#ff6a5f;         /* selection B — warm coral */
+  --B-dim:#8a3630;
+  --neutral:#3b475f;   /* parity */
+  --gold:#f2b53a;      /* derived / attention */
+  --cyan:#63d2ff;      /* interactive accent */
+  --ok:#5ad19a;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --sans:"IBM Plex Sans",-apple-system,system-ui,sans-serif;
+  --cond:"IBM Plex Sans Condensed",var(--sans);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  background:
+    radial-gradient(1200px 600px at 78% -8%, rgba(255,106,95,.06), transparent 60%),
+    radial-gradient(1000px 600px at 8% -6%, rgba(49,201,192,.06), transparent 55%),
+    var(--bg);
+  color:var(--ink); font-family:var(--sans); font-size:13px; line-height:1.35;
+  display:flex; flex-direction:column; overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit; cursor:pointer}
+::selection{background:rgba(99,210,255,.25)}
+
+/* ---- concept ribbon ---- */
+.ribbon{display:flex; align-items:center; gap:14px; padding:7px 16px;
+  background:linear-gradient(90deg,rgba(49,201,192,.10),rgba(255,106,95,.10));
+  border-bottom:1px solid var(--line); flex-shrink:0; font-size:11.5px; color:var(--dim)}
+.ribbon .tag{font-family:var(--cond); font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+  font-size:10.5px; color:var(--ink); background:rgba(255,255,255,.05);
+  border:1px solid var(--line2); padding:2px 9px; border-radius:20px}
+.ribbon b{color:var(--A)}
+.ribbon i{color:var(--B); font-style:normal}
+.ribbon .sp{margin-left:auto; display:flex; gap:14px}
+.ribbon a{color:var(--faint); text-decoration:none}
+.ribbon a:hover{color:var(--cyan)}
+
+/* ---- header ---- */
+.head{display:flex; align-items:center; gap:16px; padding:11px 18px 10px;
+  border-bottom:1px solid var(--line); flex-shrink:0}
+.scope-title{display:flex; flex-direction:column; gap:1px}
+.scope-title .svc{font-family:var(--cond); font-size:18px; font-weight:600; letter-spacing:.01em}
+.scope-title .svc small{color:var(--faint); font-weight:500; font-size:12px; margin-left:6px}
+.scope-title .sub{font-size:11px; color:var(--faint)}
+
+.tabs{display:flex; gap:2px; margin-left:8px; background:var(--bg2);
+  border:1px solid var(--line); border-radius:9px; padding:3px}
+.tab{padding:6px 15px; border-radius:6px; font-size:12.5px; font-weight:500; color:var(--dim);
+  background:none; border:none; letter-spacing:.02em; transition:.15s}
+.tab:hover{color:var(--ink)}
+.tab.on{background:var(--panel2); color:var(--ink); box-shadow:inset 0 0 0 1px var(--line2)}
+
+.head .grow{flex:1}
+.cmp-btn{display:flex; align-items:center; gap:9px; padding:8px 15px; border-radius:9px;
+  font-size:12.5px; font-weight:600; color:#fff; border:1px solid var(--B-dim);
+  background:linear-gradient(180deg,rgba(255,106,95,.28),rgba(255,106,95,.14));
+  box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 4px 16px rgba(255,106,95,.16)}
+.cmp-btn:hover{filter:brightness(1.12)}
+.cmp-btn .glyph{font-size:15px; line-height:1}
+.cmp-btn small{font-weight:500; color:rgba(255,255,255,.72)}
+.back-btn{padding:7px 13px; border-radius:8px; font-size:12px; color:var(--dim);
+  background:var(--panel); border:1px solid var(--line)}
+.back-btn:hover{color:var(--ink); border-color:var(--line2)}
+
+/* ---- selection bar ---- */
+.selbar{display:flex; align-items:stretch; gap:0; padding:10px 18px; border-bottom:1px solid var(--line);
+  background:var(--bg2); flex-shrink:0; position:relative}
+.side{display:flex; align-items:center; gap:8px; flex:1; min-width:0}
+.side.b{opacity:0; transform:translateX(-10px); pointer-events:none; transition:.28s ease}
+body.compare .side.b{opacity:1; transform:none; pointer-events:auto}
+.badge{display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:6px;
+  font-family:var(--mono); font-weight:600; font-size:12px; flex-shrink:0}
+.badge.a{background:rgba(49,201,192,.16); color:var(--A); box-shadow:inset 0 0 0 1px var(--A-dim)}
+.badge.b{background:rgba(255,106,95,.16); color:var(--B); box-shadow:inset 0 0 0 1px var(--B-dim)}
+.side .lbl{font-family:var(--cond); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--faint); flex-shrink:0}
+
+.chips{display:flex; align-items:center; gap:6px; flex-wrap:wrap; min-width:0}
+.chip{display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:7px;
+  font-family:var(--mono); font-size:11.5px; color:var(--ink);
+  background:var(--panel2); border:1px solid var(--line2); white-space:nowrap}
+.chip .kk{color:var(--faint)}
+.chip.all{color:var(--faint); font-style:italic; background:transparent; border-style:dashed}
+.chip.not{color:var(--A); border-color:var(--A-dim); background:rgba(49,201,192,.08)}
+.chip.derived{color:var(--gold); border-color:#5a4a1e; background:rgba(242,181,58,.08)}
+.chip.derived .prov{color:#8a7a48; font-family:var(--sans); font-style:italic; font-size:10.5px}
+.chip .x{color:var(--faint); cursor:pointer; font-size:13px; line-height:1; margin-left:1px}
+.chip .x:hover{color:var(--B)}
+.chip .rf{color:var(--gold); cursor:pointer; font-size:12px}
+.chip .rf:hover{filter:brightness(1.3)}
+.arrow{align-self:center; color:var(--faint); font-size:15px; padding:0 14px; flex-shrink:0}
+body:not(.compare) .arrow, body:not(.compare) .cov.b{display:none}
+
+.cov{display:flex; flex-direction:column; align-items:flex-end; gap:3px; flex-shrink:0; margin-left:10px}
+.cov .num{font-family:var(--mono); font-size:11px; color:var(--dim)}
+.cov .num b{color:var(--ink); font-weight:600}
+.cov .bar{width:88px; height:4px; border-radius:3px; background:var(--line); overflow:hidden}
+.cov .fill{height:100%; border-radius:3px; transition:width .5s ease}
+.cov.a .fill{background:var(--A)}
+.cov.b .fill{background:var(--B)}
+
+/* ---- view-local row ---- */
+.vlocal{display:none; align-items:center; gap:9px; padding:6px 18px; border-bottom:1px solid var(--line);
+  background:repeating-linear-gradient(45deg,rgba(242,181,58,.03) 0 8px,transparent 8px 16px)}
+body.compare.view-flame .vlocal{display:flex}
+.vlocal .lbl{font-family:var(--cond); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:#8a7a48}
+.chip.vl{border-style:dashed; border-color:#6b5a2a; background:rgba(242,181,58,.07); color:#f0d79a}
+.chip.vl .side-tag{font-family:var(--sans); font-size:10px; font-weight:600; padding:0 5px; border-radius:4px; letter-spacing:.03em}
+.chip.vl .side-tag.b{background:rgba(255,106,95,.2); color:var(--B)}
+.vlocal .note{font-size:10.5px; color:var(--faint); font-style:italic}
+
+/* ---- main ---- */
+.main{flex:1; display:flex; min-height:0; overflow:hidden}
+.views{flex:1; display:flex; min-width:0; gap:1px; background:var(--line)}
+.panel{flex:1; min-width:0; display:flex; flex-direction:column; background:var(--panel);
+  transition:flex-basis .28s ease}
+body:not(.compare) .panel.pb{flex:0 0 0; min-width:0; overflow:hidden; opacity:0}
+.panel-head{display:flex; align-items:center; gap:9px; padding:8px 13px; border-bottom:1px solid var(--line);
+  flex-shrink:0; background:linear-gradient(180deg,var(--panel2),var(--panel))}
+.panel-head .pb-badge{width:20px;height:20px;border-radius:5px;font-family:var(--mono);font-weight:600;font-size:11px;
+  display:inline-flex;align-items:center;justify-content:center}
+.pa .pb-badge{background:rgba(49,201,192,.16);color:var(--A);box-shadow:inset 0 0 0 1px var(--A-dim)}
+.pb .pb-badge{background:rgba(255,106,95,.16);color:var(--B);box-shadow:inset 0 0 0 1px var(--B-dim)}
+.panel-head .ptitle{font-family:var(--cond); font-size:13px; font-weight:600}
+.panel-head .psub{font-size:11px; color:var(--faint)}
+.panel-head .sync{font-size:10.5px; color:var(--faint); font-style:italic; display:flex; align-items:center; gap:4px}
+.panel-head .grow{flex:1}
+.selwrap{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim)}
+.mini-sel{background:var(--bg2); color:var(--dim); border:1px solid var(--line2); border-radius:6px;
+  padding:4px 7px; font-size:11px; font-family:var(--mono)}
+.mini-sel:hover{color:var(--ink)}
+
+.panel-body{flex:1; overflow:hidden; position:relative}
+canvas{display:block; width:100%; height:100%}
+.fg-legend{position:absolute; left:12px; bottom:10px; display:flex; align-items:center; gap:8px;
+  font-size:10.5px; color:var(--faint); background:rgba(13,17,28,.72); backdrop-filter:blur(3px);
+  padding:4px 9px; border-radius:7px; border:1px solid var(--line)}
+.fg-legend .ramp{width:88px; height:8px; border-radius:4px;
+  background:linear-gradient(90deg,var(--A),var(--neutral) 50%,var(--B))}
+
+.tip{position:fixed; z-index:60; pointer-events:none; display:none; max-width:340px;
+  background:var(--bg); border:1px solid var(--line2); border-radius:9px; padding:9px 11px;
+  box-shadow:0 12px 34px rgba(0,0,0,.5); font-size:12px}
+.tip .fn{font-family:var(--mono); font-weight:600; color:var(--ink); word-break:break-all; margin-bottom:6px}
+.tip .row{display:flex; justify-content:space-between; gap:20px; font-family:var(--mono); font-size:11.5px; padding:1px 0}
+.tip .row .k{color:var(--faint)}
+.tip .row.a .v{color:var(--A)} .tip .row.b .v{color:var(--B)}
+.tip .delta{margin-top:6px; padding-top:6px; border-top:1px solid var(--line); font-weight:600}
+
+/* context menu */
+.ctx{position:fixed; z-index:70; display:none; background:var(--bg); border:1px solid var(--line2);
+  border-radius:10px; padding:5px; box-shadow:0 16px 40px rgba(0,0,0,.55); min-width:210px}
+.ctx .title{font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint);
+  padding:6px 9px 4px; font-family:var(--cond)}
+.ctx .item{display:flex; align-items:center; gap:9px; padding:7px 9px; border-radius:7px; font-size:12px; color:var(--ink)}
+.ctx .item:hover{background:var(--panel2)}
+.ctx .item .st{font-family:var(--mono); font-size:10px; font-weight:600; padding:1px 6px; border-radius:5px}
+.st.a{background:rgba(49,201,192,.16); color:var(--A)}
+.st.b{background:rgba(255,106,95,.16); color:var(--B)}
+.st.ab{background:rgba(99,210,255,.14); color:var(--cyan)}
+.ctx .illu{font-size:10px; color:var(--faint); font-style:italic; padding:3px 9px 5px}
+
+/* ---- differences rail ---- */
+.rail{flex:0 0 400px; display:flex; flex-direction:column; background:var(--bg2);
+  border-left:1px solid var(--line); min-width:0}
+body:not(.compare) .rail{flex-basis:0; overflow:hidden; border:none}
+.rail-head{padding:13px 16px 10px; border-bottom:1px solid var(--line)}
+.rail-head .t{display:flex; align-items:center; gap:9px}
+.rail-head .t h3{font-family:var(--cond); font-size:15px; font-weight:600; letter-spacing:.01em}
+.rail-head .t .spark{width:5px; height:16px; border-radius:2px; background:linear-gradient(var(--A),var(--B))}
+.rail-head .t .grow{flex:1}
+.seg{display:inline-flex; background:var(--bg); border:1px solid var(--line2); border-radius:7px; padding:2px}
+.seg button{padding:4px 9px; border-radius:5px; font-size:10.5px; font-weight:600; color:var(--faint);
+  background:none; border:none; letter-spacing:.02em}
+.seg button.on{background:var(--panel2); color:var(--ink)}
+.rail-head .cap{font-size:11px; color:var(--faint); margin-top:6px}
+
+.gate{margin:12px 14px 0; padding:11px 12px; border-radius:10px; border:1px solid #5a4a1e;
+  background:repeating-linear-gradient(45deg,rgba(242,181,58,.06) 0 9px,transparent 9px 18px);
+  display:flex; flex-direction:column; gap:9px}
+.gate .msg{font-size:12px; color:#f0d79a; line-height:1.45}
+.gate .msg b{color:var(--gold)}
+.gate button{align-self:flex-start; padding:6px 12px; border-radius:7px; font-size:11.5px; font-weight:600;
+  color:#1a1200; background:var(--gold); border:none}
+.gate button:hover{filter:brightness(1.08)}
+body.folded .gate{display:none}
+
+.difflist{flex:1; overflow:auto; padding:8px 10px 14px}
+body:not(.folded) .difflist{opacity:.32; filter:grayscale(.6); pointer-events:none}
+.diffrow{display:grid; grid-template-columns:1fr auto; gap:2px 10px; padding:9px 10px; border-radius:9px;
+  align-items:center; transition:background .12s}
+.diffrow:hover{background:var(--panel)}
+.diffrow + .diffrow{border-top:1px solid var(--line)}
+.diffrow .name{font-family:var(--mono); font-size:12px; font-weight:500; color:var(--ink);
+  display:flex; align-items:center; gap:7px; min-width:0}
+.diffrow .name .n{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.flag{font-family:var(--cond); font-size:9.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+  padding:1px 6px; border-radius:5px; flex-shrink:0}
+.flag.new{background:rgba(255,106,95,.16); color:var(--B)}
+.flag.gone{background:rgba(49,201,192,.16); color:var(--A)}
+.diffrow .delta{font-family:var(--mono); font-size:14px; font-weight:600; text-align:right; grid-row:1/3; align-self:center}
+.diffrow .delta.up{color:var(--B)} .diffrow .delta.down{color:var(--A)}
+.diffrow .delta small{display:block; font-size:10px; font-weight:500; color:var(--faint); margin-top:1px}
+.cmpbar{grid-column:1; display:flex; align-items:center; gap:7px; margin-top:2px}
+.cmpbar .track{flex:1; height:9px; border-radius:5px; background:var(--line); position:relative; overflow:hidden}
+.cmpbar .va{position:absolute; left:0; top:0; bottom:0; background:var(--A); opacity:.85}
+.cmpbar .vb{position:absolute; left:0; top:0; bottom:0; background:var(--B); opacity:.9; mix-blend-mode:screen}
+.cmpbar .vals{font-family:var(--mono); font-size:10px; color:var(--faint); white-space:nowrap}
+.cmpbar .vals .xa{color:var(--A)} .cmpbar .vals .xb{color:var(--B)}
+.difflist .foot{font-size:10.5px; color:var(--faint); font-style:italic; padding:12px 10px 0; line-height:1.5}
+
+/* ---- span / tokio tables ---- */
+.tblpanel{flex:1; min-width:0; display:flex; flex-direction:column; background:var(--panel)}
+.tbl-view{flex:1; overflow:auto; padding:14px 16px}
+.tbl-head{display:flex; align-items:center; gap:10px; margin-bottom:12px; flex-wrap:wrap}
+.tbl-head .kindpill{font-family:var(--mono); font-size:11px; color:var(--dim);
+  background:var(--panel2); border:1px solid var(--line2); padding:3px 9px; border-radius:7px}
+.tbl-head .kindpill b{color:var(--ink)}
+.tbl-head label{font-size:11px; color:var(--faint)}
+.tbl-head select{background:var(--bg); color:var(--ink); border:1px solid var(--line2); border-radius:7px;
+  padding:5px 9px; font-family:var(--mono); font-size:11.5px}
+table{width:100%; border-collapse:collapse; font-size:12px}
+th{text-align:left; font-family:var(--cond); font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+  font-size:10px; color:var(--faint); padding:6px 10px; border-bottom:1px solid var(--line2); position:sticky; top:0;
+  background:var(--panel)}
+th.num,td.num{text-align:right; font-family:var(--mono)}
+td{padding:8px 10px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:12px}
+tr:hover td{background:var(--panel2)}
+td.name{font-weight:500; color:var(--ink)}
+.comp{display:inline-flex; height:11px; width:150px; border-radius:4px; overflow:hidden; vertical-align:middle;
+  border:1px solid var(--line)}
+.comp span{height:100%}
+.split{display:inline-flex; height:11px; width:120px; border-radius:4px; overflow:hidden; border:1px solid var(--line); vertical-align:middle}
+.split .on{background:var(--A)} .split .off{background:var(--B-dim)}
+
+.legendrow{display:flex; gap:14px; align-items:center; font-size:10.5px; color:var(--faint); margin-bottom:10px; flex-wrap:wrap}
+.legendrow i{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:4px;vertical-align:middle}
+
+/* ---- unified diff table (single, aligned; the row IS the diff) ---- */
+.unified{flex:1; min-width:0; display:flex; flex-direction:column; background:var(--panel)}
+.unified .panel-head .aName{color:var(--A)} .unified .panel-head .bName{color:var(--B)}
+.dtbl{width:100%; border-collapse:separate; border-spacing:0; font-size:12px}
+.dtbl th{text-align:left; font-family:var(--cond); font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+  font-size:10px; color:var(--faint); padding:8px 12px; border-bottom:1px solid var(--line2); position:sticky; top:0; background:var(--panel); z-index:2}
+.dtbl th .ab{font-family:var(--mono); text-transform:none; letter-spacing:0; font-size:10px}
+.dtbl th .ab .a{color:var(--A)} .dtbl th .ab .b{color:var(--B)}
+.dtbl td{padding:11px 12px; border-bottom:1px solid var(--line); vertical-align:middle}
+.dtbl tr:hover td{background:var(--panel2)}
+.dtbl td.nm{font-family:var(--mono); font-weight:500; color:var(--ink); white-space:nowrap}
+.rowbadge{font-family:var(--cond); font-size:9.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+  padding:1px 6px; border-radius:5px; margin-left:8px}
+.rowbadge.new{background:rgba(255,106,95,.16); color:var(--B)}
+.rowbadge.gone{background:rgba(49,201,192,.16); color:var(--A)}
+
+/* occurrences: A→B */
+.occ{font-family:var(--mono); font-size:11.5px; white-space:nowrap}
+.occ .a{color:var(--A)} .occ .b{color:var(--B)} .occ .ar{color:var(--faint); margin:0 5px}
+
+/* latency range dumbbell on a shared log axis */
+.lat{min-width:220px}
+.lat .track{position:relative; height:34px}
+.lat .grid{position:absolute; inset:0}
+.lat .grid i{position:absolute; top:0; bottom:12px; width:1px; background:var(--line)}
+.lat .grid b{position:absolute; bottom:0; transform:translateX(-50%); font-family:var(--mono); font-size:8.5px; color:var(--faint)}
+.lat .bar{position:absolute; height:6px; border-radius:4px}
+.lat .bar.a{top:5px; background:linear-gradient(90deg,rgba(49,201,192,.35),var(--A))}
+.lat .bar.b{top:15px; background:linear-gradient(90deg,rgba(255,106,95,.35),var(--B))}
+.lat .cap{position:absolute; width:2px; height:10px; border-radius:2px; top:3px}
+.lat .cap.a{background:var(--A)} .lat .cap.b{background:var(--B); top:13px}
+.lat .p99dot{position:absolute; width:8px; height:8px; border-radius:50%; transform:translate(-50%,-50%)}
+.lat .p99dot.a{background:var(--A); top:8px; box-shadow:0 0 0 2px var(--panel)}
+.lat .p99dot.b{background:var(--B); top:18px; box-shadow:0 0 0 2px var(--panel)}
+.lat .link{position:absolute; height:2px; top:12px; background:linear-gradient(90deg,var(--A),var(--B)); opacity:.5}
+.lat .num{font-family:var(--mono); font-size:10.5px; color:var(--dim); margin-top:3px}
+.lat .num b{font-weight:600}
+.lat .num .up{color:var(--B)} .lat .num .down{color:var(--A)}
+
+/* composition reallocation: diverging around a center line */
+.reallo{min-width:200px}
+.reallo .strip{position:relative; height:14px; border-radius:4px; background:var(--bg); border:1px solid var(--line); overflow:hidden}
+.reallo .mid{position:absolute; left:50%; top:0; bottom:0; width:1px; background:var(--line2); z-index:2}
+.reallo seg,.reallo .seg{position:absolute; top:0; bottom:0}
+.reallo .cap{font-size:10px; color:var(--faint); margin-top:4px; display:flex; gap:10px; flex-wrap:wrap}
+.reallo .cap .mv{font-family:var(--mono)}
+.reallo .cap .up{color:var(--B)} .reallo .cap .down{color:var(--A)}
+.tblfoot{font-size:10.5px; color:var(--faint); font-style:italic; padding:12px 14px; line-height:1.5}
+
+/* ---- status ---- */
+.status{display:flex; align-items:center; gap:20px; padding:7px 18px; border-top:1px solid var(--line);
+  background:var(--bg2); flex-shrink:0; font-size:11px; color:var(--dim)}
+.status .mode{font-family:var(--cond); letter-spacing:.05em; color:var(--ink)}
+.status .grow{flex:1}
+.status .link{color:var(--cyan); cursor:pointer; display:flex; align-items:center; gap:5px}
+.status .link:hover{filter:brightness(1.2)}
+.status .pill{font-family:var(--mono); font-size:10px; background:var(--panel2); border:1px solid var(--line2);
+  padding:2px 7px; border-radius:5px; color:var(--dim)}
+.status em{color:var(--faint); font-style:italic}
+.illu{color:var(--faint); font-style:italic}
+</style>
+</head>
+<body class="view-flame">
+
+<div class="ribbon">
+  <span class="tag">Diff-first</span>
+  <span>Every view compares two selections — <b>A baseline</b> vs <i>B focus</i>. A lone flamegraph is just the <b>B&nbsp;=&nbsp;∅</b> case.</span>
+  <span class="sp">
+    <a href="index.html">gallery</a><a href="concept-1.html">c1</a><a href="concept-2.html">c2</a><a href="concept-3.html">c3</a>
+  </span>
+</div>
+
+<div class="head">
+  <div class="scope-title">
+    <div class="svc">checkout <small>us-east-1 · 2026-07-17 14:00–14:15</small></div>
+    <div class="sub">quick-built from S3 browser — “whole service, 15-min window”</div>
+  </div>
+  <div class="tabs" id="tabs">
+    <button class="tab on" data-view="flame">Flamegraph</button>
+    <button class="tab" data-view="spans">Spans</button>
+    <button class="tab" data-view="tokio">Tokio</button>
+  </div>
+  <div class="grow"></div>
+  <button class="cmp-btn" id="cmpBtn"><span class="glyph">⋔</span><span>Compare<br><small>pop out &gt; p99 latency</small></span></button>
+  <button class="back-btn" id="backBtn" style="display:none">← back to Inspect</button>
+</div>
+
+<div class="selbar">
+  <div class="side a">
+    <span class="badge a">A</span><span class="lbl">baseline</span>
+    <div class="chips" id="chipsA">
+      <span class="chip"><span class="kk">service</span>=checkout</span>
+      <span class="chip all">host = ∗ (all)</span>
+      <span class="chip"><span class="kk">time</span>=14:00–14:15</span>
+      <span class="chip not" id="notChip"><span class="kk">NOT</span> dur&gt;340ms <span class="x" id="notx" title="drop the complement — compare B vs the whole baseline">✕</span></span>
+    </div>
+    <div class="cov a"><div class="num"><b id="covAf">47</b>/480 files · <span id="covAp">9.8%</span></div><div class="bar"><div class="fill" id="covAfill" style="width:9.8%"></div></div></div>
+  </div>
+  <div class="arrow">→</div>
+  <div class="side b">
+    <span class="badge b">B</span><span class="lbl">focus</span>
+    <div class="chips" id="chipsB">
+      <span class="chip"><span class="kk">service</span>=checkout</span>
+      <span class="chip derived" id="derivedChip">
+        <span class="kk">dur</span>&gt;340ms
+        <span class="rf" id="refreshBtn" title="re-derive against all folded data">↻</span>
+        <span class="prov" id="prov">derived: p99 @ cov 12/480</span>
+      </span>
+    </div>
+    <div class="cov b"><div class="num"><b id="covBf">12</b>/480 files · <span id="covBp">2.5%</span></div><div class="bar"><div class="fill" id="covBfill" style="width:2.5%"></div></div></div>
+  </div>
+</div>
+
+<div class="vlocal">
+  <span class="lbl">view-local · flamegraph</span>
+  <span class="chip vl"><span class="kk">path ⊃</span> db::query <span class="side-tag b">B only</span> <span class="x" id="vlx">✕</span></span>
+  <span class="note">one-sided filter → A and B no longer share a predicate; the asymmetry is shown here, never silent.</span>
+</div>
+
+<div class="main">
+  <div class="views" id="views">
+    <!-- FLAMEGRAPH VIEW -->
+    <div class="panel pa" id="flameA">
+      <div class="panel-head">
+        <span class="pb-badge">A</span>
+        <div><div class="ptitle">baseline ∖ (dur&gt;340ms)</div></div>
+        <span class="psub" id="paSub">— the fast / normal requests</span>
+        <div class="grow"></div>
+        <div class="selwrap">colour <select class="mini-sel" id="colorA"><option value="delta">A/B delta</option><option value="hot">hotness</option><option value="mod">by module</option></select></div>
+      </div>
+      <div class="panel-body"><canvas id="cvA"></canvas>
+        <div class="fg-legend"><span>A heavier</span><span class="ramp"></span><span>B heavier</span></div>
+      </div>
+    </div>
+    <div class="panel pb" id="flameB">
+      <div class="panel-head">
+        <span class="pb-badge">B</span>
+        <div><div class="ptitle">focus: dur&gt;340ms</div></div>
+        <span class="psub">— the slow p99 tail</span>
+        <span class="sync">⇄ synced to A · zoom / search / inspect mirror</span>
+        <div class="grow"></div>
+        <div class="selwrap">colour <select class="mini-sel" id="colorB"><option value="delta">A/B delta</option><option value="hot">hotness</option><option value="mod">by module</option></select></div>
+      </div>
+      <div class="panel-body"><canvas id="cvB"></canvas></div>
+    </div>
+  </div>
+
+  <div class="rail" id="rail">
+    <div class="rail-head">
+      <div class="t"><span class="spark"></span><h3>Most significant differences</h3><span class="grow"></span>
+        <span class="seg" id="rankSeg"><button class="on" data-rank="share">by share</button><button data-rank="rel">by Δ%</button></span>
+      </div>
+      <div class="cap" id="railCap">Ranked frames whose self-time shifted most between A and B · unsymbolised excluded.</div>
+    </div>
+    <div class="gate">
+      <div class="msg">⚠ Coverage asymmetric — <b>A 9.8%</b> vs <b>B 2.5%</b>. Differences are <b>preliminary</b> until both sides fold a comparable share.</div>
+      <button id="foldBtn">▶ simulate fold complete</button>
+    </div>
+    <div class="difflist" id="difflist"></div>
+  </div>
+</div>
+
+<div class="status">
+  <span class="mode" id="modeLbl">Inspect · B = ∅ · single full-width panel</span>
+  <span class="grow"></span>
+  <span>view: <b id="viewLbl" style="font-family:var(--mono);color:var(--cyan)">flamegraph</b></span>
+  <span><em>nav state (zoom/search) remembered per-view</em></span>
+  <span class="link" id="permalink">🔗 copy comparison link <span class="pill">A + B-as-Δ in URL</span></span>
+</div>
+
+<div class="tip" id="tip"></div>
+<div class="ctx" id="ctx">
+  <div class="title">filter to this path…</div>
+  <div class="item">keep only samples through <b style="font-family:var(--mono);margin:0 3px">db::query</b></div>
+  <div class="item">apply to <span class="st a">A only</span></div>
+  <div class="item">apply to <span class="st b">B only</span></div>
+  <div class="item">apply to <span class="st ab">both</span> · keeps sides comparable</div>
+  <div class="illu">illustrative — the “B only” result is the view-local chip above</div>
+</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * Hand-authored realistic call tree for a tokio checkout service.
+ * N(name, aSelf, bSelf, ...children). self = samples landing directly
+ * in this frame. `b` tells the story of the slow tail: db::query +
+ * pool lock_wait explode, cache_hit_path vanishes, retry::backoff
+ * appears. U(...) marks an unsymbolised frame (excluded from diff).
+ * ------------------------------------------------------------------ */
+function N(name,a,b,...kids){return{name,a,b,self_a:a,self_b:b,kids,opt:{}};}
+function U(name,a,b,...kids){const n=N(name,a,b,...kids);n.opt.unsym=true;return n;}
+
+const TREE = N("all",0,0,
+  N("tokio::runtime::worker::run_task",0,0,
+    N("<checkout::App as Service>::call",30,16,
+    N("checkout::handle_request",90,44,
+      N("checkout::route_checkout",40,20,
+        N("auth::verify",20,10,
+          N("jwt::decode",60,30, N("ring::signature::verify",70,34, N("ring::ec::verify",40,18))),
+          N("redis::get_session",22,10, N("tokio::net::TcpStream::read",40,20, N("mio::sys::read",90,52, U("__libc_recv",60,40)))),
+        ),
+        N("db::query",50,90,
+          N("sqlx::Executor::execute",60,70,
+            N("sqlx::mysql::MySqlConnection::run",40,60,
+              N("sqlx::mysql::protocol::write_query",30,26, N("tokio::net::TcpStream::write",90,120, N("mio::sys::write",60,90))),
+              N("sqlx::mysql::protocol::read_rows",70,90, N("tokio::net::TcpStream::read",120,180, N("mio::sys::read",110,190, U("__libc_recv",44,70)))),
+            ),
+            N("sqlx::decode::decode_row",80,96, N("sqlx::parse_rows",120,150)),
+          ),
+          N("pool::acquire",10,40,
+            N("lock_wait",6,220, N("futex_wait",8,180)),
+            N("parking_lot::Mutex::lock",10,80, N("std::sync::park",6,60)),
+          ),
+        ),
+        N("checkout::serialize_response",20,10,
+          N("serde_json::to_vec",120,54, N("serde::ser::serialize",96,40, N("itoa::write",50,20))),
+        ),
+        N("cache::lookup",14,10,
+          N("cache_hit_path",210,4, N("hashbrown::get",120,3, N("ahash::hash",60,2))),
+          N("cache_miss_path",20,120, N("db::query",20,90, N("sqlx::Executor::execute",40,120, N("tokio::net::TcpStream::read",50,140)))),
+        ),
+      ),
+      N("checkout::route_cart",30,16,
+        N("cart::load_items",40,24, N("db::query",50,88, N("tokio::net::TcpStream::read",70,120, N("mio::sys::read",60,110)))),
+        N("cart::price",50,26, N("decimal::mul",120,58, N("num_bigint::mul",70,30))),
+      ),
+    )),
+    N("retry::backoff",0,90,
+      N("tokio::time::sleep",4,150, N("tokio::time::Sleep::poll",6,90)),
+      N("checkout::handle_request",6,60, N("db::query",8,70, N("sqlx::Executor::execute",6,80))),
+    ),
+    N("metrics::flush",24,12, N("hdrhistogram::record",52,20, N("hdrhistogram::index_for",30,12))),
+  ),
+);
+
+function agg(n){let a=n.self_a,b=n.self_b;for(const k of n.kids){agg(k);a+=k.a;b+=k.b;}n.a=a;n.b=b;return n;}
+agg(TREE);
+const TOTAL_A=TREE.a, TOTAL_B=TREE.b;
+
+/* ---------- color ---------- */
+function lerp(a,b,t){return a+(b-a)*t;}
+function hex(c){return"#"+c.map(x=>Math.max(0,Math.min(255,Math.round(x))).toString(16).padStart(2,"0")).join("");}
+const TEAL=[49,201,192],SLATE=[59,71,95],CORAL=[255,106,95];
+function diverge(t){if(t<0){const u=-t;return hex([lerp(SLATE[0],TEAL[0],u),lerp(SLATE[1],TEAL[1],u),lerp(SLATE[2],TEAL[2],u)]);}return hex([lerp(SLATE[0],CORAL[0],t),lerp(SLATE[1],CORAL[1],t),lerp(SLATE[2],CORAL[2],t)]);}
+function deltaColor(n){const af=n.a/TOTAL_A,bf=n.b/TOTAL_B,eps=0.4/Math.max(TOTAL_A,TOTAL_B);const s=Math.log2((bf+eps)/(af+eps));return diverge(Math.max(-1,Math.min(1,s/3)));}
+let HUE={};
+function modColor(name){const mod=name.split("::")[0];if(!(mod in HUE)){HUE[mod]=(Object.keys(HUE).length*61+20)%360;}return"hsl("+HUE[mod]+" 42% 50%)";}
+function hotColor(n,side){const f=(side==="a"?n.self_a/TOTAL_A:n.self_b/TOTAL_B);const t=Math.min(1,Math.pow(f*60,.5));return hex([lerp(60,255,t),lerp(70,150,t),lerp(90,40,t)]);}
+function colorOf(n,side,mode){if(n.opt.unsym)return"#2c3346";if(mode==="mod")return modColor(n.name);if(mode==="hot")return hotColor(n,side);return deltaColor(n);}
+
+/* ---------- flame layout + render ---------- */
+const PAD=1, TOP=8;
+function maxDepth(node,side,d){let m=d;for(const k of node.kids){if((side==="a"?k.a:k.b)>0)m=Math.max(m,maxDepth(k,side,d+1));}return m;}
+function layout(node,side,x,w,depth,out){
+  const val=side==="a"?node.a:node.b; if(val<=0||w<0.4)return;
+  out.push({node,x,w,depth});
+  let cx=x;
+  for(const k of node.kids){const kv=side==="a"?k.a:k.b; if(kv<=0)continue; const kw=kv/val*w; layout(k,side,cx,kw,depth+1,out); cx+=kw;}
+}
+function draw(canvas,side){
+  const wrap=canvas.parentElement,dpr=window.devicePixelRatio||1;
+  const W=wrap.clientWidth,H=wrap.clientHeight; if(W<2||H<2)return;
+  canvas.width=W*dpr; canvas.height=H*dpr;
+  const ctx=canvas.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  const mode=document.getElementById(side==="a"?"colorA":"colorB").value;
+  const boxes=[]; layout(TREE.kids[0],side,6,W-12,0,boxes);
+  canvas._boxes=boxes;
+  // scale row height so the tree fills the panel (min 15, max 30), leaving a
+  // little breathing room at the bottom for the legend overlay.
+  const depth=maxDepth(TREE.kids[0],side,0)+1;
+  const ROW=Math.max(15,Math.min(42,Math.floor((H-TOP-30)/depth)));
+  canvas._row=ROW;
+  ctx.font=(ROW<18?'500 10px':'500 11.5px')+' "IBM Plex Mono",monospace'; ctx.textBaseline="middle";
+  for(const bx of boxes){
+    const y=TOP+bx.depth*ROW,h=ROW-PAD,col=colorOf(bx.node,side,mode);
+    ctx.fillStyle=col; roundRect(ctx,bx.x,y,Math.max(bx.w-1,.5),h,3); ctx.fill();
+    if(bx.node.opt.unsym){ctx.save();ctx.beginPath();roundRect(ctx,bx.x,y,Math.max(bx.w-1,.5),h,3);ctx.clip();ctx.strokeStyle="rgba(255,255,255,.10)";ctx.lineWidth=1;for(let i=-h;i<bx.w;i+=5){ctx.beginPath();ctx.moveTo(bx.x+i,y);ctx.lineTo(bx.x+i+h,y+h);ctx.stroke();}ctx.restore();}
+    if(bx.w>34){const lum=bx.node.opt.unsym?0:luma(col);ctx.fillStyle=lum>150?"rgba(10,14,22,.9)":"rgba(236,242,252,.94)";ctx.fillText(fit(ctx,bx.node.name,bx.w-8),bx.x+5,y+h/2+.5);}
+  }
+}
+function roundRect(ctx,x,y,w,h,r){r=Math.min(r,w/2,h/2);ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function luma(c){if(c.startsWith("hsl"))return 120;const h=c.slice(1);return .299*parseInt(h.slice(0,2),16)+.587*parseInt(h.slice(2,4),16)+.114*parseInt(h.slice(4,6),16);}
+function fit(ctx,s,max){if(ctx.measureText(s).width<=max)return s;let lo=0,hi=s.length;while(lo<hi){const m=(lo+hi+1)>>1;if(ctx.measureText(s.slice(0,m)+"…").width<=max)lo=m;else hi=m-1;}return lo<1?"":s.slice(0,lo)+"…";}
+
+/* ---------- hover + context menu ---------- */
+function hookHover(canvas){
+  const tip=document.getElementById("tip");
+  canvas.addEventListener("mousemove",e=>{
+    const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+    const ROW=canvas._row||17;
+    const bx=(canvas._boxes||[]).find(b=>{const y=TOP+b.depth*ROW;return mx>=b.x&&mx<=b.x+b.w&&my>=y&&my<=y+ROW;});
+    if(!bx){tip.style.display="none";return;}
+    const n=bx.node,af=n.a/TOTAL_A*100,bf=n.b/TOTAL_B*100;
+    const dl=n.a===0?'<span style="color:var(--B)">new in B</span>':n.b===0?'<span style="color:var(--A)">gone in B</span>':(bf>=af?'<span style="color:var(--B)">+'+((bf/af-1)*100|0)+'% share in B</span>':'<span style="color:var(--A)">−'+((1-bf/af)*100|0)+'% share in B</span>');
+    tip.innerHTML='<div class="fn">'+n.name+(n.opt.unsym?' · <span style="color:var(--faint)">[unsymbolised — excluded]</span>':'')+'</div>'+
+      '<div class="row a"><span class="k">A · baseline</span><span class="v">'+af.toFixed(1)+'%  ('+n.a+' smp)</span></div>'+
+      '<div class="row b"><span class="k">B · focus</span><span class="v">'+bf.toFixed(1)+'%  ('+n.b+' smp)</span></div>'+
+      '<div class="delta">'+dl+'</div>';
+    tip.style.display="block";
+    tip.style.left=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-10)+"px";
+    tip.style.top=Math.min(e.clientY+14,innerHeight-tip.offsetHeight-10)+"px";
+  });
+  canvas.addEventListener("mouseleave",()=>document.getElementById("tip").style.display="none");
+  canvas.addEventListener("contextmenu",e=>{e.preventDefault();const c=document.getElementById("ctx");c.style.display="block";c.style.left=Math.min(e.clientX,innerWidth-230)+"px";c.style.top=Math.min(e.clientY,innerHeight-200)+"px";});
+}
+addEventListener("click",e=>{if(!e.target.closest("#ctx"))document.getElementById("ctx").style.display="none";});
+
+/* ---------- flamegraph differences ---------- */
+function selfRows(){
+  const m={};
+  (function walk(n){if(!n.opt.unsym){(m[n.name]||(m[n.name]={a:0,b:0,name:n.name}));m[n.name].a+=n.self_a;m[n.name].b+=n.self_b;}n.kids.forEach(walk);})(TREE);
+  return Object.values(m).filter(r=>r.name!=="all"&&(r.a+r.b)>=20).map(r=>{
+    r.ap=r.a/TOTAL_A*100; r.bp=r.b/TOTAL_B*100; r.dShare=r.bp-r.ap; r.dAbs=r.b-r.a;
+    r.rel=r.a===0?Infinity:r.b===0?-1:r.b/r.a-1; return r;});
+}
+let RANK="share";
+function renderDiffFlame(){
+  const rows=selfRows();
+  rows.sort((x,y)=>RANK==="share"?Math.abs(y.dShare)-Math.abs(x.dShare):(Math.abs(y.rel===Infinity?9:y.rel)-Math.abs(x.rel===Infinity?9:x.rel)));
+  const top=rows.slice(0,9),maxv=Math.max(...top.map(r=>Math.max(r.ap,r.bp)),1);
+  document.getElementById("difflist").innerHTML=top.map(r=>{
+    const flag=r.a===0?'<span class="flag new">new</span>':r.b===0?'<span class="flag gone">gone</span>':'';
+    const up=r.dShare>=0;
+    const dlabel=r.a===0?'new':r.b===0?'−100%':(r.rel>=0?'+'+(r.rel*100|0)+'%':'−'+((-r.rel)*100|0)+'%');
+    return '<div class="diffrow"><div class="name"><span class="n">'+r.name+'</span>'+flag+'</div>'+
+      '<div class="delta '+(up?'up':'down')+'">'+dlabel+'<small>'+(up?'+':'')+r.dShare.toFixed(1)+' pp · '+(r.dAbs>=0?'+':'')+r.dAbs+' smp</small></div>'+
+      '<div class="cmpbar"><div class="track"><div class="va" style="width:'+(r.ap/maxv*100)+'%"></div><div class="vb" style="width:'+(r.bp/maxv*100)+'%"></div></div>'+
+      '<span class="vals"><span class="xa">A '+r.ap.toFixed(1)+'%</span> <span class="xb">B '+r.bp.toFixed(1)+'%</span></span></div></div>';
+  }).join("")+'<div class="foot">Δ share = shift in this frame’s % of the profile (percentage-points). “new / gone” = present on only one side. Unsymbolised frames are excluded — they always differ and would flood the ranking.</div>';
+}
+
+/* ---------- unified diff datasets ----------
+ * One row per identity, carrying BOTH sides. p50/p95/p99 in ns; occ = count;
+ * comp = 5-way composition [on-cpu, sched, sync-block, async-wait, unknown].
+ * The row renders as a DIFF (range dumbbell + reallocation), never two rows. */
+const COMPC=["var(--A)","#c9a13b","#c96f6f","var(--B-dim)","var(--neutral)"],COMPL=["on-cpu","sched","sync-block","async-wait","unknown"];
+const NS={us:1e3,ms:1e6};
+function ms(x){return x*NS.ms;} function us(x){return x*NS.us;}
+function fmtT(ns){if(ns>=1e9)return(ns/1e9).toFixed(ns>=1e10?0:1)+"s";if(ns>=1e6)return(ns/1e6).toFixed(ns>=1e7?0:0)+"ms";if(ns>=1e3)return(ns/1e3).toFixed(0)+"µs";return ns+"ns";}
+function fmtC(n){return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":""+n;}
+
+const SPANS=[
+  {n:"db.query",       occA:842000, occB:41000, aP:[ms(1),ms(3),ms(12)],  bP:[ms(28),ms(280),ms(340)], compA:[55,10,20,10,5], compB:[18,14,30,34,4]},
+  {n:"http.request",   occA:610000, occB:38000, aP:[ms(9),ms(30),ms(140)],bP:[ms(60),ms(410),ms(620)], compA:[30,8,40,18,4], compB:[14,10,26,46,4]},
+  {n:"auth.verify",    occA:598000, occB:37000, aP:[us(400),ms(1.2),ms(6)],bP:[ms(2),ms(9),ms(11)],    compA:[70,6,14,6,4],  compB:[52,10,20,14,4]},
+  {n:"cache.get",      occA:1200000,occB:33000, aP:[us(120),us(400),ms(2)],bP:[us(180),us(500),ms(1)], compA:[80,4,8,4,4],   compB:[82,4,6,4,4]},
+  {n:"serialize.resp", occA:604000, occB:36000, aP:[us(300),us(800),ms(4)],bP:[us(500),ms(1),ms(3)],   compA:[88,2,4,2,4],   compB:[86,2,4,4,4]},
+  {n:"retry.attempt",  occA:0,      occB:9000,  aP:null,                   bP:[ms(50),ms(150),ms(300)], compA:null,           compB:[6,4,80,6,4]},
+];
+const TOKIO=[
+  {n:"axum::serve @ src/main.rs:243",           occA:1200000,occB:38000, aP:[us(8),us(20),us(40)], bP:[us(200),us(700),ms(1.2)],compA:[78,6,10,2,4], compB:[24,20,40,12,4]},
+  {n:"checkout::handler::spawn @ handler.rs:88",occA:891000, occB:1200000,aP:[us(90),ms(2),ms(6)], bP:[ms(40),ms(120),ms(210)], compA:[70,8,14,4,4], compB:[24,14,20,38,4]},
+  {n:"db::pool::spawn @ src/pool.rs:210",       occA:420000, occB:512000, aP:[us(40),us(300),ms(1)],bP:[ms(4),ms(22),ms(44)],    compA:[61,10,20,5,4],compB:[19,16,55,6,4]},
+  {n:"metrics::flush::spawn @ src/main.rs:57",  occA:31000,  occB:33000,  aP:[us(20),us(60),us(90)],bP:[us(30),us(80),us(110)],  compA:[95,1,2,1,1],  compB:[93,2,2,2,1]},
+];
+
+/* shared log axis across a dataset's p99s so dumbbells are comparable row-to-row */
+function axisFor(rows){let lo=Infinity,hi=0;rows.forEach(r=>{[r.aP,r.bP].forEach(p=>{if(p){lo=Math.min(lo,p[0]);hi=Math.max(hi,p[2]);}});});
+  const l0=Math.floor(Math.log10(lo)),l1=Math.ceil(Math.log10(hi));return {l0,l1,span:l1-l0};}
+function xOf(ns,ax){return (Math.log10(ns)-ax.l0)/ax.span*100;}
+function gridTicks(ax){const t=[];for(let e=ax.l0;e<=ax.l1;e++)t.push(e);return t;}
+
+/* latency-range dumbbell: A range bar + B range bar on a shared log axis,
+ * p50→p99 as the bar, p99 as the dot, joined A↔B. THE ROW IS THE DIFF. */
+function latCell(r,ax){
+  if(!r.aP) return rangeOnly(r.bP,ax,"b","new in B");
+  if(!r.bP) return rangeOnly(r.aP,ax,"a","gone in B");
+  const xa0=xOf(r.aP[0],ax),xa2=xOf(r.aP[2],ax),xb0=xOf(r.bP[0],ax),xb2=xOf(r.bP[2],ax);
+  const grid=gridTicks(ax).map(e=>'<i style="left:'+xOf(Math.pow(10,e),ax)+'%"></i><b style="left:'+xOf(Math.pow(10,e),ax)+'%">'+fmtT(Math.pow(10,e))+'</b>').join("");
+  const rel=r.bP[2]/r.aP[2]-1, cls=rel>=0?"up":"down", sign=rel>=0?"+":"−";
+  return '<div class="lat"><div class="track"><div class="grid">'+grid+'</div>'+
+    '<div class="link" style="left:'+Math.min(xa2,xb2)+'%;width:'+Math.abs(xb2-xa2)+'%"></div>'+
+    '<div class="bar a" style="left:'+xa0+'%;width:'+Math.max(xa2-xa0,.5)+'%"></div><div class="p99dot a" style="left:'+xa2+'%"></div>'+
+    '<div class="bar b" style="left:'+xb0+'%;width:'+Math.max(xb2-xb0,.5)+'%"></div><div class="p99dot b" style="left:'+xb2+'%"></div>'+
+    '</div><div class="num">p99 <b class="a" style="color:var(--A)">'+fmtT(r.aP[2])+'</b> → <b class="b" style="color:var(--B)">'+fmtT(r.bP[2])+'</b> <span class="'+cls+'">('+sign+Math.abs(rel*100|0)+'%)</span></div></div>';
+}
+function rangeOnly(p,ax,side,label){
+  const x0=xOf(p[0],ax),x2=xOf(p[2],ax);
+  const grid=gridTicks(ax).map(e=>'<i style="left:'+xOf(Math.pow(10,e),ax)+'%"></i>').join("");
+  return '<div class="lat"><div class="track"><div class="grid">'+grid+'</div><div class="bar '+side+'" style="left:'+x0+'%;width:'+Math.max(x2-x0,.5)+'%;top:10px"></div><div class="p99dot '+side+'" style="left:'+x2+'%;top:13px"></div></div><div class="num" style="color:var(--'+(side==="b"?"B":"A")+')">'+label+' · p99 '+fmtT(p[2])+'</div></div>';
+}
+
+/* occurrences A→B */
+function occCell(r){
+  const a=r.occA?'<span class="a">'+fmtC(r.occA)+'</span>':'<span class="a" style="color:var(--faint)">—</span>';
+  const b=r.occB?'<span class="b">'+fmtC(r.occB)+'</span>':'<span class="b" style="color:var(--faint)">—</span>';
+  return '<span class="occ">'+a+'<span class="ar">→</span>'+b+'</span>';
+}
+
+/* composition REALLOCATION — diverging around a center: each category's B−A
+ * (in percentage points) drawn left (shrank, teal) / right (grew, coral). */
+function realloCell(r){
+  if(!r.compA||!r.compB){const c=r.compB||r.compA;return '<div class="reallo"><span class="illu" style="font-size:10.5px">'+(r.compA?"only in A":"only in B")+'</span></div>';}
+  const deltas=r.compB.map((v,i)=>({i,d:v-r.compA[i]}));
+  const maxAbs=Math.max(4,...deltas.map(x=>Math.abs(x.d)));
+  // stack grown categories to the right of center, shrunk to the left
+  let rightX=50, leftX=50, segs="";
+  deltas.filter(x=>x.d>0).sort((a,b)=>b.d-a.d).forEach(x=>{const w=x.d/maxAbs*50;segs+='<span class="seg" style="left:'+rightX+'%;width:'+w+'%;background:'+COMPC[x.i]+'"></span>';rightX+=w;});
+  deltas.filter(x=>x.d<0).sort((a,b)=>a.d-b.d).forEach(x=>{const w=-x.d/maxAbs*50;leftX-=w;segs+='<span class="seg" style="left:'+leftX+'%;width:'+w+'%;background:'+COMPC[x.i]+';opacity:.55"></span>';});
+  const top=deltas.filter(x=>Math.abs(x.d)>=3).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)).slice(0,2)
+    .map(x=>'<span class="mv '+(x.d>0?'up':'down')+'">'+COMPL[x.i]+' '+(x.d>0?'+':'−')+Math.abs(x.d)+'pp</span>').join("");
+  return '<div class="reallo"><div class="strip"><div class="mid"></div>'+segs+'</div><div class="cap">'+ (top||'<span class="illu">≈ unchanged</span>') +'</div></div>';
+}
+
+/* single-selection table (Inspect / B=∅): just A, no diff primitives. */
+function singleTable(rows,isTokio){
+  const ax=axisFor(rows);
+  const idCol=isTokio?"spawn location":"span type";
+  const head='<tr><th>'+idCol+'</th><th>occurrences</th><th>duration p50–p99</th><th>time composition</th></tr>';
+  const body=rows.filter(r=>r.aP).map(r=>{
+    const comp='<span class="comp">'+r.compA.map((v,i)=>'<span style="width:'+v+'%;background:'+COMPC[i]+'"></span>').join("")+'</span>';
+    return '<tr><td class="nm">'+r.n+'</td><td class="occ"><span class="a" style="color:var(--dim)">'+fmtC(r.occA)+'</span></td><td>'+rangeOnly(r.aP,ax,"a","p50–p99")+'</td><td>'+comp+'</td></tr>';
+  }).join("");
+  return '<table class="dtbl"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
+}
+
+/* ONE aligned diff table for a dataset (spans or tokio). Row = the diff. */
+function unifiedTable(rows,isTokio){
+  const ax=axisFor(rows);
+  const idCol=isTokio?"spawn location":"span type";
+  const compHdr=isTokio?"on-cpu → off-cpu shift":"time reallocation (B − A)";
+  const head='<tr><th>'+idCol+'</th><th>occurrences <span class="ab"><span class="a">A</span>→<span class="b">B</span></span></th>'+
+    '<th>duration p50–p99 <span class="ab"><span class="a">● A</span> <span class="b">● B</span></span></th><th>'+compHdr+'</th></tr>';
+  const body=rows.map(r=>{
+    const badge=r.occA===0?'<span class="rowbadge new">new in B</span>':r.occB===0?'<span class="rowbadge gone">gone in B</span>':'';
+    return '<tr><td class="nm">'+r.n+badge+'</td><td>'+occCell(r)+'</td><td class="lat-td">'+latCell(r,ax)+'</td><td>'+realloCell(r)+'</td></tr>';
+  }).join("");
+  return '<table class="dtbl"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
+}
+
+/* rail for tabular views: derive significance from the SAME row data (p99
+ * shift), so the rail and the aligned table never disagree. */
+function renderDiffTable(rows,isTokio){
+  const scored=rows.filter(r=>r.aP&&r.bP).map(r=>({name:r.n,a:r.aP[2],b:r.bP[2],rel:r.bP[2]/r.aP[2]-1}));
+  rows.filter(r=>!r.aP||!r.bP).forEach(r=>scored.push({name:r.n,a:r.aP?r.aP[2]:0,b:r.bP?r.bP[2]:0,rel:r.aP?-1:Infinity,mem:r.aP?"gone":"new"}));
+  scored.sort((x,y)=>(y.rel===Infinity?9:Math.abs(y.rel))-(x.rel===Infinity?9:Math.abs(x.rel)));
+  const maxb=Math.max(...scored.map(s=>Math.max(s.a,s.b)));
+  document.getElementById("difflist").innerHTML=scored.slice(0,8).map(r=>{
+    const up=r.rel>=0, dl=r.mem==="new"?'new':r.mem==="gone"?'−100%':(up?'+':'−')+Math.abs(r.rel*100|0)+'%';
+    const flag=r.mem==="new"?'<span class="flag new">new</span>':r.mem==="gone"?'<span class="flag gone">gone</span>':'';
+    return '<div class="diffrow"><div class="name"><span class="n">'+r.name+' · p99</span>'+flag+'</div>'+
+    '<div class="delta '+(up?'up':'down')+'">'+dl+'<small>'+fmtT(r.a)+' → '+fmtT(r.b)+'</small></div>'+
+    '<div class="cmpbar"><div class="track"><div class="va" style="width:'+(r.a/maxb*100)+'%"></div><div class="vb" style="width:'+(r.b/maxb*100)+'%"></div></div>'+
+    '<span class="vals"><span class="xa">A '+fmtT(r.a)+'</span> → <span class="xb">B '+fmtT(r.b)+'</span></span></div></div>';
+  }).join("")+'<div class="foot">Ranked by p99 shift — the same numbers the aligned table shows. “new/gone” = set-membership change. Same significance machinery as the flamegraph view.</div>';
+}
+
+/* ---------- view switching ---------- */
+let VIEW="flame";
+function renderView(){
+  const views=document.getElementById("views");
+  document.getElementById("viewLbl").textContent=VIEW;
+  document.body.classList.toggle("view-flame",VIEW==="flame");
+  views.querySelectorAll(".tblpanel,.unified").forEach(n=>n.remove());
+  const folded=document.body.classList.contains("folded");
+  if(VIEW==="flame"){
+    document.getElementById("flameA").style.display="";
+    document.getElementById("flameB").style.display="";
+    document.getElementById("railCap").textContent="Ranked frames whose self-time shifted most between A and B · unsymbolised excluded.";
+    redraw(); if(folded)renderDiffFlame();
+  }else{
+    document.getElementById("flameA").style.display="none";
+    document.getElementById("flameB").style.display="none";
+    const isTokio=VIEW==="tokio", rows=isTokio?TOKIO:SPANS;
+    document.getElementById("railCap").textContent=isTokio?"Ranked spawn locations whose poll-duration shifted most · same machinery as the flamegraph.":"Ranked span types whose percentile shifted most · same machinery as the flamegraph.";
+    const compare=document.body.classList.contains("compare");
+    const gb=isTokio?'<label>group by</label><select><option selected>spawn_location</option><option>span type</option><option>host</option><option>attribute…</option></select>':'<label>group by</label><select><option selected>span type</option><option>spawn_location</option><option>host</option><option>attribute…</option></select>';
+    const kind=isTokio?'kind=<b>tokio_poll</b>':'kind=<b>tracing</b>';
+    const legend='<div class="legendrow">'+(compare
+      ? '<span><i style="background:var(--A)"></i>A baseline</span><span><i style="background:var(--B)"></i>B focus</span><span class="illu">one aligned row per '+(isTokio?'spawn location':'span type')+' — each cell shows the A→B <b>difference</b>, not two separate tables</span>'
+      : COMPL.map((l,i)=>'<span><i style="background:'+COMPC[i]+'"></i>'+l+'</span>').join("")+'<span class="illu">single selection — press Compare to diff against a focus set</span>')+'</div>';
+    const title = compare?'A baseline &nbsp;⇄&nbsp; B focus':'baseline';
+    const foot = isTokio
+      ? 'Reallocation shows each poll’s on-cpu time draining into sync-block / async-wait as the pool serializes — same primitive as the spans view.'
+      : 'Duration cell is a dumbbell on a shared log axis (p50–p99 bar, p99 dot, A↔B joined). Reallocation shows where elapsed time moved between categories. New/gone badges = set membership. Every cell is a diff primitive.';
+    views.insertAdjacentHTML("beforeend",
+      '<div class="unified"><div class="panel-head"><span class="pb-badge" style="background:linear-gradient(135deg,rgba(49,201,192,.16),rgba(255,106,95,.16));color:var(--ink)">⋔</span>'+
+      '<div><div class="ptitle"><span class="aName">A</span> baseline &nbsp;⇄&nbsp; <span class="bName">B</span> focus</div></div><span class="psub">'+(compare?'the row is the diff':'B = ∅')+'</span><div class="grow"></div>'+
+      '<div class="tbl-head" style="margin:0"><span class="kindpill">'+kind+'</span>'+gb+'</div></div>'+
+      '<div class="tbl-view">'+legend+ (compare?unifiedTable(rows,isTokio):singleTable(rows,isTokio)) +'<div class="tblfoot">'+foot+'</div></div></div>');
+    if(folded)renderDiffTable(rows,isTokio);
+  }
+}
+document.getElementById("tabs").addEventListener("click",e=>{const t=e.target.closest(".tab");if(!t)return;document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));t.classList.add("on");VIEW=t.dataset.view;renderView();});
+
+/* ---------- compare / inspect ---------- */
+function setCompare(on){
+  document.body.classList.toggle("compare",on);
+  document.getElementById("cmpBtn").style.display=on?"none":"";
+  document.getElementById("backBtn").style.display=on?"":"none";
+  document.getElementById("modeLbl").textContent=on?"Compare · A (baseline ∖ P)  vs  B (baseline ∩ P) · two synced panels":"Inspect · B = ∅ · single full-width panel";
+  document.getElementById("paSub").textContent=on?"— the fast / normal requests":"— baseline (no comparison yet)";
+  setTimeout(renderView,300);
+}
+document.getElementById("cmpBtn").addEventListener("click",()=>setCompare(true));
+document.getElementById("backBtn").addEventListener("click",()=>setCompare(false));
+
+/* ---------- fold / gate + controls ---------- */
+document.getElementById("foldBtn").addEventListener("click",()=>{
+  document.body.classList.add("folded");
+  covSet("covAf","covAp","covAfill",468,97.5); covSet("covBf","covBp","covBfill",461,96.0);
+  renderView();
+});
+function covSet(f,p,fill,files,pct){document.getElementById(f).textContent=files;document.getElementById(p).textContent=pct+"%";document.getElementById(fill).style.width=pct+"%";}
+document.getElementById("rankSeg").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;document.querySelectorAll("#rankSeg button").forEach(x=>x.classList.remove("on"));b.classList.add("on");RANK=b.dataset.rank;if(document.body.classList.contains("folded")&&VIEW==="flame")renderDiffFlame();});
+document.getElementById("colorA").addEventListener("change",()=>draw(cvA,"a"));
+document.getElementById("colorB").addEventListener("change",()=>draw(cvB,"b"));
+document.getElementById("vlx").addEventListener("click",()=>document.querySelector(".vlocal").style.display="none");
+document.getElementById("notx").addEventListener("click",()=>{document.getElementById("notChip").style.display="none";document.getElementById("modeLbl").textContent="Compare · A (whole baseline)  vs  B (baseline ∩ P) · B ⊆ A";});
+document.getElementById("refreshBtn").addEventListener("click",()=>{document.getElementById("prov").textContent="derived: p99 @ cov 461/480 (refreshed)";});
+document.getElementById("permalink").addEventListener("click",function(){const s=this.querySelector(".pill"),o=s.textContent;s.textContent="copied ✓";setTimeout(()=>s.textContent=o,1400);});
+
+/* ---------- boot ---------- */
+const cvA=document.getElementById("cvA"),cvB=document.getElementById("cvB");
+hookHover(cvA); hookHover(cvB);
+function redraw(){if(VIEW==="flame"){draw(cvA,"a");if(document.body.classList.contains("compare"))draw(cvB,"b");}}
+addEventListener("resize",redraw);
+renderView();
+</script>
+</body>
+</html>

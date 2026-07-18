@@ -4,12 +4,64 @@
 //! consumes. Raw timestamp fields are converted to clock-domain newtypes as
 //! soon as orchestration leaves the wire edge.
 
-use dial9_trace_format::decoder::Decoder;
+use dial9_trace_format::decoder::{Decoder, RawEvent};
+use dial9_trace_format::types::FieldValueRef;
 use lasso::{Rodeo, Spur};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
 use super::clock::ClockOffset;
+
+/// Span enter/exit fields that describe the span's identity or lifecycle rather
+/// than user-attached metadata. These are consumed structurally elsewhere and
+/// are NOT surfaced as attributes. Mirrors the viewer's `BASE_ENTER_FIELDS` /
+/// `BASE_EXIT_FIELDS` in `trace_analysis.js` so the aggregation path exposes the
+/// same user attributes (e.g. `request_id`, `status_code`) the live viewer does.
+const BASE_SPAN_FIELDS: &[&str] = &[
+    "timestamp_ns",
+    "worker_id",
+    "span_id",
+    "span_instance_id",
+    "tid",
+    "parent_span_id",
+    "span_name",
+];
+
+/// Extract user-attached span attributes (non-base fields) from a raw span
+/// enter/exit event, resolving pooled strings and rendering scalar values to
+/// strings. Absent (`None`) fields and non-scalar values (stacks, maps, lists,
+/// bytes) are skipped — attributes are meant to be short scalar labels.
+fn extract_span_attributes(ev: &RawEvent<'_, '_>) -> Vec<(String, String)> {
+    let mut attrs = Vec::new();
+    for (name, value) in ev.field_names().zip(ev.fields.iter()) {
+        if BASE_SPAN_FIELDS.contains(&name) {
+            continue;
+        }
+        let rendered = match value {
+            FieldValueRef::String(s) => Some((*s).to_string()),
+            FieldValueRef::PooledString(id) => ev.string_pool.get(*id).map(|s| s.to_string()),
+            FieldValueRef::I64(v) => Some(v.to_string()),
+            FieldValueRef::Varint(v) => Some(v.to_string()),
+            FieldValueRef::F64(v) => Some(v.to_string()),
+            FieldValueRef::Bool(v) => Some(v.to_string()),
+            // Non-scalar or absent values are not meaningful single-cell labels.
+            FieldValueRef::Bytes(_)
+            | FieldValueRef::StackFrames(_)
+            | FieldValueRef::PooledStackFrames(_)
+            | FieldValueRef::StringMap(_)
+            | FieldValueRef::List(_)
+            | FieldValueRef::Map(_)
+            | FieldValueRef::None => None,
+            // `FieldValueRef` is #[non_exhaustive]; any future scalar variant is
+            // skipped until explicitly handled here.
+            _ => None,
+        };
+        if let Some(rendered) = rendered {
+            attrs.push((name.to_string(), rendered));
+        }
+    }
+    attrs
+}
 
 // ─── Lightweight serde structs (select only needed fields) ───────────────────
 
@@ -83,6 +135,10 @@ pub(crate) struct LegacySpanEnterEvent {
     /// Wire decode order for deterministic equal-timestamp pairing.
     #[serde(skip)]
     pub(crate) decode_sequence: u64,
+    /// User-attached span attributes (non-base fields), captured from the raw
+    /// wire event rather than serde. Populated by [`extract_span_attributes`].
+    #[serde(skip)]
+    pub(crate) attributes: Vec<(String, String)>,
 }
 
 /// Legacy span exit event from old producers.
@@ -99,14 +155,26 @@ pub(crate) struct LegacySpanExitEvent {
     /// Wire decode order for deterministic equal-timestamp pairing.
     #[serde(skip)]
     pub(crate) decode_sequence: u64,
+    /// User-attached span attributes (non-base fields), captured from the raw
+    /// wire event rather than serde. Populated by [`extract_span_attributes`].
+    #[serde(skip)]
+    pub(crate) attributes: Vec<(String, String)>,
 }
 
 /// Legacy span close event from old producers (only has span_id).
+///
+/// A close marks the `span_id` "done": tracing only recycles a `span_id` after
+/// its span closes, so each close delimits one logical span instance. The
+/// legacy adapter segments a span_id's enter/exit stream at close boundaries.
 #[derive(Debug, Deserialize)]
 pub(crate) struct LegacySpanCloseEvent {
     pub(crate) timestamp_ns: u64,
     #[serde(default)]
     pub(crate) span_id: u64,
+    /// Wire decode order, shared with enter/exit events so a close orders
+    /// deterministically against them when timestamps tie.
+    #[serde(skip)]
+    pub(crate) decode_sequence: u64,
 }
 
 /// Metadata parsed from the SpanEnter schema name for old-format events.
@@ -356,7 +424,9 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
             // convention (a Rust identifier cannot contain `:`).
             name if name == "SpanCloseEvent" || name.starts_with("SpanClose__") => {
                 match ev.deserialize::<LegacySpanCloseEvent>() {
-                    Ok(lc) if lc.span_id > 0 => {
+                    Ok(mut lc) if lc.span_id > 0 => {
+                        lc.decode_sequence = span_decode_sequence;
+                        span_decode_sequence += 1;
                         legacy_closes.push(lc);
                     }
                     _ => {
@@ -378,6 +448,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                     Ok(mut le) if le.span_id > 0 => {
                         le.decode_sequence = span_decode_sequence;
                         span_decode_sequence += 1;
+                        le.attributes = extract_span_attributes(&ev);
                         legacy_enters.push((name.to_string(), le));
                     }
                     _ => {
@@ -390,6 +461,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                     Ok(mut le) if le.span_id > 0 => {
                         le.decode_sequence = span_decode_sequence;
                         span_decode_sequence += 1;
+                        le.attributes = extract_span_attributes(&ev);
                         legacy_exits.push((name.to_string(), le));
                     }
                     _ => {
