@@ -11,6 +11,7 @@ use arrow::array::{
 use arrow::record_batch::RecordBatch;
 
 use super::{Exemplar, ExemplarAttribute, TimeComposition};
+use crate::server::metrics::SpanStatsPhaseDurations;
 
 pub(super) struct SpanStatsRow {
     pub span_type_uid: [u8; 16],
@@ -48,26 +49,58 @@ impl SpansBatchReader {
         &self,
         data: Vec<u8>,
         mut consume: impl FnMut(SpanStatsRow),
-    ) -> anyhow::Result<()> {
+    ) -> (SpanStatsPhaseDurations, anyhow::Result<()>) {
+        use std::time::Instant;
+
+        let mut phases = SpanStatsPhaseDurations::default();
+        let parse_started = Instant::now();
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
             bytes::Bytes::from(data),
             4096,
-        )?;
-        for batch in reader {
-            self.read_batch(&batch?, &mut consume)?;
+        );
+        phases.parse += parse_started.elapsed();
+        let mut reader = match reader {
+            Ok(reader) => reader,
+            Err(error) => return (phases, Err(error.into())),
+        };
+
+        loop {
+            let parse_started = Instant::now();
+            let next = reader.next();
+            let Some(batch) = next else {
+                phases.parse += parse_started.elapsed();
+                break;
+            };
+            let batch = match batch {
+                Ok(batch) => batch,
+                Err(error) => {
+                    phases.parse += parse_started.elapsed();
+                    return (phases, Err(error.into()));
+                }
+            };
+            let rows = match self.read_batch(&batch) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    phases.parse += parse_started.elapsed();
+                    return (phases, Err(error));
+                }
+            };
+            phases.parse += parse_started.elapsed();
+
+            let query_started = Instant::now();
+            for row in rows {
+                consume(row);
+            }
+            phases.query += query_started.elapsed();
         }
-        Ok(())
+        (phases, Ok(()))
     }
 
-    fn read_batch(
-        &self,
-        batch: &RecordBatch,
-        consume: &mut impl FnMut(SpanStatsRow),
-    ) -> anyhow::Result<()> {
+    fn read_batch(&self, batch: &RecordBatch) -> anyhow::Result<Vec<SpanStatsRow>> {
         let Some(type_uid_arr) = column::<FixedSizeBinaryArray>(batch, "span_type_uid") else {
             // Preserve compatibility with old/non-span parts: a batch without a
             // recognizable type UID contributes no span rows.
-            return Ok(());
+            return Ok(Vec::new());
         };
         if type_uid_arr.value_length() != 16 {
             anyhow::bail!(
@@ -112,6 +145,7 @@ impl SpansBatchReader {
         let unknown_col = column::<Int64Array>(batch, "unknown_ns");
         let details_complete_col = column::<BooleanArray>(batch, "details_complete");
 
+        let mut rows = Vec::with_capacity(batch.num_rows());
         for row_index in 0..batch.num_rows() {
             if type_uid_arr.is_null(row_index)
                 || elapsed_arr.is_null(row_index)
@@ -211,7 +245,7 @@ impl SpansBatchReader {
                         .collect(),
                 });
 
-            consume(SpanStatsRow {
+            rows.push(SpanStatsRow {
                 span_type_uid,
                 kind: kind_arr.value(row_index).to_string(),
                 name: name_arr.value(row_index).to_string(),
@@ -225,7 +259,7 @@ impl SpansBatchReader {
                 details_complete: optional_bool(details_complete_col, row_index),
             });
         }
-        Ok(())
+        Ok(rows)
     }
 }
 

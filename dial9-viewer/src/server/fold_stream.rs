@@ -29,6 +29,7 @@ use futures::stream::{self, BoxStream, Stream, StreamExt};
 
 use crate::ingest::aggregate::{AggContext, Coverage, FoldLimits};
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, Folded, Resolved};
+use crate::server::metrics::{SpanStatsPhaseDurations, SpanStatsStreamMetricsGuard};
 
 /// The outcome of attempting to merge one part-file into a sink's accumulator,
 /// returned by [`FoldSink::seed_batch`] (once per pre-folded leaf) and
@@ -77,6 +78,13 @@ pub(crate) trait FoldSink {
         agg: &AggContext,
         folded: &Folded,
     ) -> impl Future<Output = PartOutcome> + Send;
+
+    /// Drain endpoint-specific phase timings recorded by the preceding
+    /// `seed_batch` or `fold_one` operation. The default keeps endpoints without
+    /// a stream-lifetime breakdown (currently flamegraph) free of bookkeeping.
+    fn take_phase_durations(&mut self) -> SpanStatsPhaseDurations {
+        SpanStatsPhaseDurations::default()
+    }
 
     /// Shape the accumulator's current snapshot into one SSE `data:` event.
     ///
@@ -156,7 +164,18 @@ struct Driver<S> {
     /// Successful matched merges and represented hosts, updated once per newly
     /// inserted leaf so snapshot coverage is O(1) in the matched-scope size.
     files_folded: usize,
+    /// Split of `files_folded` by phase, for the stream-lifetime metric:
+    /// `files_seeded` = leaves served from already-folded spans parts (seeding),
+    /// `files_folded_cold` = leaves cold-folded from raw traces (folding). Their
+    /// sum equals `files_folded`.
+    files_seeded: usize,
+    files_folded_cold: usize,
     folded_hosts: HashSet<String>,
+    /// Optional stream-lifetime metric guard (span-stats only). Held for the life
+    /// of the response body and updated as the stream seeds/folds, so the entry
+    /// carries FINAL coverage and the full `stream_duration` when the stream is
+    /// dropped (normal end or client disconnect).
+    stream_metrics: Option<SpanStatsStreamMetricsGuard>,
     /// Files whose fold failed this stream, and the most recent error message —
     /// surfaced in the coverage block so a systematic failure isn't silent.
     errors: FoldErrors,
@@ -179,12 +198,47 @@ impl<S: FoldSink> Driver<S> {
                     && let Some(host) = self.resolved.matched_host_for_leaf(&leaf)
                 {
                     self.files_folded += 1;
+                    // Split the count by the phase that produced it: seeding
+                    // reads already-folded spans parts (GET + merge), folding
+                    // cold-folds raw traces. Lets the stream metric show whether
+                    // stream time went to re-reading Parquet or cold-folding.
+                    match self.phase {
+                        Phase::Seeding => self.files_seeded += 1,
+                        Phase::Folding => self.files_folded_cold += 1,
+                    }
                     self.folded_hosts.insert(host.to_string());
                 }
             }
             PartOutcome::Failed { key, error } => {
                 self.errors.record(&key, &error);
             }
+        }
+        self.update_stream_metrics();
+    }
+
+    /// Push the current coverage split onto the stream-lifetime metric guard, if
+    /// one is armed. Called after every applied outcome so the guard carries the
+    /// FINAL counts whenever the stream ends (drop). `files_matched` is fixed by
+    /// the resolved scope; the folded counts grow as the stream progresses.
+    fn update_stream_metrics(&mut self) {
+        if let Some(guard) = self.stream_metrics.as_mut() {
+            guard.files_matched = self.resolved.files_matched as u32;
+            guard.files_folded = self.files_folded as u32;
+            guard.files_seeded = self.files_seeded as u32;
+            guard.files_folded_cold = self.files_folded_cold as u32;
+            guard.failed = (self.errors.count > 0) as u32;
+        }
+    }
+
+    /// Add the endpoint work recorded by the most recent sink operation to the
+    /// stream-lifetime metric. Draining after each awaited operation preserves
+    /// partial measurements if the client disconnects later in the stream.
+    fn record_phase_durations(&mut self) {
+        let phases = self.sink.take_phase_durations();
+        if let Some(guard) = self.stream_metrics.as_mut() {
+            guard.download_duration += phases.download;
+            guard.parse_duration += phases.parse;
+            guard.query_duration += phases.query;
         }
     }
 
@@ -220,7 +274,7 @@ pub(crate) fn drive<S>(
 where
     S: FoldSink + Send + 'static,
 {
-    drive_with_options(agg, resolved, limits, sink, false)
+    drive_with_options(agg, resolved, limits, sink, false, None)
 }
 
 /// Like [`drive`], but when `seed_only` is true the fold work-list is empty:
@@ -228,12 +282,19 @@ where
 /// additional raw trace files. Used by the span-stats duration-band exemplar
 /// refetch, which re-selects exemplars from spans already in Parquet and must
 /// not trigger any new folding.
+///
+/// `stream_metrics` is an optional armed [`SpanStatsStreamMetricsGuard`] the
+/// driver holds for the life of the returned stream and updates as it
+/// seeds/folds. When the stream is dropped (normal end or client disconnect),
+/// the guard emits the stream-lifetime entry with FINAL coverage and the full
+/// wall-clock `stream_duration`.
 pub(crate) fn drive_with_options<S>(
     agg: AggContext,
     resolved: Resolved,
     limits: FoldLimits,
     sink: S,
     seed_only: bool,
+    stream_metrics: Option<SpanStatsStreamMetricsGuard>,
 ) -> impl Stream<Item = Result<Event, Infallible>> + use<S>
 where
     S: FoldSink + Send + 'static,
@@ -253,19 +314,26 @@ where
         refine::fold_stream(Arc::clone(&agg), limits, fold_worklist).boxed();
 
     let seed_keys = resolved.folded_matching_full_keys();
-    let driver = Driver {
+    let mut driver = Driver {
         agg,
         resolved,
         sink,
         folded: HashSet::new(),
         files_folded: 0,
+        files_seeded: 0,
+        files_folded_cold: 0,
         folded_hosts: HashSet::new(),
         errors: FoldErrors::default(),
         seed_keys,
         seed_next: 0,
         folds,
         phase: Phase::Seeding,
+        stream_metrics,
     };
+    // Seed `files_matched` onto the guard up front so even a stream that folds
+    // nothing (or disconnects before its first outcome) still reports the scope
+    // size and a real `stream_duration` on drop.
+    driver.update_stream_metrics();
 
     stream::unfold(driver, |mut d| async move {
         match d.phase {
@@ -273,6 +341,7 @@ where
                 let end = seed_batch_end(d.seed_next, d.seed_keys.len(), S::SEED_BATCH_SIZE);
                 let keys = d.seed_keys[d.seed_next..end].to_vec();
                 let outcomes = d.sink.seed_batch(&d.agg, &keys).await;
+                d.record_phase_durations();
                 for outcome in outcomes {
                     d.apply(outcome);
                 }
@@ -291,12 +360,14 @@ where
                         // failures increment errors. The sink does the fetch+merge
                         // and reports the outcome; the driver applies the rule.
                         let outcome = d.sink.fold_one(&d.agg, &f).await;
+                        d.record_phase_durations();
                         d.apply(outcome);
                     }
                     FoldOutcome::Failed { raw_key, error } => {
                         // Count it and carry a sample message so the client can see
                         // that folding is failing (e.g. unwritable output).
                         d.errors.record(&raw_key, &error);
+                        d.update_stream_metrics();
                     }
                 }
                 let event = d.snapshot_event();
@@ -536,7 +607,7 @@ mod tests {
         };
 
         let _events: Vec<_> =
-            drive_with_options(agg, resolved, FoldLimits::new(1, 1, 1), sink, true)
+            drive_with_options(agg, resolved, FoldLimits::new(1, 1, 1), sink, true, None)
                 .collect()
                 .await;
 

@@ -29,8 +29,12 @@ use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::fold_stream;
-use crate::server::metrics::OperationMetrics;
+use crate::server::metrics::{OperationMetrics, SpanStatsPhaseDurations, SpanStatsStreamMetrics};
 use crate::storage::StorageBackend;
+
+/// The matched-path operation label for this endpoint, shared by the request
+/// metric and the stream-lifetime metric so their `operation` dimensions align.
+const SPAN_STATS_OPERATION: &str = "/api/span-stats";
 
 /// Sub-octave subdivision factor (same as polls histogram).
 const HIST_SUBDIV: u32 = 4;
@@ -448,12 +452,18 @@ pub async fn get_span_stats(
     let accum = SpanStatsAccum::new(params.start_ns, params.end_ns)
         .with_exemplar_bounds(params.min_span_ns, params.max_span_ns)
         .with_attr_filters(attr_filters);
+    // Arm the stream-lifetime metric: the request middleware stops its latency
+    // timer at response-headers time, so it sees only time-to-first-byte. This
+    // guard rides the SSE body and emits the FINAL coverage + full
+    // `stream_duration` when the stream ends (normal close or client disconnect).
+    let stream_metrics = SpanStatsStreamMetrics::arm(SPAN_STATS_OPERATION);
     let stream = span_stats_stream(
         agg,
         resolved,
         state.fold_limits.clone(),
         accum,
         params.exemplars_only,
+        stream_metrics,
     );
     Ok((
         Extension(op),
@@ -836,12 +846,25 @@ impl SpanStatsAccum {
     /// Stream one spans part into a bounded staged accumulator, then commit it.
     /// A malformed later row discards the stage, so no row from that part can
     /// partially mutate the live aggregate.
+    #[cfg(test)]
     fn merge_spans_part(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+        self.merge_spans_part_timed(data).1
+    }
+
+    /// Timed variant used by the streaming endpoint. Parsing and querying are
+    /// returned even on failure so the stream metric retains work completed
+    /// before a malformed part aborted the transactional merge.
+    fn merge_spans_part_timed(
+        &mut self,
+        data: Vec<u8>,
+    ) -> (SpanStatsPhaseDurations, anyhow::Result<()>) {
         let mut staged = self.clone();
-        SpansBatchReader::new(self.start_ns, self.end_ns)
-            .read(data, |row| staged.merge_row(row))?;
-        *self = staged;
-        Ok(())
+        let (phases, result) = SpansBatchReader::new(self.start_ns, self.end_ns)
+            .read(data, |row| staged.merge_row(row));
+        if result.is_ok() {
+            *self = staged;
+        }
+        (phases, result)
     }
 
     fn merge_row(&mut self, row: SpanStatsRow) {
@@ -997,6 +1020,7 @@ async fn fetch_folded_spans_parts(
 /// in the driver.
 struct SpanStatsSink {
     accum: SpanStatsAccum,
+    pending_phase_durations: SpanStatsPhaseDurations,
 }
 
 impl fold_stream::FoldSink for SpanStatsSink {
@@ -1005,7 +1029,10 @@ impl fold_stream::FoldSink for SpanStatsSink {
         agg: &AggContext,
         full_keys: &[String],
     ) -> Vec<fold_stream::PartOutcome> {
-        // Prime with one bounded batch of already-folded spans parts.
+        // Prime with one bounded batch of already-folded spans parts. Downloads
+        // run concurrently, so record the batch's wall-clock elapsed time rather
+        // than summing per-object latency.
+        let download_started = std::time::Instant::now();
         let results = fetch_folded_spans_parts(
             &*agg.output,
             &agg.output_bucket,
@@ -1013,19 +1040,24 @@ impl fold_stream::FoldSink for SpanStatsSink {
             full_keys,
         )
         .await;
+        self.pending_phase_durations.download += download_started.elapsed();
         // Finding 4: Only include a leaf in `folded` after its GET and merge both
         // succeed. Failed seed parts increment fold_errors and are excluded from
         // files_folded. The driver applies the rule from these outcomes.
         let mut outcomes = Vec::with_capacity(results.len());
         for (leaf, result) in results {
             let outcome = match result {
-                Ok(part) => match self.accum.merge_spans_part(part) {
-                    Ok(()) => fold_stream::PartOutcome::Folded { leaf },
-                    Err(e) => fold_stream::PartOutcome::Failed {
-                        key: "seed".to_string(),
-                        error: e.to_string(),
-                    },
-                },
+                Ok(part) => {
+                    let (phases, result) = self.accum.merge_spans_part_timed(part);
+                    self.pending_phase_durations += phases;
+                    match result {
+                        Ok(()) => fold_stream::PartOutcome::Folded { leaf },
+                        Err(e) => fold_stream::PartOutcome::Failed {
+                            key: "seed".to_string(),
+                            error: e.to_string(),
+                        },
+                    }
+                }
                 Err(msg) => fold_stream::PartOutcome::Failed {
                     key: "seed".to_string(),
                     error: msg,
@@ -1038,24 +1070,35 @@ impl fold_stream::FoldSink for SpanStatsSink {
 
     async fn fold_one(&mut self, agg: &AggContext, f: &Folded) -> fold_stream::PartOutcome {
         let spans_key = aggregate::spans_part_key_pub(&agg.output_prefix, &f.full_key);
-        match agg.output.get_object(&agg.output_bucket, &spans_key).await {
-            Ok(data) => match self.accum.merge_spans_part(data) {
-                // Only count as folded when both GET and merge succeed.
-                Ok(()) => fold_stream::PartOutcome::Folded {
-                    leaf: aggregate::part_leaf_of(&f.full_key),
-                },
-                // Decode/merge failure: increment fold_errors, do NOT add to folded set.
-                Err(e) => fold_stream::PartOutcome::Failed {
-                    key: f.raw_key.clone(),
-                    error: format!("decode/merge: {e}"),
-                },
-            },
+        let download_started = std::time::Instant::now();
+        let result = agg.output.get_object(&agg.output_bucket, &spans_key).await;
+        self.pending_phase_durations.download += download_started.elapsed();
+        match result {
+            Ok(data) => {
+                let (phases, result) = self.accum.merge_spans_part_timed(data);
+                self.pending_phase_durations += phases;
+                match result {
+                    // Only count as folded when both GET and merge succeed.
+                    Ok(()) => fold_stream::PartOutcome::Folded {
+                        leaf: aggregate::part_leaf_of(&f.full_key),
+                    },
+                    // Decode/merge failure: increment fold_errors, do NOT add to folded set.
+                    Err(e) => fold_stream::PartOutcome::Failed {
+                        key: f.raw_key.clone(),
+                        error: format!("decode/merge: {e}"),
+                    },
+                }
+            }
             // GET failure: increment fold_errors, do NOT add to folded set.
             Err(e) => fold_stream::PartOutcome::Failed {
                 key: f.raw_key.clone(),
                 error: format!("spans part GET: {e}"),
             },
         }
+    }
+
+    fn take_phase_durations(&mut self) -> SpanStatsPhaseDurations {
+        std::mem::take(&mut self.pending_phase_durations)
     }
 
     fn snapshot_event(
@@ -1088,8 +1131,19 @@ fn span_stats_stream(
     limits: FoldLimits,
     accum: SpanStatsAccum,
     seed_only: bool,
+    stream_metrics: crate::server::metrics::SpanStatsStreamMetricsGuard,
 ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
-    fold_stream::drive_with_options(agg, resolved, limits, SpanStatsSink { accum }, seed_only)
+    fold_stream::drive_with_options(
+        agg,
+        resolved,
+        limits,
+        SpanStatsSink {
+            accum,
+            pending_phase_durations: SpanStatsPhaseDurations::default(),
+        },
+        seed_only,
+        Some(stream_metrics),
+    )
 }
 
 #[cfg(test)]
