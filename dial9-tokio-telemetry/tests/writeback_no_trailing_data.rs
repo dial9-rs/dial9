@@ -29,7 +29,6 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         .with_tokio(|t| {
             t.worker_threads(2);
         })
-        .graceful_shutdown(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
 
@@ -52,7 +51,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         }
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    traced.graceful_shutdown(Duration::from_secs(10));
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
