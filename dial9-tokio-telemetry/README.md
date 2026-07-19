@@ -553,6 +553,31 @@ dial9's internal hooks always run first, then your callbacks fire in registratio
 
 **Important:** Do not set hooks directly via `tokio::runtime::Builder::on_thread_start()` etc. — dial9 will overwrite them. Always use `with_tokio_hooks` to compose your callbacks with dial9's instrumentation.
 
+### Metrique integration (`metrique-integration` feature)
+
+Dial9 can act as a peer sink for [metrique](https://docs.rs/metrique) entries: fields from your existing application metrics flow into the dial9 trace alongside tokio runtime telemetry, correlated by worker id, task id, and a monotonic time span. Requires the `metrique-integration` feature.
+
+```rust,ignore
+use dial9_tokio_telemetry::telemetry::metrique_integration::{Dial9Context, Dial9Stream, Emit, Interned};
+use metrique::unit_of_work::metrics;
+use metrique::writer::stream::tee;
+
+#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+struct RequestMetrics {
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+    #[metrics(flags(Interned))]
+    route: String,
+    operation: &'static str,
+    #[metrics(flags(skip(Emit)))]
+    debug_blob: String,
+}
+
+let stream = tee(emf_stream, Dial9Stream::new(&handle));
+```
+
+`Emit` opts a field into the dial9 payload (directly, or via `#[metrics(default_flags(Emit))]` at the struct level); `Interned` routes a string-shaped field through dial9's string pool; `flags(skip(Emit))` excludes a field from a struct-level default. `Dial9Context` can be flattened anywhere in the struct — dispatch is by field name, not declaration order. See the [`metrique_integration`](https://docs.rs/dial9-tokio-telemetry/latest/dial9_tokio_telemetry/telemetry/metrique_integration/) module docs for known limitations (list fields land as comma-joined strings, not structured lists; `Flex` fields aren't supported).
+
 ## Getting data out of dial9
 
 dial9 is recording data to in memory buffers and eventually to disk. For most applications, they would like the data to go somewhere else. `dial9` has a built in exporter for S3 and it is also possible to write your own exporter.

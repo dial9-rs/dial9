@@ -13,6 +13,9 @@ pub(crate) use dial9_core::buffer;
 pub(crate) mod custom_events;
 pub(crate) mod events;
 pub(crate) mod format;
+#[cfg(feature = "metrique-integration")]
+/// Integrate metrique entries into the dial9 trace. See the module docs.
+pub mod metrique_integration;
 pub(crate) mod process_resource_usage;
 pub(crate) mod recorder;
 #[cfg(feature = "linux-socket")]

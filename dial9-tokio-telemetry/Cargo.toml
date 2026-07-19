@@ -105,6 +105,12 @@ worker-s3 = [
 ## Removes #[non_exhaustive] from event structs so downstream crates can
 ## construct them directly. Unstable: no semver guarantees on new fields.
 unstable-events = ["dial9-perf-self-profile?/unstable-events"]
+## Record Emit-tagged fields of descriptor-aware metrique entries into the
+## dial9 trace. See docs/design/metrique-integration.md and the
+## `telemetry::metrique_integration` module docs. `metrique`/`metrique-writer`
+## are already unconditional deps (used for dial9's own internal metrics),
+## so this only gates compiling the integration module.
+metrique-integration = []
 ## All features except platform-specific ones (taskdump). Used in CI for non-Linux targets.
 __nonlinux_all_features = [
     "analysis",
@@ -113,12 +119,14 @@ __nonlinux_all_features = [
     "linux-socket",
     "tracing-layer",
     "worker-s3",
+    "metrique-integration",
 ]
 
 [dev-dependencies]
 dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
     "memory-profiling",
+    "metrique-integration",
     "tracing-layer",
     "unstable-events",
     "worker-s3",
@@ -159,6 +167,7 @@ iai-callgrind = "=0.16.1"
 dial9-tokio-telemetry = { path = ".", features = [
     "cpu-profiling",
     "memory-profiling",
+    "metrique-integration",
     "worker-s3",
     "analysis",
     "taskdump",
@@ -205,6 +214,10 @@ required-features = ["cpu-profiling", "analysis"]
 [[example]]
 name = "s3_stress_test"
 required-features = ["worker-s3"]
+
+[[example]]
+name = "metrique_integration"
+required-features = ["metrique-integration"]
 
 [[example]]
 name = "analyze_trace"
