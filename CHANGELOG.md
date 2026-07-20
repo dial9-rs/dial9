@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.15](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.14...dial9-tokio-telemetry-v0.3.15) - 2026-07-20
+
+### Fixed
+
+- *(taskdump)* propagate Ready from the capture re-poll ([#683](https://github.com/dial9-rs/dial9/pull/683))
+
 ## [0.3.14](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.13...dial9-tokio-telemetry-v0.3.14) - 2026-07-09
 
 ### Other
