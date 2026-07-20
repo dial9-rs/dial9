@@ -14,7 +14,11 @@ import {
   filterPointsOfInterest,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
-import { sharedWorkerSpans, columnarWorkerStoreFor } from "../../components/canvas/lanes/data.js";
+import {
+  columnarWorkerStoreFor,
+  lifecycleWorkerIds,
+  sharedWorkerSpans,
+} from "../../components/canvas/lanes/data.js";
 import { laneSource, type LaneSource } from "../../lib/trace/columnar-worker-spans.js";
 import type {
   ParsedTrace,
@@ -104,26 +108,13 @@ const sourceCache = new WeakMap<ParsedTrace, PoiSource>();
  *  non-wake event, sorted ascending. Runtime-group reordering is order-only
  *  and never changes the count, so it is skipped here (the rail applies its
  *  own display sort). */
-function deriveWorkerIds(trace: ParsedTrace): number[] {
-  const set = new Set<number>();
-  for (const e of trace.events) {
-    if (
-      e.eventType === EVENT_TYPES.QueueSample ||
-      e.eventType === EVENT_TYPES.WakeEvent
-    ) {
-      continue;
-    }
-    set.add(e.workerId);
-  }
-  return [...set].sort((a, b) => a - b);
-}
 
 /** The memoized POI source for a trace (built once per loaded trace). */
 export function poiSourceFor(trace: ParsedTrace): PoiSource {
   let source = sourceCache.get(trace);
   if (source !== undefined) return source;
 
-  const workerIds = deriveWorkerIds(trace);
+  const workerIds = lifecycleWorkerIds(trace);
   // Shared reconstruction (buildWorkerSpans + attachCpuSamples applied once);
   // the "cpu-sampled" detector reads the already-attached poll samples.
   const spanResult = sharedWorkerSpans(trace);

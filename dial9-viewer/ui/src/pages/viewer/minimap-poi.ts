@@ -18,7 +18,11 @@ import {
   filterPointsOfInterest,
   laneSource,
 } from "../../lib/trace/index.js";
-import { sharedWorkerSpans, columnarWorkerStoreFor } from "../../components/canvas/lanes/data.js";
+import {
+  columnarWorkerStoreFor,
+  lifecycleWorkerIds,
+  sharedWorkerSpans,
+} from "../../components/canvas/lanes/data.js";
 import type {
   ParsedTrace,
   PointOfInterest,
@@ -36,19 +40,6 @@ export interface MinimapPoi {
 }
 
 /** Distinct worker ids that appear in lifecycle events, sorted. */
-function lifecycleWorkerIds(trace: ParsedTrace): number[] {
-  const set = new Set<number>();
-  for (const e of trace.events) {
-    if (
-      e.eventType === EVENT_TYPES.QueueSample ||
-      e.eventType === EVENT_TYPES.WakeEvent
-    ) {
-      continue;
-    }
-    set.add(e.workerId);
-  }
-  return [...set].sort((a, b) => a - b);
-}
 
 /**
  * Derive the overview POI ticks for one parsed trace: reconstruct worker

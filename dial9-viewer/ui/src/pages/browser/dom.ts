@@ -1,17 +1,18 @@
 // Typed element handles for the browser page. The ids/classes match the
 // page markup and are load-bearing for the row walkers.
 
-function byId<T extends HTMLElement>(id: string): T {
-  const el = document.getElementById(id);
-  if (!el) throw new Error(`browser page markup is missing #${id}`);
-  return el as T;
-}
+import {
+  byId as lookupById,
+  byIdOf as lookupByIdOf,
+  bySelector as lookupBySelector,
+} from "../../lib/dom/query.js";
 
-function bySelector<T extends HTMLElement>(selector: string): T {
-  const el = document.querySelector<T>(selector);
-  if (!el) throw new Error(`browser page markup is missing ${selector}`);
-  return el;
-}
+const SHELL = "browser page";
+const byId = <T extends HTMLElement>(id: string): T => lookupById<T>(SHELL, id);
+const byIdOf = <T extends HTMLElement>(id: string, ctor: new () => T): T =>
+  lookupByIdOf(SHELL, id, ctor);
+const bySelector = <T extends HTMLElement>(sel: string): T =>
+  lookupBySelector<T>(SHELL, sel);
 
 export interface BrowserEls {
   // Header
@@ -111,7 +112,7 @@ export function queryEls(): BrowserEls {
     heatmapView: byId("heatmap-view"),
     heatmapLabels: byId("heatmap-labels"),
     heatmapPlot: byId("heatmap-plot"),
-    heatmapCanvas: byId("heatmap-canvas"),
+    heatmapCanvas: byIdOf("heatmap-canvas", HTMLCanvasElement),
     heatmapSel: byId("heatmap-sel"),
     heatmapAxis: byId("heatmap-axis"),
     heatmapResetZoom: byId("heatmap-reset-zoom"),

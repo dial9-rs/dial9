@@ -3,7 +3,7 @@
 
 import {
   createHelpOverlay,
-  isTextEntryTarget,
+  helpKeyBindings,
   mountKeyRouter,
 } from "../../lib/interact/index.js";
 import type { HelpOverlay, HelpSection } from "../../lib/interact/index.js";
@@ -39,25 +39,12 @@ export function mountTokioStatsKeys(): TokioStatsKeys {
     sections: [KEY_ROWS, MOUSE_ROWS],
   });
 
-  const disposeRouter = mountKeyRouter(window, [
-    { key: "?", onKey: () => help.toggle() },
-  ]);
-
-  // Focus-outside Escape: the overlay consumes its own Escape while focused;
-  // this covers the case where focus is elsewhere. The page has no other Escape
-  // behavior to cascade to.
-  function onKeydown(e: KeyboardEvent): void {
-    if (e.key !== "Escape") return;
-    if (isTextEntryTarget(e.target)) return;
-    if (help.isOpen()) help.close();
-  }
-  window.addEventListener("keydown", onKeydown);
+  const disposeRouter = mountKeyRouter(window, helpKeyBindings(help));
 
   return {
     help,
     dispose(): void {
       disposeRouter();
-      window.removeEventListener("keydown", onKeydown);
       help.dispose();
     },
   };

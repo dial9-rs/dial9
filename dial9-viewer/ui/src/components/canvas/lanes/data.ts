@@ -71,10 +71,16 @@ export function deriveWorkerIds(trace: ParsedTrace): number[] {
   return deriveRuntimeGroups(trace).flatMap((g) => g.workerIds);
 }
 
-/** The runtime groups in render order: scan non-queue/non-wake events for the
- *  worker set, then group by runtime. A single-runtime trace yields one group;
- *  the lanes renderer draws headers only when there is more than one. */
-export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
+/**
+ * The distinct worker ids on lifecycle events, sorted ascending. Queue samples
+ * and wake events are skipped: their `workerId` is a queue/target, not a worker
+ * that ran anything, so counting them would invent lanes.
+ *
+ * This is the SET; callers that need render order wrap it in
+ * deriveRuntimeGroups. Consumers that only count workers (POI detectors, the
+ * minimap ticks) take it directly.
+ */
+export function lifecycleWorkerIds(trace: ParsedTrace): number[] {
   const set = new Set<number>();
   for (const e of trace.events) {
     if (e.eventType === EVENT_TYPES.QueueSample || e.eventType === EVENT_TYPES.WakeEvent) {
@@ -82,8 +88,14 @@ export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
     }
     set.add(e.workerId);
   }
-  const sorted = [...set].sort((a, b) => a - b);
-  return computeRuntimeGroups(sorted, trace.runtimeWorkers);
+  return [...set].sort((a, b) => a - b);
+}
+
+/** The runtime groups in render order: the lifecycle worker set, grouped by
+ *  runtime. A single-runtime trace yields one group; the lanes renderer draws
+ *  headers only when there is more than one. */
+export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
+  return computeRuntimeGroups(lifecycleWorkerIds(trace), trace.runtimeWorkers);
 }
 
 /**

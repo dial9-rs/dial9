@@ -13,6 +13,7 @@
 
 import {
   createHelpOverlay,
+  helpKeyBindings,
   mountKeyRouter,
 } from "../../lib/interact/index.js";
 import type { HelpSection } from "../../lib/interact/index.js";
@@ -66,7 +67,7 @@ export function mountBrowserPageKeys({ store, els, actions }: PageCtx): void {
   }
 
   mountKeyRouter(window, [
-    { key: "?", onKey: () => help.toggle() },
+    ...helpKeyBindings(help),
     {
       key: "/",
       onKey: (): void => {
@@ -74,21 +75,6 @@ export function mountBrowserPageKeys({ store, els, actions }: PageCtx): void {
           store.getState().ui.tab === "raw" ? els.rawSearchInput : els.prefixInput;
         target.focus();
         target.select();
-      },
-    },
-    {
-      // Focus-elsewhere close for the overlay (it consumes its own
-      // Escape while focused); declines when closed so the page default
-      // stays intact.
-      key: "Escape",
-      preserveDefault: true,
-      inTextEntry: true,
-      onKey: (): boolean => {
-        if (help.isOpen()) {
-          help.close();
-          return true;
-        }
-        return false;
       },
     },
   ]);

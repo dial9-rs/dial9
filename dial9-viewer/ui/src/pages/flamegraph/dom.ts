@@ -13,13 +13,9 @@ export interface PageEls {
   showError(msg: string): void;
 }
 
-function mustGet(id: string): HTMLElement {
-  const el = document.getElementById(id);
-  if (el === null) {
-    throw new Error(`flamegraph shell is missing #${id}`);
-  }
-  return el;
-}
+import { byId } from "../../lib/dom/query.js";
+
+const mustGet = (id: string): HTMLElement => byId("flamegraph shell", id);
 
 /** Resolve the shell elements (throws on a drifted shell). */
 export function pageEls(): PageEls {

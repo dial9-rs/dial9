@@ -15,11 +15,10 @@ export interface PageEls {
   tableContainer: HTMLElement;
 }
 
-function byId<T extends HTMLElement>(id: string): T {
-  const el = document.getElementById(id);
-  if (el === null) throw new Error(`tokio-stats shell is missing #${id}`);
-  return el as T;
-}
+import { byId as lookupById } from "../../lib/dom/query.js";
+
+const byId = <T extends HTMLElement>(id: string): T =>
+  lookupById<T>("tokio-stats shell", id);
 
 /** Resolve the static shell elements; throws if the markup is incomplete. */
 export function pageEls(): PageEls {

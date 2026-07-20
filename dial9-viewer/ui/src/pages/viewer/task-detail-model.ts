@@ -36,7 +36,7 @@ import type {
   LaneSpans,
 } from "../../lib/trace/index.js";
 import { nsToDrawX, pixelCoverage } from "../../lib/canvas/index.js";
-import { sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
+import { lifecycleWorkerIds, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
 import {
   isColumnarLane,
   type ColumnarWorkerSpans,
@@ -74,20 +74,10 @@ export const EMPTY_TASK_POLL_SOURCE: TaskPollSource = {
  * discriminant), but the grouped order is kept.
  */
 export function collectWorkerIds(trace: ParsedTrace): number[] {
-  const set = new Set<number>();
-  for (const e of trace.events) {
-    if (
-      e.eventType === EVENT_TYPES.QueueSample ||
-      e.eventType === EVENT_TYPES.WakeEvent
-    ) {
-      continue;
-    }
-    set.add(e.workerId);
-  }
-  const sorted = [...set].sort((a, b) => a - b);
-  return computeRuntimeGroups(sorted, trace.runtimeWorkers).flatMap(
-    (g) => g.workerIds,
-  );
+  return computeRuntimeGroups(
+    lifecycleWorkerIds(trace),
+    trace.runtimeWorkers,
+  ).flatMap((g) => g.workerIds);
 }
 
 /**

@@ -5,6 +5,7 @@
 // transient-channel updates only; rendering is the selection overlay's and
 // painter's job.
 
+import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
 import { clamp } from "./format.js";
@@ -58,7 +59,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     }
     const dx = Math.abs(x - startX);
     const dy = Math.abs(y - startY);
-    if (dx < 4 && dy < 4) {
+    if (dx <= DRAG_INTENT_PX && dy <= DRAG_INTENT_PX) {
       actions.selectSegmentAt(startX, startY); // treat as a click
     } else {
       actions.finalizeSelection(

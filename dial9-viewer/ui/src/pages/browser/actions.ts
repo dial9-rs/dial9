@@ -28,6 +28,7 @@ import {
   encodeScope,
   scopeFromKeys,
 } from "../../lib/trace/trace_scope.js";
+import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import { apiFetch, sampleBucketKeys, type BrowseResponse } from "./api.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
@@ -618,7 +619,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // re-normalizes to the visible window on the repaint.
   function zoomToX(x0: number, x1: number): void {
     const b = store.getState().browse;
-    if (!b.domain || x1 - x0 < 4) return;
+    if (!b.domain || x1 - x0 <= DRAG_INTENT_PX) return;
     const W = canvasWidth();
     const { tMin, tMax } = b.domain;
     const t0 = xToTime(x0, tMin, tMax, W);
@@ -671,7 +672,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // selection snaps to the actual [min start, max end] of the covered files.
   function finalizeSelection(x0: number, x1: number, y0: number, y1: number): void {
     const b = store.getState().browse;
-    if (!b.domain || x1 - x0 < 3) {
+    if (!b.domain || x1 - x0 <= DRAG_INTENT_PX) {
       setHeatmapSelection(null);
       return;
     }

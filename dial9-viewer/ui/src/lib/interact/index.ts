@@ -47,7 +47,7 @@ export {
 } from "./palette.js";
 export type { PaletteItem, PaletteOptions, SearchPalette } from "./palette.js";
 
-export { createHelpOverlay } from "./help-overlay.js";
+export { createHelpOverlay, helpKeyBindings } from "./help-overlay.js";
 export type {
   HelpOverlay,
   HelpOverlayOptions,

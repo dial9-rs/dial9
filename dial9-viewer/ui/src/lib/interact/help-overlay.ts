@@ -10,6 +10,7 @@
 // isOpen() first in their own Escape handling.
 
 import "../../styles/interact.css";
+import type { KeyBinding } from "./keyboard.js";
 
 export interface HelpRow {
   /** Key label, rendered as <kbd> ("/", "n / p", "Cmd/Ctrl + F"). */
@@ -39,6 +40,32 @@ export interface HelpOverlay {
   isOpen(): boolean;
   /** Remove the overlay from the document. */
   dispose(): void;
+}
+
+/**
+ * The two bindings every page wires for the overlay: `?` toggles it, and
+ * Escape closes it when focus has left it (the overlay consumes its own
+ * Escape while focused - see the Escape composition note above).
+ *
+ * Owned here rather than per page because the Escape half is easy to get
+ * subtly wrong: it must DECLINE when the overlay is closed so the page's own
+ * Escape cascade still runs, and it must not swallow the browser default.
+ * Spread into the page's mountKeyRouter call.
+ */
+export function helpKeyBindings(help: HelpOverlay): KeyBinding[] {
+  return [
+    { key: "?", onKey: () => help.toggle() },
+    {
+      key: "Escape",
+      preserveDefault: true,
+      inTextEntry: true,
+      onKey: (): boolean => {
+        if (!help.isOpen()) return false;
+        help.close();
+        return true;
+      },
+    },
+  ];
 }
 
 const DEFAULT_FOOTER =
