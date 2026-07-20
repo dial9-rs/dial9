@@ -1,14 +1,10 @@
 // The at-cursor info readout, rehomed into the persistent inspector surface.
 // Computes the readout and writes it to the `transient.atCursor` store
-// contract; the inspector renders it. `renderAtCursorStub` proves the wiring by
-// rendering it into the inspector slot.
+// contract; the inspector renders it.
 //
 // PURE compute (Node-testable): the readout is bounded lookups over the
-// overlay's derived series (data.ts), never a trace rescan. The stub renderer
-// does zero measure-after-write (textContent/lit-html only) - it rides the
-// transient channel like the crosshair, so it never triggers a track redraw.
+// overlay's derived series (data.ts), never a trace rescan.
 
-import { html, render } from "lit-html";
 import type { AtCursorReadout, SegmentEntry } from "../../types/state.js";
 import { activeTaskCountAt, nearestByT } from "../../lib/trace/query.js";
 
@@ -83,60 +79,4 @@ export function computeAtCursorReadout(
     activeTaskCount: activeTaskCountAt(input.activeTaskSamples, ns),
     coverage,
   };
-}
-
-// Inspector stub (proves the store wiring).
-
-const STUB_CLASS = "d9-atcursor-readout";
-
-/** The inspector body the readout mirrors into (statically templated). */
-function inspectorBody(root: ParentNode): HTMLElement | null {
-  return root.querySelector<HTMLElement>(".d9-inspector-body");
-}
-
-/**
- * Ensure the at-cursor readout stub exists in the inspector body (idempotent),
- * then render `readout` into it. Appends into a container with no lit-html
- * dynamic binding (only static content), so the shell's declarative re-renders
- * do not clobber it. Null hides the readout.
- */
-export function renderAtCursorStub(root: ParentNode, readout: AtCursorReadout | null): void {
-  const body = inspectorBody(root);
-  if (!body) return;
-  let host = body.querySelector<HTMLElement>(`.${STUB_CLASS}`);
-  if (!host) {
-    host = body.ownerDocument.createElement("div");
-    host.className = STUB_CLASS;
-    host.setAttribute("aria-label", "At-cursor stats");
-    // Insert first so it reads as the "current moment" header.
-    body.insertBefore(host, body.firstChild);
-  }
-  if (readout === null) {
-    render(html`<span class="d9-atcursor-empty">Hover the timeline for at-cursor stats</span>`, host);
-    return;
-  }
-  const num = (v: number | null): string => (v !== null ? String(v) : "-");
-  const coverageNote =
-    readout.coverage === "truncated"
-      ? html` <span class="d9-atcursor-warn">partial window</span>`
-      : readout.coverage === "oversized"
-        ? html` <span class="d9-atcursor-warn">oversized segment</span>`
-        : "";
-  render(
-    html`
-      <div class="d9-atcursor-row">
-        <span class="label">Worker</span>
-        <span class="value">${readout.workerId !== null ? String(readout.workerId) : "-"}</span>
-        <span class="label">Global Q</span>
-        <span class="value">${num(readout.globalQueue)}</span>
-        <span class="label">Local max</span>
-        <span class="value">${num(readout.localMax)}</span>
-        ${readout.activeTaskCount !== null
-          ? html`<span class="label">Active tasks</span>
-              <span class="value">${String(readout.activeTaskCount)}</span>`
-          : ""}${coverageNote}
-      </div>
-    `,
-    host,
-  );
 }

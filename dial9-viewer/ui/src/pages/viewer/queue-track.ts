@@ -75,8 +75,7 @@ export interface QueueTrackController {
     viewStart: number,
     viewEnd: number,
   ): void;
-  /** Read the current (cached) queue data - the spawned-tasks source. */
-  data(): QueueData;
+  queueSeries(): QueueData;
   /**
    * The spawned-tasks derivation for a range: tasks first polled in range,
    * grouped by spawn location. Exposed so the inspector reuses the logic and
@@ -302,7 +301,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     store.update("selection", { spawnedTasksRange: range });
   }
 
-  function data(): QueueData {
+  function queueSeries(): QueueData {
     return queueData();
   }
 
@@ -323,7 +322,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     sizerCanvas = null;
   }
 
-  return { rowTemplate, paint, data, spawnedTasks, commitRange, dispose };
+  return { rowTemplate, paint, queueSeries, spawnedTasks, commitRange, dispose };
 }
 
 // ── Draw-area x mapping + selection band (module-local) ────────────────────

@@ -455,13 +455,13 @@ export function createRegionAnalysis(
         during a poll.
       </p>
       <div class="d9-block-bars">
-        ${view.groups.map((g) => blockingBar(g, view.total))}
+        ${view.groups.map((g) => blockingBar(g))}
       </div>
       <div class="d9-block-groups">${view.groups.map(blockingGroup)}</div>
     `;
   }
 
-  function blockingBar(g: BlockingGroup, _total: number): TemplateResult {
+  function blockingBar(g: BlockingGroup): TemplateResult {
     return html`<div class=${classMap({ "d9-block-row": true, [`c-${g.color}`]: true })}>
       <span class="d9-block-count">${g.count}</span>
       <span class="d9-block-bar" style="width:${g.barPct}%"></span>

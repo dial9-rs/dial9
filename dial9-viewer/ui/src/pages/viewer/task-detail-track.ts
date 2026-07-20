@@ -113,7 +113,7 @@ export interface TaskDetailTrackController {
     viewEnd: number,
   ): void;
   /** Read the current (cached) derivation - the inspector Task tab source. */
-  data(): TaskDetailData;
+  taskDetail(): TaskDetailData;
   /**
    * Dispatch `selection.hoveredWakerTaskId` for a pointer at draw-area (mx, my)
    * over `model` (null off any waker label). Dispatches only on a change (no
@@ -268,10 +268,6 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
         hoveredWakerTaskId: null,
       });
     }
-    // Click a dumped idle gap -> open the captured async stack. The stack
-    // renders in the inspector / flamegraph surface: this track exposes the
-    // dumps on the derivation + hit region; it does not build the flamegraph
-    // modal here.
   }
 
   function clearHover(): void {
@@ -317,7 +313,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     clickWaker(model, mx, my);
   }
 
-  function data(): TaskDetailData {
+  function taskDetail(): TaskDetailData {
     return taskDetailData();
   }
 
@@ -328,7 +324,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     sizerCanvas = null;
   }
 
-  return { rowTemplate, paint, data, hoverWaker, clickWaker, clearHover, dispose };
+  return { rowTemplate, paint, taskDetail, hoverWaker, clickWaker, clearHover, dispose };
 }
 
 // ── Canvas draw (extracted so the render input is unit-testable) ───────────

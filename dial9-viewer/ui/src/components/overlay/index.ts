@@ -33,8 +33,6 @@ import { buildLaneTooltip, createTooltip, type TooltipHandle } from "./tooltip.j
 const OVERLAY_CLASS = "d9-crosshair-overlay";
 
 export interface MountedOverlay {
-  /** Force one overlay redraw (after mount / on resize). */
-  refresh(): void;
   /** Tear down subscriptions, listeners, and the overlay DOM. */
   dispose(): void;
 }
@@ -175,8 +173,7 @@ export function mountOverlay(
 
     // At-cursor readout: the overlay's job is to POPULATE `transient.atCursor`
     // (computeAtCursorReadout); the persistent inspector RENDERS it in one
-    // place, so no inspector-slot stub runs here. renderAtCursorStub stays
-    // exported for its own test.
+    // place, so nothing renders it here.
 
     // Tooltip: rebuilt only on a fresh mousemove; hidden on mouseleave/drag.
     // Uses CACHED dims (no measure-after-write).
@@ -288,7 +285,6 @@ export function mountOverlay(
   drawFrame();
 
   return {
-    refresh: () => store.update("transient", {}),
     dispose(): void {
       unsubscribe();
       trackColumn.removeEventListener("mousemove", onMouseMove);
@@ -308,7 +304,7 @@ export {
   createTooltip,
 } from "./tooltip.js";
 export type { TooltipHandle, TooltipRow, TooltipSegment } from "./tooltip.js";
-export { computeAtCursorReadout, coverageAt, renderAtCursorStub } from "./readout.js";
+export { computeAtCursorReadout, coverageAt } from "./readout.js";
 export type { AtCursorInput } from "./readout.js";
 export { deriveOverlayData } from "./data.js";
 export type { OverlayData } from "./data.js";

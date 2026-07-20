@@ -53,6 +53,12 @@ export interface LaneData {
   hasTaskTracking: boolean;
 }
 
+/**
+ * Assemble the lanes track's frame-invariant input for one parsed trace: the
+ * shared span/queue/wake derivations plus the span-id index the highlight
+ * reads. The mount caches this per trace (store.derived over the `trace`
+ * slice), so a pan or selection change never re-runs it.
+ */
 export function deriveLaneData(trace: ParsedTrace): LaneData {
   const runtimeGroups = deriveRuntimeGroups(trace);
   const workerIds = runtimeGroups.flatMap((g) => g.workerIds);

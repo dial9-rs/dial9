@@ -47,8 +47,6 @@ function clampLanesHeight(h: number): number {
 }
 
 export interface MountedLanes {
-  /** Force one redraw (used after mount / on resize). */
-  refresh(): void;
   /** Tear down the subscription and release the track claim. */
   dispose(): void;
 }
@@ -249,7 +247,6 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
   draw();
 
   return {
-    refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();
       releaseClaim();

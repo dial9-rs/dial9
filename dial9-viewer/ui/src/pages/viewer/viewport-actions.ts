@@ -119,7 +119,7 @@ export interface ViewportActions {
   applyPan(win: ViewWindow): void;
   /** Record the CURRENT viewport as a history entry (pan-drag end / baseline). */
   recordCurrent(): void;
-  /** Reset history (new trace loaded); optionally seed a baseline. */
+  /** Clear the zoom history (new trace loaded). */
   resetHistory(): void;
   /**
    * `z` zoom-undo: pop the previous committed view and apply it. Returns true

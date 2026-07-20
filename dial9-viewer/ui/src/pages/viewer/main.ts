@@ -277,7 +277,7 @@ function boot(): void {
   // bindings (arrows/WASD/z + the kb-selection Escape/Enter) join the unified
   // router BEFORE the entry's `?`/Escape fallbacks so a kb-selection
   // cancel/confirm wins, and the generic Escape cascade runs otherwise.
-  const laneInteraction = mountLaneInteraction(root, shell.trackColumn, store, { announcer });
+  const laneInteraction = mountLaneInteraction(shell.trackColumn, store, { announcer });
 
   // Unified keyboard: the lane bindings first, then `?` toggles help and Escape
   // runs the cascade + clears the task selection + refocuses the timeline.

@@ -63,12 +63,7 @@ export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
   return computeRuntimeGroups(lifecycleWorkerIds(trace), trace.runtimeWorkers);
 }
 
-/**
- * Derive the frame-invariant lane data for one parsed trace. Runs the frozen
- * core's buildWorkerSpans (which also extracts queue samples and wake
- * indices) + attachCpuSamples, and builds the span-id index from the span
- * data. Call once per trace and cache (store.derived over the `trace` slice).
- */
+/** Keyed on trace identity, so a reparse invalidates but a pan never does. */
 const workerSpansCache = new WeakMap<ParsedTrace, LaneWorkerSpans>();
 
 /**

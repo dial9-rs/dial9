@@ -47,12 +47,6 @@ export interface ShellDeps extends ToolbarDeps {
   onNewFile?(): void;
 }
 
-/** Everything the shell template needs, derived from store state. */
-interface ShellViewModel extends TracksViewModel {
-  // Carries only the track inputs; file-info fields live in the toolbar
-  // controller and the status fields in the mounted status-bar component.
-}
-
 /** The persistent interaction hint chips: always visible, never auto-hidden. */
 const HINT_CHIPS: readonly string[] = [
   "Shift+drag = select region",
@@ -64,7 +58,7 @@ const HINT_CHIPS: readonly string[] = [
 ];
 
 /** Build the view model for a render pass from the current store state. */
-function viewModel(state: StoreState): ShellViewModel {
+function viewModel(state: StoreState): TracksViewModel {
   const trace = state.trace.trace;
   const hasTrace = trace !== null;
   const taskSelected = state.selection.selectedTaskId !== null;
@@ -133,7 +127,7 @@ function inspectorTemplate(): TemplateResult {
 
 /** The full shell template for one render pass. */
 function shellTemplate(
-  vm: ShellViewModel,
+  vm: TracksViewModel,
   state: StoreState,
   deps: ShellDeps,
   toolbar: ToolbarController,
@@ -243,8 +237,6 @@ export interface MountedShell {
   minimapRegion: HTMLElement;
   /** The status-bar footer host (pass to createStatusBar). */
   statusRegion: HTMLElement;
-  /** Force one render+size pass (used after mount and on resize). */
-  refresh(): void;
   /** Tear down the store subscription and resize listener. */
   dispose(): void;
 }
@@ -343,7 +335,6 @@ export function mountShell(
     inspectorRegion,
     minimapRegion,
     statusRegion,
-    refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();
       window.removeEventListener("resize", onResize);

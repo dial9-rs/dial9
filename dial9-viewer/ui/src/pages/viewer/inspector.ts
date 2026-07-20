@@ -86,8 +86,6 @@ export interface InspectorDeps {
 }
 
 export interface MountedInspector {
-  /** Force one render (used after mount). */
-  refresh(): void;
   /** Tear down the store subscription + esc registration + drag listeners. */
   dispose(): void;
 }
@@ -905,7 +903,6 @@ export function mountInspector(
   renderFrame();
 
   return {
-    refresh: renderFrame,
     dispose(): void {
       unsubFrame();
       unsubReadout();

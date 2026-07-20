@@ -127,7 +127,7 @@ describe("waker-hover dispatch (the lanes contract)", () => {
     // A wide wake band: poll@1000 with a wake@500 over a 0..2000 / 2000px view
     // is 500px wide (> 40), so a waker region exists.
     const model = buildTaskDetailRenderModel({
-      data: track.data(),
+      data: track.taskDetail(),
       viewStart: 0,
       viewEnd: 2000,
       drawW: 2000,

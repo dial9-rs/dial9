@@ -65,16 +65,13 @@ interface ColumnGeom {
  * Mount the lane interaction layer against `store`, attaching pointer/wheel/
  * click listeners to `trackColumn` (and window for the drag move/up), the
  * Shift/Alt keyboard-selection listener, the viewport controls, and the
- * selection overlay. `root` is the viewer app root (unused today; reserved so
- * the controls could relocate without touching the entry).
+ * selection overlay.
  */
 export function mountLaneInteraction(
-  root: HTMLElement,
   trackColumn: HTMLElement,
   store: ViewerStore,
   deps: LaneInteractionDeps,
 ): MountedLaneInteraction {
-  void root;
   const pointer = createPointerMachine();
   const kbSel = createKbSelectionMachine();
   const viewport: ViewportActions = createViewportActions(store);

@@ -59,7 +59,6 @@ export interface MinimapDeps {
 }
 
 export interface MountedMinimap {
-  refresh(): void;
   dispose(): void;
 }
 
@@ -287,7 +286,6 @@ export function mountMinimap(
   draw();
 
   return {
-    refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();
       region.removeEventListener("keydown", onKeyDown);
