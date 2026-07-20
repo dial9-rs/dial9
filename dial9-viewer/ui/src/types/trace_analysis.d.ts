@@ -200,7 +200,15 @@ declare module "*/trace_analysis.js" {
     worker: number;
     type: PointOfInterestType;
     value: number;
-    span: PollSpan | ParkSpan;
+    /**
+     * The span the detector flagged. Declared as the subset consumers read
+     * (start/end, plus taskId when it is a poll) rather than PollSpan|ParkSpan:
+     * the frozen detector does hand back whole spans, but the columnar store's
+     * pointsOfInterest emits a light {start,end,taskId} for the viewport jump,
+     * and materializing a full PollSpan per POI purely to satisfy a type would
+     * defeat the reason that path exists.
+     */
+    span: { start: number; end: number; taskId?: number };
     schedDelay?: SchedDelay;
   }
 

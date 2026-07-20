@@ -472,7 +472,6 @@ export interface StoreState {
   segments: SegmentsSlice;
 }
 
-/** "trace" | "viewport" | "selection" | "poi" | "uiPrefs" | "transient" | "segments" */
 export type StoreSliceName = keyof StoreState;
 
 // ── Layout geometry ──────────────────────────────────────────────────────

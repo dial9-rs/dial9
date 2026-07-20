@@ -83,7 +83,7 @@ export class ColumnarEvents {
    * a contiguous index range - it must be found through this sort index. */
   private _tsIndex: Int32Array | null = null;
 
-  private readonly view: MutableView;
+  private readonly view: ReusedEventCursor;
 
   constructor(cap = INITIAL_CAP) {
     this._cap = cap;
@@ -99,7 +99,7 @@ export class ColumnarEvents {
     this.tidRaw = new Float64Array(cap);
     this.wakerTaskIdRaw = new Float64Array(cap);
     this.wokenTaskIdRaw = new Float64Array(cap);
-    this.view = new MutableView(this);
+    this.view = new ReusedEventCursor(this);
   }
 
   get length(): number {
@@ -365,7 +365,7 @@ function materialize(c: ColumnarEvents, i: number): EventLike {
  * (schedWait NaN->null, tid NaN->undefined, spawnLoc idx->string|null). Wake
  * fields read as-is (NaN on non-wake events, which never read them).
  */
-class MutableView implements EventLike {
+class ReusedEventCursor implements EventLike {
   _i = 0;
   private readonly c: ColumnarEvents;
   constructor(c: ColumnarEvents) { this.c = c; }

@@ -178,7 +178,6 @@ export function spanAncestryAt(
     } else {
       break;
     }
-    // Defense against cycles in malformed data:
     if (++steps >= SPAN_ANCESTRY_CYCLE_LIMIT) break;
   }
   return { outermost, ids };

@@ -179,7 +179,7 @@ export function fmtCpuPercent(value: number): string {
 
 // The info label joins its parts with a middle dot (U+00B7), kept as an escape
 // so this source stays plain ASCII while the OUTPUT is byte-for-byte the dot.
-const SEP = " · ";
+const SEP = " \u00b7 ";
 
 /**
  * The visible-window info readout: `avg <cores> cores`, then (only when

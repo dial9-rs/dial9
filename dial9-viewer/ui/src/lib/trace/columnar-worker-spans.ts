@@ -17,6 +17,7 @@ import type { SpanList } from "./query.js";
 import type {
   PointOfInterest,
   PointOfInterestType,
+  SchedDelay,
   WorkerLane,
   WorkerSpansResult,
 } from "../../types/trace.js";
@@ -494,14 +495,12 @@ export class ColumnarWorkerSpans {
   pointsOfInterest(
     filterType: PointOfInterestType,
     workerIds: readonly number[],
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    schedDelays: readonly any[],
+    schedDelays: readonly (SchedDelayView | SchedDelay)[],
     opts: PoiOpts = {}
   ): PointOfInterest[] {
     const hasSchedWait = !!opts.hasSchedWait;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const points: any[] = [];
-    const lightPoll = (c: WorkerPollColumns, i: number): { start: number; end: number; taskId: number } => ({
+    const points: PointOfInterest[] = [];
+    const pollSpanForJump = (c: WorkerPollColumns, i: number): { start: number; end: number; taskId: number } => ({
       start: c.start[i]!, end: c.end[i]!, taskId: c.taskId[i]!,
     });
 
@@ -514,14 +513,14 @@ export class ColumnarWorkerSpans {
           if (hasSchedWait && !Number.isNaN(sw) && sw > 100) {
             points.push({
               time: c.parkEnd[i]! - sw, worker: w, type: "sched", value: sw,
-              span: { start: c.parkStart[i], end: c.parkEnd[i] },
+              span: { start: c.parkStart[i]!, end: c.parkEnd[i]! },
             });
           }
         }
       } else if (filterType === "long-poll") {
         for (let i = 0; i < c.n; i++) {
           const durMs = (c.end[i]! - c.start[i]!) / 1e6;
-          if (durMs > 1) points.push({ time: c.start[i], worker: w, type: "long-poll", value: durMs, span: lightPoll(c, i) });
+          if (durMs > 1) points.push({ time: c.start[i]!, worker: w, type: "long-poll", value: durMs, span: pollSpanForJump(c, i) });
         }
       } else if (filterType === "cpu-sampled") {
         const cpuOff = c.cpuOff, schedOff = c.schedOff;
@@ -529,7 +528,7 @@ export class ColumnarWorkerSpans {
           const cpuCount = cpuOff ? cpuOff[i + 1]! - cpuOff[i]! : 0;
           const schedCount = schedOff ? schedOff[i + 1]! - schedOff[i]! : 0;
           if (cpuCount + schedCount > 0) {
-            points.push({ time: c.start[i], worker: w, type: "cpu-sampled", value: (c.end[i]! - c.start[i]!) / 1e6, span: lightPoll(c, i) });
+            points.push({ time: c.start[i]!, worker: w, type: "cpu-sampled", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
           }
         }
       }
@@ -552,7 +551,7 @@ export class ColumnarWorkerSpans {
         for (let i = 0; i < c.n; i++) {
           const tid = c.taskId[i];
           if (tid && ti.get(tid) === false) {
-            points.push({ time: c.start[i], worker: w, type: "uninstrumented", value: (c.end[i]! - c.start[i]!) / 1e6, span: lightPoll(c, i) });
+            points.push({ time: c.start[i]!, worker: w, type: "uninstrumented", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
           }
         }
       }

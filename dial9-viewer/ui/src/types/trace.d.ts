@@ -299,5 +299,4 @@ export type RuntimeEvent =
   | QueueSampleEvent
   | WakeEvent;
 
-/** "poll-start" | "poll-end" | "worker-park" | "worker-unpark" | "queue-sample" | "wake" */
 export type RuntimeEventKind = RuntimeEvent["kind"];

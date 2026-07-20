@@ -24,7 +24,8 @@ import type {
   WorkerSpansResult,
 } from "../../../trace_analysis.js";
 
-type Rec<T> = Record<string, T>;
+/** Keyed by worker id (stringified, as object keys always are). */
+type ByWorker<T> = Record<string, T>;
 
 const defaultMeta = { taskId: 0, spawnLocId: 0 as number | string | null, spawnLoc: null as string | null };
 
@@ -38,7 +39,7 @@ interface SpanEmitter {
 
 /** Builds the fat WorkerLane dict, byte-identical to the frozen output. */
 class FatSpanEmitter implements SpanEmitter {
-  readonly workerSpans: Rec<WorkerLane> = {};
+  readonly workerSpans: ByWorker<WorkerLane> = {};
   ensure(w: number): void {
     if (this.workerSpans[w] === undefined) this.workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
   }
@@ -76,12 +77,12 @@ class StoreSpanEmitter implements SpanEmitter {
 /** Everything buildWorkerSpans returns except `workerSpans` (which the caller
  * gets in whichever representation it asked for). */
 interface SpanAggregates {
-  perWorker: Rec<number[]>;
+  perWorker: ByWorker<number[]>;
   queueSamples: { t: number; global: number }[];
-  workerQueueSamples: Rec<{ t: number; local: number }[]>;
+  workerQueueSamples: ByWorker<{ t: number; local: number }[]>;
   maxLocalQueue: number;
-  wakesByTask: Rec<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
-  wakesByWorker: Rec<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
+  wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
+  wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
 }
 
 /** The shared span state machine; emits polls/parks/actives through `emit`. */
@@ -92,20 +93,20 @@ function reconstruct(
   blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined,
   emit: SpanEmitter,
 ): SpanAggregates {
-  const openPoll: Rec<number | null> = {};
-  const openPark: Rec<number | null> = {};
-  const openUnpark: Rec<{ timestamp: number; cpuTime: number } | null> = {};
-  const openPollMeta: Rec<{ taskId: number; spawnLocId: number | string | null; spawnLoc: string | null }> = {};
+  const openPoll: ByWorker<number | null> = {};
+  const openPark: ByWorker<number | null> = {};
+  const openUnpark: ByWorker<{ timestamp: number; cpuTime: number } | null> = {};
+  const openPollMeta: ByWorker<{ taskId: number; spawnLocId: number | string | null; spawnLoc: string | null }> = {};
 
-  const gapsByW: Rec<BlockInPlaceGap[]> = {};
+  const gapsByW: ByWorker<BlockInPlaceGap[]> = {};
   if (blockInPlaceGaps && blockInPlaceGaps.length > 0) {
     for (const g of blockInPlaceGaps) (gapsByW[g.workerId] ??= []).push(g);
   }
 
-  const workerQueueSamples: Rec<{ t: number; local: number }[]> = {};
+  const workerQueueSamples: ByWorker<{ t: number; local: number }[]> = {};
   let maxLocalQueue = 1;
-  const wakesByTask: Rec<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]> = {};
-  const wakesByWorker: Rec<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]> = {};
+  const wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]> = {};
+  const wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]> = {};
 
   for (const w of workerIds) workerQueueSamples[w] = [];
 
@@ -121,7 +122,7 @@ function reconstruct(
   const n = store.length;
 
   // First pass: bucket event INDICES by worker; index wake events.
-  const perWorker: Rec<number[]> = {};
+  const perWorker: ByWorker<number[]> = {};
   for (let i = 0; i < n; i++) {
     const et = eventType[i];
     if (et === EVT.WakeEvent) {
@@ -141,43 +142,43 @@ function reconstruct(
   for (const key in wakesByTask) wakesByTask[key]!.sort((a, b) => a.timestamp - b.timestamp);
   for (const key in wakesByWorker) wakesByWorker[key]!.sort((a, b) => a.timestamp - b.timestamp);
 
-  for (const wKey in perWorker) {
-    const w = Number(wKey); // numeric worker id for the emitter/store keys
-    for (const i of perWorker[wKey]!) {
+  for (const workerKey in perWorker) {
+    const w = Number(workerKey);
+    for (const i of perWorker[workerKey]!) {
       const et = eventType[i];
       const t = ts[i]!;
 
       if (et === EVT.PollStart || et === EVT.WorkerPark || et === EVT.WorkerUnpark) {
-        workerQueueSamples[wKey]!.push({ t, local: localQueue[i]! });
+        workerQueueSamples[workerKey]!.push({ t, local: localQueue[i]! });
         if (localQueue[i]! > maxLocalQueue) maxLocalQueue = localQueue[i]!;
       }
 
       if (et === EVT.PollStart) {
-        if (openPoll[wKey] != null) {
-          const meta = openPollMeta[wKey] || defaultMeta;
-          emit.poll(w, openPoll[wKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true);
+        if (openPoll[workerKey] != null) {
+          const meta = openPollMeta[workerKey] || defaultMeta;
+          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true);
         }
-        openPoll[wKey] = t;
+        openPoll[workerKey] = t;
         const sl = store.spawnLocAt(i);
-        openPollMeta[wKey] = { taskId: taskId[i]!, spawnLocId: sl, spawnLoc: sl };
+        openPollMeta[workerKey] = { taskId: taskId[i]!, spawnLocId: sl, spawnLoc: sl };
       } else if (et === EVT.PollEnd) {
-        if (openPoll[wKey] != null) {
-          const meta = openPollMeta[wKey] || defaultMeta;
-          emit.poll(w, openPoll[wKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, false);
-          openPoll[wKey] = null;
+        if (openPoll[workerKey] != null) {
+          const meta = openPollMeta[workerKey] || defaultMeta;
+          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, false);
+          openPoll[workerKey] = null;
         }
       } else if (et === EVT.WorkerPark) {
-        if (openPoll[wKey] != null) {
-          const meta = openPollMeta[wKey] || defaultMeta;
-          emit.poll(w, openPoll[wKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true);
-          openPoll[wKey] = null;
+        if (openPoll[workerKey] != null) {
+          const meta = openPollMeta[workerKey] || defaultMeta;
+          emit.poll(w, openPoll[workerKey]!, t, meta.taskId, meta.spawnLocId, meta.spawnLoc, true);
+          openPoll[workerKey] = null;
         }
-        openPark[wKey] = t;
-        const ou = openUnpark[wKey];
+        openPark[workerKey] = t;
+        const ou = openUnpark[workerKey];
         if (ou != null) {
           const activeStart = ou.timestamp;
           const activeEnd = t;
-          const wGaps = gapsByW[wKey];
+          const wGaps = gapsByW[workerKey];
           let crossesGap = false;
           if (wGaps) {
             for (const g of wGaps) {
@@ -191,14 +192,14 @@ function reconstruct(
             const ratio = wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
             emit.active(w, activeStart, activeEnd, ratio);
           }
-          openUnpark[wKey] = null;
+          openUnpark[workerKey] = null;
         }
       } else if (et === EVT.WorkerUnpark) {
-        if (openPark[wKey] != null) {
-          emit.park(w, openPark[wKey]!, t, store.schedWaitAt(i));
-          openPark[wKey] = null;
+        if (openPark[workerKey] != null) {
+          emit.park(w, openPark[workerKey]!, t, store.schedWaitAt(i));
+          openPark[workerKey] = null;
         }
-        openUnpark[wKey] = { timestamp: t, cpuTime: cpuTime[i]! };
+        openUnpark[workerKey] = { timestamp: t, cpuTime: cpuTime[i]! };
       }
     }
   }
@@ -246,10 +247,10 @@ export function buildWorkerSpansColumnar(
 export interface WorkerSpansStoreResult {
   store: ColumnarWorkerSpans;
   queueSamples: { t: number; global: number }[];
-  workerQueueSamples: Rec<{ t: number; local: number }[]>;
+  workerQueueSamples: ByWorker<{ t: number; local: number }[]>;
   maxLocalQueue: number;
-  wakesByTask: Rec<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
-  wakesByWorker: Rec<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
+  wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
+  wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
 }
 
 /**
