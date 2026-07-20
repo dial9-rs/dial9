@@ -266,37 +266,37 @@ td.name{font-weight:500; color:var(--ink)}
 .rowbadge.new{background:rgba(255,106,95,.16); color:var(--B)}
 .rowbadge.gone{background:rgba(49,201,192,.16); color:var(--A)}
 
-/* occurrences: A→B */
-.occ{font-family:var(--mono); font-size:11.5px; white-space:nowrap}
-.occ .a{color:var(--A)} .occ .b{color:var(--B)} .occ .ar{color:var(--faint); margin:0 5px}
+/* shared latency/A-B text colors */
+.ta{color:var(--A)} .tb{color:var(--B)}
+.occ{font-family:var(--mono); font-size:12px; white-space:nowrap}
 
-/* latency range dumbbell on a shared log axis */
-.lat{min-width:220px}
-.lat .track{position:relative; height:34px}
-.lat .grid{position:absolute; inset:0}
-.lat .grid i{position:absolute; top:0; bottom:12px; width:1px; background:var(--line)}
-.lat .grid b{position:absolute; bottom:0; transform:translateX(-50%); font-family:var(--mono); font-size:8.5px; color:var(--faint)}
-.lat .bar{position:absolute; height:6px; border-radius:4px}
-.lat .bar.a{top:5px; background:linear-gradient(90deg,rgba(49,201,192,.35),var(--A))}
-.lat .bar.b{top:15px; background:linear-gradient(90deg,rgba(255,106,95,.35),var(--B))}
-.lat .cap{position:absolute; width:2px; height:10px; border-radius:2px; top:3px}
-.lat .cap.a{background:var(--A)} .lat .cap.b{background:var(--B); top:13px}
-.lat .p99dot{position:absolute; width:8px; height:8px; border-radius:50%; transform:translate(-50%,-50%)}
-.lat .p99dot.a{background:var(--A); top:8px; box-shadow:0 0 0 2px var(--panel)}
-.lat .p99dot.b{background:var(--B); top:18px; box-shadow:0 0 0 2px var(--panel)}
-.lat .link{position:absolute; height:2px; top:12px; background:linear-gradient(90deg,var(--A),var(--B)); opacity:.5}
-.lat .num{font-family:var(--mono); font-size:10.5px; color:var(--dim); margin-top:3px}
-.lat .num b{font-weight:600}
-.lat .num .up{color:var(--B)} .lat .num .down{color:var(--A)}
+/* DURATION = overlaid A/B histogram + moving p50/p99/p999 markers */
+.dist{min-width:260px}
+.hsvg{width:100%; height:40px; display:block; overflow:visible}
+.hsvg .gl{stroke:var(--line); stroke-width:.4}
+.hsvg .ha{fill:rgba(49,201,192,.20); stroke:var(--A); stroke-width:1; vector-effect:non-scaling-stroke}
+.hsvg .hb{fill:rgba(255,106,95,.20); stroke:var(--B); stroke-width:1; vector-effect:non-scaling-stroke}
+.hsvg .mk{vector-effect:non-scaling-stroke}
+.hsvg .mk.a{stroke:var(--A); opacity:.9} .hsvg .mk.b{stroke:var(--B); opacity:.9}
+/* percentile key: line-style swatches (solid/dashed/dotted) */
+.pkey{display:inline-flex; gap:10px; margin-left:8px; font-family:var(--mono); font-size:9.5px; color:var(--faint); text-transform:none; letter-spacing:0}
+.pkey b{display:inline-flex; align-items:center; gap:4px; font-weight:400}
+.pkey .sw{width:16px; height:0; border-top:2px solid var(--dim)}
+.pkey .sw.d{border-top-style:dashed} .pkey .sw.t{border-top-style:dotted}
+.dist .axis{position:relative; height:12px; margin-top:1px}
+.dist .axis span{position:absolute; transform:translateX(-50%); font-family:var(--mono); font-size:8.5px; color:var(--faint)}
+.dist .read{font-family:var(--mono); font-size:10.5px; color:var(--dim); margin-top:3px}
+.dist .read b{font-weight:600}
 
-/* composition reallocation: diverging around a center line */
-.reallo{min-width:200px}
-.reallo .strip{position:relative; height:14px; border-radius:4px; background:var(--bg); border:1px solid var(--line); overflow:hidden}
-.reallo .mid{position:absolute; left:50%; top:0; bottom:0; width:1px; background:var(--line2); z-index:2}
-.reallo seg,.reallo .seg{position:absolute; top:0; bottom:0}
-.reallo .cap{font-size:10px; color:var(--faint); margin-top:4px; display:flex; gap:10px; flex-wrap:wrap}
-.reallo .cap .mv{font-family:var(--mono)}
-.reallo .cap .up{color:var(--B)} .reallo .cap .down{color:var(--A)}
+/* COMPOSITION = two plain stacked bars A over B */
+.comp2{min-width:300px}
+.comp2 .crow{display:flex; align-items:center; gap:7px; margin:2px 0}
+.comp2 .cl{font-family:var(--mono); font-size:10px; color:var(--faint); width:10px}
+.cbar{display:inline-flex; height:18px; flex:1; border-radius:3px; overflow:hidden; border:1px solid var(--line)}
+.cbar span{height:100%; display:inline-flex; align-items:center; overflow:hidden}
+.cbar em{font-style:normal; font-family:var(--mono); font-size:9.5px; color:rgba(255,255,255,.92); padding:0 4px; white-space:nowrap; text-shadow:0 1px 1px rgba(0,0,0,.4)}
+.cbar span.dk em{color:rgba(16,20,30,.9); text-shadow:none}
+.comp2 .cnote{font-family:var(--mono); font-size:10px; color:var(--dim); margin-top:4px; margin-left:17px}
 .tblfoot{font-size:10.5px; color:var(--faint); font-style:italic; padding:12px 14px; line-height:1.5}
 
 /* ---- status ---- */
@@ -375,13 +375,13 @@ td.name{font-weight:500; color:var(--ink)}
     <div class="panel pa" id="flameA">
       <div class="panel-head">
         <span class="pb-badge">A</span>
-        <div><div class="ptitle">baseline ∖ (dur&gt;340ms)</div></div>
-        <span class="psub" id="paSub">— the fast / normal requests</span>
+        <div><div class="ptitle" id="paTitle">baseline</div></div>
+        <span class="psub" id="paSub">— all requests</span>
         <div class="grow"></div>
-        <div class="selwrap">colour <select class="mini-sel" id="colorA"><option value="delta">A/B delta</option><option value="hot">hotness</option><option value="mod">by module</option></select></div>
+        <div class="selwrap">colour <select class="mini-sel" id="colorA"><option value="mod">by module</option><option value="delta">A/B delta</option><option value="hot">hotness</option></select></div>
       </div>
       <div class="panel-body"><canvas id="cvA"></canvas>
-        <div class="fg-legend"><span>A heavier</span><span class="ramp"></span><span>B heavier</span></div>
+        <div class="fg-legend" id="rampLegend" style="display:none"><span>A heavier</span><span class="ramp"></span><span>B heavier</span></div>
       </div>
     </div>
     <div class="panel pb" id="flameB">
@@ -591,91 +591,113 @@ function ms(x){return x*NS.ms;} function us(x){return x*NS.us;}
 function fmtT(ns){if(ns>=1e9)return(ns/1e9).toFixed(ns>=1e10?0:1)+"s";if(ns>=1e6)return(ns/1e6).toFixed(ns>=1e7?0:0)+"ms";if(ns>=1e3)return(ns/1e3).toFixed(0)+"µs";return ns+"ns";}
 function fmtC(n){return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(0)+"K":""+n;}
 
+/* per side: [p50, p99, p999] in ns. Histogram is synthesized log-normally
+ * from p50/p99 so the OVERLAY + percentile MARKERS move together. */
 const SPANS=[
-  {n:"db.query",       occA:842000, occB:41000, aP:[ms(1),ms(3),ms(12)],  bP:[ms(28),ms(280),ms(340)], compA:[55,10,20,10,5], compB:[18,14,30,34,4]},
-  {n:"http.request",   occA:610000, occB:38000, aP:[ms(9),ms(30),ms(140)],bP:[ms(60),ms(410),ms(620)], compA:[30,8,40,18,4], compB:[14,10,26,46,4]},
-  {n:"auth.verify",    occA:598000, occB:37000, aP:[us(400),ms(1.2),ms(6)],bP:[ms(2),ms(9),ms(11)],    compA:[70,6,14,6,4],  compB:[52,10,20,14,4]},
-  {n:"cache.get",      occA:1200000,occB:33000, aP:[us(120),us(400),ms(2)],bP:[us(180),us(500),ms(1)], compA:[80,4,8,4,4],   compB:[82,4,6,4,4]},
-  {n:"serialize.resp", occA:604000, occB:36000, aP:[us(300),us(800),ms(4)],bP:[us(500),ms(1),ms(3)],   compA:[88,2,4,2,4],   compB:[86,2,4,4,4]},
-  {n:"retry.attempt",  occA:0,      occB:9000,  aP:null,                   bP:[ms(50),ms(150),ms(300)], compA:null,           compB:[6,4,80,6,4]},
+  {n:"db.query",       occA:842000, occB:41000, aP:[ms(3),ms(12),ms(28)],   bP:[ms(120),ms(340),ms(520)], compA:[55,10,20,10,5], compB:[18,14,30,34,4]},
+  {n:"http.request",   occA:610000, occB:38000, aP:[ms(30),ms(140),ms(260)],bP:[ms(180),ms(620),ms(1200)],compA:[30,8,40,18,4], compB:[14,10,26,46,4]},
+  {n:"auth.verify",    occA:598000, occB:37000, aP:[ms(1.2),ms(6),ms(14)],  bP:[ms(4),ms(11),ms(20)],     compA:[70,6,14,6,4],  compB:[52,10,20,14,4]},
+  {n:"cache.get",      occA:1200000,occB:33000, aP:[us(400),ms(2),ms(5)],   bP:[us(500),ms(1),ms(3)],     compA:[80,4,8,4,4],   compB:[82,4,6,4,4]},
+  {n:"serialize.resp", occA:604000, occB:36000, aP:[us(800),ms(4),ms(9)],   bP:[ms(1),ms(3),ms(7)],       compA:[88,2,4,2,4],   compB:[86,2,4,4,4]},
+  {n:"retry.attempt",  occA:0,      occB:9000,  aP:null,                    bP:[ms(80),ms(300),ms(600)],  compA:null,           compB:[6,4,80,6,4]},
 ];
 const TOKIO=[
-  {n:"axum::serve @ src/main.rs:243",           occA:1200000,occB:38000, aP:[us(8),us(20),us(40)], bP:[us(200),us(700),ms(1.2)],compA:[78,6,10,2,4], compB:[24,20,40,12,4]},
-  {n:"checkout::handler::spawn @ handler.rs:88",occA:891000, occB:1200000,aP:[us(90),ms(2),ms(6)], bP:[ms(40),ms(120),ms(210)], compA:[70,8,14,4,4], compB:[24,14,20,38,4]},
-  {n:"db::pool::spawn @ src/pool.rs:210",       occA:420000, occB:512000, aP:[us(40),us(300),ms(1)],bP:[ms(4),ms(22),ms(44)],    compA:[61,10,20,5,4],compB:[19,16,55,6,4]},
-  {n:"metrics::flush::spawn @ src/main.rs:57",  occA:31000,  occB:33000,  aP:[us(20),us(60),us(90)],bP:[us(30),us(80),us(110)],  compA:[95,1,2,1,1],  compB:[93,2,2,2,1]},
+  {n:"axum::serve @ src/main.rs:243",           occA:1200000,occB:38000, aP:[us(20),us(40),us(90)],  bP:[us(700),ms(1.2),ms(3)],compA:[78,6,10,2,4], compB:[24,20,40,12,4]},
+  {n:"checkout::handler::spawn @ handler.rs:88",occA:891000, occB:1200000,aP:[ms(2),ms(6),ms(14)],   bP:[ms(120),ms(210),ms(380)],compA:[70,8,14,4,4], compB:[24,14,20,38,4]},
+  {n:"db::pool::spawn @ src/pool.rs:210",       occA:420000, occB:512000, aP:[us(300),ms(1),ms(3)],  bP:[ms(22),ms(44),ms(90)], compA:[61,10,20,5,4],compB:[19,16,55,6,4]},
+  {n:"metrics::flush::spawn @ src/main.rs:57",  occA:31000,  occB:33000,  aP:[us(60),us(90),us(140)],bP:[us(80),us(110),us(180)],compA:[95,1,2,1,1],  compB:[93,2,2,2,1]},
 ];
 
-/* shared log axis across a dataset's p99s so dumbbells are comparable row-to-row */
+/* shared log axis across a dataset's full range so histograms line up row-to-row */
 function axisFor(rows){let lo=Infinity,hi=0;rows.forEach(r=>{[r.aP,r.bP].forEach(p=>{if(p){lo=Math.min(lo,p[0]);hi=Math.max(hi,p[2]);}});});
-  const l0=Math.floor(Math.log10(lo)),l1=Math.ceil(Math.log10(hi));return {l0,l1,span:l1-l0};}
+  const l0=Math.floor(Math.log10(lo)),l1=Math.ceil(Math.log10(hi));return {l0,l1,span:Math.max(1,l1-l0)};}
 function xOf(ns,ax){return (Math.log10(ns)-ax.l0)/ax.span*100;}
 function gridTicks(ax){const t=[];for(let e=ax.l0;e<=ax.l1;e++)t.push(e);return t;}
 
-/* latency-range dumbbell: A range bar + B range bar on a shared log axis,
- * p50→p99 as the bar, p99 as the dot, joined A↔B. THE ROW IS THE DIFF. */
-function latCell(r,ax){
-  if(!r.aP) return rangeOnly(r.bP,ax,"b","new in B");
-  if(!r.bP) return rangeOnly(r.aP,ax,"a","gone in B");
-  const xa0=xOf(r.aP[0],ax),xa2=xOf(r.aP[2],ax),xb0=xOf(r.bP[0],ax),xb2=xOf(r.bP[2],ax);
-  const grid=gridTicks(ax).map(e=>'<i style="left:'+xOf(Math.pow(10,e),ax)+'%"></i><b style="left:'+xOf(Math.pow(10,e),ax)+'%">'+fmtT(Math.pow(10,e))+'</b>').join("");
-  const rel=r.bP[2]/r.aP[2]-1, cls=rel>=0?"up":"down", sign=rel>=0?"+":"−";
-  return '<div class="lat"><div class="track"><div class="grid">'+grid+'</div>'+
-    '<div class="link" style="left:'+Math.min(xa2,xb2)+'%;width:'+Math.abs(xb2-xa2)+'%"></div>'+
-    '<div class="bar a" style="left:'+xa0+'%;width:'+Math.max(xa2-xa0,.5)+'%"></div><div class="p99dot a" style="left:'+xa2+'%"></div>'+
-    '<div class="bar b" style="left:'+xb0+'%;width:'+Math.max(xb2-xb0,.5)+'%"></div><div class="p99dot b" style="left:'+xb2+'%"></div>'+
-    '</div><div class="num">p99 <b class="a" style="color:var(--A)">'+fmtT(r.aP[2])+'</b> → <b class="b" style="color:var(--B)">'+fmtT(r.bP[2])+'</b> <span class="'+cls+'">('+sign+Math.abs(rel*100|0)+'%)</span></div></div>';
-}
-function rangeOnly(p,ax,side,label){
-  const x0=xOf(p[0],ax),x2=xOf(p[2],ax);
-  const grid=gridTicks(ax).map(e=>'<i style="left:'+xOf(Math.pow(10,e),ax)+'%"></i>').join("");
-  return '<div class="lat"><div class="track"><div class="grid">'+grid+'</div><div class="bar '+side+'" style="left:'+x0+'%;width:'+Math.max(x2-x0,.5)+'%;top:10px"></div><div class="p99dot '+side+'" style="left:'+x2+'%;top:13px"></div></div><div class="num" style="color:var(--'+(side==="b"?"B":"A")+')">'+label+' · p99 '+fmtT(p[2])+'</div></div>';
+/* log-normal density in log10 space from p50 (median) & p99 */
+function densityFn(p50,p99){const mu=Math.log10(p50),sigma=Math.max(0.08,(Math.log10(p99)-mu)/2.326);
+  return lx=>Math.exp(-((lx-mu)*(lx-mu))/(2*sigma*sigma));}
+
+/* DURATION cell = overlaid A/B histogram on a shared log axis, with p50/p99/p999
+ * markers that visibly move with the distribution. Kept compact & flat. */
+const NB=44, HH=40;
+function histPath(fn,ax){let d="M0,"+HH,mx=0;const ys=[];for(let i=0;i<=NB;i++){const lx=ax.l0+ (i/NB)*ax.span; const v=fn(lx); ys.push(v); mx=Math.max(mx,v);}
+  for(let i=0;i<=NB;i++){const x=(i/NB)*100, y=HH-(ys[i]/(mx||1))*(HH-3); d+=" L"+x.toFixed(1)+","+y.toFixed(1);} d+=" L100,"+HH+" Z"; return d;}
+// p50 solid, p99 dashed, p999 dotted — same visual code both sides, so the
+// pattern reads the percentile and the color reads the side.
+const MK_DASH=["none","3 2","1 2.5"];      // p50, p99, p999
+const MK_W=[1.6,1.1,1.1];
+function markers(p,ax,cls){return p.map((v,i)=>{const x=xOf(v,ax);
+  return '<line class="mk '+cls+'" x1="'+x+'" x2="'+x+'" y1="0" y2="'+HH+'" stroke-dasharray="'+MK_DASH[i]+'" style="stroke-width:'+MK_W[i]+'"/>';}).join("");}
+function distCell(r,ax){
+  const grid=gridTicks(ax).map(e=>{const x=xOf(Math.pow(10,e),ax);return '<line class="gl" x1="'+x+'" x2="'+x+'" y1="0" y2="'+HH+'"/>';}).join("");
+  let areas="",mk="";
+  if(r.aP){areas+='<path class="ha" d="'+histPath(densityFn(r.aP[0],r.aP[1]),ax)+'"/>'; mk+=markers(r.aP,ax,"a");}
+  if(r.bP){areas+='<path class="hb" d="'+histPath(densityFn(r.bP[0],r.bP[1]),ax)+'"/>'; mk+=markers(r.bP,ax,"b");}
+  const tlabels=gridTicks(ax).map(e=>'<span style="left:'+xOf(Math.pow(10,e),ax)+'%">'+fmtT(Math.pow(10,e))+'</span>').join("");
+  // numeric readout: p50 / p99 / p999, A → B
+  let read="";
+  if(r.aP&&r.bP){read=["p50","p99","p999"].map((l,i)=>l+' <b class="ta">'+fmtT(r.aP[i])+'</b>→<b class="tb">'+fmtT(r.bP[i])+'</b>').join(' · ');}
+  else if(r.bP){read='<span class="tb">only in B</span> · p50 '+fmtT(r.bP[0])+' · p99 '+fmtT(r.bP[1])+' · p999 '+fmtT(r.bP[2]);}
+  else if(r.single){read='p50 '+fmtT(r.aP[0])+' · p99 '+fmtT(r.aP[1])+' · p999 '+fmtT(r.aP[2]);}
+  else {read='<span class="ta">only in A</span> · p50 '+fmtT(r.aP[0])+' · p99 '+fmtT(r.aP[1]);}
+  return '<div class="dist"><svg viewBox="0 0 100 '+HH+'" preserveAspectRatio="none" class="hsvg">'+grid+areas+mk+'</svg>'+
+    '<div class="axis">'+tlabels+'</div><div class="read">'+read+'</div></div>';
 }
 
 /* occurrences A→B */
 function occCell(r){
-  const a=r.occA?'<span class="a">'+fmtC(r.occA)+'</span>':'<span class="a" style="color:var(--faint)">—</span>';
-  const b=r.occB?'<span class="b">'+fmtC(r.occB)+'</span>':'<span class="b" style="color:var(--faint)">—</span>';
-  return '<span class="occ">'+a+'<span class="ar">→</span>'+b+'</span>';
+  const a=r.occA?'<span class="ta">'+fmtC(r.occA)+'</span>':'<span style="color:var(--faint)">—</span>';
+  const b=r.occB?'<span class="tb">'+fmtC(r.occB)+'</span>':'<span style="color:var(--faint)">—</span>';
+  return '<span class="occ">'+a+' → '+b+'</span>';
 }
 
-/* composition REALLOCATION — diverging around a center: each category's B−A
- * (in percentage points) drawn left (shrank, teal) / right (grew, coral). */
-function realloCell(r){
-  if(!r.compA||!r.compB){const c=r.compB||r.compA;return '<div class="reallo"><span class="illu" style="font-size:10.5px">'+(r.compA?"only in A":"only in B")+'</span></div>';}
-  const deltas=r.compB.map((v,i)=>({i,d:v-r.compA[i]}));
-  const maxAbs=Math.max(4,...deltas.map(x=>Math.abs(x.d)));
-  // stack grown categories to the right of center, shrunk to the left
-  let rightX=50, leftX=50, segs="";
-  deltas.filter(x=>x.d>0).sort((a,b)=>b.d-a.d).forEach(x=>{const w=x.d/maxAbs*50;segs+='<span class="seg" style="left:'+rightX+'%;width:'+w+'%;background:'+COMPC[x.i]+'"></span>';rightX+=w;});
-  deltas.filter(x=>x.d<0).sort((a,b)=>a.d-b.d).forEach(x=>{const w=-x.d/maxAbs*50;leftX-=w;segs+='<span class="seg" style="left:'+leftX+'%;width:'+w+'%;background:'+COMPC[x.i]+';opacity:.55"></span>';});
-  const top=deltas.filter(x=>Math.abs(x.d)>=3).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)).slice(0,2)
-    .map(x=>'<span class="mv '+(x.d>0?'up':'down')+'">'+COMPL[x.i]+' '+(x.d>0?'+':'−')+Math.abs(x.d)+'pp</span>').join("");
-  return '<div class="reallo"><div class="strip"><div class="mid"></div>'+segs+'</div><div class="cap">'+ (top||'<span class="illu">≈ unchanged</span>') +'</div></div>';
+/* COMPOSITION = two stacked bars, A over B. Segments carry INLINE labels +
+ * the time they represent (pct × that side's p99 elapsed), so you read the
+ * bar directly without crossing to a legend. Thin segments stay unlabeled. */
+function darkText(i){return i===1;} // sched (gold) needs dark ink
+function compTwoBar(comp,elapsed){
+  return '<span class="cbar">'+comp.map((v,i)=>{
+    const t=elapsed?fmtT(v/100*elapsed):null;
+    // label if the segment is wide enough to hold text
+    let inner="";
+    if(v>=22) inner='<em>'+COMPL[i]+(t?' · '+t:'')+'</em>';
+    else if(v>=12) inner='<em>'+(t||COMPL[i])+'</em>';
+    return '<span class="'+(darkText(i)?'dk':'')+'" style="width:'+v+'%;background:'+COMPC[i]+'" title="'+COMPL[i]+' '+v+'%'+(t?' · '+t:'')+'">'+inner+'</span>';
+  }).join("")+'</span>';
+}
+function compCell(r){
+  if(!r.compA||!r.compB){const c=r.compB||r.compA,el=(r.bP||r.aP)[1];return '<div class="comp2"><div class="crow"><span class="cl">'+(r.compB?'B':'A')+'</span>'+compTwoBar(c,el)+'</div><div class="cnote illu">'+(r.compB?'only in B':'only in A')+'</div></div>';}
+  const deltas=r.compB.map((v,i)=>({i,d:v-r.compA[i]})).filter(x=>Math.abs(x.d)>=3).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)).slice(0,2);
+  const note=deltas.length?'shift: '+deltas.map(x=>COMPL[x.i]+' '+(x.d>0?'+':'−')+Math.abs(x.d)+'pp').join(', '):'≈ unchanged';
+  return '<div class="comp2"><div class="crow"><span class="cl">A</span>'+compTwoBar(r.compA,r.aP[1])+'</div><div class="crow"><span class="cl">B</span>'+compTwoBar(r.compB,r.bP[1])+'</div><div class="cnote">'+note+' <span class="illu">· segment time @ p99</span></div></div>';
 }
 
-/* single-selection table (Inspect / B=∅): just A, no diff primitives. */
+/* single-selection table (Inspect / B=∅): just A, no diff. */
 function singleTable(rows,isTokio){
   const ax=axisFor(rows);
   const idCol=isTokio?"spawn location":"span type";
-  const head='<tr><th>'+idCol+'</th><th>occurrences</th><th>duration p50–p99</th><th>time composition</th></tr>';
+  const pkey='<span class="pkey"><b><span class="sw"></span>p50</b><b><span class="sw d"></span>p99</b><b><span class="sw t"></span>p999</b></span>';
+  const ckey='<span class="pkey">'+COMPL.map((l,i)=>'<b><i style="width:9px;height:9px;border-radius:2px;display:inline-block;background:'+COMPC[i]+'"></i>'+l+'</b>').join("")+'</span>';
+  const head='<tr><th>'+idCol+'</th><th>occurrences</th><th>duration distribution'+pkey+'</th><th>time composition <span class="ab">time @ p99</span>'+ckey+'</th></tr>';
   const body=rows.filter(r=>r.aP).map(r=>{
-    const comp='<span class="comp">'+r.compA.map((v,i)=>'<span style="width:'+v+'%;background:'+COMPC[i]+'"></span>').join("")+'</span>';
-    return '<tr><td class="nm">'+r.n+'</td><td class="occ"><span class="a" style="color:var(--dim)">'+fmtC(r.occA)+'</span></td><td>'+rangeOnly(r.aP,ax,"a","p50–p99")+'</td><td>'+comp+'</td></tr>';
+    return '<tr><td class="nm">'+r.n+'</td><td class="occ"><span style="color:var(--dim)">'+fmtC(r.occA)+'</span></td><td>'+distCell({aP:r.aP,bP:null,single:true},ax)+'</td><td><div class="comp2"><div class="crow"><span class="cl">A</span>'+compTwoBar(r.compA,r.aP[1])+'</div></div></td></tr>';
   }).join("");
   return '<table class="dtbl"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
 }
 
-/* ONE aligned diff table for a dataset (spans or tokio). Row = the diff. */
+/* ONE aligned diff table for a dataset. Row = the diff. */
 function unifiedTable(rows,isTokio){
   const ax=axisFor(rows);
   const idCol=isTokio?"spawn location":"span type";
-  const compHdr=isTokio?"on-cpu → off-cpu shift":"time reallocation (B − A)";
-  const head='<tr><th>'+idCol+'</th><th>occurrences <span class="ab"><span class="a">A</span>→<span class="b">B</span></span></th>'+
-    '<th>duration p50–p99 <span class="ab"><span class="a">● A</span> <span class="b">● B</span></span></th><th>'+compHdr+'</th></tr>';
+  const pkey='<span class="pkey"><b><span class="sw"></span>p50</b><b><span class="sw d"></span>p99</b><b><span class="sw t"></span>p999</b></span>';
+  const ckey='<span class="pkey">'+COMPL.map((l,i)=>'<b><i style="width:9px;height:9px;border-radius:2px;display:inline-block;background:'+COMPC[i]+'"></i>'+l+'</b>').join("")+'</span>';
+  const head='<tr><th>'+idCol+'</th><th>occurrences A→B</th>'+
+    '<th>duration distribution <span class="ab"><span class="a">A</span> <span class="b">B</span></span>'+pkey+'</th>'+
+    '<th>time composition <span class="ab"><span class="a">A</span> / <span class="b">B</span> · time @ p99</span>'+ckey+'</th></tr>';
   const body=rows.map(r=>{
     const badge=r.occA===0?'<span class="rowbadge new">new in B</span>':r.occB===0?'<span class="rowbadge gone">gone in B</span>':'';
-    return '<tr><td class="nm">'+r.n+badge+'</td><td>'+occCell(r)+'</td><td class="lat-td">'+latCell(r,ax)+'</td><td>'+realloCell(r)+'</td></tr>';
+    return '<tr><td class="nm">'+r.n+badge+'</td><td>'+occCell(r)+'</td><td>'+distCell(r,ax)+'</td><td>'+compCell(r)+'</td></tr>';
   }).join("");
   return '<table class="dtbl"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
 }
@@ -719,12 +741,12 @@ function renderView(){
     const gb=isTokio?'<label>group by</label><select><option selected>spawn_location</option><option>span type</option><option>host</option><option>attribute…</option></select>':'<label>group by</label><select><option selected>span type</option><option>spawn_location</option><option>host</option><option>attribute…</option></select>';
     const kind=isTokio?'kind=<b>tokio_poll</b>':'kind=<b>tracing</b>';
     const legend='<div class="legendrow">'+(compare
-      ? '<span><i style="background:var(--A)"></i>A baseline</span><span><i style="background:var(--B)"></i>B focus</span><span class="illu">one aligned row per '+(isTokio?'spawn location':'span type')+' — each cell shows the A→B <b>difference</b>, not two separate tables</span>'
-      : COMPL.map((l,i)=>'<span><i style="background:'+COMPC[i]+'"></i>'+l+'</span>').join("")+'<span class="illu">single selection — press Compare to diff against a focus set</span>')+'</div>';
+      ? '<span><i style="background:var(--A)"></i>A baseline</span><span><i style="background:var(--B)"></i>B focus</span><span class="illu">one aligned row per '+(isTokio?'spawn location':'span type')+' — each cell is the A→B difference</span>'
+      : '<span class="illu">single selection — press Compare to diff against a focus set</span>')+'</div>';
     const title = compare?'A baseline &nbsp;⇄&nbsp; B focus':'baseline';
     const foot = isTokio
-      ? 'Reallocation shows each poll’s on-cpu time draining into sync-block / async-wait as the pool serializes — same primitive as the spans view.'
-      : 'Duration cell is a dumbbell on a shared log axis (p50–p99 bar, p99 dot, A↔B joined). Reallocation shows where elapsed time moved between categories. New/gone badges = set membership. Every cell is a diff primitive.';
+      ? 'Duration = overlaid A/B poll-time histograms with p50/p99/p999 markers. Composition = A-over-B stacked bars; note names the biggest mover.'
+      : 'Duration = overlaid A/B histograms on a shared log axis; the p50 / p99 / p999 markers move with the distribution. Composition = A-over-B stacked bars. New/gone badges = set membership.';
     views.insertAdjacentHTML("beforeend",
       '<div class="unified"><div class="panel-head"><span class="pb-badge" style="background:linear-gradient(135deg,rgba(49,201,192,.16),rgba(255,106,95,.16));color:var(--ink)">⋔</span>'+
       '<div><div class="ptitle"><span class="aName">A</span> baseline &nbsp;⇄&nbsp; <span class="bName">B</span> focus</div></div><span class="psub">'+(compare?'the row is the diff':'B = ∅')+'</span><div class="grow"></div>'+
@@ -741,7 +763,12 @@ function setCompare(on){
   document.getElementById("cmpBtn").style.display=on?"none":"";
   document.getElementById("backBtn").style.display=on?"":"none";
   document.getElementById("modeLbl").textContent=on?"Compare · A (baseline ∖ P)  vs  B (baseline ∩ P) · two synced panels":"Inspect · B = ∅ · single full-width panel";
-  document.getElementById("paSub").textContent=on?"— the fast / normal requests":"— baseline (no comparison yet)";
+  document.getElementById("paSub").textContent=on?"— the fast / normal requests":"— all requests";
+  document.getElementById("paTitle").innerHTML=on?"baseline ∖ (dur&gt;340ms)":"baseline";
+  document.getElementById("rampLegend").style.display=on?"flex":"none";
+  // A/B-delta coloring is meaningless without B — default to by-module in Inspect.
+  const cA=document.getElementById("colorA"); cA.value=on?"delta":"mod";
+  const cB=document.getElementById("colorB"); if(cB)cB.value=on?"delta":"mod";
   setTimeout(renderView,300);
 }
 document.getElementById("cmpBtn").addEventListener("click",()=>setCompare(true));

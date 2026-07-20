@@ -69,8 +69,17 @@ Examples:
 
 | Kind | Span type | Instance |
 |---|---|---|
-| Tokio | `tokio.poll` + spawn location | One task poll |
+| Tokio | `tokio_poll` (kind + callsite) | One task poll |
 | Tracing | target + name + file + line | One tracing span lifecycle |
+
+> **Superseded by [ADR-0005](../adr/0005-span-type-identity-excludes-metadata.md).**
+> This table originally identified the poll span type as "`tokio.poll` +
+> spawn location", baking spawn location into `span_type_uid`. The diff-first
+> design reverses that: span-type identity is **kind + callsite only**, and
+> spawn location is metadata you **group by** at query time (a first-class
+> group-by-attribute capability that also lets tracing spans group by any
+> attribute, e.g. `handle_request` by `route`). See
+> [diff-first-unified-view.md](./diff-first-unified-view.md).
 
 Every interval is half-open: `[start_ns, end_ns)`.
 
@@ -383,6 +392,16 @@ says the category was evaluated and absent. Otherwise their time remains in
 
 ## 5. Backend and query interface
 
+> **Extended by the diff-first design.** This section specifies the
+> single-selection query surface. The diff-first unified view adds two things
+> on top: (1) a **group-by-attribute** capability (group `span-stats` results by
+> any metadata key, e.g. poll spawn location — see the ADR-0005 note in §1.1),
+> and (2) a **server-side A/B compare** mode that resolves two selections,
+> schedules folding to keep their coverage comparable, and returns an
+> already-merged diff plus a ranked significant-differences list
+> ([ADR-0004](../adr/0004-diff-is-computed-server-side.md)). See
+> [diff-first-unified-view.md](./diff-first-unified-view.md).
+
 ### 5.1 Span statistics
 
 Add `GET /api/span-stats` as an SSE refinement stream using the existing scope,
@@ -434,6 +453,14 @@ if multiple memberships match. Completeness (`details_complete`) filtering is
 ---
 
 ## 6. Span Explorer UI
+
+> **Superseded as the terminal UI by the diff-first design.** The
+> single-selection Span Explorer described here is the v0 surface and the
+> starting point: the diff-first unified view is grown by forking this page and
+> making every surface compare two selections (A vs B), with the flamegraph,
+> span-stats, and tokio views becoming lenses over one shared selection. The
+> catalog below remains accurate for the B = ∅ (single-selection) case. See
+> [diff-first-unified-view.md](./diff-first-unified-view.md).
 
 Add a Span Explorer that uses `/api/span-stats` for discovery and the existing
 flamegraph renderer for selected samples.
