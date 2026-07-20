@@ -33,10 +33,10 @@ import type {
   TracingSpan,
   LaneSpans,
 } from "../../lib/trace/index.js";
-import { sharedSpanData, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
+import { sharedSpanData, sharedWorkerSpans } from "../../lib/trace/derived.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
-import type { TrackSpec } from "./track-layout.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import {
   BASE_BAR_H,
   buildSpanRenderModel,

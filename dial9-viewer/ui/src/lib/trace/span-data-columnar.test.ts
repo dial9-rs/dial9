@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseTraceBuffer } from "./load.js";
 import { buildSpanData, buildWorkerSpans } from "./analysis.js";
-import { deriveWorkerIds } from "../../components/canvas/lanes/data.js";
+import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
 import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";

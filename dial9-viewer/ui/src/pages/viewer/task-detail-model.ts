@@ -36,7 +36,7 @@ import type {
   LaneSpans,
 } from "../../lib/trace/index.js";
 import { nsToDrawX, pixelCoverage } from "../../lib/canvas/index.js";
-import { lifecycleWorkerIds, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
+import { lifecycleWorkerIds, sharedWorkerSpans } from "../../lib/trace/derived.js";
 import {
   isColumnarLane,
   type ColumnarWorkerSpans,

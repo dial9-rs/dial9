@@ -16,7 +16,7 @@
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
 import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
-import { deriveWorkerIds, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
+import { deriveWorkerIds, sharedWorkerSpans } from "../../lib/trace/derived.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
 

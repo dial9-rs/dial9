@@ -14,7 +14,7 @@ import {
   deriveRuntimeGroups,
   sharedSpanData,
   sharedWorkerSpans,
-} from "../canvas/lanes/data.js";
+} from "../../lib/trace/derived.js";
 import type {
   BlockInPlaceGap,
   ParsedTrace,

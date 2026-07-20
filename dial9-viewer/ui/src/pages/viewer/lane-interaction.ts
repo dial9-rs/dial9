@@ -17,7 +17,7 @@
 import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../../components/canvas/lanes/render.js";
-import { lanesScrollbarWidth } from "./track-layout.js";
+import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
 import { createPointerMachine } from "../../lib/interact/pointer.js";
 import type { PointerCommand } from "../../lib/interact/pointer.js";
 import { createKbSelectionMachine } from "../../lib/interact/kb-selection.js";

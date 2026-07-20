@@ -18,12 +18,11 @@
 // crosshair, so the two never fight.
 
 import type { ViewerStore } from "../../store/store.js";
-import type { TimePanelLayout } from "../../types/state.js";
+import type { StoreState, TimePanelLayout } from "../../types/state.js";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../canvas/lanes/render.js";
-import { deriveAxisInputs, fmtAxisTick } from "../../pages/viewer/axis.js";
-import { lanesScrollbarWidth } from "../../pages/viewer/track-layout.js";
+import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
 import { assembleLaneHover } from "../canvas/lanes/index.js";
 import type { LaneHoverInput } from "../canvas/lanes/hover.js";
 import { deriveOverlayData, type OverlayData } from "./data.js";
@@ -95,10 +94,18 @@ function workerAtClientY(
  * column. `root` is the viewer app root (the readout stub mirrors into its
  * inspector slot). Returns teardown handles.
  */
+/**
+ * How the host page renders a timestamp. Injected rather than imported so this
+ * component does not reach up into a page: the axis's absolute/relative clock
+ * mode and its date qualification are viewer policy, not overlay policy.
+ */
+export type FormatTimestamp = (state: StoreState, ns: number) => string;
+
 export function mountOverlay(
   root: HTMLElement,
   trackColumn: HTMLElement,
   store: ViewerStore,
+  formatTimestamp: FormatTimestamp,
 ): MountedOverlay {
   // Frame-invariant hover data, recomputed only when the trace slice is
   // replaced. Null until a trace loads.
@@ -145,8 +152,7 @@ export function mountOverlay(
     const geom = columnGeometry(trackColumn, viewStart, viewEnd);
     const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
 
-    const axis = deriveAxisInputs(state);
-    const formatTs = (ns: number): string => fmtAxisTick(axis, ns, false);
+    const formatTs = (ns: number): string => formatTimestamp(state, ns);
 
     // writes from here down
     if (sizer === null) return;

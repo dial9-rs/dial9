@@ -23,7 +23,7 @@ import { classMap } from "lit-html/directives/class-map.js";
 import { createCanvasSizer, makeColorAssigner } from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
 import { formatFieldValue } from "../../lib/trace/index.js";
-import { sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
+import { sharedWorkerSpans } from "../../lib/trace/derived.js";
 import type {
   CustomTraceEvent,
   LaneSpans,
@@ -32,7 +32,7 @@ import type {
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
-import type { TrackSpec } from "./track-layout.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import {
   buildEventRenderModel,
   buildPinnedEvent,

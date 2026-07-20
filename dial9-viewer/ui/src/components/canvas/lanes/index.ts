@@ -21,9 +21,9 @@ import {
   TRACKS,
   lanesScrollbarWidth,
   trackGeometry,
-} from "../../../pages/viewer/track-layout.js";
-import type { TrackId } from "../../../pages/viewer/track-layout.js";
-import { claimTrack } from "../../../pages/viewer/track-renderers.js";
+} from "../../../lib/canvas/track-layout.js";
+import type { TrackId } from "../../../lib/canvas/track-layout.js";
+import { claimTrack } from "../../../lib/canvas/track-renderers.js";
 import { deriveLaneData } from "./data.js";
 import type { LaneData } from "./data.js";
 import {

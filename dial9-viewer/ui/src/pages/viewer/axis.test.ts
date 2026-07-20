@@ -19,8 +19,8 @@ import {
   renderTimeAxis,
   type AxisInputs,
 } from "./axis.js";
-import { TRACKS, LABEL_W, trackGeometry } from "./track-layout.js";
-import type { TrackSpec } from "./track-layout.js";
+import { TRACKS, LABEL_W, trackGeometry } from "../../lib/canvas/track-layout.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import type { PanelGeometry } from "../../types/state.js";
 
 const trackById = (id: string): TrackSpec =>

@@ -4,8 +4,8 @@
 
 import { describe, it, expect } from "vitest";
 import { crosshairX, drawCrosshair, type CrosshairContext, type CrosshairInput } from "./crosshair.js";
-import { TRACKS, LABEL_W, trackGeometry } from "../../pages/viewer/track-layout.js";
-import type { TrackSpec } from "../../pages/viewer/track-layout.js";
+import { TRACKS, LABEL_W, trackGeometry } from "../../lib/canvas/track-layout.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 
 const trackById = (id: string): TrackSpec => TRACKS.find((t) => t.id === id) as TrackSpec;
 

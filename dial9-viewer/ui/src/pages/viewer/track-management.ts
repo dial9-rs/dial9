@@ -18,8 +18,8 @@
 // per-track height only; it does not touch the per-track render delegation.
 
 import type { ViewerStore } from "../../store/store.js";
-import { TRACKS } from "./track-layout.js";
-import type { TrackId, TrackSpec } from "./track-layout.js";
+import { TRACKS } from "../../lib/canvas/track-layout.js";
+import type { TrackId, TrackSpec } from "../../lib/canvas/track-layout.js";
 
 /** Collapsed (label-only) track height in CSS px. */
 export const COLLAPSED_TRACK_H = 36;

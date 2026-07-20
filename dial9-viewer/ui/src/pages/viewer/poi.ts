@@ -18,7 +18,7 @@ import {
   columnarWorkerStoreFor,
   lifecycleWorkerIds,
   sharedWorkerSpans,
-} from "../../components/canvas/lanes/data.js";
+} from "../../lib/trace/derived.js";
 import { laneSource, type LaneSource } from "../../lib/trace/columnar-worker-spans.js";
 import type {
   ParsedTrace,

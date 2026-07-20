@@ -24,7 +24,7 @@ import type { CanvasSizer } from "../../lib/canvas/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import type { TimeRange } from "../../types/trace.js";
-import type { TrackSpec } from "./track-layout.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import {
   COMPLETE_QUEUE_WINDOW,
   QUEUE_LEGEND,

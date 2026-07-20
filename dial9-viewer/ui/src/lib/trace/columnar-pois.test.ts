@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseTraceBuffer } from "./load.js";
 import { buildWorkerSpans, filterPointsOfInterest, computeSchedulingDelays, attachCpuSamples } from "./index.js";
-import { deriveWorkerIds } from "../../components/canvas/lanes/data.js";
+import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

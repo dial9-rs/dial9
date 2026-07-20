@@ -25,8 +25,8 @@ import {
 } from "./cpu.js";
 import { nsToDrawX as axisNsToDrawX } from "./axis.js";
 import { nsToDrawX as sharedNsToDrawX } from "../../lib/canvas/index.js";
-import { TRACKS, trackGeometry } from "./track-layout.js";
-import type { TrackSpec } from "./track-layout.js";
+import { TRACKS, trackGeometry } from "../../lib/canvas/track-layout.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import type { PanelGeometry, StoreState } from "../../types/state.js";
 import type { ParsedTrace } from "../../types/trace.js";
 import type { ProcessCpuUsageInterval } from "../../lib/trace/index.js";

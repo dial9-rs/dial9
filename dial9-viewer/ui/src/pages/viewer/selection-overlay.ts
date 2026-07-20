@@ -15,7 +15,7 @@
 import { assertInScheduledRender } from "../../store/store.js";
 import { timePanelLayout } from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
-import { lanesScrollbarWidth } from "./track-layout.js";
+import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { SelectionSlice, TransientSlice } from "../../types/state.js";
 

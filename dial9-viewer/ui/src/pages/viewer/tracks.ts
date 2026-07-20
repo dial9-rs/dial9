@@ -15,8 +15,8 @@ import { html, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
 import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, lanesScrollbarWidth, trackGeometry } from "./track-layout.js";
-import type { TrackId, TrackSpec } from "./track-layout.js";
+import { LABEL_W, lanesScrollbarWidth, trackGeometry } from "../../lib/canvas/track-layout.js";
+import type { TrackId, TrackSpec } from "../../lib/canvas/track-layout.js";
 import {
   COLLAPSED_TRACK_H,
   isCollapsed,
@@ -25,7 +25,7 @@ import {
   type TrackManageActions,
 } from "./track-management.js";
 import { renderTimeAxis, type AxisInputs } from "./axis.js";
-import { isTrackClaimed } from "./track-renderers.js";
+import { isTrackClaimed } from "../../lib/canvas/track-renderers.js";
 import { renderCpuTrack, type CpuInputs } from "./cpu.js";
 import type { SpansTrackController } from "./spans-track.js";
 import type { QueueTrackController } from "./queue-track.js";

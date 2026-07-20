@@ -23,6 +23,7 @@ import { mountInspector } from "./inspector.js";
 import { createRegionAnalysis } from "./region-analysis.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
+import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
 import { initViewportFromTrace } from "./viewport-init.js";
 import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
@@ -203,7 +204,9 @@ function boot(): void {
   // subscriber runs LAST each frame - it re-ensures the overlay canvas after
   // any shell re-render that would clobber it, and reads column geometry only
   // after the shell's writes have settled.
-  const overlay = mountOverlay(root, shell.trackColumn, store);
+  const overlay = mountOverlay(root, shell.trackColumn, store, (state, ns) =>
+    fmtAxisTick(deriveAxisInputs(state), ns, false),
+  );
 
   // Persistent inspector sidebar: tabs (Task/Poll/Event/Related/Stack), the
   // at-cursor readout, and the P-row mechanics (resize/persist). Rendered

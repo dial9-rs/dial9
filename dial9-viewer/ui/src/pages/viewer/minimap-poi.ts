@@ -22,7 +22,7 @@ import {
   columnarWorkerStoreFor,
   lifecycleWorkerIds,
   sharedWorkerSpans,
-} from "../../components/canvas/lanes/data.js";
+} from "../../lib/trace/derived.js";
 import type {
   ParsedTrace,
   PointOfInterest,

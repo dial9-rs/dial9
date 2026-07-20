@@ -12,8 +12,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createViewerStore } from "./store.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
-import { TRACKS } from "./track-layout.js";
-import type { TrackId } from "./track-layout.js";
+import { TRACKS } from "../../lib/canvas/track-layout.js";
+import type { TrackId } from "../../lib/canvas/track-layout.js";
 import {
   COLLAPSED_TRACK_H,
   MANAGEABLE_TRACK_IDS,

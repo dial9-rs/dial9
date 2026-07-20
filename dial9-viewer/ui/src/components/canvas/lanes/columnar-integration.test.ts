@@ -12,7 +12,7 @@ import { parseTraceBuffer } from "../../../lib/trace/load.js";
 import { ColumnarEvents } from "../../../lib/trace/columnar-events.js";
 import { ColumnarCpuSamples } from "../../../lib/trace/columnar-cpu-samples.js";
 import { ColumnarSpanEvents } from "../../../lib/trace/columnar-span-events.js";
-import { sharedWorkerSpans, sharedSpanData, deriveWorkerIds } from "./data.js";
+import { sharedWorkerSpans, sharedSpanData, deriveWorkerIds } from "../../../lib/trace/derived.js";
 
 let raw: Uint8Array;
 beforeAll(() => {
