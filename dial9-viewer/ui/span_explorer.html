@@ -270,6 +270,7 @@
   let exemplarColOverrides = loadExemplarColOverrides();
   let lastCoverage = null;
   let exemplarRefreshPending = false;
+  let exemplarPreviewAvailable = false;
   let streamToken = 0;
   let abortCtl = null;
   let activeStreamMode = null;
@@ -305,7 +306,10 @@
     SE.setMaxFilesParam(u.searchParams, maxFiles);
     // An exemplar refetch (duration-band change / span-type reselect) reads only
     // already-folded spans parts — it must not parse any additional raw files.
-    if (mode === "exemplars") u.searchParams.set("exemplars_only", "true");
+    if (mode === "exemplars") {
+      u.searchParams.set("exemplars_only", "true");
+      if (selectedUid) u.searchParams.set("span_type_uid", selectedUid);
+    }
     return u;
   }
 
@@ -339,6 +343,7 @@
   // produced them. Clear the selected type's copy before changing bounds so a
   // previous band's count or exemplars are never relabeled as the new scope.
   function invalidateSelectedExemplarData() {
+    exemplarPreviewAvailable = false;
     spanTypes = spanTypes.map((st) => {
       if (st.span_type_uid !== selectedUid) return st;
       const next = Object.assign({}, st, { exemplars: [] });
@@ -419,7 +424,7 @@
     // to — the slowest exemplar (exemplars[0], sorted desc) is the max
     // instance. Clicking pans/zooms the viewer to that span via focus_* params.
     const scope = exemplarScope(st);
-    const exemplarCandidates = exemplarRefreshPending
+    const exemplarCandidates = exemplarRefreshPending && !exemplarPreviewAvailable
       ? []
       : SE.exemplarsInBand(st.exemplars, bandMinNs, bandMaxNs);
     const slowest = exemplarCandidates.length > 0 ? exemplarCandidates[0] : null;
@@ -1228,6 +1233,9 @@
     const baselineFilesFolded = (mode === "refine" || mode === "exemplars") && lastCoverage
       ? lastCoverage.files_folded
       : 0;
+    const baselineFoldedSetId = mode === "exemplars" && lastCoverage
+      ? lastCoverage.folded_set_id
+      : null;
     stopStreaming();
     activeStreamMode = mode;
     setStreamingUi(true);
@@ -1244,9 +1252,8 @@
     const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
     const requestSelectedUid = selectedUid;
     const requestExemplarScopeKey = currentExemplarScopeKey();
-    let latestIncomingTypes = null;
-    let latestIncomingCoverage = null;
     let exemplarSnapshotAdopted = false;
+    if (mode === "exemplars") exemplarPreviewAvailable = false;
     let gotEvent = false;
 
     Dial9Sse.openSse(buildApiUrl(mode), {
@@ -1265,21 +1272,27 @@
         const incomingTypes = resp.span_types || [];
         const incomingFilesFolded = resp.coverage ? resp.coverage.files_folded : 0;
         if (mode === "exemplars") {
-          latestIncomingTypes = incomingTypes;
-          latestIncomingCoverage = resp.coverage || null;
-          if (incomingFilesFolded >= baselineFilesFolded) {
+          exemplarSnapshotAdopted = false;
+          const incomingFoldedSetId = resp.coverage
+            ? resp.coverage.folded_set_id
+            : null;
+          const targetFoldedSetId = resp.coverage
+            ? resp.coverage.target_folded_set_id
+            : null;
+          const membership = SE.classifyExemplarSnapshot(
+            baselineFoldedSetId,
+            incomingFoldedSetId,
+            targetFoldedSetId,
+          );
+          if (membership.preview) {
             const merged = SE.mergeSelectedExemplarSnapshot(
               spanTypes,
               incomingTypes,
               requestSelectedUid,
             );
             spanTypes = merged.spanTypes;
-            if (merged.matched) {
-              exemplarScopeByUid.set(requestSelectedUid, requestExemplarScopeKey);
-              exemplarRefreshPending = false;
-              exemplarSnapshotAdopted = true;
-            }
-            lastCoverage = resp.coverage || lastCoverage;
+            exemplarPreviewAvailable = merged.matched;
+            exemplarSnapshotAdopted = membership.complete && merged.matched;
             renderDetail();
           }
         } else if (SE.shouldAdoptCatalogSnapshot(
@@ -1314,22 +1327,17 @@
           currentExemplarScopeKey(),
         )) return;
         if (mode === "exemplars") {
-          const finalFilesFolded = latestIncomingCoverage
-            ? latestIncomingCoverage.files_folded
-            : 0;
-          const recoveredBaseline = finalFilesFolded >= baselineFilesFolded;
-          const catalogChanged = recoveredBaseline && latestIncomingTypes != null &&
-            !SE.sameSpanCatalogStatistics(spanTypes, latestIncomingTypes);
-          if (catalogChanged) {
-            spanTypes = latestIncomingTypes;
-            lastCoverage = latestIncomingCoverage || lastCoverage;
-            exemplarScopeByUid.clear();
-            for (const spanType of spanTypes) {
-              exemplarScopeByUid.set(spanType.span_type_uid, requestExemplarScopeKey);
-            }
-            renderCatalog();
+          const completed = SE.completeExemplarRefresh(
+            spanTypes,
+            lastCoverage,
+            exemplarSnapshotAdopted,
+          );
+          spanTypes = completed.spanTypes;
+          lastCoverage = completed.coverage;
+          exemplarRefreshPending = completed.pending;
+          if (exemplarSnapshotAdopted) {
+            exemplarScopeByUid.set(requestSelectedUid, requestExemplarScopeKey);
           }
-          exemplarRefreshPending = !exemplarSnapshotAdopted;
           renderDetail();
         } else {
           exemplarRefreshPending = false;

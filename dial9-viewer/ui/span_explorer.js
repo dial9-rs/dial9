@@ -593,6 +593,26 @@ function mergeSelectedExemplarSnapshot(currentTypes, incomingTypes, selectedUid)
   };
 }
 
+// A seed-only stream advertises the exact final folded set it is working toward.
+// Its cumulative subsets are safe to preview when that target matches the full
+// catalog, but cache validity still requires the current successful set itself
+// to match exactly.
+function classifyExemplarSnapshot(baselineSetId, currentSetId, targetSetId) {
+  const complete = baselineSetId != null && currentSetId === baselineSetId;
+  return {
+    preview: complete || (baselineSetId != null && targetSetId === baselineSetId),
+    complete,
+  };
+}
+
+function completeExemplarRefresh(currentTypes, currentCoverage, snapshotAdopted) {
+  return {
+    spanTypes: currentTypes,
+    coverage: currentCoverage,
+    pending: !snapshotAdopted,
+  };
+}
+
 // Compare query-independent catalog data while ignoring duration-scoped
 // exemplar fields. Preserve-mode refreshes use this at stream completion to
 // avoid rerendering an already-complete catalog, while still adopting a final
@@ -904,6 +924,8 @@ var SpanExplorer = {
   exemplarAttrValue,
   columnIsDegenerate,
   mergeSelectedExemplarSnapshot,
+  classifyExemplarSnapshot,
+  completeExemplarRefresh,
   exemplarRequestMatches,
   sameSpanCatalogStatistics,
   exemplarViewerUrl,

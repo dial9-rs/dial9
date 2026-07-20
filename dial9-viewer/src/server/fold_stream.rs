@@ -60,6 +60,13 @@ pub(crate) trait FoldSink {
     /// snapshot. Endpoints may tune this for payload size and merge cost.
     const SEED_BATCH_SIZE: usize = 24;
 
+    /// Runtime seed cadence. Most sinks use the associated default; sinks with
+    /// lightweight response modes may emit a smaller first preview without
+    /// penalizing throughput for the rest of the aggregation.
+    fn seed_batch_size(&self, _first_batch: bool) -> usize {
+        Self::SEED_BATCH_SIZE
+    }
+
     /// Prime the accumulator from one bounded batch of already-folded parts.
     /// The driver repeatedly invokes this with stable sampling-order slices and
     /// emits an SSE snapshot after every batch, so deep cached refinements do
@@ -98,6 +105,8 @@ pub(crate) trait FoldSink {
         &self,
         resolved: &Resolved,
         files_folded: usize,
+        folded_set_id: &str,
+        target_folded_set_id: Option<&str>,
         hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event;
@@ -110,6 +119,8 @@ pub(crate) trait FoldSink {
 pub(crate) fn coverage_from(
     resolved: &Resolved,
     files_folded: usize,
+    folded_set_id: &str,
+    target_folded_set_id: Option<&str>,
     hosts_folded: usize,
     errors: &FoldErrors,
     samples_folded: usize,
@@ -117,6 +128,8 @@ pub(crate) fn coverage_from(
     Coverage {
         files_matched: resolved.files_matched,
         files_folded,
+        folded_set_id: Some(folded_set_id.to_string()),
+        target_folded_set_id: target_folded_set_id.map(str::to_string),
         fold_work_cap: resolved.fold_work_cap(),
         samples_folded,
         total_bytes: resolved.total_bytes,
@@ -125,6 +138,17 @@ pub(crate) fn coverage_from(
         fold_errors: errors.count,
         fold_error_sample: errors.sample.clone(),
     }
+}
+
+fn folded_set_id(folded: &HashSet<String>) -> String {
+    let mut leaves = folded.iter().collect::<Vec<_>>();
+    leaves.sort_unstable();
+    let mut hasher = blake3::Hasher::new();
+    for leaf in leaves {
+        hasher.update(&(leaf.len() as u64).to_le_bytes());
+        hasher.update(leaf.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Rate-limited warn for the per-file merge path (reachable once per folded file
@@ -184,6 +208,7 @@ struct Driver<S> {
     /// lets coverage report only cached parts actually fetched and merged.
     seed_keys: Vec<String>,
     seed_next: usize,
+    target_folded_set_id: Option<String>,
     folds: BoxStream<'static, FoldOutcome>,
     phase: Phase,
 }
@@ -239,14 +264,28 @@ impl<S: FoldSink> Driver<S> {
             guard.download_duration += phases.download;
             guard.parse_duration += phases.parse;
             guard.query_duration += phases.query;
+
+            // Sub-phase breakdown (sum == parse_duration).
+            guard.reader_setup_duration += phases.reader_setup;
+            guard.batch_decode_duration += phases.batch_decode;
+            guard.row_materialize_duration += phases.row_materialize;
+
+            // Work counters.
+            guard.parquet_bytes += phases.parquet_bytes;
+            guard.record_batches_decoded += phases.record_batches_decoded;
+            guard.rows_materialized += phases.rows_materialized;
+            guard.attribute_entries += phases.attribute_entries;
         }
     }
 
     /// Build one SSE event from the current accumulator snapshot + coverage.
     fn snapshot_event(&self) -> Event {
+        let folded_set_id = folded_set_id(&self.folded);
         self.sink.snapshot_event(
             &self.resolved,
             self.files_folded,
+            &folded_set_id,
+            self.target_folded_set_id.as_deref(),
             self.folded_hosts.len(),
             &self.errors,
         )
@@ -314,6 +353,13 @@ where
         refine::fold_stream(Arc::clone(&agg), limits, fold_worklist).boxed();
 
     let seed_keys = resolved.folded_matching_full_keys();
+    let target_folded_set_id = seed_only.then(|| {
+        let target = seed_keys
+            .iter()
+            .map(|key| crate::ingest::aggregate::part_leaf_of(key))
+            .collect::<HashSet<_>>();
+        folded_set_id(&target)
+    });
     let mut driver = Driver {
         agg,
         resolved,
@@ -326,6 +372,7 @@ where
         errors: FoldErrors::default(),
         seed_keys,
         seed_next: 0,
+        target_folded_set_id,
         folds,
         phase: Phase::Seeding,
         stream_metrics,
@@ -338,7 +385,9 @@ where
     stream::unfold(driver, |mut d| async move {
         match d.phase {
             Phase::Seeding => {
-                let end = seed_batch_end(d.seed_next, d.seed_keys.len(), S::SEED_BATCH_SIZE);
+                let first_batch = d.seed_next == 0;
+                let batch_size = d.sink.seed_batch_size(first_batch);
+                let end = seed_batch_end(d.seed_next, d.seed_keys.len(), batch_size);
                 let keys = d.seed_keys[d.seed_next..end].to_vec();
                 let outcomes = d.sink.seed_batch(&d.agg, &keys).await;
                 d.record_phase_durations();
@@ -379,15 +428,31 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
     use axum::response::sse::Event;
     use futures::StreamExt;
+    use metrique::ServiceMetrics;
+    use metrique::test_util::{TestEntrySink, test_entry_sink};
 
-    use super::{FoldSink, PartOutcome, coverage_from, drive, drive_with_options, seed_batch_end};
+    use super::{
+        FoldSink, PartOutcome, coverage_from, drive_with_options, folded_set_id, seed_batch_end,
+    };
     use crate::ingest::aggregate::{self, AggContext, FoldLimits};
     use crate::ingest::refine::{FoldErrors, Folded, Resolved};
+    use crate::server::metrics::{SpanStatsPhaseDurations, SpanStatsStreamMetrics};
     use crate::storage::{LocalBackend, StorageBackend};
+
+    #[test]
+    fn folded_set_identity_tracks_membership_not_iteration_order() {
+        let first = HashSet::from(["leaf-a".to_string(), "leaf-b".to_string()]);
+        let reordered = HashSet::from(["leaf-b".to_string(), "leaf-a".to_string()]);
+        let different = HashSet::from(["leaf-a".to_string(), "leaf-c".to_string()]);
+
+        assert_eq!(folded_set_id(&first), folded_set_id(&reordered));
+        assert_ne!(folded_set_id(&first), folded_set_id(&different));
+    }
 
     #[test]
     fn cached_seed_batches_are_bounded_and_cover_all_keys() {
@@ -409,9 +474,11 @@ mod tests {
         assert_eq!(seed_batch_end(2, 2, 0), 2);
     }
 
+    type RecordedSnapshot = (usize, usize, Option<String>);
+
     struct RecordingSink {
         batches: Arc<Mutex<Vec<Vec<String>>>>,
-        snapshots: Arc<Mutex<Vec<(usize, usize)>>>,
+        snapshots: Arc<Mutex<Vec<RecordedSnapshot>>>,
         failed_key: String,
     }
 
@@ -459,15 +526,25 @@ mod tests {
             &self,
             resolved: &Resolved,
             files_folded: usize,
+            folded_set_id: &str,
+            target_folded_set_id: Option<&str>,
             hosts_folded: usize,
             errors: &FoldErrors,
         ) -> Event {
-            let coverage =
-                coverage_from(resolved, files_folded, hosts_folded, errors, files_folded);
-            self.snapshots
-                .lock()
-                .unwrap()
-                .push((coverage.files_folded, coverage.fold_errors));
+            let coverage = coverage_from(
+                resolved,
+                files_folded,
+                folded_set_id,
+                target_folded_set_id,
+                hosts_folded,
+                errors,
+                files_folded,
+            );
+            self.snapshots.lock().unwrap().push((
+                coverage.files_folded,
+                coverage.fold_errors,
+                coverage.target_folded_set_id,
+            ));
             Event::default()
         }
     }
@@ -485,7 +562,8 @@ mod tests {
         let folded = full_keys
             .iter()
             .map(|full| aggregate::part_leaf_of(full))
-            .collect();
+            .collect::<HashSet<_>>();
+        let expected_target = folded_set_id(&folded);
         let resolved = Resolved::for_test(capped, folded);
 
         let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
@@ -507,9 +585,10 @@ mod tests {
             failed_key: full_keys[1].clone(),
         };
 
-        let events: Vec<_> = drive(agg, resolved, FoldLimits::new(1, 1, 1), sink)
-            .collect()
-            .await;
+        let events: Vec<_> =
+            drive_with_options(agg, resolved, FoldLimits::new(1, 1, 1), sink, true, None)
+                .collect()
+                .await;
 
         assert_eq!(
             events.len(),
@@ -528,8 +607,12 @@ mod tests {
         );
         assert_eq!(
             *snapshots.lock().unwrap(),
-            vec![(1, 1), (3, 1), (4, 1)],
-            "coverage grows cumulatively and excludes failed, duplicate, and out-of-scope parts"
+            vec![
+                (1, 1, Some(expected_target.clone())),
+                (3, 1, Some(expected_target.clone())),
+                (4, 1, Some(expected_target)),
+            ],
+            "coverage grows cumulatively while retaining the exact final seed target"
         );
     }
 
@@ -564,10 +647,20 @@ mod tests {
             &self,
             resolved: &Resolved,
             files_folded: usize,
+            folded_set_id: &str,
+            target_folded_set_id: Option<&str>,
             hosts_folded: usize,
             errors: &FoldErrors,
         ) -> Event {
-            let _ = coverage_from(resolved, files_folded, hosts_folded, errors, files_folded);
+            let _ = coverage_from(
+                resolved,
+                files_folded,
+                folded_set_id,
+                target_folded_set_id,
+                hosts_folded,
+                errors,
+                files_folded,
+            );
             Event::default()
         }
     }
@@ -616,5 +709,97 @@ mod tests {
             0,
             "seed-only mode must not fold the unfolded capped file"
         );
+    }
+
+    struct MetricsSink {
+        pending: SpanStatsPhaseDurations,
+    }
+
+    impl FoldSink for MetricsSink {
+        async fn seed_batch(
+            &mut self,
+            _agg: &AggContext,
+            _full_keys: &[String],
+        ) -> Vec<PartOutcome> {
+            Vec::new()
+        }
+
+        async fn fold_one(&mut self, _agg: &AggContext, _folded: &Folded) -> PartOutcome {
+            panic!("empty test scope has no fold work")
+        }
+
+        fn take_phase_durations(&mut self) -> SpanStatsPhaseDurations {
+            std::mem::take(&mut self.pending)
+        }
+
+        fn snapshot_event(
+            &self,
+            _resolved: &Resolved,
+            _files_folded: usize,
+            _folded_set_id: &str,
+            _target_folded_set_id: Option<&str>,
+            _hosts_folded: usize,
+            _errors: &FoldErrors,
+        ) -> Event {
+            Event::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_phases_reach_stream_metrics() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
+        let agg = AggContext {
+            source: Arc::clone(&backend),
+            output: backend,
+            source_bucket: String::new(),
+            source_is_local: true,
+            output_bucket: String::new(),
+            output_prefix: "test".to_string(),
+            source_prefixes: Vec::new(),
+            segment_duration_secs: 60,
+        };
+        let phases = SpanStatsPhaseDurations {
+            download: std::time::Duration::from_millis(1),
+            parse: std::time::Duration::from_millis(9),
+            query: std::time::Duration::from_millis(5),
+            reader_setup: std::time::Duration::from_millis(2),
+            batch_decode: std::time::Duration::from_millis(3),
+            row_materialize: std::time::Duration::from_millis(4),
+            parquet_bytes: 100,
+            record_batches_decoded: 2,
+            rows_materialized: 30,
+            attribute_entries: 40,
+        };
+        let sink = MetricsSink { pending: phases };
+        let resolved = Resolved::for_test(Vec::new(), std::collections::HashSet::new());
+        let stream_metrics = SpanStatsStreamMetrics::arm("/api/span-stats");
+
+        let _: Vec<_> = drive_with_options(
+            agg,
+            resolved,
+            FoldLimits::new(1, 1, 1),
+            sink,
+            true,
+            Some(stream_metrics),
+        )
+        .collect()
+        .await;
+
+        let entries = inspector.entries();
+        assert_eq!(entries.len(), 1);
+        let metrics = &entries[0].metrics;
+        assert_eq!(metrics["download_duration"].as_f64(), 1.0);
+        assert_eq!(metrics["parse_duration"].as_f64(), 9.0);
+        assert_eq!(metrics["query_duration"].as_f64(), 5.0);
+        assert_eq!(metrics["reader_setup_duration"].as_f64(), 2.0);
+        assert_eq!(metrics["batch_decode_duration"].as_f64(), 3.0);
+        assert_eq!(metrics["row_materialize_duration"].as_f64(), 4.0);
+        assert_eq!(metrics["parquet_bytes"].as_u64(), 100);
+        assert_eq!(metrics["record_batches_decoded"].as_u64(), 2);
+        assert_eq!(metrics["rows_materialized"].as_u64(), 30);
+        assert_eq!(metrics["attribute_entries"].as_u64(), 40);
     }
 }

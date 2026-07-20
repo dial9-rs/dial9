@@ -9,7 +9,9 @@ mod spans_reader;
 
 #[cfg(test)]
 use spans_reader::parse_map_column;
-use spans_reader::{SpanStatsRow, SpansBatchReader};
+use spans_reader::{
+    ExemplarOnlyConfig, ExemplarOnlySummary, SpanStatsInput, SpanStatsRow, SpansBatchReader,
+};
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -76,17 +78,17 @@ pub struct SpanStatsParams {
     /// exemplar selection). Repeat the param to AND multiple constraints.
     #[serde(default)]
     pub attr: Vec<String>,
+    /// Optional 16-byte hex span type identifier. Exemplar refreshes use this to
+    /// discard other types before allocating row strings and attributes.
+    pub span_type_uid: Option<String>,
     pub max_files: Option<usize>,
     pub bucket: Option<String>,
     pub prefix: Option<String>,
     /// Region for ambient-credential S3 reads, carried by browse deep links.
     pub aws_region: Option<String>,
-    /// Seed-only mode: read ONLY the already-folded spans part-files and skip
-    /// all new fold work. Set by the UI's duration-band exemplar refetch, which
-    /// re-selects exemplars within the band from spans that are already in
-    /// Parquet — it must never parse additional raw trace files. Without this,
-    /// every band drag re-drove the full fold pipeline over the scope's
-    /// unfolded files.
+    /// Seed-only, lightweight exemplar mode: read only already-folded spans
+    /// part-files and aggregate only per-type counts plus bounded exemplars.
+    /// The UI patches those fields into its existing full catalog snapshot.
     #[serde(default)]
     pub exemplars_only: bool,
 }
@@ -117,6 +119,22 @@ fn parse_attr_filters(raw: &[String]) -> Result<Vec<AttrFilter>, String> {
         });
     }
     Ok(filters)
+}
+
+fn parse_span_type_uid(raw: Option<&str>) -> Result<Option<[u8; 16]>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let decoded = hex::decode(raw).map_err(|error| {
+        format!("invalid span_type_uid {raw:?}: expected 32 hex digits: {error}")
+    })?;
+    let uid = decoded.try_into().map_err(|bytes: Vec<u8>| {
+        format!(
+            "invalid span_type_uid {raw:?}: expected 16 bytes, got {}",
+            bytes.len()
+        )
+    })?;
+    Ok(Some(uid))
 }
 
 /// One span type's aggregated statistics.
@@ -410,6 +428,8 @@ pub async fn get_span_stats(
 
     let attr_filters =
         parse_attr_filters(&params.attr).map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    let span_type_uid = parse_span_type_uid(params.span_type_uid.as_deref())
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
 
     let Some(agg) = state
         .agg_context_for(
@@ -451,7 +471,9 @@ pub async fn get_span_stats(
 
     let accum = SpanStatsAccum::new(params.start_ns, params.end_ns)
         .with_exemplar_bounds(params.min_span_ns, params.max_span_ns)
-        .with_attr_filters(attr_filters);
+        .with_attr_filters(attr_filters)
+        .with_span_type_uid(span_type_uid)
+        .with_exemplars_only(params.exemplars_only);
     // Arm the stream-lifetime metric: the request middleware stops its latency
     // timer at response-headers time, so it sees only time-to-first-byte. This
     // guard rides the SSE body and emits the FINAL coverage + full
@@ -604,7 +626,11 @@ impl SpanTypeAccum {
             .histogram
             .entry(hist_bucket_key(elapsed_ns))
             .or_insert(0) += 1;
-        // Maintain bounded slow exemplars
+        // Maintain bounded slow exemplars.
+        self.record_exemplar(exemplar);
+    }
+
+    fn record_exemplar(&mut self, exemplar: Option<Exemplar>) {
         if let Some(ex) = exemplar {
             if self.exemplars.len() < MAX_EXEMPLARS {
                 self.exemplars.push(ex);
@@ -801,6 +827,11 @@ struct SpanStatsAccum {
     /// Attribute equality filters (ANDed). A row is dropped entirely unless its
     /// attributes contain every one of these key/value pairs. Empty = no filter.
     attr_filters: Vec<AttrFilter>,
+    /// Optional type selected by a lightweight exemplar refresh.
+    span_type_uid: Option<[u8; 16]>,
+    /// Skip catalog histograms, composition, facets, and quality counters while
+    /// retaining exact counts and bounded exemplars for a UI patch response.
+    exemplars_only: bool,
     /// Total instances whose type was dropped because MAX_SPAN_TYPES was reached.
     types_overflow_instances: u64,
 }
@@ -814,6 +845,8 @@ impl SpanStatsAccum {
             exemplar_min_ns: None,
             exemplar_max_ns: None,
             attr_filters: Vec::new(),
+            span_type_uid: None,
+            exemplars_only: false,
             types_overflow_instances: 0,
         }
     }
@@ -826,6 +859,16 @@ impl SpanStatsAccum {
 
     fn with_attr_filters(mut self, filters: Vec<AttrFilter>) -> Self {
         self.attr_filters = filters;
+        self
+    }
+
+    fn with_span_type_uid(mut self, span_type_uid: Option<[u8; 16]>) -> Self {
+        self.span_type_uid = span_type_uid;
+        self
+    }
+
+    fn with_exemplars_only(mut self, exemplars_only: bool) -> Self {
+        self.exemplars_only = exemplars_only;
         self
     }
 
@@ -859,12 +902,58 @@ impl SpanStatsAccum {
         data: Vec<u8>,
     ) -> (SpanStatsPhaseDurations, anyhow::Result<()>) {
         let mut staged = self.clone();
-        let (phases, result) = SpansBatchReader::new(self.start_ns, self.end_ns)
-            .read(data, |row| staged.merge_row(row));
+        // Without attribute filters, a selected-type exemplar refresh can count
+        // every scoped row from Arrow primitives while materializing only each
+        // batch's top candidates. Attribute filters still require owned map
+        // parsing for every row and therefore use the general path.
+        let exemplar_only =
+            (self.exemplars_only && self.attr_filters.is_empty() && self.span_type_uid.is_some())
+                .then_some(ExemplarOnlyConfig {
+                    min_ns: self.exemplar_min_ns,
+                    max_ns: self.exemplar_max_ns,
+                    max_exemplars: MAX_EXEMPLARS,
+                });
+        let (phases, result) = SpansBatchReader::new(
+            self.start_ns,
+            self.end_ns,
+            self.span_type_uid,
+            exemplar_only,
+        )
+        .read(data, |input| match input {
+            SpanStatsInput::Row(row) => staged.merge_row(*row),
+            SpanStatsInput::ExemplarOnlySummary(summary) => {
+                staged.merge_exemplar_only_summary(summary);
+            }
+        });
         if result.is_ok() {
             *self = staged;
         }
         (phases, result)
+    }
+
+    fn merge_exemplar_only_summary(&mut self, summary: ExemplarOnlySummary) {
+        debug_assert!(self.exemplars_only);
+        let ExemplarOnlySummary {
+            span_type_uid,
+            kind,
+            name,
+            target,
+            callsite_file,
+            callsite_line,
+            count,
+            selected_duration_count,
+        } = summary;
+        if !self.types.contains_key(&span_type_uid) && self.types.len() >= MAX_SPAN_TYPES {
+            self.types_overflow_instances += count;
+            return;
+        }
+        let entry = self.types.entry(span_type_uid).or_insert_with(|| {
+            SpanTypeAccum::new(kind, name, target, callsite_file, callsite_line)
+        });
+        entry.count += count;
+        if let Some(selected_count) = selected_duration_count {
+            *entry.selected_duration_count.get_or_insert(0) += selected_count;
+        }
     }
 
     fn merge_row(&mut self, row: SpanStatsRow) {
@@ -896,6 +985,7 @@ impl SpanStatsAccum {
             return;
         }
 
+        let exemplars_only = self.exemplars_only;
         let entry = self.types.entry(span_type_uid).or_insert_with(|| {
             SpanTypeAccum::new(kind, name, target, callsite_file, callsite_line)
         });
@@ -904,6 +994,11 @@ impl SpanStatsAccum {
             if matches_exemplar_bounds {
                 *matching_count += 1;
             }
+        }
+        if exemplars_only {
+            entry.count += 1;
+            entry.record_exemplar(exemplar);
+            return;
         }
         entry.record(elapsed_ns, exemplar);
 
@@ -1024,6 +1119,14 @@ struct SpanStatsSink {
 }
 
 impl fold_stream::FoldSink for SpanStatsSink {
+    fn seed_batch_size(&self, first_batch: bool) -> usize {
+        if self.accum.exemplars_only && first_batch {
+            4
+        } else {
+            24
+        }
+    }
+
     async fn seed_batch(
         &mut self,
         agg: &AggContext,
@@ -1105,12 +1208,16 @@ impl fold_stream::FoldSink for SpanStatsSink {
         &self,
         resolved: &Resolved,
         files_folded: usize,
+        folded_set_id: &str,
+        target_folded_set_id: Option<&str>,
         hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event {
         let coverage = fold_stream::coverage_from(
             resolved,
             files_folded,
+            folded_set_id,
+            target_folded_set_id,
             hosts_folded,
             errors,
             self.accum.total_instances(),
@@ -1823,6 +1930,39 @@ mod tests {
     }
 
     #[test]
+    fn exemplar_only_stream_uses_smaller_preview_batches() {
+        let full = SpanStatsSink {
+            accum: SpanStatsAccum::new(None, None),
+            pending_phase_durations: SpanStatsPhaseDurations::default(),
+        };
+        let lightweight = SpanStatsSink {
+            accum: SpanStatsAccum::new(None, None).with_exemplars_only(true),
+            pending_phase_durations: SpanStatsPhaseDurations::default(),
+        };
+
+        assert_eq!(fold_stream::FoldSink::seed_batch_size(&full, true), 24);
+        assert_eq!(
+            fold_stream::FoldSink::seed_batch_size(&lightweight, true),
+            4
+        );
+        assert_eq!(
+            fold_stream::FoldSink::seed_batch_size(&lightweight, false),
+            24
+        );
+    }
+
+    #[test]
+    fn parse_span_type_uid_validates_hex_and_width() {
+        assert_eq!(parse_span_type_uid(None).unwrap(), None);
+        assert_eq!(
+            parse_span_type_uid(Some("000102030405060708090a0b0c0d0e0f")).unwrap(),
+            Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+        );
+        assert!(parse_span_type_uid(Some("not-hex")).is_err());
+        assert!(parse_span_type_uid(Some("00")).is_err());
+    }
+
+    #[test]
     fn attr_filter_narrows_counts_and_exemplars() {
         // Three "A" spans: two with status_code=500, one with status_code=200.
         let s500 = || vec![("status_code".to_string(), "500".to_string())];
@@ -1936,6 +2076,139 @@ mod tests {
             vec![40, 30, 20],
             "exemplars must use inclusive selected-band bounds"
         );
+    }
+
+    /// Exemplar refreshes retain only fields patched into the existing catalog
+    /// and discard non-selected types before materializing their rows.
+    #[test]
+    fn exemplars_only_preserves_patch_fields_without_catalog_aggregation() {
+        let data = make_spans_parquet_with_attrs(&[
+            (
+                0,
+                10,
+                10,
+                "A",
+                "h1",
+                true,
+                vec![("route".to_string(), "/a".to_string())],
+            ),
+            (
+                0,
+                20,
+                20,
+                "A",
+                "h1",
+                false,
+                vec![("route".to_string(), "/b".to_string())],
+            ),
+            (
+                0,
+                30,
+                30,
+                "A",
+                "h1",
+                true,
+                vec![("route".to_string(), "/c".to_string())],
+            ),
+            (
+                0,
+                16,
+                16,
+                "A",
+                "h1",
+                true,
+                vec![("route".to_string(), "/d".to_string())],
+            ),
+            (
+                0,
+                17,
+                17,
+                "A",
+                "h1",
+                true,
+                vec![("route".to_string(), "/e".to_string())],
+            ),
+            (
+                0,
+                18,
+                18,
+                "A",
+                "h1",
+                true,
+                vec![("route".to_string(), "/f".to_string())],
+            ),
+            (
+                0,
+                19,
+                19,
+                "A",
+                "h1",
+                true,
+                vec![("route".to_string(), "/g".to_string())],
+            ),
+            (
+                0,
+                25,
+                25,
+                "B",
+                "h1",
+                true,
+                vec![("large".to_string(), "unrelated".repeat(100))],
+            ),
+        ]);
+        let mut full = SpanStatsAccum::new(None, None).with_exemplar_bounds(Some(15), Some(30));
+        full.merge_spans_part(data.clone()).unwrap();
+
+        let mut selected_uid = [0_u8; 16];
+        selected_uid[15] = b'A';
+        let mut lightweight = SpanStatsAccum::new(None, None)
+            .with_exemplar_bounds(Some(15), Some(30))
+            .with_span_type_uid(Some(selected_uid))
+            .with_exemplars_only(true);
+        let (phases, result) = lightweight.merge_spans_part_timed(data);
+        result.unwrap();
+
+        let full_snapshot = full.snapshot();
+        let lightweight_snapshot = lightweight.snapshot();
+        let full_stats = full_snapshot
+            .span_types
+            .iter()
+            .find(|stats| stats.span_type_uid == hex::encode(selected_uid))
+            .unwrap();
+        assert_eq!(lightweight_snapshot.span_types.len(), 1);
+        assert_eq!(phases.rows_materialized, MAX_EXEMPLARS as u64);
+        assert_eq!(phases.attribute_entries, MAX_EXEMPLARS as u64);
+        let lightweight_stats = &lightweight_snapshot.span_types[0];
+        assert_eq!(lightweight_stats.count, full_stats.count);
+        assert_eq!(
+            lightweight_stats.selected_duration_count,
+            full_stats.selected_duration_count
+        );
+        assert_eq!(
+            lightweight_stats
+                .exemplars
+                .iter()
+                .map(|exemplar| exemplar.elapsed_ns)
+                .collect::<Vec<_>>(),
+            full_stats
+                .exemplars
+                .iter()
+                .map(|exemplar| exemplar.elapsed_ns)
+                .collect::<Vec<_>>()
+        );
+
+        assert!(lightweight_stats.histogram.is_empty());
+        assert_eq!(lightweight_stats.p50_ns, None);
+        assert_eq!(lightweight_stats.p95_ns, None);
+        assert_eq!(lightweight_stats.p99_ns, None);
+        assert_eq!(lightweight_stats.min_ns, None);
+        assert_eq!(lightweight_stats.max_ns, None);
+        assert!(lightweight_stats.composition.is_none());
+        assert!(lightweight_stats.composition_histogram.is_empty());
+        assert_eq!(lightweight_stats.details_complete_count, 0);
+        assert_eq!(lightweight_stats.partial_count, 0);
+        assert!(lightweight_stats.attribute_facets.is_empty());
+        assert!(!lightweight_stats.attribute_keys_overflow);
     }
 
     /// Finding 1: Parse attributes Map from Parquet and build bounded facets.
@@ -2204,6 +2477,8 @@ mod tests {
         let coverage = Coverage {
             files_matched: 10,
             files_folded: 0, // nothing successfully folded
+            folded_set_id: None,
+            target_folded_set_id: None,
             fold_work_cap: 10,
             samples_folded: accum.total_instances(),
             total_bytes: 50_000,
@@ -2575,6 +2850,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn absent_span_type_uid_is_ignored_but_wrong_type_is_error() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc as StdArc;
+
+        fn write_part(
+            schema: StdArc<Schema>,
+            columns: Vec<StdArc<dyn arrow::array::Array>>,
+        ) -> Vec<u8> {
+            let batch = RecordBatch::try_new(StdArc::clone(&schema), columns).unwrap();
+            let mut data = Vec::new();
+            let mut writer = ArrowWriter::try_new(&mut data, schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            data
+        }
+
+        let absent_schema = StdArc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("kind", DataType::Utf8, false),
+            Field::new("elapsed_ns", DataType::Int64, false),
+        ]));
+        let absent = write_part(
+            absent_schema,
+            vec![
+                StdArc::new(StringArray::from(vec!["legacy"])),
+                StdArc::new(StringArray::from(vec!["tracing"])),
+                StdArc::new(Int64Array::from(vec![10_i64])),
+            ],
+        );
+        let mut accum = SpanStatsAccum::new(None, None);
+        accum.merge_spans_part(absent).unwrap();
+        assert!(accum.snapshot().span_types.is_empty());
+
+        let wrong_type_schema = StdArc::new(Schema::new(vec![
+            Field::new("span_type_uid", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("kind", DataType::Utf8, false),
+            Field::new("elapsed_ns", DataType::Int64, false),
+        ]));
+        let wrong_type = write_part(
+            wrong_type_schema,
+            vec![
+                StdArc::new(StringArray::from(vec!["not-binary"])),
+                StdArc::new(StringArray::from(vec!["bad"])),
+                StdArc::new(StringArray::from(vec!["tracing"])),
+                StdArc::new(Int64Array::from(vec![10_i64])),
+            ],
+        );
+        let error = accum.merge_spans_part(wrong_type).unwrap_err().to_string();
+        assert!(error.contains("span_type_uid column has wrong type"));
+    }
+
     /// Finding 3: Wrong-width span_type_uid (not 16 bytes) is a merge error.
     #[test]
     fn wrong_width_uid_is_merge_error() {
@@ -2700,6 +3031,8 @@ mod tests {
         let coverage = Coverage {
             files_matched: 3,
             files_folded: 1, // only the successful one
+            folded_set_id: Some("leaf-good".to_string()),
+            target_folded_set_id: None,
             fold_work_cap: 3,
             samples_folded: accum.total_instances(),
             total_bytes: 30_000,
@@ -2827,7 +3160,14 @@ mod tests {
         }
 
         let mut accum = SpanStatsAccum::new(Some(0), Some(1_000));
-        assert!(accum.merge_spans_part(buf).is_err());
+        let (phases, result) = accum.merge_spans_part_timed(buf);
+        assert!(result.is_err());
+        assert_eq!(phases.rows_materialized, 1);
+        assert_eq!(phases.attribute_entries, 0);
+        assert_eq!(
+            phases.parse,
+            phases.reader_setup + phases.batch_decode + phases.row_materialize
+        );
         assert_eq!(accum.total_instances(), 0);
         assert!(accum.types.is_empty(), "failed part must commit no rows");
     }
@@ -2970,5 +3310,118 @@ mod tests {
             "error message must mention elapsed_ns: got {msg}"
         );
         assert_eq!(accum.total_instances(), 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase timing and work-counter accumulation tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// `merge_spans_part_timed` splits parse time into sub-phases and reports
+    /// deterministic work counters.
+    #[test]
+    fn phase_durations_and_counters_on_successful_parse() {
+        let data = make_spans_parquet_with_attrs(&[
+            (
+                100,
+                200,
+                100,
+                "A",
+                "h1",
+                true,
+                vec![
+                    ("key1".to_string(), "v1".to_string()),
+                    ("key2".to_string(), "v2".to_string()),
+                ],
+            ),
+            (300, 400, 100, "B", "h1", true, vec![]),
+            (
+                500,
+                600,
+                100,
+                "C",
+                "h1",
+                true,
+                vec![("k".to_string(), "v".to_string())],
+            ),
+        ]);
+        let data_len = data.len() as u64;
+
+        let mut accum = SpanStatsAccum::new(None, None);
+        let (phases, result) = accum.merge_spans_part_timed(data);
+        result.unwrap();
+
+        let sub_sum = phases.reader_setup + phases.batch_decode + phases.row_materialize;
+        assert_eq!(phases.parse, sub_sum);
+        assert_eq!(phases.parquet_bytes, data_len);
+        assert!(phases.record_batches_decoded >= 1);
+        assert_eq!(phases.rows_materialized, 3);
+        assert_eq!(phases.attribute_entries, 3);
+    }
+
+    /// Work performed before a parse failure is still represented in metrics.
+    #[test]
+    fn phase_durations_recorded_on_parse_failure() {
+        let garbage = b"definitely not a parquet file".to_vec();
+        let garbage_len = garbage.len() as u64;
+
+        let mut accum = SpanStatsAccum::new(None, None);
+        let (phases, result) = accum.merge_spans_part_timed(garbage);
+        assert!(result.is_err());
+
+        assert_eq!(phases.parquet_bytes, garbage_len);
+        assert_eq!(phases.parse, phases.reader_setup);
+        assert_eq!(phases.record_batches_decoded, 0);
+        assert_eq!(phases.rows_materialized, 0);
+        assert_eq!(phases.attribute_entries, 0);
+    }
+
+    /// Multiple merge_spans_part_timed calls accumulate via AddAssign on the
+    /// pending phase durations (simulates the fold-stream pattern).
+    #[test]
+    fn phase_durations_accumulate_across_parts() {
+        let part_a = make_spans_parquet(&[(100, 200, 100, "A", "h1", true)]);
+        let part_b = make_spans_parquet(&[
+            (200, 300, 100, "B", "h1", true),
+            (300, 400, 100, "C", "h1", true),
+        ]);
+
+        let mut accum = SpanStatsAccum::new(None, None);
+        let (phases_a, _) = accum.merge_spans_part_timed(part_a);
+        let (phases_b, _) = accum.merge_spans_part_timed(part_b);
+
+        let mut total = SpanStatsPhaseDurations::default();
+        total += phases_a;
+        total += phases_b;
+
+        // Total rows = 1 + 2.
+        assert_eq!(total.rows_materialized, 3);
+        // Batches decoded from two separate reads (at least 1 each).
+        assert!(total.record_batches_decoded >= 2);
+        // Sum invariant holds for the accumulated total.
+        let sub_sum = total.reader_setup + total.batch_decode + total.row_materialize;
+        assert_eq!(total.parse, sub_sum);
+        // Bytes from both parts.
+        assert!(total.parquet_bytes > 0);
+    }
+
+    /// Time-filtered rows that are excluded do NOT count in rows_materialized
+    /// (they are skipped inside read_batch before being pushed into the Vec).
+    #[test]
+    fn time_filtered_rows_excluded_from_counter() {
+        let data = make_spans_parquet(&[
+            (10, 50, 40, "A", "h1", true),   // end_ns=50 < 100 → excluded
+            (10, 150, 140, "A", "h1", true), // end_ns=150 → included
+            (10, 250, 240, "A", "h1", true), // end_ns=250 >= 200 → excluded
+        ]);
+
+        let mut accum = SpanStatsAccum::new(Some(100), Some(200));
+        let (phases, result) = accum.merge_spans_part_timed(data);
+        result.unwrap();
+
+        // Only the row that passes the time filter is "materialized" for counting.
+        assert_eq!(
+            phases.rows_materialized, 1,
+            "only time-included rows counted"
+        );
     }
 }

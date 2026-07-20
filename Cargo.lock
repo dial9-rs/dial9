@@ -1901,6 +1901,7 @@ dependencies = [
  "clap",
  "criterion",
  "dial9-core",
+ "dial9-tokio-telemetry",
  "dial9-trace-format",
  "flate2",
  "form_urlencoded",

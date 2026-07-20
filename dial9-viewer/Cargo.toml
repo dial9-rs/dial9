@@ -13,6 +13,9 @@ pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-
 
 [features]
 dev-server = ["dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]
+# Opt-in self-instrumentation: the viewer records its own dial9 traces.
+# Activate with DIAL9_ENABLED=true; CPU profiling defaults on only on Linux.
+self-telemetry = ["dep:dial9-tokio-telemetry"]
 
 [[bin]]
 name = "dial9-viewer"
@@ -64,6 +67,7 @@ rustc-hash = "2"
 dial9-core.workspace = true
 hex = "0.4"
 urlencoding = "2"
+dial9-tokio-telemetry = { version = "=0.4.0-alpha.1", path = "../dial9-tokio-telemetry", features = ["cpu-profiling"], optional = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

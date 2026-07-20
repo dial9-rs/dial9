@@ -677,6 +677,39 @@ assertEq(
   assert(absent.spanTypes === current, "mergeSelectedExemplarSnapshot: retains current catalog when absent");
 }
 
+// ── classifyExemplarSnapshot ──
+{
+  const partial = SE.classifyExemplarSnapshot("catalog", "partial", "catalog");
+  assert(partial.preview, "classifyExemplarSnapshot: previews a subset targeting the catalog");
+  assert(!partial.complete, "classifyExemplarSnapshot: subset is not cache-complete");
+
+  const complete = SE.classifyExemplarSnapshot("catalog", "catalog", "catalog");
+  assert(complete.preview, "classifyExemplarSnapshot: exact set remains visible");
+  assert(complete.complete, "classifyExemplarSnapshot: exact current set completes refresh");
+
+  const unrelated = SE.classifyExemplarSnapshot("catalog", "other", "other-target");
+  assert(!unrelated.preview, "classifyExemplarSnapshot: rejects an unrelated target set");
+  assert(!unrelated.complete, "classifyExemplarSnapshot: unrelated set cannot complete refresh");
+}
+
+// ── completeExemplarRefresh ──
+{
+  const catalog = [
+    { span_type_uid: "selected", count: 100 },
+    { span_type_uid: "other", count: 50 },
+  ];
+  const coverage = { files_folded: 100, samples_folded: 150 };
+  const complete = SE.completeExemplarRefresh(catalog, coverage, true);
+  assert(complete.spanTypes === catalog, "completeExemplarRefresh: preserves full catalog");
+  assert(complete.coverage === coverage, "completeExemplarRefresh: preserves catalog coverage");
+  assert(!complete.pending, "completeExemplarRefresh: clears pending after adopted patch");
+
+  const incomplete = SE.completeExemplarRefresh(catalog, coverage, false);
+  assert(incomplete.spanTypes === catalog, "completeExemplarRefresh: interrupted refresh preserves catalog");
+  assert(incomplete.coverage === coverage, "completeExemplarRefresh: interrupted refresh preserves coverage");
+  assert(incomplete.pending, "completeExemplarRefresh: interrupted refresh stays pending");
+}
+
 // ── exemplarRequestMatches ──
 {
   assert(
@@ -920,6 +953,20 @@ async function testDemoTrace() {
   assert(
     html.includes('u.searchParams.set("max_span_ns", String(bandMaxNs))'),
     "span_explorer.html: sends selected duration maximum to span-stats",
+  );
+  assert(
+    html.includes('if (selectedUid) u.searchParams.set("span_type_uid", selectedUid)'),
+    "span_explorer.html: scopes exemplar refreshes to the selected span type",
+  );
+  assert(
+    html.includes("SE.classifyExemplarSnapshot(") &&
+      html.includes("exemplarPreviewAvailable = merged.matched") &&
+      html.includes("exemplarSnapshotAdopted = membership.complete && merged.matched"),
+    "span_explorer.html: previews target-matched subsets but completes only on the exact folded set",
+  );
+  assert(
+    html.includes("if (exemplarSnapshotAdopted) {\n            exemplarScopeByUid.set"),
+    "span_explorer.html: caches exemplar scope only after clean stream completion",
   );
   assert(
     html.includes('cpuLink.addEventListener("click", openFlamegraphWithSession)') &&

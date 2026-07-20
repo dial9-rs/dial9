@@ -9,9 +9,83 @@ use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, Int64Array, MapArray, StringArray, UInt32Array,
 };
 use arrow::record_batch::RecordBatch;
+use parquet::arrow::ProjectionMask;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 
 use super::{Exemplar, ExemplarAttribute, TimeComposition};
 use crate::server::metrics::SpanStatsPhaseDurations;
+
+pub(super) struct ExemplarOnlyConfig {
+    pub min_ns: Option<i64>,
+    pub max_ns: Option<i64>,
+    pub max_exemplars: usize,
+}
+
+impl ExemplarOnlyConfig {
+    fn matches(&self, elapsed_ns: i64) -> bool {
+        self.min_ns.is_none_or(|min| elapsed_ns >= min)
+            && self.max_ns.is_none_or(|max| elapsed_ns <= max)
+    }
+
+    fn has_bounds(&self) -> bool {
+        self.min_ns.is_some() || self.max_ns.is_some()
+    }
+}
+
+const SPAN_STATS_COLUMNS: &[&str] = &[
+    "span_uid",
+    "span_type_uid",
+    "kind",
+    "name",
+    "target",
+    "callsite_file",
+    "callsite_line",
+    "start_ns",
+    "end_ns",
+    "elapsed_ns",
+    "details_complete",
+    "on_cpu_ns_est",
+    "blocked_ns_est",
+    "async_wait_ns",
+    "scheduler_delay_ns",
+    "unknown_ns",
+    "attributes",
+    "source_key",
+    "host",
+];
+
+fn projected_reader(data: Vec<u8>) -> parquet::errors::Result<ParquetRecordBatchReader> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?;
+    let root_indices = builder
+        .parquet_schema()
+        .root_schema()
+        .get_fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| SPAN_STATS_COLUMNS.contains(&field.name()).then_some(index))
+        .collect::<Vec<_>>();
+    let projection = ProjectionMask::roots(builder.parquet_schema(), root_indices);
+    builder
+        .with_batch_size(4096)
+        .with_projection(projection)
+        .build()
+}
+
+pub(super) enum SpanStatsInput {
+    Row(Box<SpanStatsRow>),
+    ExemplarOnlySummary(ExemplarOnlySummary),
+}
+
+pub(super) struct ExemplarOnlySummary {
+    pub span_type_uid: [u8; 16],
+    pub kind: String,
+    pub name: String,
+    pub target: Option<String>,
+    pub callsite_file: Option<String>,
+    pub callsite_line: Option<u32>,
+    pub count: u64,
+    pub selected_duration_count: Option<u64>,
+}
 
 pub(super) struct SpanStatsRow {
     pub span_type_uid: [u8; 16],
@@ -38,55 +112,88 @@ pub(super) struct RowComposition {
 pub(super) struct SpansBatchReader {
     start_ns: Option<i64>,
     end_ns: Option<i64>,
+    span_type_uid: Option<[u8; 16]>,
+    exemplar_only: Option<ExemplarOnlyConfig>,
 }
 
+#[derive(Default)]
+struct MaterializationCounts {
+    rows: u64,
+    attribute_entries: u64,
+}
 impl SpansBatchReader {
-    pub(super) fn new(start_ns: Option<i64>, end_ns: Option<i64>) -> Self {
-        Self { start_ns, end_ns }
+    pub(super) fn new(
+        start_ns: Option<i64>,
+        end_ns: Option<i64>,
+        span_type_uid: Option<[u8; 16]>,
+        exemplar_only: Option<ExemplarOnlyConfig>,
+    ) -> Self {
+        Self {
+            start_ns,
+            end_ns,
+            span_type_uid,
+            exemplar_only,
+        }
     }
 
     pub(super) fn read(
         &self,
         data: Vec<u8>,
-        mut consume: impl FnMut(SpanStatsRow),
+        mut consume: impl FnMut(SpanStatsInput),
     ) -> (SpanStatsPhaseDurations, anyhow::Result<()>) {
         use std::time::Instant;
 
-        let mut phases = SpanStatsPhaseDurations::default();
-        let parse_started = Instant::now();
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
-            bytes::Bytes::from(data),
-            4096,
-        );
-        phases.parse += parse_started.elapsed();
+        let mut phases = SpanStatsPhaseDurations {
+            parquet_bytes: data.len() as u64,
+            ..Default::default()
+        };
+
+        // ── Reader setup: Parquet footer parsing + Arrow schema negotiation ──
+        let setup_started = Instant::now();
+        let reader = projected_reader(data);
+        let setup_elapsed = setup_started.elapsed();
+        phases.reader_setup += setup_elapsed;
+        phases.parse += setup_elapsed;
+
         let mut reader = match reader {
             Ok(reader) => reader,
             Err(error) => return (phases, Err(error.into())),
         };
 
         loop {
-            let parse_started = Instant::now();
+            // ── Batch decode: advance column-chunk decoding into RecordBatch ─
+            let decode_started = Instant::now();
             let next = reader.next();
+            let decode_elapsed = decode_started.elapsed();
+            phases.batch_decode += decode_elapsed;
+            phases.parse += decode_elapsed;
+
             let Some(batch) = next else {
-                phases.parse += parse_started.elapsed();
                 break;
             };
             let batch = match batch {
                 Ok(batch) => batch,
                 Err(error) => {
-                    phases.parse += parse_started.elapsed();
                     return (phases, Err(error.into()));
                 }
             };
-            let rows = match self.read_batch(&batch) {
-                Ok(rows) => rows,
-                Err(error) => {
-                    phases.parse += parse_started.elapsed();
-                    return (phases, Err(error));
-                }
-            };
-            phases.parse += parse_started.elapsed();
+            phases.record_batches_decoded += 1;
 
+            // ── Row materialize: walk Arrow arrays → owned SpanStatsRow ──────
+            let materialize_started = Instant::now();
+            let mut counts = MaterializationCounts::default();
+            let rows = self.read_batch(&batch, &mut counts);
+            let materialize_elapsed = materialize_started.elapsed();
+            phases.row_materialize += materialize_elapsed;
+            phases.parse += materialize_elapsed;
+            phases.rows_materialized += counts.rows;
+            phases.attribute_entries += counts.attribute_entries;
+            let rows = match rows {
+                Ok(rows) => rows,
+                Err(error) => return (phases, Err(error)),
+            };
+
+            // ── Query: feed rows into the caller's accumulator ───────────────
             let query_started = Instant::now();
             for row in rows {
                 consume(row);
@@ -96,11 +203,24 @@ impl SpansBatchReader {
         (phases, Ok(()))
     }
 
-    fn read_batch(&self, batch: &RecordBatch) -> anyhow::Result<Vec<SpanStatsRow>> {
-        let Some(type_uid_arr) = column::<FixedSizeBinaryArray>(batch, "span_type_uid") else {
+    fn read_batch(
+        &self,
+        batch: &RecordBatch,
+        counts: &mut MaterializationCounts,
+    ) -> anyhow::Result<Vec<SpanStatsInput>> {
+        let Some(type_uid_column) = batch.column_by_name("span_type_uid") else {
             // Preserve compatibility with old/non-span parts: a batch without a
-            // recognizable type UID contributes no span rows.
+            // type UID contributes no span rows.
             return Ok(Vec::new());
+        };
+        let Some(type_uid_arr) = type_uid_column
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+        else {
+            anyhow::bail!(
+                "span_type_uid column has wrong type: expected FixedSizeBinary, got {}",
+                type_uid_column.data_type()
+            );
         };
         if type_uid_arr.value_length() != 16 {
             anyhow::bail!(
@@ -117,7 +237,7 @@ impl SpansBatchReader {
         if has_time_filter && end_ns_col.is_none() {
             anyhow::bail!(
                 "time filter active but spans part is missing end_ns column; \
-                 cannot apply occurrence-time filter"
+                     cannot apply occurrence-time filter"
             );
         }
 
@@ -145,19 +265,24 @@ impl SpansBatchReader {
         let unknown_col = column::<Int64Array>(batch, "unknown_ns");
         let details_complete_col = column::<BooleanArray>(batch, "details_complete");
 
-        let mut rows = Vec::with_capacity(batch.num_rows());
-        for row_index in 0..batch.num_rows() {
+        let scoped_row = |row_index: usize| -> anyhow::Result<Option<(i64, Option<i64>)>> {
             if type_uid_arr.is_null(row_index)
                 || elapsed_arr.is_null(row_index)
                 || name_arr.is_null(row_index)
                 || kind_arr.is_null(row_index)
             {
-                continue;
+                return Ok(None);
+            }
+            if self
+                .span_type_uid
+                .is_some_and(|expected| type_uid_arr.value(row_index) != expected.as_slice())
+            {
+                return Ok(None);
             }
 
             let elapsed_ns = elapsed_arr.value(row_index);
             if elapsed_ns < 0 {
-                continue;
+                return Ok(None);
             }
 
             let end_ns = match end_ns_col {
@@ -165,7 +290,7 @@ impl SpansBatchReader {
                     if has_time_filter {
                         anyhow::bail!(
                             "null end_ns at row {row_index} with time filter active; \
-                             part file is malformed"
+                                 part file is malformed"
                         );
                     }
                     None
@@ -185,9 +310,12 @@ impl SpansBatchReader {
                 self.start_ns.is_some_and(|start| value < start)
                     || self.end_ns.is_some_and(|end| value >= end)
             }) {
-                continue;
+                return Ok(None);
             }
+            Ok(Some((elapsed_ns, end_ns)))
+        };
 
+        let materialize_row = |row_index: usize, elapsed_ns: i64, end_ns: Option<i64>| {
             let mut span_type_uid = [0; 16];
             span_type_uid.copy_from_slice(type_uid_arr.value(row_index));
 
@@ -245,7 +373,7 @@ impl SpansBatchReader {
                         .collect(),
                 });
 
-            rows.push(SpanStatsRow {
+            SpanStatsRow {
                 span_type_uid,
                 kind: kind_arr.value(row_index).to_string(),
                 name: name_arr.value(row_index).to_string(),
@@ -257,9 +385,90 @@ impl SpansBatchReader {
                 attributes,
                 composition,
                 details_complete: optional_bool(details_complete_col, row_index),
-            });
+            }
+        };
+
+        if let Some(config) = &self.exemplar_only {
+            debug_assert!(self.span_type_uid.is_some());
+            let mut total_count = 0_u64;
+            let mut matching_count = 0_u64;
+            let mut first_row = None;
+            let mut candidates: Vec<(usize, i64)> = Vec::with_capacity(config.max_exemplars);
+
+            for row_index in 0..batch.num_rows() {
+                let Some((elapsed_ns, _)) = scoped_row(row_index)? else {
+                    continue;
+                };
+                total_count += 1;
+                first_row.get_or_insert(row_index);
+                if !config.matches(elapsed_ns) {
+                    continue;
+                }
+                matching_count += 1;
+                if span_uid_col.is_none_or(|array| array.is_null(row_index))
+                    || config.max_exemplars == 0
+                {
+                    continue;
+                }
+                if candidates.len() < config.max_exemplars {
+                    candidates.push((row_index, elapsed_ns));
+                } else if let Some((min_position, (_, min_elapsed))) = candidates
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, (_, candidate_elapsed))| *candidate_elapsed)
+                    && elapsed_ns > *min_elapsed
+                {
+                    candidates[min_position] = (row_index, elapsed_ns);
+                }
+            }
+
+            // Per-batch top-K is sufficient for exact global top-K: a row outside
+            // its batch's top K cannot belong to the top K of the union. Preserve
+            // wire order among retained rows so equal-duration tie behavior stays
+            // identical to eager materialization.
+            candidates.sort_unstable_by_key(|(row_index, _)| *row_index);
+            let materialized_count = candidates.len() as u64;
+            let mut inputs = Vec::with_capacity(candidates.len() + 1);
+            for (row_index, elapsed_ns) in candidates {
+                let (_, end_ns) = scoped_row(row_index)?.expect("retained row remains in scope");
+                let row = materialize_row(row_index, elapsed_ns, end_ns);
+                counts.rows += 1;
+                counts.attribute_entries += row.attributes.len() as u64;
+                inputs.push(SpanStatsInput::Row(Box::new(row)));
+            }
+
+            let summary_count = total_count - materialized_count;
+            if summary_count > 0 {
+                let row_index = first_row.expect("non-zero count has a source row");
+                let mut span_type_uid = [0; 16];
+                span_type_uid.copy_from_slice(type_uid_arr.value(row_index));
+                inputs.push(SpanStatsInput::ExemplarOnlySummary(ExemplarOnlySummary {
+                    span_type_uid,
+                    kind: kind_arr.value(row_index).to_string(),
+                    name: name_arr.value(row_index).to_string(),
+                    target: optional_string(target_col, row_index),
+                    callsite_file: optional_string(file_col, row_index),
+                    callsite_line: optional_u32(line_col, row_index),
+                    count: summary_count,
+                    selected_duration_count: config
+                        .has_bounds()
+                        .then_some(matching_count - materialized_count),
+                }));
+            }
+            return Ok(inputs);
         }
-        Ok(rows)
+
+        let mut inputs = Vec::with_capacity(batch.num_rows());
+        for row_index in 0..batch.num_rows() {
+            let Some((elapsed_ns, end_ns)) = scoped_row(row_index)? else {
+                continue;
+            };
+            let row = materialize_row(row_index, elapsed_ns, end_ns);
+            counts.rows += 1;
+            counts.attribute_entries += row.attributes.len() as u64;
+            inputs.push(SpanStatsInput::Row(Box::new(row)));
+        }
+        Ok(inputs)
     }
 }
 
@@ -319,4 +528,52 @@ pub(super) fn parse_map_column(map_array: &MapArray, row: usize) -> Vec<(String,
         result.push((keys.value(index).to_string(), value));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+
+    use super::*;
+
+    #[test]
+    fn reader_projects_only_span_stats_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("span_type_uid", DataType::FixedSizeBinary(16), false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("kind", DataType::Utf8, false),
+            Field::new("elapsed_ns", DataType::Int64, false),
+            Field::new("active_ns", DataType::Int64, false),
+        ]));
+        let uid = [7_u8; 16];
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uid.as_slice()].into_iter()).unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["test"])),
+                Arc::new(StringArray::from(vec!["tracing"])),
+                Arc::new(Int64Array::from(vec![10_i64])),
+                Arc::new(Int64Array::from(vec![9_i64])),
+            ],
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        {
+            let mut writer = ArrowWriter::try_new(&mut data, schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+
+        let mut reader = projected_reader(data).unwrap();
+        let projected = reader.next().unwrap().unwrap();
+        assert!(projected.column_by_name("span_type_uid").is_some());
+        assert!(projected.column_by_name("elapsed_ns").is_some());
+        assert!(projected.column_by_name("active_ns").is_none());
+    }
 }
