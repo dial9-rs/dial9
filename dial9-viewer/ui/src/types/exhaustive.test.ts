@@ -177,7 +177,7 @@ const initialState: StoreState = {
     hoveredWakerTaskId: null,
     spawnedTasksRange: null,
   },
-  poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1 },
+  poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
   uiPrefs: {
     // All four foldable panels start collapsed;
     // Record<FoldablePanelKind, boolean> forces exactly these keys.
@@ -193,6 +193,7 @@ const initialState: StoreState = {
     spanPctFilter: 0,
     timeMode: "rel",
     tz: "utc",
+    stacksAsFlamegraph: false,
   },
   transient: {
     mouseNs: null,

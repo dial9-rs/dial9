@@ -57,6 +57,17 @@ export interface TracksViewModel {
    */
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
+  /**
+   * Tracks the loaded trace carries no data for. These are dropped from the
+   * column entirely, unlike a collapsed track (which keeps its row so it can be
+   * re-expanded): a track that can never paint anything is not something the
+   * user should have to fold away, and at full height it pushes real surfaces
+   * past the scroll fold.
+   *
+   * Only consulted once a trace is loaded - before that every track is
+   * trivially empty, and the empty column is the drop-zone's backdrop.
+   */
+  emptyTracks: ReadonlySet<TrackId>;
   /** Height (CSS px) of the worker-lanes scroll box. The lanes row sizes its
    *  viewport to this; the user drag-resizes it via the lanes bottom gutter. */
   lanesViewportHeight: number;
@@ -65,14 +76,16 @@ export interface TracksViewModel {
 /**
  * The tracks visible for a view model, in the user's order: apply `trackOrder`
  * (manageable tracks permuted, structural tracks pinned), then drop the
- * selection-only task-detail track unless a task is selected. Collapsed tracks
- * REMAIN visible (label-only) - collapse is a height override, not a hide - so
- * this is order + selection filtering only.
+ * selection-only task-detail track unless a task is selected, and drop tracks
+ * the loaded trace has no data for. Collapsed tracks REMAIN visible
+ * (label-only) - collapse is a height override, not a hide.
  */
 export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
-  return orderedTracks(vm.trackOrder).filter(
-    (t) => !t.selectionOnly || vm.taskSelected,
-  );
+  return orderedTracks(vm.trackOrder).filter((t) => {
+    if (t.selectionOnly && !vm.taskSelected) return false;
+    if (vm.hasTrace && vm.emptyTracks.has(t.id)) return false;
+    return true;
+  });
 }
 
 /**

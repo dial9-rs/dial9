@@ -78,6 +78,12 @@ export type {
   WorkerTraceLoad,
 } from "./load.js";
 
+// load-perf.ts - opt-in User Timing instrumentation for the load path
+// (`?perf=1` / localStorage "dial9.viewer.perf"). Pages read the flag to decide
+// whether to log loader-reported timings alongside these marks.
+export { isLoadPerfEnabled, startLoadPerf, measureSpan } from "./load-perf.js";
+export type { LoadPerfRecorder, LoadPerfStats, LoadPhase } from "./load-perf.js";
+
 // worker/protocol.ts - the worker-boundary message vocabulary pages and
 // transport adapters consume (the worker entry itself is not exported;
 // load.ts's factory owns it).

@@ -222,9 +222,15 @@ export function mountMinimap(
 
   let dragGrabOffsetNs: number | null = null;
   let dragWidth = 0;
+  // The canvas geometry for the active scrub. getBoundingClientRect forces a
+  // layout flush, and the drag already re-renders every track each frame, so
+  // reading it per mousemove made scrubbing thrash layout for a rect that
+  // cannot change mid-drag (the canvas is not resizing while the pointer is
+  // down). Captured on mousedown, dropped on mouseup.
+  let dragRect: { left: number; width: number } | null = null;
 
   function nsAtClientX(canvas: HTMLElement, range: MinimapRange, clientX: number): number {
-    const rect = canvas.getBoundingClientRect();
+    const rect = dragRect ?? canvas.getBoundingClientRect();
     const frac = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
     return fracToNs(range, frac);
   }
@@ -235,6 +241,8 @@ export function mountMinimap(
     if (range === null) return;
     e.preventDefault();
     const canvas = e.currentTarget as HTMLElement;
+    const box = canvas.getBoundingClientRect();
+    dragRect = { left: box.left, width: box.width };
     const ns = nsAtClientX(canvas, range, e.clientX);
     const vp = state.viewport;
     dragWidth = Math.max(0, vp.viewEnd - vp.viewStart);
@@ -261,6 +269,7 @@ export function mountMinimap(
 
   function onMouseUp(): void {
     dragGrabOffsetNs = null;
+    dragRect = null;
     doc.removeEventListener("mousemove", onMouseMove);
     doc.removeEventListener("mouseup", onMouseUp);
   }

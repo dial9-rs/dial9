@@ -199,6 +199,14 @@ function boot(): void {
   // the lanes canvas so the shell stops painting its placeholder.
   const lanes = mountLanes(shell.trackColumn, store);
 
+  // Jumping to a point of interest moves the time window; the lanes box scrolls
+  // separately, so hand the rail the action that brings the POI's lane on
+  // screen too. Bound here because the lanes mount after the shell built the
+  // rail.
+  shell.rail.setRevealWorker((workerId) => {
+    lanes.revealWorker(workerId);
+  });
+
   // Transient overlay: crosshair canvas + hover tooltip + at-cursor readout, on
   // the store's `transient` RAF channel. Mounts AFTER the shell + lanes so its
   // subscriber runs LAST each frame - it re-ensures the overlay canvas after

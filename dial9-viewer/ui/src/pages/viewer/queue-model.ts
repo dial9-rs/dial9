@@ -206,6 +206,98 @@ export interface QueueRenderInputs {
   drawW: number;
 }
 
+/**
+ * Running max over the workers' current local depths.
+ *
+ * The queue track's cost used to be O(pixels x workers): every pixel column
+ * re-scanned every worker's depth to find the max, ~48k map reads per frame at
+ * 32 workers, and it did that whether or not anything was in view. That is why
+ * this track janked where spans/events (which scale with visible data) did not.
+ *
+ * Depths are small non-negative integers, so a histogram over depth gives O(1)
+ * updates: bump the counts, raise the max on the way up, and walk it down only
+ * when the current max empties. The walk-down is amortized against the raises,
+ * so a full sweep is O(pixels + transitions) instead of O(pixels x workers).
+ */
+class RunningMax {
+  /** countAtDepth[d] = how many workers currently sit at depth d. */
+  private counts = new Int32Array(64);
+  private depthOf = new Map<number, number>();
+  private max = 0;
+
+  reset(workerIds: readonly number[]): void {
+    this.counts.fill(0);
+    this.depthOf.clear();
+    this.max = 0;
+    // Every worker starts at depth 0, matching the previous seed loop.
+    if (workerIds.length > 0) this.counts[0] = workerIds.length;
+    for (const w of workerIds) this.depthOf.set(w, 0);
+  }
+
+  /**
+   * Record a worker's new depth. Workers not seeded by `reset` are IGNORED: the
+   * merged timeline can carry samples for workers outside `data.workerIds`, and
+   * the previous implementation took its max by iterating that id list, so such
+   * samples were applied to its state map but never counted. Dropping them here
+   * preserves that, or the plotted max would silently grow.
+   */
+
+  private grow(depth: number): void {
+    let n = this.counts.length;
+    while (n <= depth) n *= 2;
+    const next = new Int32Array(n);
+    next.set(this.counts);
+    this.counts = next;
+  }
+
+  set(worker: number, depth: number): void {
+    const prev = this.depthOf.get(worker);
+    if (prev === undefined) return; // untracked worker - see tracks()
+    const d = depth < 0 ? 0 : depth;
+    if (d >= this.counts.length) this.grow(d);
+    if (prev === d) return;
+    this.counts[prev]! -= 1;
+    this.counts[d]! += 1;
+    this.depthOf.set(worker, d);
+    if (d > this.max) {
+      this.max = d;
+      return;
+    }
+    // Only a drop from the current peak can lower the max, and only once that
+    // depth is vacated.
+    if (prev === this.max && this.counts[prev]! === 0) {
+      let m = this.max;
+      while (m > 0 && this.counts[m]! === 0) m--;
+      this.max = m;
+    }
+  }
+
+  value(): number {
+    return this.max;
+  }
+}
+
+// Frame-scratch, reused across paints: at ~1500 buckets these were five fresh
+// arrays per frame, on a path that runs on every pan/zoom/minimap-scrub frame.
+// Grown on demand, never shrunk; only ever read back within one synchronous
+// buildQueueRenderModel call, so reuse is not observable to callers.
+let scratchGlobal = new Float64Array(0);
+let scratchLocal = new Float64Array(0);
+let scratchHasData = new Uint8Array(0);
+const runningMax = new RunningMax();
+
+function ensureScratch(n: number): void {
+  if (scratchGlobal.length >= n) {
+    scratchGlobal.fill(0, 0, n);
+    scratchLocal.fill(0, 0, n);
+    scratchHasData.fill(0, 0, n);
+    return;
+  }
+  scratchGlobal = new Float64Array(n);
+  scratchLocal = new Float64Array(n);
+  scratchHasData = new Uint8Array(n);
+}
+
 /** Binary search: index of the first entry with `.t` >= target (lowerBound). */
 function lowerBoundT<T extends { t: number }>(arr: readonly T[], target: number): number {
   let lo = 0;
@@ -239,9 +331,12 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
 
   let hasData = false;
 
+  ensureScratch(numBuckets);
+  const bucketGlobal = scratchGlobal;
+  const bucketLocal = scratchLocal;
+  const bucketHasData = scratchHasData;
+
   // ── Global queue: max sample per pixel bucket ───────────────────────────
-  const bucketGlobal = new Array<number>(numBuckets).fill(0);
-  const bucketHasData = new Array<boolean>(numBuckets).fill(false);
   {
     const startIdx = Math.max(0, lowerBoundT(data.queueSamples, viewStart) - 1);
     for (let i = startIdx; i < data.queueSamples.length; i++) {
@@ -250,7 +345,7 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
       if (s.t < viewStart) continue;
       const bi = Math.floor(((s.t - viewStart) / viewDur) * (numBuckets - 1));
       if (bi < 0 || bi >= numBuckets) continue;
-      bucketHasData[bi] = true;
+      bucketHasData[bi] = 1;
       if (s.global > bucketGlobal[bi]!) bucketGlobal[bi] = s.global;
       hasData = true;
     }
@@ -258,46 +353,36 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
 
   // ── Local queue: single pass over the merged timeline ───────────────────
   const merged = data.mergedLocalSamples;
-  const workerState = new Map<number, number>();
-  for (const w of data.workerIds) workerState.set(w, 0);
+  runningMax.reset(data.workerIds);
   // Seed each worker from the sample just before viewStart.
   const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
   for (let i = mergeStart; i < merged.length; i++) {
     const s = merged[i]!;
     if (s.t >= viewStart) break;
-    workerState.set(s.w, s.local);
+    runningMax.set(s.w, s.local);
   }
-  const bucketLocal = new Array<number>(numBuckets).fill(0);
   let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
   for (let bi = 0; bi < numBuckets; bi++) {
     const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
     while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
       const s = merged[sampleIdx++]!;
-      workerState.set(s.w, s.local);
-      bucketHasData[bi] = true;
+      runningMax.set(s.w, s.local);
+      bucketHasData[bi] = 1;
       hasData = true;
     }
-    let max = 0;
-    for (const w of data.workerIds) {
-      const v = workerState.get(w) ?? 0;
-      if (v > max) max = v;
-    }
-    bucketLocal[bi] = max;
+    bucketLocal[bi] = runningMax.value();
   }
 
-  // maxQ across visible buckets.
-  let maxQ = 1;
-  for (let i = 0; i < numBuckets; i++) {
-    if (bucketGlobal[i]! > maxQ) maxQ = bucketGlobal[i]!;
-    if (bucketLocal[i]! > maxQ) maxQ = bucketLocal[i]!;
-  }
-
-  // Carry-forward so global[i]/local[i] are the plotted step value at pixel i:
-  // update only on hasData buckets, else carry the last value. Start at 0 (the
+  // maxQ across visible buckets, and the carry-forward that makes
+  // global[i]/local[i] the plotted step value at pixel i: update only on
+  // hasData buckets, else carry the last value forward. Starts at 0 (the
   // baseline) until the first data bucket.
+  let maxQ = 1;
   let lastG = 0;
   let lastL = 0;
   for (let i = 0; i < numBuckets; i++) {
+    if (bucketGlobal[i]! > maxQ) maxQ = bucketGlobal[i]!;
+    if (bucketLocal[i]! > maxQ) maxQ = bucketLocal[i]!;
     if (bucketHasData[i]) {
       lastG = bucketGlobal[i]!;
       lastL = bucketLocal[i]!;

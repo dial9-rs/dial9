@@ -12,6 +12,7 @@ import { html, render, nothing, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
+import type { TrackId } from "../../lib/canvas/track-layout.js";
 import { deriveAxisInputs } from "./axis.js";
 import { deriveCpuInputs } from "./cpu.js";
 import { createSpansTrack, type SpansTrackController } from "./spans-track.js";
@@ -64,13 +65,24 @@ function viewModel(state: StoreState): TracksViewModel {
   const taskSelected = state.selection.selectedTaskId !== null;
   const { viewStart, viewEnd } = state.viewport;
 
+  const cpu = deriveCpuInputs(state);
+  // The CPU track is a process-CPU bar chart fed by `process.*` custom events,
+  // NOT by CPU profile samples - a trace recorded without them has an empty
+  // series and the track can only ever draw an axis. Its emptiness is already
+  // in the view model, so this costs nothing; queue/events would each need a
+  // second derivation over the whole trace, so they are deliberately not
+  // wired here.
+  const emptyTracks = new Set<TrackId>();
+  if (cpu.intervals.length === 0) emptyTracks.add("cpu");
+
   return {
     hasTrace,
     taskSelected,
     viewStart,
     viewEnd,
     axis: deriveAxisInputs(state),
-    cpu: deriveCpuInputs(state),
+    cpu,
+    emptyTracks,
     // Track management: the order + collapse map the track column reads.
     trackOrder: state.uiPrefs.trackOrder,
     collapsed: state.uiPrefs.collapsed,
@@ -226,6 +238,11 @@ export interface MountedShell {
   /** The track column element (canvas host for sizing). */
   trackColumn: HTMLElement;
   /**
+   * The issues rail. Exposed so the entry can supply its lane-reveal action
+   * after mounting the lanes, which happens after the shell constructs this.
+   */
+  rail: IssuesRailController;
+  /**
    * Key bindings the toolbar + issues rail contribute to the unified router:
    * the rail's `n`/`p` POI step and the toolbar's `g` goto-time. The entry
    * registers them alongside the lane-interaction bindings.
@@ -331,6 +348,9 @@ export function mountShell(
   return {
     toastRegion,
     trackColumn,
+    // Exposed so the entry can hand the rail its lane-reveal action once the
+    // lanes are mounted (they mount after the shell).
+    rail,
     keyBindings: [...rail.keyBindings, ...toolbar.keyBindings],
     inspectorRegion,
     minimapRegion,

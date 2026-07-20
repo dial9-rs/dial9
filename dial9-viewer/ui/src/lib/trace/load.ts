@@ -16,9 +16,11 @@
 // else establishes `globalThis.TraceDecoder`; without this the first parse
 // throws "TraceDecoder not found".
 import "./core-globals.js";
-import { ColumnarEvents } from "./columnar-events.js";
+import { ColumnarEvents, capacityForBytes } from "./columnar-events.js";
 import { ColumnarCpuSamples } from "./columnar-cpu-samples.js";
 import { ColumnarSpanEvents } from "./columnar-span-events.js";
+import { startLoadPerf } from "./load-perf.js";
+import type { LoadPerfRecorder } from "./load-perf.js";
 import {
   EVENT_TYPES,
   OFF_WORKER_WORKER_ID,
@@ -474,6 +476,8 @@ export function loadTraceOnMainThread(
   const mode: "stream" | "buffered" = canStreamDecode() ? "stream" : "buffered";
   let eventCount = 0;
   let fetchDoneMs: number | null = null;
+  const perf: LoadPerfRecorder = startLoadPerf();
+  perf.mark("start");
 
   const emit = (
     phase: "fetching" | "parsing",
@@ -533,18 +537,45 @@ export function loadTraceOnMainThread(
     emit("fetching", 0, null);
     const buffer = await fetchTraces([...list], fetchOpts);
     fetchDoneMs = performance.now();
+    perf.mark("fetch-done");
     emit("parsing", 0, buffer.byteLength);
+    // Buffered mode is the only path that knows the decoded size before
+    // parsing, so it is the only one that can size the columns to land in a
+    // single allocation instead of doubling-and-copying all 12 of them up to
+    // the final length.
+    parseOpts.eventSink = new ColumnarEvents(capacityForBytes(buffer.byteLength));
     const trace = await parseTrace(buffer, parseOpts);
     return { trace, buffer };
   };
 
   run()
     .then(({ trace, buffer }) => {
+      perf.mark("parse-done");
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
       trace.spanEvents = spanEventSink;
       settle(() => {
         store.update("trace", { trace });
+        perf.mark("store-updated");
+        // The store arms its flush rAF inside update() above, so this callback
+        // is registered AFTER it and runs once the first render pass over the
+        // new trace has completed. That pass is where every consumer's
+        // post-parse derivation lands, which is what "derive" measures.
+        const report = (): void =>
+          perf.finish({
+            mode,
+            urlCount: list.length,
+            events: trace.events.length,
+            bytes: buffer.byteLength,
+          });
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => {
+            perf.mark("first-paint");
+            report();
+          });
+        } else {
+          report(); // No rAF (tests / headless): report without the derive span.
+        }
         const timing: TraceWorkerTiming = {
           startMs,
           fetchDoneMs,
@@ -557,6 +588,9 @@ export function loadTraceOnMainThread(
       });
     })
     .catch((err: unknown) => {
+      // Release this run's marks; an aborted/failed load has no useful spans
+      // but would otherwise leak entries into the User Timing buffer.
+      perf.finish({ mode, urlCount: list.length });
       settle(() => {
         const e = err as { message?: unknown; name?: unknown } | null;
         const error = new Error(

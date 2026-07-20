@@ -10,15 +10,15 @@ import type { TrackSpec } from "./track-layout.js";
 const opts = { pw: 1000, viewStart: 0, viewEnd: 4_000_000_000, dpr: 1 };
 
 describe("track catalogue", () => {
-  it("orders the unified column: axis, lanes, then analysis surfaces", () => {
+  it("orders the unified column: axis, lanes, task detail, then analysis surfaces", () => {
     expect(TRACKS.map((t) => t.id)).toEqual([
       "timeline",
       "lanes",
+      "task-detail",
       "cpu",
       "queue",
       "spans",
       "events",
-      "task-detail",
     ]);
   });
 

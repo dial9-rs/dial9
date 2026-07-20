@@ -60,3 +60,107 @@ describe("store.pointsOfInterest matches frozen filterPointsOfInterest", () => {
     });
   }
 });
+
+// The cap exists because "uninstrumented" matches essentially every poll on a
+// lightly-instrumented trace - millions of points, enough to kill the tab
+// before the rail renders. Truncating must not distort what the user is told.
+describe("pointsOfInterest limit", () => {
+  const opts = (extra: Record<string, unknown> = {}) => ({
+    hasSchedWait: true,
+    sortByWorst: true,
+    taskInstrumented,
+    ...extra,
+  });
+
+  it("returns the worst `limit` points, in the same order as uncapped", () => {
+    let full = -1;
+    const uncapped = store.pointsOfInterest(
+      "uninstrumented", workerIds, colSched, opts({ onTotal: (n: number) => (full = n) }),
+    );
+    expect(uncapped.length).toBeGreaterThan(3);
+
+    let matched = -1;
+    const capped = store.pointsOfInterest(
+      "uninstrumented", workerIds, colSched,
+      opts({ limit: 3, onTotal: (n: number) => (matched = n) }),
+    );
+
+    expect(capped.length).toBe(3);
+    expect(capped.map((p) => p.value)).toEqual(uncapped.slice(0, 3).map((p) => p.value));
+    // The count reported is the TRUE match count, not the capped length.
+    expect(matched).toBe(full);
+    expect(matched).toBeGreaterThan(3);
+  });
+
+  it("holds across the compaction boundary (limit*2 triggers a compact)", () => {
+    // Exercises the amortized path: the buffer fills to 2*limit, compacts, and
+    // keeps going. A bug there shows up as the wrong survivors, not a crash.
+    const uncapped = store.pointsOfInterest("uninstrumented", workerIds, colSched, opts());
+    for (const limit of [1, 2, 5, 17]) {
+      if (uncapped.length < limit) continue;
+      const capped = store.pointsOfInterest(
+        "uninstrumented", workerIds, colSched, opts({ limit }),
+      );
+      expect(capped.length, `limit=${limit}`).toBe(limit);
+      expect(capped.map((p) => p.value), `limit=${limit}`).toEqual(
+        uncapped.slice(0, limit).map((p) => p.value),
+      );
+    }
+  });
+
+  it("is a no-op when the match count is under the cap", () => {
+    let matched = -1;
+    const all = store.pointsOfInterest(
+      "uninstrumented", workerIds, colSched,
+      opts({ limit: 1_000_000, onTotal: (n: number) => (matched = n) }),
+    );
+    expect(all.length).toBe(matched);
+  });
+
+  it("caps by time order when not sorting by worst", () => {
+    const uncapped = store.pointsOfInterest(
+      "uninstrumented", workerIds, colSched, opts({ sortByWorst: false }),
+    );
+    if (uncapped.length < 4) return;
+    const capped = store.pointsOfInterest(
+      "uninstrumented", workerIds, colSched, opts({ sortByWorst: false, limit: 3 }),
+    );
+    expect(capped.map((p) => p.time)).toEqual(uncapped.slice(0, 3).map((p) => p.time));
+  });
+});
+
+// taskAggregates reduces per-task poll stats straight off the columns; it must
+// match a fat reduction over the same worker spans (the Tasks-tab index).
+describe("taskAggregates matches a fat reduction", () => {
+  it("agrees on count / total / longest / first-poll for every task", () => {
+    const fat = new Map();
+    for (const w of workerIds) {
+      for (const p of ws[w].polls) {
+        const dur = p.end - p.start;
+        const a = fat.get(p.taskId) ?? {
+          pollCount: 0, totalPollNs: 0, longestPollNs: 0,
+          firstPollStart: Infinity, firstPollWorker: -1, workers: new Set(),
+        };
+        a.pollCount++;
+        a.totalPollNs += dur;
+        if (dur > a.longestPollNs) a.longestPollNs = dur;
+        if (p.start < a.firstPollStart) { a.firstPollStart = p.start; a.firstPollWorker = w; }
+        a.workers.add(w);
+        fat.set(p.taskId, a);
+      }
+    }
+
+    const cols = store.taskAggregates();
+    expect(cols.length).toBe(fat.size);
+    for (const agg of cols) {
+      const f = fat.get(agg.taskId);
+      expect(f, `task ${agg.taskId} present in fat`).toBeDefined();
+      expect(agg.pollCount).toBe(f.pollCount);
+      expect(agg.totalPollNs).toBe(f.totalPollNs);
+      expect(agg.longestPollNs).toBe(f.longestPollNs);
+      expect(agg.firstPollStart).toBe(f.firstPollStart);
+      expect(agg.firstPollWorker).toBe(f.firstPollWorker);
+      expect(agg.workerCount).toBe(f.workers.size);
+    }
+  });
+});

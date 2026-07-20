@@ -47,6 +47,13 @@ function clampLanesHeight(h: number): number {
 }
 
 export interface MountedLanes {
+  /**
+   * Scroll the lanes box so `workerId`'s row is visible, returning true when it
+   * actually moved. The lanes box scrolls independently of the time axis, so
+   * navigating the viewport to a point of interest does not by itself put the
+   * relevant lane on screen.
+   */
+  revealWorker(workerId: number): boolean;
   /** Tear down the subscription and release the track claim. */
   dispose(): void;
 }
@@ -247,6 +254,40 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
   draw();
 
   return {
+    /**
+     * Scroll the lanes box the minimum needed to bring `workerId`'s row into
+     * view, and report whether it moved.
+     *
+     * The lanes box is its own scroll container, so navigating the horizontal
+     * viewport to a point of interest still leaves it off-screen when it lives
+     * on, say, worker 28 of 32 - the timeline jumps, the user sees nothing
+     * change, and the jump reads as broken. Minimal scrolling (rather than
+     * centring) keeps the surrounding workers stable when stepping n/p through
+     * issues on nearby lanes.
+     */
+    revealWorker(workerId: number): boolean {
+      const data = laneData();
+      const box = lanesBox();
+      if (!data || !box) return false;
+      const { rows } = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
+      const row = rows.find((r) => r.kind === "worker" && r.workerId === workerId);
+      if (row === undefined) return false;
+
+      const viewportH = box.clientHeight;
+      if (viewportH <= 0) return false;
+      const top = box.scrollTop;
+      const bottom = top + viewportH;
+      let next = top;
+      if (row.y < top) next = row.y;
+      else if (row.y + row.height > bottom) next = row.y + row.height - viewportH;
+      if (next === top) return false;
+
+      box.scrollTop = next;
+      // The canvas is sticky and painted from scrollTop, so a programmatic
+      // scroll has to repaint exactly as a user scroll does.
+      draw();
+      return true;
+    },
     dispose(): void {
       unsubscribe();
       releaseClaim();

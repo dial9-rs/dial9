@@ -407,3 +407,68 @@ async function loadATrace(h: Harness): Promise<void> {
   h.loads[h.loads.length - 1]?.resolve();
   await flush();
 }
+
+describe("progress render coalescing", () => {
+  /** Harness with a manual frame scheduler so coalescing is deterministic.
+   *  NOTE: `h` is returned as-is, never spread - `changes` is a getter and a
+   *  spread would freeze it at its current value. */
+  function framed() {
+    const frames: (() => void)[] = [];
+    const h = makeHarness({ scheduleFrame: (fn: () => void) => frames.push(fn) });
+    const runFrame = (): void => {
+      frames.splice(0).forEach((f) => f());
+    };
+    return { h, frames, runFrame };
+  }
+
+  it("collapses a burst of progress events into ONE render", () => {
+    const { h, runFrame } = framed();
+    h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
+    const before = h.changes;
+
+    for (let i = 0; i < 50; i++) {
+      h.loads[0]?.emitProgress(progress({ bytesRead: i * 1000, totalBytes: 1e6, eventCount: i }));
+    }
+    expect(h.changes, "no render before the frame runs").toBe(before);
+
+    runFrame();
+    expect(h.changes, "50 progress events -> 1 render").toBe(before + 1);
+  });
+
+  it("keeps the label current despite coalescing the render", () => {
+    const { h } = framed();
+    h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
+    h.loads[0]?.emitProgress(progress({ bytesRead: 1, totalBytes: 100, eventCount: 1 }));
+    h.loads[0]?.emitProgress(progress({ bytesRead: 90, totalBytes: 100, eventCount: 9_000 }));
+    // State is written synchronously; only the notification defers, so a
+    // reader never sees a stale label.
+    expect(h.ctrl.getState().progressLabel).toBe("Parsing: 90% - 9k events");
+  });
+
+  it("renders again on the next frame after the first drains", () => {
+    const { h, runFrame } = framed();
+    h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
+    const before = h.changes;
+    h.loads[0]?.emitProgress(progress({ bytesRead: 1, totalBytes: 100, eventCount: 1 }));
+    runFrame();
+    h.loads[0]?.emitProgress(progress({ bytesRead: 2, totalBytes: 100, eventCount: 2 }));
+    runFrame();
+    expect(h.changes).toBe(before + 2);
+  });
+
+  it("leaves completion rendering un-deferred", () => {
+    // Only progress is coalesced. The load settling must still notify without
+    // waiting on a frame, or the loading view outlives the load.
+    const { h, frames } = framed();
+    h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
+    const before = h.changes;
+    h.setHasTrace(true);
+    h.loads[0]?.resolve();
+    return Promise.resolve()
+      .then(() => Promise.resolve())
+      .then(() => {
+        expect(h.changes, "completion rendered without a frame").toBeGreaterThan(before);
+        expect(frames, "completion must not queue a progress frame").toHaveLength(0);
+      });
+  });
+});

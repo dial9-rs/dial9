@@ -242,19 +242,42 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     window.addEventListener("mouseup", onWindowMouseUp);
   }
 
+  /**
+   * Repaint the drag band, at most once per frame.
+   *
+   * mousemove fires faster than the display refreshes (well past 60/s on a
+   * high-polling-rate mouse), and this path draws the whole canvas. Unlike
+   * every other repaint in the viewer it does NOT go through the store, so
+   * nothing was coalescing it. Gated here the same way the lanes' inner scroll
+   * is (components/canvas/lanes/index.ts).
+   */
+  let dragFrame = 0;
+  function scheduleDragPaint(): void {
+    if (dragFrame !== 0) return;
+    dragFrame = requestAnimationFrame(() => {
+      dragFrame = 0;
+      if (drag === null || lastPaint === null || sizer === null) return;
+      const ctx = sizer.ensure(lastPaint.drawW, lastPaint.canvasH, lastPaint.dpr);
+      drawQueueCanvas(ctx, lastPaint.model, lastPaint.window, lastPaint.drawW, lastPaint.canvasH);
+      if (drag.moved) {
+        const selStart = Math.min(drag.startNs, drag.endNs);
+        const selEnd = Math.max(drag.startNs, drag.endNs);
+        overlayBandRange(ctx, lastPaint.drawW, lastPaint.canvasH, lastPaint.viewStart, lastPaint.viewEnd, selStart, selEnd);
+      }
+    });
+  }
+
+  function cancelDragPaint(): void {
+    if (dragFrame === 0) return;
+    cancelAnimationFrame(dragFrame);
+    dragFrame = 0;
+  }
+
   function onWindowMouseMove(ev: MouseEvent): void {
     if (drag === null || lastPaint === null) return;
     if (Math.abs(ev.clientX - drag.startX) > 3) drag.moved = true;
     drag.endNs = xToNs(lastPaint.canvas, ev.clientX, lastPaint.viewStart, lastPaint.viewEnd);
-    // Redraw the chart from the cached model, then overlay the selection band.
-    if (sizer === null) return;
-    const ctx = sizer.ensure(lastPaint.drawW, lastPaint.canvasH, lastPaint.dpr);
-    drawQueueCanvas(ctx, lastPaint.model, lastPaint.window, lastPaint.drawW, lastPaint.canvasH);
-    if (drag.moved) {
-      const selStart = Math.min(drag.startNs, drag.endNs);
-      const selEnd = Math.max(drag.startNs, drag.endNs);
-      overlayBandRange(ctx, lastPaint.drawW, lastPaint.canvasH, lastPaint.viewStart, lastPaint.viewEnd, selStart, selEnd);
-    }
+    scheduleDragPaint();
   }
 
   function onWindowMouseUp(): void {
@@ -264,6 +287,9 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     const selEnd = Math.max(drag.startNs, drag.endNs);
     drag = null;
     document.body.style.cursor = "";
+    // Drop any frame still queued from the last mousemove: it would repaint a
+    // band for a drag that has ended.
+    cancelDragPaint();
     window.removeEventListener("mousemove", onWindowMouseMove);
     window.removeEventListener("mouseup", onWindowMouseUp);
     if (moved) {
@@ -310,6 +336,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   }
 
   function dispose(): void {
+    cancelDragPaint();
     if (drag !== null) {
       window.removeEventListener("mousemove", onWindowMouseMove);
       window.removeEventListener("mouseup", onWindowMouseUp);

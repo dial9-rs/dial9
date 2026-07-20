@@ -24,7 +24,11 @@
 
 import { ESC_PRIORITY } from "./esc-cascade.js";
 import type { EscapableSurface } from "./esc-cascade.js";
-import type { TraceWorkerProgress, ReparseRange } from "../../lib/trace/index.js";
+import type {
+  TraceWorkerProgress,
+  TraceWorkerTiming,
+  ReparseRange,
+} from "../../lib/trace/index.js";
 import { isRangeActive } from "../../lib/trace/index.js";
 
 /** The load section's discrete states. */
@@ -89,11 +93,25 @@ export interface LoadControllerDeps {
    * microtask, ahead of the store scheduler's next render frame).
    */
   onLoaded?(): void;
+  /**
+   * The completed load's phase timing, when the loader reported any. The
+   * main-thread loader also emits its own User Timing marks (lib/trace/
+   * load-perf.ts); this hook is what carries the numbers back from loaders that
+   * time the parse somewhere this page cannot mark - notably the worker, whose
+   * parse happens off-thread entirely.
+   */
+  onTiming?(timing: TraceWorkerTiming): void;
   /** Wall clock for the elapsed timer; default performance.now. */
   now?(): number;
   /** Interval scheduler for the 250ms elapsed tick; default setInterval. */
   setTimer?(fn: () => void, ms: number): unknown;
   clearTimer?(handle: unknown): void;
+  /**
+   * Frame scheduler for coalescing parse-progress renders; default
+   * requestAnimationFrame. Injected in tests so progress renders are
+   * deterministic rather than frame-timed.
+   */
+  scheduleFrame?(fn: () => void): void;
   /** Build a fetchable URL for a dropped/picked file; default createObjectURL. */
   createObjectUrl?(file: Blob): string;
   revokeObjectUrl?(url: string): void;
@@ -199,6 +217,12 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     deps.revokeObjectUrl ?? ((url: string) => URL.revokeObjectURL(url));
   const credsMissing = deps.credsMissing ?? (() => false);
   const headers = deps.headers ?? (() => undefined);
+  const scheduleFrame =
+    deps.scheduleFrame ??
+    ((fn: () => void) => {
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(fn);
+      else setTimeout(fn, 0);
+    });
 
   let section: LoadSection = "chooser";
   let dragCounter = 0;
@@ -212,6 +236,25 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
   // The decompressed trace bytes from the last successful load, retained for
   // Set/Clear Range reparse. Null until the first load completes.
   let retainedBuffer: ArrayBuffer | null = null;
+
+  // Parse progress arrives on every ~256 KB drain, and each notification drives
+  // a full lit-html render of the loading layer. The main-thread parser runs
+  // that render ON the parse critical path, so at a few hundred firings it is
+  // the parse competing with its own progress bar. Coalescing to one render per
+  // frame keeps the label live (the display cannot show more than that anyway)
+  // and hands the rest of the budget back to the decoder.
+  //
+  // Only PROGRESS is coalesced. Section transitions still notify synchronously,
+  // so opening/closing the loading view is never a frame late.
+  let progressFramePending = false;
+  function notifyProgress(): void {
+    if (progressFramePending) return;
+    progressFramePending = true;
+    scheduleFrame(() => {
+      progressFramePending = false;
+      notify();
+    });
+  }
 
   function notify(): void {
     deps.onChange();
@@ -261,7 +304,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       onProgress: (p) => {
         if (token !== loadToken) return;
         progress = progressLabel(p);
-        notify();
+        notifyProgress();
       },
     };
     if (opts.withHeaders) {
@@ -289,8 +332,12 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         // Retain the decompressed buffer the worker transfers back so Set/Clear
         // Range can re-parse it with a time window without re-fetching. Blob
         // copies on reparse, so this reference stays valid across reparses.
-        const buf = (result as { buffer?: unknown } | undefined)?.buffer;
+        const settled = result as
+          | { buffer?: unknown; timing?: TraceWorkerTiming }
+          | undefined;
+        const buf = settled?.buffer;
         if (buf instanceof ArrayBuffer && buf.byteLength > 0) retainedBuffer = buf;
+        if (settled?.timing !== undefined) deps.onTiming?.(settled.timing);
         cleanup();
         if (token !== loadToken) return;
         // Success: the store's trace slice is now populated; commit the

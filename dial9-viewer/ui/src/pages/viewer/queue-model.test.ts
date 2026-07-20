@@ -261,3 +261,149 @@ describe("computeQueueData / deriveQueueWindow", () => {
     expect(oversized.oversized).toBe(true);
   });
 });
+
+// ── Equivalence with the pre-rewrite bucketing ───────────────────────────────
+//
+// buildQueueRenderModel used to be O(pixels x workers): every pixel column
+// re-scanned every worker's depth to find the max. It is now an incremental
+// running max, O(pixels + transitions). That is a pure performance change, so
+// the output must be bit-identical - this pins it against a transcription of
+// the original algorithm over randomized fixtures.
+
+/** The original local-queue bucketing, transcribed verbatim. */
+function referenceLocal(
+  data: QueueData,
+  viewStart: number,
+  viewEnd: number,
+  numBuckets: number,
+): { local: number[]; hasData: boolean[] } {
+  const viewDur = viewEnd - viewStart;
+  const merged = data.mergedLocalSamples;
+  const workerState = new Map<number, number>();
+  for (const w of data.workerIds) workerState.set(w, 0);
+
+  const lower = (arr: readonly { t: number }[], target: number): number => {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid]!.t < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  const mergeStart = Math.max(0, lower(merged, viewStart) - 1);
+  for (let i = mergeStart; i < merged.length; i++) {
+    const s = merged[i]!;
+    if (s.t >= viewStart) break;
+    workerState.set(s.w, s.local);
+  }
+  const bucketLocal = new Array<number>(numBuckets).fill(0);
+  const bucketHasData = new Array<boolean>(numBuckets).fill(false);
+  let sampleIdx = Math.max(mergeStart, lower(merged, viewStart));
+  for (let bi = 0; bi < numBuckets; bi++) {
+    const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
+    while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
+      const s = merged[sampleIdx++]!;
+      workerState.set(s.w, s.local);
+      bucketHasData[bi] = true;
+    }
+    let max = 0;
+    for (const w of data.workerIds) {
+      const v = workerState.get(w) ?? 0;
+      if (v > max) max = v;
+    }
+    bucketLocal[bi] = max;
+  }
+  return { local: bucketLocal, hasData: bucketHasData };
+}
+
+/** Deterministic PRNG so a failure is reproducible from its seed. */
+function rng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 0x100000000;
+  };
+}
+
+function randomQueueData(seed: number, workerCount: number, samples: number): QueueData {
+  const r = rng(seed);
+  const workerIds = Array.from({ length: workerCount }, (_, i) => i);
+  const merged: { t: number; w: number; local: number }[] = [];
+  for (let i = 0; i < samples; i++) {
+    merged.push({
+      t: Math.floor(r() * 10_000),
+      w: Math.floor(r() * workerCount),
+      // Depths that repeatedly revisit the peak, so the max walks down often.
+      local: Math.floor(r() * 6),
+    });
+  }
+  merged.sort((a, b) => a.t - b.t);
+  const queueSamples = Array.from({ length: samples }, () => ({
+    t: Math.floor(r() * 10_000),
+    global: Math.floor(r() * 8),
+  })).sort((a, b) => a.t - b.t);
+
+  return {
+    ...EMPTY_QUEUE_DATA,
+    workerIds,
+    mergedLocalSamples: merged,
+    queueSamples,
+  };
+}
+
+describe("buildQueueRenderModel equivalence", () => {
+  it("matches the reference local bucketing across random fixtures", () => {
+    for (let seed = 1; seed <= 25; seed++) {
+      const workerCount = 1 + (seed % 9);
+      const data = randomQueueData(seed, workerCount, 200);
+      const drawW = 40 + (seed % 30);
+      const viewStart = 0;
+      const viewEnd = 10_000;
+      const numBuckets = Math.max(0, Math.ceil(drawW));
+
+      const got = buildQueueRenderModel({ data, viewStart, viewEnd, drawW });
+      const want = referenceLocal(data, viewStart, viewEnd, numBuckets);
+
+      // Carry-forward is applied on top of the raw buckets, so compare the
+      // plotted series the reference implies rather than the raw buckets.
+      let lastL = 0;
+      const wantPlotted = want.local.map((v, i) => {
+        if (want.hasData[i]) lastL = v;
+        return lastL;
+      });
+      expect([...got.local], `seed=${seed}`).toEqual(wantPlotted);
+    }
+  });
+
+  it("ignores samples for workers outside the id set, as the original did", () => {
+    // A merged sample for worker 99 must not raise the plotted max: the old
+    // implementation took its max by iterating workerIds.
+    const data: QueueData = {
+      ...EMPTY_QUEUE_DATA,
+      workerIds: [0, 1],
+      mergedLocalSamples: [
+        { t: 10, w: 0, local: 2 },
+        { t: 20, w: 99, local: 500 },
+      ],
+    };
+    const model = buildQueueRenderModel({ data, viewStart: 0, viewEnd: 100, drawW: 10 });
+    expect(Math.max(...model.local)).toBe(2);
+  });
+
+  it("does not leak state between successive frames", () => {
+    // The bucket scratch and the running max are reused across calls; a stale
+    // read would show up as one frame's peak bleeding into the next.
+    const busy: QueueData = {
+      ...EMPTY_QUEUE_DATA,
+      workerIds: [0],
+      mergedLocalSamples: [{ t: 10, w: 0, local: 9 }],
+    };
+    const idle: QueueData = { ...EMPTY_QUEUE_DATA, workerIds: [0], mergedLocalSamples: [] };
+    buildQueueRenderModel({ data: busy, viewStart: 0, viewEnd: 100, drawW: 20 });
+    const second = buildQueueRenderModel({ data: idle, viewStart: 0, viewEnd: 100, drawW: 20 });
+    expect(Math.max(...second.local)).toBe(0);
+    expect(second.maxQ).toBe(1);
+  });
+});

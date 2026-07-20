@@ -10,16 +10,11 @@
 
 import {
   EVENT_TYPES,
-  computeSchedulingDelays,
   filterPointsOfInterest,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
-import {
-  columnarWorkerStoreFor,
-  lifecycleWorkerIds,
-  sharedWorkerSpans,
-} from "../../lib/trace/derived.js";
-import { laneSource, type LaneSource } from "../../lib/trace/columnar-worker-spans.js";
+import { sharedDetectorInputs } from "../../lib/trace/derived.js";
+import type { LaneSource } from "../../lib/trace/columnar-worker-spans.js";
 import type {
   ParsedTrace,
   ParkSpan,
@@ -98,9 +93,22 @@ export interface PoiSource {
   schedDelays: SchedDelay[];
   hasSchedWait: boolean;
   taskInstrumented: Map<number, boolean>;
-  /** Lazy per-filter detector output cache (keyed by filter type). */
-  readonly _byFilter: Map<PointOfInterestType, PointOfInterest[]>;
+  /** Lazy per-filter detector output cache (keyed by filter type). The list is
+   *  capped at POI_DETECTOR_LIMIT; `matched` is the true pre-cap count. */
+  readonly _byFilter: Map<PointOfInterestType, { list: PointOfInterest[]; matched: number }>;
 }
+
+/**
+ * Ceiling on how many points a single detector materializes.
+ *
+ * "Uninstrumented Polls" matches EVERY poll of an uninstrumented task, which on
+ * a lightly-instrumented 13M-event trace is millions - enough that building the
+ * list (and then a formatted row per entry) exhausts the tab before anything
+ * renders. Detectors run with `sortByWorst`, so the cap keeps the worst N,
+ * which is the part anyone acts on. The true count is reported separately and
+ * is what the rail displays.
+ */
+export const POI_DETECTOR_LIMIT = 50_000;
 
 const sourceCache = new WeakMap<ParsedTrace, PoiSource>();
 
@@ -114,17 +122,9 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
   let source = sourceCache.get(trace);
   if (source !== undefined) return source;
 
-  const workerIds = lifecycleWorkerIds(trace);
-  // Shared reconstruction (buildWorkerSpans + attachCpuSamples applied once);
-  // the "cpu-sampled" detector reads the already-attached poll samples.
-  const spanResult = sharedWorkerSpans(trace);
-  // Columnar path: compute scheduling delays over raw columns (the frozen
-  // computeSchedulingDelays would materialize every poll from the flyweight
-  // views). Falls back to the frozen path when there is no store.
-  const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
-  const schedDelays = lanes.columnar
-    ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
-    : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask);
+  // Shared with the minimap ticks: same worker set, same lane source, same
+  // scheduling delays, computed once per trace.
+  const { workerIds, lanes, schedDelays } = sharedDetectorInputs(trace);
 
   source = {
     workerIds,
@@ -144,24 +144,51 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
  * worst-first; the rail applies its own display sort on top, which never
  * changes the COUNT.
  */
-export function poisForFilter(
+function detectorResult(
   source: PoiSource,
   filter: PointOfInterestType,
-): PointOfInterest[] {
-  let list = source._byFilter.get(filter);
-  if (list !== undefined) return list;
+): { list: PointOfInterest[]; matched: number } {
+  const cached = source._byFilter.get(filter);
+  if (cached !== undefined) return cached;
+  let matched = -1;
   const opts = {
     hasSchedWait: source.hasSchedWait,
     sortByWorst: true,
     taskInstrumented: source.taskInstrumented,
+    limit: POI_DETECTOR_LIMIT,
+    onTotal: (n: number) => {
+      matched = n;
+    },
   };
-  list = source.lanes.columnar
+  const list = source.lanes.columnar
     ? source.lanes.store.pointsOfInterest(filter, source.workerIds, source.schedDelays, opts)
     : filterPointsOfInterest(
         filter, source.lanes.workerSpans, source.workerIds, source.schedDelays, opts,
       );
-  source._byFilter.set(filter, list);
-  return list;
+  // The frozen fat-path detector honours neither `limit` nor `onTotal`, so its
+  // result is already complete and its length IS the true count.
+  const result = { list, matched: matched >= 0 ? matched : list.length };
+  source._byFilter.set(filter, result);
+  return result;
+}
+
+export function poisForFilter(
+  source: PoiSource,
+  filter: PointOfInterestType,
+): PointOfInterest[] {
+  return detectorResult(source, filter).list;
+}
+
+/**
+ * The TRUE number of points a detector matched, which is >= the length of
+ * `poisForFilter` once POI_DETECTOR_LIMIT truncates. Counts shown to the user
+ * come from here so a capped list never understates how many issues exist.
+ */
+export function poiMatchCount(
+  source: PoiSource,
+  filter: PointOfInterestType,
+): number {
+  return detectorResult(source, filter).matched;
 }
 
 /** Per-detector counts for the red-flags summary chip. Zero-count detectors
@@ -171,7 +198,7 @@ export function redFlagCounts(
 ): { type: PointOfInterestType; count: number }[] {
   return POI_FILTERS.map((type) => ({
     type,
-    count: poisForFilter(source, type).length,
+    count: poiMatchCount(source, type),
   }));
 }
 
@@ -347,11 +374,43 @@ export interface PoiViewModel {
   sortKey: PoiSortKey;
   sortDir: "asc" | "desc";
   index: number;
+  /** The rendered slice, at most RAIL_WINDOW long - NOT the whole list. Row i
+   *  here is absolute index `windowStart + i`. */
   rows: PoiRow[];
-  /** Total count (the "N/total" position). */
+  /** Absolute index of `rows[0]`. */
+  windowStart: number;
+  /**
+   * The full retained list in display order. `n`/`p` step across ALL of it, not
+   * just the formatted window, so navigation needs the entries themselves;
+   * bounded by POI_DETECTOR_LIMIT, so holding it is cheap.
+   */
+  sorted: readonly PointOfInterest[];
+  /** Total count (the "N/total" position); the TRUE detector match count, which
+   *  can exceed both `rows.length` and POI_DETECTOR_LIMIT. */
   total: number;
+  /** How many points the detector actually retained. Below `total` when the
+   *  detector cap truncated; the rail says so rather than silently showing
+   *  fewer than it claims. */
+  retained: number;
   /** Per-detector counts for the red-flags summary chip. */
   redFlags: { type: PointOfInterestType; count: number }[];
+}
+
+/**
+ * How many rows the rail builds around the current index. Each row carries five
+ * pre-formatted strings, so mapping a whole detector list is itself enough to
+ * kill the tab - the window has to be applied BEFORE the row mapping, not at
+ * render time.
+ */
+export const RAIL_WINDOW = 500;
+
+/** The slice of `[0, total)` to materialize so `index` is inside it, biased to
+ *  show context on both sides and clamped at either end of the list. */
+export function railWindow(total: number, index: number): { start: number; end: number } {
+  if (total <= RAIL_WINDOW) return { start: 0, end: total };
+  const anchor = index < 0 ? 0 : index;
+  const start = Math.max(0, Math.min(anchor - Math.floor(RAIL_WINDOW / 2), total - RAIL_WINDOW));
+  return { start, end: start + RAIL_WINDOW };
 }
 
 /**
@@ -372,7 +431,10 @@ export function derivePoiViewModel(
       sortDir: poi.sortDir,
       index: -1,
       rows: [],
+      windowStart: 0,
+      sorted: [],
       total: 0,
+      retained: 0,
       redFlags: [],
     };
   }
@@ -380,21 +442,32 @@ export function derivePoiViewModel(
   const filtered = poisForFilter(source, poi.filter);
   const sorted = sortPois(filtered, poi.sortKey, poi.sortDir);
   const peak = peakValue(sorted);
-  const rows: PoiRow[] = sorted.map((p) => ({
-    poi: p,
-    worker: workerLabel(p.worker),
-    kind: kindLabel(p.type),
-    time: relTimeLabel(p.time, minTs),
-    duration: durationLabel(p),
-    severity: severityOf(p, peak),
-  }));
+  const index = poi.index < sorted.length ? poi.index : -1;
+  // Format only the visible window. `peak` is computed over the whole retained
+  // list, so severity shading stays consistent as the window moves.
+  const { start, end } = railWindow(sorted.length, index);
+  const rows: PoiRow[] = [];
+  for (let i = start; i < end; i++) {
+    const p = sorted[i]!;
+    rows.push({
+      poi: p,
+      worker: workerLabel(p.worker),
+      kind: kindLabel(p.type),
+      time: relTimeLabel(p.time, minTs),
+      duration: durationLabel(p),
+      severity: severityOf(p, peak),
+    });
+  }
   return {
     filter: poi.filter,
     sortKey: poi.sortKey,
     sortDir: poi.sortDir,
-    index: poi.index < sorted.length ? poi.index : -1,
+    index,
     rows,
-    total: sorted.length,
+    windowStart: start,
+    sorted,
+    total: poiMatchCount(source, poi.filter),
+    retained: sorted.length,
     redFlags: redFlagCounts(source).filter((r) => r.count > 0),
   };
 }

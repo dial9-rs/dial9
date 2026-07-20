@@ -170,6 +170,12 @@ export interface SelectionSlice {
  */
 export type PoiSortKey = "worker" | "kind" | "time" | "duration";
 
+/** The rail's active tab: the POI issues list or the task index. */
+export type RailTab = "issues" | "tasks";
+
+/** Tasks-tab sort column. */
+export type TaskSortKey = "id" | "loc" | "polls" | "total" | "longest" | "lifetime";
+
 /**
  * Points-of-interest navigation state. The detectors are the frozen
  * `filterPointsOfInterest` set (trace_analysis.js, consumed via
@@ -196,6 +202,22 @@ export interface PoiSlice {
    * status/rail read it for the "N/total" position.
    */
   index: number;
+  /**
+   * Which rail tab is showing. Lives in the store (not a rail-local) because
+   * the rail is a pure controller: the shell only re-renders it when a
+   * subscribed slice changes, so a local `activeTab` would never repaint.
+   */
+  railTab: RailTab;
+  /** Tasks-tab sort column. Default "total" (heaviest first). */
+  taskSort: TaskSortKey;
+  /** Tasks-tab sort direction. Default "desc". */
+  taskSortDir: "asc" | "desc";
+  /**
+   * Index of the current task within the DERIVED sorted list, or -1. The
+   * Tasks-tab analogue of `index`; kept separate so switching tabs preserves
+   * each tab's cursor.
+   */
+  taskIndex: number;
 }
 
 // ── uiPrefs slice ───────────────────────────────────────────────────────
@@ -272,6 +294,14 @@ export interface UiPrefsSlice {
    * timeMode === "abs".
    */
   tz: TimeZoneMode;
+  /**
+   * Render stack-frame sample lists (the poll inspector's CPU/sched samples,
+   * the region panel's blocking sub-stacks) as a flamegraph instead of a
+   * grouped list. Lives here rather than component-local because the inspector
+   * resets its per-selection expansion state on every new selection - a local
+   * toggle would reset with it, so the preference has to outlive the selection.
+   */
+  stacksAsFlamegraph: boolean;
 }
 
 // ── transient slice ─────────────────────────────────────────────────────

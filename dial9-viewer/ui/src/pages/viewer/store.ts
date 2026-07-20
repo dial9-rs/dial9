@@ -41,6 +41,10 @@ export function initialViewerState(): StoreState {
       sortKey: "duration",
       sortDir: "desc",
       index: -1,
+      railTab: "issues",
+      taskSort: "total",
+      taskSortDir: "desc",
+      taskIndex: -1,
     },
     uiPrefs: {
       // Analysis surfaces are visible by default. The unified column has no
@@ -63,6 +67,9 @@ export function initialViewerState(): StoreState {
       // these; the time-axis track reads them.
       timeMode: "rel",
       tz: "utc",
+      // Stack lists start as lists; the toggle in the poll/blocking views flips
+      // this and it persists across selections.
+      stacksAsFlamegraph: false,
     },
     transient: {
       mouseNs: null,

@@ -51,6 +51,32 @@ export interface EventLike {
 
 const INITIAL_CAP = 1 << 16;
 
+/**
+ * Measured decoded-bytes-per-event, used to pre-size the columns. The demo
+ * trace sits at ~37.6; this deliberately under-states it so the estimate errs
+ * toward over-allocating rather than forcing another round of doubling.
+ */
+const BYTES_PER_EVENT_ESTIMATE = 32;
+
+/** Ceiling on the estimate, so a malformed or unusually large byte count cannot
+ *  commit hundreds of MB of columns up front. Past this, doubling takes over. */
+const MAX_ESTIMATED_CAP = 1 << 25; // ~33.5M events
+
+/**
+ * Capacity to start the columns at for a trace of `bytes` decoded bytes.
+ *
+ * Growth doubles and copies all 12 columns, so the TOTAL copied is ~N elements
+ * however small the start - the win is not from fewer early copies (those are
+ * cheap) but from landing at the final size in one allocation and copying
+ * nothing. That is only possible when the byte count is known up front, which
+ * is the buffered path; a streaming parse learns its size too late.
+ */
+export function capacityForBytes(bytes: number): number {
+  if (!Number.isFinite(bytes) || bytes <= 0) return INITIAL_CAP;
+  const estimate = Math.ceil(bytes / BYTES_PER_EVENT_ESTIMATE);
+  return Math.min(MAX_ESTIMATED_CAP, Math.max(INITIAL_CAP, estimate));
+}
+
 export class ColumnarEvents {
   eventType: Uint8Array;
   ts: Float64Array;

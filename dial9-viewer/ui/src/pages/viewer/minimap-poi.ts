@@ -12,17 +12,8 @@
 // minimap must not reach into that shared derivation. The remaining detectors
 // (long-poll, sched, wake-delay, uninstrumented) read the spans read-only.
 
-import {
-  EVENT_TYPES,
-  computeSchedulingDelays,
-  filterPointsOfInterest,
-  laneSource,
-} from "../../lib/trace/index.js";
-import {
-  columnarWorkerStoreFor,
-  lifecycleWorkerIds,
-  sharedWorkerSpans,
-} from "../../lib/trace/derived.js";
+import { EVENT_TYPES, filterPointsOfInterest } from "../../lib/trace/index.js";
+import { lifecycleWorkerIds, sharedDetectorInputs } from "../../lib/trace/derived.js";
 import type {
   ParsedTrace,
   PointOfInterest,
@@ -52,17 +43,10 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   const workerIds = lifecycleWorkerIds(trace);
   if (workerIds.length === 0) return [];
 
-  // Shared reconstruction. The minimap's detectors (long-poll, sched,
-  // wake-delay, uninstrumented) read the spans READ-ONLY and never touch cpu
-  // samples, so the shared result (with attachCpuSamples already applied once)
-  // yields identical ticks without a second full reconstruction.
-  const spanResult = sharedWorkerSpans(trace);
-  // Columnar path: raw-column detectors instead of the fat filterPointsOfInterest
-  // over flyweight views (which materializes every poll).
-  const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
-  const schedDelays = lanes.columnar
-    ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
-    : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask);
+  // Shared with the issues rail. The minimap's detectors (long-poll, sched,
+  // wake-delay, uninstrumented) read the spans READ-ONLY, so one shared
+  // reconstruction (attachCpuSamples already applied) yields identical ticks.
+  const { lanes, schedDelays } = sharedDetectorInputs(trace);
 
   // Applicable detectors: long-poll always; the sched-derived ones only when
   // the trace carries sched-wait data; uninstrumented only when the trace

@@ -53,7 +53,9 @@ import {
   type RelatedSection,
   type RelatedUiState,
   type SampleGroupView,
+  type PollDetailView,
 } from "./inspector-model.js";
+import { createFlamegraphHost } from "./flamegraph-host.js";
 
 /** Clamp bounds for the resize drag ([200px, 92vw]). */
 const MIN_WIDTH = 200;
@@ -96,6 +98,8 @@ interface InspectorData {
   customEvents: readonly CustomTraceEvent[];
   callframeSymbols: CallframeSymbols;
   queueData: QueueData;
+  /** Enables the flamegraph's runtime filter dropdown; null before a trace. */
+  runtimeWorkers: Map<string, number[]> | null;
 }
 
 /**
@@ -116,6 +120,7 @@ export function mountInspector(
       customEvents: trace?.customEvents ?? [],
       callframeSymbols: trace?.callframeSymbols ?? new Map(),
       queueData: computeQueueData(trace),
+      runtimeWorkers: trace?.runtimeWorkers ?? null,
     };
   });
   const taskDetail = createTaskDetailDerivation(store);
@@ -149,6 +154,17 @@ export function mountInspector(
   // Poll Detail frame-group expansion, keyed "sched-<i>"/"cpu-<i>".
   let expandedGroups = new Set<string>();
   let lastPollRef: SelectionSlice["pollDetail"] = null;
+  // Which sample section the poll flamegraph shows when both cpu + sched exist.
+  // A within-poll view choice (not a cross-selection pref), so it resets when
+  // the clicked poll changes. The list/flame CHOICE itself is the persisted
+  // uiPrefs.stacksAsFlamegraph.
+  let pollFgSection: "cpu" | "sched" = "cpu";
+  // The poll tab's own flamegraph instance, hosted the same way the region
+  // panel hosts its own (a SECOND live instance on the page).
+  const pollFg = createFlamegraphHost({
+    doc: host.ownerDocument,
+    className: "d9-poll-fg",
+  });
   // Related tab UI state; reset when the detail event changes.
   let relatedUi: RelatedUiState = { collapsed: {}, expand: {}, correlate: null };
   let lastDetailEventRef: CustomTraceEvent | null = null;
@@ -188,9 +204,11 @@ export function mountInspector(
     if (sig === lastSelSig) return;
     lastSelSig = sig;
 
-    // Reset Poll Detail expansion when the clicked poll changes.
+    // Reset Poll Detail expansion + flamegraph section when the clicked poll
+    // changes.
     if (sel.pollDetail !== lastPollRef) {
       expandedGroups = new Set();
+      pollFgSection = "cpu";
       lastPollRef = sel.pollDetail;
     }
     // Reset Related UI when the detail event changes (persistence is per
@@ -250,6 +268,9 @@ export function mountInspector(
     // unless the Stack tab is showing a retained region; runs after the frame
     // render so the `[data-region-host]` node exists.
     deps.regionPanel.sync();
+    // Same, for the Poll tab's flamegraph: the host node exists only after the
+    // render above.
+    syncPollFlamegraph(s);
   }
 
   /** Readout-only render (transient channel; the at-moment surface). */
@@ -436,29 +457,159 @@ export function mountInspector(
       </p>`;
     }
     const view = buildPollDetail(poll, data().callframeSymbols);
+    const hasStacks = view.schedGroups.length > 0 || view.cpuGroups.length > 0;
+    const asFlame = state().uiPrefs.stacksAsFlamegraph;
     return html`
       <div class="d9-poll-detail">
-        <div class="d9-poll-title">${view.title}</div>
-        ${view.schedGroups.length > 0
-          ? html`<div class="d9-poll-sched-head">
-                ⚠ Blocking during poll (${view.schedCount} sched
-                event${view.schedCount > 1 ? "s" : ""})
-              </div>
-              ${view.schedGroups.map((g, i) => sampleGroup(g, "sched", i))}`
-          : nothing}
-        ${view.cpuGroups.length > 0
-          ? html`${view.schedCount > 0
-                ? html`<div class="d9-poll-cpu-head">
-                    CPU Profile (${view.cpuCount} sample${view.cpuCount > 1 ? "s" : ""})
-                  </div>`
-                : nothing}
-              ${view.cpuGroups.map((g, i) => sampleGroup(g, "cpu", i))}`
-          : nothing}
-        ${view.schedGroups.length === 0 && view.cpuGroups.length === 0
+        <div class="d9-poll-title">
+          <span>${view.title}</span>
+          ${hasStacks ? stacksViewToggle(asFlame) : nothing}
+        </div>
+        ${!hasStacks
           ? html`<p class="d9-inspector-hint">No samples captured for this poll.</p>`
-          : nothing}
+          : asFlame
+            ? pollFlamegraphBody(view)
+            : pollListBody(view)}
       </div>
     `;
+  }
+
+  /** The list ⇄ flamegraph switch shown on any stack-carrying view. Flips the
+   *  persisted uiPrefs pref, so every stack surface changes together and the
+   *  choice outlives the selection. */
+  function stacksViewToggle(asFlame: boolean): TemplateResult {
+    return html`<span class="d9-stacks-view" role="group" aria-label="Stack view">
+      <button
+        type="button"
+        class=${classMap({ "d9-stacks-view-btn": true, on: !asFlame })}
+        aria-pressed=${!asFlame ? "true" : "false"}
+        title="Show samples as a grouped list"
+        @click=${() => store.update("uiPrefs", { stacksAsFlamegraph: false })}
+      >
+        List
+      </button>
+      <button
+        type="button"
+        class=${classMap({ "d9-stacks-view-btn": true, on: asFlame })}
+        aria-pressed=${asFlame ? "true" : "false"}
+        title="Show samples as a flamegraph"
+        @click=${() => store.update("uiPrefs", { stacksAsFlamegraph: true })}
+      >
+        Flame
+      </button>
+    </span>`;
+  }
+
+  function pollListBody(view: PollDetailView): TemplateResult {
+    return html`
+      ${view.schedGroups.length > 0
+        ? html`<div class="d9-poll-sched-head">
+              ⚠ Blocking during poll (${view.schedCount} sched
+              event${view.schedCount > 1 ? "s" : ""})
+            </div>
+            ${view.schedGroups.map((g, i) => sampleGroup(g, "sched", i))}`
+        : nothing}
+      ${view.cpuGroups.length > 0
+        ? html`${view.schedCount > 0
+              ? html`<div class="d9-poll-cpu-head">
+                  CPU Profile (${view.cpuCount} sample${view.cpuCount > 1 ? "s" : ""})
+                </div>`
+              : nothing}
+            ${view.cpuGroups.map((g, i) => sampleGroup(g, "cpu", i))}`
+        : nothing}
+    `;
+  }
+
+  /**
+   * Flamegraph mode for the poll's samples. One instance can show one tree, so
+   * when a poll carries BOTH cpu and sched samples a small section switch picks
+   * which feeds the canvas; the switch is hidden when only one kind exists. The
+   * `[data-poll-fg-host]` node is binding-free so the post-render sync can own
+   * the canvas without lit-html reconciling it away (same technique as the
+   * region host).
+   */
+  function pollFlamegraphBody(view: PollDetailView): TemplateResult {
+    const hasCpu = view.cpuSamplesRaw.length > 0;
+    const hasSched = view.schedSamplesRaw.length > 0;
+    const section = activePollFgSection(view);
+    return html`
+      ${hasCpu && hasSched
+        ? html`<div class="d9-poll-fg-sections" role="tablist">
+            <button
+              type="button"
+              class=${classMap({ "d9-poll-fg-section": true, on: section === "cpu" })}
+              role="tab"
+              aria-selected=${section === "cpu" ? "true" : "false"}
+              @click=${() => setPollFgSection("cpu")}
+            >
+              CPU (${view.cpuCount})
+            </button>
+            <button
+              type="button"
+              class=${classMap({ "d9-poll-fg-section": true, on: section === "sched" })}
+              role="tab"
+              aria-selected=${section === "sched" ? "true" : "false"}
+              @click=${() => setPollFgSection("sched")}
+            >
+              Blocking (${view.schedCount})
+            </button>
+          </div>`
+        : nothing}
+      <div class="d9-poll-fg-host" data-poll-fg-host></div>
+    `;
+  }
+
+  /** The section actually rendered: the stored choice when its samples exist,
+   *  else whichever kind the poll has (a poll can carry only one). */
+  function activePollFgSection(view: PollDetailView): "cpu" | "sched" {
+    if (pollFgSection === "cpu" && view.cpuSamplesRaw.length > 0) return "cpu";
+    if (pollFgSection === "sched" && view.schedSamplesRaw.length > 0) return "sched";
+    return view.cpuSamplesRaw.length > 0 ? "cpu" : "sched";
+  }
+
+  function setPollFgSection(section: "cpu" | "sched"): void {
+    if (pollFgSection === section) return;
+    pollFgSection = section;
+    renderFrame();
+  }
+
+  /**
+   * Feed the poll flamegraph after the frame render (the host node exists only
+   * then). A no-op unless the Poll tab is active in flame mode with samples; on
+   * the list path or other tabs it detaches so the widget parks with its
+   * removed host, exactly like the region panel.
+   */
+  function syncPollFlamegraph(s: StoreState): void {
+    const poll = s.selection.pollDetail;
+    if (activeTab !== "poll" || poll === null || !s.uiPrefs.stacksAsFlamegraph) {
+      pollFg.detach();
+      return;
+    }
+    const hostEl = host.querySelector<HTMLElement>("[data-poll-fg-host]");
+    if (hostEl === null) {
+      pollFg.detach();
+      return;
+    }
+    const view = buildPollDetail(poll, data().callframeSymbols);
+    const section = activePollFgSection(view);
+    const samples = section === "cpu" ? view.cpuSamplesRaw : view.schedSamplesRaw;
+    if (samples.length === 0) {
+      pollFg.detach();
+      return;
+    }
+    const d = data();
+    // sig changes only when the tree would: this poll, which section, and the
+    // sample count (the poll identity + section fully determine the samples).
+    const sig = `${poll.start}-${poll.end}:${section}:${samples.length}`;
+    pollFg.sync({
+      hostEl,
+      sig,
+      apply: (instance) =>
+        instance.setData(samples, d.callframeSymbols, {
+          exportTitle: `${section === "cpu" ? "CPU" : "Blocking"} - ${view.title}`,
+          runtimeWorkers: d.runtimeWorkers,
+        }),
+    });
   }
 
   function sampleGroup(g: SampleGroupView, kind: "sched" | "cpu", idx: number): TemplateResult {
@@ -907,6 +1058,7 @@ export function mountInspector(
       unsubFrame();
       unsubReadout();
       unregisterEsc();
+      pollFg.destroy();
       window.removeEventListener("mousemove", onResizeMove);
       window.removeEventListener("mouseup", onResizeUp);
     },

@@ -40,13 +40,24 @@ export function spanKindOf(name: string): number | null {
 }
 
 // buildSpanData's base fields, excluded from a span's copied `fields`.
-const BASE_ENTER_FIELDS = new Set([
-  "worker_id",
-  "span_id",
-  "parent_span_id",
-  "span_name",
-]);
-const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_name"]);
+//
+// Tested with `===` chains rather than Set.has: this runs once per FIELD of
+// every span event (~4.7 fields x 175k events on the demo trace alone, and span
+// events are the majority of a span-heavy trace), and the keys are string
+// literals, so V8 compares internalized strings by pointer. A Set.has is a hash
+// of the key first. `parent_span_id` leads because Enter events - the common
+// kind - carry it.
+function isBaseEnterField(k: string): boolean {
+  return (
+    k === "span_id" ||
+    k === "worker_id" ||
+    k === "parent_span_id" ||
+    k === "span_name"
+  );
+}
+function isBaseExitField(k: string): boolean {
+  return k === "span_id" || k === "worker_id" || k === "span_name";
+}
 
 const INITIAL_CAP = 1 << 16;
 
@@ -229,17 +240,24 @@ export class ColumnarSpanEvents {
     this.ts[i] = timestamp;
     // Number(undefined) === NaN, matching the fat path's Number(v.worker_id).
     this.workerId[i] = v.worker_id != null ? Number(v.worker_id) : NaN;
-    this.spanIdIdx[i] = v.span_id != null ? this.internStr(String(v.span_id)) : -1;
+    // span_id / parent_span_id are already strings on the wire, so skip the
+    // String() round-trip in the common case (it was allocating a new identical
+    // string 176k times on the demo trace); fall back only for the rare
+    // numeric-encoded id.
+    const sid = v.span_id;
+    this.spanIdIdx[i] =
+      sid == null ? -1 : this.internStr(typeof sid === "string" ? sid : String(sid));
+    const pid = v.parent_span_id;
     this.parentIdx[i] =
-      v.parent_span_id != null ? this.internStr(String(v.parent_span_id)) : -1;
+      pid == null ? -1 : this.internStr(typeof pid === "string" ? pid : String(pid));
     const sn = v.span_name;
     this.spanNameIdx[i] = typeof sn === "string" && sn ? this.internName(sn) : -1;
 
     // Non-base fields: interned into the CSR (matches buildSpanData's per-span
     // `fields`, which excludes the base keys). extraOff[i+1] closes event i.
-    const baseSet = kind === SPAN_KIND.Exit ? BASE_EXIT_FIELDS : BASE_ENTER_FIELDS;
+    const isBase = kind === SPAN_KIND.Exit ? isBaseExitField : isBaseEnterField;
     for (const k in v) {
-      if (!baseSet.has(k)) {
+      if (!isBase(k)) {
         if (this.extraLen === this._extraCap) this.growExtra();
         this.extraKeyId[this.extraLen] = this.internKey(k);
         this.extraValId[this.extraLen] = this.internVal(v[k]!);

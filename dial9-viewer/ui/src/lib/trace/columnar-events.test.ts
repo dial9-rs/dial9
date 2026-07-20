@@ -10,7 +10,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { parseTraceBuffer } from "./load.js";
 import { buildWorkerSpans } from "./analysis.js";
 import { deriveWorkerIds } from "./derived.js";
-import { ColumnarEvents, EVT } from "./columnar-events.js";
+import { ColumnarEvents, EVT, capacityForBytes } from "./columnar-events.js";
 import type { EventLike } from "./columnar-events.js";
 
 let raw: Uint8Array;
@@ -225,3 +225,41 @@ function mk(o: Partial<EventLike>): EventLike {
     tid: undefined, wakerTaskId: 0, wokenTaskId: 0, targetWorker: 0, ...o,
   };
 }
+
+describe("capacityForBytes", () => {
+  it("scales with the byte count", () => {
+    // ~32 bytes/event, so a 32MB trace should pre-size near 1M events.
+    expect(capacityForBytes(32 * 1024 * 1024)).toBe(1024 * 1024);
+  });
+
+  it("never starts below the default capacity", () => {
+    expect(capacityForBytes(1)).toBe(1 << 16);
+    expect(capacityForBytes(0)).toBe(1 << 16);
+  });
+
+  it("is defensive about a nonsense byte count", () => {
+    expect(capacityForBytes(Number.NaN)).toBe(1 << 16);
+    expect(capacityForBytes(-5)).toBe(1 << 16);
+  });
+
+  it("clamps so a huge trace cannot commit unbounded columns up front", () => {
+    expect(capacityForBytes(Number.MAX_SAFE_INTEGER)).toBe(1 << 25);
+  });
+
+  it("pre-sized columns hold the same data as default-sized ones", () => {
+    const a = new ColumnarEvents();
+    const b = new ColumnarEvents(capacityForBytes(4 * 1024 * 1024));
+    for (const sink of [a, b]) {
+      for (let i = 0; i < 200; i++) {
+        sink.pushEvent(
+          EVT.PollStart, i * 10, i % 4, 0, 0, 0, null, i, null,
+          undefined, undefined, undefined,
+        );
+      }
+    }
+    expect(b.length).toBe(a.length);
+    expect(b.at(199)!.timestamp).toBe(a.at(199)!.timestamp);
+    expect(b.at(199)!.timestamp).toBe(1990);
+    expect(b.at(199)!.taskId).toBe(199);
+  });
+});

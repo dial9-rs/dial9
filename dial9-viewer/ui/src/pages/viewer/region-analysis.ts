@@ -11,11 +11,12 @@
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
-import { createFlamegraph } from "../../lib/canvas/index.js";
 import type {
+  FlamegraphDataSample,
   FlamegraphInstance,
   FlamegraphSetDataOptions,
 } from "../../lib/canvas/index.js";
+import { createFlamegraphHost } from "./flamegraph-host.js";
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
 import type { LaneData } from "../../components/canvas/lanes/index.js";
 import type { FlamegraphNode } from "../../lib/trace/index.js";
@@ -76,7 +77,10 @@ export interface RegionAnalysisController {
 type ComputedView =
   | { kind: "cpu"; cpu: CpuRegionView }
   | { kind: "heap"; heap: HeapRegionView }
-  | { kind: "blocking"; blocking: BlockingView }
+  // `samples` are the raw, stack-carrying sched samples the flamegraph mode
+  // feeds off - the grouped `blocking` view has already dropped the per-sample
+  // callchain the widget needs.
+  | { kind: "blocking"; blocking: BlockingView; samples: readonly FlamegraphDataSample[] }
   | { kind: "empty" };
 
 export function createRegionAnalysis(
@@ -98,10 +102,13 @@ export function createRegionAnalysis(
   let lastRangeKey: string | null = null;
 
   // ── widget lifecycle (lazy, single instance reused) ─────────────────────
-  let fgContainer: HTMLElement | null = null;
-  let fgInstance: FlamegraphInstance | null = null;
-  let lastFgHost: HTMLElement | null = null;
-  let appliedSig: string | null = null; // what setData last applied
+  // The container/instance/ResizeObserver/appliedSig discipline lives in the
+  // shared host helper (the inspector hosts a second instance the same way).
+  const fg = createFlamegraphHost({
+    doc: deps.inspectorHost.ownerDocument,
+    className: "d9-region-fg",
+    onZoom: onZoomChange,
+  });
   let computedView: ComputedView = { kind: "empty" };
   let computedSig: string | null = null;
   let cpuSamplesForExtent: readonly { callchain: string[]; workerId: number; timestamp: number }[] = [];
@@ -128,26 +135,17 @@ export function createRegionAnalysis(
 
   // ── flamegraph widget ───────────────────────────────────────────────────
 
-  function ensureFg(): FlamegraphInstance {
-    if (fgContainer === null || fgInstance === null) {
-      const doc = deps.inspectorHost.ownerDocument;
-      fgContainer = doc.createElement("div");
-      fgContainer.className = "d9-region-fg";
-      fgInstance = createFlamegraph(fgContainer, onZoomChange);
-    }
-    return fgInstance;
-  }
-
   /** The widget fires this whenever the zoom stack changes. Recompute the
    *  frame->time extent and re-render the header (no setData). */
   function onZoomChange(): void {
     const trace = state().trace.trace;
-    if (fgInstance === null || trace === null || mode !== "cpu") {
+    const inst = fg.instance();
+    if (inst === null || trace === null || mode !== "cpu") {
       showExtent = null;
     } else {
       showExtent = frameSampleTimeExtent(
         cpuSamplesForExtent,
-        fgInstance.getZoomPath(),
+        inst.getZoomPath(),
         trace.callframeSymbols,
       );
     }
@@ -161,7 +159,17 @@ export function createRegionAnalysis(
     if (m === "heap") return { kind: "heap", heap: heapRegionView(trace, range, ld.workerSpans) };
     if (m === "blocking") {
       const entries = collectSchedSamplesInRange(ld.workerSpans, ld.workerIds, range);
-      return { kind: "blocking", blocking: buildBlockingView(entries, trace.callframeSymbols, groupBy) };
+      // Retain the raw stack-carrying samples for the flamegraph toggle; the
+      // grouped view drops them. `SchedEntry.sample` is a CpuSample, which
+      // already satisfies FlamegraphDataSample.
+      const samples = entries
+        .map((e) => e.sample)
+        .filter((s) => s.callchain.length > 0) as FlamegraphDataSample[];
+      return {
+        kind: "blocking",
+        blocking: buildBlockingView(entries, trace.callframeSymbols, groupBy),
+        samples,
+      };
     }
     return { kind: "empty" };
   }
@@ -210,7 +218,7 @@ export function createRegionAnalysis(
       // Parked: the Stack tab is not showing a region. The widget stays alive
       // (its container detaches with the removed host); re-resolve on reopen.
       lastRangeKey = null;
-      lastFgHost = null;
+      fg.detach();
       return;
     }
     const ld = laneData();
@@ -249,33 +257,29 @@ export function createRegionAnalysis(
     }
     render(panelTemplate(range, present, coverage), host);
 
-    // Body: flamegraph canvas (cpu/heap) or the blocking HTML (in the template).
-    if (mode === "cpu" || mode === "heap") {
+    // Body: the flamegraph canvas (cpu/heap always; blocking when the
+    // list/flame toggle is on flame and there are stack-carrying samples) or
+    // HTML (in the template).
+    const blockingFlame =
+      mode === "blocking" &&
+      state().uiPrefs.stacksAsFlamegraph &&
+      computedView.kind === "blocking" &&
+      computedView.samples.length > 0;
+    if (mode === "cpu" || mode === "heap" || blockingFlame) {
       const fgHost = host.querySelector<HTMLElement>(".d9-region-fg-host");
       if (fgHost === null) return;
-      const instance = ensureFg();
-      let needResize = false;
-      if (fgContainer !== null && fgHost !== lastFgHost) {
-        fgHost.appendChild(fgContainer);
-        lastFgHost = fgHost;
-        needResize = true;
-      }
-      if (sig !== appliedSig) {
-        // Set the applied signature BEFORE setData so a re-entrant sync (the
-        // widget's onZoomChange fires sync) sees the signature satisfied and
-        // never loops back into setData.
-        appliedSig = sig;
-        applyFlamegraph(instance, trace, range);
-        needResize = true;
-      }
-      if (needResize) {
-        const win = host.ownerDocument.defaultView ?? window;
-        win.requestAnimationFrame(() => instance.resize());
-      }
+      // The flame pref is part of the signature so switching list<->flame for
+      // blocking re-applies setData.
+      const fgSig = blockingFlame ? `${sig}:flame` : sig;
+      fg.sync({
+        hostEl: fgHost,
+        sig: fgSig,
+        apply: (instance) => applyFlamegraph(instance, trace, range),
+      });
     } else {
-      // Blocking / empty: the widget is detached with its old host; drop the
-      // stale attach marker so re-entering cpu/heap re-attaches + resizes.
-      lastFgHost = null;
+      // Blocking-list / empty: the widget is detached with its old host; drop
+      // the stale attach marker so re-entering a flamegraph re-attaches + resizes.
+      fg.detach();
     }
   }
 
@@ -293,6 +297,14 @@ export function createRegionAnalysis(
         trace.callframeSymbols,
         heapFgOpts(computedView.heap, range),
       );
+    } else if (computedView.kind === "blocking") {
+      // No frame->time extent for blocking (its samples are off-CPU park
+      // points, not an on-CPU profile), so the "show in timeline" link stays off.
+      cpuSamplesForExtent = [];
+      instance.setData(computedView.samples, trace.callframeSymbols, {
+        exportTitle: `Blocking calls - ${regionTitle(range)}`,
+        runtimeWorkers: trace.runtimeWorkers,
+      });
     }
   }
 
@@ -440,25 +452,56 @@ export function createRegionAnalysis(
     if (view.total === 0) {
       return html`<p class="d9-inspector-hint">No scheduling events in the selected region.</p>`;
     }
+    const asFlame = state().uiPrefs.stacksAsFlamegraph;
+    const canFlame =
+      computedView.kind === "blocking" && computedView.samples.length > 0;
     return html`
       <div class="d9-region-actions">
         <label class="d9-block-groupby">
           <span class="d9-sr-only">Group blocking calls by</span>
-          <select @change=${onGroupByChange}>
+          <select @change=${onGroupByChange} ?disabled=${asFlame && canFlame}>
             <option value="leaf" ?selected=${groupBy === "leaf"}>Group by blocking call</option>
             <option value="full" ?selected=${groupBy === "full"}>Group by full stack</option>
           </select>
         </label>
+        ${canFlame ? blockingViewToggle(asFlame) : nothing}
       </div>
       <p class="d9-block-note">
         Blocking calls that caused the kernel to deschedule a tokio worker thread
         during a poll.
       </p>
-      <div class="d9-block-bars">
-        ${view.groups.map((g) => blockingBar(g))}
-      </div>
-      <div class="d9-block-groups">${view.groups.map(blockingGroup)}</div>
+      ${asFlame && canFlame
+        ? html`<div class="d9-region-fg-host"></div>`
+        : html`<div class="d9-block-bars">
+              ${view.groups.map((g) => blockingBar(g))}
+            </div>
+            <div class="d9-block-groups">${view.groups.map(blockingGroup)}</div>`}
     `;
+  }
+
+  /** List ⇄ flamegraph switch for the blocking sub-stacks, sharing the same
+   *  persisted uiPrefs pref as the poll inspector. */
+  function blockingViewToggle(asFlame: boolean): TemplateResult {
+    return html`<span class="d9-stacks-view" role="group" aria-label="Stack view">
+      <button
+        type="button"
+        class=${classMap({ "d9-stacks-view-btn": true, on: !asFlame })}
+        aria-pressed=${!asFlame ? "true" : "false"}
+        title="Show blocking calls as a grouped list"
+        @click=${() => store.update("uiPrefs", { stacksAsFlamegraph: false })}
+      >
+        List
+      </button>
+      <button
+        type="button"
+        class=${classMap({ "d9-stacks-view-btn": true, on: asFlame })}
+        aria-pressed=${asFlame ? "true" : "false"}
+        title="Show blocking calls as a flamegraph"
+        @click=${() => store.update("uiPrefs", { stacksAsFlamegraph: true })}
+      >
+        Flame
+      </button>
+    </span>`;
   }
 
   function blockingBar(g: BlockingGroup): TemplateResult {
@@ -573,6 +616,7 @@ export function createRegionAnalysis(
     }
     const qs = traceUrls.map((u) => `trace=${encodeURIComponent(u)}`).join("&");
     let url = `flamegraph.html?${qs}&start=${Math.round(range.startNs)}&end=${Math.round(range.endNs)}`;
+    const fgInstance = fg.instance();
     if (fgInstance !== null) {
       const z = fgInstance.getZoomPath();
       if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
@@ -610,10 +654,7 @@ export function createRegionAnalysis(
     openWholeTrace,
     dispose(): void {
       unsubscribe();
-      fgInstance?.destroy();
-      fgContainer?.remove();
-      fgContainer = null;
-      fgInstance = null;
+      fg.destroy();
     },
   };
 }

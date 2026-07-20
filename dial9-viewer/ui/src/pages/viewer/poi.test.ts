@@ -30,6 +30,8 @@ import type {
 import type { PoiSlice, ViewportSlice } from "../../types/state.js";
 import {
   POI_FILTERS,
+  RAIL_WINDOW,
+  railWindow,
   derivePoiViewModel,
   durationLabel,
   filterLabel,
@@ -51,6 +53,10 @@ const DEFAULT_POI: PoiSlice = {
   sortKey: "duration",
   sortDir: "desc",
   index: -1,
+  railTab: "issues",
+  taskSort: "total",
+  taskSortDir: "desc",
+  taskIndex: -1,
 };
 
 let trace: ParsedTrace;
@@ -108,8 +114,61 @@ describe("rail count parity (DoD)", () => {
     for (const sortKey of ["worker", "kind", "time", "duration"] as const) {
       for (const sortDir of ["asc", "desc"] as const) {
         const vm = derivePoiViewModel(trace, { ...DEFAULT_POI, sortKey, sortDir }, trace.minTs ?? 0);
-        expect(vm.rows.length).toBe(base);
+        // `retained`, not `rows`: rows is a bounded window into the list.
+        expect(vm.retained).toBe(base);
+        expect(vm.rows.length).toBe(Math.min(base, RAIL_WINDOW));
       }
+    }
+  });
+});
+
+describe("rail windowing", () => {
+  it("formats at most RAIL_WINDOW rows however many points matched", () => {
+    for (const filter of POI_FILTERS) {
+      const vm = derivePoiViewModel(trace, { ...DEFAULT_POI, filter }, trace.minTs ?? 0);
+      expect(vm.rows.length, `filter=${filter}`).toBeLessThanOrEqual(RAIL_WINDOW);
+    }
+  });
+
+  it("reports the true match count even when the window is smaller", () => {
+    const vm = derivePoiViewModel(trace, DEFAULT_POI, trace.minTs ?? 0);
+    expect(vm.total).toBeGreaterThanOrEqual(vm.rows.length);
+    expect(vm.retained).toBeGreaterThanOrEqual(vm.rows.length);
+  });
+
+  it("keeps every entry navigable, not just the formatted ones", () => {
+    const vm = derivePoiViewModel(trace, DEFAULT_POI, trace.minTs ?? 0);
+    expect(vm.sorted.length).toBe(vm.retained);
+  });
+});
+
+describe("railWindow", () => {
+  it("returns the whole list when it fits", () => {
+    expect(railWindow(120, 5)).toEqual({ start: 0, end: 120 });
+  });
+
+  it("anchors from the start before anything is selected", () => {
+    expect(railWindow(10_000, -1)).toEqual({ start: 0, end: RAIL_WINDOW });
+  });
+
+  it("centres on the cursor once it is past the first window", () => {
+    const w = railWindow(10_000, 5_000);
+    expect(w.end - w.start).toBe(RAIL_WINDOW);
+    expect(5_000).toBeGreaterThanOrEqual(w.start);
+    expect(5_000).toBeLessThan(w.end);
+  });
+
+  it("clamps at the end of the list rather than running past it", () => {
+    const w = railWindow(10_000, 9_999);
+    expect(w.end).toBe(10_000);
+    expect(w.start).toBe(10_000 - RAIL_WINDOW);
+  });
+
+  it("always contains the cursor, wherever it is", () => {
+    for (const i of [0, 1, 249, 250, 251, 4_000, 9_998, 9_999]) {
+      const w = railWindow(10_000, i);
+      expect(i, `index=${i}`).toBeGreaterThanOrEqual(w.start);
+      expect(i, `index=${i}`).toBeLessThan(w.end);
     }
   });
 });

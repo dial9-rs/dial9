@@ -53,25 +53,30 @@ export interface TrackSpec {
 }
 
 /**
- * The canonical track catalogue, in column order: axis, lanes, then the analysis
- * surfaces top-down. Task detail is last (it appears below the surfaces when a
- * task is selected).
+ * The canonical track catalogue, in column order: axis, lanes, the selected
+ * task's detail, then the analysis surfaces top-down.
+ *
+ * Task detail sits directly under the worker lanes rather than at the bottom:
+ * it is the surface a user reads immediately after clicking a task, and below
+ * four expanded analysis tracks it fell past the scroll fold, so selecting a
+ * task appeared to do nothing. It stays selectionOnly, so it still occupies no
+ * space until a task is actually selected.
  */
 export const TRACKS: readonly TrackSpec[] = [
   { id: "timeline", label: "Time", height: 30 },
   { id: "lanes", label: "Workers", height: 130 },
-  { id: "cpu", label: "CPU", height: 74 },
-  { id: "queue", label: "Queue G+L", height: 74 },
-  { id: "spans", label: "Spans", height: 150 },
-  // Events track: a legend strip (LEGEND_H) above a marker-tick canvas. Height
-  // seats a 40px tick canvas plus the chip legend.
-  { id: "events", label: "Events", height: 70 },
   {
     id: "task-detail",
     label: "Task detail",
     height: 160,
     selectionOnly: true,
   },
+  { id: "cpu", label: "CPU", height: 74 },
+  { id: "queue", label: "Queue G+L", height: 74 },
+  { id: "spans", label: "Spans", height: 150 },
+  // Events track: a legend strip (LEGEND_H) above a marker-tick canvas. Height
+  // seats a 40px tick canvas plus the chip legend.
+  { id: "events", label: "Events", height: 70 },
 ];
 
 export interface TrackGeometryOpts {

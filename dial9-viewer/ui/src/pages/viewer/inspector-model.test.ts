@@ -132,6 +132,36 @@ describe("buildPollDetail", () => {
     expect(v.schedGroups).toHaveLength(0);
     expect(v.cpuGroups).toHaveLength(0);
   });
+
+  it("retains the raw, un-deduplicated samples for the flamegraph toggle", () => {
+    const v = buildPollDetail(poll, SYMS);
+    // The list view deduped 4 sched samples into 2 groups; the raw arrays keep
+    // every sample so the flamegraph builds the real tree.
+    expect(v.schedSamplesRaw).toHaveLength(4);
+    expect(v.cpuSamplesRaw).toHaveLength(2);
+    // And they carry the callchain the deduped groups threw away.
+    expect(v.cpuSamplesRaw[0]!.callchain).toEqual(stackCpu);
+  });
+
+  it("drops samples with no stack from the raw arrays", () => {
+    const withEmpty: PollSpan = {
+      ...poll,
+      cpuSamples: [sample(stackCpu), sample([])],
+      schedSamples: [sample([])],
+    };
+    const v = buildPollDetail(withEmpty, SYMS);
+    // A flamegraph over an empty callchain builds a degenerate tree, so the
+    // stackless samples are filtered out.
+    expect(v.cpuSamplesRaw).toHaveLength(1);
+    expect(v.schedSamplesRaw).toHaveLength(0);
+  });
+
+  it("a poll with no samples yields empty raw arrays (no throw)", () => {
+    const bare: PollSpan = { ...poll, cpuSamples: [], schedSamples: [] };
+    const v = buildPollDetail(bare, SYMS);
+    expect(v.cpuSamplesRaw).toEqual([]);
+    expect(v.schedSamplesRaw).toEqual([]);
+  });
 });
 
 // ── Event detail ─────────────────────────────────────────────────────────────

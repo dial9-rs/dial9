@@ -95,16 +95,17 @@ describe("orderedTracks", () => {
   });
 
   it("permutes manageable tracks, pinning structural + task-detail slots", () => {
-    // Reverse the manageable block; timeline/lanes stay on top, task-detail last.
+    // Reverse the manageable block; timeline/lanes/task-detail keep their
+    // catalogue slots (task-detail sits directly under lanes).
     const ids = orderedTracks(["events", "spans", "queue", "cpu"]).map((t) => t.id);
     expect(ids).toEqual([
       "timeline",
       "lanes",
+      "task-detail",
       "events",
       "spans",
       "queue",
       "cpu",
-      "task-detail",
     ]);
   });
 
@@ -121,11 +122,11 @@ describe("orderedTracks", () => {
     expect(ids).toEqual([
       "timeline",
       "lanes",
+      "task-detail",
       "spans",
       "cpu",
       "queue",
       "events",
-      "task-detail",
     ]);
   });
 
@@ -135,11 +136,11 @@ describe("orderedTracks", () => {
     expect(ids).toEqual([
       "timeline",
       "lanes",
+      "task-detail",
       "events",
       "cpu",
       "queue", // unnamed, appended in catalogue order
       "spans",
-      "task-detail",
     ]);
   });
 });
@@ -265,11 +266,11 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(orderedTracks(uiPrefs(s2).trackOrder).map((t) => t.id)).toEqual([
       "timeline",
       "lanes",
+      "task-detail",
       "events",
       "queue",
       "spans",
       "cpu",
-      "task-detail",
     ]);
   });
 

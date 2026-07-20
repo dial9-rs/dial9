@@ -13,6 +13,7 @@ import {
   formatHumanDuration,
 } from "../../lib/trace/index.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
+import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type {
   CallframeSymbols,
   CustomTraceEvent,
@@ -70,6 +71,16 @@ export interface PollDetailView {
   schedGroups: SampleGroupView[];
   /** Deduplicated CPU-profile groups (orange); empty when none. */
   cpuGroups: SampleGroupView[];
+  /**
+   * The raw, PRE-deduplication samples, retained so the poll detail can render
+   * a flamegraph instead of the grouped list. The list view (schedGroups/
+   * cpuGroups) has already collapsed and symbolized away the per-sample
+   * callchain the flamegraph needs, so the toggle must feed off these instead.
+   * Filtered to samples that actually carry a stack (`callchain.length > 0`);
+   * empty when the poll caught no usable samples of that kind.
+   */
+  cpuSamplesRaw: readonly FlamegraphDataSample[];
+  schedSamplesRaw: readonly FlamegraphDataSample[];
 }
 
 function groupViews(
@@ -138,7 +149,29 @@ export function buildPollDetail(
         )
       : [];
 
-  return { durationLabel, cpuCount, schedCount, title, schedGroups, cpuGroups };
+  // Raw samples with a stack, kept for the flamegraph toggle. CpuSample already
+  // satisfies FlamegraphDataSample (callchain + workerId); the callchains here
+  // were already read by the deduplicateSamples calls above, so this filter
+  // forces nothing new.
+  const withStack = (s: { callchain: readonly string[] }): boolean =>
+    s.callchain.length > 0;
+  const cpuSamplesRaw = poll.cpuSamples
+    ? (poll.cpuSamples.filter(withStack) as FlamegraphDataSample[])
+    : [];
+  const schedSamplesRaw = poll.schedSamples
+    ? (poll.schedSamples.filter(withStack) as FlamegraphDataSample[])
+    : [];
+
+  return {
+    durationLabel,
+    cpuCount,
+    schedCount,
+    title,
+    schedGroups,
+    cpuGroups,
+    cpuSamplesRaw,
+    schedSamplesRaw,
+  };
 }
 
 // ── Event detail ──────────────────────────────────────────────────────────

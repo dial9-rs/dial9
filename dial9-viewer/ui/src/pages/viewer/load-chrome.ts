@@ -14,7 +14,11 @@
 // surfaces it.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
-import { loadTraceOnMainThread, Dial9Creds } from "../../lib/trace/index.js";
+import {
+  loadTraceOnMainThread,
+  isLoadPerfEnabled,
+  Dial9Creds,
+} from "../../lib/trace/index.js";
 import type { ReparseRange } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { EscCascade } from "./esc-cascade.js";
@@ -109,6 +113,17 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     onChange: renderLayer,
     onLoaded: () => {
       committedLabel = pendingLabel;
+    },
+    onTiming: (timing) => {
+      if (!isLoadPerfEnabled()) return;
+      const fetchMs =
+        timing.fetchDoneMs !== null ? timing.fetchDoneMs - timing.startMs : null;
+      const parseMs = timing.parseDoneMs - (timing.fetchDoneMs ?? timing.startMs);
+      console.info(
+        `[dial9 loadPerf] loader-reported: ${fetchMs !== null ? `fetch ${fetchMs.toFixed(0)}ms  ` : ""}` +
+          `parse ${parseMs.toFixed(0)}ms  total ${(timing.parseDoneMs - timing.startMs).toFixed(0)}ms  ` +
+          `(${timing.mode}, ${timing.events.toLocaleString()} events, ${(timing.bytes / 1e6).toFixed(1)} MB)`,
+      );
     },
     credsMissing: () => !Dial9Creds.has(),
     headers: () => {

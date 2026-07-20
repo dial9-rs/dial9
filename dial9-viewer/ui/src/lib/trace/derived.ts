@@ -16,17 +16,21 @@ import {
   buildSpanData,
   buildWorkerSpans,
   computeRuntimeGroups,
+  computeSchedulingDelays,
 } from "./index.js";
 import type { SpanData } from "./index.js";
 import { ColumnarEvents } from "./columnar-events.js";
 import { buildWorkerSpansColumnarStore } from "./worker-spans-columnar.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
+import { measureSpan } from "./load-perf.js";
 import {
   fatLanes,
+  laneSource,
   type ColumnarWorkerSpans,
+  type LaneSource,
   type LaneWorkerSpans,
 } from "./columnar-worker-spans.js";
-import type { ParsedTrace, RuntimeGroup } from "../../types/trace.js";
+import type { ParsedTrace, RuntimeGroup, SchedDelay } from "../../types/trace.js";
 
 /** The distinct worker ids in a trace, in runtime-group render order: scan
  *  non-queue/non-wake events for the worker set, then reorder to match the
@@ -45,7 +49,15 @@ export function deriveWorkerIds(trace: ParsedTrace): number[] {
  * deriveRuntimeGroups. Consumers that only count workers (POI detectors, the
  * minimap ticks) take it directly.
  */
+const workerIdsCache = new WeakMap<ParsedTrace, number[]>();
+
 export function lifecycleWorkerIds(trace: ParsedTrace): number[] {
+  const cached = workerIdsCache.get(trace);
+  if (cached !== undefined) return cached;
+  // A FULL event scan, and on the columnar path each step allocates a fresh
+  // iterator result and reads through view getters. Several consumers (POI
+  // source, minimap ticks, runtime groups, task detail) each ran their own copy
+  // on the load frame; memoizing collapses them to one.
   const set = new Set<number>();
   for (const e of trace.events) {
     if (e.eventType === EVENT_TYPES.QueueSample || e.eventType === EVENT_TYPES.WakeEvent) {
@@ -53,14 +65,61 @@ export function lifecycleWorkerIds(trace: ParsedTrace): number[] {
     }
     set.add(e.workerId);
   }
-  return [...set].sort((a, b) => a - b);
+  const ids = [...set].sort((a, b) => a - b);
+  workerIdsCache.set(trace, ids);
+  return ids;
 }
+
+const runtimeGroupsCache = new WeakMap<ParsedTrace, RuntimeGroup[]>();
 
 /** The runtime groups in render order: the lifecycle worker set, grouped by
  *  runtime. A single-runtime trace yields one group; the lanes renderer draws
  *  headers only when there is more than one. */
 export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
-  return computeRuntimeGroups(lifecycleWorkerIds(trace), trace.runtimeWorkers);
+  const cached = runtimeGroupsCache.get(trace);
+  if (cached !== undefined) return cached;
+  const groups = computeRuntimeGroups(lifecycleWorkerIds(trace), trace.runtimeWorkers);
+  runtimeGroupsCache.set(trace, groups);
+  return groups;
+}
+
+/** The inputs every POI detector needs, derived once per trace. */
+export interface DetectorInputs {
+  workerIds: number[];
+  /** Which representation the detectors scan (columnar columns or fat spans). */
+  lanes: LaneSource;
+  schedDelays: SchedDelay[];
+}
+
+const detectorInputsCache = new WeakMap<ParsedTrace, DetectorInputs>();
+
+/**
+ * The shared POI-detector inputs: worker id set, lane source, scheduling delays.
+ *
+ * The issues rail and the minimap ticks each built this independently, so
+ * `schedulingDelays` ran twice per trace - and it materializes a full PollView
+ * per delay, so it is far from free. Both now share one result.
+ */
+export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
+  const cached = detectorInputsCache.get(trace);
+  if (cached !== undefined) return cached;
+
+  const workerIds = lifecycleWorkerIds(trace);
+  // buildWorkerSpans + attachCpuSamples applied once, so the "cpu-sampled"
+  // detector sees the already-attached poll samples.
+  const spanResult = sharedWorkerSpans(trace);
+  // Columnar path: scan raw columns. The frozen computeSchedulingDelays would
+  // materialize every poll from the flyweight views.
+  const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
+  const schedDelays = measureSpan("schedDelays", () =>
+    lanes.columnar
+      ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
+      : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask),
+  );
+
+  const inputs: DetectorInputs = { workerIds, lanes, schedDelays };
+  detectorInputsCache.set(trace, inputs);
+  return inputs;
 }
 
 /** Keyed on trace identity, so a reparse invalidates but a pan never does. */
@@ -93,13 +152,17 @@ export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
       // Big-trace (main-thread) path: build the typed-array span store DIRECTLY
       // (no fat poll/park/active objects) and hand render/models columnar lane
       // VIEWS. The worker path (plain-array events) is untouched below.
-      const built = buildWorkerSpansColumnarStore(
-        ev, deriveWorkerIds(trace), trace.maxTs ?? 0, trace.blockInPlaceGaps,
+      const built = measureSpan("reconstruct", () =>
+        buildWorkerSpansColumnarStore(
+          ev, deriveWorkerIds(trace), trace.maxTs ?? 0, trace.blockInPlaceGaps,
+        ),
       );
       if (trace.cpuSamples && trace.cpuSamples.length > 0) {
         // Frozen-core CpuSample[] bridges to the columnar store's sample type
         // (it reads only the common fields); same `as never` idiom as poi.ts.
-        built.store.attachCpuSamples(trace.cpuSamples as never);
+        measureSpan("attachCpuSamples", () =>
+          built.store.attachCpuSamples(trace.cpuSamples as never),
+        );
       }
       columnarStoreCache.set(trace, built.store);
       r = {
@@ -163,10 +226,11 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
     const workerSpans = sharedWorkerSpans(trace).workerSpans;
     const store = columnarStoreCache.get(trace);
     const spanEvents = trace.spanEvents;
-    r =
+    r = measureSpan("spanData", () =>
       store && spanEvents
         ? buildSpanDataColumnar(spanEvents, store)
-        : buildSpanData(trace.customEvents, fatLanes(workerSpans));
+        : buildSpanData(trace.customEvents, fatLanes(workerSpans)),
+    );
     spanDataCache.set(trace, r);
   }
   return r;

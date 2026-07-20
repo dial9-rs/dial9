@@ -27,6 +27,17 @@ export interface PoiOpts {
   hasSchedWait?: boolean;
   sortByWorst?: boolean;
   taskInstrumented?: Map<number, boolean>;
+  /**
+   * Keep at most this many points, under the ACTIVE order - the worst `limit`
+   * when `sortByWorst`, else the earliest. Detectors like "uninstrumented" match
+   * essentially every poll on a lightly-instrumented trace (millions), and
+   * materializing them all costs more memory than the trace itself. Omit for
+   * the unbounded result.
+   */
+  limit?: number;
+  /** Receives the TRUE match count, before `limit` truncates. Counts remain
+   *  honest even when the returned list is capped. */
+  onTotal?: (matched: number) => void;
 }
 
 /** A poll span materialized back out of the columns (for hover/click/parity).
@@ -93,6 +104,22 @@ export interface PollsByTaskCSR {
   start: Float64Array;
   end: Float64Array;
   worker: Float64Array;
+}
+
+/** Per-task poll aggregate for the Tasks tab index. Scalars only - reduced from
+ *  the poll columns without materializing any span. */
+export interface TaskPollAggregate {
+  taskId: number;
+  pollCount: number;
+  totalPollNs: number;
+  longestPollNs: number;
+  /** Start of the task's earliest poll (the CSR slice is start-sorted). */
+  firstPollStart: number;
+  /** Worker the earliest poll ran on - the "where did this task first run"
+   *  reveal target. */
+  firstPollWorker: number;
+  /** Distinct workers the task ever polled on. */
+  workerCount: number;
 }
 
 /**
@@ -504,6 +531,24 @@ export class ColumnarWorkerSpans {
       start: c.start[i]!, end: c.end[i]!, taskId: c.taskId[i]!,
     });
 
+    const order = opts.sortByWorst
+      ? (a: PointOfInterest, b: PointOfInterest): number => b.value - a.value
+      : (a: PointOfInterest, b: PointOfInterest): number => a.time - b.time;
+    const cap = opts.limit !== undefined && opts.limit > 0 ? opts.limit : Infinity;
+    let matched = 0;
+    // Bounded retention: let the buffer grow to 2x the cap, then sort and drop
+    // the tail. Amortized O(n) with O(cap) live objects, so a detector matching
+    // millions of polls never holds more than a bounded slice of them.
+    const compact = (): void => {
+      points.sort(order);
+      points.length = Math.min(points.length, cap);
+    };
+    const add = (p: PointOfInterest): void => {
+      matched++;
+      points.push(p);
+      if (points.length >= cap * 2) compact();
+    };
+
     for (const w of workerIds) {
       const c = this.byWorker.get(w);
       if (!c) continue;
@@ -511,7 +556,7 @@ export class ColumnarWorkerSpans {
         for (let i = 0; i < c.nParks; i++) {
           const sw = c.parkSchedWait[i]!;
           if (hasSchedWait && !Number.isNaN(sw) && sw > 100) {
-            points.push({
+            add({
               time: c.parkEnd[i]! - sw, worker: w, type: "sched", value: sw,
               span: { start: c.parkStart[i]!, end: c.parkEnd[i]! },
             });
@@ -520,7 +565,7 @@ export class ColumnarWorkerSpans {
       } else if (filterType === "long-poll") {
         for (let i = 0; i < c.n; i++) {
           const durMs = (c.end[i]! - c.start[i]!) / 1e6;
-          if (durMs > 1) points.push({ time: c.start[i]!, worker: w, type: "long-poll", value: durMs, span: pollSpanForJump(c, i) });
+          if (durMs > 1) add({ time: c.start[i]!, worker: w, type: "long-poll", value: durMs, span: pollSpanForJump(c, i) });
         }
       } else if (filterType === "cpu-sampled") {
         const cpuOff = c.cpuOff, schedOff = c.schedOff;
@@ -528,7 +573,7 @@ export class ColumnarWorkerSpans {
           const cpuCount = cpuOff ? cpuOff[i + 1]! - cpuOff[i]! : 0;
           const schedCount = schedOff ? schedOff[i + 1]! - schedOff[i]! : 0;
           if (cpuCount + schedCount > 0) {
-            points.push({ time: c.start[i]!, worker: w, type: "cpu-sampled", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
+            add({ time: c.start[i]!, worker: w, type: "cpu-sampled", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
           }
         }
       }
@@ -538,7 +583,7 @@ export class ColumnarWorkerSpans {
       for (const sd of schedDelays) {
         const delayUs = sd.delay / 1000;
         if (delayUs > 100) {
-          points.push({ time: sd.wakeTime, worker: sd.worker, type: "wake-delay", value: delayUs, span: sd.poll, schedDelay: sd });
+          add({ time: sd.wakeTime, worker: sd.worker, type: "wake-delay", value: delayUs, span: sd.poll, schedDelay: sd });
         }
       }
     }
@@ -551,14 +596,14 @@ export class ColumnarWorkerSpans {
         for (let i = 0; i < c.n; i++) {
           const tid = c.taskId[i];
           if (tid && ti.get(tid) === false) {
-            points.push({ time: c.start[i]!, worker: w, type: "uninstrumented", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
+            add({ time: c.start[i]!, worker: w, type: "uninstrumented", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
           }
         }
       }
     }
 
-    if (opts.sortByWorst) points.sort((a, b) => b.value - a.value);
-    else points.sort((a, b) => a.time - b.time);
+    compact();
+    opts.onTotal?.(matched);
     return points as PointOfInterest[];
   }
 
@@ -610,6 +655,42 @@ export class ColumnarWorkerSpans {
     // Sort each task slice by start (stable - matches the fat arr.sort tie-break).
     for (let s = 0; s < T; s++) sortTriByStart(start, end, worker, off[s]!, off[s + 1]!);
     return (this._pollsByTaskCSR = { slotOf, off, start, end, worker });
+  }
+
+  /**
+   * Per-task poll aggregates for the task index, reduced straight off the CSR:
+   * poll count, total + longest poll time, and the first poll's start/worker
+   * (the CSR slice is start-sorted, so slot 0 is the first). Never materializes
+   * a PollView - the whole point of the columnar path. Tasks that never polled
+   * are absent here; the caller unions them in from the spawn map.
+   */
+  taskAggregates(): TaskPollAggregate[] {
+    const csr = this.pollsByTaskCSR();
+    const out: TaskPollAggregate[] = [];
+    for (const [taskId, slot] of csr.slotOf) {
+      const lo = csr.off[slot]!;
+      const hi = csr.off[slot + 1]!;
+      if (hi <= lo) continue;
+      let total = 0;
+      let longest = 0;
+      const workers = new Set<number>();
+      for (let p = lo; p < hi; p++) {
+        const dur = csr.end[p]! - csr.start[p]!;
+        total += dur;
+        if (dur > longest) longest = dur;
+        workers.add(csr.worker[p]!);
+      }
+      out.push({
+        taskId,
+        pollCount: hi - lo,
+        totalPollNs: total,
+        longestPollNs: longest,
+        firstPollStart: csr.start[lo]!,
+        firstPollWorker: csr.worker[lo]!,
+        workerCount: workers.size,
+      });
+    }
+    return out;
   }
 
   /**
