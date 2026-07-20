@@ -190,6 +190,10 @@ jobs:
           cache-dependency-path: dial9-viewer/ui/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      # Re-checks src/types/*.d.ts with skipLibCheck OFF: the main config's
+      # skipLibCheck (for node_modules) also skips our hand-written frozen-core
+      # declarations, which is how three of them drifted from the JS.
+      - run: npm run check:types
       - run: npm run test
       - run: npm run build
 

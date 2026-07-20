@@ -272,7 +272,7 @@ declare module "*/trace_parser.js" {
     pushIfSpan(
       name: string,
       timestamp: number,
-      fields: Record<string, DecodedFieldValue>
+      fields: Record<string, import("*/decode.js").DecodedFieldValue>
     ): boolean;
   }
 

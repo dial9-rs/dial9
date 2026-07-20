@@ -67,7 +67,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       div.className = "row";
       if (row.segments[0]?.layout === "unknown") {
         // Raw display: `host` carries the group's raw directory path
-        // (actions.ts unknownGroupPath); no service/host split exists.
+        // (segments.ts unknownGroupPath); no service/host split exists.
         div.append(document.createTextNode(row.host));
       } else {
         const svc = document.createElement("span");

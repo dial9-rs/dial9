@@ -21,10 +21,12 @@ import { createStore } from "../../store/store.js";
 import { EVENT_TYPES } from "../../../trace_parser.js";
 import { parseTraceBuffer } from "./load.js";
 import {
-  RESIDENT_RAW_BUDGET_BYTES,
   createSegmentWindow,
   parseSegmentInWorker,
 } from "./segments.js";
+import {
+  RESIDENT_RAW_BUDGET_BYTES,
+} from "./segment-budget.js";
 import type { Store, ViewerStore } from "../../store/store.js";
 import type { ParsedTrace, TraceEvent } from "../../../trace_parser.js";
 import type { SegmentEntry, SegmentsSlice } from "../../types/state.js";

@@ -9,21 +9,25 @@ import { gunzipSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseTraceBuffer } from "./load.js";
 import {
+  deriveSegmentExtents,
+  mapExtentToMonotonic,
+} from "./segments.js";
+import {
   BUDGET_EVICTION_THRESHOLD_FRACTION,
   capToBudget,
   computeNeedSet,
   computePrefetchSet,
-  computeSegmentEdgePolls,
-  computeWindowBoundaryPolls,
-  createRawByteCache,
-  deriveSegmentExtents,
   evictionTriggerBytes,
+  planEviction,
   extentDistance,
   extentsOverlap,
-  mapExtentToMonotonic,
-  planEviction,
+} from "./segment-budget.js";
+import {
+  computeSegmentEdgePolls,
+  computeWindowBoundaryPolls,
   segmentInvariants,
-} from "./segments.js";
+} from "./segment-boundary-polls.js";
+import { createRawByteCache } from "./raw-byte-cache.js";
 import { EVENT_TYPES } from "../../../trace_parser.js";
 import type { ParsedTrace, TraceEvent } from "../../../trace_parser.js";
 import type { ListedSegment } from "./segments.js";

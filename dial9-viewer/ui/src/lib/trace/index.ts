@@ -95,6 +95,24 @@ export type {
 // derivation, window decision functions, the raw-gzip cache, boundary-poll
 // stitching/truncation, and the viewport-driven orchestrator.
 export {
+  createSegmentWindow,
+  deriveSegmentExtents,
+  mapExtentToMonotonic,
+  parseSegmentInWorker,
+} from "./segments.js";
+
+// segment-boundary-polls.ts - the truncation hard edge: what a segment left
+// open, what the next one closed, and the stitched whole polls.
+export {
+  computeSegmentEdgePolls,
+  computeWindowBoundaryPolls,
+  segmentInvariants,
+} from "./segment-boundary-polls.js";
+
+// raw-byte-cache.ts - the compressed lower level of the two-level cache.
+// segment-budget.ts - residency budgets and the pure need/prefetch/admit/
+// evict decisions computed from them.
+export {
   BUDGET_EVICTION_THRESHOLD_FRACTION,
   GZIP_EXPANSION_ESTIMATE,
   RAW_GZIP_CACHE_BUDGET_BYTES,
@@ -102,28 +120,24 @@ export {
   capToBudget,
   computeNeedSet,
   computePrefetchSet,
-  computeSegmentEdgePolls,
-  computeWindowBoundaryPolls,
-  createRawByteCache,
-  createSegmentWindow,
-  deriveSegmentExtents,
   evictionTriggerBytes,
+  planEviction,
   extentDistance,
   extentsOverlap,
-  mapExtentToMonotonic,
-  parseSegmentInWorker,
-  planEviction,
-  segmentInvariants,
-} from "./segments.js";
+} from "./segment-budget.js";
 export type {
   AdmissionCandidate,
   AdmissionPlan,
-  DerivedExtents,
   EvictionPlan,
   EvictionPlanInput,
-  ListedSegment,
-  RawByteCache,
   ResidentSegment,
+} from "./segment-budget.js";
+
+export { createRawByteCache } from "./raw-byte-cache.js";
+export type { RawByteCache } from "./raw-byte-cache.js";
+export type {
+  DerivedExtents,
+  ListedSegment,
   SegmentBytesFetcher,
   SegmentListing,
   SegmentParseJob,

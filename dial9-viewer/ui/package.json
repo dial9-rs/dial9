@@ -5,6 +5,7 @@
   "scripts": {
     "build": "vite build",
     "check:boundary": "node scripts/check-core-imports.mjs",
+    "check:types": "tsc -p tsconfig.types.json --noEmit",
     "dev": "vite",
     "dev:embedded": "vite build --watch",
     "pretest": "npm run check:boundary",

@@ -20,10 +20,12 @@ import { gunzipSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseTraceBuffer } from "./load.js";
 import {
+} from "./segments.js";
+import {
   computeSegmentEdgePolls,
   computeWindowBoundaryPolls,
   segmentInvariants,
-} from "./segments.js";
+} from "./segment-boundary-polls.js";
 import type { ParsedTrace } from "../../../trace_parser.js";
 import type { SegmentEntry } from "../../types/state.js";
 

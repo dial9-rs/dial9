@@ -6,57 +6,31 @@
 // modules that import trace_analysis.js / trace_parser.js at init (they
 // expect <script>-established globals), which this page must not load.
 import {
-  MAX_OPEN_BYTES,
-  groupByHost,
   segmentSpan,
-  segmentGaps,
   segmentsOverlapping,
-  tileSegments,
   totalBytes,
 } from "../../lib/canvas/heatmap.js";
-import {
-  addDiffCapture,
-  chooseTarget,
-  removeDiffSide,
-  swapDiffCapture,
-} from "../../lib/canvas/flamegraph_diff.js";
 import { parseKey } from "../../lib/trace/keys.js";
 import { isDateLayer } from "../../lib/trace/prefixes.js";
-import { traceTitleParams } from "../../lib/trace/title.js";
-import {
-  encodeAggregationParams,
-  encodeScope,
-  scopeFromKeys,
-} from "../../lib/trace/trace_scope.js";
 import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import { apiFetch, sampleBucketKeys, type BrowseResponse } from "./api.js";
+import { createDiffActions } from "./diff-actions.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
+import { createOpenLinks } from "./open-links.js";
 import { sortRawRows, toRawRows } from "./raw-rows.js";
+import { computeExtent, toRows, toSegments } from "./segments.js";
 import type {
   BrowseObject,
   BrowserStore,
-  HeatmapRow,
   HeatmapSegment,
   HeatmapSelection,
   StatusState,
-  TimeDomain,
 } from "./state.js";
 import type { UrlStateFields } from "./globals.js";
 
 /** px height of each host row in the heatmap. */
 export const ROW_H = 26;
-
-/**
- * Heatmap grouping key for an unknown-layout S3 key: the key's raw
- * directory path, so segments from the same directory share a row without
- * any guessed service/host labels. Falls back to the whole key for keys
- * with no directory.
- */
-export function unknownGroupPath(key: string): string {
-  const dir = key.split("/").slice(0, -1).join("/");
-  return dir || key;
-}
 
 export interface BrowserActions {
   syncUrl(): void;
@@ -181,19 +155,6 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   function switchTab(tab: "browse" | "raw"): void {
     store.update("ui", { tab });
     syncUrl();
-  }
-
-  // Full data extent across segments.
-  function computeExtent(segments: readonly HeatmapSegment[]): TimeDomain {
-    let tMin = Infinity;
-    let tMax = -Infinity;
-    for (const s of segments) {
-      const span = segmentSpan(s);
-      if (span.start < tMin) tMin = span.start;
-      if (span.end > tMax) tMax = span.end;
-    }
-    if (!(tMax > tMin)) tMax = tMin + 1;
-    return { tMin, tMax };
   }
 
   // Clear the selection, and either show the "no traces" status (no rows)
@@ -356,49 +317,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         return;
       }
 
-      // Build normalized segments for the density timeline. A segment's
-      // wall-clock span is [trace-start epoch, last_modified]; bytes are
-      // spread uniformly across it when rendering density. Unknown-layout
-      // keys group by their raw directory path; their filename epoch is
-      // layout-independent, so time placement is unchanged.
-      const segments: HeatmapSegment[] = allObjects
-        .map((obj) => {
-          const p = parseKey(obj.key);
-          // Local traces carry no date/epoch in the key, so fall back to the
-          // upload mtime for time placement (#627); S3 traces keep p.epoch.
-          const mtime = epochSeconds(obj.last_modified);
-          const start = p.epoch || mtime;
-          const end = mtime || start;
-          const shared = { key: obj.key, size: obj.size, start, end };
-          if (p.layout === "known") {
-            return {
-              ...shared,
-              layout: "known" as const,
-              service: p.service,
-              host: p.host,
-              bootId: p.bootId,
-            };
-          }
-          return {
-            ...shared,
-            layout: "unknown" as const,
-            service: "",
-            host: unknownGroupPath(obj.key),
-            bootId: "",
-          };
-        })
-        .filter((s) => s.start > 0);
-
-      // Precompute per-row density inputs once (reused across zoom/resize
-      // redraws): segments tiled so upload-lag overlaps don't double-count,
-      // plus the genuine coverage gaps between them.
-      const rows: HeatmapRow[] = groupByHost(segments).map((row) => ({
-        ...row,
-        tiled: tileSegments(row.segments),
-        gaps: segmentGaps(row.segments),
-      }));
-
-      store.update("browse", { segments, rows });
+      const segments = toSegments(allObjects);
+      store.update("browse", { segments, rows: toRows(segments) });
       renderHeatmapState();
     } catch (err) {
       store.update("browse", {
@@ -748,187 +668,17 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       .filter((key) => s.raw.selected.has(key));
   }
 
-  // The bucket's region, stamped onto every link this page opens so the
-  // opened tab's URL is self-contained (signs the right regional S3 endpoint
-  // without inheriting a detected region). Source of truth is the credentials
-  // store; the panel's region field is the fallback. "" when unknown (the
-  // server then uses its default region).
-  function currentRegion(): string {
-    const stored = window.Dial9Creds ? window.Dial9Creds.get() : null;
-    if (stored && stored.region) return stored.region;
-    return els.credsRegion.value.trim() || "";
-  }
-
-  // The selection spanned too many hosts to name them all in the URL, so the
-  // scope degraded to "all hosts in the time window". Warn that the opened
-  // view may be broader than the literal box selection.
-  function warnHostsDropped(): void {
-    alert(
-      "This selection spans too many hosts to put in the link, so the opened " +
-        "view covers ALL hosts in the selected time window. Narrow the time " +
-        "range or host selection for an exact match.",
-    );
-  }
-
-  // Open the viewer on the selection. Carry it as a compact *scope*
-  // (bucket/prefix/service/host-set + time window) rather than one trace=
-  // component per file, so a large selection's URL stays under CloudFront's
-  // 8192-byte cap and re-resolves in any browser (#589). Local mode is the
-  // exception: buffer-style local key names carry nothing to derive a scope
-  // from, so open those directly by key (#627).
-  function viewSelected(): void {
-    const keys = getSelectedKeys();
-    if (keys.length === 0) return;
-
-    const bucket = els.bucketInput.value.trim();
-
-    if (store.getState().config.localMode) {
-      const params = new URLSearchParams();
-      for (const key of keys) {
-        params.append("trace", "/api/object?key=" + encodeURIComponent(key));
-      }
-      window.open("viewer.html?" + params.toString(), "_blank");
-      return;
-    }
-
-    // Structured metadata for the viewer title, plus the scope the viewer
-    // re-lists files from. Unknown-layout keys don't leak shifted svc/host.
-    const titleParams = traceTitleParams(keys, { localTz: localTz() });
-    const sel = store.getState().browse.selection;
-    const scope = scopeFromKeys(
-      bucket,
-      keys,
-      sel ? sel.t0 : null,
-      sel ? sel.t1 : null,
-      currentRegion(),
-    );
-    // Raw mode passes no window, so scopeFromKeys derives it from the keys'
-    // epochs; null means an unrecognized layout with nothing to scope.
-    if (!scope) {
-      alert(
-        "Could not derive a time range from the selected files. Their key " +
-          "names may use an unrecognized layout.",
-      );
-      return;
-    }
-    const { query, hostsDropped } = encodeScope(titleParams, scope);
-    if (hostsDropped) warnHostsDropped();
-    window.open(`viewer.html?${query}`, "_blank");
-  }
-
-  // Flamegraph button. Two modes: aggregation-enabled servers get the sampled
-  // server-side refinement loop over the selection's scope (encoded in the
-  // un-namespaced aggregation vocabulary, `api=1` selecting the demand-driven
-  // path); otherwise the exact per-file decode over a compact `s_*` scope.
-  // A captured A/B diff routes the button to the two-sided diff instead (#623).
-  function viewCpuProfile(): void {
-    const s = store.getState();
-    if (s.diff.a && s.diff.b) {
-      launchDiff("flamegraph");
-      return;
-    }
-    const sel = s.browse.selection;
-    if (!sel || !sel.keys.length) return;
-    const bucket = els.bucketInput.value.trim();
-    if (!bucket) {
-      alert("Bucket is required");
-      return;
-    }
-    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion());
-    if (!scope) return; // a box selection always carries a window, so unreachable
-
-    if (s.config.aggregationEnabled) {
-      const base = new URLSearchParams();
-      base.set("api", "1");
-      const { query, hostsDropped } = encodeAggregationParams(base, scope);
-      if (hostsDropped) warnHostsDropped();
-      window.open("flamegraph.html?" + query, "_blank");
-      return;
-    }
-
-    // Exact mode: open the selected raw traces and decode client-side.
-    const fgParams = traceTitleParams(sel.keys, { localTz: localTz() });
-    const { query, hostsDropped } = encodeScope(fgParams, scope);
-    if (hostsDropped) warnHostsDropped();
-    window.open("flamegraph.html?" + query, "_blank");
-  }
-
-  // Tokio Stats button: the same aggregation scope the demand-driven
-  // flamegraph uses (/api/tokio-stats reads the same param vocabulary). A
-  // captured A/B diff routes to the two-sided diff instead (#623).
-  function viewTokioStats(): void {
-    const s = store.getState();
-    if (s.diff.a && s.diff.b) {
-      launchDiff("tokio");
-      return;
-    }
-    const sel = s.browse.selection;
-    if (!sel || !sel.keys.length) return;
-    const bucket = els.bucketInput.value.trim();
-    if (!bucket) {
-      alert("Bucket is required");
-      return;
-    }
-    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion());
-    if (!scope) return; // window always present for a box selection
-    const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
-    if (hostsDropped) warnHostsDropped();
-    window.open("tokio_stats.html?" + query, "_blank");
-  }
-
-  // ── Differential comparison (A/B) ──
-  // Two captured aggregate scopes launched into either viz via the shared
-  // FlamegraphDiff scope-link codec (?diff=1&a=<b64>&b=<b64>), which both
-  // flamegraph.html and tokio_stats.html consume. Held in the store only.
-
-  // The current selection as an aggregate scope (bucket/prefix/service/
-  // host-set + start_ns/end_ns), shared with the flamegraph/tokio buttons so
-  // all three agree on how a box maps to a scope. Null when there's no usable
-  // selection (or no bucket).
-  function selectionScope(): URLSearchParams | null {
-    const sel = store.getState().browse.selection;
-    if (!sel || !sel.keys.length) return null;
-    const bucket = els.bucketInput.value.trim();
-    if (!bucket) return null;
-    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion());
-    if (!scope) return null;
-    const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
-    if (hostsDropped) warnHostsDropped();
-    return new URLSearchParams(query);
-  }
-
-  // Capture the current selection as one side (A first, then B) of a diff.
-  function addToDiff(): void {
-    const scope = selectionScope();
-    if (!scope) {
-      if (!els.bucketInput.value.trim()) alert("Bucket is required");
-      return;
-    }
-    store.update("diff", addDiffCapture(store.getState().diff, scope));
-  }
-
-  function clearDiff(): void {
-    store.update("diff", { a: null, b: null });
-  }
-
-  // Swap A and B (no-op unless both are set - the codec fills A first).
-  function swapDiff(): void {
-    store.update("diff", swapDiffCapture(store.getState().diff));
-  }
-
-  // Remove one side (clearing A promotes B to A so there's never a B-without-A).
-  function clearDiffSide(side: "a" | "b"): void {
-    store.update("diff", removeDiffSide(store.getState().diff, side));
-  }
-
-  // Launch the captured A/B diff in the chosen viz via the shared scope-link
-  // codec, so flamegraph and tokio-stats receive the same two-scope encoding.
-  function launchDiff(kind: "flamegraph" | "tokio"): void {
-    const d = store.getState().diff;
-    if (!d.a || !d.b) return;
-    const { page, search } = chooseTarget(kind, { hasDiff: true, diffA: d.a, diffB: d.b });
-    window.open(page + "?" + search, "_blank");
-  }
+  // Deep links (viewer / flamegraph / tokio-stats) and the A/B diff verbs
+  // live in their own modules; they are wired together here because a
+  // captured diff takes over the flamegraph and tokio buttons (#623) while
+  // a diff capture reads the same selection scope those buttons build.
+  const diffActions = createDiffActions(store, els);
+  const openLinks = createOpenLinks({
+    store,
+    els,
+    getSelectedKeys,
+    launchDiff: diffActions.launchDiff,
+  });
 
   return {
     syncUrl,
@@ -956,13 +706,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     rawSelectAll,
     syncRawSelectionFromDom,
     getSelectedKeys,
-    viewSelected,
-    viewCpuProfile,
-    viewTokioStats,
-    addToDiff,
-    clearDiff,
-    swapDiff,
-    clearDiffSide,
-    launchDiff,
+    ...openLinks,
+    ...diffActions,
   };
 }
