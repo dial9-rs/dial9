@@ -545,6 +545,14 @@ memory. Encoding:
 
 ## 10. Delivery plan
 
+The vertical slices are specified in
+[diff-first-delivery.md](./diff-first-delivery.md). Summary: a **general fold
+scheduler is built first (S0)** — foundational infra so coverage symmetry is
+correct from the first diff — then the diff capability lands as vertical slices
+that each cut data → API → UI and end demoable: **S1** load-test window
+comparison (spans p99), **S2** Compare/pop-out UX, **S3** full spans vocabulary,
+**S4** flamegraph view diff, **S5** tokio via group-by-attribute.
+
 The unified view is grown by **forking the current span explorer page** as the
 host shell, then *adding* to it — not a greenfield rewrite and not
 flamegraph-first. The span explorer is already closest to the destination: it
