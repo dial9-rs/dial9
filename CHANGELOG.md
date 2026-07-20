@@ -7,29 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`dial9` is now the facade for all dial9 features: one dependency, `dial9 = "0.5"`, re-exporting the recorder, the
+Tokio instrumentation, the perf sources, and the viewer CLI, and owning `#[dial9::main]` and
+`dial9::record_event`. This is a breaking release: you depend on `dial9` instead of
+`dial9-tokio-telemetry`, and the config, writer, and handle APIs all change.
+
+`Dial9Config` is gone. You build a writer, wrap it in `dial9::recorder(writer)`, and chain
+sources and a runtime onto it:
+
+```rust
+let writer = DiskBuffer::builder().base_path("/tmp/dial9-traces").build()?;
+dial9::recorder(writer)
+    .with_cpu_profiling(CpuProfilingConfig::default())
+    .with_tokio(|t| { t.worker_threads(4); })
+    .with_task_tracking(true)
+```
+
+`recorder(writer)` by itself records with no runtime at all (`.build()` gives a `Recorder`, and any
+`Source` plugs in); `.with_tokio(..)` adds Tokio instrumentation and yields a `TracedRuntime`.
+Sources chain on either side of `.with_tokio`, per-source knobs (`.with_cpu_profiling`,
+`.with_memory_profiling`, …) live on the builder, and `dial9::recorder_from_env()` builds a
+production recorder from the unchanged `DIAL9_*` vars. `dial9::recorder_or_disabled(writer, ..)`
+and `TracedRuntimeBuilder::disabled()` cover the boot-anyway and telemetry-off cases. The
+low-level `TracedRuntime::builder()` and the pipeline / trace-path type-state markers are gone.
+
+The refactor also renamed the trace writers to buffers (`RotatingWriter` → `DiskBuffer`, with
+`DiskBuffer` / `MemoryBuffer` the public storage backends and a fully in-memory pipeline that
+needs no filesystem: `SegmentData::segment()` now returns `&SegmentRef`), collapsed the handles
+(`TelemetryHandle` / `RuntimeTelemetryHandle` into `Dial9Handle` for record/control and
+`Dial9TokioHandle` for spawn, so `record_event(event, &handle)` becomes `handle.record_event(event)`),
+and moved the non-Tokio pieces (custom events, symbolization, process-resource and socket sources,
+memory profiling) into `dial9-core` / `dial9-perf-self-profile` with their public APIs
+(`Dial9Allocator`, `MemoryProfiler`, …) unchanged. 
+Custom processors gain `SegmentProcessor::finalize_dump` and `ProcessError::into_parts`.
+
+Profiling features (`cpu-profiling`, `memory-profiling`, `process-resource`, `linux-socket`) are
+now standalone sources that no longer pull in `tokio`: they auto-wire when `tokio` is on, and the
+facade defaults to `["cli"]` so `cargo install dial9` still works. 
+One behavior flip to watch on upgrade: process resource usage (rusage) sampling is now opt-in behind the `process-resource`
+feature. It was on by default on Unix, so Unix users stop getting rss / page-fault events until
+they enable it.
+
 ### Added
 
 - Explicit CPU profiling backend selection via `CpuProfilingConfig::with_perf_backend()` and `CpuProfilingConfig::with_ctimer_backend()` constructors. The default (Auto: try perf, fall back to ctimer) is unchanged ([#579](https://github.com/dial9-rs/dial9/issues/579), [#660](https://github.com/dial9-rs/dial9/pull/660))
-- In-memory buffer (`MemoryBuffer`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - `#[dial9::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `.graceful_shutdown(Duration)` on the traced-runtime builder (default 1s) or skip it with `.disable_graceful_shutdown()`. Without the macro, drive it yourself via `Recorder::graceful_shutdown(timeout)` ([#479](https://github.com/dial9-rs/dial9/issues/479))
-- `SegmentProcessor::finalize_dump`: custom processors can flush per-dump state when an on-demand dump completes ([#549](https://github.com/dial9-rs/dial9/pull/549))
-- `ProcessError::into_parts`: destructure a processing error into its kind and the carried segment data ([#549](https://github.com/dial9-rs/dial9/pull/549))
-- `dial9::recorder` (also `dial9_core::recorder`): a recording-session builder. `recorder(writer).source(..).pipe(..).build()` returns a live `Recorder`; any `Source` (e.g. CPU profiling, or your own) plugs in ([#356](https://github.com/dial9-rs/dial9/issues/356))
-- `dial9::recorder(writer).with_tokio(..)`: attach a Tokio runtime and build a `TracedRuntime` (the `RecorderBuilderTokioExt` trait). Plug profiling sources with `.with_cpu_profiling` / `.with_sched_events` / `.with_process_resource_usage` / `.with_socket_accept_queues` (the `RecorderPerfExt` trait). `dial9::recorder_from_env()` builds a production recorder from `DIAL9_*`; `dial9::recorder_or_disabled(writer, ..)` downgrades to a plain runtime on writer-setup failure; `dial9::TracedRuntimeBuilder::disabled()` runs without telemetry ([#356](https://github.com/dial9-rs/dial9/issues/356))
-- `.with_memory_profiling(config)` on the recorder builder (the `RecorderPerfExt` trait): install sampled allocation profiling on the plain recording session or a tokio runtime in one call. Backed by `RecorderSourceExt::on_recording_start`, a hook run once with the live handle when recording starts ([#356](https://github.com/dial9-rs/dial9/issues/356))
 
 ### Changed
 
 - Programs using `#[dial9::main]` now drain the telemetry worker on clean exit (up to the graceful-shutdown deadline, default 1s) instead of exiting immediately. This adds a bounded amount of shutdown latency but ensures the final segment is processed; opt out with `.disable_graceful_shutdown()` ([#479](https://github.com/dial9-rs/dial9/issues/479))
-- **Breaking:** renamed the trace writers to buffers: `RotatingWriter` is now `DiskBuffer`, and the writer is generic over its storage backend (`SegmentWriter<Mode>`) with `DiskBuffer` / `MemoryBuffer` as the public types; memory constructors are `MemoryBuffer::new` / `::builder` ([#435](https://github.com/dial9-rs/dial9/pull/435))
-- **Breaking:** `SegmentData::segment()` returns `&SegmentRef` (disk- or memory-backed) instead of `&SealedSegment`; processors that read the segment path must match the enum ([#435](https://github.com/dial9-rs/dial9/pull/435))
-- **Breaking:** collapsed the handle types into `Dial9Handle` (record/control, runtime-agnostic) and `Dial9TokioHandle` (spawn only). `TelemetryHandle` and `RuntimeTelemetryHandle` are removed ([#535](https://github.com/dial9-rs/dial9/pull/535))
-- **Breaking:** recording is now a method: `record_event(event, &handle)` becomes `handle.record_event(event)` ([#535](https://github.com/dial9-rs/dial9/pull/535))
-- **Breaking:** the record/control handle is `Dial9Handle` (from `Recorder::handle()`). To spawn instrumented tasks use the `Dial9TokioHandle` from `Dial9TokioHandle::current()`, `TracedRuntime::tokio_handle(&handle)`, or `TracedRuntime::trace_runtime(name).build(..)` ([#535](https://github.com/dial9-rs/dial9/pull/535))
 - **Breaking:** `boot_id` is no longer an `S3Config` builder field. The runtime injects the on-disk namespace `boot_id` into the S3 config at build time, so a local trace segment and its S3 key share one identity. An `S3Config` built outside the managed `recorder_from_env` path falls back to a fresh `{4-alpha}-{pid}` ([#566](https://github.com/dial9-rs/dial9/pull/566))
-- Memory profiling moved into `dial9-perf-self-profile`. The `dial9_tokio_telemetry::memory_profiling::*` paths and public API (`Dial9Allocator`, `MemoryProfiler::install`, `MemoryProfilerGuard`) are unchanged.
-- **Breaking:** removed `Dial9Config` and its builders (`Dial9ConfigBuilder`, `DiskConfigBuilder`, `MemoryConfigBuilder`) along with `Dial9ConfigBuilderError` / `ValidationError` / `TelemetryRuntimeError`. Configure telemetry with `dial9::recorder(writer).with_tokio(..)` (programmatic) or `dial9::recorder_from_env()` (env). Per-source knobs (`with_cpu_profiling`, …) move to the recorder builder (the `RecorderPerfExt` trait); `.build_or_disabled()` becomes `dial9::recorder_or_disabled(writer, ..)`. All `DIAL9_*` env vars are unchanged ([#356](https://github.com/dial9-rs/dial9/issues/356))
-- **Breaking:** removed the low-level `TracedRuntime::builder()` constructor and the pipeline type-state markers. Build a traced runtime via `dial9::recorder(writer).with_tokio(..)`, which yields a `TracedRuntimeBuilder`; for multiple runtimes on one recorder use `TracedRuntime::trace_runtime(name).build(..)`. The worker trace path comes solely from the writer's base path ([#356](https://github.com/dial9-rs/dial9/issues/356))
 
 ### Fixed
 
