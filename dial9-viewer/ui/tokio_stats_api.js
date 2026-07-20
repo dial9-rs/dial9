@@ -92,17 +92,6 @@ function latencyHeat(ns) {
   return "#3fb950"; // green — sub-millisecond
 }
 
-// Map a worker's poll share to a severity color relative to the ideal balanced
-// share (100 / numWorkers). >2× ideal is red (hot worker), >1.5× amber, else
-// green. Used by the "Worker activity" card.
-function workerShareHeat(sharePct, numWorkers) {
-  if (!numWorkers || numWorkers < 1) return "#3fb950";
-  const ideal = 100 / numWorkers;
-  if (sharePct > ideal * 2) return "#f85149"; // red — hot worker
-  if (sharePct > ideal * 1.5) return "#d29922"; // amber — somewhat concentrated
-  return "#3fb950"; // green — balanced
-}
-
 // Map a worker's busyness percentage to a severity color. Busyness = time spent
 // in poll() / wall-clock time. ≥80% is red (near-saturated), ≥50% amber
 // (moderately loaded), else green. Thresholds are intentionally higher than
@@ -114,24 +103,47 @@ function busynessHeat(busyPct) {
   return "#3fb950"; // green — has headroom
 }
 
-// Aggregate a host's busyness from its workers' individual `busy_pct` values.
+// A host's busyness as a POOLED ratio: Σ busy_ns / Σ span_ns (span_ns =
+// observed active time; see worker_activity in tokio_stats.rs) — total poll
+// time over total observed worker-time, i.e. the runtime's mean utilization.
 //
-// A runtime's busyness is the MEAN of its workers' busyness, not Σ busy_ns over
-// any single span. Two reasons the naive form is wrong:
-//   - Different denominators: each worker's busy_pct uses that worker's OWN
-//     observed span (see worker_activity in tokio_stats.rs), so summing the
-//     numerators over one worker's span is a category error.
-//   - Unbounded / misleading: Σ busy_ns / max(span) can exceed 100%, and a
-//     64-worker runtime where each worker is 1/64 saturated would read as
-//     "100% saturated" — the opposite of the truth. The mean reads ~1.6%.
-// The mean is bounded by the per-worker values (each ≤ ~100%) and equals the
-// average of the per-worker rows shown when the host is expanded, so the number
-// stays verifiable by eye. Returns 0 for a host with no workers.
+// NOT the mean of per-worker busy_pct: a mean-of-ratios over-weights workers
+// with a tiny observed window (a few polls clustered in time read as spuriously
+// "busy"), so a host sampled more sparsely looks busier than one doing more
+// work. Pooling weights each worker by its observed time, so those can't
+// dominate.
+//
+// Bounded to ≤100% (per-worker busy_ns ≤ span_ns, so Σ busy_ns ≤ Σ span_ns).
+// Returns 0 for a host with no workers or no observed time.
 function hostBusyPct(workers) {
   const ws = workers || [];
-  if (!ws.length) return 0;
-  const sum = ws.reduce((s, w) => s + (Number(w.busy_pct) || 0), 0);
-  return sum / ws.length;
+  let busy = 0, span = 0;
+  for (const w of ws) {
+    busy += Number(w.busy_ns) || 0;
+    span += Number(w.span_ns) || 0;
+  }
+  return span > 0 ? (busy / span) * 100 : 0;
+}
+
+// A host's worker count as { active, total }, rendered "active / total".
+//
+//   - active = workers actually observed polling (the rows we have).
+//   - total  = the runtime's configured worker count. Tokio numbers workers
+//     contiguously 0..N-1, so max observed worker_id + 1 recovers it. When some
+//     workers never polled in the window, active < total (e.g. "23 / 64"),
+//     surfacing idle-but-available capacity that `active` alone would hide.
+//
+// total ≥ active always (falls back to active when no worker_id is present).
+function hostWorkerCounts(workers) {
+  const ws = workers || [];
+  const active = ws.length;
+  let maxId = -1;
+  for (const w of ws) {
+    const id = Number(w.worker_id);
+    if (Number.isFinite(id) && id > maxId) maxId = id;
+  }
+  const total = maxId >= 0 ? Math.max(maxId + 1, active) : active;
+  return { active, total };
 }
 
 // Whether a coverage block still has matched files left to fold (so "Load more"
@@ -148,9 +160,9 @@ if (typeof module !== "undefined" && module.exports) {
     exemplarViewerUrl,
     formatTokioCoverage,
     latencyHeat,
-    workerShareHeat,
     busynessHeat,
     hostBusyPct,
+    hostWorkerCounts,
     canRefineMore,
   };
 }

@@ -132,18 +132,17 @@ pub struct WorkerStats {
     pub host: String,
     /// All polls observed on this worker (including sub-floor).
     pub total_polls: u64,
-    /// Share of total polls across all workers, as a percentage (0–100).
-    pub poll_share_pct: f64,
     /// Sum of ALL poll durations on this worker (ns).
     pub busy_ns: i64,
-    /// The worker's observed time span (ns): `max(end_ns) − min(start_ns)`.
-    /// This is the denominator for `busy_pct` — exposed so the UI can show the
-    /// breakdown for verification (busy_ns / span_ns = busy_pct).
+    /// The worker's observed active time (ns) — the denominator for `busy_pct`,
+    /// exposed so the UI can show the breakdown for verification
+    /// (busy_ns / span_ns = busy_pct). This is observed time, not the wall-clock
+    /// span; see [`WorkerAccum::observed_ns`].
     pub span_ns: i64,
     /// Busyness percentage: `busy_ns / span_ns * 100`. Approximates worker
-    /// utilization — 100% means the worker never idled during its observed
-    /// window. Measured over the worker's full observed window, including any
-    /// downtime between boots on the same host.
+    /// utilization — 100% means the worker was polling for the whole of its
+    /// observed active time. Bounded to ≤100% because a worker's polls are
+    /// sequential (non-overlapping), so `busy_ns ≤ span_ns`.
     pub busy_pct: f64,
     /// Polls above the duration floor on this worker.
     pub notable_polls: u64,
@@ -405,7 +404,7 @@ fn snapshot_event(
         bucket: ctx.source_bucket.clone(),
         by_spawn_loc,
         top_long_polls: acc.top_long_polls(),
-        worker_activity: acc.worker_activity(time_span_ns),
+        worker_activity: acc.worker_activity(),
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
             files_folded,
@@ -470,34 +469,32 @@ impl TokioStatsAccum {
         top
     }
 
-    /// Per-worker activity ranked by busyness descending. Computes shares from
-    /// the current `total_polls` denominator and busyness from each worker's own
-    /// `busy_ns / (max_end_ns − min_start_ns)` (not the global span, which would
-    /// be meaninglessly diluted in multi-host scopes). Falls back to the global
-    /// span for the degenerate single-poll worker (where min_start == max_end
-    /// after the guard, i.e. a single instantaneous poll).
-    fn worker_activity(&self, global_time_span_ns: i64) -> Vec<WorkerStats> {
+    /// Per-worker activity ranked by busyness descending. Busyness is
+    /// `busy_ns / observed_ns` — poll time over the worker's observed active
+    /// time (the sum of its per-segment windows, NOT the gap-filled span across
+    /// segments; see [`WorkerAccum::observed_ns`]). A worker with no observed
+    /// window (e.g. a single instantaneous poll in every segment) reports 0%
+    /// rather than dividing by zero.
+    fn worker_activity(&self) -> Vec<WorkerStats> {
         if self.by_worker.is_empty() {
             return Vec::new();
         }
-        let total = self.total_polls.max(1) as f64;
-        let fallback_span = global_time_span_ns.max(1) as f64;
         let mut workers: Vec<WorkerStats> = self
             .by_worker
             .iter()
             .map(|((host, wid), wa)| {
-                let worker_span = match (wa.min_ts, wa.max_ts) {
-                    (Some(min), Some(max)) if max > min => (max - min) as f64,
-                    _ => fallback_span,
+                let busy_pct = if wa.observed_ns > 0 {
+                    (wa.busy_ns as f64 / wa.observed_ns as f64) * 100.0
+                } else {
+                    0.0
                 };
                 WorkerStats {
                     worker_id: *wid,
                     host: host.clone(),
                     total_polls: wa.total_polls,
-                    poll_share_pct: (wa.total_polls as f64 / total) * 100.0,
                     busy_ns: wa.busy_ns,
-                    span_ns: worker_span as i64,
-                    busy_pct: (wa.busy_ns as f64 / worker_span) * 100.0,
+                    span_ns: wa.observed_ns,
+                    busy_pct,
                     notable_polls: wa.notable_polls,
                     worst_poll_ns: wa.worst_poll_ns,
                     worst_exemplar: wa.worst_exemplar.clone(),
@@ -513,19 +510,23 @@ impl TokioStatsAccum {
     }
 }
 
-/// Per-worker accumulator for the worker activity rollup. Tracks total polls
-/// (for share computation), busy time (for busyness %), time span observed (for
-/// per-worker denominator), and the worst poll (for heat-coloring + deep-link).
+/// Per-worker accumulator for the worker activity rollup. Tracks total polls,
+/// busy time (for busyness %), observed active time (the busyness denominator),
+/// and the worst poll (for heat-coloring + deep-link).
 #[derive(Default)]
 struct WorkerAccum {
     total_polls: u64,
     /// Sum of all poll durations on this worker (ns), for busyness computation.
     busy_ns: i64,
-    /// Earliest poll start observed on this worker — used with `max_ts` to
-    /// compute the worker's own time span (the correct busyness denominator,
-    /// rather than the global scope span which inflates for multi-host scopes).
-    min_ts: Option<i64>,
-    max_ts: Option<i64>,
+    /// Sum of this worker's per-segment observed windows (ns): for each trace
+    /// segment (= one polls part-file), `max(end_ns) − min(start_ns)` over the
+    /// worker's polls in that segment, accumulated across segments. This is the
+    /// busyness denominator. It deliberately EXCLUDES the idle gaps between
+    /// segments: taking `max − min` across all segments would count that
+    /// unobserved downtime, making a host whose segments cluster in wall-clock
+    /// time read as far busier than one whose segments are spread out —
+    /// independent of actual work.
+    observed_ns: i64,
     notable_polls: u64,
     worst_poll_ns: i64,
     worst_exemplar: Option<PollExemplar>,
@@ -579,6 +580,11 @@ fn read_polls_part(
         4096,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Per-worker (min start_ns, max end_ns) window within this segment (one
+    // part-file = one segment), accumulated across this file's batches and
+    // folded into each worker's `observed_ns` after the loop.
+    let mut seg_windows: HashMap<(String, u32), (i64, i64)> = HashMap::new();
 
     for batch in reader {
         let batch = batch.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -635,30 +641,27 @@ fn read_polls_part(
             acc.total_polls += 1;
 
             // Worker activity: count every poll and accumulate busy_ns (before
-            // the notable floor) so share% and busyness reflect the true
-            // distribution. Keyed by (host, worker_id) so multi-host scopes
-            // don't conflate workers from different runtimes. Skip part-files
-            // that predate the worker_id column rather than fabricating a worker 0.
+            // the notable floor) so busyness reflects the true distribution.
+            // Keyed by (host, worker_id) so multi-host scopes don't conflate
+            // workers from different runtimes. Skip part-files that predate the
+            // worker_id column rather than fabricating a worker 0.
             if let Some(workers) = worker_arr {
                 let host_val = host_arr
                     .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
                     .unwrap_or("");
-                let wa = acc
-                    .by_worker
-                    .entry((host_val.to_string(), workers.value(i)))
-                    .or_default();
+                let key = (host_val.to_string(), workers.value(i));
+                let wa = acc.by_worker.entry(key.clone()).or_default();
                 wa.total_polls += 1;
                 wa.busy_ns += dur;
-                if let Some(sa) = start_arr {
-                    let ts = sa.value(i);
-                    wa.min_ts = Some(wa.min_ts.map_or(ts, |m| m.min(ts)));
-                }
-                // max_ts uses end_ns (not start_ns) so the span covers the
-                // full duration of the last poll — otherwise busy_pct exceeds
-                // 100% when a worker's last poll is long relative to its span.
-                if let Some(ea) = end_arr {
-                    let ts = ea.value(i);
-                    wa.max_ts = Some(wa.max_ts.map_or(ts, |m| m.max(ts)));
+                // Extend this worker's window within this segment. The upper
+                // bound uses end_ns (not start_ns) so it covers the last poll's
+                // full duration, keeping busy_ns ≤ the window. Folded into
+                // `observed_ns` after the batch loop.
+                if let (Some(sa), Some(ea)) = (start_arr, end_arr) {
+                    let (start, end) = (sa.value(i), ea.value(i));
+                    let w = seg_windows.entry(key).or_insert((start, end));
+                    w.0 = w.0.min(start);
+                    w.1 = w.1.max(end);
                 }
             }
 
@@ -756,6 +759,15 @@ fn read_polls_part(
             }
         }
     }
+
+    // Fold this segment's per-worker windows into each worker's observed active
+    // time (summed across segments, so inter-segment gaps aren't counted).
+    for (key, (start, end)) in seg_windows {
+        if let Some(wa) = acc.by_worker.get_mut(&key) {
+            wa.observed_ns += (end - start).max(0);
+        }
+    }
+
     Ok(())
 }
 
@@ -815,23 +827,14 @@ mod tests {
             top[0].duration_ns >= DURATION_FLOOR_NS,
             "long polls must clear the notable floor"
         );
-        // Worker activity: populated, ranked by busy_pct descending, shares
-        // sum to ~100%, busyness > 0, host is set, and worst exemplar carries
-        // a source key.
-        let time_span_ns = match (acc.min_ts, acc.max_ts) {
-            (Some(min), Some(max)) => (max - min).max(1),
-            _ => 1,
-        };
-        let workers = acc.worker_activity(time_span_ns);
+        // Worker activity: populated, ranked by busy_pct descending, busyness
+        // > 0 and bounded ≤100%, host is set, and worst exemplar carries a
+        // source key.
+        let workers = acc.worker_activity();
         assert!(!workers.is_empty(), "expected at least one worker");
         assert!(
             workers.windows(2).all(|w| w[0].busy_pct >= w[1].busy_pct),
             "worker activity must be ranked descending by busyness"
-        );
-        let share_sum: f64 = workers.iter().map(|w| w.poll_share_pct).sum();
-        assert!(
-            (share_sum - 100.0).abs() < 0.1,
-            "worker shares must sum to ~100% (got {share_sum})"
         );
         assert!(
             workers.iter().all(|w| w.total_polls > 0),
@@ -844,6 +847,19 @@ mod tests {
         assert!(
             workers.iter().all(|w| w.busy_pct > 0.0),
             "every worker must have non-zero busyness"
+        );
+        // Busyness is poll time over observed active time. A worker's polls are
+        // sequential (non-overlapping), so busy_ns ≤ observed_ns ⇒ busy_pct is
+        // bounded to ≤100% (with a small epsilon for float error). This is the
+        // invariant the old gap-filled-span denominator could violate.
+        assert!(
+            workers.iter().all(|w| w.busy_pct <= 100.0 + 1e-6),
+            "busyness must be bounded to 100% (got {:?})",
+            workers.iter().map(|w| w.busy_pct).fold(0.0_f64, f64::max)
+        );
+        assert!(
+            workers.iter().all(|w| w.span_ns >= w.busy_ns),
+            "observed span must be at least the busy time for every worker"
         );
         // In real traces, host is non-empty (parsed from source key structure);
         // in the demo-trace test the source key "test-key" yields "" — which is

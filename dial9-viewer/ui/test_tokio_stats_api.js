@@ -10,9 +10,9 @@ const {
   exemplarViewerUrl,
   formatTokioCoverage,
   latencyHeat,
-  workerShareHeat,
   busynessHeat,
   hostBusyPct,
+  hostWorkerCounts,
   canRefineMore,
 } = require("./tokio_stats_api.js");
 
@@ -181,17 +181,6 @@ assertEq(latencyHeat(2_500_000), "#d29922", "1–3ms poll is amber");
 assertEq(latencyHeat(3_000_000), "#f85149", "3ms poll is red");
 assertEq(latencyHeat(50_000_000), "#f85149", "50ms poll is red");
 
-// ── workerShareHeat ──
-// With 4 workers, ideal = 25%. >50% (2×) is red, >37.5% (1.5×) amber, else green.
-assertEq(workerShareHeat(20, 4), "#3fb950", "4 workers: 20% share is green (balanced)");
-assertEq(workerShareHeat(25, 4), "#3fb950", "4 workers: exactly ideal share is green");
-assertEq(workerShareHeat(38, 4), "#d29922", "4 workers: 38% share is amber (>1.5× ideal)");
-assertEq(workerShareHeat(55, 4), "#f85149", "4 workers: 55% share is red (>2× ideal, hot worker)");
-// Edge case: single worker always gets 100% which is exactly ideal (not hot).
-assertEq(workerShareHeat(100, 1), "#3fb950", "1 worker: 100% is just ideal, green");
-// Edge case: no workers (guard).
-assertEq(workerShareHeat(50, 0), "#3fb950", "0 workers: fallback green");
-
 // ── busynessHeat ──
 // Busyness = poll time / wall-clock. ≥80% red (saturated), ≥50% amber, else green.
 assertEq(busynessHeat(30), "#3fb950", "30% busy is green (has headroom)");
@@ -202,34 +191,79 @@ assertEq(busynessHeat(80), "#f85149", "80% busy is red (near-saturated)");
 assertEq(busynessHeat(99), "#f85149", "99% busy is red");
 
 // ── hostBusyPct ──
-// A host's busyness is the MEAN of its workers' busy_pct, not Σ busy_ns over a
-// single span. It must stay bounded and match the average of the per-worker
-// rows shown on expand.
+// A host's busyness is the POOLED ratio Σ busy_ns / Σ span_ns — total poll time
+// over total observed worker-time — NOT a mean of per-worker ratios (which
+// over-weights sparse-window workers and reads backwards).
 assertClose(
-  hostBusyPct([{ busy_pct: 40 }, { busy_pct: 60 }]),
+  hostBusyPct([{ busy_ns: 40, span_ns: 100 }, { busy_ns: 60, span_ns: 100 }]),
   50,
-  "two workers -> mean of their busy_pct",
+  "two equal-span workers -> pooled ratio equals their mean",
 );
-assertClose(hostBusyPct([{ busy_pct: 73.25 }]), 73.25, "single worker -> its own busy_pct");
-// rcoh's case: 64 workers each 1/64 saturated must read ~1.56%, NOT 100%.
+assertClose(
+  hostBusyPct([{ busy_ns: 7325, span_ns: 10000 }]),
+  73.25,
+  "single worker -> busy_ns / span_ns",
+);
+// Pooling weights by observed time, so it is NOT the mean of per-worker
+// percentages: a 90%-busy worker observed briefly plus a 10%-busy worker
+// observed 9× longer pools to 18%, not the naive 50% average. This is the
+// bias that made the old mean read backwards.
+assertClose(
+  hostBusyPct([{ busy_ns: 90, span_ns: 100 }, { busy_ns: 90, span_ns: 900 }]),
+  (90 + 90) / (100 + 900) * 100,
+  "pooled ratio weights by observed time (18%), not the 50% naive mean",
+);
+// rcoh's case: 64 workers each 1/64 saturated -> host reads ~1.56%, not 100%.
 {
-  const workers = Array.from({ length: 64 }, () => ({ busy_pct: 100 / 64 }));
+  const workers = Array.from({ length: 64 }, () => ({ busy_ns: 1, span_ns: 64 }));
   assertClose(hostBusyPct(workers), 100 / 64, "64 workers each 1/64 busy -> ~1.56%, not 100%");
 }
-// The mean can never exceed the workers' own (bounded) busyness, so a host of
-// fully-saturated workers is 100% — never over.
+// Fully-saturated workers pool to 100% and never exceed it (Σbusy ≤ Σspan).
 {
-  const workers = Array.from({ length: 8 }, () => ({ busy_pct: 100 }));
+  const workers = Array.from({ length: 8 }, () => ({ busy_ns: 100, span_ns: 100 }));
   assertClose(hostBusyPct(workers), 100, "all workers 100% busy -> host 100% (never over)");
 }
 // Degenerate / defensive inputs.
 assertEq(hostBusyPct([]), 0, "no workers -> 0 (no NaN)");
 assertEq(hostBusyPct(undefined), 0, "undefined workers -> 0");
-assertClose(
-  hostBusyPct([{ busy_pct: 50 }, {}]),
-  25,
-  "missing busy_pct counts as 0 in the mean (not NaN)",
+assertEq(
+  hostBusyPct([{ busy_ns: 5, span_ns: 0 }]),
+  0,
+  "zero observed time -> 0 (no divide-by-zero)",
 );
+
+// ── hostWorkerCounts ──
+// active = observed workers; total = configured (max worker_id + 1, since Tokio
+// numbers workers 0..N-1). total ≥ active always.
+{
+  const c = hostWorkerCounts([{ worker_id: 0 }, { worker_id: 1 }, { worker_id: 2 }]);
+  assertEq(c.active, 3, "contiguous 0..2 -> active 3");
+  assertEq(c.total, 3, "contiguous 0..2 -> total 3 (fully observed)");
+}
+// rcoh's case: only 23 workers polled, but ids run up to 63 -> "23 / 64".
+{
+  const ids = [0, 1, 2, 5, 10, 63]; // 6 observed, highest id 63
+  const c = hostWorkerCounts(ids.map((id) => ({ worker_id: id })));
+  assertEq(c.active, 6, "sparse ids -> active is observed count");
+  assertEq(c.total, 64, "sparse ids -> total is max id + 1 (undercount closed)");
+}
+// Missing worker_id (older part-files): fall back to active, never below it.
+{
+  const c = hostWorkerCounts([{}, {}]);
+  assertEq(c.active, 2, "no worker_id -> active from row count");
+  assertEq(c.total, 2, "no worker_id -> total falls back to active");
+}
+// A single worker 0 -> 1 / 1.
+{
+  const c = hostWorkerCounts([{ worker_id: 0 }]);
+  assertEq(c.total, 1, "worker 0 alone -> total 1");
+}
+// No workers.
+{
+  const c = hostWorkerCounts([]);
+  assertEq(c.active, 0, "no workers -> active 0");
+  assertEq(c.total, 0, "no workers -> total 0");
+}
 
 // ── canRefineMore ──
 assertEq(canRefineMore({ files_matched: 480, files_folded: 24 }), true, "folded < matched -> more");
