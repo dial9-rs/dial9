@@ -4,7 +4,7 @@
 // buildWorkerSpans takes the trace's blockInPlaceGaps and DISCARDS active
 // spans that cross a gap (they are absent from `actives`, never split); the
 // final still-open park span has no schedWait, hence
-// `ParkSpan.schedWait?: number`.
+// `ParkSpan.schedWait?: number | null`.
 
 declare module "*/trace_analysis.js" {
   import type {
@@ -30,7 +30,11 @@ declare module "*/trace_analysis.js" {
     start: number;
     end: number;
     taskId: number;
-    spawnLocId: string | null;
+    /** The interned spawn-location id, or the literal 0 the frozen builder
+     * substitutes when a poll closes with no recorded meta (trace_analysis.js
+     * emits `spawnLocId: 0`, not null, on those three fallback paths). Read
+     * `spawnLoc` for the resolved string. */
+    spawnLocId: number | string | null;
     spawnLoc: string | null;
     /**
      * True when no matching PollEnd was seen (block_in_place handoff or
@@ -47,10 +51,13 @@ declare module "*/trace_analysis.js" {
     start: number;
     end: number;
     /**
-     * Kernel scheduling wait (ns) read from the closing WorkerUnpark.
-     * Absent on the synthetic park closed at trace end (no unpark seen).
+     * Kernel scheduling wait (ns) read from the closing WorkerUnpark. Two
+     * distinct absences, both real on the wire: the key is OMITTED on the
+     * synthetic park closed at trace end (no unpark seen), and it is NULL when
+     * the unpark carried no sched_wait_ns (trace_parser.js decodes the missing
+     * field to null). Readers must test `!= null` to cover both.
      */
-    schedWait?: number;
+    schedWait?: number | null;
   }
 
   /**

@@ -33,11 +33,14 @@ import type {
   SpanList,
   TaskDump,
   TaskWake,
-  WorkerLane,
+  LaneSpans,
 } from "../../lib/trace/index.js";
-import { pixelCoverage } from "../../lib/canvas/index.js";
+import { nsToDrawX, pixelCoverage } from "../../lib/canvas/index.js";
 import { sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
-import type { ColumnarWorkerSpans } from "../../lib/trace/columnar-worker-spans.js";
+import {
+  isColumnarLane,
+  type ColumnarWorkerSpans,
+} from "../../lib/trace/columnar-worker-spans.js";
 
 // ── Trace-invariant poll source (buildWorkerSpans, keyed by trace) ────────
 
@@ -51,7 +54,7 @@ export interface TaskPollSource {
   /** Distinct runtime worker ids (render order irrelevant here). */
   workerIds: readonly number[];
   /** Reconstructed poll/park/active spans per worker. */
-  workerSpans: Record<number, WorkerLane>;
+  workerSpans: Record<number, LaneSpans>;
   /** Wake events indexed by woken task. */
   wakesByTask: Record<number, TaskWake[]>;
 }
@@ -220,12 +223,12 @@ export function computeTaskDetailData(
   // the lane views themselves, so we read it from `source` (no trace re-derive).
   let store: ColumnarWorkerSpans | undefined;
   for (const w of source.workerIds) {
-    const lane = source.workerSpans[w] as { store?: ColumnarWorkerSpans } | undefined;
-    if (lane?.store) { store = lane.store; break; }
+    const lane = source.workerSpans[w];
+    if (lane !== undefined && isColumnarLane(lane)) { store = lane.store; break; }
   }
   let polls: PollSpan[];
   if (store) {
-    polls = store.pollsForTask(taskId) as unknown as PollSpan[];
+    polls = store.pollsForTask(taskId);
   } else {
     polls = [];
     for (const w of source.workerIds) {
@@ -253,9 +256,11 @@ export function computeTaskDetailData(
   );
 
   const firstPoll = polls[0]!;
+  // spawnLocations is string-keyed; the frozen builder's numeric 0 fallback
+  // means "no recorded location" and has no entry to find.
   const spawnLocId = firstPoll.spawnLocId;
   const spawnLocation =
-    spawnLocId != null ? trace.spawnLocations.get(spawnLocId) ?? null : null;
+    typeof spawnLocId === "string" ? trace.spawnLocations.get(spawnLocId) ?? null : null;
 
   const spawnTs = trace.taskSpawnTimes.get(taskId) ?? null;
   const terminateTs = trace.taskTerminateTimes.get(taskId) ?? null;
@@ -694,15 +699,9 @@ export function wakeRegionAt(
  * Resolves to the "complete" value for a whole-trace load (the segments slice is
  * empty). Mirrors the CPU track's CpuWindow.
  */
-export interface TaskDetailWindow {
-  /** Which edge(s) of the resident window truncate the poll data. */
-  truncatedAt: "start" | "end" | "both" | null;
-  /** True when a needed segment is terminally "oversized" (never resident). */
-  oversized: boolean;
-}
 
-/** The "complete window" descriptor (whole-trace load, no windowing). */
-export const COMPLETE_TASK_DETAIL_WINDOW: TaskDetailWindow = {
-  truncatedAt: null,
-  oversized: false,
-};
+
+export {
+  COMPLETE_WINDOW as COMPLETE_TASK_DETAIL_WINDOW,
+  type ResidentWindow as TaskDetailWindow,
+} from "./resident-window.js";

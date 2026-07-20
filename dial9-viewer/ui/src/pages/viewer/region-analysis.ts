@@ -107,7 +107,7 @@ export function createRegionAnalysis(
   let cpuSamplesForExtent: readonly { callchain: string[]; workerId: number; timestamp: number }[] = [];
 
   function state(): StoreState {
-    return store.getState() as StoreState;
+    return store.getState();
   }
 
   function currentRange(): TimeRange | null {

@@ -19,31 +19,33 @@ import type { ColumnarEvents } from "./columnar-events.js";
 import { ColumnarWorkerSpansBuilder, type ColumnarWorkerSpans } from "./columnar-worker-spans.js";
 import type {
   BlockInPlaceGap,
+  PollSpan,
+  WorkerLane,
   WorkerSpansResult,
 } from "../../../trace_analysis.js";
 
 type Rec<T> = Record<string, T>;
 
-const defaultMeta = { taskId: 0, spawnLocId: 0 as number | string, spawnLoc: null as string | null };
+const defaultMeta = { taskId: 0, spawnLocId: 0 as number | string | null, spawnLoc: null as string | null };
 
 /** Sink for reconstructed spans. `schedWait` omitted (undefined) => the
  * trace-end park close, which the frozen path pushes WITHOUT a schedWait key. */
 interface SpanEmitter {
-  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string, spawnLoc: string | null, openEnded: boolean): void;
+  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean): void;
   park(w: number, start: number, end: number, schedWait?: number | null): void;
   active(w: number, start: number, end: number, ratio: number): void;
 }
 
 /** Builds the fat WorkerLane dict, byte-identical to the frozen output. */
 class FatSpanEmitter implements SpanEmitter {
-  readonly workerSpans: Rec<{ polls: unknown[]; parks: unknown[]; actives: unknown[]; cpuSampleTimes: number[] }> = {};
+  readonly workerSpans: Rec<WorkerLane> = {};
   ensure(w: number): void {
     if (this.workerSpans[w] === undefined) this.workerSpans[w] = { polls: [], parks: [], actives: [], cpuSampleTimes: [] };
   }
-  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string, spawnLoc: string | null, openEnded: boolean): void {
-    const o: Record<string, unknown> = { start, end, taskId, spawnLocId, spawnLoc };
-    if (openEnded) o.openEnded = true;
-    this.workerSpans[w]!.polls.push(o);
+  poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean): void {
+    const poll: PollSpan = { start, end, taskId, spawnLocId, spawnLoc };
+    if (openEnded) poll.openEnded = true;
+    this.workerSpans[w]!.polls.push(poll);
   }
   park(w: number, start: number, end: number, schedWait?: number | null): void {
     // Omit the key entirely on the trace-end close, matching the frozen push.
@@ -60,7 +62,7 @@ class StoreSpanEmitter implements SpanEmitter {
   constructor(b: ColumnarWorkerSpansBuilder) {
     this.b = b;
   }
-  poll(w: number, start: number, end: number, taskId: number, _spawnLocId: number | string, spawnLoc: string | null, openEnded: boolean): void {
+  poll(w: number, start: number, end: number, taskId: number, _spawnLocId: number | string | null, spawnLoc: string | null, openEnded: boolean): void {
     this.b.pushPoll(w, start, end, taskId, spawnLoc, openEnded);
   }
   park(w: number, start: number, end: number, schedWait?: number | null): void {
@@ -93,7 +95,7 @@ function reconstruct(
   const openPoll: Rec<number | null> = {};
   const openPark: Rec<number | null> = {};
   const openUnpark: Rec<{ timestamp: number; cpuTime: number } | null> = {};
-  const openPollMeta: Rec<{ taskId: number; spawnLocId: number | string; spawnLoc: string | null }> = {};
+  const openPollMeta: Rec<{ taskId: number; spawnLocId: number | string | null; spawnLoc: string | null }> = {};
 
   const gapsByW: Rec<BlockInPlaceGap[]> = {};
   if (blockInPlaceGaps && blockInPlaceGaps.length > 0) {
@@ -157,7 +159,7 @@ function reconstruct(
         }
         openPoll[wKey] = t;
         const sl = store.spawnLocAt(i);
-        openPollMeta[wKey] = { taskId: taskId[i]!, spawnLocId: sl as unknown as string, spawnLoc: sl };
+        openPollMeta[wKey] = { taskId: taskId[i]!, spawnLocId: sl, spawnLoc: sl };
       } else if (et === EVT.PollEnd) {
         if (openPoll[wKey] != null) {
           const meta = openPollMeta[wKey] || defaultMeta;
@@ -227,13 +229,16 @@ export function buildWorkerSpansColumnar(
   const agg = reconstruct(store, workerIds, maxTs, blockInPlaceGaps, emit);
   return {
     workerSpans: emit.workerSpans,
-    perWorker: agg.perWorker,
+    // The ONE field that is not frozen-identical: index buckets, not event
+    // objects (see the header). No consumer reads it, so the divergence stays
+    // confined to this field instead of blanking the whole result's type.
+    perWorker: agg.perWorker as unknown as WorkerSpansResult["perWorker"],
     queueSamples: agg.queueSamples,
     workerQueueSamples: agg.workerQueueSamples,
     maxLocalQueue: agg.maxLocalQueue,
     wakesByTask: agg.wakesByTask,
     wakesByWorker: agg.wakesByWorker,
-  } as unknown as WorkerSpansResult;
+  };
 }
 
 /** Result of the store path: the typed-array store plus the non-span

@@ -161,7 +161,7 @@ export function createStatusBar(
   const onClear = (): void => deps.clearSelection();
 
   function renderPass(): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     render(statusTemplate(statusViewModel(state), onClear), textHost);
   }
 

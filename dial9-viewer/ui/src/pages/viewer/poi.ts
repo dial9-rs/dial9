@@ -15,7 +15,7 @@ import {
   formatHumanDuration,
 } from "../../lib/trace/index.js";
 import { sharedWorkerSpans, columnarWorkerStoreFor } from "../../components/canvas/lanes/data.js";
-import type { ColumnarWorkerSpans } from "../../lib/trace/columnar-worker-spans.js";
+import { laneSource, type LaneSource } from "../../lib/trace/columnar-worker-spans.js";
 import type {
   ParsedTrace,
   ParkSpan,
@@ -23,7 +23,6 @@ import type {
   PointOfInterestType,
   PollSpan,
   SchedDelay,
-  WorkerLane,
 } from "../../types/trace.js";
 import type { PoiSlice, PoiSortKey, ViewportSlice } from "../../types/state.js";
 
@@ -35,6 +34,14 @@ export const POI_FILTERS: readonly PointOfInterestType[] = [
   "wake-delay",
   "uninstrumented",
 ];
+
+/** Validate a filter arriving from the DOM (a `<select>` value is just a
+ * string) before it reaches the store and the detectors. */
+export function parsePoiFilter(value: string): PointOfInterestType | null {
+  return (POI_FILTERS as readonly string[]).includes(value)
+    ? (value as PointOfInterestType)
+    : null;
+}
 
 /** The full-length option label for the filter dropdown. */
 export function filterLabel(type: PointOfInterestType): string {
@@ -81,13 +88,12 @@ export function kindLabel(type: PointOfInterestType): string {
  */
 export interface PoiSource {
   workerIds: number[];
-  workerSpans: Record<number, WorkerLane>;
+  /** Which representation the detectors run against: the columnar store scans
+   * raw columns, the fat path takes the frozen filterPointsOfInterest. */
+  lanes: LaneSource;
   schedDelays: SchedDelay[];
   hasSchedWait: boolean;
   taskInstrumented: Map<number, boolean>;
-  /** Columnar store on the main-thread path; detectors scan its raw columns
-   * instead of the fat filterPointsOfInterest over the flyweight views. */
-  store?: ColumnarWorkerSpans | undefined;
   /** Lazy per-filter detector output cache (keyed by filter type). */
   readonly _byFilter: Map<PointOfInterestType, PointOfInterest[]>;
 }
@@ -121,22 +127,20 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
   // Shared reconstruction (buildWorkerSpans + attachCpuSamples applied once);
   // the "cpu-sampled" detector reads the already-attached poll samples.
   const spanResult = sharedWorkerSpans(trace);
-  const workerSpans = spanResult.workerSpans;
   // Columnar path: compute scheduling delays over raw columns (the frozen
   // computeSchedulingDelays would materialize every poll from the flyweight
   // views). Falls back to the frozen path when there is no store.
-  const store = columnarWorkerStoreFor(trace);
-  const schedDelays = store
-    ? store.schedulingDelays(workerIds, spanResult.wakesByTask as never)
-    : computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);
+  const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
+  const schedDelays = lanes.columnar
+    ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
+    : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask);
 
   source = {
     workerIds,
-    workerSpans,
-    schedDelays: schedDelays as SchedDelay[],
+    lanes,
+    schedDelays,
     hasSchedWait: trace.hasSchedWait,
     taskInstrumented: trace.taskInstrumented,
-    store,
     _byFilter: new Map(),
   };
   sourceCache.set(trace, source);
@@ -160,9 +164,11 @@ export function poisForFilter(
     sortByWorst: true,
     taskInstrumented: source.taskInstrumented,
   };
-  list = source.store
-    ? source.store.pointsOfInterest(filter, source.workerIds, source.schedDelays, opts)
-    : filterPointsOfInterest(filter, source.workerSpans, source.workerIds, source.schedDelays, opts);
+  list = source.lanes.columnar
+    ? source.lanes.store.pointsOfInterest(filter, source.workerIds, source.schedDelays, opts)
+    : filterPointsOfInterest(
+        filter, source.lanes.workerSpans, source.workerIds, source.schedDelays, opts,
+      );
   source._byFilter.set(filter, list);
   return list;
 }

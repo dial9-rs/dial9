@@ -25,16 +25,7 @@ import { deriveWorkerIds, sharedWorkerSpans } from "../../components/canvas/lane
  * partial window is never painted as complete. Both fields resolve to the
  * "complete" value for a whole-trace load. Mirrors the CPU track's `CpuWindow`.
  */
-export interface QueueWindow {
-  truncatedAt: "start" | "end" | "both" | null;
-  oversized: boolean;
-}
 
-/** The "complete window" descriptor (whole-trace load, no windowing). */
-export const COMPLETE_QUEUE_WINDOW: QueueWindow = {
-  truncatedAt: null,
-  oversized: false,
-};
 
 // ── Series data (derived once per trace) ─────────────────────────────────
 
@@ -130,14 +121,6 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
  * the renderer consumes the descriptor regardless. Mirrors cpu.ts
  * `deriveCpuWindow`.
  */
-export function deriveQueueWindow(state: StoreState): QueueWindow {
-  for (const entry of state.segments.segments.values()) {
-    if (entry.state === "oversized") {
-      return { truncatedAt: null, oversized: true };
-    }
-  }
-  return COMPLETE_QUEUE_WINDOW;
-}
 
 // ── The scale function ───────────────────────────────────────────────────
 
@@ -447,3 +430,9 @@ export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
   { swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
   { swatch: "#81c784", label: "Active tasks", shape: "line" },
 ];
+
+export {
+  COMPLETE_WINDOW as COMPLETE_QUEUE_WINDOW,
+  deriveResidentWindow as deriveQueueWindow,
+  type ResidentWindow as QueueWindow,
+} from "./resident-window.js";

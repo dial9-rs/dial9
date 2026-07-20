@@ -246,8 +246,9 @@ export function probeAnalysis(trace: ParsedTrace): void {
       }
     }
     for (const park of lane.parks) {
-      // schedWait is absent on the synthetic trace-end park.
-      if (park.schedWait !== undefined && park.schedWait > 100) void park.end;
+      // Omitted on the synthetic trace-end park, null when the unpark carried
+      // no sched_wait_ns; `!= null` is the check that covers both.
+      if (park.schedWait != null && park.schedWait > 100) void park.end;
     }
     for (const a of lane.actives) {
       const ratio: number = a.ratio; // gap-crossing actives are discarded

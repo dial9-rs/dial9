@@ -14,7 +14,12 @@
 import { SegmentForest, spanBucketMerge, type SpanAgg } from "./segment-forest.js";
 import type { CpuSample } from "./columnar-cpu-samples.js";
 import type { SpanList } from "./query.js";
-import type { PointOfInterest, PointOfInterestType, WorkerLane } from "../../types/trace.js";
+import type {
+  PointOfInterest,
+  PointOfInterestType,
+  WorkerLane,
+  WorkerSpansResult,
+} from "../../types/trace.js";
 
 /** Options for pointsOfInterest, mirroring filterPointsOfInterest's opts. */
 export interface PoiOpts {
@@ -43,6 +48,15 @@ export interface ParkView {
   start: number;
   end: number;
   schedWait: number | null;
+}
+
+/** A park as consumers read it off EITHER lane representation. The two spell an
+ * unsampled park->unpark wait differently -- the columnar store reports null,
+ * the frozen fat path omits the field -- so readers must test `!= null`. */
+export interface ParkLike {
+  start: number;
+  end: number;
+  schedWait?: number | null;
 }
 /** An active (on-CPU) span with its cpu/wall ratio. */
 export interface ActiveView {
@@ -124,6 +138,57 @@ export interface WorkerLaneView {
   cpuSampleTimes: number[];
   store: ColumnarWorkerSpans;
   w: number;
+}
+
+/** A lane as consumers receive it: fat objects on small traces, columnar on
+ * big ones. Narrow with isColumnarLane before touching either representation. */
+export type LaneSpans = WorkerLane | WorkerLaneView;
+
+/** buildWorkerSpans' result as the APP sees it. Identical to the frozen core's
+ * shape except that lanes may be columnar: the frozen function only ever
+ * returns fat lanes, so widening WorkerSpansResult itself would misdescribe
+ * it. */
+export type LaneWorkerSpans = Omit<WorkerSpansResult, "workerSpans"> & {
+  workerSpans: Record<number, LaneSpans>;
+};
+
+/** True when `lane` is columnar-backed (dispatch guard for render + hit-test),
+ * mirroring isColumnarSpans in columnar-spans.ts. */
+export function isColumnarLane(lane: LaneSpans): lane is WorkerLaneView {
+  return (lane as Partial<WorkerLaneView>).store !== undefined;
+}
+
+/** Which representation the POI + sched-delay detectors run against. The frozen
+ * detectors take fat lanes; the columnar store scans its raw columns instead.
+ * A discriminated pair so a consumer cannot reach for the wrong one. */
+export type LaneSource =
+  | { columnar: true; store: ColumnarWorkerSpans }
+  | { columnar: false; workerSpans: Record<number, WorkerLane> };
+
+/** The lanes as the frozen fat-path consumers require them. Throws rather than
+ * substituting a default: a columnar lane reaching a frozen consumer means the
+ * store and lane caches disagreed, and silently dropping it would surface as
+ * empty spans/POIs on exactly the big traces this path exists for. */
+export function fatLanes(lanes: Record<number, LaneSpans>): Record<number, WorkerLane> {
+  const fat: Record<number, WorkerLane> = {};
+  for (const [worker, lane] of Object.entries(lanes)) {
+    if (isColumnarLane(lane)) {
+      throw new Error(`columnar lane for worker ${worker} reached a fat-path consumer`);
+    }
+    fat[Number(worker)] = lane;
+  }
+  return fat;
+}
+
+/** Pair `store` with the lanes it was built from, so a consumer cannot reach
+ * for the representation it is not on. */
+export function laneSource(
+  store: ColumnarWorkerSpans | null | undefined,
+  lanes: Record<number, LaneSpans>,
+): LaneSource {
+  return store
+    ? { columnar: true, store }
+    : { columnar: false, workerSpans: fatLanes(lanes) };
 }
 
 /** Per-worker poll columns, sorted ascending by start (buildWorkerSpans already
@@ -243,9 +308,7 @@ export class ColumnarWorkerSpans {
     for (const key of Object.keys(workerSpans)) {
       const w = Number(key);
       const lane = workerSpans[w]!;
-      const polls = lane.polls as unknown as PollView[];
-      const parks = lane.parks as unknown as ParkView[];
-      const actives = lane.actives as unknown as ActiveView[];
+      const { polls, parks, actives } = lane;
       const cols = new WorkerPollColumns(polls.length, parks.length, actives.length);
       for (let i = 0; i < polls.length; i++) {
         const p = polls[i]!;
@@ -388,11 +451,18 @@ export class ColumnarWorkerSpans {
 
   // ── cheap poll scalar reads (no PollView / sample-slice materialization) ──
   // For the every-frame render window loops (open-ended markers, waker/sched
-  // scans) that need one column, not a full flyweight.
-  pollStartAt(w: number, i: number): number { const c = this.byWorker.get(w); return c ? c.start[i]! : NaN; }
-  pollEndAt(w: number, i: number): number { const c = this.byWorker.get(w); return c ? c.end[i]! : NaN; }
-  pollTaskIdAt(w: number, i: number): number { const c = this.byWorker.get(w); return c ? c.taskId[i]! : 0; }
-  pollOpenEndedAt(w: number, i: number): boolean { const c = this.byWorker.get(w); return c ? c.openEnded[i] === 1 : false; }
+  // scans) that need one column, not a full flyweight. Callers reach these
+  // through a WorkerLaneView, whose `w` came from this store, so an unknown
+  // worker is a wiring bug: throw rather than return a sentinel that would
+  // silently paint a wrong (or invisible) marker every frame.
+  private columnsFor(w: number): WorkerPollColumns {
+    const c = this.byWorker.get(w);
+    if (c === undefined) throw new Error(`no poll columns for worker ${w}`);
+    return c;
+  }
+  pollStartAt(w: number, i: number): number { return this.columnsFor(w).start[i]!; }
+  pollEndAt(w: number, i: number): number { return this.columnsFor(w).end[i]!; }
+  pollOpenEndedAt(w: number, i: number): boolean { return this.columnsFor(w).openEnded[i] === 1; }
 
   /** Per-worker cpu-sample tick timestamps (source!==1), for drawCpuTicks. */
   cpuSampleTimes(w: number): number[] {

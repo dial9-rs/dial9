@@ -241,7 +241,7 @@ export class ColumnarEvents {
       next(): IteratorResult<EventLike> {
         if (i >= n) return { done: true, value: undefined };
         view._i = i++;
-        return { done: false, value: view as unknown as EventLike };
+        return { done: false, value: view };
       },
     };
   }
@@ -253,7 +253,7 @@ export class ColumnarEvents {
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
       view._i = i;
-      out[i] = fn(view as unknown as EventLike, i);
+      out[i] = fn(view, i);
     }
     return out;
   }
@@ -264,7 +264,7 @@ export class ColumnarEvents {
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
       view._i = i;
-      if (fn(view as unknown as EventLike, i)) out.push(materialize(this, i));
+      if (fn(view, i)) out.push(materialize(this, i));
     }
     return out;
   }
@@ -273,7 +273,7 @@ export class ColumnarEvents {
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
       view._i = i;
-      if (fn(view as unknown as EventLike, i)) return true;
+      if (fn(view, i)) return true;
     }
     return false;
   }
@@ -365,7 +365,7 @@ function materialize(c: ColumnarEvents, i: number): EventLike {
  * (schedWait NaN->null, tid NaN->undefined, spawnLoc idx->string|null). Wake
  * fields read as-is (NaN on non-wake events, which never read them).
  */
-class MutableView {
+class MutableView implements EventLike {
   _i = 0;
   private readonly c: ColumnarEvents;
   constructor(c: ColumnarEvents) { this.c = c; }

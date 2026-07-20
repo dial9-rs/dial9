@@ -52,14 +52,14 @@ declare module "*/flamegraph_histogram.js" {
    * The sample-weighted median poll duration (ns) - the `lo_ns` of the bar
    * crossing the halfway sample count. null for an empty histogram.
    */
-  export function sampleWeightedMedianNs(bars: unknown): number | null;
+  export function sampleWeightedMedianNs(bars: readonly PollHistogramBar[]): number | null;
 
   /**
    * Equal-width column geometry for a `width`-px strip, `gap` px between
    * columns (default 1). Empty bars / non-positive width -> no columns.
    */
   export function histogramLayout(
-    bars: unknown,
+    bars: readonly PollHistogramBar[],
     width: number,
     gap?: number
   ): HistogramLayout;
@@ -70,7 +70,7 @@ declare module "*/flamegraph_histogram.js" {
    * `cols` may be passed to avoid recomputing. null when there are no bars.
    */
   export function pxToNs(
-    bars: unknown,
+    bars: readonly PollHistogramBar[],
     width: number,
     px: number,
     cols?: readonly HistogramColumn[] | null
@@ -81,7 +81,7 @@ declare module "*/flamegraph_histogram.js" {
    * band. null for no bars or a near-zero-width drag (treated as a click).
    */
   export function brushToBand(
-    bars: unknown,
+    bars: readonly PollHistogramBar[],
     width: number,
     x0: number,
     x1: number

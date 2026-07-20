@@ -13,6 +13,12 @@
 // segment state (a "partial window" badge). Whole-trace loads resolve the
 // descriptor to "complete".
 
+import {
+  COMPLETE_WINDOW,
+  deriveResidentWindow as deriveCpuWindow,
+  drawWindowMarkers,
+  type ResidentWindow as CpuWindow,
+} from "./resident-window.js";
 import type { PanelGeometry, StoreState } from "../../types/state.js";
 import type { ParsedTrace } from "../../types/trace.js";
 import {
@@ -25,6 +31,8 @@ import {
   makeStrokeBatcher,
   drawStrokeBatches,
   type StrokeStyleSpec,
+  clampX,
+  nsToDrawX,
 } from "../../lib/canvas/index.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
@@ -35,23 +43,7 @@ import {
  * to the "complete" value ({ truncatedAt: null, oversized: false }) for a
  * whole-trace load.
  */
-export interface CpuWindow {
-  /**
-   * Which edge(s) of the resident window truncate the CPU data: data beyond
-   * the edge is not resident, so that edge is a WINDOW boundary, not the true
-   * data boundary. null when the window covers the whole trace.
-   */
-  truncatedAt: "start" | "end" | "both" | null;
-  /**
-   * True when a segment needed for this view is in the terminal "oversized"
-   * state (SegmentLifecycle): it can never be resident, so the view is
-   * unavoidably partial and must say so.
-   */
-  oversized: boolean;
-}
 
-/** The "complete window" descriptor (whole-trace load, no windowing). */
-export const COMPLETE_WINDOW: CpuWindow = { truncatedAt: null, oversized: false };
 
 // ── Store-lifted inputs ─────────────────────────────────────────────────
 
@@ -103,16 +95,6 @@ export function cpuSeriesFor(trace: ParsedTrace): CpuSeries {
  * makes the view partial. `truncatedAt` stays null on the whole-trace path
  * (empty segments slice); the renderer consumes the descriptor regardless.
  */
-export function deriveCpuWindow(state: StoreState): CpuWindow {
-  let oversized = false;
-  for (const entry of state.segments.segments.values()) {
-    if (entry.state === "oversized") {
-      oversized = true;
-      break;
-    }
-  }
-  return { truncatedAt: null, oversized };
-}
 
 /** Lift the CPU track's inputs from a store snapshot. */
 export function deriveCpuInputs(state: StoreState): CpuInputs {
@@ -275,8 +257,6 @@ const GRID_STROKE = "rgba(255,255,255,0.07)";
 const CAP_STROKE = "rgba(255,207,153,0.65)";
 const CAP_LABEL = "#ffcf99";
 const READOUT_FILL = "#aaa";
-const TRUNC_BAND = "rgba(255,120,120,0.28)";
-const TRUNC_LABEL = "#ffb3b3";
 const CAP_DASH: readonly number[] = [4, 3];
 
 // Vertical chart margins: top headroom for labels, small bottom margin.
@@ -450,29 +430,6 @@ function paintReadout(
  * a "partial window" badge when a needed segment is oversized. No-ops for a
  * complete window.
  */
-function drawWindowMarkers(
-  ctx: CanvasRenderingContext2D,
-  window: CpuWindow,
-  drawW: number,
-  height: number,
-): void {
-  const BAND = 6;
-  const t = window.truncatedAt;
-  if (t === "start" || t === "both") {
-    ctx.fillStyle = TRUNC_BAND;
-    ctx.fillRect(0, 0, BAND, height);
-  }
-  if (t === "end" || t === "both") {
-    ctx.fillStyle = TRUNC_BAND;
-    ctx.fillRect(Math.max(0, drawW - BAND), 0, BAND, height);
-  }
-  if (window.oversized) {
-    ctx.fillStyle = TRUNC_LABEL;
-    ctx.font = "10px monospace";
-    ctx.textAlign = "left";
-    ctx.fillText("partial window", 3, height - 3);
-  }
-}
 
 // ── Shared draw-area x mapping (the alignment invariant) ──────────────────
 
@@ -482,17 +439,11 @@ function drawWindowMarkers(
  * after the DOM label gutter, so this is the same expression every track
  * uses for its canvas-local x (the alignment invariant).
  */
-export function nsToDrawX(
-  ns: number,
-  viewStart: number,
-  viewEnd: number,
-  drawW: number,
-): number {
-  const span = viewEnd - viewStart || 1;
-  return ((ns - viewStart) / span) * drawW;
-}
 
 /** Clamp a draw-area x into [0, drawW]. */
-function clampX(x: number, drawW: number): number {
-  return Math.min(Math.max(x, 0), drawW);
-}
+
+export {
+  COMPLETE_WINDOW,
+  deriveResidentWindow as deriveCpuWindow,
+  type ResidentWindow as CpuWindow,
+} from "./resident-window.js";

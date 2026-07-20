@@ -8,7 +8,8 @@
 
 import { html, nothing, render, type TemplateResult } from "lit-html";
 import type { TokioStatsResponse } from "../../lib/trace/index.js";
-import { formatDuration, latencyHeat, nsToDatetime } from "./format.js";
+import { formatDuration, nsToDatetime } from "./format.js";
+import { latencyHeat } from "../../lib/trace/tokio_stats_api.js";
 import { exemplarLink } from "./exemplar.js";
 import {
   buildDiffModel,

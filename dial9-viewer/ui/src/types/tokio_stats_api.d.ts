@@ -1,9 +1,9 @@
 // Type declarations for `tokio_stats_api.js` (pure helpers for the aggregated
 // tokio-stats page). See src/types/decode.d.ts for the declaration-form
 // rationale. Consumed by typed src/ through the lib/trace boundary
-// (src/lib/trace/tokio_stats_api.ts). Only the exemplar deep-link builder is
-// declared; the coverage/latency/refine helpers are reimplemented in
-// src/pages/tokio-stats/{format,stats}.ts.
+// (src/lib/trace/tokio_stats_api.ts). The exemplar deep-link builder and the
+// latency heat scale are declared; the coverage/refine helpers are
+// reimplemented in src/pages/tokio-stats/{format,stats}.ts.
 
 declare module "*/tokio_stats_api.js" {
   // The frozen builder guards each optional with `!= null`/truthiness, so
@@ -28,4 +28,11 @@ declare module "*/tokio_stats_api.js" {
    * `sourceKey` is absent.
    */
   export function exemplarViewerUrl(opts: ExemplarViewerOpts): string;
+
+  /**
+   * Severity color for a poll/latency duration (ns): >=3ms red, >=1ms amber,
+   * else green, in dial9's palette. Thresholds are pinned by
+   * test_tokio_stats_api.js, so consumers must not re-derive them.
+   */
+  export function latencyHeat(ns: number): string;
 }

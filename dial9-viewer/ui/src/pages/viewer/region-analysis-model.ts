@@ -17,14 +17,14 @@ import type {
   CpuSample,
   ParsedTrace,
   PollSpan,
-  WorkerLane,
+  LaneSpans,
 } from "../../lib/trace/index.js";
 import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type { TimeRange } from "../../types/trace.js";
 import type { SegmentsSlice } from "../../types/state.js";
 
 /** Worker-lane bundle the region analyses read. */
-export type WorkerSpans = Record<number, WorkerLane>;
+export type WorkerSpans = Record<number, LaneSpans>;
 
 // ── Region modes present + default ────────────────────────────────────────────
 
@@ -273,7 +273,7 @@ function spawnLocAt(
   // findSpanAt: rightmost start <= timestamp, then confirm timestamp <= end -
   // identical to the previous inline search, and accessor-based so a columnar
   // lane view backs it.
-  const cand = findSpanAt(lane.polls, timestamp);
+  const cand = findSpanAt<PollSpan>(lane.polls, timestamp);
   return cand ? cand.spawnLoc : null;
 }
 

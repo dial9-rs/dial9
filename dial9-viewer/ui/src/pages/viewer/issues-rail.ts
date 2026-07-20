@@ -20,6 +20,7 @@ import {
   POI_FILTERS,
   derivePoiViewModel,
   filterLabel,
+  parsePoiFilter,
   poiJump,
   stepIndex,
   type PoiViewModel,
@@ -77,7 +78,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
 
   /** Center + select on the POI at `index` of the current sorted list. */
   function jumpTo(index: number): void {
-    const vm = viewModel(store.getState() as StoreState);
+    const vm = viewModel(store.getState());
     const row = vm.rows[index];
     if (row === undefined) return;
     const jump = poiJump(row.poi, store.getState().viewport);
@@ -88,7 +89,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
 
   /** `n`/`p`: step the current index and jump. */
   function step(dir: 1 | -1): boolean {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const vm = viewModel(state);
     const next = stepIndex(vm.total, state.poi.index, dir);
     if (next < 0) return false; // nothing to step to - decline the key
@@ -105,7 +106,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
    *  default direction. Index is preserved by re-clamping (a re-sort keeps
    *  the same rows), matching the "sort is count-independent" contract. */
   function sortByColumn(col: Column): void {
-    const { poi } = store.getState() as StoreState;
+    const { poi } = store.getState();
     const dir =
       poi.sortKey === col.key
         ? poi.sortDir === "asc"
@@ -157,8 +158,10 @@ function railTemplate(vm: PoiViewModel, h: RailHandlers): TemplateResult {
               data-poi-filter
               aria-label="Point-of-interest filter"
               title="Which class of issue to list"
-              @change=${(e: Event) =>
-                h.setFilter((e.target as HTMLSelectElement).value as PointOfInterestType)}
+              @change=${(e: Event) => {
+                const filter = parsePoiFilter((e.target as HTMLSelectElement).value);
+                if (filter !== null) h.setFilter(filter);
+              }}
             >
               ${POI_FILTERS.map(
                 (f) => html`<option value=${f} ?selected=${f === vm.filter}>

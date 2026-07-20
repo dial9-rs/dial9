@@ -102,7 +102,7 @@ function recordingCtx(): Recording {
       rec.strokes.push({
         x: curX,
         dash: [...curDash],
-        strokeStyle: rec.ctx.strokeStyle,
+        strokeStyle: String(rec.ctx.strokeStyle),
         lineWidth: rec.ctx.lineWidth,
       });
     },

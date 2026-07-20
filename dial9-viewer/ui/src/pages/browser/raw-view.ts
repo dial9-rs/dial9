@@ -14,10 +14,10 @@ import type { PageCtx } from "./ctx.js";
 import { formatDate, formatEpochStr, formatSize } from "./format.js";
 import {
   nextSort,
+  parseRawSortKey,
   sortRawRows,
   toRawRows,
   type RawSort,
-  type RawSortKey,
 } from "./raw-rows.js";
 import type { BrowseObject } from "./state.js";
 import { renderStatus } from "./status-render.js";
@@ -52,8 +52,9 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     ...els.rawTable.querySelectorAll<HTMLTableCellElement>("th[data-sort]"),
   ];
   for (const th of sortHeaders) {
+    const key = parseRawSortKey(th.dataset["sort"]);
+    if (key === null) continue;
     th.addEventListener("click", () => {
-      const key = th.dataset["sort"] as RawSortKey;
       store.update("raw", { sort: nextSort(store.getState().raw.sort, key) });
     });
   }

@@ -20,8 +20,8 @@ import type {
   ParsedTrace,
   RuntimeGroup,
   TracingSpan,
-  WorkerLane,
 } from "../../types/trace.js";
+import type { LaneSpans } from "../../lib/trace/columnar-worker-spans.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 
 /** Everything the hover channel needs beyond per-frame viewport/selection. */
@@ -31,7 +31,7 @@ export interface OverlayData {
   /** Runtime groups in render order (for the fixed-height + header y-mapping). */
   runtimeGroups: RuntimeGroup[];
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
-  workerSpans: Record<number, WorkerLane>;
+  workerSpans: Record<number, LaneSpans>;
   /** All completed spans, start-sorted (span detail + span-in-poll count).
    * EMPTY on the columnar path - read `columnarSpans`. */
   allSpans: TracingSpan[];

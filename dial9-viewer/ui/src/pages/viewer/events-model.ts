@@ -18,10 +18,12 @@
 // -> field worker_id + poll-at-timestamp -> unambiguous cross-worker scan.
 
 import { findSpanAt } from "../../lib/trace/index.js";
+import { nsToDrawX } from "../../lib/canvas/index.js";
+
 import type {
   CustomTraceEvent,
+  LaneSpans,
   PollSpan,
-  WorkerLane,
 } from "../../lib/trace/index.js";
 import type { PinnedCustomEvent, SelectionSlice } from "../../types/state.js";
 
@@ -170,7 +172,7 @@ export function filterVisibleEvents(
  */
 export function resolveTaskForEvent(
   ev: CustomTraceEvent,
-  workerSpans: Record<number, WorkerLane>,
+  workerSpans: Record<number, LaneSpans>,
   workerIds: readonly number[],
 ): number | null {
   const f = ev.fields || {};
@@ -207,7 +209,7 @@ export function resolveTaskForEvent(
  */
 export function resolvePollForEvent(
   ev: CustomTraceEvent,
-  workerSpans: Record<number, WorkerLane>,
+  workerSpans: Record<number, LaneSpans>,
   workerIds: readonly number[],
   preferTask: number | null = null,
 ): PollSpan | null {
@@ -339,13 +341,6 @@ export interface EventRenderModelOpts {
   colorOf: (name: string) => string;
 }
 
-/** Timestamp (ns) -> draw-area-relative x (px), the shared mapping (no
- *  LABEL_W: the track canvas already sits after the DOM label gutter). */
-function nsToDrawX(ns: number, viewStart: number, viewEnd: number, drawW: number): number {
-  const span = viewEnd - viewStart || 1;
-  return ((ns - viewStart) / span) * drawW;
-}
-
 /**
  * Build the per-frame render model: binary-searched visible window -> name
  * filter -> per-pixel clustering -> tick geometry + info. Pure and cheap
@@ -456,7 +451,7 @@ export function isSameCluster(
  */
 export function buildPinnedEvent(
   bucket: EventDrawBucket,
-  workerSpans: Record<number, WorkerLane>,
+  workerSpans: Record<number, LaneSpans>,
   workerIds: readonly number[],
 ): PinnedCustomEvent {
   const events = bucket.events;

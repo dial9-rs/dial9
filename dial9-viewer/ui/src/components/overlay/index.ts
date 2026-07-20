@@ -18,7 +18,7 @@
 // crosshair, so the two never fight.
 
 import type { ViewerStore } from "../../store/store.js";
-import type { StoreState, TimePanelLayout } from "../../types/state.js";
+import type { TimePanelLayout } from "../../types/state.js";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../canvas/lanes/render.js";
@@ -135,7 +135,7 @@ export function mountOverlay(
   }
 
   function drawFrame(): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     ensureOverlay();
     const { viewStart, viewEnd } = state.viewport;
 
@@ -150,7 +150,7 @@ export function mountOverlay(
 
     // writes from here down
     if (sizer === null) return;
-    const ctx = sizer.ensure(geom.pw, geom.scrollHeight, dpr) as unknown as CrosshairContext;
+    const ctx = sizer.ensure(geom.pw, geom.scrollHeight, dpr);
 
     const pinned = state.selection.pinnedEvent;
     drawCrosshair(ctx, {
@@ -211,7 +211,7 @@ export function mountOverlay(
   // Pointer wiring (hover only).
 
   function onMouseMove(e: MouseEvent): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     // Suppress the tooltip + mouse crosshair while a drag is in flight.
     if (state.transient.drag !== null) {
       if (state.transient.mouseNs !== null) store.update("transient", { mouseNs: null, atCursor: null });
@@ -261,7 +261,7 @@ export function mountOverlay(
   }
 
   function onMouseLeave(): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     if (state.transient.mouseNs !== null || state.transient.atCursor !== null) {
       store.update("transient", { mouseNs: null, atCursor: null });
     }

@@ -181,7 +181,7 @@ export function mountMinimap(
 
   function draw(): void {
     const canvas = ensureCanvas();
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const rect = canvas.getBoundingClientRect();
     const cssW = Math.round(rect.width);
     const cssH = Math.round(rect.height);
@@ -231,7 +231,7 @@ export function mountMinimap(
   }
 
   function onMouseDown(e: MouseEvent): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const range = currentRange(state);
     if (range === null) return;
     e.preventDefault();
@@ -252,7 +252,7 @@ export function mountMinimap(
 
   function onMouseMove(e: MouseEvent): void {
     if (dragGrabOffsetNs === null) return;
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const range = currentRange(state);
     const canvas = region.querySelector<HTMLElement>(`.${CANVAS_CLASS}`);
     if (range === null || canvas === null) return;
@@ -270,7 +270,7 @@ export function mountMinimap(
   // the view by a fraction of its width so the overview is not a focus trap.
   function onKeyDown(e: KeyboardEvent): void {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const range = currentRange(state);
     if (range === null) return;
     const vp = state.viewport;

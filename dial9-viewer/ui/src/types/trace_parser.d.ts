@@ -40,7 +40,9 @@ declare module "*/trace_parser.js" {
     localQueue: number;
     globalQueue: number;
     cpuTime: number;
-    schedWait: number;
+    /** null when this park->unpark carried no sched_wait_ns (distinct from a
+     * sampled 0); the parser decodes the absent field to null. */
+    schedWait: number | null;
     taskId: number;
     spawnLocId: string | null;
     spawnLoc: string | null;
@@ -234,6 +236,46 @@ declare module "*/trace_parser.js" {
     cached?: number;
   }
 
+  /**
+   * The event-store contract a `ParseOptions.eventSink` must satisfy: the
+   * parser writes with `push`, and finalizeParse + deriveBlockInPlaceGaps read
+   * `length` and iterate. A plain TraceEvent[] satisfies it structurally.
+   */
+  export interface EventSink {
+    push(event: TraceEvent): void;
+    readonly length: number;
+    [Symbol.iterator](): Iterator<TraceEvent>;
+  }
+
+  /**
+   * The cpu-sample contract a `ParseOptions.cpuSampleSink` must satisfy.
+   * `rawCallchain` holds the undecoded frame values; the sink owns how (or
+   * whether) it materializes them.
+   */
+  export interface CpuSampleSink {
+    pushSample(
+      timestamp: number,
+      workerId: number,
+      tid: number,
+      source: number,
+      rawCallchain: readonly unknown[],
+      cpu: number | null
+    ): void;
+  }
+
+  /**
+   * The span-event contract a `ParseOptions.spanEventSink` must satisfy.
+   * Returns true when the event was a span event and the sink consumed it, so
+   * the parser knows to keep it out of the fat customEvents array.
+   */
+  export interface SpanEventSink {
+    pushIfSpan(
+      name: string,
+      timestamp: number,
+      fields: Record<string, DecodedFieldValue>
+    ): boolean;
+  }
+
   export interface ParseOptions {
     /** Cap event count (metadata/symbols always parsed). Default Infinity. */
     maxEvents?: number;
@@ -246,11 +288,10 @@ declare module "*/trace_parser.js" {
      * for `state.events`. The new viewer passes a columnar sink
      * (src/lib/trace/columnar-events.ts ColumnarEvents) whose `.push(event)`
      * writes fields into typed-array columns and drops the object, so a large
-     * trace never materializes millions of fat event objects. Its `.push`,
-     * `.length`, iterator and (via the sink's own bounds) ts range must satisfy
-     * what finalizeParse + deriveBlockInPlaceGaps read.
+     * trace never materializes millions of fat event objects. A plain
+     * TraceEvent[] satisfies EventSink, which is the default.
      */
-    eventSink?: unknown;
+    eventSink?: EventSink;
     /**
      * Optional columnar cpu-sample sink (src/lib/trace/columnar-cpu-samples.ts
      * ColumnarCpuSamples). Its `.pushSample(...)` stores each sample's callchain
@@ -258,7 +299,7 @@ declare module "*/trace_parser.js" {
      * perf-capture trace's cpuSamples drop from ~2.3 GB to ~0.5 GB. Defaults to
      * a plain array of fat samples.
      */
-    cpuSampleSink?: unknown;
+    cpuSampleSink?: CpuSampleSink;
     /**
      * Optional columnar sink for SPAN custom events (src/lib/trace/
      * columnar-span-events.ts ColumnarSpanEvents). Its `.pushIfSpan(name, ts, v)`
@@ -266,7 +307,7 @@ declare module "*/trace_parser.js" {
      * span-event objects on a heavily-instrumented trace); non-span custom events
      * stay in the fat customEvents array. buildSpanDataColumnar reads the columns.
      */
-    spanEventSink?: unknown;
+    spanEventSink?: SpanEventSink;
     /** Directory parsing only (Node). */
     cache?: boolean;
     parallel?: boolean;

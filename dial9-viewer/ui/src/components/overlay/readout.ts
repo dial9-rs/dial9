@@ -10,6 +10,7 @@
 
 import { html, render } from "lit-html";
 import type { AtCursorReadout, SegmentEntry } from "../../types/state.js";
+import { activeTaskCountAt, nearestByT } from "../../lib/trace/query.js";
 
 /** The frame-invariant series the readout reads (subset of OverlayData). */
 export interface AtCursorInput {
@@ -17,43 +18,6 @@ export interface AtCursorInput {
   queueSamples: readonly { t: number; global: number }[];
   workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
   activeTaskSamples: readonly { t: number; count: number }[];
-}
-
-/** Nearest sample to `ns` by |t - ns|; binary search. */
-function nearestByT<T extends { t: number }>(arr: readonly T[], ns: number): T | null {
-  if (arr.length === 0) return null;
-  let lo = 0;
-  let hi = arr.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid]!.t < ns) lo = mid + 1;
-    else hi = mid;
-  }
-  const cand = arr[lo]!;
-  if (lo > 0) {
-    const prev = arr[lo - 1]!;
-    if (Math.abs(prev.t - ns) <= Math.abs(cand.t - ns)) return prev;
-  }
-  return cand;
-}
-
-/** Active-task count at `ns`: the latest sample with t <= ns (step). */
-function activeTaskCountAt(
-  samples: readonly { t: number; count: number }[],
-  ns: number,
-): number | null {
-  if (samples.length === 0) return null;
-  let lo = 0;
-  let hi = samples.length - 1;
-  let ans = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (samples[mid]!.t <= ns) {
-      ans = mid;
-      lo = mid + 1;
-    } else hi = mid - 1;
-  }
-  return ans >= 0 ? samples[ans]!.count : 0;
 }
 
 /**

@@ -149,7 +149,8 @@ describe("computeTaskDetailData (numbers, exact vs legacy)", () => {
 // ── formatTaskDetailSummary - the label assembly ──────────────────────────
 
 describe("formatTaskDetailSummary (label parts)", () => {
-  const base = source({ workerIds: [0], pollsByWorker: { 0: [poll(100, 200, 42), poll(300, 400, 42)] } });
+  const basePolls = [poll(100, 200, 42), poll(300, 400, 42)];
+  const base = source({ workerIds: [0], pollsByWorker: { 0: basePolls } });
 
   it("assembles id, location, poll/wake counts, lifetime, and completion mark", () => {
     const trace = fakeTrace({
@@ -159,7 +160,7 @@ describe("formatTaskDetailSummary (label parts)", () => {
       taskInstrumented: { 42: true },
     });
     const data = computeTaskDetailData(
-      source({ workerIds: [0], pollsByWorker: { 0: base.workerSpans[0]!.polls }, wakesByTask: { 42: [wake(50, 5)] } }),
+      source({ workerIds: [0], pollsByWorker: { 0: basePolls }, wakesByTask: { 42: [wake(50, 5)] } }),
       trace,
       42,
     );

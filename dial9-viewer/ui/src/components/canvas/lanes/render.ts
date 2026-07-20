@@ -20,10 +20,8 @@
 import type {
   ActiveSpan,
   BlockInPlaceGap,
-  ParkSpan,
   PollSpan,
   TracingSpan,
-  WorkerLane,
   WorkerWake,
 } from "../../../types/trace.js";
 import type { TimePanelLayout } from "../../../types/state.js";
@@ -40,8 +38,12 @@ import {
 import { pollColor } from "../../../lib/canvas/palette.js";
 import { laneRowLayout } from "../../../lib/canvas/layout.js";
 import type { LaneRowLayout } from "../../../lib/canvas/layout.js";
-import { findSpanAt } from "../../../lib/trace/query.js";
-import type { WorkerLaneView } from "../../../lib/trace/columnar-worker-spans.js";
+import { findSpanAt, type SpanList } from "../../../lib/trace/query.js";
+import {
+  isColumnarLane,
+  type LaneSpans,
+  type ParkLike,
+} from "../../../lib/trace/columnar-worker-spans.js";
 import type { SpanByIdMulti } from "../../../lib/trace/columnar-spans.js";
 
 /** The per-lane reference height. Band offsets below are expressed against
@@ -74,7 +76,7 @@ export interface LanesRenderInput {
   /** Worker ids in render order (top to bottom). */
   workerIds: readonly number[];
   /** Reconstructed spans per worker (buildWorkerSpans + attachCpuSamples). */
-  workerSpans: Readonly<Record<number, WorkerLane>>;
+  workerSpans: Readonly<Record<number, LaneSpans>>;
   /** Per-worker local-queue samples, sorted by t. */
   workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
   /** Wake events indexed by target worker. */
@@ -279,7 +281,7 @@ export function renderLanes(
     const qTop = top + 34 * sf;
     const qH = laneH - 38 * sf;
 
-    drawLaneBackground(ctx, spans, input, nsToX, drawW, top, laneH, sf);
+    drawLaneBackground(ctx, spans, input, nsToX, drawW, top, laneH);
     drawBlockInPlaceGaps(ctx, batcher, row, input, workerId, nsToX, drawW, top, laneH, sf);
     drawParks(ctx, spans, input, nsToX, drawW, top, laneH, sf);
     drawPolls(ctx, batcher, row, spans, input, nsToX, drawW, bandTop, bandH);
@@ -327,13 +329,12 @@ function drawRuntimeHeader(
 
 function drawLaneBackground(
   ctx: LaneDrawContext,
-  spans: WorkerLane,
+  spans: LaneSpans,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   drawW: number,
   top: number,
   laneH: number,
-  _sf: number,
 ): void {
   // Base: entire lane "active" (dark).
   ctx.fillStyle = "#1a1e2a";
@@ -342,18 +343,16 @@ function drawLaneBackground(
   // CPU scheduling tint: one representative active per pixel column, longest
   // wins. Only when the trace carries CPU time.
   if (!input.hasCpuTime) return;
-  const cstore = (spans as unknown as Partial<WorkerLaneView>).store;
-  let reps: ActiveSpan[];
-  if (cstore) {
-    const w = (spans as unknown as WorkerLaneView).w;
-    const startIdx = cstore.firstVisibleActive(w, input.viewStart);
-    reps = cstore.downsampleActives(
-      w, startIdx, input.viewStart, input.viewEnd, drawW,
-    ) as unknown as ActiveSpan[];
+  let reps: readonly ActiveSpan[];
+  if (isColumnarLane(spans)) {
+    const startIdx = spans.store.firstVisibleActive(spans.w, input.viewStart);
+    reps = spans.store.downsampleActives(
+      spans.w, startIdx, input.viewStart, input.viewEnd, drawW,
+    );
   } else {
     const startIdx = firstVisible(spans.actives, input.viewStart);
     reps = pixelDownsampleSpans(
-      spans.actives as ActiveSpan[], startIdx, input.viewStart, input.viewEnd, drawW, spanDur,
+      spans.actives, startIdx, input.viewStart, input.viewEnd, drawW, spanDur,
     );
   }
   for (const s of reps) {
@@ -405,7 +404,7 @@ function drawBlockInPlaceGaps(
 
 function drawParks(
   ctx: LaneDrawContext,
-  spans: WorkerLane,
+  spans: LaneSpans,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   drawW: number,
@@ -413,18 +412,16 @@ function drawParks(
   laneH: number,
   sf: number,
 ): void {
-  const cstore = (spans as unknown as Partial<WorkerLaneView>).store;
-  let reps: ParkSpan[];
-  if (cstore) {
-    const w = (spans as unknown as WorkerLaneView).w;
-    const startIdx = cstore.firstVisiblePark(w, input.viewStart);
-    reps = cstore.downsampleParks(
-      w, startIdx, input.viewStart, input.viewEnd, drawW,
-    ) as unknown as ParkSpan[];
+  let reps: readonly ParkLike[];
+  if (isColumnarLane(spans)) {
+    const startIdx = spans.store.firstVisiblePark(spans.w, input.viewStart);
+    reps = spans.store.downsampleParks(
+      spans.w, startIdx, input.viewStart, input.viewEnd, drawW,
+    );
   } else {
     const startIdx = firstVisible(spans.parks, input.viewStart);
     reps = pixelDownsampleSpans(
-      spans.parks as ParkSpan[], startIdx, input.viewStart, input.viewEnd, drawW, spanDur,
+      spans.parks, startIdx, input.viewStart, input.viewEnd, drawW, spanDur,
     );
   }
   const accentH = 4 * sf;
@@ -433,7 +430,7 @@ function drawParks(
     const x2 = Math.min(drawW, nsToX(s.end));
     const w = Math.max(x2 - x1, 1);
     const schedWait = s.schedWait;
-    if (input.hasSchedWait && schedWait !== undefined && schedWait > 0) {
+    if (input.hasSchedWait && schedWait != null && schedWait > 0) {
       const wakeupShouldBe = s.end - schedWait;
       if (wakeupShouldBe > s.start) {
         const xSplit = Math.min(drawW, nsToX(wakeupShouldBe));
@@ -466,7 +463,7 @@ function drawPolls(
   ctx: LaneDrawContext,
   batcher: ReturnType<typeof makeStrokeBatcher>,
   row: number,
-  spans: WorkerLane,
+  spans: LaneSpans,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   drawW: number,
@@ -474,17 +471,15 @@ function drawPolls(
   bandH: number,
 ): void {
   const { viewStart, viewEnd, selectedTaskId } = input;
-  const cstore = (spans as unknown as Partial<WorkerLaneView>).store;
   let pollStart: number;
-  let reps: PollSpan[];
-  if (cstore) {
+  let reps: readonly PollSpan[];
+  if (isColumnarLane(spans)) {
     // Columnar path: the store binary-searches + LOD-downsamples the poll
     // columns for the viewport, materializing only the <= drawW representatives.
-    const w = (spans as unknown as WorkerLaneView).w;
-    pollStart = cstore.firstVisiblePoll(w, viewStart);
-    reps = cstore.downsamplePolls(
-      w, pollStart, viewStart, viewEnd, drawW, selectedTaskId ?? null,
-    ) as unknown as PollSpan[];
+    pollStart = spans.store.firstVisiblePoll(spans.w, viewStart);
+    reps = spans.store.downsamplePolls(
+      spans.w, pollStart, viewStart, viewEnd, drawW, selectedTaskId ?? null,
+    );
   } else {
     pollStart = firstVisible(spans.polls, viewStart);
     // Representative weighting: latest starter wins a column (an unbiased colour
@@ -494,7 +489,7 @@ function drawPolls(
       ? (s: PollSpan): number => (s.taskId === selectedTaskId ? Infinity : s.start)
       : (s: PollSpan): number => s.start;
     reps = pixelDownsampleSpans(
-      spans.polls as PollSpan[], pollStart, viewStart, viewEnd, drawW, weight,
+      spans.polls, pollStart, viewStart, viewEnd, drawW, weight,
     );
   }
 
@@ -528,12 +523,12 @@ function drawPolls(
   // rather than materializing a PollView (+ CSR sample slices) per poll every
   // frame; the fat path keeps the .at(i) flyweight.
   const nPolls = spans.polls.length;
-  if (cstore) {
-    const w = (spans as unknown as WorkerLaneView).w;
+  if (isColumnarLane(spans)) {
+    const { store, w } = spans;
     for (let i = pollStart; i < nPolls; i++) {
-      if (cstore.pollStartAt(w, i) > viewEnd) break;
-      if (!cstore.pollOpenEndedAt(w, i)) continue;
-      const x2 = Math.min(drawW, nsToX(cstore.pollEndAt(w, i)));
+      if (store.pollStartAt(w, i) > viewEnd) break;
+      if (!store.pollOpenEndedAt(w, i)) continue;
+      const x2 = Math.min(drawW, nsToX(store.pollEndAt(w, i)));
       batcher.tick(`openpoll:w${row}`, x2, bandTop, bandTop + bandH);
     }
   } else {
@@ -604,7 +599,7 @@ function drawCpuTicks(
 
 function drawSchedTriangles(
   ctx: LaneDrawContext,
-  polls: readonly PollSpan[],
+  polls: SpanList<PollSpan>,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   bandTop: number,
@@ -634,7 +629,7 @@ function drawSchedTriangles(
 
 function drawWakerHighlight(
   ctx: LaneDrawContext,
-  polls: readonly PollSpan[],
+  polls: SpanList<PollSpan>,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   drawW: number,
@@ -658,7 +653,7 @@ function drawWakerHighlight(
 
 function drawSelectedSpanOutlines(
   ctx: LaneDrawContext,
-  polls: readonly PollSpan[],
+  polls: SpanList<PollSpan>,
   workerId: number,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,

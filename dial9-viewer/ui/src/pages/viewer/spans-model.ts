@@ -18,6 +18,7 @@
 
 import {
   buildSpanData,
+  fatLanes,
   collectDescendants,
   computeSpanLayout,
   selectSpanRenderSet,
@@ -31,7 +32,7 @@ import type {
   SpanLayoutBucket,
   TracingSpan,
   UnmatchedSpan,
-  WorkerLane,
+  LaneSpans,
 } from "../../lib/trace/index.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { SelectionSlice } from "../../types/state.js";
@@ -90,7 +91,7 @@ export const EMPTY_SPAN_TRACK_DATA: SpanTrackData = {
  */
 export function computeSpanTrackData(
   customEvents: readonly CustomTraceEvent[] | null | undefined,
-  workerSpans?: Record<number, WorkerLane>,
+  workerSpans?: Record<number, LaneSpans>,
   precomputedSpanData?: SpanData,
 ): SpanTrackData {
   if (customEvents == null || customEvents.length === 0) {
@@ -101,7 +102,9 @@ export function computeSpanTrackData(
   // its taskId is resolved; without it, the coarse on-wire segments are kept.
   // The viewer passes `precomputedSpanData` (shared with the lanes derivation)
   // so buildSpanData runs once per trace instead of once per span consumer.
-  const data = precomputedSpanData ?? buildSpanData(customEvents, workerSpans);
+  const data =
+    precomputedSpanData ??
+    buildSpanData(customEvents, workerSpans && fatLanes(workerSpans));
   const cs = data.columnarSpans;
   const spanCount = cs ? cs.length : data.allSpans.length;
   if (spanCount === 0 && data.unmatchedSpans.length === 0) {

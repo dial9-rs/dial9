@@ -16,7 +16,6 @@ import {
   cpuIntervalAt,
   cpuIntervalTooltip,
   cpuBarColor,
-  nsToDrawX,
   renderCpuTrack,
   deriveCpuInputs,
   cpuSeriesFor,
@@ -25,6 +24,7 @@ import {
   type CpuWindow,
 } from "./cpu.js";
 import { nsToDrawX as axisNsToDrawX } from "./axis.js";
+import { nsToDrawX as sharedNsToDrawX } from "../../lib/canvas/index.js";
 import { TRACKS, trackGeometry } from "./track-layout.js";
 import type { TrackSpec } from "./track-layout.js";
 import type { PanelGeometry, StoreState } from "../../types/state.js";
@@ -205,9 +205,13 @@ describe("cpuBarColor (legacy load ramp, verbatim)", () => {
 // ── Draw-area alignment (same mapping as the axis) ───────────────────────
 
 describe("nsToDrawX (alignment invariant)", () => {
-  it("is the axis track's mapping verbatim (no LABEL_W added)", () => {
+  // Every time-based track shares ONE mapping (lib/canvas/layout). Reintroducing
+  // a per-track copy is the regression this guards: it would still agree here by
+  // value, so assert function IDENTITY, not just equal output.
+  it("the axis track uses the shared mapping, not a copy", () => {
+    expect(axisNsToDrawX).toBe(sharedNsToDrawX);
     for (const ns of [0, 250, 500, 1000]) {
-      expect(nsToDrawX(ns, 0, 1000, 1100)).toBe(
+      expect(sharedNsToDrawX(ns, 0, 1000, 1100)).toBe(
         axisNsToDrawX(ns, 0, 1000, 1100),
       );
     }

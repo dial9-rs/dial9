@@ -9,6 +9,7 @@
 
 import { findContainingSpan, spanAncestryAt, taskAt } from "../../../lib/trace/query.js";
 import type { PollSpan, TracingSpan } from "../../../types/trace.js";
+import type { SpanList } from "../../../lib/trace/query.js";
 import type { ColumnarSpans, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { SpanFocus } from "../../../types/state.js";
 
@@ -19,7 +20,7 @@ export interface LaneClickInput {
   /** Timestamp under the click (trace-monotonic ns). */
   ns: number;
   /** The clicked worker's polls (LaneData.workerSpans[workerId].polls). */
-  polls: readonly PollSpan[];
+  polls: SpanList<PollSpan>;
   /** All completed spans, start-sorted (LaneData.allSpans). EMPTY on the
    * columnar path - read `columnarSpans`. */
   allSpans: readonly TracingSpan[];

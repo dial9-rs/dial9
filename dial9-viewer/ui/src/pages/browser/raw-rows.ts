@@ -63,6 +63,23 @@ export type RawSortKey =
   | "size"
   | "last_modified";
 
+const RAW_SORT_KEYS: ReadonlySet<string> = new Set<RawSortKey>([
+  "service",
+  "host",
+  "bootId",
+  "traceStart",
+  "segIndex",
+  "size",
+  "last_modified",
+]);
+
+/** Validate a `data-sort` attribute before it becomes a sort key. An unknown
+ * value would miss every case in sortValue and silently scramble the table
+ * rather than failing, so callers must skip the header instead. */
+export function parseRawSortKey(value: string | undefined): RawSortKey | null {
+  return value !== undefined && RAW_SORT_KEYS.has(value) ? (value as RawSortKey) : null;
+}
+
 export interface RawSort {
   key: RawSortKey;
   /** 1 = ascending, -1 = descending. */

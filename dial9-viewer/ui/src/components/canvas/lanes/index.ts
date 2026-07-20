@@ -12,7 +12,6 @@
 // placeholder over it, then owns the canvas's DPR sizing + draw.
 
 import type { ViewerStore } from "../../../store/store.js";
-import type { StoreState } from "../../../types/state.js";
 import { createCanvasSizer } from "../../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../../lib/canvas/dpr.js";
 import { makeColorDimmer } from "../../../lib/canvas/palette.js";
@@ -30,7 +29,6 @@ import type { LaneData } from "./data.js";
 import {
   LANE_ROW_H,
   RUNTIME_HEADER_H,
-  type LaneDrawContext,
   type LanesRenderInput,
   renderLanes,
   sharedVisibleMaxQueue,
@@ -88,7 +86,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
   }
 
   function draw(): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const data = laneData();
     if (!data || data.workerIds.length === 0) return;
     const canvas = laneCanvas();
@@ -135,7 +133,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       sizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
       sizerCanvas = canvas;
     }
-    const ctx = sizer.ensure(drawW, viewportH, dpr) as unknown as LaneDrawContext;
+    const ctx = sizer.ensure(drawW, viewportH, dpr);
 
     const sel = state.selection;
     const selectedSpanIds = sel.spanFocus ? sel.spanFocus.chain : EMPTY_SET;
@@ -230,7 +228,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     win.removeEventListener("mouseup", onResizeUp);
     // Commit once: the viewmodel now matches the box, and the uiPrefs ->
     // trackPrefs subscriber persists the final height.
-    if (pendingH > 0 && pendingH !== (store.getState() as StoreState).uiPrefs.lanesViewportHeight) {
+    if (pendingH > 0 && pendingH !== store.getState().uiPrefs.lanesViewportHeight) {
       store.update("uiPrefs", { lanesViewportHeight: pendingH });
     }
   }

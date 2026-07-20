@@ -26,8 +26,8 @@ import { formatFieldValue } from "../../lib/trace/index.js";
 import { sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
 import type {
   CustomTraceEvent,
+  LaneSpans,
   ParsedTrace,
-  WorkerLane,
 } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -58,7 +58,7 @@ const INFO_FILL = "#aaa";
 
 /** Derived worker lanes + ids for task resolution. */
 interface WorkerLaneData {
-  lanes: Record<number, WorkerLane>;
+  lanes: Record<number, LaneSpans>;
   workerIds: number[];
 }
 
@@ -115,7 +115,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
   let sizerCanvas: HTMLCanvasElement | null = null;
 
   function state(): StoreState {
-    return store.getState() as StoreState;
+    return store.getState();
   }
 
   /** The memoized per-event task resolver bound to the current lanes. */
@@ -427,10 +427,10 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
 export function dispatchEventPin(
   store: ViewerStore,
   bucket: EventDrawBucket,
-  lanes: Record<number, WorkerLane>,
+  lanes: Record<number, LaneSpans>,
   workerIds: readonly number[],
 ): void {
-  const prior = (store.getState() as StoreState).selection.pinnedEvent;
+  const prior = store.getState().selection.pinnedEvent;
   if (isSameCluster(prior, bucket)) {
     store.update("selection", { pinnedEvent: null });
     return;
@@ -450,7 +450,7 @@ export function dispatchEventPin(
  * No-op when unchanged (avoids a redundant frame).
  */
 export function dispatchHoverEvent(store: ViewerStore, ts: number | null): void {
-  if ((store.getState() as StoreState).transient.hoverEventTs !== ts) {
+  if (store.getState().transient.hoverEventTs !== ts) {
     store.update("transient", { hoverEventTs: ts });
   }
 }

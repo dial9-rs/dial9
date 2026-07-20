@@ -2,16 +2,18 @@
 // the tooltip never rescans: every lookup is a binary-search / indexed query
 // helper, not a linear per-mousemove scan.
 
-import { findContainingSpan, findSpanAt } from "../../../lib/trace/query.js";
+import {
+  activeTaskCountAt,
+  findContainingSpan,
+  findSpanAt,
+  nearestByT,
+} from "../../../lib/trace/query.js";
 import type { ColumnarSpans } from "../../../lib/trace/columnar-spans.js";
 import type {
-  ActiveSpan,
   BlockInPlaceGap,
-  ParkSpan,
-  PollSpan,
   TracingSpan,
-  WorkerLane,
 } from "../../../types/trace.js";
+import type { LaneSpans, ParkLike } from "../../../lib/trace/columnar-worker-spans.js";
 
 /** A worker's state at the hovered instant. */
 export type WorkerHoverState = "active" | "parked" | "block_in_place" | "polling";
@@ -58,7 +60,7 @@ export interface LaneHoverData {
 export interface LaneHoverInput {
   workerId: number;
   ns: number;
-  spans: WorkerLane;
+  spans: LaneSpans;
   /** All completed spans, start-sorted (span detail + span-in-poll count).
    * EMPTY on the columnar path - read `columnarSpans` instead. */
   allSpans: readonly TracingSpan[];
@@ -74,44 +76,6 @@ export interface LaneHoverInput {
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
-}
-
-/** Nearest sample to `ns` by |t - ns| via binary search. */
-function nearestByT<T extends { t: number }>(arr: readonly T[], ns: number): T | null {
-  if (arr.length === 0) return null;
-  let lo = 0;
-  let hi = arr.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid]!.t < ns) lo = mid + 1;
-    else hi = mid;
-  }
-  // lo is the first index with t >= ns; compare against its predecessor.
-  const cand = arr[lo]!;
-  if (lo > 0) {
-    const prev = arr[lo - 1]!;
-    if (Math.abs(prev.t - ns) <= Math.abs(cand.t - ns)) return prev;
-  }
-  return cand;
-}
-
-/** Active-task count at `ns`: the latest sample with t <= ns (step). */
-function activeTaskCountAt(
-  samples: readonly { t: number; count: number }[],
-  ns: number,
-): number | null {
-  if (samples.length === 0) return null;
-  let lo = 0;
-  let hi = samples.length - 1;
-  let ans = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (samples[mid]!.t <= ns) {
-      ans = mid;
-      lo = mid + 1;
-    } else hi = mid - 1;
-  }
-  return ans >= 0 ? samples[ans]!.count : 0;
 }
 
 /**
@@ -131,11 +95,11 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
   let blockInPlace: LaneHoverData["blockInPlace"] = null;
 
   if (input.hasCpuTime) {
-    const active = findSpanAt(spans.actives as ActiveSpan[], ns);
+    const active = findSpanAt(spans.actives, ns);
     if (active) onCpuRatio = active.ratio;
   }
 
-  const park = findSpanAt(spans.parks as ParkSpan[], ns);
+  const park = findSpanAt<ParkLike>(spans.parks, ns);
   if (park) {
     state = "parked";
     parkDurationNs = park.end - park.start;
@@ -159,7 +123,7 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
 
   let poll: HoverPollInfo | null = null;
   let hasClickableStack = false;
-  const hitPoll = findSpanAt(spans.polls as PollSpan[], ns);
+  const hitPoll = findSpanAt(spans.polls, ns);
   if (hitPoll) {
     state = "polling";
     const cpuCount = hitPoll.cpuSamples ? hitPoll.cpuSamples.length : 0;

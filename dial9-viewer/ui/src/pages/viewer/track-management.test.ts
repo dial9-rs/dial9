@@ -49,7 +49,7 @@ function manualScheduler(): { flush(): void; store: ViewerStore } {
 }
 
 function uiPrefs(store: ViewerStore): StoreState["uiPrefs"] {
-  return (store.getState() as StoreState).uiPrefs;
+  return store.getState().uiPrefs;
 }
 
 /** In-memory localStorage stand-in (node has none); optionally throwing. */

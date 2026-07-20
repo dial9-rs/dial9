@@ -18,7 +18,6 @@
 // per-track height only; it does not touch the per-track render delegation.
 
 import type { ViewerStore } from "../../store/store.js";
-import type { StoreState } from "../../types/state.js";
 import { TRACKS } from "./track-layout.js";
 import type { TrackId, TrackSpec } from "./track-layout.js";
 
@@ -141,13 +140,13 @@ export function createTrackManageActions(store: ViewerStore): TrackManageActions
   return {
     toggleCollapse(id: TrackId): void {
       if (!isManageableTrack(id)) return;
-      const cur = (store.getState() as StoreState).uiPrefs.collapsed;
+      const cur = store.getState().uiPrefs.collapsed;
       store.update("uiPrefs", {
         collapsed: { ...cur, [id]: !(cur[id] === true) },
       });
     },
     reorder(dragged: TrackId, target: TrackId): void {
-      const cur = (store.getState() as StoreState).uiPrefs.trackOrder;
+      const cur = store.getState().uiPrefs.trackOrder;
       const next = computeReorder(cur, dragged, target);
       // Only write on an actual change (no store thrash / needless render).
       // Compare against the RESOLVED current order, not the raw stored value:

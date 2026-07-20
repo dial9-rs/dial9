@@ -6,8 +6,10 @@
 
 export {
   LABEL_W,
+  clampX,
   laneRowLayout,
   laneStackGeometry,
+  nsToDrawX,
   panelGeometry,
   timePanelLayout,
   workerAtLaneY,

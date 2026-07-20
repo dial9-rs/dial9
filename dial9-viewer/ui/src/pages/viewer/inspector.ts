@@ -168,7 +168,7 @@ export function mountInspector(
   }
 
   function state(): StoreState {
-    return store.getState() as StoreState;
+    return store.getState();
   }
 
   // ── Selection-driven tab activation (re-scope in the same action) ─────────

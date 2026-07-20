@@ -28,7 +28,7 @@ import {
   encodeScope,
   scopeFromKeys,
 } from "../../lib/trace/trace_scope.js";
-import { apiFetch, type BrowseResponse } from "./api.js";
+import { apiFetch, sampleBucketKeys, type BrowseResponse } from "./api.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
 import { sortRawRows, toRawRows } from "./raw-rows.js";
@@ -262,16 +262,16 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       return;
     }
 
-    const fromStr = els.rangeFrom.value;
-    const toStr = els.rangeTo.value;
-    if (!fromStr || !toStr) {
+    const tz = localTz();
+    // pickerToDate also returns null for a non-empty but unparseable value, so
+    // an emptiness check alone would let NaN epochs reach the request URL.
+    const from = pickerToDate(els.rangeFrom.value, tz);
+    const to = pickerToDate(els.rangeTo.value, tz);
+    if (!from || !to) {
       alert("Select a time range");
       return;
     }
 
-    const tz = localTz();
-    const from = pickerToDate(fromStr, tz)!;
-    const to = pickerToDate(toStr, tz)!;
     const fromEpoch = Math.floor(from.getTime() / 1000);
     const toEpoch = Math.floor(to.getTime() / 1000);
     // When the server has its own prefix it owns prefixing; otherwise pass
@@ -329,27 +329,20 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         // Show sample keys to help the user understand the bucket layout
         let status: StatusState;
         try {
-          const sampleResp = await apiFetch(
-            `/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now() / 1000) - 86400}&to=${Math.floor(Date.now() / 1000)}`,
-          );
-          const samples = sampleResp.ok
-            ? ((await sampleResp.json()) as BrowseResponse).objects ?? []
-            : [];
-          if (samples.length > 0) {
-            status = {
-              visible: true,
-              kind: "normal",
-              text: "No traces found in this time range. Sample keys in this bucket:",
-              sampleKeys: samples.slice(0, 5).map((o) => o.key),
-            };
-          } else {
-            status = {
-              visible: true,
-              kind: "normal",
-              text: "No traces found in this time range. Bucket appears empty.",
-              sampleKeys: null,
-            };
-          }
+          const sampleKeys = await sampleBucketKeys(bucket);
+          status = sampleKeys.length > 0
+            ? {
+                visible: true,
+                kind: "normal",
+                text: "No traces found in this time range. Sample keys in this bucket:",
+                sampleKeys,
+              }
+            : {
+                visible: true,
+                kind: "normal",
+                text: "No traces found in this time range. Bucket appears empty.",
+                sampleKeys: null,
+              };
         } catch {
           status = {
             visible: true,
@@ -457,8 +450,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // Empty results -> status + async sample-key hint; results -> table
   // rebuild (renderEpoch bump; the raw-view component builds the rows).
   // The rebuild leaves every checkbox unchecked, so the selection mirror
-  // resets with it. NOTE: the empty-state sample fetch uses plain fetch(),
-  // not apiFetch.
+  // resets with it.
   async function renderRawResults(objects: readonly BrowseObject[]): Promise<void> {
     if (objects.length === 0) {
       const prev = store.getState().raw.status;
@@ -470,21 +462,10 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       });
       let statusPatch: Partial<StatusState>;
       try {
-        const bucket = els.bucketInput.value.trim();
-        const sampleResp = await fetch(
-          `/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now() / 1000) - 86400}&to=${Math.floor(Date.now() / 1000)}`,
-        );
-        const samples = sampleResp.ok
-          ? ((await sampleResp.json()) as BrowseResponse).objects ?? []
-          : [];
-        if (samples.length > 0) {
-          statusPatch = {
-            text: "No results found. Sample keys in this bucket:",
-            sampleKeys: samples.slice(0, 5).map((o) => o.key),
-          };
-        } else {
-          statusPatch = { text: "No results found. Bucket appears empty.", sampleKeys: null };
-        }
+        const sampleKeys = await sampleBucketKeys(els.bucketInput.value.trim());
+        statusPatch = sampleKeys.length > 0
+          ? { text: "No results found. Sample keys in this bucket:", sampleKeys }
+          : { text: "No results found. Bucket appears empty.", sampleKeys: null };
       } catch {
         statusPatch = { text: "No results found.", sampleKeys: null };
       }

@@ -16,9 +16,10 @@
 // be missing samples beyond the resident window; drawWindowMarkers surfaces a
 // truncated/oversized window rather than painting a clipped chart as complete.
 
+import { drawWindowMarkers } from "./resident-window.js";
 import { html, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
-import { createCanvasSizer } from "../../lib/canvas/index.js";
+import { clampX, createCanvasSizer, nsToDrawX } from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -53,8 +54,6 @@ const ACTIVE_LABEL = "#81c784";
 const EMPTY_TEXT = "#555";
 const SEL_FILL = "rgba(129,199,132,0.2)";
 const SEL_STROKE = "rgba(129,199,132,0.6)";
-const TRUNC_BAND = "rgba(255,120,120,0.28)";
-const TRUNC_LABEL = "#ffb3b3";
 
 // Vertical chart margins inside the canvas (below the legend strip). Headroom
 // at top for the maxQ label, a little at the bottom for the "0" label; the
@@ -124,7 +123,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     null;
 
   function state(): StoreState {
-    return store.getState() as StoreState;
+    return store.getState();
   }
 
   function renderModel(
@@ -329,11 +328,6 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
 // ── Draw-area x mapping + selection band (module-local) ────────────────────
 
-function nsToDrawX(ns: number, viewStart: number, viewEnd: number, drawW: number): number {
-  const span = viewEnd - viewStart || 1;
-  const x = ((ns - viewStart) / span) * drawW;
-  return x < 0 ? 0 : x > drawW ? drawW : x;
-}
 
 /** Draw the green selection band for [selStart, selEnd] over the canvas. */
 function overlayBandRange(
@@ -466,27 +460,3 @@ export function drawQueueCanvas(
  * and a "partial window" badge when a needed segment is oversized. No-ops for a
  * complete window. Mirrors cpu.ts.
  */
-function drawWindowMarkers(
-  ctx: CanvasRenderingContext2D,
-  window: QueueWindow,
-  drawW: number,
-  canvasH: number,
-): void {
-  if (window === COMPLETE_QUEUE_WINDOW) return;
-  const BAND = 6;
-  const t = window.truncatedAt;
-  if (t === "start" || t === "both") {
-    ctx.fillStyle = TRUNC_BAND;
-    ctx.fillRect(0, 0, BAND, canvasH);
-  }
-  if (t === "end" || t === "both") {
-    ctx.fillStyle = TRUNC_BAND;
-    ctx.fillRect(Math.max(0, drawW - BAND), 0, BAND, canvasH);
-  }
-  if (window.oversized) {
-    ctx.fillStyle = TRUNC_LABEL;
-    ctx.font = "10px monospace";
-    ctx.textAlign = "left";
-    ctx.fillText("partial window", 3, canvasH - 3);
-  }
-}

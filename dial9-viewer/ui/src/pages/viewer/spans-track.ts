@@ -17,7 +17,12 @@
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
 import { classMap } from "lit-html/directives/class-map.js";
-import { createCanvasSizer, makeColorAssigner } from "../../lib/canvas/index.js";
+import {
+  clampX,
+  createCanvasSizer,
+  makeColorAssigner,
+  nsToDrawX,
+} from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
 import {
   formatFieldValue,
@@ -26,7 +31,7 @@ import {
 import type {
   ParsedTrace,
   TracingSpan,
-  WorkerLane,
+  LaneSpans,
 } from "../../lib/trace/index.js";
 import { sharedSpanData, sharedWorkerSpans } from "../../components/canvas/lanes/data.js";
 import type { ViewerStore } from "../../store/store.js";
@@ -120,7 +125,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
   let sizerCanvas: HTMLCanvasElement | null = null;
 
   function state(): StoreState {
-    return store.getState() as StoreState;
+    return store.getState();
   }
 
   function filterState(s: StoreState): SpanFilterState {
@@ -597,7 +602,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
 
 /** Build the worker poll lanes for task resolution. Empty when the trace has no
  *  events. */
-function buildWorkerLanes(trace: ParsedTrace | null): Record<number, WorkerLane> {
+function buildWorkerLanes(trace: ParsedTrace | null): Record<number, LaneSpans> {
   if (trace === null || trace.maxTs === null) return {};
   return sharedWorkerSpans(trace).workerSpans;
 }

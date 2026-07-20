@@ -19,14 +19,18 @@ import type { SpanData, WorkerSpansResult } from "../../../lib/trace/index.js";
 import { ColumnarEvents } from "../../../lib/trace/columnar-events.js";
 import { buildWorkerSpansColumnarStore } from "../../../lib/trace/worker-spans-columnar.js";
 import { buildSpanDataColumnar } from "../../../lib/trace/span-data-columnar.js";
-import type { ColumnarWorkerSpans } from "../../../lib/trace/columnar-worker-spans.js";
+import {
+  fatLanes,
+  type ColumnarWorkerSpans,
+  type LaneSpans,
+  type LaneWorkerSpans,
+} from "../../../lib/trace/columnar-worker-spans.js";
 import { LazySpansById, LazySpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { ColumnarSpans, SpanByIdMulti, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type {
   ParsedTrace,
   RuntimeGroup,
   TracingSpan,
-  WorkerLane,
   WorkerWake,
 } from "../../../types/trace.js";
 
@@ -38,7 +42,7 @@ export interface LaneData {
    *  common case; the renderer draws headers only when there is more than one. */
   runtimeGroups: RuntimeGroup[];
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
-  workerSpans: Record<number, WorkerLane>;
+  workerSpans: Record<number, LaneSpans>;
   /** Per-worker local-queue samples, sorted by t. */
   workerQueueSamples: Record<number, { t: number; local: number }[]>;
   /** Wake events indexed by target worker. */
@@ -88,7 +92,7 @@ export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
  * indices) + attachCpuSamples, and builds the span-id index from the span
  * data. Call once per trace and cache (store.derived over the `trace` slice).
  */
-const workerSpansCache = new WeakMap<ParsedTrace, WorkerSpansResult>();
+const workerSpansCache = new WeakMap<ParsedTrace, LaneWorkerSpans>();
 
 /**
  * buildWorkerSpans computed ONCE per trace and shared across EVERY eager
@@ -109,7 +113,7 @@ const workerSpansCache = new WeakMap<ParsedTrace, WorkerSpansResult>();
  * same worker-id SET (or a subset it only reads back), so one result is correct
  * for all.
  */
-export function sharedWorkerSpans(trace: ParsedTrace): WorkerSpansResult {
+export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
   let r = workerSpansCache.get(trace);
   if (r === undefined) {
     const ev = trace.events;
@@ -134,9 +138,9 @@ export function sharedWorkerSpans(trace: ParsedTrace): WorkerSpansResult {
         maxLocalQueue: built.maxLocalQueue,
         wakesByTask: built.wakesByTask,
         wakesByWorker: built.wakesByWorker,
-      } as unknown as WorkerSpansResult;
+      };
     } else {
-      r = buildWorkerSpans(
+      const fat = buildWorkerSpans(
         trace.events,
         deriveWorkerIds(trace),
         trace.maxTs ?? 0,
@@ -146,8 +150,9 @@ export function sharedWorkerSpans(trace: ParsedTrace): WorkerSpansResult {
       // consumers previously never touched it (minimap/queue/task-detail), so
       // their unit-test mock traces omit it.
       if (trace.cpuSamples && trace.cpuSamples.length > 0) {
-        attachCpuSamples(trace.cpuSamples, r.workerSpans);
+        attachCpuSamples(trace.cpuSamples, fat.workerSpans);
       }
+      r = fat;
     }
     workerSpansCache.set(trace, r);
   }
@@ -189,7 +194,7 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
     r =
       store && spanEvents
         ? buildSpanDataColumnar(spanEvents, store)
-        : buildSpanData(trace.customEvents, workerSpans);
+        : buildSpanData(trace.customEvents, fatLanes(workerSpans));
     spanDataCache.set(trace, r);
   }
   return r;

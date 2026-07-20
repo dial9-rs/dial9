@@ -21,8 +21,8 @@ import type { KeyboardSelection, TimePanelLayout } from "../../types/state.js";
 
 /** The minimal 2D-context surface `drawCrosshair` needs (Node-testable). */
 export interface CrosshairContext {
-  strokeStyle: string;
-  fillStyle: string;
+  strokeStyle: string | CanvasGradient | CanvasPattern;
+  fillStyle: string | CanvasGradient | CanvasPattern;
   lineWidth: number;
   font: string;
   textAlign: CanvasTextAlign;

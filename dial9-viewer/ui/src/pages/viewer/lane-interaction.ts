@@ -173,7 +173,7 @@ export function mountLaneInteraction(
     if ((e.target as Element | null)?.closest?.(".d9-lanes-resize")) return;
     // A mousedown pre-empts an in-flight keyboard selection.
     if (kbSel.active()) runCommands(kbSel.clear());
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const vp = state.viewport;
     const geom = readColumnGeom();
     runCommands(
@@ -301,7 +301,7 @@ export function mountLaneInteraction(
     if (e.key !== "Shift" && e.key !== "Alt") return;
     if (e.repeat) return; // a held modifier must not auto-confirm the selection
     if (isTextEntryTarget(e.target)) return; // typing in a filter field
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     if (state.trace.trace === null) return;
     if (state.transient.drag !== null) return; // a drag owns the gesture
     // Blocked while the sidebar retains a range.
@@ -344,7 +344,7 @@ export function mountLaneInteraction(
 
   let lastTrace: StoreState["trace"]["trace"] | null = null;
   const unsubTrace = store.subscribe(["trace"], () => {
-    const trace = (store.getState() as StoreState).trace.trace;
+    const trace = store.getState().trace.trace;
     if (trace === null || trace === lastTrace) return;
     lastTrace = trace;
     // initViewportFromTrace (registered earlier) has fitted the viewport in

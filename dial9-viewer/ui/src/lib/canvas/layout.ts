@@ -31,6 +31,30 @@ export type { TimePanelLayout };
  */
 export const LABEL_W = 100;
 
+/**
+ * Timestamp (ns) -> draw-area-relative x (px). THE alignment invariant: every
+ * time-based track maps ns to x with this one expression, so ticks, poll bars,
+ * span bars and CPU bars line up pixel-exact. No LABEL_W is added - a track
+ * canvas already sits after the DOM label gutter.
+ *
+ * Deliberately UNCLAMPED, so callers that need to know a mark fell outside the
+ * viewport still can. Compose with clampX where the x feeds a fillRect.
+ */
+export function nsToDrawX(
+  ns: number,
+  viewStart: number,
+  viewEnd: number,
+  drawW: number,
+): number {
+  const span = viewEnd - viewStart || 1;
+  return ((ns - viewStart) / span) * drawW;
+}
+
+/** Clamp a draw-area x into [0, drawW]. */
+export function clampX(x: number, drawW: number): number {
+  return x < 0 ? 0 : x > drawW ? drawW : x;
+}
+
 export interface TimePanelLayoutOpts {
   /** Full panel/canvas width in CSS px (the panel's clientWidth). */
   pw: number;

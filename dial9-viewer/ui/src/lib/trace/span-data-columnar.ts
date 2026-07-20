@@ -150,7 +150,7 @@ export function buildSpanDataColumnar(
       spanName: rec?.spanName || "unknown",
       fields: rec?.fields || {},
       parentSpanId: rec?.parentSpanId ?? null,
-    } as unknown as UnmatchedSpan);
+    });
   }
   unmatchedSpans.sort((a, b) => a.start - b.start);
 

@@ -7,6 +7,9 @@
 // crosses a calendar-day boundary, so ticks across a day boundary read
 // unambiguously. Relative mode has no calendar day, so it is never qualified.
 
+import { nsToDrawX } from "../../lib/canvas/index.js";
+export { nsToDrawX };
+
 import type {
   PanelGeometry,
   StoreState,
@@ -96,15 +99,6 @@ export function tickTimestamps(
  * expression the lanes/panels use for their canvas-local x (the alignment
  * invariant - see the file header).
  */
-export function nsToDrawX(
-  ns: number,
-  viewStart: number,
-  viewEnd: number,
-  drawW: number,
-): number {
-  const span = viewEnd - viewStart || 1;
-  return ((ns - viewStart) / span) * drawW;
-}
 
 // ── Wall-clock resolution ────────────────────────────────────────────────
 

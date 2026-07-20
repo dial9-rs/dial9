@@ -20,6 +20,7 @@
 // uninstrumented badge, the idle-flamegraph link) renders in the inspector Task
 // tab from the SAME derivation, exposed via createTaskDetailDerivation.
 
+import { drawWindowMarkers } from "./resident-window.js";
 import { html, nothing, type TemplateResult } from "lit-html";
 import { createCanvasSizer } from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
@@ -54,8 +55,6 @@ const LIFESPAN_BORDER = "rgba(129,199,132,0.3)";
 const LIFESPAN_EDGE = "#81c784";
 const LEGEND_LABEL = "#aaa";
 const CROSSHATCH = "rgba(140,120,255,0.35)";
-const TRUNC_BAND = "rgba(255,120,120,0.28)";
-const TRUNC_LABEL = "#ffb3b3";
 
 /**
  * The store-cached task-detail derivation. Keyed on ["trace", "selection"] so a
@@ -144,7 +143,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
   let sizerCanvas: HTMLCanvasElement | null = null;
 
   function state(): StoreState {
-    return store.getState() as StoreState;
+    return store.getState();
   }
 
   function renderModel(
@@ -531,26 +530,3 @@ function drawCrossHatch(
  * "partial window" badge when a needed segment is oversized. No-ops for a
  * complete window. Mirrors the CPU track's drawWindowMarkers.
  */
-function drawWindowMarkers(
-  ctx: CanvasRenderingContext2D,
-  window: TaskDetailWindow,
-  drawW: number,
-  height: number,
-): void {
-  const BAND = 6;
-  const t = window.truncatedAt;
-  if (t === "start" || t === "both") {
-    ctx.fillStyle = TRUNC_BAND;
-    ctx.fillRect(0, 0, BAND, height);
-  }
-  if (t === "end" || t === "both") {
-    ctx.fillStyle = TRUNC_BAND;
-    ctx.fillRect(Math.max(0, drawW - BAND), 0, BAND, height);
-  }
-  if (window.oversized) {
-    ctx.fillStyle = TRUNC_LABEL;
-    ctx.font = "10px monospace";
-    ctx.textAlign = "left";
-    ctx.fillText("partial window", 3, height - 3);
-  }
-}

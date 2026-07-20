@@ -16,13 +16,13 @@ import {
   EVENT_TYPES,
   computeSchedulingDelays,
   filterPointsOfInterest,
+  laneSource,
 } from "../../lib/trace/index.js";
 import { sharedWorkerSpans, columnarWorkerStoreFor } from "../../components/canvas/lanes/data.js";
 import type {
   ParsedTrace,
   PointOfInterest,
   PointOfInterestType,
-  WorkerLane,
 } from "../../lib/trace/index.js";
 
 /** One overview tick: where a point of interest sits, and what kind. */
@@ -66,13 +66,12 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   // samples, so the shared result (with attachCpuSamples already applied once)
   // yields identical ticks without a second full reconstruction.
   const spanResult = sharedWorkerSpans(trace);
-  const workerSpans: Record<number, WorkerLane> = spanResult.workerSpans;
   // Columnar path: raw-column detectors instead of the fat filterPointsOfInterest
   // over flyweight views (which materializes every poll).
-  const store = columnarWorkerStoreFor(trace);
-  const schedDelays = store
-    ? store.schedulingDelays(workerIds, spanResult.wakesByTask as never)
-    : computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);
+  const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
+  const schedDelays = lanes.columnar
+    ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
+    : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask);
 
   // Applicable detectors: long-poll always; the sched-derived ones only when
   // the trace carries sched-wait data; uninstrumented only when the trace
@@ -93,9 +92,9 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
       sortByWorst: true,
       taskInstrumented: trace.taskInstrumented,
     };
-    const pois: PointOfInterest[] = store
-      ? store.pointsOfInterest(type, workerIds, schedDelays, opts)
-      : filterPointsOfInterest(type, workerSpans, workerIds, schedDelays, opts);
+    const pois: PointOfInterest[] = lanes.columnar
+      ? lanes.store.pointsOfInterest(type, workerIds, schedDelays, opts)
+      : filterPointsOfInterest(type, lanes.workerSpans, workerIds, schedDelays, opts);
     for (const p of pois) {
       const dedupeKey = `${p.time}:${p.worker}:${p.type}`;
       if (seen.has(dedupeKey)) continue;

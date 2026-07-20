@@ -203,6 +203,17 @@ export type {
   WorkerWake,
 } from "./analysis.js";
 
+// The lane union: a lane is fat objects on small traces and a columnar view on
+// big ones, so consumers take LaneSpans and narrow with isColumnarLane.
+export { fatLanes, isColumnarLane, laneSource } from "./columnar-worker-spans.js";
+export type {
+  LaneSource,
+  LaneSpans,
+  LaneWorkerSpans,
+  ParkLike,
+  WorkerLaneView,
+} from "./columnar-worker-spans.js";
+
 // creds.ts - the frozen creds.js store, typed. Trace fetches carry its
 // x-dial9-aws-* headers.
 export { Dial9Creds } from "./creds.js";

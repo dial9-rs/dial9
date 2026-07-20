@@ -50,7 +50,7 @@ export function findSpanAt<S extends { start: number; end: number }>(
  * taskId 0 for traces without task tracking, treated here as "no task".
  */
 export function taskAt(
-  polls: readonly PollSpan[],
+  polls: SpanList<PollSpan>,
   ns: number
 ): { poll: PollSpan; taskId: number | null } | null {
   const poll = findSpanAt(polls, ns);
@@ -116,7 +116,7 @@ export function enclosingSpansColumnar(
     const lo = cs.segOff[r]!, hi = cs.segOff[r + 1]!;
     for (let j = lo; j < hi; j++) {
       if (cs.segWorker[j] === wid && cs.segStart[j]! <= ts && cs.segEnd[j]! >= ts) {
-        out.push(cs.at(r) as unknown as TracingSpan);
+        out.push(cs.at(r));
         break;
       }
     }
@@ -182,4 +182,46 @@ export function spanAncestryAt(
     if (++steps >= SPAN_ANCESTRY_CYCLE_LIMIT) break;
   }
   return { outermost, ids };
+}
+
+/** Nearest sample to `ns` by |t - ns|; binary search over a t-sorted series. */
+export function nearestByT<T extends { t: number }>(
+  arr: readonly T[],
+  ns: number
+): T | null {
+  if (arr.length === 0) return null;
+  let lo = 0;
+  let hi = arr.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid]!.t < ns) lo = mid + 1;
+    else hi = mid;
+  }
+  // lo is the first index with t >= ns; compare against its predecessor.
+  const cand = arr[lo]!;
+  if (lo > 0) {
+    const prev = arr[lo - 1]!;
+    if (Math.abs(prev.t - ns) <= Math.abs(cand.t - ns)) return prev;
+  }
+  return cand;
+}
+
+/** Active-task count at `ns`: the latest sample with t <= ns (a step series).
+ * null only for an empty series; 0 when `ns` precedes the first sample. */
+export function activeTaskCountAt(
+  samples: readonly { t: number; count: number }[],
+  ns: number
+): number | null {
+  if (samples.length === 0) return null;
+  let lo = 0;
+  let hi = samples.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid]!.t <= ns) {
+      ans = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  return ans >= 0 ? samples[ans]!.count : 0;
 }

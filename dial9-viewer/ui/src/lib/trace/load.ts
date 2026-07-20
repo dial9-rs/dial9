@@ -542,7 +542,7 @@ export function loadTraceOnMainThread(
     .then(({ trace, buffer }) => {
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
-      (trace as { spanEvents?: ColumnarSpanEvents }).spanEvents = spanEventSink;
+      trace.spanEvents = spanEventSink;
       settle(() => {
         store.update("trace", { trace });
         const timing: TraceWorkerTiming = {

@@ -285,7 +285,7 @@ export function mountShell(
   const trackActions = createTrackManageActions(store);
 
   function renderPass(): void {
-    const state = store.getState() as StoreState;
+    const state = store.getState();
     const vm = viewModel(state);
     render(
       shellTemplate(
