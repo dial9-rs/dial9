@@ -1811,7 +1811,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "arc-swap",
  "async-trait",

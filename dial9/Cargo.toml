@@ -25,7 +25,7 @@ required-features = ["cli"]
 [dependencies]
 dial9-core = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
-dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry", optional = true }
+dial9-tokio-telemetry = { version = "0.5.0-rc0.1", path = "../dial9-tokio-telemetry", optional = true }
 dial9-macro = { workspace = true, optional = true }
 
 dial9-viewer = { version = "0.5.0-rc0", path = "../dial9-viewer", optional = true }
