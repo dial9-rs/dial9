@@ -391,32 +391,137 @@ headlines. This is a substantial statistics effort and is not a v1 blocker.
 
 ---
 
-## 8. Backend
+## 8. API design
 
 The diff and the ranked significant-difference list are computed
 **server-side**, not in the browser
-([ADR-0004](../adr/0004-diff-is-computed-server-side.md)). One endpoint (or a
-`compare=` mode on the existing per-view endpoints) resolves both A and B
-selections and **schedules** fold work across both to keep their coverage
-comparable (not rigid lockstep — the sides may drift within a tolerance), then
-streams:
+([ADR-0004](../adr/0004-diff-is-computed-server-side.md)). The overriding
+design constraint is that **the current three endpoints already share almost
+everything the compare mode needs** — so compare is mostly *reuse* plus a thin
+envelope, not a new subsystem.
 
-1. the two sides already merged into a diff structure;
-2. the bounded ranked differences (by % and by absolute sample-count,
-   unsymbolized frames excluded).
+### 8.1 What matches today's APIs (reused unchanged)
 
-The **client** renders the two synced panels + listing table and owns only
-interactive navigation (zoom / search / inspect) over the shipped structure.
+The three GET SSE endpoints today are `/api/flamegraph`, `/api/span-stats`,
+`/api/tokio-stats`. They already share:
 
-Rationale: the server already holds the data in the right shape; the design
-bounds output rather than shipping every instance; per-node confidence intervals
-need server-side per-file statistics; and one Rust diff+rank implementation over
-the kind-agnostic span accumulator serves every view, versus re-implementing
-merge+rank per view in JS. The legacy `flamegraph_diff.js` client merge is
-superseded (kept, if at all, as a thin fallback).
+| Shared piece | Today | In compare |
+|---|---|---|
+| **`Scope`** (`start_ns`, `end_ns`, `service`, `hosts[]`) — `ingest/aggregate.rs` | one per request | one **per side**; a selection's scope subset maps 1:1 |
+| **`AggContext`** (`bucket`/`prefix`/`aws_region`) | resolved from params | unchanged — both sides share one context |
+| **`resolve(agg, scope, RefineOpts{max_files}) → Resolved`** — `ingest/refine.rs` | called once | called **once per side**; each side's `Resolved.folded` + `files_matched` is exactly the coverage-symmetry input |
+| **`fold_stream::drive`** unfold driver — `server/fold_stream.rs` | drives one sink | drives **two** sinks (see §8.3) |
+| **`Coverage`** block (incl. `folded_set_id` = blake3 of the folded-leaf set) | one per snapshot | one **per side**; `folded_set_id` is the symmetry signal |
+| **Per-view filter params** (`thread_class`, `source`, `phase`, `spawn_location`, `span_type_uid`, `min_span_ns`/`max_span_ns`, `min_poll_ns`/`max_poll_ns`, `attr[]`, …) | on the request struct | **unchanged**; each side carries its own set |
+| **Per-view response types** (`FlamegraphResponse`, `SpanStatsResponse`, `TokioStatsResponse`) | the SSE payload | reused verbatim as the `a` and `b` fields of the diff envelope (§8.4) |
 
-This extends the query interface in generalized-span §5 with (a) the
-group-by-attribute capability and (b) the compare/diff mode.
+The compare mode adds **no new scope/filter/resolve/coverage machinery** — it
+composes the existing pieces.
+
+### 8.2 The request shape: `compare` is a mode, not a new endpoint
+
+Compare is a **mode on each existing endpoint**, keyed by a single new param
+carrying selection B:
+
+```
+GET /api/span-stats?<A's params…>&b=<base64url(B's params)>
+```
+
+- **`b` absent → today's response, byte-for-byte unchanged.** This *is* the
+  "B = ∅ is the special case" principle expressed in the API: the current
+  single-selection endpoint is the compare endpoint with B omitted. No
+  migration of existing callers.
+- **`b` present →** B's params are the *same param struct* as the endpoint's own
+  (`SpanStatsParams`, etc.), base64url-encoded — mirroring the existing client
+  diff's `a=`/`b=` codec (`flamegraph_diff.js`). The **client** expands B's
+  permalink-delta (§9: "B encoded as a delta from A") into a full param set
+  before the call, so the **server stays dumb about the "B refines A"
+  relationship** — it just resolves two independent selections. The `NOT P`
+  complement on A is likewise just an ordinary filter already present in A's
+  params.
+
+Rejected alternative: a separate `/api/compare` route. It would duplicate every
+endpoint's param parsing and validation and force the client to special-case
+which endpoint's compare to call. A per-endpoint `b=` mode keeps validation and
+the response-type family co-located with the single-selection handler.
+
+### 8.3 The two genuinely new server behaviors
+
+Everything else is composition; these two are new code:
+
+1. **Coordinated fold scheduling.** Instead of two independent streams racing
+   (what the client does today — the direct cause of coverage asymmetry), one
+   driver interleaves both sides' fold work to keep
+   `files_folded / files_matched` comparable within a tolerance (not rigid
+   lockstep). Mechanically this is the existing `fold_stream::drive` unfold
+   generalized to alternate between two `Resolved` work-lists / two sinks,
+   emitting a combined snapshot after each step. Because A and B usually share
+   most of their matched files (B refines A's predicate over the same coarse
+   scope), the same folded part often feeds both sides — so a row-level B
+   predicate can be evaluated by **partitioning one fold**, not double-folding.
+2. **Server-side merge + rank.** The tree merge that lives in
+   `flamegraph_diff.js` today moves into Rust, over the kind-agnostic span
+   accumulator ([span-kind unification](#5-span-kind-unification)), producing
+   the merged `diff` structure and the bounded `ranked` list. One
+   implementation serves all three views.
+
+### 8.4 The response envelope: `DiffSnapshot<T>`
+
+Each SSE snapshot wraps the view's **existing** response type, adding the merge,
+the ranking, and per-side coverage:
+
+```rust
+struct DiffSnapshot<T> {          // T = FlamegraphResponse | SpanStatsResponse | TokioStatsResponse
+    a: T,                         // side A — the current response type, unchanged
+    b: T,                         // side B — same type
+    diff: T::Diff,                // merged structure (flamegraph: tree w/ per-node a/b counts;
+                                  //   tabular: rows aligned by identity w/ a/b values)
+    ranked: Vec<Difference>,      // bounded, sorted; the significant-difference list
+    coverage_a: Coverage,         // reused Coverage struct, per side
+    coverage_b: Coverage,
+    comparable: bool,             // coverage-symmetry gate: are the two folded fractions close enough
+                                  //   to trust `ranked`? Client grays the ranking until true.
+}
+
+struct Difference {
+    id: String,                   // frame name / span_type_uid / spawn_loc
+    kind: DiffKind,               // Frame | SpanType | SpawnLoc
+    a_value: f64, b_value: f64,   // the compared consequent (self-fraction, p99, mean poll…)
+    delta_pct: f64,               // relative change  (∞ / −100% encode new / gone)
+    delta_abs: f64,               // absolute change (e.g. sample-count delta)
+    membership: Membership,       // Both | OnlyA | OnlyB
+}
+```
+
+- `a` and `b` are the **unchanged** per-view response types, so a client can
+  render either panel with today's rendering code — the single-selection
+  renderer *is* the per-panel renderer.
+- `diff` is the merged form the two synced panels / the aligned table read from.
+- `ranked` is bounded (top-N, unsymbolized frames excluded) and drives the
+  significant-difference rail; it is derived from the same numbers as `diff`, so
+  they never disagree.
+- `comparable` is the coverage-symmetry gate (§7.1): the client shows the
+  "still folding — differences preliminary" state while it is false.
+
+### 8.5 Group-by-attribute (extends span-stats §5)
+
+Independent of compare, the span-stats query gains a `group_by=<attribute-key>`
+param (default: span-type identity). It regroups the same folded rows by any
+metadata key (e.g. `group_by=spawn_location` is the tokio view;
+`group_by=route` groups `handle_request` by route). This is the query-side of
+[ADR-0005](../adr/0005-span-type-identity-excludes-metadata.md) — grouping is a
+runtime operation, not baked into `span_type_uid`.
+
+### 8.6 What the client keeps
+
+The **client** renders the two synced panels + aligned table + rail, and owns
+only interactive navigation (zoom / search / inspect) over the shipped
+structure. The legacy `flamegraph_diff.js` client merge is superseded (kept, if
+at all, as a thin fallback for the old `?diff=1` page until it is retired).
+
+This section extends the query interface in generalized-span §5 with (a) the
+group-by-attribute capability and (b) the compare mode + `DiffSnapshot`
+envelope.
 
 ---
 
@@ -483,6 +588,16 @@ Instead: one renderer and one selection model, with two layout modes (§1.2).
 Rejected for the general case (ADR-0004). Client-side ranking can only rank what
 was shipped, reintroducing a sampling bias the server does not have, and would
 require re-implementing merge+rank per view in JS.
+
+### A separate `/api/compare` endpoint
+
+Rejected (§8.2). It would duplicate every endpoint's param parsing and
+validation and force the client to special-case which view's compare to call. A
+per-endpoint `b=<base64>` **mode** keeps validation and the response-type family
+co-located with the single-selection handler, and makes "B = ∅ → today's
+response, unchanged" fall out for free (compare is the current endpoint with B
+omitted). It also preserves backward compatibility: existing single-selection
+callers are untouched.
 
 ### Spawn-location baked into the poll span-type identity
 
