@@ -22,7 +22,7 @@ include = [
     "/benches/**",
     "/skills/**",
     "/README.md",
-    "/README_TELEMETRY.md",
+    "/skill-source.md",
     "/ui/dist/**",
 ]
 
