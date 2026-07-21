@@ -28,11 +28,12 @@ few samples.** You don't need to aggregate every minute of every hour — a smal
    — deterministic, but uniform across host and time, so the first few files are
    a representative spread rather than one host's earliest minutes.
 3. **One request streams the refinement** over Server-Sent Events. The server
-   emits the already-folded snapshot immediately (stamped with *coverage* —
-   "4 / 480 files"), then folds the not-yet-folded files up to the *sampling cap*
-   (default 5% of matched, ceiling 100 files), pushing a fresh full tree as each
-   file lands, and closes the stream at the cap. It deliberately never folds the
-   whole window. "Fetch more" reopens the stream with a higher cap.
+   merges every already-folded matching part in bounded batches and emits
+   cumulative snapshots (stamped with *coverage* — "40 / 480 files"), then
+   folds missing files inside the *sampling-cap prefix* (default 5% of matched,
+   ceiling 100 files), pushing a fresh full tree as each file lands. It never
+   decodes the whole window merely to answer one request; "Fetch more" reopens
+   the stream with a larger new-work prefix.
 4. **You drill into the tree** — filter by host, source, thread class, or spawn
    location (the toolbar is driven by the *facets* the response advertises) and
    the tree recomputes over the folded set.
@@ -174,11 +175,13 @@ clicked node) are **not yet a server endpoint** — see [Deferred](#deferred).
 ## API Endpoints
 
 Both endpoints are **Server-Sent Event streams** (`Content-Type:
-text/event-stream`). A single request holds the connection open: the server
-emits the already-folded snapshot first, then folds the not-yet-folded files up
-to the sampling cap and pushes a fresh full snapshot (one `data:` JSON object per
-SSE event) as each file lands, closing the stream at the cap. The client
-re-renders on every event — there is no client-driven polling.
+text/event-stream`). A single request holds the connection open. Generic aggregate
+streams (`/api/flamegraph` and `/api/span-stats`) emit cumulative snapshots after
+bounded batches of every matching cached part, then fold missing files only in
+the sampling-cap prefix and close when that bounded work-list drains. The custom
+`/api/tokio-stats` stream retains capped-prefix reconstruction. Each newly folded
+file produces a fresh full snapshot (one `data:` JSON object per SSE event); there
+is no client-driven polling.
 
 Because bring-your-own-credentials rides on `x-dial9-aws-*` request headers, the
 client reads the stream via `fetch` (the native `EventSource` can't set request
@@ -211,6 +214,7 @@ the UI renders the toolbar from that array.
   "coverage": {
     "files_matched": 480,
     "files_folded": 24,
+    "fold_work_cap": 24,
     "samples_folded": 163029,
     "total_bytes": 1788000000
   },
@@ -229,8 +233,9 @@ the UI renders the toolbar from that array.
 }
 ```
 
-`files_folded` climbs monotonically across events until it reaches the cap, at
-which point the server closes the stream.
+`files_folded` climbs monotonically across events until cached reconstruction and
+the bounded new-work list drain. It can start or finish above `fold_work_cap`
+because every successfully merged matching cached part contributes to coverage.
 
 ### `GET /api/tokio-stats`
 
@@ -248,9 +253,10 @@ drift apart:
 
 - **`resolve`** (once per request): list the source scope, filter to the
   [scope]'s service/host/time (interval-overlap on the filename `epoch`, padded
-  by the segment duration), sort by the *order key*, take the first *cap* files
-  as the capped prefix, and list the folded set (the output `samples/` tree —
-  the record of what's already folded; **no manifest**).
+  by the segment duration), sort by the *order key*, retain the full matched set
+  for cached reads, take the first *cap* files as the bounded new-work prefix,
+  and list the folded set (the output `samples/` tree — the record of what's
+  already folded; **no manifest**).
 - **`fold_stream`** (drives the SSE stream): fold the not-yet-folded capped files
   concurrently under the process-global `FoldLimits`, yielding each file as it
   lands. A *fold* is: fetch + gunzip → decode with `dial9-trace-format::Decoder`
@@ -259,17 +265,22 @@ drift apart:
   part-file, and a polls part-file, all named `{blake3(source_key)}`.
 
 The *endpoint* consumes the fold stream, incrementally merging each folded file's
-part-files into an accumulator and emitting one SSE event per file:
-`/api/flamegraph` merges `samples/` into a tree, `/api/tokio-stats` merges
-`polls/` into poll stats. Both attach the same `coverage` block. It emits the
-already-folded snapshot first (instant), then a refined snapshot per fold.
+part-files into an accumulator and emitting SSE events: `/api/flamegraph` merges
+`samples/` into a tree, `/api/span-stats` merges `spans/` into a catalog, and
+`/api/tokio-stats` merges `polls/` into poll stats. All attach the same `coverage`
+shape. Generic fold streams count every successfully merged matching part and
+first merge all such cached parts in the matched scope,
+emitting cumulative snapshots after bounded cached batches, then emit a refined
+snapshot per newly folded capped-prefix file. Thus cache warmed by an overlapping
+query automatically improves the view; the cap bounds new work, not reusable
+cached data.
 
 Stream-driven and idempotent: folding runs only while the request is open (the
 fold `JoinSet` is dropped — cancelling in-flight folds — when the client
 disconnects), and re-folding a file writes the same keys. The `coverage` block
 (`files_matched`, `files_folded`, `samples_folded`, `total_bytes`) tells the user
-how complete the view is; it climbs monotonically until the server closes the
-stream at the cap.
+how complete the view is; it climbs monotonically until cached reconstruction and
+the bounded work-list drain.
 
 [scope]: ./CONTEXT.md
 
@@ -278,7 +289,8 @@ stream at the cap.
 `./scripts/demo-aggregation.sh` seeds a local directory with synthetic segments
 across several hosts/minutes, starts the viewer in demand-driven mode
 (`serve --agg-source-dir …`), and polls the endpoint to show coverage climbing
-from the baseline to the cap. Add `--serve` to explore it in the browser.
+through all matching cache plus the bounded new-work prefix. Add `--serve` to
+explore it in the browser.
 
 ---
 
@@ -336,9 +348,11 @@ rustc-hash = "2"    # FxHash for hot maps
 | Fleet-hourly fold (sampled, not whole window) | bounded by the sampling cap |
 | Dict size (fleet-wide, shared stacks) | ~50-100MB |
 
-The sampling cap means a query never reads the whole window: it folds a
-representative subset (default 5% of matched files, ceiling 100) and reports
-coverage, so cost scales with the cap, not the scope size.
+The sampling cap means a query never decodes the whole source window: new folding
+is limited to a representative prefix (default 5% of matched files, ceiling 100).
+Cached reconstruction still reads every applicable matching part, so source decode
+and write cost scale with the cap while reusable-cache read cost scales with the
+matching cached set.
 
 ---
 
