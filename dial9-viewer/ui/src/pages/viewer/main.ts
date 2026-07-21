@@ -27,6 +27,7 @@ import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
 import { initViewportFromTrace } from "./viewport-init.js";
 import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
+import { bootScopeFromSearch } from "./scope-boot.js";
 import {
   bindViewStateToUrl,
   resolveViewState,
@@ -317,7 +318,15 @@ function boot(): void {
   // Escape surface in the cascade, and auto-loads the boot `?trace=` components
   // when present; otherwise it shows the drop zone. Load failures surface as an
   // error toast.
-  loadChrome = mountLoadChrome({
+  //
+  // Two boot sources feed it: inline `?trace=` components (resolved synchronously
+  // into source.urls) and a compact `s_*` scope (bucket/prefix/service/host-set +
+  // window) the S3 browser emits for large selections. The scope must be re-listed
+  // via `/api/browse` before it yields URLs, so it is resolved asynchronously
+  // below and pushed through loadUrls() once the file set is known. `initialUrls`
+  // is set only for the inline case; the scope case enters the loading view via
+  // scopeLoading() immediately, then calls loadUrls() once resolution completes.
+  const boot = mountLoadChrome({
     store,
     esc,
     onError: (message) => {
@@ -326,6 +335,18 @@ function boot(): void {
     ...(source.urls.length > 0
       ? { initialUrls: source.urls, initialLabel: source.label }
       : {}),
+  });
+  loadChrome = boot;
+
+  // Scope boot: no inline `?trace=`, but the URL carries an `s_*` selection.
+  // Re-list its files (credentialed, like the browser page) and load them
+  // through the same worker path the inline list uses.
+  void bootScopeFromSearch({
+    search: window.location.search,
+    hasInlineUrls: source.urls.length > 0,
+    loadChrome: boot,
+    onError: (message) =>
+      toasts.show({ id: "load-error", type: "error", message }),
   });
 
   // Mirror the shareable state INTO the URL as it changes, debounced.

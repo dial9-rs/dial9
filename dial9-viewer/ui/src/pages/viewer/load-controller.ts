@@ -183,6 +183,14 @@ export interface LoadController {
   /** Load one or more URLs (boot `?trace=`). `label` is the initial label. */
   loadUrls(urls: readonly string[], label: string): void;
   /**
+   * Show the loading view without starting a load, for the async gap while a
+   * boot `s_*` scope is resolved to its URLs. The caller follows with loadUrls
+   * (success) or cancel (failure/empty).
+   */
+  showLoading(label: string): number;
+  /** Whether `token` still names the current loading operation. */
+  isCurrentLoad(token: number): boolean;
+  /**
    * Set/Clear Range: re-parse the retained buffer filtered to `range` (null /
    * open bounds = full trace). No-op before the first load completes.
    */
@@ -375,12 +383,12 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
   };
 
   function cancelLoad(): void {
-    // Abort supersedes the handle; bump the token so its late done/catch is
-    // ignored, then return to the drop zone.
+    // Supersede both worker loads and the handle-less async scope resolution so
+    // their late completions are ignored, then return to the drop zone.
+    if (section === "loading") loadToken += 1;
     if (currentHandle !== null) {
       const h = currentHandle;
       currentHandle = null;
-      loadToken += 1;
       h.abort();
     }
     stopTimer();
@@ -427,6 +435,19 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     loadUrls(urls, label): void {
       begin(urls, { label, withHeaders: true, objectUrl: null });
     },
+    showLoading(label): number {
+      // Show the loading view WITHOUT starting a worker load, for the async
+      // gap while a boot `s_*` scope is re-listed to its file URLs (the caller
+      // then calls loadUrls, or cancel() on failure). Return the token so a
+      // superseded resolution's late loadUrls can be ignored by the caller.
+      loadToken += 1;
+      section = "loading";
+      progress = label;
+      startTimer();
+      notify();
+      return loadToken;
+    },
+    isCurrentLoad: (token) => token === loadToken && section === "loading",
     reparse(range): void {
       // Set/Clear Range: re-parse the retained buffer with a time window, OFF
       // the main thread (reuses the worker load path via an object URL). The
@@ -465,6 +486,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       notify();
     },
     dispose(): void {
+      loadToken += 1;
       if (currentHandle !== null) {
         currentHandle.abort();
         currentHandle = null;
