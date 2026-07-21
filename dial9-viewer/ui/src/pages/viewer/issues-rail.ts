@@ -476,6 +476,15 @@ function railTable(vm: PoiViewModel, h: RailHandlers): TemplateResult {
   `;
 }
 
+/** Give the hovered cell a native title tooltip carrying its own text, but
+ *  only when that text is actually clipped (scrollWidth > clientWidth). Empty
+ *  otherwise, so cells that fully fit show nothing. Reads `textContent` so the
+ *  tooltip is scoped to the hovered cell, never the whole row. */
+function titleWhenClipped(e: Event): void {
+  const el = e.currentTarget as HTMLElement;
+  el.title = el.scrollWidth > el.clientWidth ? (el.textContent ?? "") : "";
+}
+
 function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
   return html`
     <div class="d9-rail-list">
@@ -515,15 +524,14 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
                 class=${classMap({ "d9-rail-row": true, on: abs === vm.index })}
                 role="option"
                 aria-selected=${abs === vm.index ? "true" : "false"}
-                title=${`${row.id} · ${row.loc} · ${row.polls} polls · ${row.total} total`}
                 @click=${() => h.jumpToTask(abs)}
               >
-                <td class="d9-task-id">${row.id}</td>
-                <td class="d9-task-loc" title=${row.loc}>${row.loc}</td>
-                <td class="d9-rail-num">${row.polls}</td>
-                <td class="d9-rail-num">${row.total}</td>
-                <td class="d9-rail-num">${row.longest}</td>
-                <td class="d9-rail-num">${row.lifetime}</td>
+                <td class="d9-task-id" title="" @pointerenter=${titleWhenClipped}>${row.id}</td>
+                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}>${row.loc}</td>
+                <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.polls}</td>
+                <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.total}</td>
+                <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.longest}</td>
+                <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.lifetime}</td>
               </tr>
             `;
           })}
