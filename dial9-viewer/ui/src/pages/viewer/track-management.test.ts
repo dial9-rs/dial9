@@ -324,7 +324,7 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     dispose();
 
     const s2 = createViewerStore({ scheduler: () => {} });
-    expect(uiPrefs(s2).lanesViewportHeight).toBe(200); // store default before hydrate
+    expect(uiPrefs(s2).lanesViewportHeight).toBe(360); // store default before hydrate
     hydrateTrackPrefs(s2);
     expect(uiPrefs(s2).lanesViewportHeight).toBe(312);
   });
@@ -340,7 +340,7 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(loadTrackPrefs()?.lanesHeight).toBeUndefined();
     const store = createViewerStore({ scheduler: () => {} });
     hydrateTrackPrefs(store);
-    expect(uiPrefs(store).lanesViewportHeight).toBe(200); // untouched default
+    expect(uiPrefs(store).lanesViewportHeight).toBe(360); // untouched default
   });
 
   it("rejects a non-positive stored lanes height", () => {

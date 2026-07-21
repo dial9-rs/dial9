@@ -14,9 +14,11 @@ import type { StoreOptions } from "../../store/store.js";
 /** The default persistent inspector width (CSS px). */
 export const DEFAULT_INSPECTOR_WIDTH = 360;
 
-/** Default height of the worker-lanes box (CSS px) - shows ~3 fixed rows before
- *  the box scrolls; the user resizes it via the lanes bottom gutter. */
-export const DEFAULT_LANES_HEIGHT = 200;
+/** Default height of the worker-lanes box (CSS px) - shows ~6 fixed rows before
+ *  the box scrolls; the user resizes it via the lanes bottom gutter. Roomy by
+ *  default so multi-runtime traces are not cramped to a couple of visible rows;
+ *  folding a runtime (header click) reclaims the rest. */
+export const DEFAULT_LANES_HEIGHT = 360;
 
 /** Build the viewer store's resting (no-trace) initial state. */
 export function initialViewerState(): StoreState {
@@ -56,6 +58,7 @@ export function initialViewerState(): StoreState {
       // (no localStorage here, so it is Node-testable).
       trackOrder: [],
       collapsed: {},
+      collapsedRuntimes: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       lanesViewportHeight: DEFAULT_LANES_HEIGHT,
       selectedSpanNames: new Set<string>(),

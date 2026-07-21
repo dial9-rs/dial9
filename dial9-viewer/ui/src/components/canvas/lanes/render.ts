@@ -305,26 +305,48 @@ export function renderLanes(
 }
 
 /**
- * Draw a runtime-group header band across the draw area: a tinted strip with the
- * runtime name + worker count. Only reached when a trace has more than one
- * runtime group (e.g. two traces opened together).
+ * Draw a runtime-group header band across the draw area: a caret (folded ->
+ * right, open -> down), the runtime name, and its worker count. Clicking the
+ * band folds/unfolds the runtime (lane-interaction). Only reached when a trace
+ * has more than one runtime group (e.g. two traces opened together).
  */
 function drawRuntimeHeader(
   ctx: LaneDrawContext,
-  row: { name: string; inferred: boolean; workerCount: number; height: number },
+  row: { name: string; inferred: boolean; workerCount: number; collapsed: boolean; height: number },
   drawW: number,
   top: number,
 ): void {
   ctx.fillStyle = "#1b2036";
   ctx.fillRect(0, top, drawW, row.height);
+  drawCaret(ctx, 10, top + row.height / 2, row.collapsed);
   const label = row.inferred ? `${row.name} runtime` : `runtime: ${row.name}`;
-  const count = `${row.workerCount} worker${row.workerCount === 1 ? "" : "s"}`;
+  const count = row.collapsed
+    ? `${row.workerCount} worker${row.workerCount === 1 ? "" : "s"} (folded)`
+    : `${row.workerCount} worker${row.workerCount === 1 ? "" : "s"}`;
   ctx.fillStyle = "#aeb6e0";
   ctx.font = "11px sans-serif";
   ctx.textAlign = "left";
-  ctx.fillText(label, 8, top + row.height - 8);
+  ctx.fillText(label, 22, top + row.height - 8);
   ctx.fillStyle = "#6b73a0";
-  ctx.fillText(count, drawW - 90, top + row.height - 8);
+  ctx.fillText(count, drawW - 110, top + row.height - 8);
+}
+
+/** A small disclosure caret centred at (cx, cy): right-pointing when collapsed,
+ *  down-pointing when expanded. */
+function drawCaret(ctx: LaneDrawContext, cx: number, cy: number, collapsed: boolean): void {
+  ctx.fillStyle = "#8b93c0";
+  ctx.beginPath();
+  if (collapsed) {
+    ctx.moveTo(cx - 3, cy - 4);
+    ctx.lineTo(cx + 3, cy);
+    ctx.lineTo(cx - 3, cy + 4);
+  } else {
+    ctx.moveTo(cx - 4, cy - 3);
+    ctx.lineTo(cx + 4, cy - 3);
+    ctx.lineTo(cx, cy + 3);
+  }
+  ctx.closePath();
+  ctx.fill();
 }
 
 function drawLaneBackground(

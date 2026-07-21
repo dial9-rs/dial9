@@ -253,6 +253,14 @@ export interface UiPrefsSlice {
    * (dial9.viewer.trackPrefs).
    */
   collapsed: Readonly<Record<string, boolean>>;
+  /**
+   * Per-runtime collapsed state: runtime-group name -> true when the user folded
+   * that runtime to header-only (its worker rows hidden), clicked on the runtime
+   * header band in the lanes track. Only meaningful with more than one runtime
+   * group (headers exist only then). Absent or false = expanded. localStorage-
+   * backed (dial9.viewer.trackPrefs), so a fold survives reload.
+   */
+  collapsedRuntimes: Readonly<Record<string, boolean>>;
   /** Stack-sidebar width in CSS px (drag-resizable). */
   sidebarWidth: number;
   /**

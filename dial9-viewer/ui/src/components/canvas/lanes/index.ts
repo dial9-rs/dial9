@@ -126,8 +126,14 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const viewportH = box.clientHeight;
     if (viewportH <= 0) return;
 
-    // Fixed-height runtime-aware stack (headers only when >1 runtime group).
-    const rowLayout = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
+    // Fixed-height runtime-aware stack (headers only when >1 runtime group);
+    // a folded runtime keeps its header but drops its worker rows.
+    const rowLayout = laneRowLayout(
+      data.runtimeGroups,
+      LANE_ROW_H,
+      RUNTIME_HEADER_H,
+      state.uiPrefs.collapsedRuntimes,
+    );
     // Size the inner spacer so the box scrolls exactly the overflow past the
     // window (the sticky canvas occupies the first `viewportH` of flow).
     setSpacerHeight(box, Math.max(0, rowLayout.contentHeight - viewportH));
@@ -244,10 +250,11 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
   };
   trackColumn.addEventListener("mousedown", onColumnDown);
 
-  // Only the slices the lanes actually read - NOT uiPrefs (legend chips filter
-  // spans/events, not lanes). A uiPrefs-only change never redraws the lanes; the
-  // resize poke goes through the viewport channel.
-  const unsubscribe = store.subscribe(["trace", "viewport", "selection"], () => draw());
+  // The lanes read `trace`/`viewport`/`selection`, plus `uiPrefs` for the
+  // per-runtime fold state (a header click toggles collapsedRuntimes, which must
+  // repaint the lanes). Legend-chip uiPrefs changes also poke a redraw, but that
+  // is one cheap virtualized-canvas paint, not the span/cpu/queue panels.
+  const unsubscribe = store.subscribe(["trace", "viewport", "selection", "uiPrefs"], () => draw());
 
   // First paint if a trace is already resident; otherwise the subscription
   // fires when the trace loads.
@@ -269,7 +276,17 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       const data = laneData();
       const box = lanesBox();
       if (!data || !box) return false;
-      const { rows } = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
+      // Auto-expand the runtime that owns this worker when it is folded, so
+      // stepping n/p to an issue on a collapsed runtime still brings its lane on
+      // screen instead of silently failing to scroll.
+      const collapsed = store.getState().uiPrefs.collapsedRuntimes;
+      const owning = data.runtimeGroups.find((g) => g.workerIds.includes(workerId));
+      let effective = collapsed;
+      if (owning && collapsed[owning.name] === true) {
+        effective = { ...collapsed, [owning.name]: false };
+        store.update("uiPrefs", { collapsedRuntimes: effective });
+      }
+      const { rows } = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H, effective);
       const row = rows.find((r) => r.kind === "worker" && r.workerId === workerId);
       if (row === undefined) return false;
 

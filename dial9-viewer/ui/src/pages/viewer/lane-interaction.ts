@@ -14,7 +14,7 @@
 // opens for that range is the region panel's. A lane click on a poll with
 // samples returns openStackFor, which drives the inspector's Poll Detail.
 
-import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
+import { LABEL_W, headerAtLaneY, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../../components/canvas/lanes/render.js";
 import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
@@ -30,6 +30,7 @@ import { deriveLaneData, resolveLaneClick } from "../../components/canvas/lanes/
 import type { LaneData } from "../../components/canvas/lanes/index.js";
 import { createViewportActions } from "./viewport-actions.js";
 import type { ViewportActions } from "./viewport-actions.js";
+import { toggleRuntimeCollapsed } from "./track-management.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -108,13 +109,37 @@ export function mountLaneInteraction(
    *  over a runtime header. Fixed-height rows + the box scrollTop, resolved
    *  through the shared row layout so click matches what the renderer drew. */
   function workerAtClientY(clientY: number, data: LaneData): number | null {
+    const rowLayout = laneRowAt(clientY, data);
+    return rowLayout === null ? null : workerAtLaneY(rowLayout.layout, rowLayout.localY);
+  }
+
+  /** Runtime-group name whose header band is under `clientY`, or null. A header
+   *  click folds/unfolds that runtime rather than selecting a worker. */
+  function runtimeHeaderAtClientY(clientY: number, data: LaneData): string | null {
+    if (data.runtimeGroups.length <= 1) return null; // no headers to hit
+    const rowLayout = laneRowAt(clientY, data);
+    return rowLayout === null ? null : headerAtLaneY(rowLayout.layout, rowLayout.localY);
+  }
+
+  /** Shared lanes-box hit geometry: the collapse-aware row layout + the box-local
+   *  y, or null when the point is off the lanes box. Built from the SAME collapse
+   *  state the renderer drew from, so click resolves to what is on screen. */
+  function laneRowAt(
+    clientY: number,
+    data: LaneData,
+  ): { layout: ReturnType<typeof laneRowLayout>; localY: number } | null {
     const box = trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
     if (box === null || data.workerIds.length === 0) return null;
     const rect = box.getBoundingClientRect();
     if (clientY < rect.top || clientY >= rect.bottom || rect.height <= 0) return null;
     const localY = clientY - rect.top + box.scrollTop;
-    const rowLayout = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H);
-    return workerAtLaneY(rowLayout, localY);
+    const layout = laneRowLayout(
+      data.runtimeGroups,
+      LANE_ROW_H,
+      RUNTIME_HEADER_H,
+      store.getState().uiPrefs.collapsedRuntimes,
+    );
+    return { layout, localY };
   }
 
   // ── command executor (shared by both machines) ──────────────────────────
@@ -227,6 +252,13 @@ export function mountLaneInteraction(
     // Any lanes click clears the pinned custom-event marker.
     if (mouseXCol < LABEL_W || mouseXCol > LABEL_W + geom.drawW) {
       store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
+      return;
+    }
+    // A click on a runtime header band folds/unfolds that runtime - never a
+    // worker select and never a selection clear.
+    const headerName = runtimeHeaderAtClientY(e.clientY, data);
+    if (headerName !== null) {
+      toggleRuntimeCollapsed(store, headerName);
       return;
     }
     const ns = geom.layout.panelXToNs(mouseXCol);

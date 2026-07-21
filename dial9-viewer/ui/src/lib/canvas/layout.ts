@@ -145,6 +145,9 @@ export type LaneRow =
       /** True for the inferred default ("main") runtime (label reads differently). */
       inferred: boolean;
       workerCount: number;
+      /** True when this runtime is folded: the header is drawn but its worker
+       *  rows are omitted from the stack. Drives the header caret direction. */
+      collapsed: boolean;
       y: number;
       height: number;
     };
@@ -163,28 +166,37 @@ export interface LaneRowLayout {
  * Cumulative `y` runs top to bottom. This is the ONE source of lane vertical
  * geometry - the renderer draws from it and both hit-tests resolve against it,
  * so a fixed row height + headers can never drift between draw and click.
+ *
+ * A group named in `collapsed` (only honoured when headers are shown) keeps its
+ * header but omits its worker rows, so a folded runtime takes only header
+ * height. The flat worker `index` counts emitted rows only, so it stays a dense,
+ * unique per-frame batcher key regardless of which groups are folded.
  */
 export function laneRowLayout(
   groups: readonly RuntimeGroup[],
   rowH: number,
   headerH: number,
+  collapsed: Readonly<Record<string, boolean>> = {},
 ): LaneRowLayout {
   const rows: LaneRow[] = [];
   const showHeaders = groups.length > 1;
   let y = 0;
   let index = 0;
   for (const g of groups) {
+    const isCollapsed = showHeaders && collapsed[g.name] === true;
     if (showHeaders) {
       rows.push({
         kind: "header",
         name: g.name,
         inferred: g.inferred,
         workerCount: g.workerIds.length,
+        collapsed: isCollapsed,
         y,
         height: headerH,
       });
       y += headerH;
     }
+    if (isCollapsed) continue;
     for (const workerId of g.workerIds) {
       rows.push({ kind: "worker", workerId, index, y, height: rowH });
       y += rowH;
@@ -206,6 +218,21 @@ export function workerAtLaneY(rowLayout: LaneRowLayout, localY: number): number 
   for (const row of rowLayout.rows) {
     if (localY < row.y || localY >= row.y + row.height) continue;
     return row.kind === "worker" ? row.workerId : null;
+  }
+  return null;
+}
+
+/**
+ * Resolve a lanes-local y to the runtime-group NAME whose header band contains
+ * it, or null when the point is over a worker row / past the content. The
+ * counterpart to workerAtLaneY over the same geometry, so a click resolves to
+ * exactly one target (a header toggle or a worker select, never both).
+ */
+export function headerAtLaneY(rowLayout: LaneRowLayout, localY: number): string | null {
+  if (localY < 0) return null;
+  for (const row of rowLayout.rows) {
+    if (localY < row.y || localY >= row.y + row.height) continue;
+    return row.kind === "header" ? row.name : null;
   }
   return null;
 }

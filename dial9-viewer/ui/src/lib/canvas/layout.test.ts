@@ -10,6 +10,7 @@ import {
   laneStackGeometry,
   laneRowLayout,
   workerAtLaneY,
+  headerAtLaneY,
 } from "./layout.js";
 import type { RuntimeGroup } from "../../types/trace.js";
 
@@ -151,14 +152,39 @@ describe("laneRowLayout", () => {
       24,
     );
     expect(rows).toEqual([
-      { kind: "header", name: "a", inferred: false, workerCount: 2, y: 0, height: 24 },
+      { kind: "header", name: "a", inferred: false, workerCount: 2, collapsed: false, y: 0, height: 24 },
       { kind: "worker", workerId: 0, index: 0, y: 24, height: 60 },
       { kind: "worker", workerId: 1, index: 1, y: 84, height: 60 },
-      { kind: "header", name: "b", inferred: false, workerCount: 1, y: 144, height: 24 },
+      { kind: "header", name: "b", inferred: false, workerCount: 1, collapsed: false, y: 144, height: 24 },
       { kind: "worker", workerId: 2, index: 2, y: 168, height: 60 },
     ]);
     // 2 headers (24) + 3 workers (60) = 228.
     expect(contentHeight).toBe(228);
+  });
+
+  it("a collapsed group keeps its header but drops its worker rows", () => {
+    const { rows, contentHeight } = laneRowLayout(
+      [group("a", [0, 1]), group("b", [2])],
+      60,
+      24,
+      { a: true },
+    );
+    expect(rows).toEqual([
+      { kind: "header", name: "a", inferred: false, workerCount: 2, collapsed: true, y: 0, height: 24 },
+      { kind: "header", name: "b", inferred: false, workerCount: 1, collapsed: false, y: 24, height: 24 },
+      // b's worker keeps a dense index (0): folded a's workers never emit.
+      { kind: "worker", workerId: 2, index: 0, y: 48, height: 60 },
+    ]);
+    // header a (24) + header b (24) + 1 worker (60) = 108.
+    expect(contentHeight).toBe(108);
+  });
+
+  it("ignores the collapse map for a single-runtime (headerless) trace", () => {
+    const { rows } = laneRowLayout([group("main", [3, 0], true)], 60, 24, { main: true });
+    expect(rows).toEqual([
+      { kind: "worker", workerId: 3, index: 0, y: 0, height: 60 },
+      { kind: "worker", workerId: 0, index: 1, y: 60, height: 60 },
+    ]);
   });
 
   it("no groups -> empty stack", () => {
@@ -190,5 +216,23 @@ describe("workerAtLaneY", () => {
     expect(workerAtLaneY(grouped, 168)).toBe(2); // worker under header "b"
     expect(workerAtLaneY(grouped, 10_000)).toBeNull(); // past the content
     expect(workerAtLaneY(single, -1)).toBeNull(); // above the content
+  });
+});
+
+describe("headerAtLaneY", () => {
+  const grouped = laneRowLayout([group("a", [0, 1]), group("b", [2])], 60, 24);
+  const folded = laneRowLayout([group("a", [0, 1]), group("b", [2])], 60, 24, { a: true });
+
+  it("resolves the runtime name whose header band contains the y, else null", () => {
+    expect(headerAtLaneY(grouped, 10)).toBe("a"); // header "a" band [0,24)
+    expect(headerAtLaneY(grouped, 24)).toBeNull(); // first worker row
+    expect(headerAtLaneY(grouped, 150)).toBe("b"); // header "b" band [144,168)
+    expect(headerAtLaneY(grouped, 10_000)).toBeNull(); // past the content
+  });
+
+  it("a folded runtime's header + the next header are adjacent hit targets", () => {
+    expect(headerAtLaneY(folded, 10)).toBe("a"); // folded header a [0,24)
+    expect(headerAtLaneY(folded, 30)).toBe("b"); // header b now at [24,48)
+    expect(workerAtLaneY(folded, 60)).toBe(2); // b's only worker at [48,108)
   });
 });

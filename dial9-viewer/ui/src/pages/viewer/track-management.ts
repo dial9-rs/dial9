@@ -162,6 +162,20 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
   return a.every((v, i) => v === b[i]);
 }
 
+/**
+ * Toggle a runtime group's folded state by NAME (a click on its lanes header
+ * band). Folding drops that runtime's worker rows from the lanes stack (its
+ * header stays, so it can be unfolded); the change persists via the uiPrefs ->
+ * trackPrefs subscriber. Standalone (not on TrackManageActions) because the
+ * lanes interaction layer dispatches it directly, without the track strip.
+ */
+export function toggleRuntimeCollapsed(store: ViewerStore, name: string): void {
+  const cur = store.getState().uiPrefs.collapsedRuntimes;
+  store.update("uiPrefs", {
+    collapsedRuntimes: { ...cur, [name]: !(cur[name] === true) },
+  });
+}
+
 // ── localStorage persistence (survives reload) ─────────────────────────────
 //
 // A try/catch around localStorage with an in-memory fallback map, so a
@@ -172,13 +186,28 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
 /** localStorage key for the serialized track prefs. */
 export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
 
-/** The persisted shape: the manageable order + the collapse map + the lanes box
- *  height. `lanesHeight` is optional so prefs written before it existed still
- *  parse (the store keeps its default when absent). */
+/** The persisted shape: the manageable order + the collapse map + the per-runtime
+ *  fold map + the lanes box height. `lanesHeight` and `collapsedRuntimes` are
+ *  optional so prefs written before they existed still parse (the store keeps its
+ *  default when absent). */
 export interface TrackPrefs {
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
+  collapsedRuntimes?: Readonly<Record<string, boolean>>;
   lanesHeight?: number;
+}
+
+/** Coerce an unknown value into a `Record<string, boolean>`, keeping only the
+ *  boolean-valued entries. A non-object yields an empty map. Shared by the
+ *  `collapsed` (track) + `collapsedRuntimes` (runtime) fold maps. */
+function parseBoolMap(value: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof v === "boolean") out[k] = v;
+    }
+  }
+  return out;
 }
 
 const memoryFallback = new Map<string, string>();
@@ -214,27 +243,33 @@ export function loadTrackPrefs(): TrackPrefs | null {
     const trackOrder = Array.isArray(obj.trackOrder)
       ? obj.trackOrder.filter((v): v is string => typeof v === "string")
       : [];
-    const collapsed: Record<string, boolean> = {};
-    if (obj.collapsed !== null && typeof obj.collapsed === "object") {
-      for (const [k, v] of Object.entries(obj.collapsed as Record<string, unknown>)) {
-        if (typeof v === "boolean") collapsed[k] = v;
-      }
-    }
+    const collapsed = parseBoolMap(obj.collapsed);
+    const cr = (obj as { collapsedRuntimes?: unknown }).collapsedRuntimes;
+    const collapsedRuntimes = cr !== undefined ? parseBoolMap(cr) : undefined;
     const lh = (obj as { lanesHeight?: unknown }).lanesHeight;
     const lanesHeight = typeof lh === "number" && Number.isFinite(lh) && lh > 0 ? lh : undefined;
-    return { trackOrder, collapsed, ...(lanesHeight !== undefined ? { lanesHeight } : {}) };
+    return {
+      trackOrder,
+      collapsed,
+      ...(collapsedRuntimes !== undefined ? { collapsedRuntimes } : {}),
+      ...(lanesHeight !== undefined ? { lanesHeight } : {}),
+    };
   } catch {
     return null;
   }
 }
 
-/** Persist track prefs (order + collapse map + lanes box height) to localStorage. */
+/** Persist track prefs (order + collapse map + runtime fold map + lanes box
+ *  height) to localStorage. */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
   storageSet(
     TRACK_PREFS_STORAGE_KEY,
     JSON.stringify({
       trackOrder: prefs.trackOrder,
       collapsed: prefs.collapsed,
+      ...(prefs.collapsedRuntimes !== undefined
+        ? { collapsedRuntimes: prefs.collapsedRuntimes }
+        : {}),
       ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
     }),
   );
@@ -252,7 +287,11 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
   store.update("uiPrefs", {
     trackOrder: prefs.trackOrder,
     collapsed: prefs.collapsed,
-    // Only override the store default when a height was actually stored.
+    // Only override the store defaults when the field was actually stored (prefs
+    // written before these existed keep the resting default).
+    ...(prefs.collapsedRuntimes !== undefined
+      ? { collapsedRuntimes: prefs.collapsedRuntimes }
+      : {}),
     ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
   });
 }
@@ -266,7 +305,7 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
  */
 export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
   return store.subscribe(["uiPrefs"], (state) => {
-    const { trackOrder, collapsed, lanesViewportHeight } = state.uiPrefs;
-    saveTrackPrefs({ trackOrder, collapsed, lanesHeight: lanesViewportHeight });
+    const { trackOrder, collapsed, collapsedRuntimes, lanesViewportHeight } = state.uiPrefs;
+    saveTrackPrefs({ trackOrder, collapsed, collapsedRuntimes, lanesHeight: lanesViewportHeight });
   });
 }

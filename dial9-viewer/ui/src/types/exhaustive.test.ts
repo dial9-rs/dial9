@@ -185,6 +185,7 @@ const initialState: StoreState = {
     // Track management: custom order + collapse map.
     trackOrder: ["queue", "cpu", "spans", "events"],
     collapsed: { cpu: true, queue: false },
+    collapsedRuntimes: { "blocking pool": true },
     sidebarWidth: 400,
     lanesViewportHeight: 220,
     selectedSpanNames: new Set(),

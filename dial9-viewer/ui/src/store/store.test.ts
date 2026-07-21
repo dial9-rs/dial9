@@ -58,6 +58,7 @@ function initialViewerState(): StoreState {
       panelCollapsed: { spans: false, events: false, cpu: false, queue: false },
       trackOrder: [],
       collapsed: {},
+      collapsedRuntimes: {},
       sidebarWidth: 320,
       lanesViewportHeight: 200,
       selectedSpanNames: new Set(),
