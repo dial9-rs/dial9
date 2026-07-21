@@ -1,0 +1,474 @@
+//! `ThreadLocalBuffer` is the entrypoint for almost all dial9 events
+//!
+//! The TL buffer is created lazily the first time an event is sent. Events are encoded directly
+//! into a thread-local `Encoder<Vec<u8>>` and flushed to the central collector when the encoded
+//! batch reaches the configured batch size (default 1 MB).
+//!
+//! Each buffer is wrapped in `Arc<Mutex<…>>` so the flush thread can intrusively
+//! drain idle/silent threads via [`TlBufferHandle`]s registered in `SharedState`.
+use crate::collector::CentralCollector;
+use crate::primitives::sync::atomic::{AtomicU64, Ordering};
+use crate::primitives::sync::{Arc, Mutex, Weak};
+use dial9_trace_format::encoder::{Encoder, FxHashMap};
+use dial9_trace_format::{InternedStackFrames, InternedString};
+use std::panic::Location;
+use std::time::Duration;
+
+// ── Public API types ────────────────────────────────────────────────────────
+
+/// Scoped encoder for writing events into the thread-local trace buffer.
+///
+/// Provides access to string interning and event encoding. The borrow lifetime
+/// ensures that [`InternedString`] handles created via [`intern_string`](Self::intern_string)
+/// are used within the same batch — they become invalid after the buffer flushes.
+///
+/// You don't construct this directly; it's passed to [`Encodable::encode`].
+pub struct ThreadLocalEncoder<'a> {
+    encoder: &'a mut Encoder<Vec<u8>>,
+    location_cache: &'a mut FxHashMap<&'static Location<'static>, String>,
+}
+
+impl std::fmt::Debug for ThreadLocalEncoder<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadLocalEncoder").finish_non_exhaustive()
+    }
+}
+
+impl ThreadLocalEncoder<'_> {
+    /// Intern a string into the trace's string pool, returning a compact handle.
+    ///
+    /// If the string was already interned in this batch, returns the existing handle
+    /// (no duplicate wire data). The returned [`InternedString`] is only valid for
+    /// encoding within this same [`Encodable::encode`] call.
+    pub fn intern_string(&mut self, s: &str) -> InternedString {
+        self.encoder.intern_string_infallible(s)
+    }
+
+    /// Intern a stack-frame vector into the trace's stack pool, returning a compact handle.
+    ///
+    /// If the stack was already interned in this batch, returns the existing handle
+    /// (no duplicate wire data). The returned [`InternedStackFrames`] is only valid for
+    /// encoding within this same [`Encodable::encode`] call.
+    pub fn intern_stack_frames(&mut self, frames: &[u64]) -> InternedStackFrames {
+        self.encoder.intern_stack_frames_infallible(frames)
+    }
+
+    /// Encode a [`TraceEvent`](dial9_trace_format::TraceEvent) struct into the buffer.
+    ///
+    /// The `'static` bound is required because the encoder uses [`TypeId`](std::any::TypeId)
+    /// to cache schema registrations per concrete type.
+    pub fn encode(&mut self, event: &(impl dial9_trace_format::TraceEvent + 'static)) {
+        self.encoder.write_infallible(event);
+    }
+
+    /// Write an event with a dynamically-registered schema.
+    ///
+    /// The first element of `values` must be `FieldValue::Varint(timestamp_ns)`.
+    /// The remaining values must match the schema's field definitions in order.
+    /// The schema is auto-registered on first use per buffer flush cycle.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use dial9_trace_format::types::FieldValue;
+    ///
+    /// enc.write_event(&schema, &[
+    ///     FieldValue::Varint(timestamp_ns),  // must be first
+    ///     FieldValue::Varint(worker_id),
+    ///     FieldValue::PooledString(enc.intern_string("hello")),
+    /// ]);
+    /// ```
+    // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
+    #[doc(hidden)]
+    pub fn write_event(
+        &mut self,
+        schema: &dial9_trace_format::encoder::Schema,
+        values: &[dial9_trace_format::types::FieldValue],
+    ) {
+        self.encoder
+            .write_event(schema, values)
+            .expect("writing to Vec<u8> is infallible");
+    }
+
+    /// Intern a `&'static Location` (caching the `to_string()` result).
+    #[doc(hidden)]
+    pub fn intern_location(&mut self, location: &'static Location<'static>) -> InternedString {
+        let s = self
+            .location_cache
+            .entry(location)
+            .or_insert_with(|| location.to_string());
+        self.encoder.intern_string_infallible(s)
+    }
+}
+
+/// Trait for types that can be encoded into a dial9 trace.
+///
+/// # Simple case — `#[derive(TraceEvent)]`
+///
+/// Any type implementing [`TraceEvent`](dial9_trace_format::TraceEvent) automatically
+/// implements `Encodable` via a blanket impl, so you can pass it directly to
+/// `Dial9Handle::record_event`:
+///
+/// ```ignore
+/// #[derive(TraceEvent)]
+/// struct MyEvent {
+///     #[traceevent(timestamp)]
+///     timestamp_ns: u64,
+///     request_count: u32,
+/// }
+/// handle.record_event(MyEvent { timestamp_ns: now, request_count: 42 });
+/// ```
+///
+/// # Advanced case — string interning
+///
+/// Implement `Encodable` manually when you need [`InternedString`] fields
+/// for efficient repeated-string encoding:
+///
+/// ```ignore
+/// struct HttpRequest { timestamp_ns: u64, method: String, status: u32 }
+///
+/// impl Encodable for HttpRequest {
+///     fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+///         let method = enc.intern_string(&self.method);
+///         enc.encode(&HttpRequestWire {
+///             timestamp_ns: self.timestamp_ns,
+///             method,
+///             status: self.status,
+///         });
+///     }
+/// }
+/// ```
+///
+/// # Wire event naming
+///
+/// The event name in the trace comes from the struct passed to
+/// [`ThreadLocalEncoder::encode`], not from the type implementing `Encodable`.
+/// In the example above, the trace will contain events named `"HttpRequestWire"`,
+/// not `"HttpRequest"`.
+///
+pub trait Encodable {
+    /// Encode this event into the thread-local trace buffer.
+    ///
+    /// Implementations should call [`ThreadLocalEncoder::encode`] exactly once.
+    /// Each `encode` call is counted as one event for buffer flush decisions;
+    /// calling `encode` multiple times will produce multiple wire events but
+    /// only one event will be counted.
+    fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>);
+}
+
+impl<T: dial9_trace_format::TraceEvent + 'static> Encodable for T {
+    fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>) {
+        encoder.encode(self);
+    }
+}
+
+// ── Thread-local buffer internals ───────────────────────────────────────────
+
+/// Tracks the last drain epoch at which a particular thread-local buffer
+/// was flushed. The flush thread reads this (relaxed) to skip buffers
+/// that have self-flushed recently, avoiding contention with busy workers.
+#[derive(Clone)]
+pub(crate) struct FlushEpoch(Arc<AtomicU64>);
+
+impl FlushEpoch {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) fn store(&self, epoch: u64) {
+        self.0.store(epoch, Ordering::Relaxed);
+    }
+
+    pub(crate) fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Default maximum encoded batch size before flushing (~1MB).
+const DEFAULT_BATCH_SIZE: usize = 1023 * 1024;
+
+pub(crate) struct ThreadLocalBuffer {
+    encoder: Encoder<Vec<u8>>,
+    event_count: usize,
+    batch_size: usize,
+    collector: Option<Arc<CentralCollector>>,
+    /// Caches `Location::to_string()` to avoid re-formatting on every event.
+    /// Bounded by the number of `#[track_caller]` call sites in the program,
+    /// which is fixed at compile time, so this does not grow unboundedly.
+    location_cache: FxHashMap<&'static Location<'static>, String>,
+    /// Last drain epoch at which this buffer was flushed. Shared with the
+    /// flush thread via `TlBufferHandle` so it can skip busy workers.
+    pub(crate) flush_epoch: FlushEpoch,
+}
+
+impl Default for ThreadLocalBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ThreadLocalBuffer {
+    fn new() -> Self {
+        Self::with_batch_size(DEFAULT_BATCH_SIZE)
+    }
+
+    fn with_batch_size(batch_size: usize) -> Self {
+        Self {
+            // Allocate 1KB extra headroom so typical events never trigger a realloc.
+            encoder: Encoder::new_to(Vec::with_capacity(batch_size + 1024))
+                .expect("Vec::write_all cannot fail"),
+            event_count: 0,
+            batch_size,
+            collector: None,
+            location_cache: FxHashMap::default(),
+            flush_epoch: FlushEpoch::new(),
+        }
+    }
+
+    /// Ensure the collector reference is set. Called on every record_event;
+    /// only the first call per thread actually stores the Arc.
+    /// Returns `true` on the first call (when the collector was not yet set).
+    fn set_collector(&mut self, collector: &Arc<CentralCollector>) -> bool {
+        if self.collector.is_none() {
+            self.collector = Some(Arc::clone(collector));
+            return true;
+        }
+        false
+    }
+
+    fn thread_local_encoder(&mut self) -> ThreadLocalEncoder<'_> {
+        ThreadLocalEncoder {
+            encoder: &mut self.encoder,
+            location_cache: &mut self.location_cache,
+        }
+    }
+
+    // Only reached via `encode_single` (test-util) and core's own tests.
+    #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
+    fn record_encodable(&mut self, event: &dyn Encodable) {
+        event.encode(&mut self.thread_local_encoder());
+        self.event_count += 1;
+    }
+
+    fn should_flush(&self) -> bool {
+        self.encoder.bytes_written() as usize >= self.batch_size
+    }
+
+    pub(crate) fn flush(&mut self) -> crate::collector::Batch {
+        let event_count = self.event_count as u64;
+        let encoded_bytes = self
+            .encoder
+            .reset_to_infallible(Vec::with_capacity(self.batch_size));
+        self.event_count = 0;
+        crate::collector::Batch::new(encoded_bytes, event_count)
+    }
+
+    pub(crate) fn has_pending_events(&self) -> bool {
+        self.event_count > 0
+    }
+}
+
+crate::test_util_pub! {
+/// Encode a single event into a self-contained batch (header + event).
+fn encode_single(event: &dyn Encodable) -> Vec<u8> {
+    let mut buf = ThreadLocalBuffer::with_batch_size(1024);
+    buf.record_encodable(event);
+    buf.flush().into_encoded_bytes()
+}
+}
+
+impl Drop for ThreadLocalBuffer {
+    fn drop(&mut self) {
+        if self.event_count > 0 {
+            if let Some(collector) = self.collector.take() {
+                collector.accept_flush(self.flush());
+            } else {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        "dial9-tokio-telemetry: dropping {} unflushed events (no collector registered on this thread)",
+                        self.event_count
+                    );
+                });
+            }
+        }
+    }
+}
+
+/// A handle to a thread-local buffer, held by `SharedState` so the flush
+/// thread can intrusively drain idle/silent buffers.
+pub(crate) struct TlBufferHandle {
+    pub(crate) buffer: Weak<Mutex<ThreadLocalBuffer>>,
+    pub(crate) flush_epoch: FlushEpoch,
+}
+
+crate::primitives::thread_local! {
+    static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
+}
+
+/// Drain the current thread's buffer into `collector`, even if not full.
+/// Used at shutdown and before flush cycles to avoid losing events.
+pub(crate) fn drain_to_collector(collector: &CentralCollector) {
+    BUFFER.with(|buf| {
+        let mut buf = match buf.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::error!("dial9: thread-local buffer mutex poisoned in drain_to_collector; skipping drain");
+                });
+                return;
+            }
+        };
+        if buf.event_count > 0 {
+            collector.accept_flush(buf.flush());
+        }
+    });
+}
+
+pub(crate) fn record_encodable_event(
+    event: &dyn Encodable,
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+) -> Option<TlBufferHandle> {
+    with_encoder(|enc| event.encode(enc), collector, drain_epoch)
+}
+
+pub(crate) fn with_encoder(
+    f: impl FnOnce(&mut ThreadLocalEncoder<'_>),
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+) -> Option<TlBufferHandle> {
+    BUFFER.with(|arc| {
+        let mut buf = match arc.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::error!("dial9: thread-local buffer mutex poisoned in with_encoder; dropping events for this thread");
+                });
+                return None;
+            }
+        };
+        let first_call = buf.set_collector(collector);
+        f(&mut buf.thread_local_encoder());
+        buf.event_count += 1;
+        let current_epoch = drain_epoch.load(Ordering::Relaxed);
+        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
+            collector.accept_flush(buf.flush());
+            buf.flush_epoch.store(current_epoch);
+        }
+        if first_call {
+            Some(TlBufferHandle {
+                buffer: Arc::downgrade(arc),
+                flush_epoch: buf.flush_epoch.clone(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_event() -> crate::format::ClockSyncEvent {
+        crate::format::ClockSyncEvent {
+            timestamp_ns: 1000,
+            realtime_ns: 2000,
+        }
+    }
+
+    #[test]
+    fn test_buffer_creation() {
+        let buffer = ThreadLocalBuffer::new();
+        assert_eq!(buffer.event_count, 0);
+        assert_eq!(buffer.batch_size, DEFAULT_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_record_event() {
+        let mut buffer = ThreadLocalBuffer::new();
+        buffer.record_encodable(&sample_event());
+        assert_eq!(buffer.event_count, 1);
+        assert!(buffer.encoder.bytes_written() > 0);
+    }
+
+    #[test]
+    fn test_should_flush_respects_batch_size() {
+        // Use a tiny batch size so a single event triggers flush.
+        let mut buffer = ThreadLocalBuffer::with_batch_size(1);
+        assert!(!buffer.should_flush());
+        buffer.record_encodable(&sample_event());
+        assert!(buffer.should_flush());
+    }
+
+    #[test]
+    fn test_should_flush_default_batch_size() {
+        let mut buffer = ThreadLocalBuffer::new();
+        assert!(!buffer.should_flush());
+        buffer.record_encodable(&sample_event());
+        // A single small event should not exceed 1 MB.
+        assert!(!buffer.should_flush());
+    }
+
+    #[test]
+    fn test_flush() {
+        let mut buffer = ThreadLocalBuffer::new();
+        buffer.record_encodable(&sample_event());
+        let batch = buffer.flush();
+        assert!(!batch.encoded_bytes().is_empty());
+        assert_eq!(buffer.event_count, 0);
+    }
+
+    #[test]
+    fn test_flush_epoch_store_load() {
+        let epoch = FlushEpoch::new();
+        assert_eq!(epoch.load(), 0);
+        epoch.store(42);
+        assert_eq!(epoch.load(), 42);
+    }
+
+    #[test]
+    fn test_flush_epoch_shared_across_threads() {
+        let epoch = FlushEpoch::new();
+        let epoch_clone = epoch.clone();
+        let handle = std::thread::spawn(move || {
+            epoch_clone.store(7);
+        });
+        handle.join().unwrap();
+        assert_eq!(epoch.load(), 7);
+    }
+
+    #[test]
+    fn test_flush_epoch_stamped_on_self_flush() {
+        let collector = Arc::new(CentralCollector::new());
+        let drain_epoch = AtomicU64::new(5);
+        // Use a tiny batch size so a single event triggers self-flush.
+        // We can't use record_event (thread-local) easily, so test the
+        // logic directly: flush + stamp.
+        let mut buffer = ThreadLocalBuffer::with_batch_size(1);
+        buffer.set_collector(&collector);
+        buffer.record_encodable(&sample_event());
+        assert!(buffer.should_flush());
+        buffer
+            .flush_epoch
+            .store(drain_epoch.load(Ordering::Relaxed));
+        collector.accept_flush(buffer.flush());
+        assert_eq!(buffer.flush_epoch.load(), 5);
+    }
+
+    #[test]
+    fn test_mutex_accessible_from_another_thread() {
+        let buf = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
+        let buf_clone = Arc::clone(&buf);
+        // Write an event from a different thread.
+        let handle = std::thread::spawn(move || {
+            let mut guard = buf_clone.lock().unwrap();
+            guard.record_encodable(&sample_event());
+            assert_eq!(guard.event_count, 1);
+        });
+        handle.join().unwrap();
+        // Main thread can also access it.
+        let guard = buf.lock().unwrap();
+        assert_eq!(guard.event_count, 1);
+    }
+}

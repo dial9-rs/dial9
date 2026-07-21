@@ -1,6 +1,6 @@
-use crate::buffer;
-use crate::buffer::TlBufferHandle;
 use crate::collector::CentralCollector;
+use crate::encoder;
+use crate::encoder::TlBufferHandle;
 use crate::metrics::TlDrainStats;
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
@@ -33,17 +33,19 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(start_time_ns: u64) -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
-            collector: Arc::new(CentralCollector::new()),
-            start_time_ns,
-            next_worker_id: AtomicU64::new(0),
-            drain_epoch: AtomicU64::new(0),
-            tl_buffers: Mutex::new(Vec::new()),
-            sources: Mutex::new(Vec::new()),
-            #[cfg(feature = "pipeline")]
-            dump_trigger: std::sync::OnceLock::new(),
+    crate::test_util_pub! {
+        fn new(start_time_ns: u64) -> Self {
+            Self {
+                enabled: AtomicBool::new(false),
+                collector: Arc::new(CentralCollector::new()),
+                start_time_ns,
+                next_worker_id: AtomicU64::new(0),
+                drain_epoch: AtomicU64::new(0),
+                tl_buffers: Mutex::new(Vec::new()),
+                sources: Mutex::new(Vec::new()),
+                #[cfg(feature = "pipeline")]
+                dump_trigger: std::sync::OnceLock::new(),
+            }
         }
     }
 
@@ -120,9 +122,9 @@ impl SharedState {
     /// Test-only shortcut to record an event directly. Production code records
     /// through [`EventBuffer`] via [`if_enabled`](Self::if_enabled).
     #[cfg(test)]
-    fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
+    fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
         if let Some(handle) =
-            buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)
+            encoder::record_encodable_event(event, &self.collector, &self.drain_epoch)
         {
             self.tl_buffers.lock().unwrap().push(handle);
         }
@@ -231,16 +233,16 @@ impl SharedState {
 pub struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {
-    pub fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
+    pub fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
         if let Some(handle) =
-            buffer::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
+            encoder::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
         {
             self.0.tl_buffers.lock().unwrap().push(handle);
         }
     }
 
-    pub fn with_encoder(&self, f: impl FnOnce(&mut buffer::ThreadLocalEncoder<'_>)) {
-        if let Some(handle) = buffer::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
+    pub fn with_encoder(&self, f: impl FnOnce(&mut encoder::ThreadLocalEncoder<'_>)) {
+        if let Some(handle) = encoder::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
             self.0.tl_buffers.lock().unwrap().push(handle);
         }
     }

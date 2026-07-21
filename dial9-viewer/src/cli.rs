@@ -72,8 +72,9 @@ enum Commands {
         #[arg(long)]
         agg_output_dir: Option<PathBuf>,
 
-        /// Output S3 bucket for the aggregator's Parquet part-files. Defaults to
-        /// the source `--bucket`. May target a different bucket/account/region.
+        /// Optional S3 bucket for persistent aggregator Parquet part-files. For
+        /// S3/BYOC aggregation, leaving this unset uses a process-local temporary
+        /// directory and never writes to the source bucket.
         #[arg(long)]
         agg_output_bucket: Option<String>,
 
@@ -130,6 +131,15 @@ enum AgentsAction {
         /// Directory to write skills into (created if missing)
         path: PathBuf,
     },
+}
+
+/// Build a Tokio runtime and run the CLI. For binaries that don't set up their
+/// own runtime (e.g. the `dial9` binary).
+pub fn run_blocking() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
 }
 
 /// Run the CLI. Call this from your binary's `main()`.

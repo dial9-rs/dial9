@@ -108,7 +108,7 @@ pub struct S3Config {
     /// different runs of the same service on the same host don't collide.
     ///
     /// Not a builder field: when telemetry is configured through the managed
-    /// `Dial9Config` path the runtime injects the same
+    /// `recorder_from_env` path the runtime injects the same
     /// boot_id it uses for the on-disk `{boot_id}/` namespace directory (via
     /// [`set_boot_id`](Self::set_boot_id)), so a local trace segment and its S3
     /// key share one identity. Defaults to a fresh `{4-alpha}-{pid}` when no

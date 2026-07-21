@@ -223,10 +223,13 @@ impl std::fmt::Debug for OfflineSymbolizer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "android", target_arch = "aarch64")
+))]
 mod imp {
     use super::{FxHashSet, MapsEntry, collect_stack_frame_addresses};
-    use crate::rate_limit::rate_limited;
+    use dial9_core::rate_limited;
     use dial9_trace_format::decoder::Decoder;
     use std::io;
     use std::panic::AssertUnwindSafe;
@@ -461,7 +464,10 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(
+    target_os = "linux",
+    all(target_os = "android", target_arch = "aarch64")
+)))]
 mod imp {
     use super::MapsEntry;
     use std::io;

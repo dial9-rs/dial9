@@ -1,0 +1,61 @@
+//! Minimal example: add dial9 telemetry to an async app.
+//!
+//! The `#[dial9::main]` macro replaces `#[tokio::main]`.
+//! It builds the Tokio runtime from a config function and spawns the body as
+//! an instrumented task so top-level code is visible in traces.
+//!
+//! Usage:
+//!   cargo run --example simple_workload
+//!
+//! Inspect the trace afterwards:
+//!   cargo run --example analyze_trace -- simple_workload_trace/trace.0.bin
+
+use std::time::Duration;
+
+use dial9::Dial9TokioHandle;
+
+async fn cpu_work(iterations: u64) -> u64 {
+    let mut result = 0u64;
+    for i in 0..iterations {
+        result = result.wrapping_add(i.wrapping_mul(i));
+    }
+    result
+}
+
+async fn io_simulation() {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+}
+
+async fn mixed_task(id: usize) {
+    for i in 0..10 {
+        if i % 3 == 0 {
+            io_simulation().await;
+        } else {
+            cpu_work(100_000).await;
+        }
+        tokio::task::yield_now().await;
+    }
+    println!("Task {id} completed");
+}
+
+#[dial9::main(config = || {
+    let writer = dial9::DiskBuffer::builder()
+        .base_path("simple_workload_trace")
+        .max_file_size(64 * 1024 * 1024)
+        .max_total_size(256 * 1024 * 1024)
+        .build();
+    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); })
+        .with_task_tracking(true)
+})]
+async fn main() {
+    println!("Running workload...");
+
+    let handle = Dial9TokioHandle::current();
+    let tasks: Vec<_> = (0..200).map(|i| handle.spawn(mixed_task(i))).collect();
+
+    for task in tasks {
+        let _ = task.await;
+    }
+
+    println!("Trace written to simple_workload_trace/trace.*.bin");
+}

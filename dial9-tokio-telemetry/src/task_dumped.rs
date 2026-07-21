@@ -50,7 +50,7 @@ use std::task::{Context, Poll};
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
 
 crate::primitives::thread_local! {
-    /// This session's task-dump config for the current thread. Installed on
+    /// This recorder's task-dump config for the current thread. Installed on
     /// every runtime-owned thread: worker thread-start, plus the block_on
     /// thread in `attach_runtime` (which thread-start doesn't fire for on a
     /// current-thread runtime), and cleared on thread stop.
@@ -96,7 +96,7 @@ pin_project! {
         // capture → …). Cleared on the next poll so subsequent real wakes
         // proceed normally.
         just_captured: bool,
-        // Whether task dumps are configured for this session. `None` until the
+        // Whether task dumps are configured for this recorder. `None` until the
         // first poll reads the per-thread config. The wrapping thread may lack
         // it (e.g. an explicit handle spawned from elsewhere), but the polling
         // thread always has it. `Some(false)` makes poll a passthrough.
@@ -127,7 +127,7 @@ impl<F: Future> Future for TaskDumped<F> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let mut this = self.project();
 
-        // Read this session's task-dump config on the first poll. Wrapping can
+        // Read this recorder's task-dump config on the first poll. Wrapping can
         // happen on a thread without the config, but a task always polls on a
         // runtime-owned thread, which has it.
         let enabled = match *this.enabled {
@@ -195,7 +195,13 @@ impl<F: Future> Future for TaskDumped<F> {
                 if *this.just_captured {
                     *this.just_captured = false;
                 } else {
-                    this.frames.capture(this.inner.as_mut(), cx);
+                    let repoll_result = this.frames.capture(this.inner.as_mut(), cx);
+                    // In rare circumstances, repoll will now be ready.
+                    if repoll_result.is_ready() {
+                        this.frames.clear();
+                        *this.pending_capture_ts = None;
+                        return repoll_result;
+                    }
                     *this.just_captured = true;
                     let poll_end = crate::telemetry::recorder::poll_start_ts_monotonic();
                     *this.pending_capture_ts = NonZeroU64::new(poll_end);
@@ -276,8 +282,11 @@ impl FrameBuf {
     }
 
     /// Capture backtraces at yield points by re-polling `inner` under the
-    /// real waker inside `trace_with`.
-    fn capture<F: Future>(&mut self, inner: Pin<&mut F>, cx: &mut Context<'_>) {
+    /// real waker inside `trace_with`, returning that re-poll's result.
+    ///
+    /// The re-poll can complete `inner`; that `Ready` is returned so the caller
+    /// can adopt it.
+    fn capture<F: Future>(&mut self, inner: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
         if self.ips.capacity() == 0 {
             self.ips.reserve(FRAME_BUF_INITIAL_CAPACITY);
         }
@@ -288,9 +297,10 @@ impl FrameBuf {
 
         // `trace_with`'s outer closure is `FnOnce`; `Option::take` moves the
         // pinned reference in without requiring a `Copy` bound or unsafe.
+        let mut result = Poll::Pending;
         tokio::runtime::dump::trace_with(
             || {
-                let _ = inner.poll(cx);
+                result = inner.poll(cx);
             },
             |meta| {
                 let ip_start = ips.len();
@@ -306,6 +316,7 @@ impl FrameBuf {
                 });
             },
         );
+        result
     }
 }
 
@@ -332,7 +343,7 @@ impl Encodable for TaskDumpData<'_> {
 mod tests {
     use super::TaskDumpData;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::buffer::encode_single;
+    use crate::telemetry::encoder::encode_single;
     use crate::telemetry::format::decode_events;
     use crate::telemetry::task_metadata::TaskId;
 

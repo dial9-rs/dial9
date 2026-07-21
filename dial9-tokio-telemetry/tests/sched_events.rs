@@ -5,28 +5,29 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, tid_to_worker};
-use dial9_tokio_telemetry::telemetry::InMemoryWriter;
+use dial9_tokio_telemetry::telemetry::MemoryBuffer;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::SchedEventConfig;
-    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, RecorderPerfExt, recorder};
     use std::time::Duration;
 
     let (capture, batches) = capture_processor();
 
     let num_workers = 2u64;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers as usize).enable_all();
 
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default())
+        .with_tokio(move |t| {
+            t.worker_threads(num_workers as usize);
+        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_workers * 2 {
             handles.push(tokio::spawn(async {
@@ -39,10 +40,7 @@ fn sched_events_capture_context_switches() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -81,7 +79,7 @@ fn sched_events_capture_context_switches() {
 #[test]
 fn sched_events_sampling_reduces_count() {
     use dial9_tokio_telemetry::telemetry::SchedEventConfig;
-    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, RecorderPerfExt, recorder};
     use std::collections::HashSet;
     use std::time::Duration;
 
@@ -90,19 +88,19 @@ fn sched_events_sampling_reduces_count() {
 
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers as usize).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default().sampling_interval(PERIOD))
+        .with_tokio(move |t| {
+            t.worker_threads(num_workers as usize);
+        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
     // Baseline switch counts for all current threads (workers already spawned).
     let before = common::snapshot_task_switches();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_workers * 20 {
             handles.push(tokio::spawn(async {
@@ -120,8 +118,7 @@ fn sched_events_sampling_reduces_count() {
     // Snapshot again while the worker threads are still alive.
     let after = common::snapshot_task_switches();
 
-    drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(5)).unwrap();
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

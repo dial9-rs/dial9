@@ -1722,16 +1722,34 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.3.13"
+version = "0.5.0-rc0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "bon",
+ "clap",
+ "dial9",
+ "dial9-core",
+ "dial9-macro",
+ "dial9-perf-self-profile",
+ "dial9-tokio-telemetry",
+ "dial9-trace-format",
  "dial9-viewer",
+ "flate2",
+ "hostname",
+ "metrique",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "dial9-core"
-version = "0.4.0-alpha.1"
+version = "0.5.0-rc0"
 dependencies = [
  "assert2",
  "bon",
@@ -1756,8 +1774,9 @@ dependencies = [
 
 [[package]]
 name = "dial9-macro"
-version = "0.3.7"
+version = "0.5.0-rc0"
 dependencies = [
+ "dial9",
  "insta",
  "prettyplease",
  "proc-macro2",
@@ -1767,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.4.4"
+version = "0.5.0-rc0"
 dependencies = [
  "blazesym",
  "bon",
@@ -1778,28 +1797,30 @@ dependencies = [
  "dial9-core",
  "dial9-trace-format",
  "libc",
+ "netlink-packet-core",
+ "netlink-packet-sock-diag",
+ "netlink-sys",
  "perf-event-data",
  "perf-event-open-sys2",
  "scc",
+ "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.4.0-alpha.1"
+version = "0.5.0-rc0"
 dependencies = [
  "arc-swap",
- "assert2",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "bon",
  "bytes",
- "clap",
  "criterion",
  "dial9-core",
- "dial9-macro",
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
@@ -1813,9 +1834,6 @@ dependencies = [
  "metrique",
  "metrique-timesource",
  "metrique-writer",
- "netlink-packet-core",
- "netlink-packet-sock-diag",
- "netlink-sys",
  "nix",
  "pin-project-lite",
  "proptest",
@@ -1836,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.4.1"
+version = "0.5.0-rc0"
 dependencies = [
  "dial9-trace-format",
  "dial9-trace-format-derive",
@@ -1849,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.4.1"
+version = "0.5.0-rc0"
 dependencies = [
  "insta",
  "prettyplease",
@@ -1860,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-utils"
-version = "0.4.0-alpha.1"
+version = "0.5.0-rc0"
 dependencies = [
  "assert2",
  "async-trait",
@@ -1883,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.4.0"
+version = "0.5.0-rc0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1928,6 +1946,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2990,9 +3009,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.185"
+version = "0.2.188"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
+checksum = "22053b6a34f84abc97f9129e61334f40174659a1b9bd18c970b83db6a9a6348b"
 
 [[package]]
 name = "libm"
@@ -3080,7 +3099,7 @@ dependencies = [
 name = "memory-local"
 version = "0.1.0"
 dependencies = [
- "dial9-tokio-telemetry",
+ "dial9",
  "tokio",
 ]
 
@@ -3103,7 +3122,7 @@ dependencies = [
  "axum",
  "axum-core",
  "clap",
- "dial9-tokio-telemetry",
+ "dial9",
  "dial9-trace-format",
  "futures-util",
  "hostname",
@@ -4709,7 +4728,7 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 name = "simple-local"
 version = "0.1.0"
 dependencies = [
- "dial9-tokio-telemetry",
+ "dial9",
  "tokio",
 ]
 

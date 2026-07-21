@@ -14,14 +14,14 @@ struct MainArgs {
 }
 
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
-                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           #[dial9::main(config = dial9::recorder_from_env)]\n\
                            or with an inline closure:\n  \
-                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
+                           #[dial9::main(config = || dial9::recorder(writer).with_tokio(|_| {}))]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g.\n  \
-                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
+                           #[dial9::main(config = || dial9::recorder(writer).with_tokio(|_| {}))]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
@@ -64,21 +64,21 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     if !input.sig.inputs.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.sig.inputs,
-            "#[dial9_tokio_telemetry::main] does not support function arguments",
+            "#[dial9::main] does not support function arguments",
         ));
     }
 
     if !input.sig.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.sig.generics,
-            "#[dial9_tokio_telemetry::main] does not support generics",
+            "#[dial9::main] does not support generics",
         ));
     }
 
     if input.sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(
             &input.sig.generics.where_clause,
-            "#[dial9_tokio_telemetry::main] does not support where clauses",
+            "#[dial9::main] does not support where clauses",
         ));
     }
 
@@ -95,9 +95,13 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(#config_call);
+            let __dial9_rt = ::dial9::TracedRuntime::new(#config_call);
             let __dial9_out = __dial9_rt.block_on(async move { #(#body_stmts)* });
-            __dial9_rt.graceful_shutdown();
+            if let Some(__dial9_timeout) = __dial9_rt.graceful_shutdown_timeout() {
+                __dial9_rt.graceful_shutdown(__dial9_timeout);
+            } else {
+                drop(__dial9_rt);
+            }
             __dial9_out
         }
     })
@@ -118,19 +122,13 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or a zero-argument closure
-///   returning any value convertible into a `TracedRuntime`. In
-///   practice that means one of:
-///     - `Dial9Config` from `Dial9Config::builder().on_disk_buffer(..)..build()`
-///       or `..in_memory_buffer()..build()` (strict): a writer-I/O failure surfaces
-///       from `.build()` as a `Dial9ConfigBuilderError`; runtime construction
-///       under the macro panics on tokio-builder or telemetry-core I/O.
-///     - `Dial9Config` from `..build_or_disabled()` (lenient): the same
-///       `Dial9Config` type, but writer-I/O failures are logged at `error!`
-///       and downgraded to a disabled config that still preserves your
-///       `with_tokio` configurators.
+///   returning a value convertible into a `TracedRuntime`, in practice a
+///   `TracedRuntimeBuilder` from `dial9::recorder(writer).with_tokio(..)` or from
+///   `dial9::recorder_from_env`. Runtime construction under the macro panics on
+///   tokio-builder or telemetry-core I/O.
 ///
-///   Use `.enabled(false)` to run without telemetry while keeping your
-///   `with_tokio` configurators.
+///   Use `dial9::TracedRuntimeBuilder::disabled()` to run without telemetry while
+///   keeping your `with_tokio` configurators.
 ///
 /// # Graceful shutdown
 ///
@@ -141,17 +139,17 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// exits. The deadline defaults to 1 second and is configurable on the config
 /// builder:
 ///
-/// ```rust,ignore
-/// Dial9Config::builder()
-///     .on_disk_buffer("/tmp/trace.bin")
-///     .max_total_size(16 * 1024 * 1024)
-///     .graceful_shutdown(std::time::Duration::from_secs(5)) // custom deadline
-///     // .disable_graceful_shutdown()                       // or opt out entirely
-///     .build()
+/// ```no_run
+/// # use dial9::{DiskBuffer, RecorderBuilderTokioExt};
+/// # let writer = DiskBuffer::builder().base_path("/tmp/traces").max_total_size(16 << 20).build().unwrap();
+/// let _config = dial9::recorder(writer)
+///     .with_tokio(|_| {})
+///     .graceful_shutdown(std::time::Duration::from_secs(5)); // custom deadline
+///     // or `.disable_graceful_shutdown()` to opt out entirely
 /// ```
 ///
 /// The low-level `TracedRuntime` API is unaffected — there you call
-/// `TelemetryGuard::graceful_shutdown` yourself.
+/// `TracedRuntime::graceful_shutdown` yourself.
 ///
 /// The implicit drain only runs when the body returns normally. If the body
 /// panics, the panic propagates and the guard's `Drop` still flushes and seals
@@ -162,19 +160,21 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// Using a named function:
 ///
-/// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
+/// ```no_run
+/// use dial9::Dial9TokioHandle;
+/// use dial9::{main, DiskBuffer, RecorderBuilderTokioExt, TracedRuntimeBuilder};
 ///
-/// fn my_config() -> Dial9Config {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
+/// fn my_config() -> TracedRuntimeBuilder {
+///     let writer = DiskBuffer::builder()
+///         .base_path("/tmp/traces")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
-///         .expect("config build failed")
+///         .expect("writer build failed");
+///     dial9::recorder(writer).with_tokio(|_| {})
 /// }
 ///
-/// #[dial9_tokio_telemetry::main(config = my_config)]
+/// #[dial9::main(config = my_config)]
 /// async fn main() {
 ///     let handle = Dial9TokioHandle::current();
 ///     handle
@@ -186,31 +186,27 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// Using an inline closure:
 ///
-/// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
+/// ```no_run
+/// # use dial9::RecorderBuilderTokioExt;
+/// #[dial9::main(config = || {
+///     let writer = dial9::DiskBuffer::builder()
+///         .base_path("/tmp/traces")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
-///         .expect("config build failed")
+///         .expect("writer build failed");
+///     dial9::recorder(writer).with_tokio(|_| {})
 /// })]
 /// async fn main() {
 ///     /* ... */
 /// }
 /// ```
 ///
-/// Lenient (telemetry is best-effort; falls back to a plain tokio
-/// runtime if writer setup fails):
+/// From the environment (best-effort; `DIAL9_ENABLED` off, or a writer-setup
+/// failure, yields a plain tokio runtime):
 ///
-/// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
-///         .max_file_size(1024 * 1024)
-///         .max_total_size(16 * 1024 * 1024)
-///         .build_or_disabled()
-/// })]
+/// ```no_run
+/// #[dial9::main(config = dial9::recorder_from_env)]
 /// async fn main() {
 ///     /* ... */
 /// }
@@ -219,29 +215,25 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Disabled (no telemetry, plain tokio runtime — useful for toggling
 /// dial9 off via a feature flag or env var without removing the macro):
 ///
-/// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
-///         .enabled(false)
-///         .build()
-///         .expect("config build failed")
-/// })]
+/// ```no_run
+/// #[dial9::main(config = || dial9::TracedRuntimeBuilder::<dial9::Disk>::disabled())]
 /// async fn main() {
 ///     /* ... */
 /// }
 /// ```
 ///
-/// In-memory writer (no telemetry on disk), select it with `.in_memory_buffer()`.
+/// In-memory writer (nothing on local disk). With no disk writeback, pair it
+/// with a pipeline that ships the buffered segments somewhere — e.g.
+/// `.with_s3_uploader(..)` or `.with_custom_pipeline(..)`.
 ///
-/// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
-///     Dial9Config::builder()
-///         .in_memory_buffer()
+/// ```no_run
+/// # use dial9::RecorderBuilderTokioExt;
+/// #[dial9::main(config = || {
+///     let writer = dial9::MemoryBuffer::builder()
 ///         .max_total_size(16 * 1024 * 1024)
-///         .with_runtime(|r| r.with_custom_pipeline(|p| p.pipe(MyUploader)))
 ///         .build()
-///         .expect("config build failed")
+///         .expect("writer build failed");
+///     dial9::recorder(writer).with_tokio(|_| {})
 /// })]
 /// async fn main() {
 ///     /* ... */

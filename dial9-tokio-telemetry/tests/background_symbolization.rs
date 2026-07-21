@@ -6,10 +6,13 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
+};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::time::Duration;
 
 /// Burn CPU in a tight loop to generate stack samples.
 ///
@@ -31,24 +34,28 @@ fn burn_cpu_work() {
 #[test]
 fn background_symbolization_produces_symbol_table_entries() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     // Small segments to force rotation so the worker has segments to process.
     // Large total size so segments aren't evicted before the worker processes them.
-    let writer = DiskWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(4 * 1024)
+        .max_total_size(10 * 1024 * 1024)
+        .build()
+        .unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .with_trace_path(&trace_path)
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .build()
         .unwrap();
 
     // Burn CPU across multiple threads to generate CpuSample events.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(tokio::task::spawn_blocking(burn_cpu_work)));
@@ -61,11 +68,8 @@ fn background_symbolization_produces_symbol_table_entries() {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     });
 
-    drop(runtime);
     // Graceful shutdown: seals final segment, worker drains all remaining.
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).

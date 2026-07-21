@@ -23,8 +23,8 @@ pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<TracedHandle> {
 /// Spawned futures are wrapped with wake-event tracking when telemetry is live
 /// on this handle. Otherwise they spawn plainly. Obtain one for the current
 /// runtime with [`current`](Self::current), or bound to a specific runtime
-/// from [`TelemetryGuard::tokio_handle`](super::guard::TelemetryGuard::tokio_handle)
-/// or [`trace_runtime`](super::guard::TelemetryGuard::trace_runtime)'s builder.
+/// from [`TracedRuntime::tokio_handle`](super::builder::TracedRuntime::tokio_handle)
+/// or [`trace_runtime`](super::builder::TracedRuntime::trace_runtime)'s builder.
 ///
 /// This handle only spawns. For recording and control, use [`Dial9Handle`].
 #[derive(Clone)]
@@ -65,7 +65,7 @@ impl Dial9TokioHandle {
     }
 
     /// Handle bound to a specific runtime. Used by the guard's runtime builder
-    /// and [`TelemetryGuard::tokio_handle`](super::guard::TelemetryGuard::tokio_handle).
+    /// and [`TracedRuntime::tokio_handle`](super::builder::TracedRuntime::tokio_handle).
     pub(super) fn for_runtime(
         runtime: tokio::runtime::Handle,
         traced: Option<crate::traced::TracedHandle>,

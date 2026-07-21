@@ -95,17 +95,17 @@ fn bench_mixed_sizes(c: &mut Criterion) {
 
 fn install_profiler() {
     use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
-    use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
+    use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 
     // We leak the runtime and guard so they live for the process lifetime.
     // This is intentional — the profiler is process-permanent anyway.
-    let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
+        .build()
         .unwrap();
-    let handle = guard.handle();
+    let handle = traced.record_handle();
 
     let track_liveset = matches!(
         std::env::var("BENCH_CONFIG").as_deref(),
@@ -123,8 +123,7 @@ fn install_profiler() {
         .expect("profiler install should succeed in bench");
 
     // Leak everything to keep the profiler alive for the process.
-    std::mem::forget(runtime);
-    std::mem::forget(guard);
+    std::mem::forget(traced);
     // _mem_guard doesn't implement Drop — dropping is fine.
 }
 

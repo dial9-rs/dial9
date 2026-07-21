@@ -212,7 +212,6 @@ let s3_config = S3Config::builder()
 
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
-    .with_trace_path(trace_path)
     .with_s3_uploader(s3_config)
     .build_and_start(builder, writer)?;
 

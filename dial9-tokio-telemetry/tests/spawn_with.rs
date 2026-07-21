@@ -5,12 +5,11 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, InMemoryWriter, TaskId, TelemetryGuard, TracedRuntime,
+    DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TaskId, TracedRuntime, recorder,
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::runtime::Runtime;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Deserialize)]
@@ -31,29 +30,30 @@ enum SpawnEvent {
 }
 
 /// Standard 2-worker multi_thread runtime with task tracking enabled.
-fn build_capturing_runtime() -> (Runtime, TelemetryGuard, Arc<Mutex<Vec<Vec<u8>>>>) {
+fn build_capturing_runtime() -> (TracedRuntime, Arc<Mutex<Vec<Vec<u8>>>>) {
     let (capture, batches) = capture_processor();
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_task_tracking(true)
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
-    (runtime, guard, batches)
+    (traced, batches)
 }
 
 /// `spawn_with(fut, |f| set.spawn(f))` produces `WakeEvent`s for the
 /// spawned task — the same as `handle.spawn(fut)` would.
 #[test]
 fn spawn_with_joinset_emits_wake_events() {
-    let (runtime, guard, batches) = build_capturing_runtime();
+    let (traced, batches) = build_capturing_runtime();
 
-    let handle = guard.tokio_handle(runtime.handle());
+    let handle = traced.handle();
     let spawned_id: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
     let id_w = spawned_id.clone();
 
-    runtime.block_on(async move {
+    traced.runtime().block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
         handle.spawn_with(
             async move {
@@ -66,10 +66,7 @@ fn spawn_with_joinset_emits_wake_events() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<SpawnEvent> = decode_all(&b);
@@ -88,17 +85,18 @@ fn spawn_with_joinset_emits_wake_events() {
 fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_task_tracking(true)
-        .build_and_start(builder, writer)
+        .build()
         .unwrap();
 
-    let handle = guard.tokio_handle(runtime.handle());
+    let handle = traced.handle();
 
-    runtime.block_on(async move {
+    traced.runtime().block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
 
         // Inside `spawn_with`: marked instrumented, caller = this file.
@@ -111,8 +109,7 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     let sealed = dir.path().join("trace.0.bin");
     let events: Vec<SpawnEvent> = decode_file(&sealed);
@@ -147,44 +144,44 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
 /// `spawn_with` returns whatever the closure returns.
 #[test]
 fn spawn_with_returns_closure_value() {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(common::small_mem_writer())
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_task_tracking(true)
-        .build_and_start(builder, common::small_mem_writer())
+        .build()
         .unwrap();
 
-    let handle = guard.tokio_handle(runtime.handle());
+    let handle = traced.handle();
 
-    runtime.block_on(async move {
+    traced.runtime().block_on(async move {
         let join = handle.spawn_with(async { 42u32 }, tokio::spawn);
         let value = join.await.unwrap();
         assert_eq!(value, 42);
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// `Dial9TokioHandle::spawn_with` composes with `JoinSet::spawn_on`
 /// to target a specific runtime.
 #[test]
 fn runtime_handle_spawn_with_targets_correct_runtime() {
-    use dial9_tokio_telemetry::telemetry::TelemetryCore;
+    use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
 
     let (capture, batches) = capture_processor();
-    let guard = TelemetryCore::builder()
-        .writer(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .processors(vec![Box::new(capture)])
+    // Unused current-thread primary; the runtimes under test attach below.
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+        })
+        .with_custom_pipeline(|p| p.pipe(capture))
         .build()
         .unwrap();
-    guard.enable();
 
     let mut builder_a = tokio::runtime::Builder::new_multi_thread();
     builder_a.worker_threads(1).enable_all().thread_name("rt-a");
-    let (rt_a, handle_a) = guard
+    let (rt_a, handle_a) = traced
         .trace_runtime("a")
         .task_tracking(true)
         .build(builder_a)
@@ -192,7 +189,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
 
     let mut builder_b = tokio::runtime::Builder::new_multi_thread();
     builder_b.worker_threads(1).enable_all().thread_name("rt-b");
-    let (rt_b, handle_b) = guard
+    let (rt_b, handle_b) = traced
         .trace_runtime("b")
         .task_tracking(true)
         .build(builder_b)
@@ -231,7 +228,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
 
     drop(rt_a);
     drop(rt_b);
-    let _ = guard.graceful_shutdown(Duration::from_secs(1));
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let task_id_a = task_id_a.lock().unwrap().expect("task id a captured");
     let task_id_b = task_id_b.lock().unwrap().expect("task id b captured");

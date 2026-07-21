@@ -1,5 +1,5 @@
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::path::Path;
 use std::time::Duration;
@@ -38,20 +38,20 @@ fn read_events_on_disk(dir: &Path) -> Vec<Dial9Event> {
 fn disable_stops_all_event_production() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_task_tracking(true)
-        .build_and_start(builder, writer)
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.record_handle();
 
     // Phase 1: produce events while enabled
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -77,7 +77,7 @@ fn disable_stops_all_event_production() {
         .count();
 
     // Phase 2: produce more work while disabled
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..500 {
             handles.push(tokio::spawn(async {
@@ -107,8 +107,7 @@ fn disable_stops_all_event_production() {
         count_after_phase2 - count_after_disable,
     );
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 }
 
 /// After `disable()` with CPU profiling enabled, no new events should
@@ -118,25 +117,25 @@ fn disable_stops_all_event_production() {
 #[test]
 #[cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 fn disable_stops_cpu_sample_production() {
-    use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
+    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RecorderPerfExt};
 
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .build_and_start(builder, writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .with_task_tracking(true)
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.record_handle();
 
     // Phase 1: burn CPU to generate perf samples while enabled.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(async {
@@ -171,7 +170,7 @@ fn disable_stops_cpu_sample_production() {
     let total_after_disable = read_events_on_disk(dir.path()).len();
 
     // Phase 2: burn CPU while disabled — should NOT produce any events
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(async {
@@ -197,11 +196,10 @@ fn disable_stops_cpu_sample_production() {
         total_after_phase2 - total_after_disable,
     );
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 }
 
-/// After `disable()`, the DiskWriter must not produce new segments.
+/// After `disable()`, the DiskBuffer must not produce new segments.
 ///
 /// Uses a 1-second rotation period and waits 5 seconds after disable.
 /// If the flush loop were still driving rotation, we'd see new `.bin`
@@ -209,28 +207,26 @@ fn disable_stops_cpu_sample_production() {
 #[test]
 fn disable_stops_segment_rotation() {
     let dir = tempfile::tempdir().unwrap();
-    let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
+    let writer = DiskBuffer::builder()
+        .base_path(dir.path())
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
         .rotation_period(Duration::from_secs(1))
         .build()
         .unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(trace_path.to_str().unwrap())
-        .build_and_start(builder, writer)
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.record_handle();
 
     // Phase 1: produce events while enabled, let a few rotations happen.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -279,8 +275,7 @@ fn disable_stops_segment_rotation() {
         segments_after_wait.saturating_sub(segments_after_disable),
     );
 
-    drop(runtime);
-    let _ = guard.graceful_shutdown(Duration::from_secs(2));
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// After `disable()`, re-enabling with `enable()` should resume event production.
@@ -288,24 +283,24 @@ fn disable_stops_segment_rotation() {
 fn enable_after_disable_resumes_events() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_task_tracking(true)
-        .build_and_start(builder, writer)
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.record_handle();
 
     // Disable, then re-enable
     handle.disable();
     std::thread::sleep(Duration::from_millis(50));
     handle.enable();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -318,8 +313,7 @@ fn enable_after_disable_resumes_events() {
     });
 
     // Drop runtime to flush TL buffers, then guard to flush collector
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     let runtime_event_count = read_events_on_disk(dir.path())
         .iter()

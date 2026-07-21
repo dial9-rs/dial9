@@ -18,48 +18,44 @@
 #[cfg(not(iai_enabled))]
 fn main() {}
 
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TelemetryGuard, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    MemoryBuffer, RecorderBuilderTokioExt, TracedRuntime, recorder,
+};
 use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
-use tokio::runtime::Runtime;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::prelude::*;
 
 struct Harness {
-    runtime: Runtime,
-    _telemetry_guard: TelemetryGuard,
+    traced: TracedRuntime,
     _sub_guard: DefaultGuard,
 }
 
 fn setup_tracing_only() -> Harness {
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let (runtime, _telemetry_guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+            t.enable_all();
+        })
+        .build()
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
-    Harness {
-        runtime,
-        _telemetry_guard,
-        _sub_guard,
-    }
+    Harness { traced, _sub_guard }
 }
 
 fn setup_with_dial9() -> Harness {
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let (runtime, _telemetry_guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+            t.enable_all();
+        })
+        .build()
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(
         tracing_subscriber::registry().with(Dial9TracingLayer::new()),
     );
-    Harness {
-        runtime,
-        _telemetry_guard,
-        _sub_guard,
-    }
+    Harness { traced, _sub_guard }
 }
 
 fn nested_spans(depth: usize) {
@@ -77,7 +73,7 @@ const ITERATIONS_PER_BENCH: usize = 10000;
 fn run_baseline(h: &Harness) -> i32 {
     let mut sum = 0i32;
     for _ in 0..ITERATIONS_PER_BENCH {
-        sum = sum.wrapping_add(h.runtime.block_on(async { black_box(42) }));
+        sum = sum.wrapping_add(h.traced.runtime().block_on(async { black_box(42) }));
     }
     sum
 }
@@ -85,7 +81,7 @@ fn run_baseline(h: &Harness) -> i32 {
 #[inline(never)]
 fn run_depth(h: &Harness, depth: usize) {
     for _ in 0..ITERATIONS_PER_BENCH {
-        h.runtime.block_on(async {
+        h.traced.runtime().block_on(async {
             nested_spans(black_box(depth));
         });
     }
@@ -94,7 +90,7 @@ fn run_depth(h: &Harness, depth: usize) {
 #[inline(never)]
 fn run_fields(h: &Harness) {
     for _ in 0..ITERATIONS_PER_BENCH {
-        h.runtime.block_on(async {
+        h.traced.runtime().block_on(async {
             let span = tracing::info_span!(
                 "fielded",
                 user_id = 42,

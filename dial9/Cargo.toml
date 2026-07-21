@@ -1,10 +1,16 @@
 [package]
 name = "dial9"
-version = "0.3.13"
+version = "0.5.0-rc0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI for dial9-tokio-telemetry: trace viewer, analysis toolkit, and agent skills"
+readme = "README.md"
+description = "Low-overhead async runtime telemetry: event recording, Tokio integration, CPU/memory profiling, and a trace viewer CLI"
+keywords = ["tokio", "telemetry", "profiling", "tracing"]
+categories = ["asynchronous", "development-tools::profiling"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ target }-v{ version }{ archive-suffix }"
@@ -14,8 +20,241 @@ bin-dir = "dial9{ binary-ext }"
 [[bin]]
 name = "dial9"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
-anyhow = "1"
-dial9-viewer = { version = "0.4.0", path = "../dial9-viewer" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+dial9-core = { workspace = true }
+dial9-perf-self-profile = { workspace = true, optional = true }
+dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry", optional = true }
+dial9-macro = { workspace = true, optional = true }
+
+dial9-viewer = { version = "0.5.0-rc0", path = "../dial9-viewer", optional = true }
+anyhow = { version = "1", optional = true }
+
+# Needed by the config → TracedRuntime path (tokio feature only).
+tokio = { version = "1.52.0", optional = true, default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+] }
+bon = { version = "3", optional = true }
+tracing = { version = "0.1.44", optional = true }
+
+[features]
+default = ["cli"]
+
+## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
+cli = ["dep:dial9-viewer", "dep:anyhow"]
+
+## Background segment-processing pipeline (worker, processors, on-demand dumps).
+## Pulls a Tokio runtime for the worker, but not the runtime *integration*.
+## The `?/` forward enables perf's symbolize processor only when a perf source
+## (e.g. `cpu-profiling`) is already present, so the `SymbolizeProcessor`
+## re-export exists exactly when both `pipeline` and `cpu-profiling` are on.
+pipeline = [
+    "dial9-core/pipeline",
+    "dial9-perf-self-profile?/symbolize-processor",
+]
+
+## Tokio runtime integration: `#[dial9::main]`, `TracedRuntime`, `spawn`,
+## `Dial9TokioHandle`, `Dial9Config`, and the Tokio event sources.
+tokio = [
+    "dep:dial9-tokio-telemetry",
+    "dep:dial9-macro",
+    "dep:tokio",
+    "dep:bon",
+    "dep:tracing",
+    "pipeline",
+]
+
+## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
+## runtime when the `tokio` feature is also on.
+cpu-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/cpu-profiling",
+    "dial9-tokio-telemetry?/cpu-profiling",
+]
+
+## Sampled memory allocation profiling as a standalone `Source`.
+memory-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/memory-profiling",
+    "dial9-tokio-telemetry?/memory-profiling",
+]
+
+## Process resource usage (`getrusage`) as a standalone `Source` (unix).
+## Auto-wires into the Tokio runtime when the `tokio` feature is also on.
+process-resource = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/process-resource",
+    "dial9-tokio-telemetry?/process-resource",
+]
+
+## Removes `#[non_exhaustive]` from profiling event structs. Unstable.
+unstable-events = ["dial9-perf-self-profile?/unstable-events"]
+
+## Tracing-subscriber layer emitting span events into dial9 traces.
+tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
+
+## Trace file reading + analysis toolkit (offline decode).
+analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
+
+## S3 upload pipeline stage.
+worker-s3 = ["tokio", "dial9-tokio-telemetry/worker-s3"]
+
+## Async backtraces at Tokio yield points (Linux only).
+taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
+
+## TCP accept-queue depth sampling as a standalone `Source` (Linux only).
+## Auto-wires into the Tokio runtime when the `tokio` feature is also on.
+linux-socket = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/linux-socket",
+    "dial9-tokio-telemetry?/linux-socket",
+]
+
+[dev-dependencies]
+dial9 = { path = ".", features = [
+    "tokio",
+    "analysis",
+    "memory-profiling",
+    "process-resource",
+    "linux-socket",
+    "tracing-layer",
+    "unstable-events",
+    "worker-s3",
+] }
+dial9-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "time",
+    "test-util",
+] }
+tempfile = "3"
+flate2 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+metrique = { version = "0.1.23", features = ["local-format"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hostname = "0.4"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+    "default-https-client",
+    "http-1x",
+    "rt-tokio",
+    "sigv4a",
+] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dial9 = { path = ".", features = [
+    "tokio",
+    "cpu-profiling",
+    "memory-profiling",
+    "worker-s3",
+    "analysis",
+    "taskdump",
+    "tracing-layer",
+    "linux-socket",
+] }
+
+[[example]]
+name = "simple_workload"
+required-features = ["tokio"]
+
+[[example]]
+name = "many_workers"
+required-features = ["tokio"]
+
+[[example]]
+name = "conditionally_enable"
+required-features = ["tokio"]
+
+[[example]]
+name = "custom_pipeline"
+required-features = ["tokio"]
+
+[[example]]
+name = "long_workload"
+required-features = ["tokio"]
+
+[[example]]
+name = "realistic_workload"
+required-features = ["tokio"]
+
+[[example]]
+name = "on_trigger_dump"
+required-features = ["tokio"]
+
+[[example]]
+name = "on_trigger_dump_windows"
+required-features = ["tokio"]
+
+[[example]]
+name = "production_use"
+required-features = ["tokio", "cpu-profiling", "worker-s3"]
+
+[[example]]
+name = "multi_runtime"
+required-features = ["tokio"]
+
+[[example]]
+name = "custom_events"
+required-features = ["tokio"]
+
+[[example]]
+name = "in_memory_pipeline"
+required-features = ["tokio"]
+
+[[example]]
+name = "telemetry_rotating"
+required-features = ["tokio"]
+
+[[example]]
+name = "test_hooks"
+required-features = ["tokio"]
+
+[[example]]
+name = "analyze_trace"
+required-features = ["analysis"]
+
+[[example]]
+name = "trace_to_jsonl"
+required-features = ["analysis"]
+
+[[example]]
+name = "thread_per_core"
+required-features = ["analysis"]
+
+[[example]]
+name = "s3_stress_test"
+required-features = ["worker-s3"]
+
+[[example]]
+name = "tracing_sleep"
+required-features = ["tracing-layer"]
+
+[[example]]
+name = "block_in_place_workload"
+required-features = ["tokio", "cpu-profiling"]
+
+[[example]]
+name = "blocking_sleep"
+required-features = ["tokio", "cpu-profiling"]
+
+[[example]]
+name = "generate_diagnostic_traces"
+required-features = ["tokio", "cpu-profiling"]
+
+[[example]]
+name = "cpu_profile_workload"
+required-features = ["tokio", "cpu-profiling", "analysis"]
+
+[[example]]
+name = "kernel_sched_events"
+required-features = ["tokio", "cpu-profiling", "analysis"]

@@ -5,28 +5,34 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
+};
 use flate2::read::GzDecoder;
 use std::io::Read;
+use std::time::Duration;
 
 #[test]
 fn graceful_shutdown_produces_clean_gzip_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 512 * 1024, 10 * 1024 * 1024).unwrap();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_trace_path(&trace_path)
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512 * 1024)
+        .max_total_size(10 * 1024 * 1024)
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    let traced = recorder(writer)
+        .with_cpu_profiling(CpuProfilingConfig::default())
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .build()
+        .unwrap();
+
+    traced.runtime().block_on(async {
         // Spawn enough work to fill thread-local buffers. The bug requires
         // unflushed events in thread-local buffers at graceful_shutdown time,
         // which then get written through a stale fd in Drop.
@@ -45,10 +51,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown(Duration::from_secs(10));
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {

@@ -1,7 +1,7 @@
 //! IAI callgrind micro-benchmark for encoder-only throughput.
 //!
 //! Measures the pure encode path: RawEvent → Encoder → Vec<u8>. No
-//! DiskWriter, no syscalls — instruction count reflects encoder work
+//! DiskBuffer, no syscalls — instruction count reflects encoder work
 //! only. Builds anywhere; only runs on Linux (valgrind dependency).
 //!
 //! Usage:

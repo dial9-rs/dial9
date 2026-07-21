@@ -710,12 +710,55 @@ impl StorageBackend for S3Backend {
     }
 }
 
+#[cfg(unix)]
+fn make_temporary_root_private(root: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn make_temporary_root_private(_root: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain([0]).collect();
+    let destination: Vec<u16> = destination.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: both arguments are valid NUL-terminated UTF-16 paths. The source
+    // and destination are sibling files, so MoveFileExW performs one atomic
+    // same-volume replacement and cannot expose a partial destination.
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Local filesystem storage backend. Serves trace files from a directory.
 ///
 /// The `bucket` parameter is ignored — all operations are relative to `root`.
 /// Keys are relative paths from `root`.
 pub struct LocalBackend {
     root: PathBuf,
+    remove_on_drop: bool,
 }
 
 impl LocalBackend {
@@ -724,7 +767,56 @@ impl LocalBackend {
         // Canonicalize root so that symlink resolution in child paths
         // (e.g. macOS /tmp → /private/tmp) matches the root prefix.
         let root = root.canonicalize().unwrap_or(root);
-        Self { root }
+        Self {
+            root,
+            remove_on_drop: false,
+        }
+    }
+
+    /// Create a process-local aggregate store under the system temporary
+    /// directory. The path is unique per backend and removed when the last
+    /// owning `Arc` drops at server shutdown.
+    pub(crate) fn new_temporary_aggregate() -> Self {
+        Self::new_temporary_aggregate_in(std::env::temp_dir())
+    }
+
+    fn new_temporary_aggregate_in(base: impl AsRef<Path>) -> Self {
+        // Resolve platform aliases before appending the not-yet-created unique
+        // directory (notably macOS /tmp -> /private/tmp). Child canonicalization
+        // in put_object can then be compared against this stable root.
+        let base = base.as_ref();
+        let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        let root = base.join(format!(
+            "dial9-aggregate-{}",
+            uuid::Uuid::new_v4().as_hyphenated()
+        ));
+        Self {
+            root,
+            remove_on_drop: true,
+        }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for LocalBackend {
+    fn drop(&mut self) {
+        if !self.remove_on_drop {
+            return;
+        }
+        match std::fs::remove_dir_all(&self.root) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.root.display(),
+                    error = %e,
+                    "failed to remove temporary aggregate directory"
+                );
+            }
+        }
     }
 }
 
@@ -874,6 +966,7 @@ impl StorageBackend for LocalBackend {
         data: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
         let root = self.root.clone();
+        let private_temporary_root = self.remove_on_drop;
         let key = key.to_string();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
@@ -887,21 +980,44 @@ impl StorageBackend for LocalBackend {
                         "key contains path traversal".to_string(),
                     ));
                 }
-                // Reject keys that escape the root once their parent dirs are
-                // resolved (mirrors the safety check used elsewhere here).
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
+                let parent = path.parent().ok_or_else(|| {
+                    StorageError::Other("object path has no parent directory".to_string())
+                })?;
+                std::fs::create_dir_all(parent).map_err(|e| StorageError::Other(e.to_string()))?;
+                if private_temporary_root {
+                    make_temporary_root_private(&root)
                         .map_err(|e| StorageError::Other(e.to_string()))?;
-                    let canonical_parent = parent
-                        .canonicalize()
-                        .map_err(|e| StorageError::Other(e.to_string()))?;
-                    if !canonical_parent.starts_with(&root) {
-                        return Err(StorageError::Other(
-                            "path escapes root directory".to_string(),
-                        ));
-                    }
                 }
-                std::fs::write(&path, data).map_err(|e| StorageError::Other(e.to_string()))?;
+                let canonical_parent = parent
+                    .canonicalize()
+                    .map_err(|e| StorageError::Other(e.to_string()))?;
+                if !canonical_parent.starts_with(&root) {
+                    return Err(StorageError::Other(
+                        "path escapes root directory".to_string(),
+                    ));
+                }
+
+                // Publish through a hidden same-directory temporary file. A
+                // direct write to `path` would expose a truncated final object
+                // to concurrent aggregate readers; rename gives local storage
+                // the same all-at-once visibility that an S3 PutObject has.
+                let temp_path = canonical_parent.join(format!(
+                    ".dial9-write-{}",
+                    uuid::Uuid::new_v4().as_hyphenated()
+                ));
+                std::fs::write(&temp_path, data).map_err(|e| StorageError::Other(e.to_string()))?;
+                if let Err(rename_error) = replace_file_atomically(&temp_path, &path) {
+                    if let Err(cleanup_error) = std::fs::remove_file(&temp_path)
+                        && cleanup_error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %cleanup_error,
+                            "failed to clean up temporary object write"
+                        );
+                    }
+                    return Err(StorageError::Other(rename_error.to_string()));
+                }
                 Ok(())
             })
             .await
@@ -1291,6 +1407,92 @@ mod tests {
         let written = dir.path().join("a/b/c.bin");
         assert!(written.exists(), "expected file at {}", written.display());
         assert_eq!(std::fs::read(&written).unwrap(), b"hi");
+    }
+
+    /// Concurrent overwrites of one object must never expose a truncated body.
+    /// Aggregate folds use deterministic keys, so overlapping requests can hit
+    /// this exact pattern.
+    #[tokio::test]
+    async fn concurrent_put_object_readers_see_only_complete_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = std::sync::Arc::new(LocalBackend::new(dir.path()));
+        let key = "samples/part.parquet";
+        let body_len = 1024 * 1024;
+        backend
+            .put_object("local", key, vec![0; body_len])
+            .await
+            .unwrap();
+
+        let mut writers = Vec::new();
+        for byte in 1..=8u8 {
+            let backend = std::sync::Arc::clone(&backend);
+            writers.push(tokio::spawn(async move {
+                backend
+                    .put_object("local", key, vec![byte; body_len])
+                    .await
+                    .unwrap();
+            }));
+        }
+
+        for _ in 0..64 {
+            let body = backend.get_object("local", key).await.unwrap();
+            assert_eq!(body.len(), body_len, "reader observed a truncated object");
+            assert!(
+                body.iter().all(|byte| *byte == body[0]),
+                "reader observed bytes from multiple object versions"
+            );
+            tokio::task::yield_now().await;
+        }
+        for writer in writers {
+            writer.await.unwrap();
+        }
+    }
+
+    /// A temporary aggregate backend removes its whole cache tree when dropped.
+    #[tokio::test]
+    async fn temporary_aggregate_backend_cleans_up_on_drop() {
+        let backend = LocalBackend::new_temporary_aggregate();
+        let root = backend.root.clone();
+        backend
+            .put_object("cache", "a/b/c.parquet", b"cached".to_vec())
+            .await
+            .unwrap();
+        assert!(root.join("a/b/c.parquet").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "temporary cache root must be owner-only");
+        }
+
+        drop(backend);
+        assert!(!root.exists(), "temporary aggregate directory leaked");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn temporary_aggregate_backend_resolves_symlinked_temp_base() {
+        use std::os::unix::fs::symlink;
+
+        let outer = tempfile::tempdir().unwrap();
+        let real_base = outer.path().join("real-temp");
+        let linked_base = outer.path().join("temp-link");
+        std::fs::create_dir(&real_base).unwrap();
+        symlink(&real_base, &linked_base).unwrap();
+
+        let backend = LocalBackend::new_temporary_aggregate_in(&linked_base);
+        assert!(backend.root.starts_with(real_base.canonicalize().unwrap()));
+        backend
+            .put_object("cache", "samples/part.parquet", b"complete".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .get_object("cache", "samples/part.parquet")
+                .await
+                .unwrap(),
+            b"complete"
+        );
     }
 
     /// Build a backend that replays a single response with an explicit status

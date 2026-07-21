@@ -67,6 +67,7 @@ impl TraceField for WorkerId {
 /// Wire-format event for a task poll start.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct PollStartEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -84,6 +85,7 @@ pub struct PollStartEvent {
 /// Wire-format event for a task poll end.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct PollEndEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -95,6 +97,7 @@ pub struct PollEndEvent {
 /// Wire-format event for a worker park.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WorkerParkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -113,6 +116,7 @@ pub struct WorkerParkEvent {
 /// Wire-format event for a worker unpark.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WorkerUnparkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -140,64 +144,10 @@ pub(crate) struct QueueSampleEvent {
     pub global_queue: u8,
 }
 
-/// Wire-format event for process resource usage sampled from `getrusage(RUSAGE_SELF)`.
-#[derive(Debug, TraceEvent)]
-#[traceevent(wire_slot)]
-#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
-pub struct ProcessResourceUsageEvent {
-    /// Monotonic timestamp in nanoseconds.
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    /// Cumulative user CPU time used by this process.
-    #[traceevent(unit = "ns")]
-    pub user_cpu_ns: u64,
-    /// Cumulative system CPU time used by this process.
-    #[traceevent(unit = "ns")]
-    pub system_cpu_ns: u64,
-    /// Maximum resident set size in bytes.
-    #[traceevent(unit = "bytes")]
-    pub max_rss_bytes: u64,
-    /// Page faults serviced without disk I/O.
-    pub minor_faults: u64,
-    /// Page faults serviced with disk I/O.
-    pub major_faults: u64,
-    /// Block input operations performed by the process.
-    pub block_input_ops: u64,
-    /// Block output operations performed by the process.
-    pub block_output_ops: u64,
-    /// Voluntary context switches performed by the process.
-    pub voluntary_context_switches: u64,
-    /// Involuntary context switches performed by the process.
-    pub involuntary_context_switches: u64,
-}
-
-/// Wire-format event for a TCP listener accept queue snapshot.
-#[derive(Debug, TraceEvent)]
-#[traceevent(wire_slot)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) struct TcpAcceptQueueEvent {
-    /// Monotonic timestamp in nanoseconds.
-    #[traceevent(timestamp)]
-    pub(crate) timestamp_ns: u64,
-    /// Linux socket cookie reported by sock_diag.
-    pub(crate) socket_cookie: u64,
-    /// Linux socket inode reported by sock_diag.
-    pub(crate) socket_inode: u64,
-    /// IP version for `local_addr`: 4 or 6.
-    pub(crate) ip_version: u8,
-    /// Local listener address.
-    pub(crate) local_addr: String,
-    /// Local listener port.
-    pub(crate) local_port: u16,
-    /// Completed connections waiting to be accepted.
-    pub(crate) pending_connections: u32,
-    /// Effective accept backlog limit.
-    pub(crate) backlog_limit: u32,
-}
-
 /// Wire-format event for a task spawn.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct TaskSpawnEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -232,6 +182,7 @@ pub(crate) struct TaskDumpEvent {
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WakeEventEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -279,29 +230,4 @@ pub(crate) fn decode_events(
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     Ok(events)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn process_resource_usage_unit_annotations() {
-        use dial9_trace_format::TraceEvent;
-        let entry = ProcessResourceUsageEvent::schema_entry();
-        let units: Vec<(&str, &str)> = entry
-            .annotations()
-            .iter()
-            .filter(|a| a.key() == "unit")
-            .map(|a| (entry.fields()[a.field_index() as usize].name(), a.value()))
-            .collect();
-        assert_eq!(
-            units,
-            vec![
-                ("user_cpu_ns", "ns"),
-                ("system_cpu_ns", "ns"),
-                ("max_rss_bytes", "bytes"),
-            ]
-        );
-    }
 }

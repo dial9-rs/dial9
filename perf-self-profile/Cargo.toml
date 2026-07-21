@@ -1,10 +1,11 @@
 [package]
 name = "dial9-perf-self-profile"
-version = "0.4.4"
+version = "0.5.0-rc0"
 edition.workspace = true
 repository.workspace = true
-description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"
+description = "Minimal self-profiling via Linux/Android perf_event_open with frame-pointer-based stack traces"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
 
 [package.metadata.docs.rs]
 rustc-args = ["-C", "force-frame-pointers=yes"]
@@ -13,14 +14,28 @@ all-features = true
 
 [features]
 __internal-bench = []
-## Enables the dial9 `Source` integration for the profilers (`CpuProfiler`,
-## `SchedProfiler`, the memory profiler).
-dial9-source = ["dep:dial9-core"]
+## CPU and scheduler profiling as a dial9 `Source` (`CpuProfiler`, `SchedProfiler`).
+cpu-profiling = []
 ## Sampled memory allocation profiler. Feeds a dial9 trace via a `Source`.
-memory-profiling = ["dial9-source", "dep:scc", "dep:crossbeam-queue", "dep:bon"]
-## Allow constructing the public wire-event structs (`AllocEvent`/`FreeEvent`)
-## outside this crate. Off by default keeps them `#[non_exhaustive]`.
+memory-profiling = ["dep:scc", "dep:crossbeam-queue", "dep:bon"]
+## Process resource usage sampled from `getrusage(RUSAGE_SELF)`. Feeds a dial9
+## trace via a `Source` (unix).
+process-resource = ["dep:bon", "dep:libc"]
+## TCP listener accept-queue depth sampled from Linux sock_diag. Feeds a dial9
+## trace via a `Source` (Linux only).
+linux-socket = [
+    "dep:bon",
+    "dep:netlink-packet-core",
+    "dep:netlink-packet-sock-diag",
+    "dep:netlink-sys",
+]
+## Allow constructing the public wire-event structs (`AllocEvent`/`FreeEvent`,
+## `ProcessResourceUsageEvent`, `TcpAcceptQueueEvent`) outside this crate. Off by
+## default keeps them `#[non_exhaustive]`.
 unstable-events = []
+## Offline symbolization as a `SegmentProcessor`. Pulls dial9-core's pipeline
+## traits and a minimal Tokio runtime for the `spawn_blocking` handoff.
+symbolize-processor = ["dial9-core/pipeline", "dep:tokio"]
 ## Test-only helpers.
 test-util = []
 
@@ -28,22 +43,30 @@ test-util = []
 bon = { version = "3", optional = true }
 bytes = "1"
 crossbeam-queue = { version = "0.3", optional = true }
-dial9-core = { workspace = true, optional = true }
+dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true }
 scc = { version = "2", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true, default-features = false }
 tracing = "0.1.44"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))'.dependencies]
 blazesym = "0.2"
 crossbeam-utils = "0.8"
-libc = "0.2"
+libc = "0.2.186"
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"
+netlink-packet-core = { version = "0.7", optional = true }
+netlink-packet-sock-diag = { version = "0.4.2", optional = true }
+netlink-sys = { version = "0.8.8", optional = true }
+
+[target.'cfg(all(unix, not(target_os = "linux")))'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
 dial9-core = { workspace = true, features = ["test-util"] }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [[bench]]

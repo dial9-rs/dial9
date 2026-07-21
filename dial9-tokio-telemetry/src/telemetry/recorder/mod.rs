@@ -9,22 +9,20 @@ pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
 
-pub use builder::{
-    BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
-    TelemetryCore, TelemetryCoreBuilder, TelemetryRuntimeError, TracedRuntime,
-    TracedRuntimeBuilder,
-};
+pub use builder::TracedRuntime;
 pub use dial9_core::handle::Dial9Handle;
-pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
 pub(crate) use handle::traced_handle;
 pub use handle::{Dial9TokioHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
 
+mod traced_recorder;
+pub use traced_recorder::{
+    RecorderBuilderTokioExt, TokioAttachConfig, TracedRuntimeBuilder, build_traced,
+};
+
 // Re-exports for internal test access
-#[cfg(test)]
-use builder::PipelineConfig;
 #[cfg(test)]
 use handle::InstrumentedSpawnGuard;
 
@@ -236,7 +234,7 @@ fn register_hooks(
     });
 }
 
-/// Attach a runtime to an existing telemetry session: register hooks, build
+/// Attach a runtime to an existing recorder: register hooks, build
 /// the runtime, reserve worker IDs, and push the context.
 #[allow(clippy::too_many_arguments)]
 fn attach_runtime(
@@ -310,7 +308,8 @@ fn attach_runtime(
 mod tests {
     use super::*;
     use crate::background_task::testutil::{CapturingProcessor, decode_captured};
-    use crate::telemetry::writer::InMemoryWriter;
+    use crate::telemetry::buffer::MemoryBuffer;
+    use dial9_core::recorder::recorder;
     use dial9_core::test_util;
     use std::panic::Location;
     use std::sync::Arc;
@@ -339,15 +338,16 @@ mod tests {
     fn current_thread_runtime_resolves_worker_ids() {
         let (capture, data) = CapturingProcessor::new();
 
-        let mut builder = tokio::runtime::Builder::new_current_thread();
-        builder.enable_all();
-
-        let (rt, guard) = TracedRuntime::builder()
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .with_tokio(|t| {
+                *t = tokio::runtime::Builder::new_current_thread();
+                t.enable_all();
+            })
             .with_custom_pipeline(|p| p.pipe(capture))
-            .build_and_start(builder, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .build()
             .unwrap();
 
-        rt.block_on(async {
+        traced.block_on(async {
             tokio::spawn(async {
                 tokio::task::yield_now().await;
             })
@@ -355,10 +355,7 @@ mod tests {
             .unwrap();
         });
 
-        drop(rt);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
@@ -392,10 +389,10 @@ mod tests {
         let on_thread_start_calls = hook_calls.clone();
         let on_before_poll_calls = hook_calls.clone();
 
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(2).enable_all();
-
-        let (runtime, guard) = TracedRuntime::builder()
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .with_tokio(|t| {
+                t.worker_threads(2);
+            })
             .with_tokio_instrumentation(false)
             .with_task_tracking(true)
             .with_tokio_hooks(|hooks| {
@@ -407,12 +404,12 @@ mod tests {
                 });
             })
             .with_custom_pipeline(|p| p.pipe(capture))
-            .build_and_start(builder, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .build()
             .unwrap();
 
-        assert!(guard.is_enabled());
-        assert!(guard.shared().unwrap().is_enabled());
-        let runtime_meta = guard
+        assert!(traced.is_enabled());
+        assert!(traced.shared().unwrap().is_enabled());
+        let runtime_meta = traced
             .shared()
             .unwrap()
             .with_sources_mut(source::collect_segment_metadata)
@@ -422,7 +419,7 @@ mod tests {
             "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
-        runtime.block_on(async {
+        traced.runtime().block_on(async {
             for _ in 0..8 {
                 tokio::spawn(async {
                     tokio::task::yield_now().await;
@@ -432,7 +429,7 @@ mod tests {
             }
         });
 
-        let runtime_meta = guard
+        let runtime_meta = traced
             .shared()
             .unwrap()
             .with_sources_mut(source::collect_segment_metadata)
@@ -447,10 +444,7 @@ mod tests {
             "user Tokio hooks should not be installed when Tokio instrumentation is disabled"
         );
 
-        drop(runtime);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let events = if raw.is_empty() {
@@ -481,20 +475,20 @@ mod tests {
 
     #[test]
     fn build_disabled_produces_working_runtime_with_noop_guard() {
-        let builder = tokio::runtime::Builder::new_multi_thread();
-        let (runtime, guard) = TracedRuntime::builder()
-            .install(false)
-            .build(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+            .with_tokio(|_| {})
+            .enabled(false)
+            .build()
             .unwrap();
 
         // Guard methods should be safe no-ops
-        guard.enable();
-        guard.disable();
-        let handle = guard.tokio_handle(runtime.handle());
-        let _start = guard.start_time();
+        traced.enable();
+        traced.disable();
+        let handle = traced.handle();
+        let _start = traced.start_time();
 
         // Runtime should work normally, including handle.spawn
-        runtime.block_on(async {
+        traced.runtime().block_on(async {
             let result = tokio::spawn(async { 42 }).await.unwrap();
             assert_eq!(result, 42);
 
@@ -504,7 +498,7 @@ mod tests {
 
         // No flush thread or worker to join — the guard is in its
         // disabled state.
-        assert!(!guard.is_enabled());
+        assert!(!traced.is_enabled());
     }
 
     #[test]
@@ -514,7 +508,6 @@ mod tests {
         use crate::telemetry::format::WorkerId;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let base = dir.path().join("trace");
 
         #[track_caller]
         fn loc_a() -> &'static Location<'static> {
@@ -527,8 +520,8 @@ mod tests {
         let location_a = loc_a();
         let location_b = loc_b();
 
-        let writer = crate::telemetry::writer::DiskWriter::builder()
-            .base_path(&base)
+        let writer = crate::telemetry::buffer::DiskBuffer::builder()
+            .base_path(dir.path())
             .max_file_size(100)
             .max_total_size(100_000)
             .build()
@@ -603,19 +596,17 @@ mod tests {
     }
 
     #[test]
-    fn build_and_attach_to_telemetry_attaches_second_runtime() {
-        let builder_a = tokio::runtime::Builder::new_multi_thread();
-        let (runtime_a, guard) = TracedRuntime::builder()
-            .build_and_start(builder_a, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    fn trace_runtime_attaches_second_runtime() {
+        let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+            .with_tokio(|_| {})
+            .build()
             .unwrap();
 
         let builder_b = tokio::runtime::Builder::new_multi_thread();
-        let runtime_b = TracedRuntime::builder()
-            .build_and_attach_to_telemetry(builder_b, &guard)
-            .unwrap();
+        let (runtime_b, _handle_b) = traced.trace_runtime("attached").build(builder_b).unwrap();
 
         // Both runtimes should work
-        runtime_a.block_on(async {
+        traced.block_on(async {
             let r = tokio::spawn(async { 1 }).await.unwrap();
             assert_eq!(r, 1);
         });
@@ -626,29 +617,31 @@ mod tests {
     }
 
     #[test]
-    fn build_and_attach_to_telemetry_produces_unique_worker_ids() {
+    fn trace_runtime_produces_unique_worker_ids() {
         use std::collections::HashSet;
 
         let (capture, data) = CapturingProcessor::new();
 
-        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-        builder_a.worker_threads(2);
-        let (runtime_a, guard) = TracedRuntime::builder()
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .with_tokio(|t| {
+                t.worker_threads(2);
+            })
             .with_task_tracking(true)
             .with_custom_pipeline(|p| p.pipe(capture))
-            .build_and_start(builder_a, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .build()
             .unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2);
-        let runtime_b = TracedRuntime::builder()
-            .with_task_tracking(true)
-            .build_and_attach_to_telemetry(builder_b, &guard)
+        let (runtime_b, _handle_b) = traced
+            .trace_runtime("attached")
+            .task_tracking(true)
+            .build(builder_b)
             .unwrap();
 
         // Generate poll events on both runtimes. Spawn many concurrent tasks
         // to ensure work lands on actual worker threads (not just block_on's thread).
-        runtime_a.block_on(async {
+        traced.block_on(async {
             let mut handles = Vec::new();
             for _ in 0..50 {
                 handles.push(tokio::spawn(async {
@@ -672,11 +665,8 @@ mod tests {
         });
 
         // Drop runtimes, then guard to flush
-        drop(runtime_a);
         drop(runtime_b);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -712,39 +702,35 @@ mod tests {
         );
     }
 
-    /// Verify that `build_and_attach_to_telemetry` propagates the second runtime's metadata
-    /// (runtime name → worker ID mapping) into the trace file's segment metadata.
+    /// Verify that attaching a second runtime via `trace_runtime` propagates its
+    /// metadata (runtime name → worker ID mapping) into the trace file's segment metadata.
     #[test]
-    fn build_and_attach_to_telemetry_propagates_second_runtime_metadata() {
+    fn trace_runtime_propagates_second_runtime_metadata() {
         use crate::telemetry::analysis_events::Dial9Event;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let trace_path = dir.path().join("trace.bin");
 
-        let writer = crate::telemetry::writer::DiskWriter::builder()
-            .base_path(&trace_path)
+        let writer = crate::telemetry::buffer::DiskBuffer::builder()
+            .base_path(dir.path())
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
             .build()
             .unwrap();
 
-        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-        builder_a.worker_threads(2);
-        let (runtime_a, guard) = TracedRuntime::builder()
+        let traced = recorder(writer)
+            .with_tokio(|t| {
+                t.worker_threads(2);
+            })
             .with_runtime_name("main")
-            .with_trace_path(trace_path.to_str().unwrap())
-            .build_and_start(builder_a, writer)
+            .build()
             .unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2);
-        let runtime_b = TracedRuntime::builder()
-            .with_runtime_name("io")
-            .build_and_attach_to_telemetry(builder_b, &guard)
-            .unwrap();
+        let (runtime_b, _handle_b) = traced.trace_runtime("io").build(builder_b).unwrap();
 
         // Run work on both runtimes so workers resolve their identities.
-        for rt in [&runtime_a, &runtime_b] {
+        for rt in [traced.runtime(), &runtime_b] {
             rt.block_on(async {
                 let mut handles = Vec::new();
                 for _ in 0..20 {
@@ -762,9 +748,8 @@ mod tests {
         // runtime metadata into the writer on each cycle).
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        drop(runtime_a);
         drop(runtime_b);
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         // Read all sealed trace files and collect SegmentMetadata entries.
         let mut all_metadata: Vec<std::collections::HashMap<String, String>> = Vec::new();
@@ -806,7 +791,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: a runtime attached to an existing telemetry session has its
+    /// End-to-end: a runtime attached to an existing recorder has its
     /// self-detected segment metadata (the runtime→worker mapping) written into
     /// a sealed segment that decodes back. Exercises the full wiring:
     /// `attach → TokioRuntimesSource::segment_metadata → writer → encode → decode`.
@@ -825,28 +810,29 @@ mod tests {
         use crate::telemetry::analysis_events::Dial9Event;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let trace_path = dir.path().join("trace.bin");
 
-        let writer = crate::telemetry::writer::DiskWriter::builder()
-            .base_path(&trace_path)
+        let writer = crate::telemetry::buffer::DiskBuffer::builder()
+            .base_path(dir.path())
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
             .build()
             .unwrap();
 
-        let builder_a = tokio::runtime::Builder::new_current_thread();
-        let (runtime_a, guard) = TracedRuntime::builder()
+        let traced = recorder(writer)
+            .with_tokio(|t| {
+                *t = tokio::runtime::Builder::new_current_thread();
+                t.enable_all();
+            })
             .with_runtime_name("first")
             .with_task_tracking(true)
-            .with_trace_path(trace_path.to_str().unwrap())
-            .build_and_start(builder_a, writer)
+            .build()
             .unwrap();
 
         // Drive a little real work so the final segment is sealed rather than
         // discarded: `finalize()` removes a segment that holds only header +
         // metadata (no real events). Spawning a tracked task emits real events
         // synchronously — no timing wait.
-        runtime_a.block_on(async {
+        traced.block_on(async {
             tokio::spawn(async {
                 tokio::task::yield_now().await;
             })
@@ -854,22 +840,16 @@ mod tests {
             .unwrap();
         });
 
-        // Attach B to the same session. Its workers are eagerly populated at
+        // Attach B to the same recorder. Its workers are eagerly populated at
         // attach time, so its metadata is complete without ever driving it.
         let builder_b = tokio::runtime::Builder::new_current_thread();
-        let runtime_b = TracedRuntime::builder()
-            .with_runtime_name("second")
-            .build_and_attach_to_telemetry(builder_b, &guard)
-            .unwrap();
+        let (runtime_b, _handle_b) = traced.trace_runtime("second").build(builder_b).unwrap();
 
-        drop(runtime_a);
         drop(runtime_b);
         // Blocks until the flush thread polls every source one final time, writes
         // the segment metadata, and seals the segment, so both runtimes are
         // guaranteed to be in the sealed trace once this returns.
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let mut saw_first = false;
         let mut saw_second = false;
@@ -915,23 +895,25 @@ mod tests {
 
         let (capture, data) = CapturingProcessor::new();
 
-        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-        builder_a.worker_threads(2);
-        let (runtime_a, guard) = TracedRuntime::builder()
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .with_tokio(|t| {
+                t.worker_threads(2);
+            })
             .with_task_tracking(true)
             .with_custom_pipeline(|p| p.pipe(capture))
-            .build_and_start(builder_a, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .build()
             .unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2);
-        let runtime_b = TracedRuntime::builder()
-            .with_task_tracking(true)
-            .build_and_attach_to_telemetry(builder_b, &guard)
+        let (runtime_b, _handle_b) = traced
+            .trace_runtime("attached")
+            .task_tracking(true)
+            .build(builder_b)
             .unwrap();
 
         // Spawn on runtime B with wake-tracked wrapping → wake events.
-        let handle = guard.tokio_handle(runtime_b.handle());
+        let handle = traced.tokio_handle(runtime_b.handle());
         runtime_b.block_on(async {
             let mut handles = Vec::new();
             for _ in 0..50 {
@@ -944,11 +926,8 @@ mod tests {
             }
         });
 
-        drop(runtime_a);
         drop(runtime_b);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -976,15 +955,15 @@ mod tests {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::analysis_events::Dial9Event;
+        use crate::telemetry::buffer::DiskBuffer;
         use crate::telemetry::format::{WorkerId, WorkerParkEvent};
         use crate::telemetry::task_metadata::TaskId;
-        use crate::telemetry::writer::DiskWriter;
         use proptest::prelude::*;
 
         /// Encode a single event into a batch and write it through the writer.
         fn write_raw_event(
-            writer: &mut DiskWriter,
-            event: &dyn crate::telemetry::buffer::Encodable,
+            writer: &mut DiskBuffer,
+            event: &dyn crate::telemetry::encoder::Encodable,
         ) -> std::io::Result<()> {
             test_util::write_event(writer, event)
         }
@@ -1035,7 +1014,7 @@ mod tests {
 
         fn execute_flush_round(
             round: &FlushRound,
-            ew: &mut DiskWriter,
+            ew: &mut DiskBuffer,
             locations: &[&'static Location<'static>],
             timestamp: &mut u64,
             expected_raw: &mut usize,
@@ -1114,10 +1093,9 @@ mod tests {
                 max_file_size in 60u64..300,
             ) {
                 let dir = tempfile::TempDir::new().unwrap();
-                let base = dir.path().join("trace");
 
-                let writer = DiskWriter::builder()
-                    .base_path(&base)
+                let writer = DiskBuffer::builder()
+                    .base_path(dir.path())
                     .max_file_size(max_file_size)
                     .max_total_size(1_000_000)
                     .build()
@@ -1158,27 +1136,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn telemetry_core_builds_guard_without_runtime() {
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
-            .build()
-            .unwrap();
-        assert!(guard.is_enabled());
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+    // A current-thread primary keeps these recorder tests from spawning worker
+    // threads; the runtime under test is attached via `trace_runtime`.
+    fn session_recorder<M: dial9_core::buffer::BufferMode>(
+        writer: dial9_core::buffer::SegmentWriter<M>,
+    ) -> crate::telemetry::TracedRuntimeBuilder<M> {
+        recorder(writer).with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+        })
     }
 
     #[test]
-    fn telemetry_core_trace_runtime_produces_working_runtime() {
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    fn build_produces_enabled_guard() {
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
-        guard.enable();
+        assert!(traced.is_enabled());
+        traced.graceful_shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn trace_runtime_produces_working_runtime() {
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+            .build()
+            .unwrap();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
-        let (runtime, _handle) = guard.trace_runtime("main").build(builder).unwrap();
+        let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
 
         runtime.block_on(async {
             let r = tokio::spawn(async { 42 }).await.unwrap();
@@ -1186,22 +1171,20 @@ mod tests {
         });
 
         drop(runtime);
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     #[test]
-    fn telemetry_core_task_tracking_produces_task_spawn_events() {
+    fn task_tracking_produces_task_spawn_events() {
         let (capture, data) = CapturingProcessor::new();
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
-            .processors(vec![Box::new(capture)])
+        let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
-        guard.enable();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
-        let (runtime, _handle) = guard
+        let (runtime, _handle) = traced
             .trace_runtime("main")
             .task_tracking(true)
             .build(builder)
@@ -1214,9 +1197,7 @@ mod tests {
         });
 
         drop(runtime);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
@@ -1236,85 +1217,44 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_core_trace_runtime_multiple_runtimes_unique_worker_ids() {
-        use std::collections::HashSet;
-
-        let (capture, data) = CapturingProcessor::new();
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
-            .processors(vec![Box::new(capture)])
+    fn trace_runtime_multiple_runtimes_unique_worker_ids() {
+        let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .build()
             .unwrap();
-        guard.enable();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-        builder_a.worker_threads(2).enable_all();
-        let (runtime_a, _handle_a) = guard
-            .trace_runtime("main")
-            .task_tracking(true)
-            .build(builder_a)
-            .unwrap();
+        builder_a.worker_threads(1);
+        let (runtime_a, _handle_a) = traced.trace_runtime("main").build(builder_a).unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
-        builder_b.worker_threads(2).enable_all();
-        let (runtime_b, _handle_b) = guard
-            .trace_runtime("io")
-            .task_tracking(true)
-            .build(builder_b)
-            .unwrap();
+        builder_b.worker_threads(1);
+        let (runtime_b, _handle_b) = traced.trace_runtime("io").build(builder_b).unwrap();
 
-        for rt in [&runtime_a, &runtime_b] {
-            rt.block_on(async {
-                let mut handles = Vec::new();
-                for _ in 0..50 {
-                    handles.push(tokio::spawn(async {
-                        tokio::task::yield_now().await;
-                    }));
-                }
-                for h in handles {
-                    h.await.unwrap();
-                }
-            });
-        }
+        let worker_id = |runtime: &tokio::runtime::Runtime| {
+            runtime.block_on(async { tokio::spawn(async { current_worker_id() }).await.unwrap() })
+        };
+        let runtime_a_id = worker_id(&runtime_a);
+        let runtime_b_id = worker_id(&runtime_b);
+        assert_ne!(runtime_a_id, crate::telemetry::format::WorkerId::UNKNOWN);
+        assert_ne!(runtime_b_id, crate::telemetry::format::WorkerId::UNKNOWN);
+        assert_ne!(runtime_a_id, runtime_b_id);
 
         drop(runtime_a);
         drop(runtime_b);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
-
-        let raw = data.lock().unwrap();
-        let captured = decode_captured(&raw);
-        let mut worker_ids: HashSet<u64> = HashSet::new();
-        for event in &captured {
-            if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event
-                && e.worker_id != crate::telemetry::analysis_events::WorkerId::UNKNOWN
-            {
-                worker_ids.insert(e.worker_id.as_u64());
-            }
-        }
-
-        let has_runtime_a = worker_ids.iter().any(|&id| id < 2);
-        let has_runtime_b = worker_ids.iter().any(|&id| (2..4).contains(&id));
-        assert!(
-            has_runtime_a && has_runtime_b,
-            "expected worker IDs from both runtimes, got: {worker_ids:?}"
-        );
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     #[test]
     fn trace_runtime_build_returns_telemetry_handle() {
         let (capture, data) = CapturingProcessor::new();
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
-            .processors(vec![Box::new(capture)])
+        let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
-        guard.enable();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
-        let (runtime, handle) = guard.trace_runtime("main").build(builder).unwrap();
+        let (runtime, handle) = traced.trace_runtime("main").build(builder).unwrap();
 
         runtime.block_on(async {
             // handle.spawn wraps the future with wake tracking;
@@ -1331,15 +1271,13 @@ mod tests {
 
         // Drain thread-local buffers before shutdown.
         test_util::drain_thread_local(
-            &traced_handle(&guard.handle())
+            &traced_handle(&traced.record_handle())
                 .expect("enabled handle must yield a TracedHandle")
                 .shared,
         );
 
         drop(runtime);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .unwrap();
+        traced.graceful_shutdown(Duration::from_secs(1));
 
         // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
@@ -1363,19 +1301,17 @@ mod tests {
     /// correct runtime even when called from outside any runtime context.
     #[test]
     fn trace_runtime_handle_spawns_on_correct_runtime_from_outside() {
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
-        guard.enable();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
         builder_a.worker_threads(1).enable_all().thread_name("rt-a");
-        let (rt_a, handle_a) = guard.trace_runtime("a").build(builder_a).unwrap();
+        let (rt_a, handle_a) = traced.trace_runtime("a").build(builder_a).unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(1).enable_all().thread_name("rt-b");
-        let (rt_b, handle_b) = guard.trace_runtime("b").build(builder_b).unwrap();
+        let (rt_b, handle_b) = traced.trace_runtime("b").build(builder_b).unwrap();
 
         // Spawn from outside any runtime context — should target the correct runtime.
         let join_a = handle_a.spawn(async {
@@ -1401,94 +1337,11 @@ mod tests {
 
         drop(rt_a);
         drop(rt_b);
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     // ---------------------------------------------------------------
-    // High-level construction tests (TracedRuntime::new / try_new)
-    // ---------------------------------------------------------------
-
-    fn dial9_config_tmp_base_path() -> std::path::PathBuf {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Leak the TempDir so it isn't deleted while the test runs.
-        let path = dir.path().join("trace.bin");
-        std::mem::forget(dir);
-        path
-    }
-
-    #[test]
-    fn try_new_enabled_path_returns_value_and_exposes_guard() {
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(4 * 1024 * 1024)
-            .build()
-            .expect("strict build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        assert!(
-            rt.guard().is_enabled(),
-            "enabled config must install a live guard"
-        );
-        // Smoke-test the runtime accessor — exists and is usable.
-        let _ = rt.runtime().handle();
-        let value = rt.block_on(async { 5u32 });
-        assert_eq!(value, 5);
-    }
-
-    #[test]
-    fn try_new_disabled_path_returns_value_no_guard() {
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .enabled(false)
-            .build()
-            .expect("disabled build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
-        assert!(
-            !rt.guard().is_enabled(),
-            "disabled config must yield an inert guard"
-        );
-        let value = rt.block_on(async { 11u32 });
-        assert_eq!(value, 11);
-    }
-
-    #[test]
-    fn new_returns_runtime_for_valid_disabled_config() {
-        // Happy-path counterpart to the strict-I/O panic story: when the
-        // config is valid `TracedRuntime::new` returns a usable runtime
-        // without panicking. The matching panic path is covered by hand at
-        // the type level — `new` is a thin wrapper around `try_into()` that
-        // calls `unwrap_or_else(|e| panic!(...))`, and the surrounding
-        // tests assert that the inner `TelemetryRuntimeError` formats
-        // through `Display` correctly.
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .enabled(false)
-            .build()
-            .expect("disabled build should succeed");
-        let rt = TracedRuntime::new(cfg);
-        let value = rt.block_on(async { 13u32 });
-        assert_eq!(value, 13);
-    }
-
-    #[test]
-    fn telemetry_runtime_error_display_and_source_chain() {
-        let inner = std::io::Error::other("boom");
-        let err = TelemetryRuntimeError::TelemetryCore(inner);
-        let display = format!("{err}");
-        assert!(
-            display.contains("telemetry core:"),
-            "Display should label the variant, got: {display}"
-        );
-        assert!(
-            display.contains("boom"),
-            "Display should include the inner io::Error message, got: {display}"
-        );
-        let source = std::error::Error::source(&err);
-        assert!(source.is_some(), "source() must return the inner io::Error");
-    }
-
-    // ---------------------------------------------------------------
-    // Always-present TelemetryGuard / inert Dial9Handle (Phase 3)
+    // Always-present TracedRuntime / inert Dial9Handle (Phase 3)
     // ---------------------------------------------------------------
 
     /// Off-runtime callers should get a usable, inert handle rather
@@ -1534,308 +1387,32 @@ mod tests {
         assert_eq!(result, 17);
     }
 
-    /// A disabled guard's `graceful_shutdown` must be a successful
-    /// no-op — there is no flush thread or background worker to drain.
+    /// A disabled recorder's `graceful_shutdown` must be a no-op — there is no
+    /// flush thread or background worker to drain.
     #[test]
-    fn disabled_guard_graceful_shutdown_is_noop_ok() {
-        let guard = TelemetryGuard::disabled();
-        assert!(!guard.is_enabled());
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .expect("graceful_shutdown on disabled guard must be Ok(())");
-    }
-
-    /// The guard returned from a disabled `Dial9Config` is always
-    /// present, exposes an inert handle, and reports `is_enabled() ==
-    /// false`.
-    #[test]
-    fn disabled_dial9_config_yields_inert_guard() {
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .enabled(false)
+    fn disabled_session_graceful_shutdown_is_noop() {
+        let traced = crate::telemetry::TracedRuntimeBuilder::<dial9_core::buffer::Disk>::disabled()
             .build()
-            .expect("disabled build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
-
-        let guard = rt.guard();
-        assert!(!guard.is_enabled());
-        let handle = guard.handle();
-        assert!(!handle.is_enabled());
-        // start_time is None on a disabled guard.
-        assert!(guard.start_time().is_none());
-        // The runtime still works end-to-end.
-        let value = rt.block_on(async { 21u32 });
-        assert_eq!(value, 21);
+            .unwrap();
+        assert!(!traced.is_enabled());
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
+    /// Regression test for issue #400: multi-runtime callers must be able to
+    /// configure S3 upload, via `.with_s3_uploader()` on the recorder builder.
     #[cfg(feature = "worker-s3")]
     #[test]
-    fn with_s3_client_then_with_s3_uploader_preserves_client() {
-        use crate::{background_task::s3::S3Config, telemetry::Disk};
-
-        fn dummy_client() -> aws_sdk_s3::Client {
-            let conf = aws_sdk_s3::Config::builder()
-                .behavior_version_latest()
-                .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                    "test", "test", None, None, "test",
-                ))
-                .region(aws_sdk_s3::config::Region::new("us-east-1"))
-                .build();
-            aws_sdk_s3::Client::from_conf(conf)
-        }
-
-        fn cfg(boot_id: &str) -> S3Config {
-            let mut c = S3Config::builder().bucket("b").service_name("s").build();
-            c.set_boot_id(boot_id);
-            c
-        }
-
-        // Order A: client set after the uploader — already worked.
-        let mut builder = TracedRuntime::builder()
-            .with_s3_uploader::<Disk>(cfg("a"))
-            .with_s3_client(dummy_client());
-        match &mut builder.pipeline {
-            PipelineConfig::S3(u) => {
-                assert!(
-                    u.take_client().is_some(),
-                    "client must be present in order A"
-                );
-            }
-            _ => panic!("expected S3 pipeline"),
-        }
-
-        // Order B: client set first, then a follow-up `with_s3_uploader`. The
-        // replacement must carry the previously-bound client across.
-        let mut builder = TracedRuntime::builder()
-            .with_s3_uploader::<Disk>(cfg("a"))
-            .with_s3_client(dummy_client())
-            .with_s3_uploader(cfg("b"));
-        match &mut builder.pipeline {
-            PipelineConfig::S3(u) => {
-                assert!(
-                    u.take_client().is_some(),
-                    "client bound before the second with_s3_uploader must be carried over"
-                );
-            }
-            _ => panic!("expected S3 pipeline"),
-        }
-    }
-
-    /// Pin which builder paths populate `segment_metadata` (the static
-    /// entries the writer embeds as a `SegmentMetadata` event in every
-    /// sealed segment file). Today the S3 preset auto-injects;
-    /// `with_custom_pipeline` does not, so users on that path opt in via
-    /// `with_segment_metadata`.
-    mod segment_metadata_routing {
-        use super::*;
-        use crate::telemetry::writer::Disk;
-
-        fn entries<P, M>(builder: &TracedRuntimeBuilder<P, M>) -> &[(String, String)] {
-            &builder.segment_metadata
-        }
-
-        #[cfg(feature = "worker-s3")]
-        fn s3_cfg() -> crate::background_task::s3::S3Config {
-            let mut c = crate::background_task::s3::S3Config::builder()
-                .bucket("test-bucket")
-                .service_name("checkout-api")
-                .instance_path("us-east-1/i-0abc123")
-                .build();
-            c.set_boot_id("test-boot");
-            c
-        }
-
-        #[cfg(feature = "worker-s3")]
-        #[test]
-        fn s3_preset_populates_from_config() {
-            let builder = TracedRuntime::builder().with_s3_uploader::<Disk>(s3_cfg());
-            let m: std::collections::HashMap<&str, &str> = entries(&builder)
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            assert_eq!(m.get("bucket"), Some(&"test-bucket"));
-            assert_eq!(m.get("service_name"), Some(&"checkout-api"));
-            assert_eq!(m.get("instance_path"), Some(&"us-east-1/i-0abc123"));
-            assert_eq!(m.get("boot_id"), Some(&"test-boot"));
-        }
-
-        #[cfg(feature = "worker-s3")]
-        #[test]
-        fn s3_preset_replace_overwrites_metadata() {
-            let mut cfg2 = crate::background_task::s3::S3Config::builder()
-                .bucket("other-bucket")
-                .service_name("other-svc")
-                .build();
-            cfg2.set_boot_id("other-boot");
-            let builder = TracedRuntime::builder()
-                .with_s3_uploader::<Disk>(s3_cfg())
-                .with_s3_uploader(cfg2);
-            let m: std::collections::HashMap<&str, &str> = entries(&builder)
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            // cfg2 wins; nothing leaks from the first call.
-            assert_eq!(m.get("bucket"), Some(&"other-bucket"));
-            assert_eq!(m.get("service_name"), Some(&"other-svc"));
-            assert_eq!(m.get("boot_id"), Some(&"other-boot"));
-        }
-
-        /// Custom pipeline does NOT auto-populate, even when `b.s3(cfg)` is
-        /// composed inside it. Documented behavior — pinned here so a future
-        /// change is intentional.
-        #[cfg(feature = "worker-s3")]
-        #[test]
-        fn custom_pipeline_with_s3_does_not_auto_populate() {
-            let builder = TracedRuntime::builder().with_custom_pipeline(|b| b.gzip().s3(s3_cfg()));
-            assert!(
-                entries(&builder).is_empty(),
-                "with_custom_pipeline must not auto-inject segment metadata; got {:?}",
-                entries(&builder)
-            );
-        }
-
-        #[test]
-        fn custom_pipeline_without_s3_is_empty() {
-            let builder = TracedRuntime::builder().with_custom_pipeline(|b| b.gzip().write_back());
-            assert!(entries(&builder).is_empty());
-        }
-
-        #[test]
-        fn unset_pipeline_is_empty() {
-            let builder = TracedRuntime::builder();
-            assert!(entries(&builder).is_empty());
-        }
-
-        /// Custom-pipeline users can recover S3-preset parity by calling
-        /// `with_segment_metadata` explicitly.
-        #[cfg(feature = "worker-s3")]
-        #[test]
-        fn with_segment_metadata_recovers_parity_in_custom_pipeline() {
-            let cfg = s3_cfg();
-            let preset_entries: Vec<(String, String)> = cfg
-                .as_metadata()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            let builder = TracedRuntime::builder()
-                .with_custom_pipeline(|b| b.gzip().s3(s3_cfg()))
-                .with_segment_metadata(preset_entries.clone());
-            assert_eq!(entries(&builder), preset_entries.as_slice());
-        }
-
-        /// `with_segment_metadata` after `with_s3_uploader` overrides the
-        /// preset's injection — last call wins.
-        #[cfg(feature = "worker-s3")]
-        #[test]
-        fn with_segment_metadata_after_s3_overrides_preset() {
-            let custom = vec![("env".to_string(), "prod".to_string())];
-            let builder = TracedRuntime::builder()
-                .with_s3_uploader::<Disk>(s3_cfg())
-                .with_segment_metadata(custom.clone());
-            assert_eq!(entries(&builder), custom.as_slice());
-        }
-
-        /// `with_s3_uploader` after `with_segment_metadata` overwrites the
-        /// custom entries — same "last call wins" rule.
-        #[cfg(feature = "worker-s3")]
-        #[test]
-        fn s3_after_with_segment_metadata_overwrites() {
-            let builder = TracedRuntime::builder()
-                .with_segment_metadata(vec![("env".into(), "prod".into())])
-                .with_s3_uploader::<Disk>(s3_cfg());
-            let m: std::collections::HashMap<&str, &str> = entries(&builder)
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            assert_eq!(m.get("bucket"), Some(&"test-bucket"));
-            assert!(
-                !m.contains_key("env"),
-                "with_s3_uploader should overwrite, not merge"
-            );
-        }
-    }
-
-    /// Regression test for issue #400: `TelemetryCoreBuilder` must expose
-    /// `.s3_config()` so callers can configure S3 without going through
-    /// `TracedRuntimeBuilder`.
-    #[cfg(feature = "worker-s3")]
-    #[test]
-    fn telemetry_core_builder_s3_config_builds_successfully() {
+    fn session_builder_s3_config_builds_successfully() {
         use crate::background_task::s3::S3Config;
 
-        let dir = tempfile::tempdir().unwrap();
-        let trace_path = dir.path().join("trace.bin");
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
-            .trace_path(&trace_path)
-            .s3_config(s3)
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+            .with_s3_uploader(s3)
             .build()
-            .expect("TelemetryCoreBuilder with s3_config must build");
+            .expect("recorder with s3 uploader must build");
 
-        assert!(guard.is_enabled());
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
-    }
-
-    /// Regression test: `TelemetryCore::builder()` with `cpu_profiling` but
-    /// without `s3_config` must auto-wire the processor pipeline (symbolize +
-    /// gzip + write-back) so the background worker is spawned.
-    #[cfg(feature = "cpu-profiling")]
-    #[test]
-    fn telemetry_core_builder_cpu_profiling_auto_wires_processors() {
-        use crate::telemetry::writer::DiskWriter;
-        use dial9_perf_self_profile::CpuProfilingConfig;
-
-        let dir = tempfile::tempdir().unwrap();
-        let trace_path = dir.path().join("trace.bin");
-
-        // Small max_file_size to force rotation quickly.
-        let writer = DiskWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
-
-        let guard = TelemetryCore::builder()
-            .writer(writer)
-            .trace_path(&trace_path)
-            .cpu_profiling(CpuProfilingConfig::default())
-            .worker_poll_interval(std::time::Duration::from_millis(50))
-            .build()
-            .expect("TelemetryCoreBuilder with cpu_profiling must build");
-
-        guard.enable();
-
-        // Attach a runtime and generate enough events to force segment rotation.
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(2).enable_all();
-        let (runtime, _handle) = guard.trace_runtime("test").build(builder).unwrap();
-
-        runtime.block_on(async {
-            // Generate events to fill the small 4KB segment.
-            for _ in 0..1000 {
-                tokio::task::yield_now().await;
-            }
-            // Give the worker time to process the sealed segment.
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        });
-
-        runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(2));
-
-        // After shutdown, the worker should have processed at least one
-        // segment. WriteBackProcessor writes .bin.gz files.
-        let gz_files: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "gz"))
-            .collect();
-        assert!(
-            !gz_files.is_empty(),
-            "cpu_profiling should auto-wire processors that produce .gz files, \
-             but no .gz files found in {:?}. Files present: {:?}",
-            dir.path(),
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .collect::<Vec<_>>()
-        );
+        assert!(traced.is_enabled());
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 }

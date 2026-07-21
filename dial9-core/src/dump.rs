@@ -34,7 +34,7 @@
 //! [`DumpTriggerConfig::debounce`] to coalesce a burst into one dump: triggers
 //! within the debounce window after a dump dispatched resolve
 //! [`DumpError::Coalesced`], naming the dump they folded into instead of
-//! starting a new one. The gate lives on the trigger stored in the session,
+//! starting a new one. The gate lives on the trigger stored on the recorder,
 //! so every [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger)
 //! clone shares it. (A *cooldown* that rejects extra triggers outright,
 //! rather than folding them, is a possible future addition.)
@@ -50,7 +50,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::pipeline::ProcessErrorKind;
 
 /// Mint a dump trigger + receiver pair. The builder wires the receiver into
-/// the worker and stashes the trigger in the session so it can be reached via
+/// the worker and stashes the trigger in the recorder so it can be reached via
 /// [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
 pub fn channel() -> (DumpTrigger, DumpRx) {
     let (tx, rx) = mpsc::unbounded_channel();

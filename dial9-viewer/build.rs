@@ -14,7 +14,7 @@ fn main() {
 
     println!("cargo::rerun-if-changed=skills");
     println!("cargo::rerun-if-changed=ui");
-    println!("cargo::rerun-if-changed=README_TELEMETRY.md");
+    println!("cargo::rerun-if-changed=skill-source.md");
 
     let skills_dir = manifest_dir.join("skills");
     let mut skills: Vec<SkillInfo> = Vec::new();
@@ -296,7 +296,7 @@ const SETUP_SECTIONS: &[&str] = &[
 
 /// Generate the setup skill from the crate README.
 fn generate_setup_from_readme(manifest_dir: &Path, out_dir: &Path) -> String {
-    let readme_path = manifest_dir.join("README_TELEMETRY.md");
+    let readme_path = manifest_dir.join("skill-source.md");
     let readme = fs::read_to_string(&readme_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", readme_path.display()));
 

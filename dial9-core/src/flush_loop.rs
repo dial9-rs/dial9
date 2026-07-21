@@ -1,9 +1,9 @@
-use crate::buffer;
+use crate::buffer::{BufferMode, SegmentWriter};
+use crate::encoder;
 use crate::handle::ControlCommand;
 use crate::metrics::{FlushMetrics, FlushStats, Operation, TlDrainMetrics};
 use crate::rate_limit::rate_limited;
 use crate::shared_state::SharedState;
-use crate::writer::{SegmentWriter, WriterMode};
 use metrique::timers::Timer;
 use std::time::Duration;
 
@@ -31,7 +31,7 @@ enum DrainState {
 /// Perform one flush cycle: drain CPU profilers, drain the collector, write
 /// events to disk, and flush the writer. This is the only code path that
 /// touches the writer, and it runs exclusively on the flush thread.
-fn flush_once<M: WriterMode>(
+fn flush_once<M: BufferMode>(
     writer: &mut SegmentWriter<M>,
     events_written: &mut u64,
     shared: &SharedState,
@@ -50,7 +50,7 @@ fn flush_once<M: WriterMode>(
         // Periodically flush the flush thread's own TL buffer (queue samples + CPU events).
         // We don't drain every cycle because each batch becomes its own trace segment;
         // batching ~1s worth avoids writing tiny segments every 5ms.
-        buffer::drain_to_collector(&shared.collector);
+        encoder::drain_to_collector(&shared.collector);
     }
 
     let dropped = shared.collector.take_dropped_batches();
@@ -91,8 +91,8 @@ fn flush_once<M: WriterMode>(
     }
 }
 
-/// The flush thread main loop. Driven by [`CoreSession::start`](crate::session::CoreSession::start).
-pub(crate) fn run_flush_loop<M: WriterMode>(
+/// The flush thread main loop. Driven by [`Recorder::start`](crate::recording::Recorder::start).
+pub(crate) fn run_flush_loop<M: BufferMode>(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
     flush_metrics_sink: &metrique::writer::BoxEntrySink,

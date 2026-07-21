@@ -8,18 +8,16 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
+use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TracedRuntime,
-};
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
-use tokio::runtime::Builder;
+use dial9::socket::SocketAcceptQueuesConfig;
+use dial9::tracing_layer::Dial9TracingLayer;
+use dial9::{Dial9TokioHandle, TaskDumpConfig};
+use dial9::{DiskBuffer, recorder};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
@@ -52,8 +50,8 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "/tmp/metrics-service-traces/trace.bin",
-        help = "Trace file path"
+        default_value = "/tmp/metrics-service-traces",
+        help = "Trace output directory"
     )]
     trace_path: String,
 
@@ -192,7 +190,7 @@ fn main() -> std::io::Result<()> {
         args.trace_max_total_size = 100_000_000;
     }
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(&args.trace_path)
         .max_file_size(args.trace_max_file_size)
         .max_total_size(args.trace_max_total_size)
@@ -206,13 +204,9 @@ fn main() -> std::io::Result<()> {
         ])
         .build()?;
 
-    let mut builder = Builder::new_multi_thread();
-    builder.worker_threads(args.worker_threads).enable_all();
-    let traced_builder = TracedRuntime::builder()
-        .with_trace_path(&args.trace_path)
-        .with_task_tracking(true)
-        .with_process_resource_usage(ProcessResourceUsageConfig::default());
-    let traced_builder = if let Some(path) = &args.worker_metrics_path {
+    let mut rec =
+        recorder(writer).with_process_resource_usage(ProcessResourceUsageConfig::default());
+    if let Some(path) = &args.worker_metrics_path {
         // Open in append mode so multiple runs accumulate into the same
         // file. Each segment processed by the dial9 background worker
         // appends one line with PipelineMetrics including
@@ -223,27 +217,29 @@ fn main() -> std::io::Result<()> {
             .open(path)?;
         let sink = FlushImmediatelyBuilder::new()
             .build_boxed(LocalFormat::new(OutputStyle::Pretty).output_to(file));
-        traced_builder.with_worker_metrics_sink(sink)
-    } else {
-        traced_builder
-    };
-    let traced_builder = if args.no_task_dumps {
-        traced_builder
-    } else {
-        traced_builder.with_task_dumps(
-            TaskDumpConfig::builder()
-                .idle_threshold(Duration::from_millis(5))
-                .build(),
-        )
-    };
+        rec = rec.metrics_sink(sink);
+    }
     #[cfg(target_os = "linux")]
-    let traced_builder = traced_builder
+    let rec = rec
         .with_cpu_profiling(CpuProfilingConfig::default())
         .with_sched_events(SchedEventConfig::default().include_kernel(true))
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
-    let (runtime, guard) = if let Some(bucket) = &args.s3_bucket {
-        use dial9_tokio_telemetry::background_task::s3::S3Config;
+    let worker_threads = args.worker_threads;
+    let mut traced_builder = rec
+        .with_tokio(move |t| {
+            t.worker_threads(worker_threads);
+        })
+        .with_task_tracking(true);
+    if !args.no_task_dumps {
+        traced_builder = traced_builder.with_task_dumps(
+            TaskDumpConfig::builder()
+                .idle_threshold(Duration::from_millis(5))
+                .build(),
+        );
+    }
+    if let Some(bucket) = &args.s3_bucket {
+        use dial9::core::pipeline::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)
@@ -258,14 +254,10 @@ fn main() -> std::io::Result<()> {
             .maybe_region(args.s3_region.as_ref())
             .build();
 
-        traced_builder
-            .with_s3_uploader(s3_config)
-            .build(builder, writer)?
-    } else {
-        traced_builder.build(builder, writer)?
-    };
-    guard.enable();
-    let handle = guard.tokio_handle(runtime.handle());
+        traced_builder = traced_builder.with_s3_uploader(s3_config);
+    }
+    let traced = traced_builder.build()?;
+    let handle = traced.tokio_handle(traced.runtime().handle());
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -276,14 +268,13 @@ fn main() -> std::io::Result<()> {
             .build();
         Some(
             MemoryProfiler::from_config(config)
-                .install(guard.handle())
+                .install(traced.record_handle())
                 .expect("failed to install memory profiler"),
         )
     };
 
     // Wrap the body in a spawned task so the root future is instrumented.
-    // Inside, Dial9TokioHandle::current() is available on every worker thread.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         handle
             .spawn(async move {
                 let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
@@ -378,11 +369,9 @@ fn main() -> std::io::Result<()> {
             .unwrap();
     });
 
-    // Drop the runtime first so worker threads exit and flush their
-    // thread-local telemetry buffers, then run graceful_shutdown.
-    drop(runtime);
-    let shutdown = guard.graceful_shutdown(Duration::from_secs(5));
-    tracing::info!("dial9 shutdown: {shutdown:?}");
+    // graceful_shutdown drops the runtime so worker threads flush their
+    // thread-local telemetry buffers, then drains the background worker.
+    traced.graceful_shutdown(Duration::from_secs(5));
 
     Ok(())
 }

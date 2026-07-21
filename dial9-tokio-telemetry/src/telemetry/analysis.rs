@@ -760,8 +760,8 @@ mod tests {
 
     #[test]
     fn trace_reader_reads_gzip_trace_files() {
+        use crate::telemetry::buffer::DiskBuffer;
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::DiskWriter;
         use dial9_core::test_util;
         use flate2::Compression;
         use flate2::write::GzEncoder;
@@ -770,7 +770,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let raw_path = dir.path().join("trace.bin");
 
-        let mut writer = DiskWriter::single_file(&raw_path).unwrap();
+        let mut writer = DiskBuffer::single_file(&raw_path).unwrap();
         test_util::write_event(
             &mut writer,
             &WorkerParkEvent {

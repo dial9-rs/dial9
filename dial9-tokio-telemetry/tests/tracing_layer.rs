@@ -3,7 +3,7 @@
 // Only one test per process can do this. All other tests must use `set_default`
 // (thread-local) instead.
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
@@ -125,16 +125,18 @@ fn span_events_appear_in_trace() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .build()
+        .unwrap();
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set global subscriber");
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         // Test on_record: span with an empty field filled in later
         async fn late_record_span() {
             let span = tracing::info_span!("late_fields", answer = tracing::field::Empty);
@@ -199,8 +201,7 @@ fn span_events_appear_in_trace() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     let sealed_path = dir.path().join("trace.0.bin");
     let events = decode_span_events(&sealed_path);
@@ -339,16 +340,19 @@ fn span_events_on_current_thread_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+            t.enable_all();
+        })
+        .build()
+        .unwrap();
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _sub_guard = tracing::subscriber::set_default(subscriber);
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         #[tracing::instrument]
         async fn do_work() {
             tokio::task::yield_now().await;
@@ -358,8 +362,7 @@ fn span_events_on_current_thread_runtime() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     let sealed_path = dir.path().join("trace.0.bin");
     let events = decode_span_events(&sealed_path);

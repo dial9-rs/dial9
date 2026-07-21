@@ -1,4 +1,4 @@
-use crate::buffer::{Encodable, ThreadLocalEncoder};
+use crate::encoder::{Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
 use std::cell::RefCell;
@@ -10,7 +10,7 @@ crate::primitives::thread_local! {
     static CURRENT_HANDLE: RefCell<Option<Dial9Handle>> = const { RefCell::new(None) };
 }
 
-/// Commands sent to the flush thread by [`CoreSession`](crate::session::CoreSession).
+/// Commands sent to the flush thread by [`Recorder`](crate::recording::Recorder).
 pub(crate) enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
     FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
@@ -20,7 +20,7 @@ pub(crate) enum ControlCommand {
 ///
 /// A handle may be in one of two modes:
 ///
-/// - **Enabled** — backed by a real telemetry session; methods record
+/// - **Enabled** — backed by a live recorder; methods record
 ///   events and control recording.
 /// - **Disabled** — an inert sentinel returned by
 ///   [`Dial9Handle::disabled`] and by [`Dial9Handle::current`]
@@ -49,7 +49,7 @@ impl std::fmt::Debug for Dial9Handle {
 
 impl Dial9Handle {
     /// Build an enabled handle wired to a flush thread's control sender.
-    /// [`CoreSession::start`](crate::session::CoreSession::start) mints the channel
+    /// [`Recorder::start`](crate::recording::Recorder::start) mints the channel
     /// and owns the matching receiver.
     pub(crate) fn enabled(
         shared: Arc<SharedState>,
@@ -60,13 +60,13 @@ impl Dial9Handle {
         }
     }
 
-    /// Return an inert handle that is not connected to any telemetry
-    /// session. All methods are no-ops.
+    /// Return an inert handle that is not connected to any recorder.
+    /// All methods are no-ops.
     pub fn disabled() -> Self {
         Self { inner: None }
     }
 
-    /// Whether this handle is connected to a live telemetry session.
+    /// Whether this handle is connected to a live recorder.
     ///
     /// Returns `false` for handles obtained via
     /// [`Dial9Handle::disabled`], and for handles returned by
@@ -89,7 +89,7 @@ impl Dial9Handle {
         self.inner.as_ref().map(|i| &i.control_tx)
     }
 
-    /// On-demand dump trigger for this runtime's telemetry session.
+    /// On-demand dump trigger for this runtime's recorder.
     ///
     /// Returns `None` on a disabled handle (see [`disabled`](Self::disabled))
     /// and when the runtime was built without a dump trigger

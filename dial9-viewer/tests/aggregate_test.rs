@@ -523,27 +523,41 @@ impl dial9_viewer::storage::StorageBackend for FailingPuts {
 }
 
 /// Start a server WITHOUT a server-side `AggContext`, exercising the
-/// bring-your-own-credentials `/api/flamegraph?bucket=…` path instead. The
-/// output bucket is configured separately (as `--agg-output-bucket` does), so
-/// aggregated part-files are written there rather than back into the (possibly
-/// read-only) source bucket. Returns the base URL.
+/// bring-your-own-credentials `/api/flamegraph?bucket=…` path instead. With an
+/// output bucket, aggregate parts persist there; without one, they use the
+/// server's temporary local directory. Returns the base URL.
 async fn start_byoc_server(
     fs_root: &std::path::Path,
     source_bucket: &str,
     output_bucket: Option<&str>,
     segment_secs: i64,
 ) -> String {
-    // The request backend (no BYOC headers in the test → server's ambient
-    // identity, which here is the fake S3 client). This both lists the source
-    // and, when no output override is set, writes the output.
-    let request_backend = Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
+    let request_backend: Arc<dyn dial9_viewer::storage::StorageBackend> =
+        Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
+    start_byoc_server_with_backend(
+        fs_root,
+        source_bucket,
+        output_bucket,
+        segment_secs,
+        request_backend,
+    )
+    .await
+}
+
+async fn start_byoc_server_with_backend(
+    fs_root: &std::path::Path,
+    source_bucket: &str,
+    output_bucket: Option<&str>,
+    segment_secs: i64,
+    request_backend: Arc<dyn dial9_viewer::storage::StorageBackend>,
+) -> String {
     let mut state = AppState::new(request_backend, Some(source_bucket.into()), None)
         .with_byo_creds(true)
         .with_agg_segment_secs(segment_secs);
     if let Some(out) = output_bucket {
         let out_backend: Arc<dyn dial9_viewer::storage::StorageBackend> =
             Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
-        state = state.with_agg_output_bucket(Some(out.to_string()), Some(out_backend));
+        state = state.with_agg_output(dial9_viewer::server::AggOutput::s3(out, out_backend));
     }
     let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1393,11 +1407,11 @@ async fn byoc_writes_output_to_configured_bucket_not_source() {
     );
 }
 
-/// When NO output bucket is configured, BYOC aggregation falls back to writing
-/// into the source bucket (the historical behavior, valid when the source is
-/// writable). Guards the fallback branch of the output-bucket routing.
+/// With no output bucket, BYOC aggregation must use the server-local cache and
+/// never attempt to write through source credentials. The injected source
+/// backend rejects every PUT, matching a caller-provided read-only bucket.
 #[tokio::test]
-async fn byoc_without_output_bucket_writes_to_source() {
+async fn byoc_without_output_bucket_uses_temporary_cache_for_read_only_source() {
     let fs = tempfile::tempdir().unwrap();
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
 
@@ -1405,17 +1419,31 @@ async fn byoc_without_output_bucket_writes_to_source() {
     let body = mini_trace_gz();
     seed_fleet(&uploader, "src-bucket", &body).await;
 
-    let base = start_byoc_server(fs.path(), "src-bucket", None, 60).await;
+    let readable: Arc<dyn dial9_viewer::storage::StorageBackend> =
+        Arc::new(S3Backend::from_client(fake_s3_client(fs.path())));
+    let read_only: Arc<dyn dial9_viewer::storage::StorageBackend> = Arc::new(FailingPuts {
+        inner: readable,
+        fail_substr: "",
+    });
+    let base = start_byoc_server_with_backend(fs.path(), "src-bucket", None, 60, read_only).await;
     let http = reqwest::Client::new();
+    let query = "bucket=src-bucket&service=shale&host=host-a";
 
-    let r = stream_final(&http, &base, "bucket=src-bucket&service=shale&host=host-a").await;
-    assert!(r.total_samples > 0);
+    let first = stream(&http, &base, query).await;
+    let final_response = first.last().unwrap();
+    assert!(final_response.total_samples > 0);
+    assert_eq!(final_response.coverage.as_ref().unwrap().fold_errors, 0);
+
+    // A second request starts from the already-folded temporary cache rather
+    // than recomputing, proving the cache is shared across requests.
+    let second = stream(&http, &base, query).await;
+    assert!(
+        second[0].coverage.as_ref().unwrap().files_folded > 0,
+        "second request should observe aggregate parts cached by the first"
+    );
 
     let src_n = count_objects(&uploader, "src-bucket", "flamegraph-data/").await;
-    assert!(
-        src_n > 0,
-        "with no output override, output falls back to the source bucket"
-    );
+    assert_eq!(src_n, 0, "source bucket must remain unmodified");
 }
 
 /// The `/api/tokio-stats` SSE endpoint streams the same refinement machinery as

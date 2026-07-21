@@ -1,14 +1,19 @@
 ---
 source: dial9-macro/src/lib.rs
+assertion_line: 290
 expression: output
 ---
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(my_config());
+    let __dial9_rt = ::dial9::TracedRuntime::new(my_config());
     let __dial9_out = __dial9_rt
         .block_on(async move {
             do_work().await?;
             Ok(())
         });
-    __dial9_rt.graceful_shutdown();
+    if let Some(__dial9_timeout) = __dial9_rt.graceful_shutdown_timeout() {
+        __dial9_rt.graceful_shutdown(__dial9_timeout);
+    } else {
+        drop(__dial9_rt);
+    }
     __dial9_out
 }

@@ -7,7 +7,7 @@
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
 use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
-use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
+use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
@@ -25,6 +25,7 @@ const WORKER_ID_UNKNOWN: u64 = 255;
 
 /// What triggered a CPU sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CpuSampleSource {
     /// Periodic CPU profiling sample (frequency-based).
     CpuProfile = 0,
@@ -283,6 +284,10 @@ pub struct CpuProfiler {
 }
 
 impl CpuProfiler {
+    /// [`Source::name`] of the CPU profiler. The runtime builder keys off this
+    /// to decide whether the pipeline symbolizes.
+    pub const SOURCE_NAME: &'static str = "cpu_profile";
+
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
         let sampler = match config.backend {
@@ -357,7 +362,7 @@ impl Source for CpuProfiler {
     }
 
     fn name(&self) -> &'static str {
-        "cpu_profile"
+        Self::SOURCE_NAME
     }
 }
 

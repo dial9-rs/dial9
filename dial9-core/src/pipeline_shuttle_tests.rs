@@ -2,21 +2,17 @@
 //! writer -> flush thread -> sealed segment -> drain, plus the flush loop's
 //! rate-limited error handling under fs faults. No tokio, no telemetry sources.
 
+use crate::buffer::{DiskBuffer, MemoryBuffer};
 use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::session::CoreSession;
+use crate::recording::Recorder;
 use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
-use crate::writer::{DiskWriter, InMemoryWriter};
 use dial9_trace_format::TraceEvent;
 use shuttle::rand::Rng;
 use std::collections::HashMap;
-
-fn dev_null_sink() -> metrique::writer::BoxEntrySink {
-    metrique::writer::sink::DevNullSink::boxed()
-}
 
 // ── Event definition ────────────────────────────────────────────────
 
@@ -136,7 +132,7 @@ fn test_core_pipeline() {
 
     // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
     // so the ring never evicts before we drain it.
-    let writer = InMemoryWriter::builder()
+    let writer = MemoryBuffer::builder()
         .max_total_size(100 * 1024 * 1024)
         .max_segment_size(256)
         .build()
@@ -148,9 +144,9 @@ fn test_core_pipeline() {
 
     let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
     shared.push_source(Box::new(MockSource::new(source_pending.clone())));
-    let mut session = CoreSession::start(shared, writer, dev_null_sink(), || || {});
-    session.handle().enable();
-    let handle = session.handle().clone();
+    let mut recorder = Recorder::start(shared, writer, None, || || {});
+    recorder.handle().enable();
+    let handle = recorder.handle().clone();
 
     let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let writers: Vec<_> = (0..num_threads)
@@ -190,7 +186,7 @@ fn test_core_pipeline() {
         w.join().unwrap();
     }
     // Final flush + seal the last segment, then join the flush thread.
-    session.stop_flush_thread();
+    recorder.stop_flush_thread();
 
     // Drain the in-memory ring (memory pops one sealed segment per call).
     let mut all_decoded: Vec<ValidationEvent> = Vec::new();
@@ -290,12 +286,12 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let next_id = Arc::new(AtomicU64::new(0));
 
         let dir = tempfile::tempdir().unwrap();
-        let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
         let _fault = fs::set_fault(fault);
         let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        let mut session = CoreSession::start(shared, writer, dev_null_sink(), || || {});
-        session.handle().enable();
-        let handle = session.handle().clone();
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
 
         let writers: Vec<_> = (0..num_threads)
             .map(|thread_id| {
@@ -328,7 +324,7 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         }
         // The shutdown/finalize path runs a final flush + seal, which should
         // also be rate-limited if it logs on error.
-        session.stop_flush_thread();
+        recorder.stop_flush_thread();
     });
 
     warn_count.load(StdOrdering::Relaxed)

@@ -144,14 +144,15 @@ mod worker_s3_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
         let config = BackgroundTaskConfig::builder()
-            .trace_path(dir.path().join("trace.bin"))
+            .trace_dir(dir.path())
+            .trace_stem("trace")
             .build();
 
         let processors: Vec<Box<dyn SegmentProcessor>> =
             vec![Box::new(CountingProcessor(processed.clone()))];
 
         let mut worker = WorkerLoop::new(
-            Fs::new_disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_dir(), config.trace_stem()),
             config.poll_interval(),
             processors,
             stop,
@@ -212,7 +213,8 @@ mod worker_s3_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
         let config = BackgroundTaskConfig::builder()
-            .trace_path(dir.path().join("trace.bin"))
+            .trace_dir(dir.path())
+            .trace_stem("trace")
             .build();
 
         let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(FailFirstProcessor {
@@ -221,7 +223,7 @@ mod worker_s3_tests {
         })];
 
         let mut worker = WorkerLoop::new(
-            Fs::new_disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_dir(), config.trace_stem()),
             config.poll_interval(),
             processors,
             stop,
@@ -235,56 +237,22 @@ mod worker_s3_tests {
     }
 
     #[test]
-    fn trace_dir_for_bare_relative_path_defaults_to_current_directory() {
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("trace.bin")
-            .build();
-
+    fn trace_dir_and_stem_default_for_memory_backend() {
+        // No trace_dir/trace_stem set: the in-memory backend has no on-disk
+        // segments, so the accessors fall back to `.` and `trace`.
+        let config = BackgroundTaskConfig::builder().build();
         check!(config.trace_dir() == std::path::Path::new("."));
-    }
-}
-
-// --- Review finding #9: trace_stem edge cases ---
-
-#[cfg(test)]
-mod trace_stem_tests {
-    use crate::worker::BackgroundTaskConfig;
-    use assert2::check;
-
-    #[test]
-    fn trace_stem_normal_path() {
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("/tmp/traces/trace.bin")
-            .build();
         check!(config.trace_stem() == "trace");
     }
 
     #[test]
-    fn trace_stem_directory_path() {
-        // A path like "/tmp/traces/" — file_stem returns "traces", not an error
+    fn trace_dir_and_stem_return_configured_values() {
         let config = BackgroundTaskConfig::builder()
-            .trace_path("/tmp/traces/")
+            .trace_dir("/tmp/traces")
+            .trace_stem("trace")
             .build();
-        // This is the current behavior — it returns "traces" not "trace"
-        // which would silently match the wrong files
-        check!(config.trace_stem() == "traces");
-    }
-
-    #[test]
-    fn trace_stem_root_path() {
-        // A path like "/" has no file stem
-        let config = BackgroundTaskConfig::builder().trace_path("/").build();
-        // Should fall back to "trace" and log an error
+        check!(config.trace_dir() == std::path::Path::new("/tmp/traces"));
         check!(config.trace_stem() == "trace");
-    }
-
-    #[test]
-    fn trace_dir_for_directory_path() {
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("/tmp/traces/")
-            .build();
-        // trace_dir should be the parent of the path
-        check!(config.trace_dir() == std::path::Path::new("/tmp"));
     }
 }
 
@@ -305,7 +273,7 @@ mod worker_pipeline_tests {
     use std::time::Duration;
 
     fn fs_for(dir: &std::path::Path) -> Arc<Fs> {
-        Fs::new_disk(&dir.join("trace.bin"))
+        Fs::new_disk(dir, "trace")
     }
 
     fn default_poll() -> Duration {
@@ -714,7 +682,7 @@ mod worker_pipeline_tests {
     }
 
     /// Disk `mark_writer_done` alone (no stop-token cancel) drains and exits.
-    /// Symmetric with memory mode: `DiskWriter::finalize` is a complete
+    /// Symmetric with memory mode: `DiskBuffer::finalize` is a complete
     /// shutdown signal across both backends.
     #[tokio::test]
     async fn disk_worker_run_drains_on_writer_done() {
@@ -1455,7 +1423,7 @@ mod triggered_worker_tests {
         set_mtime(&old_path, now - 3600);
         std::fs::write(dir.path().join("trace.1.bin"), segment_with_epoch(now)).unwrap();
 
-        let fs = Fs::new_disk(&dir.path().join("trace.bin"));
+        let fs = Fs::new_disk(dir.path(), "trace");
         let (trigger, rx) = dump::channel();
         let stop = tokio_util::sync::CancellationToken::new();
         let worker = spawn_worker(

@@ -1,4 +1,4 @@
-//! dial9 recording core: the event bus, recording session, and trace writer.
+//! dial9 recording core: the event bus, recorder, and trace writer.
 
 #![warn(unreachable_pub)]
 
@@ -20,16 +20,20 @@ pub(crate) use test_util_pub;
 /// Shared boot identifier (`{4-alpha}-{pid}`) for segment namespacing + S3 keys.
 #[doc(hidden)]
 pub mod boot_id;
-/// Thread-local event encoding buffers and the `Encodable` trait.
+/// Rotating trace-segment buffers: the on-disk and in-memory sinks.
 pub mod buffer;
 /// Monotonic/realtime clock readings, the trace time base.
 pub mod clock;
 /// Central ring buffer of encoded event batches awaiting write.
 pub mod collector;
+/// User-provided custom events.
+pub mod custom_events;
 /// On-demand pipeline runs: trigger, request channel, and dump receipts.
 #[cfg(feature = "pipeline")]
 pub mod dump;
-/// Flush-thread loop. Driven by `CoreSession`; not public API.
+/// Thread-local event encoding buffers and the `Encodable` trait.
+pub mod encoder;
+/// Flush-thread loop. Driven by `Recorder`; not public API.
 pub(crate) mod flush_loop;
 /// Wire-format events emitted by the bus itself.
 pub mod format;
@@ -54,14 +58,17 @@ pub mod primitives;
 /// Per-call-site rate limiting for log lines.
 #[doc(hidden)]
 pub mod rate_limit;
+/// The recorder builder.
+pub mod recorder;
+/// The live recorder: recording state with RAII shutdown.
+pub mod recording;
 /// Geometric/Poisson sampling primitives (RNG, exponential draws).
 #[doc(hidden)]
 pub mod sampling;
 /// Sealed-segment detection. The segment types are public via [`pipeline`].
 pub(crate) mod sealed;
-/// Runtime-agnostic recording session.
-pub mod session;
 /// Runtime-agnostic recording state shared across threads.
+#[doc(hidden)]
 pub mod shared_state;
 /// `Source` trait: pluggable flush-thread data sources.
 pub mod source;
@@ -73,8 +80,6 @@ pub mod thread;
 /// Segment-processing worker: runs a `SegmentProcessor` pipeline over sealed segments.
 #[cfg(feature = "pipeline")]
 pub mod worker;
-/// Rotating trace-segment writer.
-pub mod writer;
 
 #[cfg(all(test, shuttle))]
 mod pipeline_shuttle_tests;

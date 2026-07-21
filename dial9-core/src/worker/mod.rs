@@ -39,10 +39,11 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(bon::Builder)]
 #[builder(on(String, into))]
 pub struct BackgroundTaskConfig {
-    /// The trace base path (same path passed to `DiskWriter::new`).
-    /// `None` when using the in-memory backend.
+    /// Directory holding the trace segments. `None` for the in-memory backend.
     #[builder(into)]
-    trace_path: Option<PathBuf>,
+    trace_dir: Option<PathBuf>,
+    /// Segment filename stem (e.g. `trace`). `None` for the in-memory backend.
+    trace_stem: Option<String>,
     /// How often the worker checks for sealed segments. Defaults to 1 second.
     #[builder(default = DEFAULT_POLL_INTERVAL)]
     poll_interval: Duration,
@@ -62,7 +63,8 @@ pub struct BackgroundTaskConfig {
 impl std::fmt::Debug for BackgroundTaskConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BackgroundTaskConfig")
-            .field("trace_path", &self.trace_path)
+            .field("trace_dir", &self.trace_dir)
+            .field("trace_stem", &self.trace_stem)
             .field("poll_interval", &self.poll_interval)
             .finish_non_exhaustive()
     }
@@ -74,43 +76,18 @@ impl BackgroundTaskConfig {
         self.poll_interval
     }
 
-    /// The full trace base path (e.g. `/tmp/trace.bin`). `None` for memory
-    /// mode.
-    pub fn trace_path(&self) -> Option<&Path> {
-        self.trace_path.as_deref()
-    }
-
-    /// Directory containing trace segments.
+    /// Directory containing trace segments. `.` for the memory backend.
     pub fn trace_dir(&self) -> &Path {
-        match self.trace_path.as_deref().and_then(|p| p.parent()) {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
+        match self.trace_dir.as_deref() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
             _ => Path::new("."),
         }
     }
 
-    /// File stem used for segment matching (e.g. "trace" for "trace.0.bin").
+    /// Segment filename stem, e.g. `trace` for `trace.0.bin`. `"trace"` for the
+    /// memory backend (which has no on-disk segments to match).
     pub fn trace_stem(&self) -> &str {
-        let stem = self
-            .trace_path
-            .as_deref()
-            .and_then(|p| p.file_stem())
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty());
-        match stem {
-            Some(s) => s,
-            None => {
-                if let Some(p) = self.trace_path.as_deref() {
-                    rate_limited!(Duration::from_secs(60), {
-                        tracing::error!(
-                            target: "dial9_worker",
-                            path = %p.display(),
-                            "trace_path has no file stem — pass a path like /tmp/traces/trace.bin, not a directory"
-                        );
-                    });
-                }
-                "trace"
-            }
-        }
+        self.trace_stem.as_deref().unwrap_or("trace")
     }
 }
 
@@ -170,14 +147,14 @@ pub(crate) fn run_background_task(
 /// a teardown closure run after it (e.g. profiler register/unregister).
 ///
 /// Owns the fs handoff so callers never touch the writer's storage backend.
-pub fn spawn<M, Init, Teardown>(
-    writer: &crate::writer::SegmentWriter<M>,
+pub(crate) fn spawn<M, Init, Teardown>(
+    writer: &crate::buffer::SegmentWriter<M>,
     config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
     thread_init: Init,
 ) -> Option<crate::primitives::thread::JoinHandle<()>>
 where
-    M: crate::writer::WriterMode,
+    M: crate::buffer::BufferMode,
     Init: FnOnce() -> Teardown + Send + 'static,
     Teardown: FnOnce(),
 {

@@ -10,7 +10,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::SchedEventConfig;
-use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, RecorderPerfExt, recorder};
 
 mod common;
 use std::sync::Mutex;
@@ -44,16 +44,16 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
     let num_workers = 2;
     let num_blocking_tasks = 50;
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(common::small_mem_writer())
         .with_sched_events(SchedEventConfig::default())
-        .build_and_start(builder, common::small_mem_writer())
+        .with_tokio(move |t| {
+            t.worker_threads(num_workers);
+        })
+        .build()
         .unwrap();
 
     // Let workers start and resolve their identity.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
@@ -61,7 +61,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     // Spawn many blocking tasks. Each one creates a new blocking pool thread.
     // Use std::thread::sleep to ensure they actually block and force new threads.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_blocking_tasks {
             handles.push(tokio::task::spawn_blocking(|| {
@@ -77,10 +77,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     let perf_fds_after = count_perf_fds();
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     // Only worker threads should have perf fds. Before the fix, we'd see
     // ~50 new perf fds (one per blocking thread). After the fix, the count
@@ -104,16 +101,17 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
 
     {
         let num_workers = 4;
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(num_workers).enable_all();
 
-        let (runtime, guard) = TracedRuntime::builder()
+        let traced = recorder(common::small_mem_writer())
             .with_sched_events(SchedEventConfig::default())
-            .build_and_start(builder, common::small_mem_writer())
+            .with_tokio(move |t| {
+                t.worker_threads(num_workers);
+            })
+            .build()
             .unwrap();
 
         // Do some work so workers resolve their identity.
-        runtime.block_on(async {
+        traced.runtime().block_on(async {
             for _ in 0..10 {
                 tokio::spawn(async { tokio::task::yield_now().await })
                     .await
@@ -129,10 +127,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
             "expected perf fds while runtime is running, got 0"
         );
 
-        drop(runtime);
-        guard
-            .graceful_shutdown(std::time::Duration::from_secs(1))
-            .expect("clean shutdown");
+        traced.graceful_shutdown(Duration::from_secs(1));
     }
 
     let perf_fds_after = count_perf_fds();

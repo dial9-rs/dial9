@@ -8,7 +8,7 @@ mod fake_s3;
 
 use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use fake_s3::{fake_s3_client, wait_for_uploaded_segment};
 use std::future::IntoFuture;
 use std::time::{Duration, Instant};
@@ -37,27 +37,28 @@ fn assertion_runtime() -> tokio::runtime::Runtime {
 fn nothing_uploads_until_dump_then_manifest_indexes_it() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
+    let traced = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(Duration::from_millis(50))
         .with_dump_trigger(|_| {})
-        .build_and_start(builder, writer)
+        .build()
         .unwrap();
 
-    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+    let trigger = traced
+        .record_handle()
+        .dump_trigger()
+        .expect("trigger wired");
 
-    wait_for_sealed_segment(&runtime, trace_dir.path());
+    wait_for_sealed_segment(traced.runtime(), trace_dir.path());
     // Plenty of poll intervals: a continuous-mode worker would have
     // uploaded by now.
     std::thread::sleep(Duration::from_millis(400));
@@ -147,8 +148,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
         }
     });
 
-    drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// A look-forward window keeps the dump open and captures a segment sealed
@@ -161,25 +161,26 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
 fn lookforward_dump_captures_post_trigger_segments() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
+    let traced = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(Duration::from_millis(50))
         .with_dump_trigger(|_| {})
-        .build_and_start(builder, writer)
+        .build()
         .unwrap();
 
-    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+    let trigger = traced
+        .record_handle()
+        .dump_trigger()
+        .expect("trigger wired");
 
     // Trigger before producing anything; the forward window collects the
     // segments the workload seals. The window is effectively unbounded (1h) so
@@ -192,11 +193,10 @@ fn lookforward_dump_captures_post_trigger_segments() {
     // open (a real mid-window capture, not a shutdown-only truncation). The
     // local `.bin` is deleted right after upload, so polling the trace dir
     // races the worker; the uploaded S3 object persists, so poll that instead.
-    wait_for_uploaded_segment(&runtime, &client, "test-bucket");
+    wait_for_uploaded_segment(traced.runtime(), &client, "test-bucket");
 
     // Resolve via shutdown rather than the wall-clock deadline.
-    drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(2)).unwrap();
+    traced.graceful_shutdown(Duration::from_secs(2));
 
     let check_rt = assertion_runtime();
     let receipt = check_rt.block_on(fut).unwrap();
@@ -230,22 +230,28 @@ fn lookforward_dump_captures_post_trigger_segments() {
 #[test]
 fn lookforward_dump_resolves_after_deadline() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
-        .with_custom_pipeline(|p| p.gzip().write_back())
-        .with_worker_poll_interval(Duration::from_millis(50))
-        .with_dump_trigger(|_| {})
-        .build_and_start(builder, writer)
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
         .unwrap();
 
-    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+    let traced = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
+        .with_custom_pipeline(|p| p.gzip().write_back())
+        .with_dump_trigger(|_| {})
+        .build()
+        .unwrap();
+
+    let trigger = traced
+        .record_handle()
+        .dump_trigger()
+        .expect("trigger wired");
 
     let lookforward = Duration::from_millis(300);
     let triggered = Instant::now();
@@ -261,8 +267,7 @@ fn lookforward_dump_resolves_after_deadline() {
         "receipt resolves only after the forward deadline"
     );
 
-    drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// Off-S3 pipelines dump to disk: the receipt works, but there is no
@@ -270,24 +275,25 @@ fn lookforward_dump_resolves_after_deadline() {
 #[test]
 fn off_s3_pipeline_dumps_without_manifest() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
+    let traced = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_custom_pipeline(|p| p.gzip().write_back())
-        .with_worker_poll_interval(Duration::from_millis(50))
         .with_dump_trigger(|_| {})
-        .build_and_start(builder, writer)
+        .build()
         .unwrap();
 
-    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+    let trigger = traced
+        .record_handle()
+        .dump_trigger()
+        .expect("trigger wired");
 
-    wait_for_sealed_segment(&runtime, trace_dir.path());
+    wait_for_sealed_segment(traced.runtime(), trace_dir.path());
 
     let check_rt = assertion_runtime();
     let receipt = check_rt
@@ -304,8 +310,7 @@ fn off_s3_pipeline_dumps_without_manifest() {
         .count();
     assert!(gz_count >= 1, "dumped segments written back to disk");
 
-    drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
+    traced.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// Shutting down with a look-forward dump still open resolves the awaited
@@ -314,34 +319,39 @@ fn off_s3_pipeline_dumps_without_manifest() {
 fn shutdown_truncates_open_lookforward_dump() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
-        .with_s3_uploader(test_s3_config())
-        .with_s3_client(client)
-        .with_worker_poll_interval(Duration::from_millis(50))
-        .with_dump_trigger(|_| {})
-        .build_and_start(builder, writer)
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(512)
+        .max_total_size(50 * 1024)
+        .build()
         .unwrap();
 
-    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+    let traced = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
+        .with_s3_uploader(test_s3_config())
+        .with_s3_client(client)
+        .with_dump_trigger(|_| {})
+        .build()
+        .unwrap();
+
+    let trigger = traced
+        .record_handle()
+        .dump_trigger()
+        .expect("trigger wired");
 
     // Hour-long forward window, then shut down long before the deadline.
     let fut = trigger
         .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
-    drive_workload(&runtime);
+    drive_workload(traced.runtime());
 
-    drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(2)).unwrap();
+    traced.graceful_shutdown(Duration::from_secs(2));
 
     let receipt = assertion_runtime()
         .block_on(fut)

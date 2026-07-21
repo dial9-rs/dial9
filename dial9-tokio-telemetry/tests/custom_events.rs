@@ -1,11 +1,13 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
+use dial9_core::recorder::RecorderSourceExt;
 use dial9_tokio_telemetry::telemetry::{
-    CustomEventsConfig, InMemoryWriter, TelemetryCore, TracedRuntime,
+    CustomEventsConfig, MemoryBuffer, RecorderBuilderTokioExt, recorder,
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
+use std::time::Duration;
 
 #[derive(Debug, serde::Deserialize, TraceEvent)]
 struct QueuedEvent {
@@ -40,22 +42,20 @@ fn traced_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
             }
         })
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
@@ -76,29 +76,25 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let guard = TelemetryCore::builder()
-        .writer(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .processors(vec![Box::new(capture)])
-        .build()
-        .unwrap();
-    guard.enable();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, _handle) = guard
-        .trace_runtime("main")
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
             }
         })
-        .build(builder)
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+        })
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build()
         .unwrap();
 
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+    let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
+
     drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);

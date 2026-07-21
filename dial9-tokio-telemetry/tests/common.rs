@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, InMemoryWriter};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, MemoryBuffer};
 use dial9_trace_format::decoder::Decoder;
 use serde::de::DeserializeOwned;
 use std::future::Future;
@@ -20,13 +20,13 @@ pub const SEAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Trivial tasks spawned per workload burst; enough to seal a 64-byte segment.
 pub const WORKLOAD_BURST: usize = 200;
 
-/// A [`DiskWriter`] tuned to seal a segment within a few hundred ms under a tiny
+/// A [`DiskBuffer`] tuned to seal a segment within a few hundred ms under a tiny
 /// workload: the small size threshold seals by bytes almost immediately, and the
 /// short rotation period is a time-based backstop. The default 60s rotation +
 /// larger size threshold could leave a tiny workload's bytes in an unsealed
 /// active segment, capturing zero segments on slow CI.
-pub fn fast_sealing_writer(trace_path: &Path) -> DiskWriter {
-    DiskWriter::builder()
+pub fn fast_sealing_writer(trace_path: &Path) -> DiskBuffer {
+    DiskBuffer::builder()
         .base_path(trace_path)
         .max_file_size(64)
         .max_total_size(50 * 1024)
@@ -85,8 +85,8 @@ pub fn wait_for_sealed_segment(runtime: &tokio::runtime::Runtime, trace_dir: &Pa
 
 /// Fixed-size in-memory writer for tests that run a telemetry runtime but don't
 /// read the trace back.
-pub fn small_mem_writer() -> InMemoryWriter {
-    InMemoryWriter::builder()
+pub fn small_mem_writer() -> MemoryBuffer {
+    MemoryBuffer::builder()
         .max_total_size(16 * 1024 * 1024)
         .max_segment_size(4 * 1024 * 1024)
         .build()
@@ -99,7 +99,7 @@ pub fn small_mem_writer() -> InMemoryWriter {
 /// Per-segment (not concatenated): each entry is a self-contained trace blob
 /// with its own header, so [`decode_all`] can decode them independently.
 ///
-/// Pair with an [`InMemoryWriter`](dial9_tokio_telemetry::telemetry::InMemoryWriter)
+/// Pair with an [`MemoryBuffer`](dial9_tokio_telemetry::telemetry::MemoryBuffer)
 /// via `.with_custom_pipeline(|p| p.pipe(capture))`, then
 /// `guard.graceful_shutdown(..)` to drain the worker before reading the captured segments.
 pub struct CapturingProcessor {

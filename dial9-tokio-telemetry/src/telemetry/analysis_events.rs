@@ -548,7 +548,7 @@ mod tests {
         .unwrap();
 
         // 13. ProcessResourceUsageEvent
-        enc.write(&format::ProcessResourceUsageEvent {
+        enc.write(&dial9_perf_self_profile::ProcessResourceUsageEvent {
             timestamp_ns: 14_000_000,
             user_cpu_ns: 1_000_000,
             system_cpu_ns: 2_000_000,
@@ -563,7 +563,7 @@ mod tests {
         .unwrap();
 
         // 14. TcpAcceptQueueEvent
-        enc.write(&format::TcpAcceptQueueEvent {
+        enc.write(&dial9_perf_self_profile::TcpAcceptQueueEvent {
             timestamp_ns: 15_000_000,
             socket_cookie: 67890,
             socket_inode: 12345,
