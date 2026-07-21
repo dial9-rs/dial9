@@ -45,6 +45,10 @@ default = ["cli"]
 ## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
 cli = ["dep:dial9-viewer", "dep:anyhow"]
 
+## Opt-in self-instrumentation for the `dial9` CLI.
+## Activate recording with `DIAL9_ENABLED=true`.
+self-telemetry = ["tokio", "cpu-profiling"]
+
 ## Background segment-processing pipeline (worker, processors, on-demand dumps).
 ## Pulls a Tokio runtime for the worker, but not the runtime *integration*.
 ## The `?/` forward enables perf's symbolize processor only when a perf source

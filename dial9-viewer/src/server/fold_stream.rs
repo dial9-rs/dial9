@@ -411,7 +411,7 @@ mod tests {
             failed_key: full_keys[1].clone(),
         };
 
-        let events: Vec<_> = drive(agg, resolved, FoldLimits::new(1, 1), sink)
+        let events: Vec<_> = drive(agg, resolved, FoldLimits::new(1, 1, 1), sink)
             .collect()
             .await;
 
