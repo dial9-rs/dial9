@@ -276,14 +276,27 @@ describe("makeStrokeBatcher", () => {
 
 interface RecordingCtx extends StrokePathContext {
   calls: string[];
+  /** The `lineJoin` in effect at each stroke() call, in order. */
+  joinsAtStroke: CanvasLineJoin[];
 }
 
 function makeRecordingCtx(): RecordingCtx {
   let stroke: string | CanvasGradient | CanvasPattern = "";
   let width = 0;
+  let join: CanvasLineJoin = "miter";
   const calls: string[] = [];
+  const joinsAtStroke: CanvasLineJoin[] = [];
   return {
     calls,
+    joinsAtStroke,
+    // lineJoin is not recorded into `calls` - it must not perturb the
+    // call-sequence assertions; joinsAtStroke captures it where it matters.
+    get lineJoin() {
+      return join;
+    },
+    set lineJoin(v) {
+      join = v;
+    },
     get strokeStyle() {
       return stroke;
     },
@@ -301,7 +314,10 @@ function makeRecordingCtx(): RecordingCtx {
     beginPath: () => calls.push("beginPath"),
     moveTo: (x, y) => calls.push(`moveTo(${x},${y})`),
     lineTo: (x, y) => calls.push(`lineTo(${x},${y})`),
-    stroke: () => calls.push("stroke"),
+    stroke: () => {
+      joinsAtStroke.push(join);
+      calls.push("stroke");
+    },
     setLineDash: (segs) => calls.push(`setLineDash([${segs.join(",")}])`),
   };
 }
@@ -330,6 +346,20 @@ describe("drawStrokeBatches", () => {
 
     expect(ctx.calls.filter((c) => c === "stroke")).toHaveLength(2);
     expect(ctx.calls.filter((c) => c === "beginPath")).toHaveLength(2);
+  });
+
+  it("strokes with a round join (no miter spike past a vertex) and restores it", () => {
+    const b = makeStrokeBatcher();
+    b.polyline("queue", [
+      { x: 0, y: 20 },
+      { x: 1, y: 0 },
+      { x: 2, y: 20 },
+    ]);
+    const ctx = makeRecordingCtx();
+    ctx.lineJoin = "bevel"; // a non-default prior value the drawer must restore
+    drawStrokeBatches(ctx, b.batches(), styleOf);
+    expect(ctx.joinsAtStroke).toEqual(["round"]);
+    expect(ctx.lineJoin).toBe("bevel");
   });
 
   it("dash state is hoisted - one setLineDash per dashed style, not per marker", () => {

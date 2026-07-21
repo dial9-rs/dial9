@@ -40,6 +40,7 @@ function recordingCtx(): Recording {
     fillStyle: "#000",
     strokeStyle: "#000",
     lineWidth: 1,
+    lineJoin: "miter",
     font: "",
     textAlign: "left",
     clearRect: () => {},

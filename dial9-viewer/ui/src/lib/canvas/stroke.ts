@@ -220,6 +220,7 @@ export interface StrokeStyleSpec {
 export interface StrokePathContext {
   strokeStyle: string | CanvasGradient | CanvasPattern;
   lineWidth: number;
+  lineJoin: CanvasLineJoin;
   beginPath(): void;
   moveTo(x: number, y: number): void;
   lineTo(x: number, y: number): void;
@@ -238,6 +239,12 @@ export function drawStrokeBatches(
   styleOf: (styleKey: string) => StrokeStyleSpec,
 ): void {
   let dashActive = false;
+  // Round joins: a sharp downsampled spike (a diagonal V between adjacent
+  // columns) miters its tip several px past the vertex - below the 0 baseline /
+  // above the max. Scoped + restored so it never leaks to the caller's own
+  // sharp-cornered strokes (e.g. the lanes' selection-outline rects).
+  const prevJoin = ctx.lineJoin;
+  ctx.lineJoin = "round";
   for (const [styleKey, batch] of batches) {
     let drawable = false;
     for (const pl of batch.polylines) {
@@ -273,4 +280,5 @@ export function drawStrokeBatches(
     ctx.stroke();
   }
   if (dashActive) ctx.setLineDash([]);
+  ctx.lineJoin = prevJoin;
 }
