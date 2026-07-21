@@ -245,7 +245,16 @@ where
         // was built for, so S3 refuses with `PermanentRedirect` (the classic
         // form) or the generic `Redirect`. Surface a clear message rather than
         // the opaque "unclassified S3 error" this used to fall through to.
-        Some("PermanentRedirect" | "Redirect") => StorageError::WrongRegion,
+        //
+        // `IllegalLocationConstraintException` is the same mismatch reported
+        // differently: an opt-in region (e.g. `af-south-1`) whose bucket is
+        // addressed through a region-specific endpoint the request wasn't signed
+        // for returns this (HTTP 400) instead of the 301 `PermanentRedirect`. It
+        // is still "wrong region", so classify it alongside the others rather
+        // than letting it fall through to the `Other` arm's 500 `fault`.
+        Some("PermanentRedirect" | "Redirect" | "IllegalLocationConstraintException") => {
+            StorageError::WrongRegion
+        }
         // Missing bucket/key: the user pointed at something that does not exist
         // (typo'd bucket name, deleted object). This is a client mistake, so map
         // it to 404 rather than letting it fall through to the `Other` arm —
@@ -1268,6 +1277,35 @@ mod tests {
             .list_prefixes("my-bucket", "")
             .await
             .expect_err("a PermanentRedirect must surface as an error");
+        assert!(
+            matches!(err, StorageError::WrongRegion),
+            "expected WrongRegion, got {err:?}"
+        );
+        // The message points the user at the fix (set/detect the region).
+        assert!(err.to_string().contains("region"), "message: {err}");
+    }
+
+    /// An `IllegalLocationConstraintException` is a region mismatch reported
+    /// differently: an opt-in region (e.g. `af-south-1`) whose bucket is
+    /// addressed through an endpoint the request wasn't signed for returns this
+    /// (HTTP 400) instead of a 301 `PermanentRedirect`. It must classify to
+    /// [`StorageError::WrongRegion`] like the redirect forms, not the opaque
+    /// `Other` that produced the "unclassified S3 error" log and a 500 `fault`.
+    #[tokio::test]
+    async fn illegal_location_constraint_classifies_as_wrong_region() {
+        // The XML S3 sends for an opt-in-region bucket hit through the wrong
+        // regional endpoint (HTTP 400) — the exact shape seen in prod.
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>IllegalLocationConstraintException</Code>
+              <Message>The af-south-1 location constraint is incompatible for the region specific endpoint this request was sent to.</Message>
+            </Error>"#;
+        let backend = replay_error_backend(400, body);
+
+        let err = backend
+            .list_prefixes("my-bucket", "")
+            .await
+            .expect_err("an IllegalLocationConstraintException must surface as an error");
         assert!(
             matches!(err, StorageError::WrongRegion),
             "expected WrongRegion, got {err:?}"
