@@ -14,7 +14,7 @@ that a candidate stack must pay for violating.
 `dial9-viewer` is a published crate installed via `cargo install --locked dial9`,
 which compiles from source on end-user machines. The server embeds the UI with
 rust-embed at compile time, verbatim from disk (`#[folder = "ui/"]`,
-`dial9-viewer/src/server/mod.rs:44`). End-user machines have cargo, not Node/npm.
+`dial9-viewer/src/server/mod.rs:49`). End-user machines have cargo, not Node/npm.
 
 This does NOT forbid a build step. `cargo publish` packages whatever files exist
 on disk at publish time, so a release-CI stage can run the JS build first and the
@@ -96,7 +96,7 @@ decode/parse semantics; behavior differences there are trace-corruption-grade bu
 ### H5. The disk-serve dev loop must survive
 
 `dev-server` (and `dial9 serve --dev`) serves `ui/` from disk via `with_dev_ui_dir`
-(`dial9-viewer/src/lib.rs:102-103`, `src/bin/dev_server.rs:102-103`): edit file,
+(defined `dial9-viewer/src/server/mod.rs:128`; called `src/lib.rs:244`, `src/bin/dev_server.rs:103`): edit file,
 refresh browser, no rebuild. Any stack with a compile step must provide an
 equivalent loop (watch mode writing into the served dir) without making the
 cargo-only path (no Node installed) unable to serve a working UI.
@@ -174,4 +174,4 @@ Within these bounds the realistic candidate space is:
 3. Lightweight web components (Lit) for chrome, canvas core untouched.
 4. Full framework + bundler (React/Svelte + Vite), CI-built dist.
 
-The stack decision and consolidated migration plan are recorded in `docs/adr/0003-viewer-ui-migration.md`.
+The stack decision and consolidated migration plan are recorded in `docs/adr/0004-viewer-ui-migration.md`.

@@ -568,8 +568,11 @@ mod tests {
     }
 
     fn load_demo_trace() -> Vec<u8> {
-        let data =
-            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap();
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/public/demo-trace.bin"
+        ))
+        .unwrap();
         let mut dec = flate2::read::GzDecoder::new(data.as_slice());
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut dec, &mut buf).unwrap();

@@ -197,6 +197,28 @@ jobs:
           sudo sysctl kernel.kptr_restrict=0
       - run: scripts/e2e-trace-tests.sh
 
+  ui:
+    name: UI (tsc, vitest, vite build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dial9-viewer/ui
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dial9-viewer/ui/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      # Re-checks src/types/*.d.ts with skipLibCheck OFF: the main config's
+      # skipLibCheck (for node_modules) also skips our hand-written frozen-core
+      # declarations, which is how three of them drifted from the JS.
+      - run: npm run check:types
+      - run: npm run test
+      - run: npm run build
+
   asan:
     name: AddressSanitizer (perf-self-profile)
     runs-on: ubuntu-latest
@@ -337,7 +359,7 @@ jobs:
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, android-aarch64-build, feature-check, check-docs, trace-integrity, asan, ecs-sim, shuttle, package]
+    needs: [fmt, clippy, build, android-aarch64-build, feature-check, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle, package]
     if: always()
     steps:
       - run: |

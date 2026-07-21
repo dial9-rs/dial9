@@ -1,6 +1,14 @@
 [build]
   base = "dial9-viewer/ui"
-  publish = "."
-  command = "rm decode.js && cp ../../dial9-trace-format/js/decode.js decode.js"
+  # Publish the Vite build output, not the source tree: the migrated pages
+  # (/new/*) are rollup-bundled into dist/ and reference /assets/* that only
+  # exist after `npm run build`. Serving "." shipped un-built source whose
+  # module scripts 404.
+  publish = "dist"
+  # decode.js is a symlink to the trace-format package; replace it with a real
+  # file copy (rm then cp - cp alone sees src==dest and fails), then build. The
+  # build static-copies decode.js + the legacy files into dist alongside the
+  # bundled /new/* pages.
+  command = "rm -f decode.js && cp ../../dial9-trace-format/js/decode.js decode.js && npm ci && npm run build"
   # always run a deploy preview no matter what
   ignore = "exit 1"

@@ -1,0 +1,125 @@
+{
+  "boot": "boot-fixw",
+  "clockOffsetNs": "1775762999000000000",
+  "epochBaseS": 1775763000,
+  "generator": "cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures",
+  "host": "window",
+  "monoBaseNs": 1000000000,
+  "multiRuntime": {
+    "file": "multi-runtime.bin.gz",
+    "mainWorkers": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "runtimes": {
+      "journal": [
+        64,
+        65,
+        66,
+        67
+      ]
+    }
+  },
+  "plantedPolls": [
+    {
+      "endNs": 63000000000,
+      "endSegment": 1,
+      "spawnLoc": "src/fixture/pipeline.rs:11",
+      "startNs": 56000000000,
+      "startSegment": 0,
+      "taskId": 101,
+      "workerId": 1
+    },
+    {
+      "endNs": 304000000000,
+      "endSegment": 5,
+      "spawnLoc": "src/fixture/compactor.rs:58",
+      "startNs": 237000000000,
+      "startSegment": 3,
+      "taskId": 202,
+      "workerId": 2
+    }
+  ],
+  "segmentSeconds": 60,
+  "segments": [
+    {
+      "epochS": 1775763000,
+      "file": "window-00.bin.gz",
+      "key": "traces/2026-04-09/1930/svc-fix/window/boot-fixw/1775763000-0.bin.gz",
+      "monoEndNs": 61000000000,
+      "monoStartNs": 1000000000
+    },
+    {
+      "epochS": 1775763060,
+      "file": "window-01.bin.gz",
+      "key": "traces/2026-04-09/1931/svc-fix/window/boot-fixw/1775763060-0.bin.gz",
+      "monoEndNs": 121000000000,
+      "monoStartNs": 61000000000
+    },
+    {
+      "epochS": 1775763120,
+      "file": "window-02.bin.gz",
+      "key": "traces/2026-04-09/1932/svc-fix/window/boot-fixw/1775763120-0.bin.gz",
+      "monoEndNs": 181000000000,
+      "monoStartNs": 121000000000
+    },
+    {
+      "epochS": 1775763180,
+      "file": "window-03.bin.gz",
+      "key": "traces/2026-04-09/1933/svc-fix/window/boot-fixw/1775763180-0.bin.gz",
+      "monoEndNs": 241000000000,
+      "monoStartNs": 181000000000
+    },
+    {
+      "epochS": 1775763240,
+      "file": "window-04.bin.gz",
+      "key": "traces/2026-04-09/1934/svc-fix/window/boot-fixw/1775763240-0.bin.gz",
+      "monoEndNs": 301000000000,
+      "monoStartNs": 241000000000
+    },
+    {
+      "epochS": 1775763300,
+      "file": "window-05.bin.gz",
+      "key": "traces/2026-04-09/1935/svc-fix/window/boot-fixw/1775763300-0.bin.gz",
+      "monoEndNs": 361000000000,
+      "monoStartNs": 301000000000
+    },
+    {
+      "epochS": 1775763360,
+      "file": "window-06.bin.gz",
+      "key": "traces/2026-04-09/1936/svc-fix/window/boot-fixw/1775763360-0.bin.gz",
+      "monoEndNs": 421000000000,
+      "monoStartNs": 361000000000
+    },
+    {
+      "epochS": 1775763420,
+      "file": "window-07.bin.gz",
+      "key": "traces/2026-04-09/1937/svc-fix/window/boot-fixw/1775763420-0.bin.gz",
+      "monoEndNs": 481000000000,
+      "monoStartNs": 421000000000
+    },
+    {
+      "epochS": 1775763480,
+      "file": "window-08.bin.gz",
+      "key": "traces/2026-04-09/1938/svc-fix/window/boot-fixw/1775763480-0.bin.gz",
+      "monoEndNs": 541000000000,
+      "monoStartNs": 481000000000
+    },
+    {
+      "epochS": 1775763540,
+      "file": "window-09.bin.gz",
+      "key": "traces/2026-04-09/1939/svc-fix/window/boot-fixw/1775763540-0.bin.gz",
+      "monoEndNs": 601000000000,
+      "monoStartNs": 541000000000
+    }
+  ],
+  "service": "svc-fix",
+  "workers": [
+    1,
+    2,
+    3,
+    4
+  ]
+}

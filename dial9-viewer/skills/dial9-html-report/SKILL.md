@@ -48,7 +48,8 @@ report/
 Copy viewer and its dependencies from the dial9-viewer `ui/` directory into the report folder:
 
 ```bash
-cp dial9-viewer/ui/{viewer,flamegraph}.{html,css} report/
+cp dial9-viewer/ui/{viewer,flamegraph}.html report/
+cp dial9-viewer/ui/public/flamegraph.css report/
 cp dial9-viewer/ui/{decode,trace_parser,trace_analysis,flamegraph,format,panel_layout}.js report/
 ```
 
@@ -134,18 +135,43 @@ const end   = minTs + 4_050_000_000; // 154489548276
 
 ### Available viewer URL params
 
+These are part of the viewer's stability-promised URL contract
+(`dial9-viewer/ui/README.md`, section "URL contract (stable deep-link API)"):
+old params stay valid forever, evolution is additive-only, so links baked
+into a report keep resolving.
+
 | Param | Description |
 |-------|-------------|
-| `trace` | Relative path or URL to a `.bin` trace file (fetched via `fetch()`) |
+| `trace` | Relative path or URL to a `.bin` trace file (fetched via `fetch()`); repeatable, N values parse as one trace |
 | `start` | Start of time range filter (absolute monotonic ns) |
 | `end` | End of time range filter (absolute monotonic ns) |
 | `svc` | Service name (display label) |
 | `host` | Host name (display label) |
-| `from` | Wall-clock start (ISO 8601, for display) |
-| `to` | Wall-clock end (ISO 8601, for display) |
-| `segs` | Comma-separated segment keys (for multi-segment traces) |
+| `from` | Human-readable wall-clock start (display only) |
+| `to` | Human-readable wall-clock end (display only) |
+| `segs` | Segment COUNT as an integer string (display only) - NOT a list of segment keys |
 
-**`?worker=`, `?task=`, and `?source=` do NOT exist.** Do not invent them — they will be silently ignored.
+**`?worker=`, `?task=`, and `?source=` do NOT exist.** Do not invent them — they will be silently ignored. Selection/highlight params do not exist yet either: the contract reserves hash keys (`sel.*`, `vp`) that land with the migrated viewer; until then a time window is the finest link granularity.
+
+### Deep-linking the standalone flamegraph page
+
+`flamegraph.html` (also copied into the report folder) honors the same
+`trace`/`start`/`end`/`svc`/`host`/`segs`/`from`/`to` params, plus a
+pre-zoom: `worker-zoom` (and `offworker-zoom`) carry a TAB-joined
+(`%09`-encoded) frame-name path from root to the target subtree, exactly
+what the flamegraph page writes to the URL when a user zooms. The reliable
+way to produce one is to zoom in the flamegraph and copy the URL rather
+than hand-assembling the path; zoom restore requires the same
+`start`/`end` window the zoomed view had (or none).
+
+```html
+<a href="flamegraph.html?trace=traces/full.bin&amp;start=150439548276&amp;end=150439698276"
+   target="_blank">CPU flamegraph for this window</a>
+```
+
+On migrated (chunk-1+) pages the same zoom state also travels in the URL
+hash as `#v=1&fg.w=<path>`; emit the `worker-zoom` query form in reports -
+it works on both page generations.
 
 ### Limitation
 
@@ -496,7 +522,7 @@ a:hover { text-decoration: underline; }
 
 - **Don't inline trace bytes as base64.** Traces are megabytes; use sliced `.bin` files in `traces/`.
 - **Don't render flamegraphs from scratch with CSS bars.** Use the standalone HTML flamegraph pattern — it produces real interactive flamegraphs.
-- **Don't invent viewer URL params.** Only `trace`, `start`, `end`, `svc`, `host`, `from`, `to`, `segs` exist. There is no `?worker=`, `?task=`, or `?source=`.
+- **Don't invent viewer URL params.** Only `trace`, `start`, `end`, `svc`, `host`, `from`, `to`, `segs` exist (plus `worker-zoom`/`offworker-zoom` on the flamegraph page). There is no `?worker=`, `?task=`, or `?source=`. The authoritative list is the URL contract in `dial9-viewer/ui/README.md`.
 - **Don't copy the full multi-MB trace into the report folder.** Slice it to the relevant time window.
 - **Don't rely on `file://`.** Reports fetch trace files via HTTP. Tell users to view via `dial9 report serve <folder>` (or `python3 -m http.server`).
 - **Don't omit `viewer.html` + its deps from the report folder if you include viewer deep-links** — the link will 404.

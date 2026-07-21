@@ -46,8 +46,13 @@ pub(crate) async fn region_from_head_bucket(
     }
 }
 
+// Embed ONLY the built artifact set (`npm run build` output), never sources,
+// tests, or node_modules. A cargo-only checkout still compiles: the committed
+// `ui/dist/.gitkeep` keeps the folder present (empty UI until built). Release
+// CI runs the JS build before packaging, so published crates/binaries carry a
+// populated dist. See docs/adr/0004-viewer-ui-migration.md section 3.
 #[derive(Embed)]
-#[folder = "ui/"]
+#[folder = "ui/dist/"]
 struct UiAssets;
 
 /// Default output key prefix for aggregate part-files.
@@ -176,6 +181,11 @@ pub struct AppState {
     pub agg_output: AggOutput,
     /// Segment duration (seconds) for BYOC aggregation scope padding.
     pub agg_segment_secs: i64,
+    /// Bucket-name substring the UI's bucket picker filters on, advertised via
+    /// `/api/config` as `bucket_filter` (the filtering itself is client-side).
+    /// Defaults to "dial9"; empty disables filtering. See
+    /// [`Self::with_bucket_filter`].
+    pub bucket_filter: String,
     /// Process-global concurrency limits for the demand-driven fold pipeline,
     /// shared across all in-flight `/api/flamegraph` requests so total fold work
     /// is bounded application-wide (see [`FoldLimits`]).
@@ -200,6 +210,7 @@ impl AppState {
             role_assumer: None,
             agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
+            bucket_filter: "dial9".to_string(),
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
     }
@@ -287,6 +298,17 @@ impl AppState {
 
     pub fn with_agg_segment_secs(mut self, secs: i64) -> Self {
         self.agg_segment_secs = secs;
+        self
+    }
+
+    /// Set the bucket-name substring the UI's bucket picker uses to surface
+    /// trace buckets, advertised to clients via `/api/config` as
+    /// `bucket_filter` (T15; the match is case-insensitive and happens
+    /// client-side). Defaults to "dial9"; pass an empty string to disable the
+    /// filtering. A page can still override the advertised value per load with
+    /// a `bucket_filter=` query param on its own URL.
+    pub fn with_bucket_filter(mut self, filter: impl Into<String>) -> Self {
+        self.bucket_filter = filter.into();
         self
     }
 
