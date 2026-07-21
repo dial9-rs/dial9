@@ -1,4 +1,3 @@
-mod axum_traced;
 mod buffer;
 mod ddb;
 mod routes;
@@ -360,7 +359,7 @@ fn main() -> std::io::Result<()> {
                     }
                 });
 
-                axum_traced::serve(listener, app.into_make_service())
+                dial9_util::dial9_axum::axum_0_8::serve(listener, app.into_make_service())
                     .with_graceful_shutdown(async move { shutdown.cancelled().await })
                     .await
                     .unwrap();
