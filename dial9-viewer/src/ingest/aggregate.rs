@@ -304,8 +304,7 @@ fn full_source_key(source_is_local: bool, source_bucket: &str, key: &str) -> Str
 /// Without this, N concurrent polls each running their own bounded batch could
 /// still oversubscribe the box by a factor of N.
 ///
-/// The two stages are bounded independently because they bottleneck on
-/// different
+/// The stages are bounded independently because they bottleneck on different
 /// resources:
 ///
 /// - [`fetch`](Self::fetch): network-bound source GETs (~37–50 MB compressed
@@ -646,6 +645,18 @@ pub(crate) async fn list_folded_leaves(
 pub(crate) struct Coverage {
     pub files_matched: usize,
     pub files_folded: usize,
+    /// Deterministic digest of the successfully represented folded leaf set.
+    /// Clients use this to ensure partial refreshes patch statistics produced
+    /// from exactly the same files, not merely the same file count. Omitted by
+    /// endpoints that do not track their represented set precisely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folded_set_id: Option<String>,
+    /// Deterministic digest of the full cached seed set this stream is working
+    /// toward. Seed-only exemplar refreshes expose it on every cumulative event,
+    /// allowing clients to preview subsets only when the final target matches
+    /// the catalog they are patching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_folded_set_id: Option<String>,
     /// Number of matched files in the deterministic prefix eligible for new
     /// folding in this request. Cached coverage may exceed this value.
     pub fold_work_cap: usize,

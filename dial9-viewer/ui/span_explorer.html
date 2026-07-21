@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Span Explorer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header { padding: 10px 20px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 1.1em; color: #6c63ff; }
+  header .stats { font-size: 0.8em; color: #888; }
+  .toolbar { padding: 8px 16px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 0.8em; }
+  .toolbar label { color: #e0e0e0; }
+  .toolbar input, .toolbar select { background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; padding: 3px 8px; border-radius: 3px; }
+  .toolbar button { cursor: pointer; font-weight: 600; border: none; padding: 4px 14px; border-radius: 3px; }
+  .toolbar .primary { background: #6c63ff; color: #fff; }
+  .toolbar .secondary { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444; }
+
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Catalog table */
+  .catalog-wrap { flex: 0 0 auto; max-height: 35vh; overflow-y: auto; border-bottom: 1px solid #333; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  th { background: #161b22; color: #8b949e; font-weight: 600; position: sticky; top: 0; z-index: 1; cursor: pointer; user-select: none; }
+  th:hover { color: #e0e0e0; }
+  tr.selected { background: #1c3a5e; }
+  tr:hover:not(.selected) { background: #1c2128; }
+  td.name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  .kind-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.75em; font-weight: 600; margin-right: 4px; }
+  .kind-tracing { background: #264f78; color: #9ec1ff; }
+  .kind-tokio_poll { background: #3d2b1f; color: #ffa657; }
+
+  /* Detail panel (histogram + composition + flamegraph links) */
+  .detail-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0 16px; }
+  .detail-panel.empty { align-items: center; justify-content: center; color: #666; font-size: 0.9em; }
+  .detail-header { padding: 10px 0 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
+  .detail-header h2 { font-size: 1em; color: #e0e0e0; }
+  .detail-header .meta { font-size: 0.8em; color: #888; }
+
+  /* Histogram */
+  .histogram-wrap { flex-shrink: 0; padding: 6px 0; }
+  .histogram-wrap svg { display: block; cursor: crosshair; }
+  .histogram-axis { position: relative; height: 1.2em; margin-top: 2px; font-size: 0.68em; color: #8a8aa0; }
+  .histogram-hint { font-size: 0.66em; color: #6a6a80; margin-top: 2px; }
+  /* Percentile guide lines (P50/P90/P99/P99.9) over the duration histogram. */
+  .histogram-wrap svg .pctile-line { stroke: #f0f6fc; stroke-opacity: 0.55; stroke-width: 1;
+    stroke-dasharray: 2 2; pointer-events: none; }
+  .histogram-wrap svg .pctile-label { fill: #c9d1d9; font-size: 8px; font-weight: 600;
+    paint-order: stroke; stroke: #0d1117; stroke-width: 2px; pointer-events: none; }
+
+  /* Time composition bar */
+  .composition-wrap { flex-shrink: 0; padding: 8px 0; }
+  .composition-bar { display: flex; height: 20px; border-radius: 3px; overflow: hidden; background: #21262d; }
+  .composition-bar .seg { height: 100%; transition: width 0.2s; }
+  .composition-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; font-size: 0.75em; }
+  .composition-legend .item { display: flex; align-items: center; gap: 4px; }
+  .composition-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .composition-legend .legend-pct { font-weight: 600; color: #e6edf3; }
+  .composition-legend .legend-ns { color: #8b949e; }
+
+  /* Band selection display */
+  .band-info { padding: 6px 0; font-size: 0.8em; color: #aaa; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .band-info .count { color: #e0e0e0; font-weight: 600; }
+
+  /* Flamegraph links */
+  .fg-links { display: flex; gap: 10px; padding: 8px 0; flex-shrink: 0; flex-wrap: wrap; }
+  .fg-links a { display: inline-block; padding: 6px 16px; border-radius: 4px; font-size: 0.82em; font-weight: 600; text-decoration: none; }
+  .fg-links .on-cpu { background: #ff6b35; color: #fff; }
+  .fg-links .blocking { background: #e63946; color: #fff; }
+  .fg-links a:hover { opacity: 0.85; }
+
+  /* Exemplars: a table of representative instances. A per-row Jump button
+     deep-links to the viewer focused on that span (like the Tokio-stats
+     exemplar tables); the row itself is not clickable. */
+  .exemplars { padding: 8px 0; font-size: 0.8em; color: #aaa; flex-shrink: 0; overflow-x: auto; }
+  .exemplars .label { font-weight: 600; margin-bottom: 4px; }
+  /* Column show/hide menu. */
+  .exemplars .col-menu { position: relative; display: inline-block; margin-bottom: 6px; }
+  .exemplars .col-menu-btn { background: #21262d; color: #adbac7; border: 1px solid #30363d;
+    border-radius: 3px; padding: 2px 8px; font-size: 1em; cursor: pointer; }
+  .exemplars .col-menu-btn:hover { border-color: #388bfd; }
+  .exemplars .col-menu-list { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 2px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); min-width: 160px; max-height: 260px; overflow-y: auto; }
+  .exemplars .col-menu-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px;
+    color: #c9d1d9; cursor: pointer; border-radius: 3px; white-space: nowrap; }
+  .exemplars .col-menu-item:hover { background: #21262d; }
+  .exemplars .col-menu-item input { cursor: pointer; }
+  .exemplars .col-menu-auto { color: #6e7681; font-style: italic; }
+  .exemplars .col-menu-reset { display: block; width: 100%; margin-top: 4px; padding: 3px 6px;
+    background: transparent; border: none; border-top: 1px solid #21262d; color: #79c0ff;
+    cursor: pointer; text-align: left; font-size: 1em; }
+  .exemplars .col-menu-reset:hover { color: #adbac7; }
+  .exemplars table.exemplar-table { width: auto; min-width: 320px; border-collapse: collapse; font-size: 0.95em; }
+  .exemplars table.exemplar-table th { position: static; background: transparent; cursor: default; padding: 3px 12px 3px 0; color: #8b949e; font-weight: 600; text-align: left; }
+  .exemplars table.exemplar-table td { padding: 3px 12px 3px 0; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  .exemplars table.exemplar-table td.dur { color: #e6edf3; font-weight: 600; }
+  .exemplars table.exemplar-table td.pctile { color: #8b949e; font-variant-numeric: tabular-nums; }
+  .exemplars table.exemplar-table td.host { color: #8b949e; }
+  .exemplars table.exemplar-table td.muted, .exemplars .muted { color: #6e7681; }
+  .exemplars table.exemplar-table code { color: #79c0ff; }
+  /* Jump-to-source button (replaces whole-row click). */
+  .exemplars td.jump-cell { padding-right: 8px; }
+  .exemplars .jump-btn { background: #21262d; color: #79c0ff; border: 1px solid #30363d;
+    border-radius: 3px; padding: 1px 7px; font-size: 0.9em; cursor: pointer; white-space: nowrap; }
+  .exemplars .jump-btn:hover:not(:disabled) { border-color: #388bfd; background: #1c2a3a; }
+  .exemplars .jump-btn:disabled { opacity: 0.4; cursor: default; }
+  /* Per-row time-composition mini-bar: same categories/colors as the aggregate
+     composition legend, scoped to a single exemplar instance. Wide enough to
+     print the time inside sufficiently large segments. */
+  .exemplars .ex-comp-bar { display: inline-flex; width: 200px; height: 16px; border-radius: 2px;
+    overflow: hidden; background: #21262d; vertical-align: middle; }
+  .exemplars .ex-comp-bar .seg { height: 100%; display: flex; align-items: center;
+    justify-content: center; overflow: hidden; min-width: 0; }
+  /* Inline time label shown only inside sufficiently wide mini-bar segments. */
+  .exemplars .ex-comp-bar .seg-label { font-size: 9px; font-weight: 600; color: #fff; white-space: nowrap;
+    padding: 0 2px; text-shadow: 0 0 2px rgba(0,0,0,0.75), 0 0 1px rgba(0,0,0,0.9); pointer-events: none; }
+  /* Attribute columns: one per attribute key. The value toggles a filter on
+     click; a small copy button copies the raw value. */
+  .exemplars td.attr-cell { color: #adbac7; }
+  .exemplars .attr-val { cursor: pointer; border-bottom: 1px dotted #30363d; }
+  .exemplars .attr-val:hover { color: #79c0ff; border-bottom-color: #388bfd; }
+  .exemplars .attr-val.active { color: #79c0ff; font-weight: 600; border-bottom: 1px solid #388bfd; }
+  .exemplars .attr-val.inert { cursor: default; border-bottom: none; }
+  .exemplars .attr-val.inert:hover { color: #adbac7; }
+  .exemplars .attr-copy { margin-left: 5px; background: transparent; border: none; color: #6e7681;
+    cursor: pointer; font-size: 1em; padding: 0 2px; vertical-align: baseline; }
+  .exemplars .attr-copy:hover { color: #79c0ff; }
+  .exemplars .attr-copy.copied { color: #3fb950; }
+
+  /* Active attribute-filter bar. */
+  .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    padding: 6px 16px; background: #0d1117; border-bottom: 1px solid #21262d; font-size: 0.8em; }
+  .filter-bar .fb-label { color: #8b949e; font-weight: 600; }
+  .filter-bar .fb-chip { display: inline-flex; align-items: center; gap: 6px;
+    background: #163050; border: 1px solid #388bfd; border-radius: 3px; padding: 2px 6px; color: #adbac7; }
+  .filter-bar .fb-chip b { color: #79c0ff; font-weight: 600; }
+  .filter-bar .fb-chip .fb-x { cursor: pointer; color: #8b949e; font-weight: 700; }
+  .filter-bar .fb-chip .fb-x:hover { color: #f85149; }
+  .filter-bar .fb-clear { cursor: pointer; color: #8b949e; text-decoration: underline; }
+  .filter-bar .fb-clear:hover { color: #adbac7; }
+  /* Clickable max value in the detail header */
+  .detail-header .meta a.max-jump { color: #79c0ff; text-decoration: none; font-weight: 600; }
+  .detail-header .meta a.max-jump:hover { text-decoration: underline; }
+
+  /* Coverage badge */
+  .coverage { padding: 6px 0; font-size: 0.75em; color: #8b949e; flex-shrink: 0; }
+
+  /* States */
+  .loading { display: flex; align-items: center; justify-content: center; flex: 1; color: #888; gap: 0.6em; }
+  .loading.hidden { display: none; }
+  .spinner { width: 1.2em; height: 1.2em; border: 2px solid #444; border-top-color: #aaa; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { display: none; align-items: center; justify-content: center; flex: 1; color: #ff6b6b; padding: 24px; text-align: center; }
+
+  /* Confidence / partial indicator */
+  .partial-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7em; background: #3a2a1a; color: #ffa657; margin-left: 6px; }
+</style>
+</head>
+<body>
+<script src="creds.js"></script>
+<script src="format.js"></script>
+<script src="sse.js"></script>
+<script src="flamegraph_api.js?v=fold-work-cap-1"></script>
+<script src="flamegraph_histogram.js"></script>
+<script src="span_explorer.js"></script>
+<script src="decode.js"></script>
+<script src="trace_parser.js"></script>
+<script src="trace_analysis.js"></script>
+
+<header>
+  <h1>🔍 Span Explorer</h1>
+  <span class="stats" id="stats"></span>
+</header>
+
+<div class="toolbar" id="toolbar">
+  <label>From: <input id="f-start" type="datetime-local" step="1"></label>
+  <label>To: <input id="f-end" type="datetime-local" step="1"></label>
+  <button class="primary" id="btn-apply">Apply</button>
+  <button class="secondary" id="btn-more" disabled>Refine more</button>
+  <button class="secondary" id="btn-stop" disabled>Stop</button>
+  <span style="flex:1"></span>
+  <button class="secondary" id="btn-copylink">Copy link</button>
+</div>
+
+<!-- Active attribute filters (populated by JS); hidden when none active. -->
+<div class="filter-bar" id="filter-bar" style="display:none"></div>
+
+<div class="main" id="main">
+  <div class="loading" id="loading"><div class="spinner"></div>Loading span statistics…</div>
+  <div class="error" id="error"></div>
+
+  <!-- Catalog table (populated by JS) -->
+  <div class="catalog-wrap" id="catalog-wrap" style="display:none">
+    <table id="catalog">
+      <thead>
+        <tr>
+          <th data-sort="name">Span</th>
+          <th data-sort="kind">Kind</th>
+          <th data-sort="count">Instances</th>
+          <th data-sort="p50_ns">p50</th>
+          <th data-sort="p95_ns">p95</th>
+          <th data-sort="p99_ns">p99</th>
+          <th data-sort="max_ns">max</th>
+          <th data-sort="quality" title="Fraction of instances with full time-composition data">Quality</th>
+        </tr>
+      </thead>
+      <tbody id="catalog-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Detail panel for selected span type -->
+  <div class="detail-panel empty" id="detail-panel">
+    <span>Select a span type above to see its duration histogram, time composition, and flamegraphs.</span>
+  </div>
+</div>
+
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const SE = window.SpanExplorer;
+  const FG_API = window.FlamegraphApi;
+
+  // Fold region into creds store (same pattern as flamegraph.html).
+  const urlRegion = params.get("aws_region");
+  if (urlRegion && window.Dial9Creds) {
+    const stored = Dial9Creds.get();
+    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+  }
+
+  // DOM refs
+  const loadingEl = document.getElementById("loading");
+  const errorEl = document.getElementById("error");
+  const statsEl = document.getElementById("stats");
+  const catalogWrap = document.getElementById("catalog-wrap");
+  const catalogBody = document.getElementById("catalog-body");
+  const detailPanel = document.getElementById("detail-panel");
+  const fStart = document.getElementById("f-start");
+  const fEnd = document.getElementById("f-end");
+  const btnMore = document.getElementById("btn-more");
+  const btnStop = document.getElementById("btn-stop");
+
+  // Scope from URL
+  const scopeBucket = params.get("bucket");
+  const scopePrefix = params.get("prefix");
+  const scopeService = params.get("service");
+  const scopeRegion = params.get("aws_region");
+  const scopeHosts = params.getAll("host");
+
+  // Initialize time pickers from URL.
+  if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
+  if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
+
+  // State
+  let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+  let spanTypes = [];       // latest snapshot from SSE
+  let selectedUid = params.get("span_type_uid") || null;
+  let bandMinNs = params.get("min_span_ns") != null ? Number(params.get("min_span_ns")) : null;
+  let bandMaxNs = params.get("max_span_ns") != null ? Number(params.get("max_span_ns")) : null;
+  // Active attribute filters: [{key, value}]. Each is an exact key=value match;
+  // multiple are ANDed. Parsed from repeated ?attr=key=value URL params.
+  let attrFilters = SE.parseAttrFilterParams(params.getAll("attr"));
+  // Explicit per-column visibility overrides for the exemplar table, by column
+  // id → true (force shown) / false (force hidden). Columns with no entry follow
+  // the auto rule: a column is auto-hidden when every visible exemplar has the
+  // same value (or all are empty), since it then adds no information. Persisted
+  // so the choice survives streaming re-renders and page reloads.
+  const EXEMPLAR_COL_STORE = "dial9.spanExplorer.exemplarColOverrides";
+  let exemplarColOverrides = loadExemplarColOverrides();
+  let lastCoverage = null;
+  let exemplarRefreshPending = false;
+  let exemplarPreviewAvailable = false;
+  let streamToken = 0;
+  let abortCtl = null;
+  let activeStreamMode = null;
+  let sortKey = "count";
+  let sortAsc = false;
+
+  // ── API URL builder ─────────────────────────────────────────────────────────
+
+  const exemplarScopeByUid = new Map();
+  function currentExemplarScopeKey() {
+    return `${bandMinNs == null ? "" : bandMinNs}:${bandMaxNs == null ? "" : bandMaxNs}`;
+  }
+
+  function buildApiUrl(mode) {
+    const u = new URL("/api/span-stats", window.location.origin);
+    if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
+    if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
+    if (scopeRegion) u.searchParams.set("aws_region", scopeRegion);
+    if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
+    if (scopeService) u.searchParams.set("service", scopeService);
+    for (const h of scopeHosts) u.searchParams.append("host", h);
+    const startNs = pickerUtcToNs(fStart.value);
+    const endNs = pickerUtcToNs(fEnd.value);
+    if (startNs) u.searchParams.set("start_ns", startNs);
+    if (endNs) u.searchParams.set("end_ns", endNs);
+    // Duration bounds scope only the backend's bounded exemplar candidates;
+    // catalog statistics remain unchanged.
+    if (bandMinNs != null) u.searchParams.set("min_span_ns", String(bandMinNs));
+    if (bandMaxNs != null) u.searchParams.set("max_span_ns", String(bandMaxNs));
+    // Attribute filters narrow the whole aggregate server-side (counts,
+    // histograms, composition, exemplars).
+    for (const a of SE.formatAttrFilterParams(attrFilters)) u.searchParams.append("attr", a);
+    SE.setMaxFilesParam(u.searchParams, maxFiles);
+    // An exemplar refetch (duration-band change / span-type reselect) reads only
+    // already-folded spans parts — it must not parse any additional raw files.
+    if (mode === "exemplars") {
+      u.searchParams.set("exemplars_only", "true");
+      if (selectedUid) u.searchParams.set("span_type_uid", selectedUid);
+    }
+    return u;
+  }
+
+  // ── URL state (deep-linking) ────────────────────────────────────────────────
+
+  function updateBrowserUrl() {
+    const p = new URLSearchParams();
+    p.set("api", "1");
+    if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
+    if (scopeBucket) p.set("bucket", scopeBucket);
+    if (scopeRegion) p.set("aws_region", scopeRegion);
+    if (scopePrefix) p.set("prefix", scopePrefix);
+    if (scopeService) p.set("service", scopeService);
+    for (const h of scopeHosts) p.append("host", h);
+    const startNs = pickerUtcToNs(fStart.value);
+    const endNs = pickerUtcToNs(fEnd.value);
+    if (startNs) p.set("start_ns", startNs);
+    if (endNs) p.set("end_ns", endNs);
+    if (selectedUid) p.set("span_type_uid", selectedUid);
+    if (bandMinNs != null) p.set("min_span_ns", String(bandMinNs));
+    if (bandMaxNs != null) p.set("max_span_ns", String(bandMaxNs));
+    for (const a of SE.formatAttrFilterParams(attrFilters)) p.append("attr", a);
+    SE.setMaxFilesParam(p, maxFiles);
+    history.replaceState(null, "", window.location.pathname + "?" + p.toString());
+  }
+
+  // ── Catalog rendering ───────────────────────────────────────────────────────
+
+
+  // Duration-scoped exemplar fields belong to the bounds of the request that
+  // produced them. Clear the selected type's copy before changing bounds so a
+  // previous band's count or exemplars are never relabeled as the new scope.
+  function invalidateSelectedExemplarData() {
+    exemplarPreviewAvailable = false;
+    spanTypes = spanTypes.map((st) => {
+      if (st.span_type_uid !== selectedUid) return st;
+      const next = Object.assign({}, st, { exemplars: [] });
+      delete next.selected_duration_count;
+      return next;
+    });
+  }
+  function renderCatalog() {
+    // Attach computed quality for sorting; original objects are not mutated.
+    const augmented = spanTypes.map(st => {
+      const q = SE.spanTypeQuality(st);
+      return q != null ? Object.assign({}, st, { quality: q }) : st;
+    });
+    const sorted = SE.sortSpanTypes(augmented, sortKey, sortAsc);
+    catalogBody.innerHTML = "";
+    for (const st of sorted) {
+      const tr = document.createElement("tr");
+      if (st.span_type_uid === selectedUid) tr.className = "selected";
+      tr.dataset.uid = st.span_type_uid;
+      const kindClass = st.kind === "tracing" ? "kind-tracing" : "kind-tokio_poll";
+      const quality = SE.spanTypeQuality(st);
+      const qualityCell = quality != null ? `${(quality * 100).toFixed(0)}%` : "—";
+      tr.innerHTML =
+        `<td class="name" title="${esc(SE.spanTypeLabel(st))}">${esc(SE.spanTypeLabel(st))}</td>` +
+        `<td><span class="kind-badge ${kindClass}">${esc(st.kind)}</span></td>` +
+        `<td>${st.count.toLocaleString()}</td>` +
+        `<td>${SE.fmtNs(st.p50_ns)}</td>` +
+        `<td>${SE.fmtNs(st.p95_ns)}</td>` +
+        `<td>${SE.fmtNs(st.p99_ns)}</td>` +
+        `<td>${SE.fmtNs(st.max_ns)}</td>` +
+        `<td>${qualityCell}</td>`;
+      tr.addEventListener("click", () => selectSpanType(st.span_type_uid));
+      catalogBody.appendChild(tr);
+    }
+    catalogWrap.style.display = sorted.length > 0 ? "block" : "none";
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // ── Span type selection ─────────────────────────────────────────────────────
+
+  function selectSpanType(uid) {
+    // A pending preserve response is scoped to the prior type/bounds. Cancel it
+    // even when the newly selected type already has valid cached exemplars.
+    if (activeStreamMode === "exemplars" || activeStreamMode === "refine") stopStreaming();
+    selectedUid = uid;
+    // Reset band on type change. Exemplar rows are request-scoped, so refresh
+    // whenever this type's cached rows were produced under different bounds.
+    bandMinNs = null;
+    bandMaxNs = null;
+    const needsExemplarRefresh =
+      !rawTraceParam && exemplarScopeByUid.get(uid) !== currentExemplarScopeKey();
+    if (needsExemplarRefresh) invalidateSelectedExemplarData();
+    exemplarRefreshPending = needsExemplarRefresh;
+    updateBrowserUrl();
+    renderCatalog();
+    renderDetail();
+    if (needsExemplarRefresh) startStreaming("exemplars");
+  }
+
+  // ── Detail panel ────────────────────────────────────────────────────────────
+
+  function renderDetail() {
+
+    const st = spanTypes.find(s => s.span_type_uid === selectedUid);
+    if (!st) {
+      detailPanel.className = "detail-panel empty";
+      detailPanel.innerHTML = "<span>Select a span type above to see its duration histogram, time composition, and flamegraphs.</span>";
+      return;
+    }
+    detailPanel.className = "detail-panel";
+    detailPanel.innerHTML = "";
+
+    // Header. The `max` value is clickable when we have a slow exemplar to jump
+    // to — the slowest exemplar (exemplars[0], sorted desc) is the max
+    // instance. Clicking pans/zooms the viewer to that span via focus_* params.
+    const scope = exemplarScope(st);
+    const exemplarCandidates = exemplarRefreshPending && !exemplarPreviewAvailable
+      ? []
+      : SE.exemplarsInBand(st.exemplars, bandMinNs, bandMaxNs);
+    const slowest = exemplarCandidates.length > 0 ? exemplarCandidates[0] : null;
+    const hasDurationBand = bandMinNs != null || bandMaxNs != null;
+    // The header's max value is an all-instances statistic, so never attach an
+    // in-band exemplar whose duration may differ from that displayed maximum.
+    const maxJumpUrl = !hasDurationBand && slowest ? SE.exemplarViewerUrl(slowest, scope) : "";
+    const maxHtml = maxJumpUrl
+      ? `<a class="max-jump" href="${esc(maxJumpUrl)}" target="_blank" ` +
+        `title="Jump to the slowest instance of this span in the viewer">${SE.fmtNs(st.max_ns)}</a>`
+      : SE.fmtNs(st.max_ns);
+    const hdr = document.createElement("div");
+    hdr.className = "detail-header";
+    hdr.innerHTML = `<h2>${esc(SE.spanTypeLabel(st))}</h2>` +
+      `<span class="meta">${st.count.toLocaleString()} instances · ` +
+      `p50 ${SE.fmtNs(st.p50_ns)} · p99 ${SE.fmtNs(st.p99_ns)} · max ${maxHtml}</span>`;
+    detailPanel.appendChild(hdr);
+
+    // Histogram
+    const histWrap = document.createElement("div");
+    histWrap.className = "histogram-wrap";
+    renderHistogram(histWrap, st.histogram);
+    detailPanel.appendChild(histWrap);
+
+    // Band info (if selection is active)
+    renderBandInfo(detailPanel, st);
+
+    // Time composition
+    renderComposition(detailPanel, st);
+
+    // Flamegraph links
+    renderFlamegraphLinks(detailPanel);
+
+    // Slow exemplars: clickable jump links to specific span instances.
+    renderExemplars(detailPanel, st);
+
+    // Coverage
+    if (lastCoverage) {
+      const cov = document.createElement("div");
+      cov.className = "coverage";
+      cov.textContent = formatCoverageBadge(lastCoverage);
+      detailPanel.appendChild(cov);
+    }
+  }
+
+  // ── Histogram rendering ─────────────────────────────────────────────────────
+
+  const HIST_H = 50;
+  let histDragging = false;
+
+  // Build an SVG <title> child (native hover tooltip) with the given text.
+  function titleEl(NS, text) {
+    const t = document.createElementNS(NS, "title");
+    t.textContent = text;
+    return t;
+  }
+
+  function renderHistogram(container, histogram) {
+    const bars = SE.normalizeSpanHistogram(histogram);
+    if (bars.length === 0) {
+      container.innerHTML = '<div style="color:#666;font-size:0.8em;padding:4px 0">No histogram data.</div>';
+      return;
+    }
+
+    const W = 600;
+    const { cols, maxCount } = SE.spanHistogramLayout(bars, W, 2);
+
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("viewBox", `0 0 ${W} ${HIST_H}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.cssText = "display:block;cursor:crosshair;overflow:visible;max-width:800px";
+
+    for (const c of cols) {
+      const inBand = (bandMinNs == null || c.hi_ns > bandMinNs) &&
+                     (bandMaxNs == null || c.lo_ns < bandMaxNs);
+      const banded = bandMinNs != null || bandMaxNs != null;
+      const rect = document.createElementNS(NS, "rect");
+      const h = Math.max(1, c.hFrac * (HIST_H - 2));
+      rect.setAttribute("x", c.x);
+      rect.setAttribute("y", HIST_H - h);
+      rect.setAttribute("width", c.w);
+      rect.setAttribute("height", h);
+      rect.setAttribute("fill", banded ? (inBand ? "#6c63ff" : "#3a3a5a") : "#6c63ff");
+      svg.appendChild(rect);
+    }
+
+    // Percentile markers: vertical guide lines at P50/P90/P99/P99.9 so it's
+    // obvious where the bulk vs. the tail of the distribution sits. Positions
+    // are derived from the histogram itself (same log axis as the bars), so they
+    // line up with the columns. Labels are nudged to stay inside the viewport.
+    const PERCENTILES = [
+      { p: 50, label: "P50" },
+      { p: 90, label: "P90" },
+      { p: 99, label: "P99" },
+      { p: 99.9, label: "P99.9" },
+    ];
+    for (const { p, label } of PERCENTILES) {
+      const ns = SE.durationAtPercentile(bars, p);
+      if (ns == null) continue;
+      const x = SE.spanNsToPx(bars, W, ns);
+      if (x == null) continue;
+      const line = document.createElementNS(NS, "line");
+      line.setAttribute("x1", x);
+      line.setAttribute("x2", x);
+      line.setAttribute("y1", "0");
+      line.setAttribute("y2", HIST_H);
+      line.setAttribute("class", "pctile-line");
+      line.appendChild(titleEl(NS, `${label}: ${SE.fmtNs(ns)}`));
+      svg.appendChild(line);
+
+      const text = document.createElementNS(NS, "text");
+      // Anchor near the line, flipping side near the right edge so it stays visible.
+      const nearRight = x > W - 40;
+      text.setAttribute("x", nearRight ? x - 3 : x + 3);
+      text.setAttribute("y", "9");
+      text.setAttribute("text-anchor", nearRight ? "end" : "start");
+      text.setAttribute("class", "pctile-label");
+      text.textContent = label;
+      text.appendChild(titleEl(NS, `${label}: ${SE.fmtNs(ns)}`));
+      svg.appendChild(text);
+    }
+
+    // Brush overlay
+    const brush = document.createElementNS(NS, "rect");
+    brush.setAttribute("fill", "rgba(255,255,255,0.12)");
+    brush.setAttribute("stroke", "#fff");
+    brush.setAttribute("stroke-dasharray", "3 2");
+    brush.setAttribute("y", "0");
+    brush.setAttribute("height", HIST_H);
+    brush.style.display = "none";
+    svg.appendChild(brush);
+
+    let dragStart = null;
+    function localX(clientX) {
+      const r = svg.getBoundingClientRect();
+      return (clientX - r.left) / r.width * W;
+    }
+
+    // Use pointer capture instead of global window listeners to prevent
+    // listener accumulation across rerenders (issue: each renderDetail call
+    // previously added new window listeners and relied on manual cleanup).
+    svg.addEventListener("pointerdown", (e) => {
+      dragStart = localX(e.clientX);
+      histDragging = true;
+      brush.setAttribute("x", dragStart);
+      brush.setAttribute("width", 0);
+      brush.style.display = "block";
+      svg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    svg.addEventListener("pointermove", (e) => {
+      if (!histDragging || dragStart == null) return;
+      const x = localX(e.clientX);
+      brush.setAttribute("x", Math.min(dragStart, x));
+      brush.setAttribute("width", Math.abs(x - dragStart));
+    });
+
+    svg.addEventListener("pointerup", (e) => {
+      if (!histDragging || dragStart == null) return;
+      histDragging = false;
+      brush.style.display = "none";
+      svg.releasePointerCapture(e.pointerId);
+      const endX = localX(e.clientX);
+      const band = SE.spanBrushToBand(bars, W, dragStart, endX);
+      dragStart = null;
+      if (band) {
+        bandMinNs = band.min_ns;
+        bandMaxNs = band.max_ns;
+        // Refetch bounded exemplar candidates. Client filtering alone cannot
+        // recover lower-band spans from the backend's global top-N list — the
+        // backend re-selects exemplars *within* the band. This is an
+        // exemplar-only (`exemplars_only=true`) stream: it reads the already-folded
+        // spans part-files and parses NO additional raw trace files, so it is
+        // cheap and never triggers the refine loop.
+        if (!rawTraceParam) invalidateSelectedExemplarData();
+        exemplarRefreshPending = !rawTraceParam;
+        updateBrowserUrl();
+        renderDetail();
+        if (!rawTraceParam) startStreaming("exemplars");
+      }
+    });
+
+    svg.addEventListener("lostpointercapture", () => {
+      // Safety: if capture is lost (e.g. element removed), reset drag state.
+      if (histDragging) {
+        histDragging = false;
+        brush.style.display = "none";
+        dragStart = null;
+      }
+    });
+
+    container.appendChild(svg);
+
+    // X-axis labels
+    const axis = document.createElement("div");
+    axis.className = "histogram-axis";
+    axis.style.maxWidth = "800px";
+    const stride = Math.max(1, Math.ceil(cols.length / Math.max(1, Math.floor(W / 70))));
+    for (let i = 0; i < cols.length; i++) {
+      if (i % stride !== 0) continue;
+      const c = cols[i];
+      const pct = (c.x / W) * 100;
+      const t = document.createElement("span");
+      t.textContent = FlamegraphHistogram.fmtDurationNs(c.lo_ns);
+      t.style.cssText = `position:absolute;left:${pct}%;white-space:nowrap;transform:translateX(-1px)`;
+      axis.appendChild(t);
+    }
+    container.appendChild(axis);
+
+    // Hint
+    const hint = document.createElement("div");
+    hint.className = "histogram-hint";
+    hint.textContent = `tallest bar = ${maxCount.toLocaleString()} instances · dashed lines mark P50/P90/P99/P99.9 · drag to select a duration band`;
+    container.appendChild(hint);
+  }
+
+  // ── Band info ───────────────────────────────────────────────────────────────
+
+  function renderBandInfo(container, st) {
+    const wrap = document.createElement("div");
+    wrap.className = "band-info";
+    if (bandMinNs != null || bandMaxNs != null) {
+      const count = st.selected_duration_count != null
+        ? Number(st.selected_duration_count)
+        : SE.countInBand(st.histogram, bandMinNs, bandMaxNs);
+      const countLabel = exemplarRefreshPending
+        ? "refreshing exact count…"
+        : `${count.toLocaleString()} instances`;
+      const lo = bandMinNs != null ? SE.fmtNs(bandMinNs) : "0";
+      const hi = bandMaxNs != null ? SE.fmtNs(bandMaxNs) : "∞";
+      wrap.innerHTML =
+        `<span>Selected band: ${lo} – ${hi}</span>` +
+        `<span class="count">${countLabel}</span>` +
+        `<button class="secondary" id="btn-clear-band" style="font-size:0.85em;padding:2px 8px;cursor:pointer">Clear</button>`;
+      wrap.querySelector("#btn-clear-band").addEventListener("click", () => {
+        bandMinNs = null;
+        bandMaxNs = null;
+        if (!rawTraceParam) invalidateSelectedExemplarData();
+        exemplarRefreshPending = !rawTraceParam;
+        updateBrowserUrl();
+        renderDetail();
+        if (!rawTraceParam) startStreaming("exemplars");
+      });
+    } else {
+      wrap.innerHTML = '<span style="color:#666">Drag the histogram to select a duration band for flamegraphs.</span>';
+    }
+    container.appendChild(wrap);
+  }
+
+  // ── Time composition ────────────────────────────────────────────────────────
+
+  function renderComposition(container, st) {
+    // Scope composition to the brushed duration band when one is active and the
+    // backend provided per-bucket composition (composition_histogram).
+    const band = { min_ns: bandMinNs, max_ns: bandMaxNs };
+    const hasBand = bandMinNs != null || bandMaxNs != null;
+    const bandScoped =
+      hasBand && Array.isArray(st.composition_histogram) && st.composition_histogram.length > 0;
+    const comp = SE.computeTimeComposition(st, band);
+    const quality = SE.spanTypeQuality(st);
+    const wrap = document.createElement("div");
+    wrap.className = "composition-wrap";
+
+    // Label. When we have equal-weighted data, say so — it's the key caveat:
+    // percentages are the mean per-instance share (each span counts once), so a
+    // few very long spans don't dominate. "time-weighted" is the older fallback.
+    const label = document.createElement("div");
+    label.style.cssText = "font-size:0.8em;color:#aaa;margin-bottom:4px;font-weight:600";
+    const scopeWord = bandScoped ? ", selected band" : "";
+    const weightWord = comp.weighting === "equal" ? ", per-instance avg" : "";
+    label.textContent = `Time composition (estimated${scopeWord}${weightWord})`;
+    const isFallback = comp.categories.length === 1 && comp.categories[0].key === "unknown" && !st.composition;
+    if (isFallback) {
+      label.innerHTML += '<span class="partial-badge">awaiting per-category data</span>';
+    } else if (hasBand && !bandScoped) {
+      // A band is selected but this type has no per-bucket data: composition is
+      // still the all-instances total. Say so, so it isn't misread as scoped.
+      label.innerHTML += '<span class="partial-badge">all instances</span>';
+    } else if (quality != null && quality < 1.0) {
+      label.innerHTML += `<span class="partial-badge">${(quality * 100).toFixed(0)}% detailed</span>`;
+    }
+    wrap.appendChild(label);
+
+    // Bar
+    const bar = document.createElement("div");
+    bar.className = "composition-bar";
+    for (const cat of comp.categories) {
+      if (cat.frac <= 0) continue;
+      const seg = document.createElement("div");
+      seg.className = "seg";
+      seg.style.width = (cat.frac * 100).toFixed(1) + "%";
+      seg.style.background = cat.color;
+      seg.title = `${cat.label}: ${SE.fmtNs(cat.ns)} (${(cat.frac * 100).toFixed(1)}%)`;
+      bar.appendChild(seg);
+    }
+    wrap.appendChild(bar);
+
+    // Legend — one item per category showing its share (percent), the mean time
+    // per instance (when known), and the actual total time across instances, so
+    // the breakdown is readable numerically, not just by bar width. Categories
+    // with zero time are dimmed rather than hidden so the legend stays stable.
+    const byKey = new Map(comp.categories.map((c) => [c.key, c]));
+    const legend = document.createElement("div");
+    legend.className = "composition-legend";
+    for (const cat of SE.TIME_CATEGORIES) {
+      const c = byKey.get(cat.key);
+      const frac = c ? c.frac : 0;
+      const ns = c ? c.ns : 0;
+      const meanNs = c ? c.meanNs : null;
+      const item = document.createElement("span");
+      item.className = "item";
+      if (frac <= 0) item.style.opacity = "0.4";
+      const pct = (frac * 100).toFixed(frac > 0 && frac < 0.001 ? 2 : 1);
+      // Prefer the mean-per-instance duration next to the percent (it matches the
+      // equal-weighted share); fall back to total when no instance count. The
+      // total is always available in the tooltip.
+      const primaryNs = meanNs != null ? meanNs : ns;
+      const primaryLabel = meanNs != null ? `${SE.fmtNs(meanNs)}/span` : SE.fmtNs(ns);
+      item.innerHTML =
+        `<span class="swatch" style="background:${cat.color}"></span>` +
+        `${cat.label} <span class="legend-pct">${pct}%</span>` +
+        (primaryNs > 0 ? ` <span class="legend-ns">(${primaryLabel})</span>` : "");
+      item.title = meanNs != null
+        ? `${cat.label}: ${pct}% · ${SE.fmtNs(meanNs)} per span · ${SE.fmtNs(ns)} total`
+        : `${cat.label}: ${pct}% · ${SE.fmtNs(ns)} total`;
+      legend.appendChild(item);
+
+    }
+    wrap.appendChild(legend);
+
+    container.appendChild(wrap);
+  }
+
+  // ── Flamegraph links ────────────────────────────────────────────────────────
+
+  // Open from the click handler rather than relying on target=_blank. Modern
+  // anchors may imply `noopener`, which prevents the same-origin tab from
+  // inheriting sessionStorage-backed BYOC credentials and yields a misleading
+  // flamegraph 404 after S3 rejects every prefix listing.
+  function openFlamegraphWithSession(event) {
+    event.preventDefault();
+    const href = event.currentTarget.href;
+    const opened = window.open(href, "_blank");
+    if (!opened) window.location.href = href;
+  }
+
+  function renderFlamegraphLinks(container) {
+    if (!selectedUid) return;
+    const wrap = document.createElement("div");
+    wrap.className = "fg-links";
+
+    // In raw trace mode, flamegraph links are not functional (no backend
+    // aggregation). Show disabled placeholders with an explanation.
+    if (rawTraceParam) {
+      wrap.innerHTML =
+        '<span style="color:#666;font-size:0.82em;padding:6px 0">🔥 On-CPU and 🧱 Blocking flamegraphs ' +
+        'require the aggregation backend (not available in raw trace mode).</span>';
+      container.appendChild(wrap);
+      return;
+    }
+
+    const state = {
+      data_dir: params.get("data_dir"),
+      max_files: maxFiles,
+      bucket: scopeBucket,
+      region: scopeRegion,
+      prefix: scopePrefix,
+      service: scopeService,
+      hosts: scopeHosts,
+      start_ns: pickerUtcToNs(fStart.value),
+      end_ns: pickerUtcToNs(fEnd.value),
+      span_type_uid: selectedUid,
+      min_span_ns: bandMinNs,
+      max_span_ns: bandMaxNs,
+    };
+
+    const cpuLink = document.createElement("a");
+    cpuLink.className = "on-cpu";
+    cpuLink.href = SE.flamegraphUrl(state, "on_cpu");
+    cpuLink.target = "_blank";
+    cpuLink.textContent = "🔥 On-CPU Flamegraph";
+    cpuLink.addEventListener("click", openFlamegraphWithSession);
+    wrap.appendChild(cpuLink);
+
+    const blockLink = document.createElement("a");
+    blockLink.className = "blocking";
+    blockLink.href = SE.flamegraphUrl(state, "blocking");
+    blockLink.target = "_blank";
+    blockLink.textContent = "🧱 Blocking Flamegraph";
+    blockLink.addEventListener("click", openFlamegraphWithSession);
+    wrap.appendChild(blockLink);
+
+    container.appendChild(wrap);
+  }
+
+  // ── Slow exemplars ────────────────────────────────────────────────────────
+
+  // The scope passed to SE.exemplarViewerUrl. bucket/region/service come from
+  // the page; the host comes from each exemplar itself (they can differ). The
+  // span type's name is forwarded so the viewer can select the exact span
+  // (focus_span_name) rather than just panning to a time window.
+  function exemplarScope(st) {
+    return {
+      bucket: scopeBucket,
+      region: scopeRegion,
+      service: scopeService,
+      spanName: st ? st.name : undefined,
+    };
+  }
+
+  // ── Exemplar-table column visibility ────────────────────────────────────────
+
+  // Load persisted explicit overrides ({id: true|false}). Best-effort: any
+  // storage/parse error yields no overrides (pure auto behavior).
+  function loadExemplarColOverrides() {
+    try {
+      const raw = window.localStorage.getItem(EXEMPLAR_COL_STORE);
+      if (!raw) return {};
+      const obj = JSON.parse(raw);
+      return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function persistExemplarColOverrides() {
+    try {
+      window.localStorage.setItem(EXEMPLAR_COL_STORE, JSON.stringify(exemplarColOverrides));
+    } catch (e) { /* storage unavailable; keep in-memory only */ }
+  }
+
+  // Set (true=force show, false=force hide) or clear (undefined=follow auto) a
+  // column's explicit override.
+  function setColOverride(id, value) {
+    if (value === undefined) delete exemplarColOverrides[id];
+    else exemplarColOverrides[id] = value;
+    persistExemplarColOverrides();
+  }
+
+  // Effective visibility for a column: an explicit override wins; otherwise a
+  // column with a `degenValue` extractor auto-hides when it's degenerate (every
+  // exemplar shares one value, or all empty — see SE.columnIsDegenerate).
+  // Returns { hidden, auto } so the menu can label auto-hidden columns distinctly
+  // from ones the user hid. Columns without `degenValue` (Duration, %ile) never
+  // auto-hide.
+  function colVisibility(col, exemplars) {
+    if (col.hideable === false) return { hidden: false, auto: false };
+    const override = exemplarColOverrides[col.id];
+    if (override === true) return { hidden: false, auto: false };
+    if (override === false) return { hidden: true, auto: false };
+    if (col.degenValue && SE.columnIsDegenerate(exemplars, col.degenValue)) {
+      return { hidden: true, auto: true };
+    }
+    return { hidden: false, auto: false };
+  }
+
+  // A "Columns ▾" control listing every hideable column with a checkbox
+  // reflecting its effective visibility. Toggling sets an explicit override and
+  // re-renders; "Reset to auto" clears overrides so degenerate columns hide
+  // again automatically. Auto-hidden columns are labeled as such.
+  function renderColumnMenu(columns, exemplars) {
+    const hideable = columns.filter((c) => c.hideable !== false);
+    const states = hideable.map((c) => ({ col: c, vis: colVisibility(c, exemplars) }));
+    const hiddenCount = states.filter((s) => s.vis.hidden).length;
+    const hasOverrides = hideable.some((c) => exemplarColOverrides[c.id] !== undefined);
+
+    const box = document.createElement("div");
+    box.className = "col-menu";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "col-menu-btn";
+    btn.textContent = hiddenCount > 0 ? `Columns (${hiddenCount} hidden) ▾` : "Columns ▾";
+    box.appendChild(btn);
+
+    const menu = document.createElement("div");
+    menu.className = "col-menu-list";
+    menu.style.display = "none";
+    for (const { col, vis } of states) {
+      const item = document.createElement("label");
+      item.className = "col-menu-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !vis.hidden;
+      cb.addEventListener("change", () => {
+        // Record an explicit choice (overriding any auto behavior).
+        setColOverride(col.id, cb.checked ? true : false);
+        renderDetail();
+      });
+      item.appendChild(cb);
+      item.appendChild(document.createTextNode(" " + (col.label || col.id)));
+      if (vis.auto) {
+        const hint = document.createElement("span");
+        hint.className = "col-menu-auto";
+        hint.textContent = " (auto-hidden)";
+        item.appendChild(hint);
+      }
+      menu.appendChild(item);
+    }
+    // Clearing overrides restores the automatic degenerate-column hiding.
+    if (hasOverrides) {
+      const reset = document.createElement("button");
+      reset.type = "button";
+      reset.className = "col-menu-reset";
+      reset.textContent = "Reset to auto";
+      reset.addEventListener("click", () => {
+        for (const c of hideable) setColOverride(c.id, undefined);
+        renderDetail();
+      });
+      menu.appendChild(reset);
+    }
+    box.appendChild(menu);
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.style.display !== "none";
+      menu.style.display = open ? "none" : "block";
+      if (!open) {
+        // Close on the next outside click.
+        const onDoc = (ev) => {
+          if (!box.contains(ev.target)) {
+            menu.style.display = "none";
+            document.removeEventListener("click", onDoc);
+          }
+        };
+        setTimeout(() => document.addEventListener("click", onDoc), 0);
+      }
+    });
+    return box;
+  }
+
+  // Render the exemplars as a table (like the Tokio-stats exemplar tables).
+  // A dedicated "Jump" button per row deep-links to the viewer focused on that
+  // exact span instance (the row itself is NOT clickable, so attribute
+  // filter/copy actions don't accidentally navigate away). In raw-trace mode
+  // (or with no source_key) the jump button is disabled.
+  //
+  // Attributes render as first-class columns (one per attribute key), since
+  // exemplars of a type almost always share the same keys. Each attribute cell
+  // offers filter-toggle and copy actions. Any non-core column can be hidden via
+  // the "Columns" menu; the choice persists across renders and reloads.
+  function renderExemplars(container, st) {
+    const hasBand = bandMinNs != null || bandMaxNs != null;
+    const exemplars = SE.exemplarsInBand(st.exemplars, bandMinNs, bandMaxNs);
+    if (exemplars.length === 0 && !hasBand) return;
+    const scope = exemplarScope(st);
+    const wrap = document.createElement("div");
+    wrap.className = "exemplars";
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = hasBand
+      ? "Exemplars in selected band:"
+      : "Exemplars:";
+    wrap.appendChild(label);
+    if (exemplars.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "muted";
+      empty.textContent = exemplarRefreshPending
+        ? "Refreshing matching exemplars…"
+        : "No matching exemplars are available for this exact duration band.";
+      wrap.appendChild(empty);
+      container.appendChild(wrap);
+      return;
+    }
+
+    // Columns adapt to whatever per-instance metadata the exemplars carry: a
+    // Host column, a Composition column when at least one has composition data,
+    // and one column PER attribute key present across the exemplars.
+    // Always-present columns: Jump, #, Duration, %ile, Callsite. Each column is a
+    // descriptor so the header, the per-row cell, and the show/hide menu stay in
+    // sync. `degenValue` (when present) lets a column auto-hide once every row
+    // shares the same value — see colVisibility/columnIsDegenerate.
+    const anyComposition = exemplars.some((e) => e.composition != null);
+    const attrKeys = SE.collectExemplarAttributeKeys(exemplars);
+
+    // `hideable: false` columns (the Jump button and the row index) are core
+    // navigation and always shown. Everything else can be toggled off, and
+    // columns with a `degenValue` auto-hide when uniform.
+    const columns = [
+      { id: "jump", th: "", hideable: false, cell: (ex) => {
+          const url = rawTraceParam ? "" : SE.exemplarViewerUrl(ex, scope);
+          const jump = url
+            ? `<button class="jump-btn" data-jump-url="${esc(url)}" ` +
+              `title="Open the viewer focused on this span instance">Jump ↗</button>`
+            : `<button class="jump-btn" disabled title="No source available">Jump ↗</button>`;
+          return `<td class="jump-cell">${jump}</td>`;
+        } },
+      { id: "index", th: "#", hideable: false, cell: (ex, i) => `<td class="muted">${i + 1}</td>` },
+      // Duration and %ile have no degenValue: they're informative even when the
+      // (bounded) exemplars happen to be close in value, and never all-empty.
+      { id: "duration", th: "Duration", label: "Duration",
+        cell: (ex) => `<td class="dur">${esc(SE.fmtNs(ex.elapsed_ns))}</td>` },
+      { id: "pctile", th: "<span title=\"Where this instance falls in the span type's duration distribution\">%ile</span>",
+        label: "%ile",
+        cell: (ex) => {
+          const pctile = SE.percentileForDuration(st.histogram, ex.elapsed_ns);
+          return `<td class="pctile" title="${pctile == null ? "" : "approx " + pctile.toFixed(2) + "th percentile"}">${esc(SE.fmtPercentile(pctile))}</td>`;
+        } },
+      { id: "callsite", th: "Callsite", label: "Callsite",
+        degenValue: (ex) => (ex.callsite_file != null
+          ? ex.callsite_file + ":" + (ex.callsite_line != null ? ex.callsite_line : "")
+          : ""),
+        cell: (ex) => {
+          const callsite = ex.callsite_file != null
+            ? esc(ex.callsite_file.split("/").pop() + (ex.callsite_line != null ? ":" + ex.callsite_line : ""))
+            : "<span class=\"muted\">—</span>";
+          return `<td><code>${callsite}</code></td>`;
+        } },
+      { id: "host", th: "Host", label: "Host",
+        degenValue: (ex) => ex.host || "",
+        cell: (ex) => `<td class="host">${esc(ex.host || "")}</td>` },
+    ];
+    if (anyComposition) {
+      // Composition's degenValue is the rounded percentage split, so exemplars
+      // with effectively identical breakdowns collapse the column.
+      columns.push({ id: "composition", th: "Time composition", label: "Time composition",
+        degenValue: (ex) => compositionSignature(ex),
+        cell: (ex) => `<td>${exemplarCompositionCell(ex)}</td>` });
+    }
+    for (const key of attrKeys) {
+      // Attribute columns share one id namespace ("attr:<key>") so an override
+      // for a key persists across renders even as the visible attribute set
+      // changes. They auto-hide when every exemplar has the same (or no) value.
+      columns.push({ id: "attr:" + key, th: esc(key), label: key,
+        degenValue: (ex) => SE.exemplarAttrValue(ex, key),
+        cell: (ex) => exemplarAttrCell(ex, key) });
+    }
+
+    // Column show/hide control (reflects auto-hidden + explicitly toggled state).
+    wrap.appendChild(renderColumnMenu(columns, exemplars));
+
+    const visible = columns.filter((c) => !colVisibility(c, exemplars).hidden);
+    const table = document.createElement("table");
+    table.className = "exemplar-table";
+    const head = "<thead><tr>" + visible.map((c) => `<th>${c.th}</th>`).join("") + "</tr></thead>";
+    const rows = exemplars
+      .map((ex, i) => "<tr>" + visible.map((c) => c.cell(ex, i)).join("") + "</tr>")
+      .join("");
+    table.innerHTML = head + "<tbody>" + rows + "</tbody>";
+    // Delegated clicks for the interactive cells:
+    //  - Jump button   → open the viewer on that span instance.
+    //  - Attribute value → toggle a whole-view filter for that key=value.
+    //  - Copy button    → copy the attribute value to the clipboard.
+    table.addEventListener("click", (e) => {
+      const jumpBtn = e.target.closest(".jump-btn[data-jump-url]");
+      if (jumpBtn) {
+        window.open(jumpBtn.dataset.jumpUrl, "_blank");
+        return;
+      }
+      const copyBtn = e.target.closest(".attr-copy[data-copy-value]");
+      if (copyBtn) {
+        copyToClipboard(copyBtn.dataset.copyValue, copyBtn);
+        return;
+      }
+      const filterEl = e.target.closest(".attr-val[data-attr-key]");
+      if (filterEl && !rawTraceParam) {
+        toggleAttrFilter(filterEl.dataset.attrKey, filterEl.dataset.attrValue);
+      }
+    });
+    wrap.appendChild(table);
+    container.appendChild(wrap);
+  }
+
+  // A coarse signature of an exemplar's composition (rounded per-category
+  // percentages) used only to decide whether the Time-composition column is
+  // degenerate. Two exemplars with effectively the same breakdown share a
+  // signature; missing composition yields "" so all-missing collapses too.
+  function compositionSignature(ex) {
+    if (ex.composition == null) return "";
+    const comp = SE.computeTimeComposition({ composition: ex.composition }, null);
+    return comp.categories.map((c) => Math.round(c.frac * 100)).join(",");
+  }
+
+  // Render one exemplar's five-way time composition as a compact stacked bar
+  // with a per-category tooltip. Reuses SE.computeTimeComposition (the same
+  // categories/colors as the aggregate legend) by wrapping the instance's own
+  // composition object. Returns an em-dash when this instance has none.
+  function exemplarCompositionCell(ex) {
+    if (ex.composition == null) return '<span class="muted">—</span>';
+    const comp = SE.computeTimeComposition({ composition: ex.composition }, null);
+    const segs = comp.categories
+      .filter((cat) => cat.frac > 0)
+      .map((cat) => {
+        // Write the time inside the segment when it's at least 20% wide;
+        // narrower segments hide it (tooltip still carries the detail).
+        const inner = cat.frac >= 0.2 && cat.ns > 0
+          ? `<span class="seg-label">${esc(SE.fmtNs(cat.ns))}</span>`
+          : "";
+        return `<div class="seg" style="width:${(cat.frac * 100).toFixed(1)}%;background:${cat.color}" ` +
+          `title="${esc(cat.label)}: ${esc(SE.fmtNs(cat.ns))} (${(cat.frac * 100).toFixed(1)}%)">${inner}</div>`;
+      })
+      .join("");
+    const tip = comp.categories
+      .filter((cat) => cat.frac > 0)
+      .map((cat) => `${cat.label} ${SE.fmtNs(cat.ns)} (${(cat.frac * 100).toFixed(0)}%)`)
+      .join(" · ");
+    return `<span class="ex-comp-bar" title="${esc(tip)}">${segs}</span>`;
+  }
+
+  // Render one exemplar's value for a single attribute key as a table cell. The
+  // value text toggles a whole-view filter on click (backend mode only); a small
+  // copy button copies the raw value. Absent values render as a muted dash.
+  function exemplarAttrCell(ex, key) {
+    const value = SE.exemplarAttrValue(ex, key);
+    if (value == null) return '<td class="attr-cell"><span class="muted">—</span></td>';
+    const active = SE.hasAttrFilter(attrFilters, key, value) ? " active" : "";
+    const filterTitle = rawTraceParam
+      ? "Attribute filtering requires the aggregation backend"
+      : (active ? "Remove this filter" : `Filter to ${key}=${value}`);
+    const valSpan =
+      `<span class="attr-val${active}${rawTraceParam ? " inert" : ""}" ` +
+      `data-attr-key="${esc(key)}" data-attr-value="${esc(value)}" ` +
+      `title="${esc(filterTitle)}">${esc(value)}</span>`;
+    const copyBtn =
+      `<button class="attr-copy" data-copy-value="${esc(value)}" title="Copy value">⧉</button>`;
+    return `<td class="attr-cell">${valSpan}${copyBtn}</td>`;
+  }
+
+  // Copy text to the clipboard, giving brief visual feedback on the button.
+  function copyToClipboard(text, btn) {
+    const done = () => {
+      if (!btn) return;
+      const orig = btn.textContent;
+      btn.textContent = "✓";
+      btn.classList.add("copied");
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1000);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => window.prompt("Copy:", text));
+    } else {
+      window.prompt("Copy:", text);
+    }
+  }
+
+  // ── Attribute filters ───────────────────────────────────────────────────────
+
+  // Apply the current attrFilters: persist to the URL and re-fetch the whole
+  // catalog (filters narrow counts/histograms/composition/exemplars server-side).
+  function applyAttrFilters() {
+    updateBrowserUrl();
+    renderFilterBar();
+    if (!rawTraceParam) startStreaming();
+  }
+
+  function toggleAttrFilter(key, value) {
+    if (rawTraceParam) return; // no backend to re-query in raw mode
+    attrFilters = SE.hasAttrFilter(attrFilters, key, value)
+      ? SE.removeAttrFilter(attrFilters, key, value)
+      : SE.addAttrFilter(attrFilters, key, value);
+    applyAttrFilters();
+  }
+
+  // Render the active-filter bar; hidden when there are no filters.
+  function renderFilterBar() {
+    const bar = document.getElementById("filter-bar");
+    if (!attrFilters || attrFilters.length === 0) {
+      bar.style.display = "none";
+      bar.innerHTML = "";
+      return;
+    }
+    bar.style.display = "flex";
+    bar.innerHTML = "";
+    const label = document.createElement("span");
+    label.className = "fb-label";
+    label.textContent = "Attribute filters:";
+    bar.appendChild(label);
+    for (const f of attrFilters) {
+      const chip = document.createElement("span");
+      chip.className = "fb-chip";
+      chip.innerHTML = `<b>${esc(f.key)}</b>=${esc(f.value)} <span class="fb-x" title="Remove">×</span>`;
+      chip.querySelector(".fb-x").addEventListener("click", () => toggleAttrFilter(f.key, f.value));
+      bar.appendChild(chip);
+    }
+    const clear = document.createElement("span");
+    clear.className = "fb-clear";
+    clear.textContent = "clear all";
+    clear.addEventListener("click", () => {
+      attrFilters = [];
+      applyAttrFilters();
+    });
+    bar.appendChild(clear);
+  }
+
+  // ── Streaming ───────────────────────────────────────────────────────────────
+
+  function setStreamingUi(active) {
+    btnStop.disabled = !active;
+    btnStop.style.opacity = active ? "1" : "0.4";
+    btnMore.disabled = active;
+    btnMore.style.opacity = active ? "0.4" : "1";
+  }
+
+  function stopStreaming() {
+    streamToken++;
+    activeStreamMode = null;
+    if (abortCtl) { abortCtl.abort(); abortCtl = null; }
+    setStreamingUi(false);
+  }
+
+  function startStreaming(mode = "replace") {
+    // An explicit query (Apply → "replace", Load more → "refine") is a fresh
+    // user intent that clears any prior Stop latch. Exemplar-only refetches do
+    // not clear it — they are incidental and must stay suppressed after a Stop.
+    const baselineFilesFolded = (mode === "refine" || mode === "exemplars") && lastCoverage
+      ? lastCoverage.files_folded
+      : 0;
+    const baselineFoldedSetId = mode === "exemplars" && lastCoverage
+      ? lastCoverage.folded_set_id
+      : null;
+    stopStreaming();
+    activeStreamMode = mode;
+    setStreamingUi(true);
+    errorEl.style.display = "none";
+    if (mode === "replace") {
+      loadingEl.classList.remove("hidden");
+      catalogWrap.style.display = "none";
+      detailPanel.className = "detail-panel empty";
+      detailPanel.innerHTML = "";
+    }
+
+    const token = ++streamToken;
+    abortCtl = new AbortController();
+    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    const requestSelectedUid = selectedUid;
+    const requestExemplarScopeKey = currentExemplarScopeKey();
+    let exemplarSnapshotAdopted = false;
+    if (mode === "exemplars") exemplarPreviewAvailable = false;
+    let gotEvent = false;
+
+    Dial9Sse.openSse(buildApiUrl(mode), {
+      headers: credHeaders,
+      signal: abortCtl.signal,
+      onEvent: (resp) => {
+        if (token !== streamToken) return;
+        if (mode === "exemplars" && !SE.exemplarRequestMatches(
+          requestSelectedUid,
+          requestExemplarScopeKey,
+          selectedUid,
+          currentExemplarScopeKey(),
+        )) return;
+        gotEvent = true;
+        loadingEl.classList.add("hidden");
+        const incomingTypes = resp.span_types || [];
+        const incomingFilesFolded = resp.coverage ? resp.coverage.files_folded : 0;
+        if (mode === "exemplars") {
+          exemplarSnapshotAdopted = false;
+          const incomingFoldedSetId = resp.coverage
+            ? resp.coverage.folded_set_id
+            : null;
+          const targetFoldedSetId = resp.coverage
+            ? resp.coverage.target_folded_set_id
+            : null;
+          const membership = SE.classifyExemplarSnapshot(
+            baselineFoldedSetId,
+            incomingFoldedSetId,
+            targetFoldedSetId,
+          );
+          if (membership.preview) {
+            const merged = SE.mergeSelectedExemplarSnapshot(
+              spanTypes,
+              incomingTypes,
+              requestSelectedUid,
+            );
+            spanTypes = merged.spanTypes;
+            exemplarPreviewAvailable = merged.matched;
+            exemplarSnapshotAdopted = membership.complete && merged.matched;
+            renderDetail();
+          }
+        } else if (SE.shouldAdoptCatalogSnapshot(
+          mode,
+          baselineFilesFolded,
+          incomingFilesFolded,
+        )) {
+          spanTypes = incomingTypes;
+          exemplarScopeByUid.clear();
+          for (const spanType of incomingTypes) {
+            exemplarScopeByUid.set(spanType.span_type_uid, requestExemplarScopeKey);
+          }
+          lastCoverage = resp.coverage || null;
+          exemplarRefreshPending = false;
+          renderCatalog();
+          renderDetail();
+        }
+        // Stats badge
+        const total = spanTypes.reduce((s, t) => s + t.count, 0);
+        let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
+        if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
+        statsEl.innerHTML = badge + ' · <span class="spinner" style="width:0.9em;height:0.9em;vertical-align:middle"></span> refining…';
+      },
+      onClose: () => {
+        if (token !== streamToken) return;
+        setStreamingUi(false);
+        activeStreamMode = null;
+        if (mode === "exemplars" && !SE.exemplarRequestMatches(
+          requestSelectedUid,
+          requestExemplarScopeKey,
+          selectedUid,
+          currentExemplarScopeKey(),
+        )) return;
+        if (mode === "exemplars") {
+          const completed = SE.completeExemplarRefresh(
+            spanTypes,
+            lastCoverage,
+            exemplarSnapshotAdopted,
+          );
+          spanTypes = completed.spanTypes;
+          lastCoverage = completed.coverage;
+          exemplarRefreshPending = completed.pending;
+          if (exemplarSnapshotAdopted) {
+            exemplarScopeByUid.set(requestSelectedUid, requestExemplarScopeKey);
+          }
+          renderDetail();
+        } else {
+          exemplarRefreshPending = false;
+        }
+        if (gotEvent) {
+          const total = spanTypes.reduce((s, t) => s + t.count, 0);
+          let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
+          if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
+          statsEl.textContent = badge +
+            (mode === "exemplars" && !exemplarSnapshotAdopted
+              ? " · exemplar refresh incomplete"
+              : " · refined");
+        }
+      },
+      onError: (err) => {
+        if (token !== streamToken) return;
+        setStreamingUi(false);
+        activeStreamMode = null;
+        if (mode === "exemplars" && !SE.exemplarRequestMatches(
+          requestSelectedUid,
+          requestExemplarScopeKey,
+          selectedUid,
+          currentExemplarScopeKey(),
+        )) return;
+        exemplarRefreshPending = mode === "exemplars";
+        if (mode === "exemplars") {
+          renderDetail();
+          statsEl.textContent = statsEl.textContent.replace(/ · .*refining.*/, "") +
+            " · exemplar refresh interrupted";
+        } else if (mode === "refine") {
+          statsEl.textContent = statsEl.textContent.replace(/ · .*refining.*/, "") +
+            " · refinement interrupted";
+        } else if (!gotEvent) {
+          loadingEl.classList.add("hidden");
+          errorEl.style.display = "flex";
+          errorEl.textContent = "Failed to load span stats: " + err.message;
+        } else {
+          statsEl.textContent = statsEl.textContent.replace(/ · .*refining.*/, "") + " · interrupted";
+        }
+      },
+    });
+  }
+
+  // ── Event handlers ──────────────────────────────────────────────────────────
+
+  document.getElementById("btn-apply").addEventListener("click", () => {
+    maxFiles = null;
+    updateBrowserUrl();
+    startStreaming();
+  });
+
+  btnMore.addEventListener("click", () => {
+    const workDepth = FG_API.refinementWorkDepth(lastCoverage, maxFiles);
+    maxFiles = FG_API.nextMaxFiles(workDepth);
+    updateBrowserUrl();
+    startStreaming("refine");
+  });
+
+  btnStop.addEventListener("click", () => {
+    const stoppedMode = activeStreamMode;
+    stopStreaming();
+    if (stoppedMode !== "exemplars") exemplarRefreshPending = false;
+    renderDetail();
+    const total = spanTypes.reduce((s, t) => s + t.count, 0);
+    let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
+    if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
+    statsEl.textContent = badge + " · stopped";
+  });
+
+  document.getElementById("btn-copylink").addEventListener("click", async () => {
+    const p = new URLSearchParams(window.location.search);
+    const url = window.location.origin + window.location.pathname + "?" + p.toString();
+    const btn = document.getElementById("btn-copylink");
+    const orig = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(url);
+      btn.textContent = "Copied!";
+    } catch (e) {
+      window.prompt("Copy this link:", url);
+      btn.textContent = "Copied!";
+    }
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+
+  // Column sort
+  document.getElementById("catalog").querySelector("thead").addEventListener("click", (e) => {
+    const th = e.target.closest("th[data-sort]");
+    if (!th) return;
+    const key = th.dataset.sort;
+    if (sortKey === key) sortAsc = !sortAsc;
+    else { sortKey = key; sortAsc = false; }
+    renderCatalog();
+  });
+
+  // ── Init ────────────────────────────────────────────────────────────────────
+
+  // Reflect any attribute filters carried in the URL before the first fetch.
+  renderFilterBar();
+
+  // Raw trace mode: ?trace=demo-trace.bin loads a local trace file directly,
+  // parses it client-side, and builds a span catalog without any backend.
+  const rawTraceParam = params.get("trace");
+  if (rawTraceParam) {
+    // Raw mode: hide SSE-only toolbar controls
+    document.getElementById("toolbar").style.display = "none";
+    statsEl.innerHTML = '<span style="color:#ffa657">📂 Raw trace mode</span> — loading…';
+
+    (async function loadRawTrace() {
+      try {
+        const resp = await fetch(rawTraceParam);
+        if (!resp.ok) throw new Error("Failed to fetch trace: HTTP " + resp.status);
+        const buf = await resp.arrayBuffer();
+        loadingEl.lastChild.textContent = "Parsing trace…";
+
+        const parsed = await TraceParser.parseTrace(new Uint8Array(buf));
+        loadingEl.lastChild.textContent = "Building span catalog…";
+
+        // Give the browser a paint frame for the status update
+        await new Promise(r => setTimeout(r, 0));
+
+        const { allSpans } = TraceAnalysis.buildSpanData(parsed.customEvents);
+        spanTypes = SE.buildSpanCatalog(allSpans, parsed.customEvents);
+
+        loadingEl.classList.add("hidden");
+
+        const total = spanTypes.reduce((s, t) => s + t.count, 0);
+        statsEl.innerHTML =
+          '<span style="color:#ffa657">📂 Raw trace mode</span> · ' +
+          spanTypes.length + " span types · " + total.toLocaleString() + " instances";
+
+        renderCatalog();
+        if (selectedUid) renderDetail();
+      } catch (e) {
+        loadingEl.classList.add("hidden");
+        errorEl.style.display = "flex";
+        errorEl.textContent = "Failed to load raw trace: " + e.message;
+      }
+    })();
+  } else if (params.get("api") === "1" || scopeBucket || params.get("data_dir")) {
+    startStreaming();
+  } else {
+    loadingEl.classList.add("hidden");
+    errorEl.style.display = "flex";
+    errorEl.textContent = "No scope provided. Open the Span Explorer from the trace browser or with ?api=1&bucket=…";
+  }
+})();
+</script>
+</body>
+</html>

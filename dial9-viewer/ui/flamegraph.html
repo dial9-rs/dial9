@@ -83,7 +83,7 @@
         <div id="error"></div>
 
         <script src="format.js"></script>
-        <script src="flamegraph_api.js"></script>
+        <script src="flamegraph_api.js?v=fold-work-cap-1"></script>
         <script src="flamegraph_histogram.js"></script>
         <script src="sse.js"></script>
         <script src="flamegraph_view_state.js"></script>
@@ -99,6 +99,7 @@
         <script>
             (async function () {
                 const params = new URLSearchParams(window.location.search);
+                const FG_API = window.FlamegraphApi;
                 // `trace` is repeatable — each value is a separate (possibly
                 // gzipped) component to fetch and concatenate. A `s_*` scope
                 // (bucket/prefix/service/host-set + window) is the compact,
@@ -701,6 +702,21 @@
                     // address bar and any copy/diff link so a shared URL stays
                     // self-contained rather than depending on the tab's store.
                     const scopeRegion = params.get("aws_region");
+                    // Span-type filter carried by span-explorer deep links. These
+                    // scope the flamegraph to CPU/sched samples enclosed by a span
+                    // of this type (and optional duration band). They are fixed for
+                    // the life of the view (not toolbar-editable), so they live
+                    // alongside the other scope vars rather than in filterState.
+                    const scopeSpanTypeUid = params.get("span_type_uid");
+                    const scopeMinSpanNs = params.get("min_span_ns");
+                    const scopeMaxSpanNs = params.get("max_span_ns");
+                    // Append the span-type filter params to any request/scope query
+                    // builder. A no-op when no span filter is active.
+                    function addSpanParams(p) {
+                        if (scopeSpanTypeUid) p.set("span_type_uid", scopeSpanTypeUid);
+                        if (scopeMinSpanNs) p.set("min_span_ns", scopeMinSpanNs);
+                        if (scopeMaxSpanNs) p.set("max_span_ns", scopeMaxSpanNs);
+                    }
 
                     function buildApiUrl() {
                         const u = new URL("/api/flamegraph", window.location.origin);
@@ -727,9 +743,10 @@
                         if (minPollNs) u.searchParams.set("min_poll_ns", minPollNs);
                         if (maxPollNs) u.searchParams.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
-                        // The endpoint is an SSE stream: the server emits the
-                        // already-folded snapshot first, then folds to the cap and
-                        // pushes a fresh tree per file. No client `refine` flag.
+                        addSpanParams(u.searchParams);
+                        // The endpoint is an SSE stream: cached parts arrive in
+                        // bounded cumulative snapshots, then missing capped-prefix
+                        // files push fresh trees until the work-list drains.
                         return u;
                     }
 
@@ -754,6 +771,8 @@
                         const maxPollNs = msToNs(fPollMax.value);
                         if (minPollNs) p.set("min_poll_ns", minPollNs);
                         if (maxPollNs) p.set("max_poll_ns", maxPollNs);
+                        if (maxFiles != null) p.set("max_files", String(maxFiles));
+                        addSpanParams(p);
                         // Carry the live zoom/inspect focus so the address bar (and
                         // anything copied from it) always reproduces the exact view.
                         if (fg) writeViewState(p, fg);
@@ -1293,14 +1312,18 @@
                     }
 
                     // (Re)start the stream from scratch: aborts any in-flight
-                    // stream and shows the loading overlay. The server emits the
-                    // already-folded snapshot immediately, then refines to the cap.
+                    // stream and shows the loading overlay. The server emits a
+                    // cumulative snapshot after each bounded cached batch, then
+                    // refines one missing capped-prefix file at a time.
                     //
                     // A scope change (new filters/facets/time/poll-band) resets the
                     // fast/slow split so it re-seeds to the incoming distribution's
                     // median. "Refine more" passes preserveSplit=true: it's the same
                     // scope with deeper sampling, so a user-chosen split must stick.
                     function startStreaming(preserveSplit = false) {
+                        const baselineFilesFolded = preserveSplit && lastCoverage
+                            ? lastCoverage.files_folded
+                            : 0;
                         if (!preserveSplit) {
                             splitNs = null;
                             renderedHistKey = null; // force the marker to re-seed
@@ -1308,27 +1331,57 @@
                         stopStreaming();
                         setRefiningUi(true);
                         gotEvent = false;
-                        loadingEl.classList.remove("hidden");
-                        loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
-                        containerEl.style.display = "none";
                         errorEl.style.display = "none";
-                        foldWarnEl.style.display = "none";
+                        if (preserveSplit) {
+                            statsEl.innerHTML = lastBadge + ' · <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
+                        } else {
+                            loadingEl.classList.remove("hidden");
+                            loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
+                            containerEl.style.display = "none";
+                            foldWarnEl.style.display = "none";
+                        }
                         const token = ++streamToken;
                         abortCtl = new AbortController();
                         const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
                         Dial9Sse.openSse(buildApiUrl(), {
                             headers: credHeaders,
                             signal: abortCtl.signal,
-                            onEvent: (resp) => { if (token === streamToken) renderEvent(resp); },
+                            onEvent: (resp) => {
+                                if (token !== streamToken) return;
+                                const incomingFilesFolded = resp.coverage
+                                    ? resp.coverage.files_folded
+                                    : 0;
+                                if (FG_API.shouldAdoptRefinementSnapshot(
+                                    preserveSplit,
+                                    baselineFilesFolded,
+                                    incomingFilesFolded,
+                                )) {
+                                    const preservedView = preserveSplit && viewRestored
+                                        ? fg.getViewState()
+                                        : null;
+                                    renderEvent(resp);
+                                    if (preservedView) {
+                                        restoringView = true;
+                                        fg.applyViewState(preservedView);
+                                        restoringView = false;
+                                    }
+                                }
+                            },
                             onClose: () => {
                                 if (token !== streamToken) return;
-                                // Server folded to the cap and closed the stream.
-                                statsEl.textContent = lastBadge + (gotEvent ? " \u00b7 refined" : "");
+                                // Cached reconstruction and bounded work are complete.
+                                statsEl.textContent = lastBadge + (gotEvent
+                                    ? " \u00b7 refined"
+                                    : preserveSplit ? " \u00b7 refinement incomplete" : "");
                                 setRefiningUi(false);
                             },
                             onError: (err) => {
                                 if (token !== streamToken) return;
-                                if (!gotEvent) {
+                                if (preserveSplit) {
+                                    // Cached reconstruction is best-effort; keep
+                                    // the previously rendered same-scope tree.
+                                    statsEl.textContent = lastBadge + " · refinement interrupted";
+                                } else if (!gotEvent) {
                                     showError("Failed to load flamegraph: " + err.message);
                                 } else {
                                     // Mid-stream drop: keep the rendered tree but
@@ -1350,11 +1403,12 @@
                     document.getElementById("f-more").addEventListener("click", () => {
                         // Request deeper sampling for the current scope: raise the
                         // ceiling to ~4x the files folded so far, then reopen the
-                        // stream. The server folds from where it left off (already-
-                        // folded files are served instantly) up to the new cap.
-                        const folded = lastCoverage ? lastCoverage.files_folded : 0;
-                        maxFiles = nextMaxFiles(folded);
-                        startStreaming(true); // same scope → keep the chosen split
+                        // stream. All applicable cached files stream back in
+                        // bounded batches before missing in-cap files fold.
+                        const workDepth = FG_API.refinementWorkDepth(lastCoverage, maxFiles);
+                        maxFiles = FG_API.nextMaxFiles(workDepth);
+                        updateBrowserUrl();
+                        startStreaming(true); // same scope → retain tree + chosen split
                     });
 
                     stopBtn.addEventListener("click", () => {
@@ -1365,8 +1419,8 @@
 
                     // Build a COMPLETE scope query for the current view, from the
                     // live toolbar state plus the scope vars. Unlike the address
-                    // bar (updateBrowserUrl, which drops bucket/prefix/max_files),
-                    // this carries everything needed to re-fetch the aggregate.
+                    // bar (which also carries transient zoom/inspect focus), this
+                    // contains only the complete data scope needed to re-fetch.
                     // Credentials are never included.
                     function currentScopeQuery() {
                         const p = new URLSearchParams();
@@ -1393,6 +1447,7 @@
                         if (minPollNs) p.set("min_poll_ns", minPollNs);
                         if (maxPollNs) p.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) p.set("max_files", String(maxFiles));
+                        addSpanParams(p);
                         return FlamegraphDiff.fullScopeQuery(p);
                     }
 

@@ -203,6 +203,215 @@ impl ObjectStreamMetrics {
     }
 }
 
+/// Standalone stream-lifetime metric for `GET /api/span-stats`, emitted when the
+/// SSE body finishes streaming — **not** part of [`RequestMetrics`].
+///
+/// The span-stats response streams: headers and the first cumulative snapshot
+/// flush in a few hundred ms, then the fold/seed work streams for many seconds
+/// afterwards. [`RequestMetrics::latency`] stops at response-headers time (see
+/// [`record_request_metrics`]), so it measures only time-to-first-byte, and the
+/// [`FlamegraphMetrics`] coverage the handler attaches is a *resolve-time*
+/// snapshot. Neither can see how long the stream actually ran or how much it
+/// folded. This entry closes that gap: the handler arms it and the fold driver
+/// holds it for the life of the response body, so it is appended when the stream
+/// is dropped (normal end **or** client disconnect). It carries the same
+/// `operation` dimension as the request metric so both line up in CloudWatch.
+#[metrics(emf::dimension_sets = [["operation"], []])]
+pub struct SpanStatsStreamMetrics {
+    #[metrics(timestamp)]
+    timestamp: SystemTime,
+    /// Matched route (`/api/span-stats`), to align with the request metric's
+    /// `operation` dimension.
+    operation: String,
+    /// Always `1`: the count of completed span-stats streams (the denominator
+    /// for the stream-duration and coverage rates).
+    #[metrics(unit = Count)]
+    count: u32,
+    /// `1` when the stream ended with at least one fold error (a GET/decode/merge
+    /// failure recorded in the coverage block). The HTTP status is a `200` the
+    /// instant the headers flush, so a stream that then fails to fold parts is
+    /// invisible to [`RequestMetrics::fault`]. `pub` so the driver can flip it
+    /// through the guard's `DerefMut`.
+    #[metrics(unit = Count)]
+    pub failed: u32,
+    /// Wall-clock from stream start (arm time) to stream end (guard drop). This
+    /// is the real end-to-end duration the request metric's `latency` cannot see.
+    /// Auto-stops when the entry is dropped, so it measures the full body
+    /// lifetime.
+    #[metrics(unit = Millisecond)]
+    stream_duration: Timer,
+    /// Source segment files in scope (final, = resolve-time `files_matched`).
+    /// `pub` so the driver can set it from the resolved scope.
+    #[metrics(unit = Count)]
+    pub files_matched: u32,
+    /// Files folded by the time the stream ended (FINAL, not resolve-time):
+    /// `files_seeded + files_folded_cold`.
+    #[metrics(unit = Count)]
+    pub files_folded: u32,
+    /// Files served from already-folded spans part-files (GET + merge only, no
+    /// raw-trace decode) — the seeding phase. High values mean the stream time
+    /// is spent re-reading Parquet parts, not cold-folding.
+    #[metrics(unit = Count)]
+    pub files_seeded: u32,
+    /// Files cold-folded this stream (raw trace fetched, decoded, encoded) — the
+    /// folding phase. High values mean the stream time is spent folding raw
+    /// traces from scratch.
+    #[metrics(unit = Count)]
+    pub files_folded_cold: u32,
+    /// Wall-clock spent downloading already-folded spans Parquet parts. Seed
+    /// batches fetch concurrently, so this records batch elapsed time rather
+    /// than summing each object's latency; it therefore remains comparable to
+    /// `stream_duration`.
+    #[metrics(unit = Millisecond)]
+    pub download_duration: Duration,
+    /// Wall-clock time spent decoding Parquet record batches and materializing
+    /// typed span rows from Arrow arrays. Equals `reader_setup_duration` +
+    /// `batch_decode_duration` + `row_materialize_duration`.
+    #[metrics(unit = Millisecond)]
+    pub parse_duration: Duration,
+    /// Wall-clock time spent applying span filters and merging rows into
+    /// histograms, exemplars, facets, and composition accumulators.
+    #[metrics(unit = Millisecond)]
+    pub query_duration: Duration,
+
+    // ── Parse sub-phases (sum == parse_duration) ─────────────────────────────
+    /// Parquet footer parsing and Arrow reader construction
+    /// (`ParquetRecordBatchReader::try_new`).
+    #[metrics(unit = Millisecond)]
+    pub reader_setup_duration: Duration,
+    /// Advancing the Parquet reader through column chunks and decoding them into
+    /// Arrow `RecordBatch`es.
+    #[metrics(unit = Millisecond)]
+    pub batch_decode_duration: Duration,
+    /// Walking decoded Arrow arrays and constructing owned `SpanStatsRow` values
+    /// with validated fields, exemplars, attributes, and composition.
+    #[metrics(unit = Millisecond)]
+    pub row_materialize_duration: Duration,
+
+    // ── Work counters ────────────────────────────────────────────────────────
+    /// Total bytes presented to the Parquet reader (compressed part-file sizes).
+    #[metrics(unit = Byte)]
+    pub parquet_bytes: u64,
+    /// Arrow RecordBatches successfully decoded across all part-files.
+    #[metrics(unit = Count)]
+    pub record_batches_decoded: u64,
+    /// SpanStatsRow values materialized (post-validation, pre-accumulator
+    /// filtering).
+    #[metrics(unit = Count)]
+    pub rows_materialized: u64,
+    /// Total attribute key/value entries materialized across all rows.
+    #[metrics(unit = Count)]
+    pub attribute_entries: u64,
+}
+
+/// Cumulative span-stats work measured inside one seed or fold operation. The
+/// fold-stream driver drains this from the endpoint sink after each operation
+/// and adds it to [`SpanStatsStreamMetrics`].
+///
+/// ## Parse sub-phases
+///
+/// `parse` = `reader_setup` + `batch_decode` + `row_materialize`. The three
+/// sub-phases decompose the cumulative `parse_duration` into:
+///
+/// - **reader_setup**: In-memory Parquet footer parsing and Arrow schema
+///   negotiation (`ParquetRecordBatchReader::try_new`).
+/// - **batch_decode**: Advancing the Parquet reader through column chunks and
+///   decoding them into Arrow `RecordBatch`es (`reader.next()`).
+/// - **row_materialize**: Walking the decoded Arrow arrays and constructing
+///   owned `SpanStatsRow` values with validated fields, exemplars, attributes,
+///   and composition — the seam between columnar Arrow data and our row-oriented
+///   domain model.
+///
+/// The invariant `parse == reader_setup + batch_decode + row_materialize` is
+/// maintained so existing dashboards on `parse_duration` remain valid.
+///
+/// ## Work counters
+///
+/// Alongside durations, low-cost counters track throughput:
+///
+/// - **parquet_bytes**: Total bytes presented to the Parquet reader (compressed
+///   on-wire size of the spans part-file).
+/// - **record_batches_decoded**: Number of Arrow `RecordBatch`es successfully
+///   decoded from all part-files in this operation.
+/// - **rows_materialized**: `SpanStatsRow` values produced (after time-filter
+///   and null/negative validation, before attribute/cardinality filtering in the
+///   accumulator).
+/// - **attribute_entries**: Total key/value attribute pairs materialized across
+///   all rows (sum of per-row attribute map lengths).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SpanStatsPhaseDurations {
+    pub(crate) download: Duration,
+    pub(crate) parse: Duration,
+    pub(crate) query: Duration,
+
+    // ── Parse sub-phases (sum == parse) ──────────────────────────────────────
+    /// Parquet footer parsing and Arrow reader construction.
+    pub(crate) reader_setup: Duration,
+    /// Decoding column chunks into Arrow RecordBatches.
+    pub(crate) batch_decode: Duration,
+    /// Walking Arrow arrays to produce owned SpanStatsRow values.
+    pub(crate) row_materialize: Duration,
+
+    // ── Work counters ────────────────────────────────────────────────────────
+    /// Bytes presented to ParquetRecordBatchReader (compressed part size).
+    pub(crate) parquet_bytes: u64,
+    /// RecordBatches successfully decoded.
+    pub(crate) record_batches_decoded: u64,
+    /// SpanStatsRow values produced (post-validation, pre-accumulator filter).
+    pub(crate) rows_materialized: u64,
+    /// Total attribute key/value entries across all materialized rows.
+    pub(crate) attribute_entries: u64,
+}
+
+impl std::ops::AddAssign for SpanStatsPhaseDurations {
+    fn add_assign(&mut self, rhs: Self) {
+        self.download += rhs.download;
+        self.parse += rhs.parse;
+        self.query += rhs.query;
+
+        self.reader_setup += rhs.reader_setup;
+        self.batch_decode += rhs.batch_decode;
+        self.row_materialize += rhs.row_materialize;
+
+        self.parquet_bytes += rhs.parquet_bytes;
+        self.record_batches_decoded += rhs.record_batches_decoded;
+        self.rows_materialized += rhs.rows_materialized;
+        self.attribute_entries += rhs.attribute_entries;
+    }
+}
+
+impl SpanStatsStreamMetrics {
+    /// Arm a stream-scoped metric guard for a `/api/span-stats` response. The
+    /// fold driver holds the guard for the life of the body and updates the
+    /// coverage fields as it seeds/folds; the entry (with the elapsed
+    /// `stream_duration`) is appended to the global sink on drop (stream end or
+    /// client disconnect).
+    pub fn arm(operation: impl Into<String>) -> SpanStatsStreamMetricsGuard {
+        SpanStatsStreamMetrics {
+            timestamp: SystemTime::now(),
+            operation: operation.into(),
+            count: 1,
+            failed: 0,
+            stream_duration: Timer::start_now(),
+            files_matched: 0,
+            files_folded: 0,
+            files_seeded: 0,
+            files_folded_cold: 0,
+            download_duration: Duration::ZERO,
+            parse_duration: Duration::ZERO,
+            query_duration: Duration::ZERO,
+            reader_setup_duration: Duration::ZERO,
+            batch_decode_duration: Duration::ZERO,
+            row_materialize_duration: Duration::ZERO,
+            parquet_bytes: 0,
+            record_batches_decoded: 0,
+            rows_materialized: 0,
+            attribute_entries: 0,
+        }
+        .append_on_drop(ServiceMetrics::sink_or_discard())
+    }
+}
+
 /// One entry per source file folded, carrying the per-phase timing breakdown of
 /// processing that file — emitted so we can see *where* fold time goes without a
 /// profiler. This is the metric that answers "why is the server slow": it splits
@@ -651,6 +860,45 @@ mod tests {
         assert_eq!(e.metrics["coverage_pct"].as_f64(), 0.0);
     }
 
+    #[test]
+    fn span_stats_phase_durations_add_each_phase_independently() {
+        let mut total = SpanStatsPhaseDurations {
+            download: Duration::from_millis(10),
+            parse: Duration::from_millis(20),
+            query: Duration::from_millis(30),
+            reader_setup: Duration::from_millis(5),
+            batch_decode: Duration::from_millis(8),
+            row_materialize: Duration::from_millis(7),
+            parquet_bytes: 1000,
+            record_batches_decoded: 2,
+            rows_materialized: 50,
+            attribute_entries: 100,
+        };
+        total += SpanStatsPhaseDurations {
+            download: Duration::from_millis(1),
+            parse: Duration::from_millis(2),
+            query: Duration::from_millis(3),
+            reader_setup: Duration::from_millis(1),
+            batch_decode: Duration::from_millis(1),
+            row_materialize: Duration::from_millis(0),
+            parquet_bytes: 500,
+            record_batches_decoded: 1,
+            rows_materialized: 25,
+            attribute_entries: 40,
+        };
+
+        assert_eq!(total.download, Duration::from_millis(11));
+        assert_eq!(total.parse, Duration::from_millis(22));
+        assert_eq!(total.query, Duration::from_millis(33));
+        assert_eq!(total.reader_setup, Duration::from_millis(6));
+        assert_eq!(total.batch_decode, Duration::from_millis(9));
+        assert_eq!(total.row_materialize, Duration::from_millis(7));
+        assert_eq!(total.parquet_bytes, 1500);
+        assert_eq!(total.record_batches_decoded, 3);
+        assert_eq!(total.rows_materialized, 75);
+        assert_eq!(total.attribute_entries, 140);
+    }
+
     #[tokio::test]
     async fn object_stream_metric_is_a_separate_entry() {
         let TestEntrySink { inspector, sink } = test_entry_sink();
@@ -678,6 +926,75 @@ mod tests {
 
         let e = inspector.get(0);
         assert_eq!(e.metrics["truncated_mid_stream"].as_u64(), 0);
+    }
+
+    #[tokio::test]
+    async fn span_stats_stream_metric_carries_duration_and_final_coverage() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+
+        // Arm, let a little wall-clock elapse, set FINAL coverage split, drop → one entry.
+        let mut guard = SpanStatsStreamMetrics::arm("/api/span-stats");
+        guard.files_matched = 1678;
+        guard.files_seeded = 154;
+        guard.files_folded_cold = 20;
+        guard.files_folded = 174;
+        guard.download_duration = Duration::from_millis(120);
+        guard.parse_duration = Duration::from_millis(230);
+        guard.query_duration = Duration::from_millis(340);
+        // Sub-phases that sum to parse_duration.
+        guard.reader_setup_duration = Duration::from_millis(50);
+        guard.batch_decode_duration = Duration::from_millis(80);
+        guard.row_materialize_duration = Duration::from_millis(100);
+        // Work counters.
+        guard.parquet_bytes = 12_345_678;
+        guard.record_batches_decoded = 42;
+        guard.rows_materialized = 150_000;
+        guard.attribute_entries = 300_000;
+        // Non-zero elapsed so stream_duration is a real observation.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        drop(guard);
+
+        let entries = inspector.entries();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        // Aligns with the request metric's `operation` dimension.
+        assert_eq!(e.values["operation"], "/api/span-stats");
+        assert_eq!(e.metrics["count"].as_u64(), 1);
+        assert_eq!(e.metrics["failed"].as_u64(), 0);
+        // Final coverage fields, seeded-vs-cold split summing to files_folded.
+        assert_eq!(e.metrics["files_matched"].as_u64(), 1678);
+        assert_eq!(e.metrics["files_folded"].as_u64(), 174);
+        assert_eq!(e.metrics["files_seeded"].as_u64(), 154);
+        assert_eq!(e.metrics["files_folded_cold"].as_u64(), 20);
+        // Each phase is emitted as one cumulative stream observation.
+        assert_eq!(e.metrics["download_duration"].num_observations(), 1);
+        assert_eq!(e.metrics["parse_duration"].num_observations(), 1);
+        assert_eq!(e.metrics["query_duration"].num_observations(), 1);
+        // Sub-phase durations are also present.
+        assert_eq!(e.metrics["reader_setup_duration"].num_observations(), 1);
+        assert_eq!(e.metrics["batch_decode_duration"].num_observations(), 1);
+        assert_eq!(e.metrics["row_materialize_duration"].num_observations(), 1);
+        // Work counters.
+        assert_eq!(e.metrics["parquet_bytes"].as_u64(), 12_345_678);
+        assert_eq!(e.metrics["record_batches_decoded"].as_u64(), 42);
+        assert_eq!(e.metrics["rows_materialized"].as_u64(), 150_000);
+        assert_eq!(e.metrics["attribute_entries"].as_u64(), 300_000);
+        // The stream-duration timer emitted a single observation (a real elapsed).
+        assert_eq!(e.metrics["stream_duration"].num_observations(), 1);
+    }
+
+    #[tokio::test]
+    async fn span_stats_stream_metric_flags_failure() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+
+        let mut guard = SpanStatsStreamMetrics::arm("/api/span-stats");
+        guard.failed = 1;
+        drop(guard);
+
+        let e = inspector.get(0);
+        assert_eq!(e.metrics["failed"].as_u64(), 1);
     }
 
     #[tokio::test]

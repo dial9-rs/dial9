@@ -11,7 +11,7 @@
     "pretest": "npm run check:boundary",
     "test": "vitest run",
     "posttest": "npm run test:node-legacy",
-    "test:node-legacy": "for f in test_flamegraph_inspect.js test_flamegraph_inspect_dom.js test_flamegraph_histogram.js test_flamegraph_view_state.js test_flamegraph_deeplink.js test_flamegraph_exact_view_state.js test_flamegraph_diff_view_state.js test_flamegraph_diff.js test_flamegraph_setdirect_export.js test_focus_timebase.js test_sse.js test_trace_scope.js test_tokio_stats_api.js; do echo \"# node $f\"; node \"$f\" || exit 1; done",
+    "test:node-legacy": "for f in test_flamegraph_inspect.js test_flamegraph_inspect_dom.js test_flamegraph_histogram.js test_flamegraph_view_state.js test_flamegraph_deeplink.js test_flamegraph_exact_view_state.js test_flamegraph_diff_view_state.js test_flamegraph_diff.js test_flamegraph_setdirect_export.js test_focus_timebase.js test_span_explorer.js test_sse.js test_trace_scope.js test_tokio_stats_api.js; do echo \"# node $f\"; node \"$f\" || exit 1; done",
     "bench": "vitest bench --run"
   },
   "dependencies": {

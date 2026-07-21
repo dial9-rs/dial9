@@ -138,6 +138,24 @@ function nextMaxFiles(currentFolded, opts) {
   return Math.min(cap, Math.max(min, target));
 }
 
+
+// Choose the depth that "Refine more" should grow. `files_folded` includes all
+// matching cache and can be much larger than this request's new-work prefix.
+function refinementWorkDepth(coverage, currentMaxFiles) {
+  const reportedCap = coverage && Number(coverage.fold_work_cap);
+  if (Number.isFinite(reportedCap) && reportedCap > 0) return reportedCap;
+  const requestedCap = Number(currentMaxFiles);
+  if (Number.isFinite(requestedCap) && requestedCap > 0) return requestedCap;
+  return coverage ? Number(coverage.files_folded) || 0 : 0;
+}
+
+// A same-scope refinement reconstructs cached state through bounded seed
+// batches. Keep the existing tree until the incoming cumulative snapshot has
+// recovered at least the files already visible to the user.
+function shouldAdoptRefinementSnapshot(preserveExisting, baselineFilesFolded, incomingFilesFolded) {
+  if (!preserveExisting) return true;
+  return Number(incomingFilesFolded || 0) >= Number(baselineFilesFolded || 0);
+}
 // --- Data-driven toolbar facet options ---------------------------------------
 //
 // The `/api/flamegraph` response carries a `metadata` block describing which
@@ -189,18 +207,21 @@ function hostFacetOptions(hostNames) {
   return opts;
 }
 
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = {
-    formatCoverageBadge,
-    foldErrorNotice,
-    coveragePercent,
-    nextMaxFiles,
-    nsToPickerUtc,
-    pickerUtcToNs,
-    msToNs,
-    nsToMs,
-    sourceFacetOptions,
-    threadFacetOptions,
-    hostFacetOptions,
-  };
-}
+const FlamegraphApi = {
+  formatCoverageBadge,
+  foldErrorNotice,
+  coveragePercent,
+  nextMaxFiles,
+  refinementWorkDepth,
+  shouldAdoptRefinementSnapshot,
+  nsToPickerUtc,
+  pickerUtcToNs,
+  msToNs,
+  nsToMs,
+  sourceFacetOptions,
+  threadFacetOptions,
+  hostFacetOptions,
+};
+
+if (typeof window !== "undefined") window.FlamegraphApi = FlamegraphApi;
+if (typeof module !== "undefined" && module.exports) module.exports = FlamegraphApi;

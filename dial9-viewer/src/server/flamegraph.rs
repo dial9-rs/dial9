@@ -568,6 +568,8 @@ impl fold_stream::FoldSink for FlamegraphSink {
         &self,
         resolved: &Resolved,
         files_folded: usize,
+        folded_set_id: &str,
+        target_folded_set_id: Option<&str>,
         hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event {
@@ -575,6 +577,8 @@ impl fold_stream::FoldSink for FlamegraphSink {
         let coverage = fold_stream::coverage_from(
             resolved,
             files_folded,
+            folded_set_id,
+            target_folded_set_id,
             hosts_folded,
             errors,
             snap.total_samples,

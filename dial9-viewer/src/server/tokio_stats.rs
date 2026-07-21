@@ -415,6 +415,8 @@ fn snapshot_event(
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
             files_folded,
+            folded_set_id: None,
+            target_folded_set_id: None,
             fold_work_cap: ctx.resolved.fold_work_cap(),
             // tokio-stats counts folded files, not samples, as its "folded" unit.
             samples_folded: files_folded,
