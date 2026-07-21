@@ -148,6 +148,11 @@ fn spans_part_key(output_prefix: &str, source_key: &str) -> String {
     )
 }
 
+/// Public accessor for `spans_part_key` used by span_stats endpoint.
+pub(crate) fn spans_part_key_pub(output_prefix: &str, source_key: &str) -> String {
+    spans_part_key(output_prefix, source_key)
+}
+
 /// The `samples/` prefix for one source bucket under the versioned root — the
 /// folded-set LIST target. Pruned to a single source bucket.
 fn samples_prefix(output_prefix: &str, source_bucket: &str) -> String {
@@ -521,6 +526,9 @@ pub(crate) async fn list_folded_leaves(
 pub(crate) struct Coverage {
     pub files_matched: usize,
     pub files_folded: usize,
+    /// Number of matched files in the deterministic prefix eligible for new
+    /// folding in this request. Cached coverage may exceed this value.
+    pub fold_work_cap: usize,
     pub samples_folded: usize,
     /// Total bytes of all matched source files in the scope.
     pub total_bytes: u64,
@@ -646,6 +654,7 @@ pub(crate) type FacetFilters = HashMap<&'static str, String>;
 
 /// Accumulates distinct facet values across part-files. One `HashSet<String>`
 /// per facet definition.
+#[derive(Clone)]
 struct FacetAccum {
     /// Distinct values per facet (indexed same as [`FACETS`]).
     sets: Vec<HashSet<String>>,
@@ -681,7 +690,7 @@ impl FacetAccum {
 }
 
 /// The combined per-query filter: time range + poll-duration band + per-facet
-/// exact-match filters.
+/// exact-match filters + span-type filter.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SampleFilter {
     /// Optional time range filter (epoch nanoseconds, half-open: [start, end)).
@@ -703,6 +712,15 @@ pub(crate) struct SampleFilter {
     /// or absent = no constraint. For "source", the default is "cpu" (set by the
     /// endpoint when the param is absent).
     pub facets: FacetFilters,
+    /// Span type UID filter (raw 16 bytes). When Some, only samples whose
+    /// `enclosing_spans` column contains a matching type UID pass. Reads
+    /// the new v4 `enclosing_spans` column; old part-files without it pass all
+    /// samples when no span filter is active (backwards compatible).
+    pub span_type_uid: Option<[u8; 16]>,
+    /// Minimum span elapsed_ns for span filtering (inclusive).
+    pub min_span_ns: Option<i64>,
+    /// Maximum span elapsed_ns for span filtering (inclusive).
+    pub max_span_ns: Option<i64>,
 }
 
 /// One bar of the poll-duration histogram: a log-scale duration bucket
@@ -814,18 +832,64 @@ impl FlamegraphAccum {
     }
 
     /// Merge one folded file's samples part-file (and its optional stacks dict)
-    /// into the running totals.
+    /// into the running totals **transactionally**: both the sample counts and the
+    /// dict are staged into temporaries and committed only when the full merge
+    /// (samples + dict) succeeds. A failure in either step leaves `self` unchanged.
     pub(crate) fn merge(&mut self, samples: Vec<u8>, dict: Option<Vec<u8>>) -> anyhow::Result<()> {
-        self.read_samples_part(samples)?;
+        // Stage: clone the mutable state that read_samples_part and read_dict_part
+        // would mutate, so a failure in either step leaves self unchanged.
+        let mut staged_counts = self.counts.clone();
+        let mut staged_dict = self.dict.clone();
+        let mut staged_facets = self.facets.clone();
+        let mut staged_total = self.total_samples;
+        let mut staged_min_ts = self.min_ts;
+        let mut staged_max_ts = self.max_ts;
+        let mut staged_poll_hist = self.poll_hist.clone();
+
+        // Apply samples into the staged state.
+        self.read_samples_part_into(
+            samples,
+            &mut staged_counts,
+            &mut staged_dict,
+            &mut staged_facets,
+            &mut staged_total,
+            &mut staged_min_ts,
+            &mut staged_max_ts,
+            &mut staged_poll_hist,
+        )?;
+
+        // Apply dict into the staged state.
         if let Some(dict) = dict {
-            read_dict_part(dict, &mut self.dict)?;
+            read_dict_part(dict, &mut staged_dict)?;
         }
+
+        // Commit: both succeeded — swap staged state into self.
+        self.counts = staged_counts;
+        self.dict = staged_dict;
+        self.facets = staged_facets;
+        self.total_samples = staged_total;
+        self.min_ts = staged_min_ts;
+        self.max_ts = staged_max_ts;
+        self.poll_hist = staged_poll_hist;
         Ok(())
     }
 
-    /// Parse a single samples part-file and merge its rows into the running
-    /// accumulators, applying time/facet/band filters.
-    fn read_samples_part(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+    /// Parse a single samples part-file and merge its rows into the provided
+    /// staged accumulators, applying time/facet/band filters. Used by the
+    /// transactional [`merge`](Self::merge) to stage mutations without touching
+    /// `self` until both samples and dict succeed.
+    #[allow(clippy::too_many_arguments)]
+    fn read_samples_part_into(
+        &self,
+        data: Vec<u8>,
+        counts: &mut HashMap<[u8; 16], u64>,
+        _dict: &mut HashMap<Vec<u8>, Vec<String>>,
+        facets: &mut FacetAccum,
+        total_samples: &mut usize,
+        min_ts: &mut Option<i64>,
+        max_ts: &mut Option<i64>,
+        poll_hist: &mut PollHist,
+    ) -> anyhow::Result<()> {
         // `Bytes::from(Vec<u8>)` reuses the allocation (no copy); threading the
         // owned buffer in from the caller avoids the round-trip through `&[u8]`.
         let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
@@ -872,7 +936,7 @@ impl FlamegraphAccum {
                 for (fi, col) in facet_cols.iter().enumerate() {
                     let val = extract_facet_value(col, i);
                     if let Some(ref v) = val {
-                        self.facets.sets[fi].insert(v.clone());
+                        facets.sets[fi].insert(v.clone());
                     }
                     row_values.push(val);
                 }
@@ -907,7 +971,7 @@ impl FlamegraphAccum {
                 // Off-poll rows (no duration) don't fall in any log₂ bucket, so they
                 // simply don't contribute — matching the band's exclusion of them.
                 if let Some(k) = poll_dur.and_then(poll_bucket) {
-                    *self.poll_hist.entry(k).or_insert(0) += 1;
+                    *poll_hist.entry(k).or_insert(0) += 1;
                 }
 
                 // Poll-duration band filter. A row with no poll duration (null column,
@@ -927,19 +991,35 @@ impl FlamegraphAccum {
                     }
                 }
 
+                // Span-type filter: when active, only samples whose
+                // enclosing_spans list contains a matching span_type_uid pass.
+                // Old part-files without the column pass all rows when no span
+                // filter is active (backwards compatible per design §7).
+                if let Some(ref wanted_uid) = self.filter.span_type_uid
+                    && !span_filter_matches(
+                        &batch,
+                        i,
+                        wanted_uid,
+                        self.filter.min_span_ns,
+                        self.filter.max_span_ns,
+                    )
+                {
+                    continue;
+                }
+
                 // Count this sample.
                 let mut id = [0u8; 16];
                 id.copy_from_slice(stack_arr.value(i));
-                *self.counts.entry(id).or_insert(0) += 1;
-                self.total_samples += 1;
+                *counts.entry(id).or_insert(0) += 1;
+                *total_samples += 1;
                 if let Some(ts) = ts_arr {
                     let v = ts.value(i);
-                    self.min_ts = Some(self.min_ts.map_or(v, |m| m.min(v)));
-                    self.max_ts = Some(self.max_ts.map_or(v, |m| m.max(v)));
+                    *min_ts = Some(min_ts.map_or(v, |m| m.min(v)));
+                    *max_ts = Some(max_ts.map_or(v, |m| m.max(v)));
                 }
                 // Track matched hosts for the "N hosts" badge.
                 if let Some(ref h) = row_values[host_facet_index()] {
-                    self.facets.matched_hosts.insert(h.clone());
+                    facets.matched_hosts.insert(h.clone());
                 }
             }
         }
@@ -984,27 +1064,33 @@ pub(crate) async fn fetch_sample_parts(
     Some((samples.ok()?, dict_data.ok()))
 }
 
-/// Fetch the samples + dict part-files for every folded key in `source_keys`,
-/// concurrently (`buffer_unordered`). Used to prime a [`FlamegraphAccum`] with
-/// the already-folded set before streaming new folds. The caller merges the
-/// returned buffers serially, so the accumulator needs no locking.
+/// Fetch the samples + dict part-files for each explicit source key,
+/// concurrently (`buffer_unordered`). Returns `(leaf, Result)` pairs keyed by
+/// [`part_leaf_of`] so callers can identify exactly which leaves succeeded or
+/// failed regardless of completion order. Used by the fold-stream driver to
+/// seed a [`FlamegraphAccum`] one bounded batch at a time.
 pub(crate) async fn fetch_folded_sample_parts(
     output: &dyn StorageBackend,
     bucket: &str,
     output_prefix: &str,
     source_keys: &[String],
-    folded: &HashSet<String>,
-) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+) -> Vec<(String, Result<(Vec<u8>, Option<Vec<u8>>), String>)> {
     use futures::stream::StreamExt;
-    let keys: Vec<String> = source_keys
-        .iter()
-        .filter(|sk| folded.contains(&part_leaf_of(sk)))
-        .cloned()
-        .collect();
-    futures::stream::iter(keys)
-        .map(|sk| async move { fetch_sample_parts(output, bucket, output_prefix, &sk).await })
+    futures::stream::iter(source_keys.iter().cloned())
+        .map(|sk| async move {
+            let leaf = part_leaf_of(&sk);
+            match fetch_sample_parts(output, bucket, output_prefix, &sk).await {
+                Some(parts) => (leaf, Ok(parts)),
+                None => (
+                    leaf,
+                    Err(format!(
+                        "{}: sample parts GET failed",
+                        sk.rsplit('/').next().unwrap_or(&sk)
+                    )),
+                ),
+            }
+        })
         .buffer_unordered(SAMPLES_READ_CONCURRENCY)
-        .filter_map(|x| async { x })
         .collect()
         .await
 }
@@ -1249,6 +1335,102 @@ pub(crate) fn ordered_full_keys_with_size(
         })
         .collect();
     (keys, total_bytes)
+}
+
+/// Check if a sample row at index `i` has an enclosing span matching the
+/// span-type filter (type UID + optional duration band). Reads the nested
+/// `enclosing_spans` LIST<STRUCT> column. Returns `true` if ANY membership
+/// matches.
+///
+/// FAIL CLOSED: If the column is absent (old v3 part-file without span data)
+/// or malformed, returns `false` — no samples pass a span filter when the
+/// membership data is unavailable. This prevents silently including unvetted
+/// samples when a user explicitly requests span-scoped analysis.
+pub(crate) fn span_filter_matches(
+    batch: &arrow::record_batch::RecordBatch,
+    row: usize,
+    wanted_uid: &[u8; 16],
+    min_span_ns: Option<i64>,
+    max_span_ns: Option<i64>,
+) -> bool {
+    use arrow::array::{Array, AsArray};
+
+    let Some(col) = batch.column_by_name("enclosing_spans") else {
+        // Old part-file without enclosing_spans column — fail closed: the sample
+        // cannot prove membership, so it does not pass the span filter.
+        return false;
+    };
+    let list_arr = match col.as_list_opt::<i32>() {
+        Some(a) => a,
+        None => return false, // Malformed column — fail closed
+    };
+
+    if list_arr.is_null(row) {
+        return false;
+    }
+
+    let offsets = list_arr.offsets();
+    let start = offsets[row] as usize;
+    let end = offsets[row + 1] as usize;
+    if start == end {
+        return false; // Empty list = no enclosing spans
+    }
+
+    let values = list_arr.values();
+    let struct_arr = match values.as_struct_opt() {
+        Some(a) => a,
+        None => return false, // Malformed — fail closed
+    };
+
+    // Find span_type_uid and elapsed_ns columns in the struct.
+    let type_uid_col = struct_arr.column_by_name("span_type_uid").and_then(|c| {
+        c.as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+    });
+    let elapsed_col = struct_arr
+        .column_by_name("elapsed_ns")
+        .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+
+    let Some(type_uid_arr) = type_uid_col else {
+        return false; // Schema doesn't have the expected field — fail closed
+    };
+
+    // When duration bounds exist, the elapsed_ns column MUST be present and
+    // valid. If it's absent, fail closed — we cannot verify the bound.
+    let has_bounds = min_span_ns.is_some() || max_span_ns.is_some();
+    if has_bounds && elapsed_col.is_none() {
+        return false; // Cannot verify bounds without elapsed_ns — fail closed
+    }
+
+    for idx in start..end {
+        // Fail closed on null list children (malformed struct entries).
+        if struct_arr.is_null(idx) {
+            continue;
+        }
+        if type_uid_arr.is_null(idx) {
+            continue; // Null type UID — skip (fail closed for this child)
+        }
+        let uid = type_uid_arr.value(idx);
+        if uid == wanted_uid.as_slice() {
+            // Type matches. Check optional duration band.
+            if has_bounds {
+                let elapsed_arr = elapsed_col.unwrap(); // safe: checked above
+                if elapsed_arr.is_null(idx) {
+                    // Null elapsed when bounds are required — fail closed for this entry.
+                    continue;
+                }
+                let elapsed = elapsed_arr.value(idx);
+                if min_span_ns.is_some_and(|min| elapsed < min) {
+                    continue;
+                }
+                if max_span_ns.is_some_and(|max| elapsed > max) {
+                    continue;
+                }
+            }
+            return true;
+        }
+    }
+    false
 }
 
 /// Shared `Arc`-friendly handle bundle the server uses to run the refinement
@@ -1611,6 +1793,322 @@ mod tests {
         assert_eq!(
             ordered.iter().map(|o| &o.key).collect::<Vec<_>>(),
             by_key.iter().map(|o| &o.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// Verify span_filter_matches fails closed when enclosing_spans column is absent
+    /// (old v3 schema). A span filter should exclude rather than include samples
+    /// with no provable membership.
+    #[test]
+    fn span_filter_old_schema_fail_closed() {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::write_samples;
+
+        // Create a sample WITH NO enclosing_spans data (simulating old schema)
+        let samples = vec![ResolvedSample {
+            timestamp_ns: 1000,
+            stack_id: [1u8; 16],
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: Some(5_000_000),
+            spawn_location: Some("src/main.rs:42".to_string()),
+            enclosing_spans: Vec::new(), // empty = no membership
+        }];
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+
+        // A span filter with a specific span_type_uid should NOT match this sample.
+        let filter = SampleFilter {
+            span_type_uid: Some([42u8; 16]),
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(buf, None).unwrap();
+        assert_eq!(
+            accum.snapshot().total_samples,
+            0,
+            "span filter must fail closed: sample with no membership data must NOT pass"
+        );
+    }
+
+    /// Verify span_filter_matches works with valid membership data.
+    #[test]
+    fn span_filter_matches_valid_membership() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::write_samples;
+
+        let target_uid = [42u8; 16];
+        let samples = vec![ResolvedSample {
+            timestamp_ns: 1000,
+            stack_id: [1u8; 16],
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: Some(5_000_000),
+            spawn_location: Some("src/main.rs:42".to_string()),
+            enclosing_spans: vec![EnclosingSpanSummary {
+                span_uid: [1u8; 16],
+                span_type_uid: target_uid,
+                elapsed_ns: 10_000_000,
+                details_complete: true,
+            }],
+        }];
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+
+        // Filter matches the target uid
+        let filter = SampleFilter {
+            span_type_uid: Some(target_uid),
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(buf, None).unwrap();
+        assert_eq!(
+            accum.snapshot().total_samples,
+            1,
+            "span filter must match when membership is present"
+        );
+    }
+
+    /// Verify that min_span_ns/max_span_ns bounds work on exact boundaries.
+    #[test]
+    fn span_filter_exact_window_boundaries() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::write_samples;
+
+        let target_uid = [42u8; 16];
+        let make_sample = |elapsed_ns: u64| -> ResolvedSample {
+            ResolvedSample {
+                timestamp_ns: 1000,
+                stack_id: [1u8; 16],
+                worker_id: Some(1),
+                source: SOURCE_CPU_PROFILE,
+                source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+                host: "myhost".to_string(),
+                service: "shale".to_string(),
+                date: "2026-06-19".to_string(),
+                poll_duration_ns: None,
+                spawn_location: None,
+                enclosing_spans: vec![EnclosingSpanSummary {
+                    span_uid: [1u8; 16],
+                    span_type_uid: target_uid,
+                    elapsed_ns,
+                    details_complete: true,
+                }],
+            }
+        };
+
+        let samples = vec![
+            make_sample(1_000_000),  // exactly at min boundary
+            make_sample(5_000_000),  // in the middle
+            make_sample(10_000_000), // exactly at max boundary
+            make_sample(10_000_001), // just above max
+            make_sample(999_999),    // just below min
+        ];
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+
+        // Band [1ms, 10ms] inclusive — should keep exactly 3 samples
+        let filter = SampleFilter {
+            span_type_uid: Some(target_uid),
+            min_span_ns: Some(1_000_000),
+            max_span_ns: Some(10_000_000),
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(buf, None).unwrap();
+        assert_eq!(
+            accum.snapshot().total_samples,
+            3,
+            "span filter boundaries must be inclusive: [min, max]"
+        );
+    }
+
+    /// DELIVERABLE (span-explorer bug repro): the `span_type_uid` filter must keep
+    /// ONLY the samples enclosed by a span of the requested type, and the surviving
+    /// flamegraph must therefore contain ONLY that type's frames. This is the test
+    /// that makes a broken filter obvious: two span types (A, B) enclose samples
+    /// with clearly distinguishable stack frames ("frame_A_only" vs "frame_B_only").
+    /// Filtering to A must yield frame_A_only and NOT frame_B_only, and vice versa.
+    ///
+    /// The count-only span-filter tests above use identical stack frames, so they
+    /// would still pass if the filter mixed the wrong samples in. This test asserts
+    /// on the actual frames present in the folded stacks dictionary, so a filter
+    /// that lets the wrong span type's samples through fails loudly.
+    #[test]
+    fn span_filter_keeps_only_matching_span_types_frames() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::{write_samples, write_stacks_dict};
+
+        let type_a = [0xAAu8; 16];
+        let type_b = [0xBBu8; 16];
+
+        // Two stacks with distinct, easily-greppable leaf frames.
+        let stack_a = [0x0Au8; 16];
+        let stack_b = [0x0Bu8; 16];
+        let frames_a = vec!["frame_A_only".to_string(), "shared_root".to_string()];
+        let frames_b = vec!["frame_B_only".to_string(), "shared_root".to_string()];
+
+        let sample = |stack_id: [u8; 16], type_uid: [u8; 16], ts: u64| ResolvedSample {
+            timestamp_ns: ts,
+            stack_id,
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: vec![EnclosingSpanSummary {
+                span_uid: [1u8; 16],
+                span_type_uid: type_uid,
+                elapsed_ns: 5_000_000,
+                details_complete: true,
+            }],
+        };
+
+        // 3 samples enclosed by type A (frame_A_only), 2 by type B (frame_B_only).
+        let samples = vec![
+            sample(stack_a, type_a, 1000),
+            sample(stack_a, type_a, 1001),
+            sample(stack_a, type_a, 1002),
+            sample(stack_b, type_b, 1003),
+            sample(stack_b, type_b, 1004),
+        ];
+        let mut samples_buf = Vec::new();
+        write_samples(&mut samples_buf, &samples, &HashMap::new()).unwrap();
+
+        let mut dict = HashMap::new();
+        dict.insert(stack_a, frames_a.clone());
+        dict.insert(stack_b, frames_b.clone());
+        let mut dict_buf = Vec::new();
+        write_stacks_dict(&mut dict_buf, &dict).unwrap();
+
+        // Collect the distinct frame names present in the surviving (kept) stacks.
+        let surviving_frames =
+            |span_type_uid: Option<[u8; 16]>| -> std::collections::HashSet<String> {
+                let filter = SampleFilter {
+                    span_type_uid,
+                    facets: HashMap::from([("source", "cpu".to_string())]),
+                    ..Default::default()
+                };
+                let mut accum = FlamegraphAccum::new(filter);
+                accum
+                    .merge(samples_buf.clone(), Some(dict_buf.clone()))
+                    .unwrap();
+                let snap = accum.snapshot();
+                let mut frames = std::collections::HashSet::new();
+                for (stack_id, count) in &snap.stack_counts {
+                    assert!(*count > 0, "a stack with zero count should not be present");
+                    if let Some(fs) = snap.stacks_dict.get(stack_id) {
+                        for f in fs {
+                            frames.insert(f.clone());
+                        }
+                    }
+                }
+                frames
+            };
+
+        // Filter to type A: only frame_A_only survives.
+        let a = surviving_frames(Some(type_a));
+        assert!(
+            a.contains("frame_A_only"),
+            "type-A filter must keep frame_A_only, got {a:?}"
+        );
+        assert!(
+            !a.contains("frame_B_only"),
+            "type-A filter must NOT keep frame_B_only (broken filter leaks B), got {a:?}"
+        );
+
+        // Filter to type B: only frame_B_only survives.
+        let b = surviving_frames(Some(type_b));
+        assert!(
+            b.contains("frame_B_only"),
+            "type-B filter must keep frame_B_only, got {b:?}"
+        );
+        assert!(
+            !b.contains("frame_A_only"),
+            "type-B filter must NOT keep frame_A_only (broken filter leaks A), got {b:?}"
+        );
+
+        // No filter: both frames survive.
+        let both = surviving_frames(None);
+        assert!(
+            both.contains("frame_A_only") && both.contains("frame_B_only"),
+            "no span filter must keep both span types' frames, got {both:?}"
+        );
+    }
+
+    /// FlamegraphAccum::merge is transactional: a dict parse failure after
+    /// samples have been read must leave the accumulator unchanged.
+    #[test]
+    fn flamegraph_merge_dict_failure_leaves_accum_unchanged() {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::write_samples;
+
+        let sample = ResolvedSample {
+            timestamp_ns: 5000,
+            stack_id: [42u8; 16],
+            worker_id: Some(0),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: Vec::new(),
+        };
+        let mut samples_buf = Vec::new();
+        write_samples(&mut samples_buf, &[sample], &HashMap::new()).unwrap();
+
+        // A valid dict: the merge should succeed.
+        let filter = SampleFilter {
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter.clone());
+        accum.merge(samples_buf.clone(), None).unwrap();
+        assert_eq!(accum.snapshot().total_samples, 1);
+
+        // Now attempt a merge with garbage dict: must fail and leave accum
+        // unchanged (transactional — samples should not be committed).
+        let mut accum2 = FlamegraphAccum::new(filter);
+        let result = accum2.merge(samples_buf, Some(b"not valid parquet".to_vec()));
+        assert!(result.is_err(), "garbage dict must fail");
+        assert_eq!(
+            accum2.snapshot().total_samples,
+            0,
+            "transactional merge must leave accum unchanged on dict failure"
+        );
+    }
+
+    /// FlamegraphAccum::merge is transactional: a samples parse failure must
+    /// leave the accumulator unchanged.
+    #[test]
+    fn flamegraph_merge_samples_failure_leaves_accum_unchanged() {
+        let filter = SampleFilter {
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        let result = accum.merge(b"not valid parquet".to_vec(), None);
+        assert!(result.is_err(), "garbage samples must fail");
+        assert_eq!(
+            accum.snapshot().total_samples,
+            0,
+            "transactional merge must leave accum unchanged on samples failure"
         );
     }
 }
