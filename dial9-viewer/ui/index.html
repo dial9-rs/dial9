@@ -269,7 +269,7 @@
             <button id="creds-clear">Clear</button>
             <span id="creds-status" class="creds-status"></span>
         </div>
-        <!-- Bucket picker, populated from GET /api/buckets/details after Apply. -->
+        <!-- Bucket picker, populated from GET /api/buckets after Apply. -->
         <div class="creds-row" id="creds-buckets-row" style="display:none;align-items:flex-start">
             <label style="padding-top:6px">Bucket</label>
             <div id="creds-buckets" class="creds-buckets"></div>
@@ -575,7 +575,7 @@
         // trace buckets. Defaults to the filtered view; the "Show all" toggle
         // flips it. Retained across re-renders (e.g. re-listing on reload).
         let showAllBuckets = false;
-        // The last full bucket list from /api/buckets/details, so the toggle can
+        // The last full bucket list from /api/buckets, so the toggle can
         // re-render without another list call.
         let lastBuckets = [];
 
@@ -702,7 +702,7 @@
         async function loadBuckets() {
             setStatus('Listing buckets…', null);
             try {
-                const buckets = await Dial9Creds.listBucketDetails();
+                const buckets = await Dial9Creds.listBuckets();
                 setStatus(`${buckets.length} bucket(s) — pick one below`, 'ok');
                 renderBucketPicker(buckets);
             } catch (e) {

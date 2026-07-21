@@ -1,7 +1,7 @@
 use assert2::check;
 use dial9_viewer::server::{AppState, UploadLimits, router};
 use dial9_viewer::storage::{
-    ListPage, LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError,
+    BucketInfo, ListPage, LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -13,7 +13,7 @@ struct FakeBackend;
 impl StorageBackend for FakeBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Ok(vec![]) })
     }
 
@@ -111,7 +111,7 @@ struct ErroringBackend;
 impl StorageBackend for ErroringBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 
@@ -632,7 +632,7 @@ fn obj_info(key: &str) -> ObjectInfo {
 impl StorageBackend for ReorderingBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Ok(vec![]) })
     }
 
@@ -797,28 +797,9 @@ async fn byo_credentials_list_buckets_from_headers() {
 
     let resp = client_list_buckets(&base).await;
     check!(resp.status().as_u16() == 200);
-    let names: Vec<String> = resp.json().await.unwrap();
-    check!(names.contains(&"byo-bucket".to_string()));
-    check!(names.contains(&"dial9-traces".to_string()));
-
-    // The additive details endpoint preserves the existing names-only contract
-    // while giving the picker ListBuckets' per-bucket region when available.
-    let resp = reqwest::Client::new()
-        .get(format!("{base}/api/buckets/details"))
-        .header(H_AKID, "test")
-        .header(H_SECRET, "test")
-        .header(H_REGION, "us-east-1")
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let buckets: Vec<serde_json::Value> = resp.json().await.unwrap();
-    check!(buckets.iter().any(|bucket| bucket["name"] == "byo-bucket"));
-    check!(
-        buckets
-            .iter()
-            .any(|bucket| bucket["name"] == "dial9-traces")
-    );
+    let buckets: Vec<BucketInfo> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket.name == "byo-bucket"));
+    check!(buckets.iter().any(|bucket| bucket.name == "dial9-traces"));
 }
 
 #[tokio::test]
@@ -1476,8 +1457,8 @@ async fn assume_role_lists_bucket_via_assumed_creds() {
         .await
         .unwrap();
     check!(resp.status().as_u16() == 200);
-    let names: Vec<String> = resp.json().await.unwrap();
-    check!(names.contains(&"byo-bucket".to_string()));
+    let buckets: Vec<BucketInfo> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket.name == "byo-bucket"));
     // The exact ARN from the header reached the assumer.
     let assumed = assumed.lock().unwrap();
     check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
@@ -1502,8 +1483,8 @@ async fn assume_role_via_query_params_is_linkable() {
         .await
         .unwrap();
     check!(resp.status().as_u16() == 200);
-    let names: Vec<String> = resp.json().await.unwrap();
-    check!(names.contains(&"byo-bucket".to_string()));
+    let buckets: Vec<BucketInfo> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket.name == "byo-bucket"));
     let assumed = assumed.lock().unwrap();
     check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
 }

@@ -547,10 +547,6 @@ fn api_router(state: AppState) -> Router {
         .route("/config", axum::routing::get(config::get_config))
         .route("/buckets", axum::routing::get(buckets::list_buckets))
         .route(
-            "/buckets/details",
-            axum::routing::get(buckets::list_bucket_details),
-        )
-        .route(
             "/credentials/check",
             axum::routing::post(check::check_credentials),
         )

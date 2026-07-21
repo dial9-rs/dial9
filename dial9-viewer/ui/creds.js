@@ -332,30 +332,14 @@
   }
 
   /**
-   * List the buckets the stored credentials can see (`GET /api/buckets`), so
-   * the UI can offer a picker. Browser-only. Throws on HTTP error with the
+   * List the buckets the stored credentials can see (`GET /api/buckets`) with
+   * the region returned by S3. Browser-only. Throws on HTTP error with the
    * server's message (e.g. credentials rejected).
-   *
-   * @returns {Promise<string[]>}
-   */
-  async function listBuckets() {
-    const resp = await fetch("/api/buckets", { headers: headers() });
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
-    }
-    return await resp.json();
-  }
-
-  /**
-   * List visible buckets with the region returned by S3's ListBuckets call.
-   * Unlike listBuckets(), this returns `{name, region}` objects and is used by
-   * the picker to avoid a second, wrong-region HeadBucket probe.
    *
    * @returns {Promise<Array<{name: string, region: string|null}>>}
    */
-  async function listBucketDetails() {
-    const resp = await fetch("/api/buckets/details", { headers: headers() });
+  async function listBuckets() {
+    const resp = await fetch("/api/buckets", { headers: headers() });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
@@ -414,7 +398,6 @@
     parse,
     check,
     listBuckets,
-    listBucketDetails,
     clear,
     headers,
     // Test seam — inject a fake storage backend.

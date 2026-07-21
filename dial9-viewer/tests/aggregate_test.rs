@@ -424,7 +424,10 @@ impl dial9_viewer::storage::StorageBackend for FailingPuts {
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<Vec<String>, dial9_viewer::storage::StorageError>,
+                    Output = Result<
+                        Vec<dial9_viewer::storage::BucketInfo>,
+                        dial9_viewer::storage::StorageError,
+                    >,
                 > + Send
                 + '_,
         >,

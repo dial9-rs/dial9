@@ -83,30 +83,13 @@ pub struct ObjectStream {
 
 /// Abstraction over trace storage (S3, local FS, etc.)
 pub trait StorageBackend: Send + Sync {
-    /// List the buckets the current credentials can see. Lets the viewer offer
-    /// a bucket picker instead of requiring the user to know the name. Backends
+    /// List the buckets the current credentials can see, including their AWS
+    /// regions when available. Lets the viewer offer a region-aware bucket
+    /// picker instead of requiring the user to know either value. Backends
     /// without a bucket concept (local FS) return an empty list.
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
-
-    /// List buckets with their AWS regions when available.
-    ///
-    /// The default preserves compatibility for third-party backends by
-    /// adapting [`StorageBackend::list_buckets`] and leaving the region
-    /// unknown. S3 overrides this to retain `BucketRegion` from `ListBuckets`.
-    fn list_bucket_details(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
-        Box::pin(async move {
-            Ok(self
-                .list_buckets()
-                .await?
-                .into_iter()
-                .map(|name| BucketInfo::new(name, None))
-                .collect())
-        })
-    }
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>>;
 
     /// List objects under `prefix`, paginating up to `cap` results.
     ///
@@ -511,19 +494,6 @@ pub fn build_credentialed_client(
 impl StorageBackend for S3Backend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
-        Box::pin(async move {
-            Ok(self
-                .fetch_bucket_details()
-                .await?
-                .into_iter()
-                .map(|bucket| bucket.name)
-                .collect())
-        })
-    }
-
-    fn list_bucket_details(
-        &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(self.fetch_bucket_details())
     }
@@ -898,7 +868,7 @@ impl Drop for LocalBackend {
 impl StorageBackend for LocalBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         // Local mode has no bucket concept; the synthetic "local" bucket is
         // wired in by the caller.
         Box::pin(async { Ok(Vec::new()) })
@@ -1325,7 +1295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_bucket_details_requests_and_preserves_regions() {
+    async fn list_buckets_requests_and_preserves_regions() {
         use aws_smithy_http_client::test_util::infallible_client_fn;
 
         let http_client = infallible_client_fn(|req: http::Request<_>| {
@@ -1367,7 +1337,7 @@ mod tests {
             .build();
         let backend = S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg));
 
-        let buckets = backend.list_bucket_details().await.unwrap();
+        let buckets = backend.list_buckets().await.unwrap();
         assert_eq!(
             buckets,
             vec![
