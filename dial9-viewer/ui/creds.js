@@ -347,6 +347,22 @@
     return await resp.json();
   }
 
+  /**
+   * List visible buckets with the region returned by S3's ListBuckets call.
+   * Unlike listBuckets(), this returns `{name, region}` objects and is used by
+   * the picker to avoid a second, wrong-region HeadBucket probe.
+   *
+   * @returns {Promise<Array<{name: string, region: string|null}>>}
+   */
+  async function listBucketDetails() {
+    const resp = await fetch("/api/buckets/details", { headers: headers() });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
+    }
+    return await resp.json();
+  }
+
   /** Clear stored credentials and notify listeners. */
   function clear() {
     storage().removeItem(STORAGE_KEY);
@@ -398,6 +414,7 @@
     parse,
     check,
     listBuckets,
+    listBucketDetails,
     clear,
     headers,
     // Test seam — inject a fake storage backend.

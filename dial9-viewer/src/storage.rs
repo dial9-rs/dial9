@@ -13,6 +13,27 @@ pub struct ObjectInfo {
     pub last_modified: Option<String>,
 }
 
+/// A bucket visible to the current credentials and its AWS region, when S3
+/// included it in the `ListBuckets` response.
+///
+/// `#[non_exhaustive]` keeps this additive response type extensible without
+/// preventing callers from reading the current fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BucketInfo {
+    pub name: String,
+    pub region: Option<String>,
+}
+
+impl BucketInfo {
+    pub fn new(name: impl Into<String>, region: Option<String>) -> Self {
+        Self {
+            name: name.into(),
+            region,
+        }
+    }
+}
+
 /// A bounded page of object listings, plus whether the cap was reached.
 ///
 /// `truncated` is the signal the old listing path lacked: when a prefix fans
@@ -68,6 +89,24 @@ pub trait StorageBackend: Send + Sync {
     fn list_buckets(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
+
+    /// List buckets with their AWS regions when available.
+    ///
+    /// The default preserves compatibility for third-party backends by
+    /// adapting [`StorageBackend::list_buckets`] and leaving the region
+    /// unknown. S3 overrides this to retain `BucketRegion` from `ListBuckets`.
+    fn list_bucket_details(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
+        Box::pin(async move {
+            Ok(self
+                .list_buckets()
+                .await?
+                .into_iter()
+                .map(|name| BucketInfo::new(name, None))
+                .collect())
+        })
+    }
 
     /// List objects under `prefix`, paginating up to `cap` results.
     ///
@@ -338,6 +377,45 @@ impl S3Backend {
         Self { client }
     }
 
+    async fn fetch_bucket_details(&self) -> Result<Vec<BucketInfo>, StorageError> {
+        const MAX_BUCKETS: usize = 200;
+
+        // S3 only includes BucketRegion when ListBuckets has at least one valid
+        // parameter. Setting the page size both enables that field and keeps
+        // pagination bounded by the viewer's existing display cap.
+        let mut pages = self
+            .client
+            .list_buckets()
+            .max_buckets(MAX_BUCKETS as i32)
+            .into_paginator()
+            .send();
+        let mut buckets = Vec::new();
+        let mut truncated = false;
+        'pages: while let Some(page) = pages.next().await {
+            let page = page.map_err(|e| classify_s3_error(&e))?;
+            for bucket in page.buckets() {
+                if let Some(name) = bucket.name() {
+                    buckets.push(BucketInfo::new(
+                        name,
+                        bucket.bucket_region().map(str::to_string),
+                    ));
+                }
+                if buckets.len() >= MAX_BUCKETS {
+                    truncated = true;
+                    break 'pages;
+                }
+            }
+        }
+        if truncated {
+            tracing::warn!(
+                max = MAX_BUCKETS,
+                "bucket listing truncated at cap; some buckets are not shown"
+            );
+        }
+        buckets.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(buckets)
+    }
+
     /// Build an ephemeral backend from user-supplied credentials.
     ///
     /// The credentials are passed as a concrete value, which acts as a *static*
@@ -435,31 +513,19 @@ impl StorageBackend for S3Backend {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
         Box::pin(async move {
-            const MAX_BUCKETS: usize = 200;
-            let mut pages = self.client.list_buckets().into_paginator().send();
-            let mut names = Vec::new();
-            let mut truncated = false;
-            'pages: while let Some(page) = pages.next().await {
-                let page = page.map_err(|e| classify_s3_error(&e))?;
-                for b in page.buckets() {
-                    if let Some(name) = b.name() {
-                        names.push(name.to_string());
-                    }
-                    if names.len() >= MAX_BUCKETS {
-                        truncated = true;
-                        break 'pages;
-                    }
-                }
-            }
-            if truncated {
-                tracing::warn!(
-                    max = MAX_BUCKETS,
-                    "bucket listing truncated at cap; some buckets are not shown"
-                );
-            }
-            names.sort();
-            Ok(names)
+            Ok(self
+                .fetch_bucket_details()
+                .await?
+                .into_iter()
+                .map(|bucket| bucket.name)
+                .collect())
         })
+    }
+
+    fn list_bucket_details(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
+        Box::pin(self.fetch_bucket_details())
     }
 
     fn list_objects(
@@ -1256,6 +1322,59 @@ mod tests {
             .http_client(http_client)
             .build();
         S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg))
+    }
+
+    #[tokio::test]
+    async fn list_bucket_details_requests_and_preserves_regions() {
+        use aws_smithy_http_client::test_util::infallible_client_fn;
+
+        let http_client = infallible_client_fn(|req: http::Request<_>| {
+            assert!(
+                req.uri()
+                    .query()
+                    .is_some_and(|query| query.contains("max-buckets=200")),
+                "ListBuckets must include a valid parameter so S3 returns BucketRegion: {}",
+                req.uri()
+            );
+            let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+                <ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Buckets>
+                    <Bucket>
+                      <Name>dial9-cape-town</Name>
+                      <CreationDate>2026-07-21T00:00:00.000Z</CreationDate>
+                      <BucketRegion>af-south-1</BucketRegion>
+                    </Bucket>
+                    <Bucket>
+                      <Name>dial9-oregon</Name>
+                      <CreationDate>2026-07-21T00:00:00.000Z</CreationDate>
+                      <BucketRegion>us-west-2</BucketRegion>
+                    </Bucket>
+                  </Buckets>
+                </ListAllMyBucketsResult>"#;
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/xml")
+                .body(body)
+                .unwrap()
+        });
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client)
+            .build();
+        let backend = S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg));
+
+        let buckets = backend.list_bucket_details().await.unwrap();
+        assert_eq!(
+            buckets,
+            vec![
+                BucketInfo::new("dial9-cape-town", Some("af-south-1".to_string())),
+                BucketInfo::new("dial9-oregon", Some("us-west-2".to_string())),
+            ]
+        );
     }
 
     /// A `PermanentRedirect` (the error S3 returns when a bucket is addressed in

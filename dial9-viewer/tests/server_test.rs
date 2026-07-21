@@ -800,6 +800,25 @@ async fn byo_credentials_list_buckets_from_headers() {
     let names: Vec<String> = resp.json().await.unwrap();
     check!(names.contains(&"byo-bucket".to_string()));
     check!(names.contains(&"dial9-traces".to_string()));
+
+    // The additive details endpoint preserves the existing names-only contract
+    // while giving the picker ListBuckets' per-bucket region when available.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets/details"))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let buckets: Vec<serde_json::Value> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket["name"] == "byo-bucket"));
+    check!(
+        buckets
+            .iter()
+            .any(|bucket| bucket["name"] == "dial9-traces")
+    );
 }
 
 #[tokio::test]
