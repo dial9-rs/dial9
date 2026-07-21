@@ -16,8 +16,10 @@ mod config;
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
+pub(crate) mod fold_stream;
 pub(crate) mod metrics;
 mod prefixes;
+pub(crate) mod span_stats;
 pub(crate) mod tokio_stats;
 mod trace;
 mod upload;
@@ -333,11 +335,12 @@ impl AppState {
         &self,
         bucket: Option<&str>,
         prefix: Option<&str>,
+        aws_region: Option<&str>,
         creds: MaybeCreds,
     ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
         use crate::ingest::aggregate::AggContext;
         if let Some(bucket) = bucket {
-            let backend = self.resolve(creds).await?;
+            let backend = self.resolve_with_region(creds, aws_region).await?;
             let source_prefix = prefix
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
@@ -398,6 +401,17 @@ impl AppState {
         &self,
         creds: MaybeCreds,
     ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
+        self.resolve_with_region(creds, None).await
+    }
+
+    /// Resolve a backend for aggregate reads, honoring a deep-linked region even
+    /// when the request uses the server's ambient credentials. Explicit BYO or
+    /// assumed-role credentials already carry their own validated region.
+    async fn resolve_with_region(
+        &self,
+        creds: MaybeCreds,
+        ambient_region: Option<&str>,
+    ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
         let parsed = match creds.0 {
             Ok(parsed) => parsed,
             Err(
@@ -424,10 +438,11 @@ impl AppState {
             // BYO disabled (local-dir) — credentials are meaningless here.
             CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
             CredSource::Default => {
-                // No credential headers reached the backend. On a BYO-capable
-                // server this means we fall back to the server's ambient identity
-                // — the usual cause of a "wrong account" error.
                 if self.allow_byo_creds {
+                    if let Some(region) = ambient_region {
+                        tracing::debug!(%region, "using ambient credentials in request region");
+                        return Ok(Arc::new(S3Backend::from_env_in_region(region).await));
+                    }
                     tracing::debug!(
                         "no x-dial9-aws-* credentials on request; using server's default identity"
                     );
@@ -560,6 +575,10 @@ fn api_router(state: AppState) -> Router {
         .route(
             "/tokio-stats",
             axum::routing::get(tokio_stats::get_tokio_stats),
+        )
+        .route(
+            "/span-stats",
+            axum::routing::get(span_stats::get_span_stats),
         )
         .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
         .merge(upload_route)

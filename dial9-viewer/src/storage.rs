@@ -324,6 +324,20 @@ impl S3Backend {
         Self::from_client(aws_sdk_s3::Client::new(&config))
     }
 
+    /// Create an ambient-credential client pinned to a request's bucket region.
+    ///
+    /// Deep links carry `aws_region` even when they rely on the server's ambient
+    /// identity rather than explicit BYO credentials. The default SDK config may
+    /// have no region at all, so reusing the process-wide backend would otherwise
+    /// fail endpoint resolution before making an S3 request.
+    pub async fn from_env_in_region(region: &str) -> Self {
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(region.to_string()))
+            .load()
+            .await;
+        Self::from_client(aws_sdk_s3::Client::new(&config))
+    }
+
     /// Create from an existing S3 client (useful for testing with s3s).
     pub fn from_client(client: aws_sdk_s3::Client) -> Self {
         Self { client }
