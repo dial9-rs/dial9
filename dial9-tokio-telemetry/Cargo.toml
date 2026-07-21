@@ -109,8 +109,10 @@ unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 ## dial9 trace. See docs/design/metrique-integration.md and the
 ## `telemetry::metrique_integration` module docs. `metrique`/`metrique-writer`
 ## are already unconditional deps (used for dial9's own internal metrics),
-## so this only gates compiling the integration module.
-metrique-integration = []
+## so this only gates compiling the integration module. The generic
+## descriptor-walking/encoding engine lives in `dial9-utils`; this crate
+## only adds the tokio-specific `Dial9Context`.
+metrique-integration = ["dep:dial9-utils", "dial9-utils/metrique-integration"]
 ## All features except platform-specific ones (taskdump). Used in CI for non-Linux targets.
 __nonlinux_all_features = [
     "analysis",

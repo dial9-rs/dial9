@@ -10,8 +10,8 @@ This design depends on the entry descriptor system in metrique (see `docs/entry-
 
 ## Glossary
 
-- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `attach_to_stream_with_dial9`, `metrique_sink(...)`, or a manual `tee(emf, Dial9Stream::new(..))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
-- **`Dial9Context`**: a metrique struct users flatten into their entries. Its constructor captures caller-thread `worker_id`, `task_id`, and `monotonic_ns_start`; its `CloseValue` captures `monotonic_ns_end`. These four fields are tagged `dial9::Context` internally so the sink can route them to the trace event header rather than into the payload.
+- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `attach_to_stream_with_dial9`, `metrique_sink(...)`, or a manual `tee(emf, Dial9Stream::new(..))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace. Implemented in `dial9-utils` (runtime-agnostic — see "Crate split" below), not in `dial9-tokio-telemetry`.
+- **`Dial9Context`**: a metrique struct users flatten into their entries, defined in `dial9-tokio-telemetry` (it's the tokio-specific piece). Its constructor captures caller-thread `worker_id` and `monotonic_ns_start`; its `CloseValue` captures `monotonic_ns_end`. These three fields are tagged `dial9::Context` internally so the sink can route them to the trace event header rather than into the payload. There is deliberately no `task_id` field — see "Task correlation" under Visualization data shape.
 - **`dial9::Emit`**: the user-facing field tag that opts a field into the dial9 payload. Applied at struct scope via `#[metrics(default_field_tag(Emit))]` or at field scope via `#[metrics(field_tag(Emit))]`; inverted with `skip(Emit)`.
 - **`dial9::Interned`**: the user-facing field tag that asks dial9 to route string data in this field through its string pool. Orthogonal to `Emit`.
 - **`dial9::Context`**: a `#[doc(hidden)]` dial9-internal field tag carried by `Dial9Context`'s own fields. Users do not interact with it directly; they flatten `Dial9Context` into their entry, and the sink walks the descriptor on first-use to find fields tagged `Context`. The name is not a stable guarantee; a future typed source-extraction mechanism would replace this tag-based discovery.
@@ -173,16 +173,14 @@ Work on the caller thread is bounded to constructing `Dial9Context` and wrapping
 
 ### `Dial9Context` (metrique field type)
 
-Regular metrique struct defined in the dial9 crate:
+Regular metrique struct, defined in `dial9-tokio-telemetry` (the tokio-specific
+crate — see "Crate split" below):
 
 ```rust
 #[metrics]
 pub struct Dial9Context {
     #[metrics(field_tag(dial9::Context))]
     worker_id: WorkerId,
-
-    #[metrics(field_tag(dial9::Context))]
-    task_id: Option<TaskId>,
 
     #[metrics(field_tag(dial9::Context))]
     monotonic_ns_start: u64,
@@ -208,7 +206,7 @@ impl Dial9Context {
 
 The metrique macro's generated `CloseValue` impl for `Dial9Context` delegates to each field's own `CloseValue::close`, which is the standard metrique pattern (the same way `Timer` and other close-time field types work). `MonotonicAtClose::close` reads the monotonic clock at close time; `u64` appears in the closed form.
 
-Construction always captures the monotonic clock at request start. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible.
+Construction always captures the monotonic clock at request start. Tokio runtime state (worker id) is captured if the thread is owned by a tokio runtime; otherwise it's `WorkerId::UNKNOWN`. `capture()` is infallible. There is no `task_id` field — see "Task correlation" under Visualization data shape for why.
 
 `Dial9Context` deliberately does not implement `Default` or `Clone`. `Default::default()` would produce zero-valued fields that silently look like "valid context captured at monotonic time 0" without ever firing the "no context" diagnostic (the `dial9::Context` tag is still present, the values are just meaningless). Users construct it with `Dial9Context::capture()` at the field initializer site; forgetting produces a clear compile error about the missing field.
 
@@ -216,7 +214,20 @@ The end monotonic is captured at close time via `CloseValue`, so the event carri
 
 If no dial9 runtime is attached at all (inert `TelemetryHandle`), `Dial9Stream` short-circuits the event; the `Dial9Context` field is harmlessly constructed and discarded.
 
-When flattened into a user struct, the four fields become part of the parent's descriptor with the `dial9::Context` tag. Dial9 finds them by walking the descriptor at first-use.
+When flattened into a user struct, the three fields become part of the parent's descriptor with the `dial9::Context` tag. Dial9 finds them by walking the descriptor at first-use.
+
+### Crate split
+
+The descriptor-walking, schema-building, and wire-encoding machinery
+(`Dial9Stream`, the `Emit`/`Interned`/`Context` field tags, schema
+construction) lives in `dial9-utils`, gated behind its own
+`metrique-integration` feature. None of it depends on tokio, or any runtime
+at all — it only needs metrique's entry-descriptor system and a
+`Dial9Handle` to write through. `Dial9Context` is the tokio-specific piece
+that's layered on top, in `dial9-tokio-telemetry`, which re-exports the
+`dial9-utils` types alongside it at the same public path
+(`dial9_tokio_telemetry::telemetry::metrique_integration`). This split keeps
+the door open for a future non-tokio dial9 integration to reuse the engine.
 
 ### `Dial9Stream`
 
@@ -257,8 +268,8 @@ For `Flex` fields, the unit applies to the map values, not the keys.
 Dial9 produces a trace with per-event data that supports viewer tooling. The design does not prescribe how the viewer renders, but the structural surface it receives from dial9 includes:
 
 - **Timeline placement**: start and end monotonic timestamps from `Dial9Context` (start from `capture()`, end from `CloseValue`). Events render as timeline spans with duration `end - start`.
-- **Worker placement**: `worker_id` from `Dial9Context`. Events pin to their starting tokio worker. Off-runtime events carry `WorkerId::UNKNOWN`.
-- **Task correlation**: `task_id: Option<TaskId>` from `Dial9Context`. Lets the viewer correlate events that ran on the same task (e.g., a `DbQueryMetrics` emitted inside a `RequestMetrics` block sharing `task_id`).
+- **Worker placement**: `worker_id` from `Dial9Context`. Captured once, at `Dial9Context::capture()` time, so it names the worker the entry *started* on, not necessarily the worker it ran on for its whole span — tokio's work-stealing scheduler can resume a task on a different worker after any await point. Off-runtime events carry `WorkerId::UNKNOWN`.
+- **Task correlation**: not carried directly. `Dial9Context` has no `task_id` field. dial9's own native poll timeline (`PollStartEvent`/`PollEndEvent`) already lets a viewer join `worker_id` + a timestamp back to the task that was running at that instant — the same join the dial9 tracing-span integration (`SpanEnter`/`SpanExit`) relies on instead of carrying `task_id` itself. Duplicating `task_id` into every metrique event would be both redundant with that join and, since it's captured only once at `capture()` time, a second and potentially staler copy of the same information.
 - **Event type identity**: the entry's canonical name from `EntryDescriptor::name()`. Viewer tooling can group, filter, or color-code by event type.
 - **Full payload with units**: every `Emit`-tagged field of the event, with:
   - Field name (post-rename, as emitted via `Entry::write`).

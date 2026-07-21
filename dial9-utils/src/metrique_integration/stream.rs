@@ -3,9 +3,13 @@
 //! trace.
 
 use super::schema::{self, CachedDescriptor, ExpectedScalar, FieldRole, PayloadWire};
-use crate::rate_limit::rate_limited;
-use crate::telemetry::{Dial9Handle, ThreadLocalEncoder};
-use dial9_trace_format::types::FieldValue;
+use dial9_core::buffer::ThreadLocalEncoder;
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::handle::Dial9Handle;
+use dial9_core::rate_limited;
+use dial9_trace_format::encoder::Schema;
+use dial9_trace_format::schema::FieldDef;
+use dial9_trace_format::types::{FieldType, FieldValue};
 use metrique::writer::core::DescriptorId;
 use metrique::writer::value::{Observation, Value, ValueWriter};
 use metrique::writer::{
@@ -14,12 +18,14 @@ use metrique::writer::{
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// A metrique [`EntryIoStream`] that records every `Emit`-tagged field of a
 /// descriptor-aware entry into the dial9 trace, correlated via a flattened
-/// [`Dial9Context`](super::Dial9Context).
+/// runtime-provided context type (e.g. `dial9_tokio_telemetry`'s
+/// `Dial9Context`) whose fields carry the internal `Context` tag.
 ///
 /// Compose with an existing metrique pipeline via
 /// [`tee`](metrique::writer::stream::tee):
@@ -30,12 +36,21 @@ use std::time::{Duration, SystemTime};
 /// ```
 ///
 /// Entries with no descriptor (hand-written `Entry` impls), with `Emit`
-/// fields but no flattened `Dial9Context`, or with unsupported field shapes
+/// fields but no flattened context type, or with unsupported field shapes
 /// are diagnosed (see the module docs) and either dropped or recorded with a
 /// fallback header — they never panic the pipeline.
 #[derive(Debug)]
 pub struct Dial9Stream {
     handle: Dial9Handle,
+    // Bounded by the number of distinct compile-time entry-type/flatten-
+    // shape combinations the process instantiates: each key is a
+    // `Vec<DescriptorId>`, and a `DescriptorId` is derived from the address
+    // of a `&'static EntryDescriptor` the metrique macro generates once per
+    // struct definition (one per monomorphization actually compiled in, for
+    // generic entries). Nothing constructs a `DescriptorId` from runtime
+    // data, so this cache cannot grow with request volume or with the
+    // *content* of any single entry — only with how many distinct entry
+    // struct shapes exist in the binary, which is fixed at compile time.
     cache: HashMap<Vec<DescriptorId>, CachedDescriptor>,
     stats: Dial9StreamStats,
 }
@@ -49,6 +64,21 @@ struct Dial9StreamStats {
 }
 
 const DEBUG_SUMMARY_SAMPLE: u64 = 10_000;
+
+/// Fixed schema for the periodic sink-summary event (see
+/// [`Dial9Stream::maybe_log_summary`]). Field order must match the
+/// `FieldValue` order built there.
+static STATS_SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
+    Schema::new(
+        "MetriqueSinkStats",
+        vec![
+            FieldDef::new("DescriptorsSeen", FieldType::Varint),
+            FieldDef::new("DescriptorsSkipped", FieldType::Varint),
+            FieldDef::new("EventsEmitted", FieldType::Varint),
+            FieldDef::new("EventsDropped", FieldType::Varint),
+        ],
+    )
+});
 
 impl Dial9Stream {
     /// Build a stream that records into `handle`'s trace. Cheap to
@@ -68,12 +98,12 @@ impl Dial9Stream {
             debug_assert!(
                 false,
                 "dial9 metrique sink: entry '{name}' has Emit-tagged fields but no flattened \
-                 Dial9Context (or a #[cfg]-gated one that isn't compiled in); recording with a \
+                 context type (or a #[cfg]-gated one that isn't compiled in); recording with a \
                  WorkerId::UNKNOWN / no-task fallback header"
             );
             tracing::error!(
                 entry = %name,
-                "dial9 metrique sink: entry has Emit fields but no Dial9Context; recording with fallback header"
+                "dial9 metrique sink: entry has Emit fields but no context type; recording with fallback header"
             );
         }
         if build.interned_on_non_string {
@@ -114,15 +144,36 @@ impl Dial9Stream {
 
     fn maybe_log_summary(&self) {
         let emitted = self.stats.events_emitted.load(Ordering::Relaxed);
-        if emitted != 0 && emitted.is_multiple_of(DEBUG_SUMMARY_SAMPLE) {
-            tracing::debug!(
-                descriptors_seen = self.stats.descriptors_seen.load(Ordering::Relaxed),
-                descriptors_skipped = self.stats.descriptors_skipped.load(Ordering::Relaxed),
-                events_emitted = emitted,
-                events_dropped = self.stats.events_dropped.load(Ordering::Relaxed),
-                "dial9 metrique sink summary"
-            );
+        if emitted == 0 || !emitted.is_multiple_of(DEBUG_SUMMARY_SAMPLE) {
+            return;
         }
+        let descriptors_seen = self.stats.descriptors_seen.load(Ordering::Relaxed);
+        let descriptors_skipped = self.stats.descriptors_skipped.load(Ordering::Relaxed);
+        let events_dropped = self.stats.events_dropped.load(Ordering::Relaxed);
+        tracing::debug!(
+            descriptors_seen,
+            descriptors_skipped,
+            events_emitted = emitted,
+            events_dropped,
+            "dial9 metrique sink summary"
+        );
+        // Also self-report into the trace: a little meta (this is the
+        // sink's own operational telemetry, not user data), but it's the
+        // same information the debug log above carries and it's useful to
+        // have alongside the rest of the trace when investigating why
+        // metrique events are missing or a schema was skipped.
+        self.handle.with_encoder(|enc| {
+            enc.write_event(
+                &STATS_SCHEMA,
+                &[
+                    FieldValue::Varint(clock_monotonic_ns()),
+                    FieldValue::Varint(descriptors_seen),
+                    FieldValue::Varint(descriptors_skipped),
+                    FieldValue::Varint(emitted),
+                    FieldValue::Varint(events_dropped),
+                ],
+            );
+        });
     }
 }
 
@@ -195,27 +246,28 @@ impl EntryIoStream for Dial9Stream {
     }
 }
 
-/// Header fields captured from `Dial9Context`'s tagged fields, keyed by
-/// name. Defaults represent "no context captured" — used verbatim when an
-/// entry has `Emit` fields but no flattened `Dial9Context` (diagnosed
-/// separately at schema-build time).
+/// Header fields captured from the context type's tagged fields. Defaults
+/// represent "no context captured" — used verbatim when an entry has
+/// `Emit` fields but no flattened context type (diagnosed separately at
+/// schema-build time).
 struct EventHeader {
     worker_id: u64,
-    task_id: Option<u64>,
     monotonic_start: u64,
     monotonic_end: u64,
 }
 
+/// Sentinel worker id for events with no captured context — mirrors
+/// `dial9_tokio_telemetry::telemetry::WorkerId::UNKNOWN` (`255`). Kept as a
+/// local constant rather than a dependency on that type: this crate is
+/// runtime-agnostic and doesn't know about tokio workers, only about the
+/// `u64` wire representation of "unknown".
+const UNKNOWN_WORKER_ID: u64 = 255;
+
 impl EventHeader {
     fn fallback(has_context: bool) -> Self {
-        let now = if has_context {
-            0
-        } else {
-            crate::telemetry::clock_monotonic_ns()
-        };
+        let now = if has_context { 0 } else { clock_monotonic_ns() };
         Self {
-            worker_id: crate::telemetry::WorkerId::UNKNOWN.as_u64(),
-            task_id: None,
+            worker_id: UNKNOWN_WORKER_ID,
             monotonic_start: now,
             monotonic_end: now,
         }
@@ -237,7 +289,7 @@ struct Dial9EntryWriter<'w, 'enc> {
 
 impl<'w, 'enc> Dial9EntryWriter<'w, 'enc> {
     fn new(cached: &'w CachedDescriptor, enc: &'w mut ThreadLocalEncoder<'enc>) -> Self {
-        let payload_len = cached.schema.fields().len().saturating_sub(3);
+        let payload_len = cached.schema.fields().len().saturating_sub(2);
         Self {
             cached,
             enc,
@@ -248,15 +300,11 @@ impl<'w, 'enc> Dial9EntryWriter<'w, 'enc> {
     }
 
     /// Assemble the final `values` slice for `Encoder::write_event`:
-    /// `[timestamp, worker_id, task_id, monotonic_ns_end, ...payload]`.
+    /// `[timestamp, worker_id, monotonic_ns_end, ...payload]`.
     fn finish(self) -> Vec<FieldValue> {
-        let mut out = Vec::with_capacity(4 + self.payload.len());
+        let mut out = Vec::with_capacity(3 + self.payload.len());
         out.push(FieldValue::Varint(self.header.monotonic_start));
         out.push(FieldValue::Varint(self.header.worker_id));
-        out.push(match self.header.task_id {
-            Some(v) => FieldValue::Varint(v),
-            None => FieldValue::None,
-        });
         out.push(FieldValue::Varint(self.header.monotonic_end));
         out.extend(self.payload);
         out
@@ -275,11 +323,12 @@ impl<'w, 'enc> Dial9EntryWriter<'w, 'enc> {
 }
 
 impl<'a, 'w, 'enc> EntryWriter<'a> for Dial9EntryWriter<'w, 'enc> {
-    fn timestamp(&mut self, _timestamp: SystemTime) {
+    fn timestamp(&mut self, _timestamp: std::time::SystemTime) {
         // `#[metrics(timestamp)]` fields are excluded from
         // `descriptors().fields()`, so there's no role to look up here.
-        // dial9's own event timestamp comes from `monotonic_ns_start`
-        // (Dial9Context), not from metrique's optional wall-clock field.
+        // dial9's own event timestamp comes from the context type's
+        // captured start time, not from metrique's optional wall-clock
+        // field.
     }
 
     fn value(&mut self, name: impl Into<Cow<'a, str>>, value: &(impl Value + ?Sized)) {
@@ -300,15 +349,7 @@ impl<'a, 'w, 'enc> EntryWriter<'a> for Dial9EntryWriter<'w, 'enc> {
                     self.header.worker_id = v;
                 }
             }
-            FieldRole::ContextTaskId => {
-                let (result, _mismatch) =
-                    capture_value(self.enc, ExpectedScalar::UInt, false, value);
-                self.header.task_id = match result {
-                    Some(FieldValue::Varint(v)) => Some(v),
-                    _ => None,
-                };
-            }
-            FieldRole::ContextMonotonicStart => {
+            FieldRole::ContextTimestamp => {
                 let (result, _mismatch) =
                     capture_value(self.enc, ExpectedScalar::UInt, false, value);
                 if let Some(FieldValue::Varint(v)) = result {
@@ -323,7 +364,7 @@ impl<'a, 'w, 'enc> EntryWriter<'a> for Dial9EntryWriter<'w, 'enc> {
                 }
             }
             FieldRole::Payload { schema_index, wire } => {
-                let payload_index = schema_index - 3;
+                let payload_index = schema_index - 2;
                 let PayloadWire {
                     expected,
                     optional,

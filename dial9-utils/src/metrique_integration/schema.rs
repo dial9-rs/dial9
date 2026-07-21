@@ -13,6 +13,29 @@
 //! matches the name `field.name_parts()` resolves to here, independent of
 //! declaration order, so keying the role map by that name sidesteps the
 //! ordering issue entirely.
+//!
+//! ## Why the header (`WorkerId`/`MonotonicNsEnd`) is hardcoded rather than
+//! generic
+//!
+//! Unlike payload (`Emit`) fields — which are named and shaped purely from
+//! whatever the descriptor reports — the three header roles below
+//! (`ContextTimestamp`/`ContextWorkerId`/`ContextMonotonicEnd`) are assigned
+//! by the *position* a `Context`-tagged field is encountered in, not by
+//! name. This mirrors `Dial9Context`'s fixed field layout (see
+//! `dial9-tokio-telemetry`'s `context.rs`) and keeps two things true:
+//! `values[0]` must be the event's native timestamp (a wire-protocol
+//! requirement of `Encoder::write_event`, not a convention this module
+//! invented), and every dial9-integration event gets the same uniform
+//! `WorkerId`/`MonotonicNsEnd` header shape, which is what lets the viewer
+//! (once it grows metrique-aware rendering) place these events on a
+//! timeline without per-schema-aware logic. `task_id` used to be a third
+//! header field but was dropped: dial9's native poll timeline already lets
+//! a viewer join a worker + a timestamp back to the task that was running
+//! (see `PollStartEvent`/`PollEndEvent` and how `SpanEnter`/`SpanExit`
+//! already rely on that join instead of carrying `task_id` themselves), so
+//! duplicating it here was both redundant and, because it's captured only
+//! once at `Dial9Context::capture()` time, a second, easily-stale copy of
+//! information the poll timeline already has.
 
 use super::flags::{Context, Emit, Interned};
 use dial9_trace_format::encoder::Schema;
@@ -101,9 +124,8 @@ pub(super) struct PayloadWire {
 /// never stored in the map itself.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FieldRole {
+    ContextTimestamp,
     ContextWorkerId,
-    ContextTaskId,
-    ContextMonotonicStart,
     ContextMonotonicEnd,
     Payload {
         schema_index: usize,
@@ -153,13 +175,13 @@ pub(super) fn build(entry: &impl Entry) -> Option<BuildResult> {
     };
 
     let mut field_roles = HashMap::new();
-    // Fixed header prefix: worker_id/task_id/monotonic_ns_end always occupy
-    // schema slots 0..3, regardless of whether this entry's payload is
-    // empty. `monotonic_ns_start` is not a schema field — it becomes
-    // `values[0]`, dial9's native event-timestamp slot (see `stream.rs`).
+    // Fixed header prefix: worker_id/monotonic_ns_end always occupy schema
+    // slots 0..2, regardless of whether this entry's payload is empty.
+    // `monotonic_ns_start` is not a schema field — it becomes `values[0]`,
+    // dial9's native event-timestamp slot (see `stream.rs`, and the module
+    // doc above for why this header isn't derived generically).
     let mut fields = vec![
         FieldDef::new("WorkerId", FieldType::Varint),
-        FieldDef::new("TaskId", FieldType::OptionalVarint),
         FieldDef::new("MonotonicNsEnd", FieldType::Varint),
     ];
     let mut annotations = Vec::new();
@@ -190,24 +212,23 @@ pub(super) fn build(entry: &impl Entry) -> Option<BuildResult> {
             let is_emit = field.flags().any(|f| f.is::<Emit>());
 
             if is_context {
-                // Dial9Context's four fields are declared (and therefore
-                // written) in a fixed relative order: worker_id, task_id,
+                // The runtime context type's fields are declared (and
+                // therefore written) in a fixed relative order: worker_id,
                 // monotonic_ns_start, monotonic_ns_end. Assign by the order
                 // Context-tagged fields are encountered — independent of
                 // any `rename_all` style, and independent of where this
                 // flattened segment lands relative to the entry's own
                 // fields (see the module docs).
-                if context_seen < 4 {
+                if context_seen < 3 {
                     let role = match context_seen {
                         0 => FieldRole::ContextWorkerId,
-                        1 => FieldRole::ContextTaskId,
-                        2 => FieldRole::ContextMonotonicStart,
+                        1 => FieldRole::ContextTimestamp,
                         _ => FieldRole::ContextMonotonicEnd,
                     };
                     let name: String = field.name_parts().collect();
                     insert_role(&mut field_roles, name, role, &mut duplicate_field_name);
                     context_seen += 1;
-                } // more than 4: unexpected, ignore extras defensively
+                } // more than 3: unexpected, ignore extras defensively
                 continue;
             }
 
@@ -317,10 +338,10 @@ pub(super) fn build(entry: &impl Entry) -> Option<BuildResult> {
         }
     }
 
-    let has_context = context_seen == 4;
-    // `fields` always carries the 3-field fixed header; only a genuine
+    let has_context = context_seen == 3;
+    // `fields` always carries the 2-field fixed header; only a genuine
     // payload field (beyond that prefix) makes "no context" worth flagging.
-    let emit_without_context = !has_context && fields.len() > 3;
+    let emit_without_context = !has_context && fields.len() > 2;
 
     let name = entry_name.unwrap_or_else(|| "UnknownMetriqueEntry".to_string());
     let entry = SchemaEntry::with_annotations(name, true, fields, annotations);
@@ -428,11 +449,10 @@ mod tests {
         // produces) round-trips through the encoder's registration path.
         let fields = vec![
             FieldDef::new("WorkerId", FieldType::Varint),
-            FieldDef::new("TaskId", FieldType::OptionalVarint),
             FieldDef::new("MonotonicNsEnd", FieldType::Varint),
             FieldDef::new("Value", FieldType::Varint),
         ];
         let schema = Schema::new("Test", fields);
-        assert_eq!(schema.fields().len(), 4);
+        assert_eq!(schema.fields().len(), 3);
     }
 }

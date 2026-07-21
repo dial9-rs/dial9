@@ -3,18 +3,28 @@
 //!
 //! Dial9 acts as a peer metrique sink: entries flowing through your
 //! existing EMF/JSON metrique pipeline are also recorded into the dial9
-//! trace, correlated by worker id, task id, and a monotonic time span. A
-//! single trace file then carries both tokio runtime telemetry and your
-//! application's own request-scoped metrics.
+//! trace, correlated by worker id and a monotonic time span. A single trace
+//! file then carries both tokio runtime telemetry and your application's
+//! own request-scoped metrics.
 //!
-//! # Opting a field in
+//! The descriptor-walking and wire-encoding engine ([`Dial9Stream`],
+//! [`Emit`], [`Interned`]) lives in `dial9-utils` — it has no tokio
+//! dependency of its own. [`Dial9Context`] is the tokio-specific piece
+//! defined here: it captures worker id and monotonic timing from the
+//! current tokio runtime and tags its fields with `dial9-utils`'s internal
+//! `Context` flag so the engine can find them.
+//!
+//! # Choosing what to emit
 //!
 //! Flatten [`Dial9Context`] into your entry — anywhere; field order doesn't
-//! matter, see "Field order" below — and tag the fields you want in the
-//! dial9 trace with [`Emit`] (directly, or via
-//! `#[metrics(default_flags(Emit))]` at the struct level — struct-level
-//! defaults don't propagate across the flatten boundary, so `Dial9Context`'s
-//! own fields are unaffected either way):
+//! matter, see "Field order" below. The common pattern is to opt in by
+//! *default* and explicitly exclude the fields you don't want, via
+//! `#[metrics(default_flags(Emit))]` at the struct level plus
+//! `flags(skip(Emit))` on individual fields — struct-level defaults don't
+//! propagate across the flatten boundary, so `Dial9Context`'s own fields are
+//! unaffected either way. Tagging individual fields with [`Emit`] directly,
+//! without a struct-level default, works the same way if you'd rather opt
+//! in field-by-field instead:
 //!
 //! ```
 //! use dial9_tokio_telemetry::telemetry::metrique_integration::{Dial9Context, Emit, Interned};
@@ -30,6 +40,8 @@
 //!
 //!     operation: &'static str,
 //!
+//!     // Opted out of the struct-level `default_flags(Emit)` — won't reach
+//!     // the dial9 trace, even though every other field does.
 //!     #[metrics(flags(skip(Emit)))]
 //!     debug_blob: String,
 //! }
@@ -43,8 +55,6 @@
 //! ```
 //!
 //! [`Interned`] routes a string-shaped field through dial9's string pool.
-//! `flags(skip(Emit))` excludes a field the struct-level default would
-//! otherwise include.
 //!
 //! ## Field order
 //!
@@ -88,12 +98,14 @@
 //!   entry currently makes the *whole entry* look hand-written to this
 //!   sink (dropped, not just that field). Avoid flattening `Flex` on any
 //!   entry that also wants dial9 integration.
+//!
+//!   Both limitations are tracked for a possible follow-up: routing
+//!   un-modeled fields (lists, `Flex`, and any other shape this sink can't
+//!   capture structurally) through a schema trailer using
+//!   `FieldType::DynamicMap`/`OptionalDynamicMap` instead of falling back to
+//!   a comma-joined string or dropping the field.
 
 mod context;
-mod flags;
-mod schema;
-mod stream;
 
 pub use context::{Dial9Context, MonotonicAtClose};
-pub use flags::{Emit, Interned};
-pub use stream::Dial9Stream;
+pub use dial9_utils::metrique_integration::{Dial9Stream, Emit, Interned};

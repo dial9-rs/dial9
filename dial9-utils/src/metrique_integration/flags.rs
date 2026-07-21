@@ -37,16 +37,23 @@ impl FlagConstructor for Interned {
     }
 }
 
-/// Internal marker carried by [`Dial9Context`](super::Dial9Context)'s own
-/// fields, so [`Dial9Stream`](super::Dial9Stream) can find them by walking
-/// the descriptor. Not a stable guarantee for external use — a future typed
-/// source-extraction mechanism may replace this tag-based discovery.
+/// Internal marker carried by a runtime's context type (e.g.
+/// `dial9_tokio_telemetry`'s `Dial9Context`), so [`Dial9Stream`](super::Dial9Stream)
+/// can find its fields by walking the descriptor and route them into the
+/// trace event header rather than the payload. Not a stable guarantee for
+/// external use — a future typed source-extraction mechanism may replace
+/// this tag-based discovery.
 #[derive(Debug)]
 pub(crate) struct ContextOpt;
 impl MetricOptions for ContextOpt {}
 
+/// `#[doc(hidden)]`: internal marker flag for runtime-provided context
+/// fields (e.g. `dial9_tokio_telemetry::Dial9Context`'s own fields). Not
+/// part of the public API — end users tag fields with [`Emit`]/[`Interned`],
+/// never with this.
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) struct Context;
+pub struct Context;
 impl FlagConstructor for Context {
     fn construct() -> MetricFlags<'static> {
         MetricFlags::upcast(&ContextOpt)

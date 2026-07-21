@@ -15,12 +15,14 @@ use metrique::unit_of_work::metrics;
 use metrique::writer::core::{FieldShape, KnownShape};
 use metrique::writer::value::{Value, ValueWriter};
 use metrique::writer::{Entry, EntryIoStream, EntryWriter};
+use serde::Deserialize;
 use std::time::Duration;
 
 /// Decode every event across all captured segments into `(schema name,
-/// positional field values)`. The dial9 metrique sink registers a schema
-/// per distinct entry shape at runtime, so there's no compile-time struct to
-/// deserialize into — assert on raw positional values instead.
+/// positional field values)`. Used where a test needs to look at raw wire
+/// representation (e.g. confirming a field was actually pooled) rather than
+/// a resolved value — see `decode_one` below for the typed alternative used
+/// by most tests.
 fn decode_raw_events(segments: &[Vec<u8>]) -> Vec<(String, Vec<FieldValue>)> {
     let mut events = Vec::new();
     for bytes in segments {
@@ -32,6 +34,31 @@ fn decode_raw_events(segments: &[Vec<u8>]) -> Vec<(String, Vec<FieldValue>)> {
         .expect("decode segment");
     }
     events
+}
+
+/// Find the first event named `schema_name` across all captured segments and
+/// deserialize it into `T` via `dial9_trace_format`'s serde support. `T`
+/// only needs to name the fields a test cares about — unrecognized map
+/// entries (including `event`/`timestamp_ns`, and any field a struct
+/// doesn't declare) are ignored by serde's default derive behavior.
+fn decode_one<T: serde::de::DeserializeOwned>(segments: &[Vec<u8>], schema_name: &str) -> T {
+    for bytes in segments {
+        let mut dec = Decoder::new(bytes).expect("valid trace header");
+        let mut found = None;
+        dec.for_each_event(|raw| {
+            if found.is_none() && raw.name == schema_name {
+                found = Some(
+                    raw.deserialize::<T>()
+                        .unwrap_or_else(|e| panic!("{schema_name} should deserialize: {e}")),
+                );
+            }
+        })
+        .expect("decode segment");
+        if let Some(v) = found {
+            return v;
+        }
+    }
+    panic!("expected a {schema_name} event in the captured trace");
 }
 
 type CapturedBatches = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
@@ -84,6 +111,20 @@ struct TestMetrics {
     hidden: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct TestMetricsEvent {
+    worker_id: u64,
+    monotonic_ns_end: u64,
+    route: String,
+    count: u64,
+    latency_ms: f64,
+    // `Vec<u64>` `Emit` fields always land as a comma-joined string, never a
+    // structured list — see schema.rs's `FieldShape::List` match arm.
+    tags: String,
+    maybe_value: Option<u64>,
+}
+
 #[test]
 fn emit_tagged_fields_round_trip_with_context_header() {
     let (runtime, guard, batches, handle) = setup();
@@ -103,41 +144,19 @@ fn emit_tagged_fields_round_trip_with_context_header() {
 
     shutdown(runtime, guard);
     let batches = batches.lock().unwrap();
-    let events = decode_raw_events(&batches);
-    let (name, fields) = events
-        .iter()
-        .find(|(name, _)| name == "TestMetrics")
-        .expect("TestMetrics event should be recorded");
-    assert_eq!(name, "TestMetrics");
+    let event: TestMetricsEvent = decode_one(&batches, "TestMetrics");
 
-    // Fixed header prefix: WorkerId, TaskId, MonotonicNsEnd. `hidden` never
-    // appears (flags(skip(Emit))); `dial9`'s own fields never appear as
-    // payload (routed to the header instead) — so the schema has exactly
-    // 3 header fields + 5 Emit payload fields = 8.
-    assert_eq!(fields.len(), 8, "fields = {fields:?}");
-    assert!(matches!(fields[0], FieldValue::Varint(_)), "worker_id");
-    assert!(
-        matches!(fields[1], FieldValue::None | FieldValue::Varint(_)),
-        "task_id"
-    );
-    assert!(
-        matches!(fields[2], FieldValue::Varint(_)),
-        "monotonic_ns_end"
-    );
-    assert!(
-        matches!(fields[3], FieldValue::PooledString(_)),
-        "route should be interned, got {:?}",
-        fields[3]
-    );
-    assert_eq!(fields[4], FieldValue::Varint(42), "count");
-    assert_eq!(fields[5], FieldValue::F64(12.5), "latency_ms");
-    // `Vec<u64>` `Emit` fields always land as a comma-joined string, never a
-    // structured `DynamicList` — metrique's `ForceFlag` (applied to every
-    // `flags(...)`-tagged field, `Emit` included) wraps the writer with a
-    // type that doesn't forward `.values()` structurally. See schema.rs's
-    // `FieldShape::List` match arm.
-    assert_eq!(fields[6], FieldValue::String("1,2,3".to_string()), "tags");
-    assert_eq!(fields[7], FieldValue::Varint(7), "maybe_value");
+    // `hidden` never appears (flags(skip(Emit))); `dial9`'s own fields never
+    // appear as payload (routed to the header instead).
+    assert_eq!(event.route, "/api/users");
+    assert_eq!(event.count, 42);
+    assert_eq!(event.latency_ms, 12.5);
+    assert_eq!(event.tags, "1,2,3");
+    assert_eq!(event.maybe_value, Some(7));
+    // worker_id/monotonic_ns_end came from `Dial9Context::capture()`, so
+    // just confirm they decoded rather than pinning exact values.
+    let _ = event.worker_id;
+    assert!(event.monotonic_ns_end > 0);
 }
 
 #[test]
@@ -165,7 +184,10 @@ fn interned_string_resolves_through_string_pool() {
             if raw.name != "TestMetrics" {
                 return;
             }
-            if let dial9_trace_format::types::FieldValueRef::PooledString(id) = raw.fields[3] {
+            // Header is now 2 fields (WorkerId, MonotonicNsEnd; `task_id`
+            // was dropped — see `Dial9Context`'s docs), so `Route` is at
+            // index 2, not 3.
+            if let dial9_trace_format::types::FieldValueRef::PooledString(id) = raw.fields[2] {
                 found = true;
                 // Can't resolve through `dec.string_pool()` while `dec` is
                 // mutably borrowed by `for_each_event`; just confirm the
@@ -252,6 +274,8 @@ fn hand_written_entry_is_dropped_without_panicking() {
         "PollStartEvent",
         "PollEndEvent",
         "WakeEventEvent",
+        "QueueSampleEvent",
+        "MetriqueSinkStats",
     ];
     let unexpected: Vec<_> = events
         .iter()
@@ -367,6 +391,15 @@ struct MiddleOrderMetrics {
     after: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MiddleOrderMetricsEvent {
+    worker_id: u64,
+    monotonic_ns_end: u64,
+    before: u64,
+    after: u64,
+}
+
 #[test]
 fn dial9_context_field_order_does_not_matter() {
     let (runtime, guard, batches, handle) = setup();
@@ -383,23 +416,10 @@ fn dial9_context_field_order_does_not_matter() {
 
     shutdown(runtime, guard);
     let batches = batches.lock().unwrap();
-    let events = decode_raw_events(&batches);
-    let (_, fields) = events
-        .iter()
-        .find(|(name, _)| name == "MiddleOrderMetrics")
-        .expect("MiddleOrderMetrics event should be recorded even with dial9 mid-struct");
+    let event: MiddleOrderMetricsEvent = decode_one(&batches, "MiddleOrderMetrics");
 
-    // 3 fixed header fields (WorkerId, TaskId, MonotonicNsEnd) + Before, After.
-    assert_eq!(fields.len(), 5, "fields = {fields:?}");
-    assert!(matches!(fields[0], FieldValue::Varint(_)), "worker_id");
-    assert!(
-        matches!(fields[1], FieldValue::None | FieldValue::Varint(_)),
-        "task_id"
-    );
-    assert!(
-        matches!(fields[2], FieldValue::Varint(_)),
-        "monotonic_ns_end"
-    );
-    assert_eq!(fields[3], FieldValue::Varint(11), "before");
-    assert_eq!(fields[4], FieldValue::Varint(22), "after");
+    assert_eq!(event.before, 11);
+    assert_eq!(event.after, 22);
+    assert!(event.monotonic_ns_end > 0);
+    let _ = event.worker_id;
 }

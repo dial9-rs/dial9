@@ -15,6 +15,12 @@
 
 use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::Dial9Handle;
+// `Emit` here reads as a bare word at the `#[metrics(default_flags(Emit))]`
+// site below; a `dial9::Emit` (or similar namespaced) path would read more
+// clearly, but that depends on a public facade crate re-exporting this API
+// that doesn't exist today (`dial9-tokio-telemetry` is the library crate;
+// the `dial9` crate on crates.io is a CLI binary only). Tracked as a
+// follow-up rather than done here.
 use dial9_tokio_telemetry::telemetry::metrique_integration::{Dial9Context, Dial9Stream, Emit};
 use metrique::CloseValue;
 use metrique::RootEntry;

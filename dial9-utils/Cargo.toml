@@ -4,7 +4,7 @@ version = "0.4.0-alpha.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "S3 upload SegmentProcessor for dial9-core's pipeline"
+description = "Supporting utilities for dial9: S3 segment upload, and the runtime-agnostic metrique trace-integration engine"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
@@ -25,6 +25,17 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 hostname = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+metrique = "0.1.23"
+dial9-trace-format = { workspace = true }
+
+[features]
+## Runtime-agnostic engine that records `Emit`-tagged fields of
+## descriptor-aware metrique entries into the dial9 trace. `metrique` is
+## already an unconditional dependency of this crate, so this only gates
+## compiling the integration module. Runtime-specific context capture (e.g.
+## tokio worker/task ids) is layered on top by consuming crates such as
+## `dial9-tokio-telemetry`.
+metrique-integration = []
 
 [dev-dependencies]
 dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
