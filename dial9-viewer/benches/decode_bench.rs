@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use dial9_viewer::ingest::decode::decode_samples;
+use dial9_viewer::ingest::benchmark_decode_samples;
 
 fn load_demo_trace() -> Vec<u8> {
     let data = std::fs::read(concat!(
@@ -16,7 +16,7 @@ fn load_demo_trace() -> Vec<u8> {
 fn bench_decode(c: &mut Criterion) {
     let data = load_demo_trace();
     c.bench_function("decode_samples_demo_trace", |b| {
-        b.iter(|| decode_samples(&data, "bench/demo-trace.bin").unwrap());
+        b.iter(|| benchmark_decode_samples(&data, "bench/demo-trace.bin").unwrap());
     });
 }
 

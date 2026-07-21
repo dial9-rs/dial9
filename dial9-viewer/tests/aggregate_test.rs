@@ -1235,11 +1235,14 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
 
     // The output bucket should contain exactly `files_folded` samples part-files
     // (one per folded source file) — no duplicates from re-polling. The output
-    // is namespaced by source bucket: `…/v1/bucket={src}/samples/…`.
+    // is namespaced by source bucket: `…/v{VERSION}/bucket={src}/samples/…`.
+    let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
     let listed = uploader
         .list_objects_v2()
         .bucket("out-bucket")
-        .prefix("flamegraph-data/v3/bucket=src-bucket/samples/")
+        .prefix(format!(
+            "flamegraph-data/v{version}/bucket=src-bucket/samples/"
+        ))
         .send()
         .await
         .unwrap();
@@ -1604,45 +1607,44 @@ async fn fold_failures_are_reported_in_coverage() {
 }
 
 /// Regression for the fold commit ordering: when a fold's part-file writes only
-/// PARTIALLY succeed (here: `polls/` PUTs fail while everything else works —
-/// the same interleaving a fold task cancelled mid-write can produce, and with
-/// SSE streams a client disconnect cancels in-flight folds routinely), the file
-/// must NOT be recorded as folded. The `samples/` part is the durable folded
-/// record (`list_folded_leaves` lists it), so it must be written last: a file
-/// recorded as folded with its polls part missing would serve incomplete
-/// tokio-stats silently, forever — folded files are never re-folded.
+/// PARTIALLY succeed, failure of any prerequisite part must prevent the samples
+/// commit marker from landing. The `samples/` part is the durable folded record
+/// (`list_folded_leaves` lists it), so a committed file is never re-folded.
 #[tokio::test]
 async fn partial_write_failure_does_not_commit_fold() {
-    let fs = tempfile::tempdir().unwrap();
-    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
-    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+    for fail_substr in ["/polls/", "/spans/"] {
+        let fs = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+        std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
 
-    let uploader = fake_s3_client(fs.path());
-    let body = mini_trace_gz();
-    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+        let uploader = fake_s3_client(fs.path());
+        let body = mini_trace_gz();
+        seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
 
-    let output = Arc::new(FailingPuts {
-        inner: Arc::new(S3Backend::from_client(fake_s3_client(fs.path()))),
-        fail_substr: "/polls/",
-    });
-    let base =
-        start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
-    let http = reqwest::Client::new();
+        let output = Arc::new(FailingPuts {
+            inner: Arc::new(S3Backend::from_client(fake_s3_client(fs.path()))),
+            fail_substr,
+        });
+        let base =
+            start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
+        let http = reqwest::Client::new();
 
-    // Every fold attempt fails at the polls write and is reported as an error.
-    let r = stream_final(&http, &base, "service=shale").await;
-    let c = r.coverage.unwrap();
-    assert_eq!(c.fold_errors, 4, "all 4 capped folds failed");
-    assert_eq!(c.files_folded, 0, "a failed fold is not counted as folded");
+        let r = stream_final(&http, &base, "service=shale").await;
+        let c = r.coverage.unwrap();
+        assert_eq!(
+            c.fold_errors, 4,
+            "all capped folds must fail for {fail_substr}"
+        );
+        assert_eq!(
+            c.files_folded, 0,
+            "a failed {fail_substr} write must not count as folded"
+        );
 
-    // The load-bearing assertion: a fresh stream must ALSO see nothing folded.
-    // If the samples part had been written before (or concurrently with) the
-    // failing polls part, the folded-set listing would now claim these files
-    // are folded — committing them with their polls data missing forever.
-    let again = stream(&http, &base, "service=shale").await;
-    let c0 = again[0].coverage.as_ref().unwrap();
-    assert_eq!(
-        c0.files_folded, 0,
-        "no samples part may exist after a partial write failure (samples must be written last)"
-    );
+        let again = stream(&http, &base, "service=shale").await;
+        let c0 = again[0].coverage.as_ref().unwrap();
+        assert_eq!(
+            c0.files_folded, 0,
+            "no samples part may exist after a {fail_substr} write failure"
+        );
+    }
 }
