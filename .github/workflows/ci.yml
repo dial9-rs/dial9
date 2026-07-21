@@ -64,6 +64,28 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+  android-aarch64-build:
+    name: Android aarch64 build
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API: "30"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+          targets: aarch64-linux-android
+      - name: Build CPU profiling example
+        run: |
+          toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export AR="$toolchain/llvm-ar"
+          export RANLIB="$toolchain/llvm-ranlib"
+          export CC_aarch64_linux_android="$toolchain/aarch64-linux-android$ANDROID_API-clang"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo build -p dial9-perf-self-profile \
+            --example basic \
+            --target aarch64-linux-android
+
   # TEMPORARY: the nightly build is disabled while aws-runtime fails to compile
   # on nightly rustc (E0282 type-inference regression upstream). This gate skips
   # `build-nightly` until 2026-07-20 (UTC), after which the job re-enables
@@ -315,7 +337,7 @@ jobs:
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, feature-check, check-docs, trace-integrity, asan, ecs-sim, shuttle, package]
+    needs: [fmt, clippy, build, android-aarch64-build, feature-check, check-docs, trace-integrity, asan, ecs-sim, shuttle, package]
     if: always()
     steps:
       - run: |

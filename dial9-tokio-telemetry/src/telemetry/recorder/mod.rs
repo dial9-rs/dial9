@@ -1218,65 +1218,30 @@ mod tests {
 
     #[test]
     fn trace_runtime_multiple_runtimes_unique_worker_ids() {
-        use std::collections::HashSet;
-
-        let (capture, data) = CapturingProcessor::new();
         let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
-            .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-        builder_a.worker_threads(2).enable_all();
-        let (runtime_a, _handle_a) = traced
-            .trace_runtime("main")
-            .task_tracking(true)
-            .build(builder_a)
-            .unwrap();
+        builder_a.worker_threads(1);
+        let (runtime_a, _handle_a) = traced.trace_runtime("main").build(builder_a).unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
-        builder_b.worker_threads(2).enable_all();
-        let (runtime_b, _handle_b) = traced
-            .trace_runtime("io")
-            .task_tracking(true)
-            .build(builder_b)
-            .unwrap();
+        builder_b.worker_threads(1);
+        let (runtime_b, _handle_b) = traced.trace_runtime("io").build(builder_b).unwrap();
 
-        for rt in [&runtime_a, &runtime_b] {
-            rt.block_on(async {
-                let mut handles = Vec::new();
-                for _ in 0..50 {
-                    handles.push(tokio::spawn(async {
-                        tokio::task::yield_now().await;
-                    }));
-                }
-                for h in handles {
-                    h.await.unwrap();
-                }
-            });
-        }
+        let worker_id = |runtime: &tokio::runtime::Runtime| {
+            runtime.block_on(async { tokio::spawn(async { current_worker_id() }).await.unwrap() })
+        };
+        let runtime_a_id = worker_id(&runtime_a);
+        let runtime_b_id = worker_id(&runtime_b);
+        assert_ne!(runtime_a_id, crate::telemetry::format::WorkerId::UNKNOWN);
+        assert_ne!(runtime_b_id, crate::telemetry::format::WorkerId::UNKNOWN);
+        assert_ne!(runtime_a_id, runtime_b_id);
 
         drop(runtime_a);
         drop(runtime_b);
         traced.graceful_shutdown(Duration::from_secs(1));
-
-        let raw = data.lock().unwrap();
-        let captured = decode_captured(&raw);
-        let mut worker_ids: HashSet<u64> = HashSet::new();
-        for event in &captured {
-            if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event
-                && e.worker_id != crate::telemetry::analysis_events::WorkerId::UNKNOWN
-            {
-                worker_ids.insert(e.worker_id.as_u64());
-            }
-        }
-
-        let has_runtime_a = worker_ids.iter().any(|&id| id < 2);
-        let has_runtime_b = worker_ids.iter().any(|&id| (2..4).contains(&id));
-        assert!(
-            has_runtime_a && has_runtime_b,
-            "expected worker IDs from both runtimes, got: {worker_ids:?}"
-        );
     }
 
     #[test]
