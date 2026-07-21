@@ -261,6 +261,33 @@ A **view** is one way of presenting a selection pair. Switching views re-runs
 the same A/B selection against a different endpoint; the selection is unchanged.
 Avoid calling views "lenses" (too close to "filter/predicate").
 
+### 4.0 The time-navigation pane (shared shell chrome)
+
+The unified shell embeds a **collapsible time-navigation pane** — a version of
+the S3 browser's density heatmap — as shared chrome above/beside the views. It
+serves two jobs that no other part of the UI does:
+
+1. **It is where A and B are picked, and where you stay oriented in time.** The
+   pane is the existing time × (service/host) density heatmap (X = wall-clock,
+   rows = hosts, cells = bytes/time). You **drag window A, drag window B**; each
+   drag is the selection the browser already computes and encodes as
+   `start_ns`/`end_ns`. A and B show as two labeled brushed bands on the same
+   axis. Without this, a selection is an abstract filter set with no "where am I
+   in time" anchor; with it, the load-test-window comparison (start vs end) is a
+   direct gesture. The pane collapses once the windows are set.
+2. **It is where exemplars land back.** Each span type's slow `Exemplar`s carry
+   `start_ns` + `host`; overlaying them as markers on the heatmap's time axis
+   (row matched by host) shows *when and where* the anomalies happen — and,
+   because they sit on the A/B bands, that the slow tail clusters in B, not A.
+   Selecting a span-type row highlights its exemplars in the pane; clicking a
+   marker deep-links to that exact span.
+
+The pane reuses the pure `heatmap.js` core unchanged; the renderer/interaction
+(currently inlined in `index.html`) is extracted into a container-scoped
+component so the browser and the pane share one implementation. No backend
+change is needed for the exemplar overlay — the time/host fields already exist
+on `Exemplar`.
+
 ### 4.1 Flamegraph view
 
 The diff capability is folded **into** the feature-rich flamegraph renderer

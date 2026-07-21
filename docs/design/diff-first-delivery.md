@@ -98,8 +98,36 @@ percentiles are already computed.
 - `comparable`: the coverage-symmetry gate, driven by the scheduler's balanced
   progress (S0).
 
-**UI.** Fork `span_explorer.html` → the unified shell (first appearance):
-- A manual two-window selector (pick window A, pick window B) — no pop-out yet.
+**UI.** Fork `span_explorer.html` → the unified shell (first appearance). The
+shell has three regions: a **collapsible time-navigation pane** (top or side),
+the aligned diff table, and the significant-difference rail.
+
+- **Collapsible time pane = the embedded S3-browser heatmap.** This is how you
+  pick A and B and how you stay oriented in time. It is the existing
+  time × (service/host) **density heatmap** (X = wall-clock, rows = hosts, cells
+  = bytes/time) — *not* a new widget. **Drag window A, drag window B**; each
+  drag produces the `{keys, t0, t1}` selection the browser already computes,
+  which `encodeAggregationParams()` already turns into `start_ns`/`end_ns`.
+  A and B render as two labeled brushed bands (teal / coral) on the same axis.
+  The pane collapses so the table can take the full height once the windows
+  are set.
+  - **Prerequisite inside this slice:** extract the ~350 lines of heatmap
+    renderer + interaction currently inlined in `index.html`
+    (`renderHeatmap` / `drawHeatmapCanvas` / `drawHeatmapAxis` /
+    `setupHeatmapInteraction`, hardcoded to element IDs and module-globals) into
+    a **container-scoped component**. The pure `heatmap.js` core (density,
+    grouping, ticks, gaps, boot transitions) is reused **unchanged**. `index.html`
+    then consumes the same component, so the browser and the unified pane do not
+    diverge.
+- **Exemplar overlay on the time axis (the second reason for the pane).** Each
+  span type's `Exemplar` rows already carry `start_ns` + `host` (epoch ns; no
+  backend change). Overlay them as markers on the heatmap: `start_ns / 1e9` →
+  the existing `timeToX()`, row matched by `host`. This is an additive canvas
+  pass (same shape as the existing boot-transition dividers). Clicking a marker
+  deep-links to that exact span (`focus_start`/`focus_end`), and — because the
+  markers sit on the A/B bands — you *see* that the slow exemplars cluster in
+  window B, not A. Selecting a span-type row highlights its exemplars in the
+  pane.
 - One **aligned diff table**: one row per span type, the **p99 distribution
   overlay** column (A/B histograms + p50/p99/p999 markers), occurrences A→B.
 - The **significant-difference rail**, ranked by p99 shift, derived from
@@ -107,10 +135,12 @@ percentiles are already computed.
 - Per-side **coverage badges** and the **"differences preliminary"** gate while
   `comparable` is false.
 
-**Demo / exit criteria.** On a real load-test trace: open the fork, set A = first
-minutes, B = last minutes, see the aligned table + ranked rail flip from
-"preliminary" to live as the scheduler balances coverage. The three existing
-pages are untouched.
+**Demo / exit criteria.** On a real load-test trace: open the fork; in the time
+pane, drag window A over the first minutes and window B over the last minutes;
+see the aligned table + ranked rail flip from "preliminary" to live as the
+scheduler balances coverage; see the slow `db.query` exemplars light up under
+window B on the time axis. Collapse the pane to read the table full-height. The
+three existing pages are untouched.
 
 ---
 
