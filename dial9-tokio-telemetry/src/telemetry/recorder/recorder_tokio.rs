@@ -45,6 +45,7 @@ use super::register_runtime_context;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::rate_limit::rate_limited;
+use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::buffer::BufferMode;
 use dial9_core::handle::set_tl_handle;
@@ -268,8 +269,15 @@ impl RecorderTokioExt for Recorder {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.enable_all();
         configure(&mut builder);
+        let instrumented = options.tokio_instrumentation_enabled;
         attach_tokio_builder(&self, &mut builder, options);
         let runtime = builder.build()?;
+
+        if let Some(shared) = self.shared()
+            && instrumented
+        {
+            register_runtime_metrics(shared, runtime.handle().metrics());
+        }
         Ok((self, runtime))
     }
 }

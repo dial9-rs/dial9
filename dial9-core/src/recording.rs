@@ -167,6 +167,17 @@ impl Recorder {
         if let Some(t) = self.flush_thread.take() {
             let _ = t.join();
         }
+
+        // Nothing drains sources once the flush thread is gone, so release them
+        // and whatever they own.
+        if let Some(shared) = self.handle.shared() {
+            shared.clear_sources();
+        }
+
+        // Runtime threads drop their handle in a thread-stop hook, but the
+        // thread that attached the runtime gets no such hook and would hold a
+        // handle to a stopped recorder for the rest of its life.
+        crate::handle::clear_tl_handle();
     }
 
     /// Flush remaining events, seal the final segment, and (with `pipeline`)

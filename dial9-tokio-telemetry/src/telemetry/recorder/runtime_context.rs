@@ -10,9 +10,7 @@ use crate::telemetry::format::{
 use crate::telemetry::task_metadata::TaskId;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use metrique_timesource::{Instant, time_source};
-use std::cell::Cell;
-#[cfg(feature = "cpu-profiling")]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
@@ -30,10 +28,8 @@ pub(crate) struct RuntimeContext {
     /// Recorder handle, installed on each of this runtime's threads (TL) so
     /// `Dial9Handle::current()`, the tracing layer, and `dial9::spawn` resolve.
     pub session_handle: Dial9Handle,
-    /// Set lazily on the first worker resolve (caller-builds attach has no
-    /// runtime at wire time). Holds the runtime metrics and the reserved base
-    /// worker ID for this runtime.
-    pub metrics_and_base: OnceLock<(RuntimeMetrics, u64)>,
+    /// Base worker ID for this runtime, reserved on the first worker resolve.
+    pub worker_id_base: OnceLock<u64>,
     /// Maps worker_index → global worker_id within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
     pub worker_ids: RwLock<HashMap<usize, u64>>,
@@ -64,6 +60,26 @@ thread_local! {
     /// Last timestamp returned by `poll_start_ts_monotonic`. Ensures strictly
     /// increasing values within a thread by bumping +1ns on ties.
     static LAST_TS: Cell<u64> = const { Cell::new(0) };
+}
+
+thread_local! {
+    /// This worker's [`RuntimeMetrics`], cached so queue-depth reads on the poll
+    /// and park paths cost only a thread-local read.
+    static WORKER_METRICS: RefCell<Option<RuntimeMetrics>> = const { RefCell::new(None) };
+}
+
+/// Read this worker's runtime metrics. Call only from a Tokio runtime thread,
+/// which every hook path already is.
+fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
+    WORKER_METRICS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        f(slot.get_or_insert_with(|| tokio::runtime::Handle::current().metrics()))
+    })
+}
+
+/// Local queue depth for `worker_index` on the current worker's runtime.
+fn local_queue_depth(worker_index: usize) -> usize {
+    worker_metrics(|m| m.worker_local_queue_depth(worker_index))
 }
 
 crate::primitives::thread_local! {
@@ -142,6 +158,10 @@ pub(crate) type RuntimeContextRegistry = Arc<Mutex<Vec<Arc<RuntimeContext>>>>;
 /// runtime->worker segment metadata.
 pub(crate) struct TokioRuntimesSource {
     contexts: RuntimeContextRegistry,
+    /// Metrics for each attached runtime, handed over once the caller has built
+    /// it. The flush thread has no runtime context of its own, so it cannot ask
+    /// Tokio for these itself. Dropped with the source at recorder teardown.
+    runtime_metrics: Vec<RuntimeMetrics>,
     last_sample: Instant,
     sample_interval: Duration,
     /// Fingerprint of the metadata emitted on the last `segment_metadata` call,
@@ -158,6 +178,7 @@ impl TokioRuntimesSource {
     pub(crate) fn new(contexts: RuntimeContextRegistry) -> Self {
         Self {
             contexts,
+            runtime_metrics: Vec::new(),
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
             last_fingerprint: 0,
@@ -172,19 +193,40 @@ impl TokioRuntimesSource {
     }
 }
 
+/// Give the source the metrics of a freshly built runtime, so the flush thread
+/// can sample its global queue depth.
+///
+/// Called once per attach, after the caller's runtime exists.
+pub(crate) fn register_runtime_metrics(shared: &SharedState, metrics: RuntimeMetrics) {
+    let mut metrics = Some(metrics);
+    shared.with_sources_mut(|sources| {
+        for source in sources.iter_mut() {
+            let any: &mut dyn std::any::Any = &mut **source;
+            if let Some(source) = any.downcast_mut::<TokioRuntimesSource>() {
+                source.runtime_metrics.extend(metrics.take());
+                return;
+            }
+        }
+    });
+    if metrics.is_some() {
+        tracing::warn!("Tokio source missing; queue depth will not be sampled");
+    }
+}
+
 impl Source for TokioRuntimesSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
         if self.last_sample.elapsed() < self.sample_interval {
             return;
         }
         self.last_sample = time_source().instant();
-        let total_global_queue: usize = {
-            let contexts = self.contexts.lock().unwrap();
-            if contexts.is_empty() {
-                return;
-            }
-            contexts.iter().map(|c| c.global_queue_depth()).sum()
-        };
+        if self.runtime_metrics.is_empty() {
+            return;
+        }
+        let total_global_queue: usize = self
+            .runtime_metrics
+            .iter()
+            .map(|m| m.global_queue_depth())
+            .sum();
         ctx.record_event(&QueueSampleEvent {
             timestamp_ns: clock_monotonic_ns(),
             global_queue: total_global_queue as u8,
@@ -238,7 +280,7 @@ impl RuntimeContext {
         Self {
             runtime_name,
             session_handle,
-            metrics_and_base: OnceLock::new(),
+            worker_id_base: OnceLock::new(),
             worker_ids: RwLock::new(HashMap::new()),
         }
     }
@@ -261,22 +303,6 @@ impl RuntimeContext {
         Some((format!("runtime.{name}"), csv))
     }
 
-    /// Sum of global queue depth for this runtime (0 if metrics not yet set).
-    pub(crate) fn global_queue_depth(&self) -> usize {
-        self.metrics_and_base
-            .get()
-            .map(|(m, _)| m.global_queue_depth())
-            .unwrap_or(0)
-    }
-
-    /// Local queue depth for a worker in this runtime.
-    fn local_queue_depth(&self, worker_index: usize) -> usize {
-        self.metrics_and_base
-            .get()
-            .map(|(m, _)| m.worker_local_queue_depth(worker_index))
-            .unwrap_or(0)
-    }
-
     /// Resolve the current thread's global worker ID.
     ///
     /// Called from the runtime hooks, where a scheduler context is current, so
@@ -289,10 +315,9 @@ impl RuntimeContext {
         // Reserve this runtime's worker-ID block on the first resolve. Caller
         // builds the runtime, so there is nothing to count at wire time; the
         // running runtime's metrics give the worker count here.
-        let (_, base) = self.metrics_and_base.get_or_init(|| {
-            let metrics = tokio::runtime::Handle::current().metrics();
-            let base = shared.reserve_worker_ids(metrics.num_workers() as u64);
-            (metrics, base)
+        let base = self.worker_id_base.get_or_init(|| {
+            let num_workers = worker_metrics(|m| m.num_workers()) as u64;
+            shared.reserve_worker_ids(num_workers)
         });
         let global_id = base + local_index as u64;
 
@@ -419,9 +444,7 @@ pub(super) fn make_poll_start(
     task_id: TaskId,
 ) -> PollStart {
     let resolved = ctx.resolve_worker(shared);
-    let worker_local_queue_depth = resolved
-        .map(|(_, idx)| ctx.local_queue_depth(idx))
-        .unwrap_or(0);
+    let worker_local_queue_depth = resolved.map(|(_, idx)| local_queue_depth(idx)).unwrap_or(0);
     let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
     POLL_START_TS.with(|c| c.set(NonZeroU64::new(timestamp_ns)));
     PollStart {
@@ -444,9 +467,7 @@ pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> PollE
 
 pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> WorkerParkEvent {
     let resolved = ctx.resolve_worker(shared);
-    let worker_local_queue_depth = resolved
-        .map(|(_, idx)| ctx.local_queue_depth(idx))
-        .unwrap_or(0);
+    let worker_local_queue_depth = resolved.map(|(_, idx)| local_queue_depth(idx)).unwrap_or(0);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on 1-in-N parks. The counter and the "sampled this
     // park" flag are thread-local, so the matching unpark on the same worker
@@ -477,9 +498,7 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Wo
 
 pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> WorkerUnparkEvent {
     let resolved = ctx.resolve_worker(shared);
-    let worker_local_queue_depth = resolved
-        .map(|(_, idx)| ctx.local_queue_depth(idx))
-        .unwrap_or(0);
+    let worker_local_queue_depth = resolved.map(|(_, idx)| local_queue_depth(idx)).unwrap_or(0);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on unpark if the matching park sampled it, so the
     // delta below always pairs with a park-time reading. Reset the flag either
