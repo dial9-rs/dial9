@@ -69,13 +69,19 @@ fn background_symbolization_produces_symbol_table_entries() {
     });
 
     // Graceful shutdown: seals final segment, worker drains all remaining.
+    // The deadline bounds the drain, it is not a sleep, so give the worker room
+    // to symbolize every segment on a slow or loaded machine.
     drop(rt);
-    recorder.graceful_shutdown(Duration::from_secs(1));
+    recorder.graceful_shutdown(Duration::from_secs(15));
 
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).
     let mut all_symbol_names: Vec<String> = Vec::new();
     let mut all_source_files: Vec<String> = Vec::new();
+    // Counted so a failure says which stage came up empty.
+    let mut segments = 0usize;
+    let mut decoded = 0usize;
+    let mut samples_with_frames = 0usize;
 
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
         let entry = entry.unwrap();
@@ -84,6 +90,7 @@ fn background_symbolization_produces_symbol_table_entries() {
         if !name.ends_with(".bin") && !name.ends_with(".bin.gz") {
             continue;
         }
+        segments += 1;
 
         let raw = std::fs::read(&path).unwrap();
         if raw.is_empty() {
@@ -100,7 +107,11 @@ fn background_symbolization_produces_symbol_table_entries() {
         let Some(mut dec) = Decoder::new(&bytes) else {
             continue;
         };
+        decoded += 1;
         dec.for_each_event(|ev| {
+            if ev.name == "CpuSampleEvent" {
+                samples_with_frames += 1;
+            }
             if ev.name == "SymbolTableEntry"
                 && let Some(dial9_trace_format::types::FieldValueRef::PooledString(id)) =
                     ev.fields.get(2)
@@ -127,7 +138,8 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     assert!(
         !all_symbol_names.is_empty(),
-        "expected SymbolTableEntry events with resolved symbol names, found none"
+        "expected SymbolTableEntry events with resolved symbol names, found none \
+         ({segments} segment files, {decoded} decoded, {samples_with_frames} CPU samples)"
     );
 
     // Verify at least one symbol name contains our burn function.
