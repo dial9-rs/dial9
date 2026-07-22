@@ -826,6 +826,70 @@ mod tests {
             .expect("sources lock")
     }
 
+    /// Runtime metadata keys that reached the sealed trace under `root`.
+    fn runtime_metadata_keys(root: &std::path::Path) -> Vec<String> {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "event")]
+        enum DecodedEvent {
+            SegmentMetadataEvent(SegmentMeta),
+            #[serde(other)]
+            Other,
+        }
+        #[derive(serde::Deserialize)]
+        struct SegmentMeta {
+            entries: HashMap<String, String>,
+        }
+
+        let mut keys = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                // Whether a segment is compressed depends on which sources are
+                // built in: the default pipeline only runs (and so only gzips)
+                // when a source contributes a stage.
+                let plain = match dial9_trace_format::decoder::Decoder::new(&bytes) {
+                    Some(_) => Some(bytes.clone()),
+                    None => {
+                        use std::io::Read;
+                        let mut out = Vec::new();
+                        flate2::read::MultiGzDecoder::new(&bytes[..])
+                            .read_to_end(&mut out)
+                            .ok()
+                            .map(|_| out)
+                    }
+                };
+                let Some(plain) = plain else { continue };
+                let Some(mut decoder) = dial9_trace_format::decoder::Decoder::new(&plain) else {
+                    continue;
+                };
+                let _ = decoder.for_each_event(|raw| {
+                    if let Ok(DecodedEvent::SegmentMetadataEvent(meta)) = raw.deserialize() {
+                        keys.extend(
+                            meta.entries
+                                .keys()
+                                .filter(|k| k.starts_with("runtime."))
+                                .cloned(),
+                        );
+                    }
+                });
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     #[derive(Default)]
     struct FakeEnv {
         vars: HashMap<String, FakeEnvValue>,
@@ -1216,18 +1280,15 @@ mod tests {
             .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25");
 
         let (rec, rt) = recorder_from_env_source(&env, |_| {}).expect("build runtime from env");
-        // Worker IDs resolve on first poll, so drive one task before reading the
-        // runtime→worker mapping out of segment metadata.
+        // Worker IDs resolve on first poll, so drive one task before shutting
+        // down, then read the runtime->worker mapping back off the sealed trace.
         rt.block_on(async { tokio::spawn(async {}).await.expect("spawned task") });
-        let runtime_meta = segment_metadata(&rec);
-        let runtime_keys: Vec<&str> = runtime_meta
-            .iter()
-            .map(|(k, _)| k.as_str())
-            .filter(|k| k.starts_with("runtime."))
-            .collect();
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(5));
+
         assert_eq!(
-            runtime_keys,
-            ["runtime.api-runtime"],
+            runtime_metadata_keys(dir.path()),
+            vec!["runtime.api-runtime".to_string()],
             "exactly one runtime, named from env, should surface in segment metadata"
         );
         let (_recorder, runtime_config) = env_recorder(resolve_env_config(parse_env_config(&env)));
