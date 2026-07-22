@@ -2,8 +2,8 @@
 //!
 //! Some applications pin one single-threaded tokio runtime per CPU core for
 //! cache locality and predictable latency. This example shows how to trace
-//! that pattern: the recorder is created with `recorder(w).with_tokio(..).build()`,
-//! then each per-core runtime is attached via `trace_runtime`.
+//! that pattern: a recorder is built, then each per-core runtime is attached to
+//! it with `attach_runtime`.
 //!
 //! After the workload completes, the trace file is read back and all
 //! PollStart/PollEnd worker IDs are printed alongside the runtime→worker
@@ -17,7 +17,7 @@
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
 use dial9::analysis::analysis_events::{Dial9Event, WorkerId};
-use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -43,15 +43,7 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
-    // Build the recorder. The primary runtime is a lightweight current-thread
-    // one we never drive — every core gets its own runtime below via
-    // `trace_runtime`.
-    let traced = recorder(writer)
-        .with_tokio(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-            t.enable_all();
-        })
-        .build()?;
+    let recorder = recorder(writer).build();
 
     // Spawn one current-thread runtime per core.
     let num_cores = std::thread::available_parallelism()
@@ -60,22 +52,31 @@ fn main() -> std::io::Result<()> {
 
     println!("Spawning {num_cores} current-thread runtimes...");
 
-    let threads: Vec<_> = (0..num_cores)
-        .map(|core_id| {
-            let mut core_builder = tokio::runtime::Builder::new_current_thread();
-            core_builder.enable_all();
+    // `attach_runtime_with` hands the recorder back each round, so the loop
+    // threads it from core to core.
+    let mut recorder = recorder;
+    let mut threads = Vec::with_capacity(num_cores);
+    for core_id in 0..num_cores {
+        let (rec, core_rt) = recorder
+            .attach_runtime_with(
+                TokioAttachOptions::builder()
+                    .runtime_name(format!("core-{core_id}"))
+                    .build(),
+                |t| {
+                    *t = tokio::runtime::Builder::new_current_thread();
+                    t.enable_all();
+                },
+            )
+            .expect("build core runtime");
+        recorder = rec;
 
-            let (core_rt, handle) = traced
-                .trace_runtime(format!("core-{core_id}"))
-                .build(core_builder)
-                .unwrap();
-
+        threads.push(
             std::thread::Builder::new()
                 .name(format!("core-{core_id}"))
                 .spawn(move || {
-                    core_rt
-                        // spawning into the handle allows for more tracking
-                        .block_on(handle.spawn(async move {
+                    core_rt.block_on(async move {
+                        // `dial9::spawn` tracks the task on this core's runtime.
+                        dial9::spawn(async move {
                             for i in 0..20 {
                                 tokio::task::yield_now().await;
                                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -83,19 +84,21 @@ fn main() -> std::io::Result<()> {
                                     println!("  [core-{core_id}] processed {i}");
                                 }
                             }
-                        }))
+                        })
+                        .await
                         .unwrap();
+                    });
                 })
-                .unwrap()
-        })
-        .collect();
+                .unwrap(),
+        );
+    }
 
     for t in threads {
         t.join().unwrap();
     }
     println!("All cores finished.\n");
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     // ── Read back the trace and verify ──────────────────────────────────
 

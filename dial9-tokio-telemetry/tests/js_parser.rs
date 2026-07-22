@@ -1,6 +1,8 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
+};
 use dial9_trace_format::decoder::Decoder;
 use std::io::{BufWriter, Write};
 use std::process::Command;
@@ -41,15 +43,19 @@ fn test_js_parser_matches_rust() {
                 dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default(),
             );
         }
-        let traced = rec
-            .with_tokio(|t| {
-                t.worker_threads(2);
-            })
-            .with_task_tracking(true)
-            .build()
-            .unwrap();
+        let recorder = rec.build();
+        let (recorder, rt) = recorder
+            .attach_runtime_with(
+                TokioAttachOptions::builder()
+                    .task_tracking_enabled(true)
+                    .build(),
+                |t| {
+                    t.worker_threads(2);
+                },
+            )
+            .expect("build tokio runtime");
 
-        traced.runtime().block_on(async {
+        rt.block_on(async {
             let mut tasks = vec![];
             for i in 0..10 {
                 tasks.push(tokio::spawn(cpu_task(i)));
@@ -58,6 +64,9 @@ fn test_js_parser_matches_rust() {
                 let _ = task.await;
             }
         });
+
+        drop(rt);
+        drop(recorder);
     }
 
     let sealed_path = temp_dir.path().join("test_trace.0.bin");

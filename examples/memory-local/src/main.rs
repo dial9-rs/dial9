@@ -7,9 +7,9 @@
 //!   cargo run -p memory-local
 
 use dial9::Dial9Handle;
-use dial9::Dial9TokioHandle;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{DiskBuffer, TracedRuntimeBuilder};
+use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
+use std::io;
 use std::time::Duration;
 
 const TRACE_DIR: &str = "/tmp/memory-local-traces";
@@ -26,16 +26,22 @@ async fn allocate_some() {
     std::hint::black_box(&buffers);
 }
 
-fn my_config() -> TracedRuntimeBuilder {
+fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
         .base_path(TRACE_DIR)
         .max_file_size(10_000_000)
         .max_total_size(50_000_000)
         .build();
-    dial9::recorder_or_disabled(writer, |t| {
-        t.worker_threads(2);
-    })
-    .with_task_tracking(true)
+    let recorder = dial9::recorder_or_disabled(writer);
+
+    recorder.attach_runtime_with(
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+        |t| {
+            t.worker_threads(2);
+        },
+    )
 }
 
 #[dial9::main(config = my_config)]
@@ -48,11 +54,9 @@ async fn main() {
     )
     .install(Dial9Handle::current())
     .expect("install memory profiler");
-
-    let handle = Dial9TokioHandle::current();
     let mut tasks = Vec::new();
     for _ in 0..200 {
-        tasks.push(handle.spawn(allocate_some()));
+        tasks.push(dial9::spawn(allocate_some()));
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     for t in tasks {

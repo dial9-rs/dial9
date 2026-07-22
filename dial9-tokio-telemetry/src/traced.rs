@@ -4,6 +4,7 @@ use crate::rate_limit::rate_limited;
 use crate::telemetry::format::WakeEventEvent;
 use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_metadata::TaskId;
+use dial9_core::handle::Dial9Handle;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
 use pin_project_lite::pin_project;
 use std::future::Future;
@@ -51,10 +52,39 @@ impl<F> std::fmt::Debug for TracedFuture<F> {
     }
 }
 
+/// How a [`TracedFuture`] obtains its recording handle at first poll.
+enum HandleSource {
+    /// Instrument with this handle when a Tokio task context is present.
+    /// Captured eagerly at spawn time on the spawning thread.
+    Eager(TracedHandle),
+    /// Never instrument, run as a transparent passthrough.
+    Passthrough,
+    /// Resolve the handle from the polling thread's current dial9 runtime at
+    /// first poll. Used by [`spawn_in`](crate::telemetry::spawn_in), which
+    /// spawns from an arbitrary thread where the target runtime's handle is not
+    /// yet reachable; the first poll runs on that runtime's worker, where the
+    /// thread-local handle is set.
+    Lazy,
+}
+
 impl<F> TracedFuture<F> {
     pub(crate) fn new(inner: F, handle: Option<TracedHandle>) -> Self {
+        let source = match handle {
+            Some(handle) => HandleSource::Eager(handle),
+            None => HandleSource::Passthrough,
+        };
         Self {
-            state: TracedFutureState::Init { inner, handle },
+            state: TracedFutureState::Init { inner, source },
+        }
+    }
+
+    /// Defer handle resolution to the first poll (see [`HandleSource::Lazy`]).
+    pub(crate) fn new_lazy(inner: F) -> Self {
+        Self {
+            state: TracedFutureState::Init {
+                inner,
+                source: HandleSource::Lazy,
+            },
         }
     }
 }
@@ -65,7 +95,7 @@ pin_project! {
     enum TracedFutureState<F> {
         Init {
             inner: F,
-            handle: Option<TracedHandle>,
+            source: HandleSource,
         },
         Passthrough {
             #[pin]
@@ -175,10 +205,21 @@ impl<F: Future> Future for TracedFuture<F> {
                 }
             }
 
-            let TracedFutureStateProjReplace::Init { inner, handle } =
+            let TracedFutureStateProjReplace::Init { inner, source } =
                 state.as_mut().project_replace(TracedFutureState::Empty)
             else {
                 unreachable!("Init was matched immediately before project_replace")
+            };
+
+            // Resolve the recording handle. `Lazy` reads the polling thread's
+            // current dial9 runtime (set on the worker's thread-local), so a task
+            // spawned from off-runtime via `spawn_in` still instruments here.
+            let handle = match source {
+                HandleSource::Eager(handle) => Some(handle),
+                HandleSource::Passthrough => None,
+                HandleSource::Lazy => {
+                    crate::telemetry::recorder::traced_handle(&Dial9Handle::current())
+                }
             };
 
             let Some(handle) = handle else {
@@ -229,7 +270,7 @@ mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
     use crate::telemetry::buffer::{DiskBuffer, MemoryBuffer};
-    use crate::telemetry::recorder::RecorderBuilderTokioExt;
+    use crate::telemetry::recorder::{Dial9TokioHandle, RecorderTokioExt, traced_handle};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use dial9_core::recorder::recorder;
     use dial9_core::test_util;
@@ -241,14 +282,8 @@ mod tests {
 
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
-        let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
-            .with_tokio(|t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-            })
-            .build()
-            .unwrap();
-        let handle = crate::telemetry::recorder::traced_handle(&traced.record_handle())
-            .expect("enabled handle yields TracedHandle");
+        let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
+        let handle = traced_handle(rec.handle()).expect("enabled handle yields TracedHandle");
 
         let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
         let waker = noop_waker();
@@ -284,15 +319,16 @@ mod tests {
 
         // Build a current-thread runtime so that all tasks — and all thread-local
         // BUFFER accesses — share a single thread with the test itself.
-        let traced = recorder(DiskBuffer::single_file(&trace_path).unwrap())
-            .with_tokio(|t| {
+        let rec = recorder(DiskBuffer::single_file(&trace_path).unwrap()).build();
+        let (rec, runtime) = rec
+            .attach_runtime(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
+                t.enable_all();
             })
-            .build()
             .unwrap();
-        let runtime = traced.runtime();
-        let handle = traced.handle();
+        let handle =
+            Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));
         let notify = Arc::new(tokio::sync::Notify::new());
         let notify_clone = notify.clone();
 
@@ -323,13 +359,13 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = crate::telemetry::recorder::traced_handle(&traced.record_handle())
-            .expect("enabled handle yields TracedHandle");
+        let th = traced_handle(rec.handle()).expect("enabled handle yields TracedHandle");
         test_util::drain_thread_local(&th.shared);
 
-        // Dropping the runtime + guard stops the background flush thread, joins
+        // Dropping the runtime + recorder stops the background flush thread, joins
         // it, then performs a final flush: collector → DiskBuffer → trace file.
-        drop(traced);
+        drop(runtime);
+        drop(rec);
 
         // Parse the trace file and collect all WakeEvents.
         let sealed = dir.path().join("trace.0.bin");

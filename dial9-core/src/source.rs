@@ -1,5 +1,7 @@
 //! Source trait for abstracting flush-thread data sources.
 
+use std::any::Any;
+
 use crate::collector::CentralCollector;
 use crate::encoder::{self, Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
@@ -47,7 +49,7 @@ impl<'a> FlushContext<'a> {
 ///
 /// [`flush`]: Source::flush
 /// [`SharedState::push_source`]: crate::shared_state::SharedState::push_source
-pub trait Source: Send {
+pub trait Source: Any + Send {
     /// Drain pending data into the trace. Called once per flush cycle.
     fn flush(&mut self, ctx: &FlushContext<'_>);
 
@@ -74,6 +76,16 @@ pub trait Source: Send {
     /// cycles allocate nothing. The default reports a source with no metadata.
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
         let _ = out;
+    }
+
+    /// A segment-processing stage this source's data needs, folded into the
+    /// recorder's default pipeline at build. Called once, at build.
+    ///
+    /// A custom pipeline replaces the default outright, so it does not pick
+    /// these up, you must chain the stage yourself in those cases.
+    #[cfg(feature = "pipeline")]
+    fn segment_processor(&mut self) -> Option<Box<dyn crate::pipeline::SegmentProcessor>> {
+        None
     }
 }
 

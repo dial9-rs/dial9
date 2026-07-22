@@ -11,9 +11,8 @@
 #![cfg(feature = "worker-s3")]
 
 use clap::Parser;
-use dial9::RecorderBuilderTokioExt;
 use dial9::core::pipeline::s3::S3Config;
-use dial9::{DiskBuffer, recorder};
+use dial9::{DiskBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -143,16 +142,20 @@ fn main() -> std::io::Result<()> {
     );
 
     let worker_threads = args.worker_threads;
-    let traced = recorder(writer)
+    let (recorder, rt) = recorder(writer)
         .metrics_sink(metrics_sink)
-        .with_tokio(move |t| {
-            t.worker_threads(worker_threads);
-        })
-        .with_task_tracking(true)
         .with_s3_uploader(s3_config)
-        .build()?;
+        .build()
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(worker_threads);
+            },
+        )
+        .expect("build tokio runtime");
 
-    let handle = traced.handle();
     let load_duration = Duration::from_secs(args.duration);
     let tasks_done = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
@@ -163,13 +166,13 @@ fn main() -> std::io::Result<()> {
     eprintln!("  Segment size: {} bytes", args.segment_size);
     eprintln!();
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let counter = tasks_done.clone();
         let trace_dir2 = trace_dir.clone();
         let trace_stem2 = trace_stem.clone();
 
         // Spawn the workload
-        let spawner = handle.spawn(async move {
+        let spawner = dial9::spawn(async move {
             loop {
                 if start.elapsed() >= load_duration {
                     break;
@@ -240,7 +243,8 @@ fn main() -> std::io::Result<()> {
     });
 
     eprintln!("Calling graceful_shutdown...");
-    traced.graceful_shutdown(Duration::from_secs(30));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(30));
     eprintln!("Done.");
 
     // Count uploaded objects in S3

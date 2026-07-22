@@ -8,6 +8,7 @@ use crate::telemetry::format::{
     WorkerUnparkEvent,
 };
 use crate::telemetry::task_metadata::TaskId;
+use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use metrique_timesource::{Instant, time_source};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -24,8 +25,12 @@ use tokio::runtime::RuntimeMetrics;
 pub(crate) struct RuntimeContext {
     /// Optional human-readable name, set via `with_runtime_name`.
     pub runtime_name: Option<String>,
-    /// Set once after `builder.build()`. Contains the runtime metrics and the
-    /// pre-reserved base worker ID for this runtime (`global_id = base + local_index`).
+    /// Recorder handle, installed on each of this runtime's threads (TL) so
+    /// `Dial9Handle::current()`, the tracing layer, and `dial9::spawn` resolve.
+    pub session_handle: Dial9Handle,
+    /// Set lazily on the first worker resolve (caller-builds attach has no
+    /// runtime at wire time). Holds the runtime metrics and the reserved base
+    /// worker ID for this runtime.
     pub metrics_and_base: OnceLock<(RuntimeMetrics, u64)>,
     /// Maps worker_index → global worker_id within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
@@ -36,8 +41,9 @@ thread_local! {
     /// Global worker ID for this thread, set on every `resolve_worker` call.
     /// Read by `current_worker_id()` for wake events.
     static GLOBAL_WORKER_ID: Cell<Option<u64>> = const { Cell::new(None) };
-    /// Whether we've registered this thread's worker_id mapping.
-    static WORKER_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    /// The global worker ID this thread last registered into its runtime's
+    /// mapping.
+    static WORKER_REGISTERED: Cell<Option<u64>> = const { Cell::new(None) };
     /// Whether we've registered this thread's OS tid for CPU profiling.
     #[cfg(feature = "cpu-profiling")]
     static TID_REGISTERED: Cell<bool> = const { Cell::new(false) };
@@ -106,6 +112,7 @@ fn advance_park_counter(counter: u64, rate: u64) -> (u64, bool) {
 ///
 /// Used by:
 /// - the task-dump idle/wake bookkeeping in [`crate::task_dumped`].
+#[cfg(any(feature = "taskdump", test))]
 pub(crate) fn poll_start_ts_monotonic() -> u64 {
     let raw = POLL_START_TS.with(|c| c.get()).map_or_else(
         crate::telemetry::events::clock_monotonic_ns,
@@ -147,6 +154,12 @@ impl TokioRuntimesSource {
             last_fingerprint: 0,
             sched_rate_emitted: false,
         }
+    }
+
+    /// The registry of attached runtimes. `attach_runtime` shares it so every
+    /// runtime on a recorder lands in the same source.
+    pub(crate) fn registry(&self) -> &RuntimeContextRegistry {
+        &self.contexts
     }
 }
 
@@ -212,9 +225,10 @@ impl Source for TokioRuntimesSource {
 }
 
 impl RuntimeContext {
-    pub(crate) fn new(runtime_name: Option<String>) -> Self {
+    pub(crate) fn new(runtime_name: Option<String>, session_handle: Dial9Handle) -> Self {
         Self {
             runtime_name,
+            session_handle,
             metrics_and_base: OnceLock::new(),
             worker_ids: RwLock::new(HashMap::new()),
         }
@@ -254,10 +268,23 @@ impl RuntimeContext {
             .unwrap_or(0)
     }
 
-    /// Resolve the current thread's global worker ID using `tokio::runtime::worker_index()`.
+    /// Resolve the current thread's global worker ID.
+    ///
+    /// Called from the runtime hooks, where a scheduler context is current, so
+    /// `worker_index()` yields the local index (0 for a `current_thread`
+    /// runtime's driver thread). `None` means no worker context (shouldn't
+    /// happen from a hook); skip rather than misattribute to worker 0.
     fn resolve_worker(&self, shared: &SharedState) -> Option<(WorkerId, usize)> {
         let local_index = tokio::runtime::worker_index()?;
-        let (_, base) = self.metrics_and_base.get()?;
+
+        // Reserve this runtime's worker-ID block on the first resolve. Caller
+        // builds the runtime, so there is nothing to count at wire time; the
+        // running runtime's metrics give the worker count here.
+        let (_, base) = self.metrics_and_base.get_or_init(|| {
+            let metrics = tokio::runtime::Handle::current().metrics();
+            let base = shared.reserve_worker_ids(metrics.num_workers() as u64);
+            (metrics, base)
+        });
         let global_id = base + local_index as u64;
 
         // Always update TLS so current_worker_id() returns the global ID.
@@ -266,8 +293,6 @@ impl RuntimeContext {
         register_worker_if_needed(self, local_index, global_id);
         #[cfg(feature = "cpu-profiling")]
         start_sched_sampling_if_needed(shared);
-        #[cfg(not(feature = "cpu-profiling"))]
-        let _ = shared;
 
         Some((WorkerId::from(global_id as usize), local_index))
     }
@@ -279,12 +304,16 @@ impl RuntimeContext {
 /// new worker from the worker count on its next flush.
 fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id: u64) {
     WORKER_REGISTERED.with(|cell| {
-        if !cell.get() {
+        if cell.get() != Some(global_id) {
             ctx.worker_ids
                 .write()
                 .unwrap()
                 .insert(local_index, global_id);
-            cell.set(true);
+            // Install the recorder handle on this thread. `on_thread_start` also
+            // does this for pool threads, but a `current_thread` runtime's driver
+            // thread gets no `on_thread_start`, so set it here on first poll.
+            set_tl_handle(ctx.session_handle.clone());
+            cell.set(Some(global_id));
         }
     });
 }
@@ -473,7 +502,10 @@ mod tests {
 
     /// Push a named runtime context with a single resolved worker into `contexts`.
     fn push_named_runtime(contexts: &RuntimeContextRegistry, name: &str, worker_id: u64) {
-        let ctx = Arc::new(RuntimeContext::new(Some(name.to_string())));
+        let ctx = Arc::new(RuntimeContext::new(
+            Some(name.to_string()),
+            Dial9Handle::disabled(),
+        ));
         ctx.worker_ids.write().unwrap().insert(0, worker_id);
         contexts.lock().unwrap().push(ctx);
     }

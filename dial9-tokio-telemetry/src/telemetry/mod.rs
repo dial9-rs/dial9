@@ -46,8 +46,8 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    Dial9Handle, Dial9TokioHandle, RecorderBuilderTokioExt, TokioAttachConfig, TokioHooks,
-    TracedRuntime, TracedRuntimeBuilder, build_traced, current_worker_id, spawn,
+    AttachedRuntime, Dial9Handle, Dial9TokioHandle, RecorderPipelineExt, RecorderTokioExt,
+    TokioAttachOptions, TokioHooks, block_on, current_worker_id, spawn, spawn_in,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

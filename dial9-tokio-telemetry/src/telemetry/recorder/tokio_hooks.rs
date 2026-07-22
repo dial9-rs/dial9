@@ -62,17 +62,20 @@ impl TokioHook<TaskMetaCb> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+/// use dial9_tokio_telemetry::telemetry::{
+///     MemoryBuffer, RecorderTokioExt, TokioAttachOptions, TokioHooks, recorder,
+/// };
 ///
-/// let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
-///     .with_tokio(|t| {
-///         t.worker_threads(4);
-///     })
-///     .with_tokio_hooks(|h| {
-///         h.on_thread_start(|| println!("started"));
-///         h.on_thread_stop(|| println!("stopping"));
-///     })
-///     .build()
+/// let mut hooks = TokioHooks::default();
+/// hooks.on_thread_start(|| println!("started"));
+/// hooks.on_thread_stop(|| println!("stopping"));
+///
+/// let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
+/// let (rec, runtime) = rec
+///     .attach_runtime_with(
+///         TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+///         |t| { t.worker_threads(4); },
+///     )
 ///     .unwrap();
 /// ```
 #[derive(Clone, Default)]

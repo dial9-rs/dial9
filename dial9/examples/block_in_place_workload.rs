@@ -8,7 +8,7 @@
 //! Produces: `block_in_place_trace/trace.*.bin` in the current directory.
 
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
+use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use std::time::Duration;
 
 /// CPU-intensive work that shows up in CPU profiles.
@@ -56,16 +56,20 @@ fn main() {
         .max_total_size(500 * 1024 * 1024)
         .build()
         .unwrap();
-    let traced = recorder(writer)
+    let (recorder, rt) = recorder(writer)
         .with_cpu_profiling(Default::default())
-        .with_tokio(|t| {
-            t.worker_threads(4);
-        })
-        .with_task_tracking(true)
         .build()
-        .unwrap();
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(4);
+            },
+        )
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         // Background work on all workers to generate CPU samples.
         let bg: Vec<_> = (0..8).map(|i| tokio::spawn(background_burn(i))).collect();
 
@@ -89,7 +93,8 @@ fn main() {
     });
 
     // Graceful shutdown seals the final segment and runs symbolization.
-    traced.graceful_shutdown(Duration::from_secs(10));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(10));
 
     println!("Trace written to block_in_place_trace/trace.*.bin");
 }

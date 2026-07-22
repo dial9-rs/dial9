@@ -1,10 +1,12 @@
 //! Multiple named runtimes sharing a single recorder.
 //!
 //! A common pattern is to run separate runtimes for different workload types
-//! (e.g. request handling vs background I/O). This example builds a primary
-//! runtime with `recorder(w).with_tokio(..).build()`, then attaches a second
-//! one with `trace_runtime`, so all workers appear in a single trace file with
-//! their runtime names in the segment metadata.
+//! (e.g. request handling vs background I/O). This example builds a recorder and
+//! attaches two named runtimes to it with `attach_runtime_with`, so all workers
+//! appear in a single trace file with their runtime names in the segment
+//! metadata. Requests run on one runtime and push their flush work onto the
+//! other with `dial9::spawn_in`, so the trace attributes each to its own
+//! runtime.
 //!
 //! Usage:
 //!   cargo run --example multi_runtime
@@ -12,7 +14,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/multi_runtime/trace.0.bin
 
-use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -25,60 +27,61 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
+    let recorder = recorder(writer).build();
+
     // Primary runtime for request handling.
-    let traced = recorder(writer)
-        .with_tokio(|t| {
+    let (recorder, main_rt) = recorder.attach_runtime_with(
+        TokioAttachOptions::builder().runtime_name("main").build(),
+        |t| {
             t.worker_threads(2);
-        })
-        .with_runtime_name("main")
-        .build()?;
+        },
+    )?;
 
     // Secondary runtime for background I/O, sharing the same recorder.
-    let mut io_builder = tokio::runtime::Builder::new_multi_thread();
-    io_builder.worker_threads(2).enable_all();
-    let (io_rt, io_handle) = traced.trace_runtime("io").build(io_builder)?;
+    let (recorder, io_rt) = recorder.attach_runtime_with(
+        TokioAttachOptions::builder().runtime_name("io").build(),
+        |t| {
+            t.worker_threads(2);
+        },
+    )?;
 
     println!("Running workload on two named runtimes...");
 
-    // Request handling on the main runtime. Spawn through the handle
-    // instead of tokio::spawn() for wake-event tracking.
-    let main_handle = traced.handle();
-    traced.runtime().block_on(async {
-        let mut handles = Vec::new();
+    // Requests run on the main runtime and hand their write-behind to the I/O
+    // runtime. `dial9::spawn` targets the runtime you are already on.
+    // `dial9::spawn_in` targets a specific one, so the flush is instrumented as
+    // work on `runtime.io` even though it was spawned from a `runtime.main`
+    // worker.
+    let io_handle = io_rt.handle().clone();
+    main_rt.block_on(async move {
+        let mut requests = Vec::new();
         for i in 0..20 {
-            handles.push(main_handle.spawn(async move {
+            let io = io_handle.clone();
+            requests.push(dial9::spawn(async move {
                 // Simulate request processing: some CPU work + async I/O.
                 tokio::task::yield_now().await;
                 tokio::time::sleep(Duration::from_millis(5)).await;
-                tokio::task::yield_now().await;
-                println!("  [main] request {i} done");
-            }));
-        }
-        for h in handles {
-            h.await.unwrap();
-        }
-    });
+                println!("  [main] request {i} handled");
 
-    // Background I/O on the second runtime.
-    io_rt.block_on(async {
-        let mut handles = Vec::new();
-        for i in 0..10 {
-            handles.push(io_handle.spawn(async move {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                tokio::task::yield_now().await;
-                println!("  [io]   batch {i} flushed");
+                dial9::spawn_in(&io, async move {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    println!("  [io]   request {i} flushed");
+                })
+                .await
+                .unwrap();
             }));
         }
-        for h in handles {
-            h.await.unwrap();
+        for request in requests {
+            request.await.unwrap();
         }
     });
 
     println!("All tasks completed.");
 
-    // Drop the attached runtime before shutdown so worker threads flush their buffers.
+    // Drop the runtimes before shutdown so worker threads flush their buffers.
     drop(io_rt);
-    traced.graceful_shutdown(Duration::from_secs(5));
+    drop(main_rt);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
     println!("\nTrace files in {trace_dir}/:");
     for entry in std::fs::read_dir(trace_dir)? {

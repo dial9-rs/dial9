@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, not(shuttle)))]
 pub(crate) mod testutil;
 
 pub use dial9_core::pipeline::{MemorySegment, Payload, SealedSegment, SegmentRef};

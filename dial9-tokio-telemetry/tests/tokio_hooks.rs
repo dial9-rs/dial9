@@ -1,4 +1,6 @@
-use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{
+    RecorderTokioExt, TokioAttachOptions, TokioHooks, recorder,
+};
 use std::time::Duration;
 
 mod common;
@@ -13,22 +15,27 @@ fn on_thread_start_and_stop_fire() {
     let stc = stop_count.clone();
 
     let num_workers = 4;
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(move |t| {
-            t.worker_threads(num_workers);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_start(move || {
-                sc.fetch_add(1, Ordering::Relaxed);
-            });
-            h.on_thread_stop(move || {
-                stc.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_start(move || {
+        sc.fetch_add(1, Ordering::Relaxed);
+    });
+    hooks.on_thread_stop(move || {
+        stc.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(num_workers);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         // Ensure all workers have started by spawning work on each.
         let mut handles = Vec::new();
         for _ in 0..num_workers * 4 {
@@ -41,7 +48,8 @@ fn on_thread_start_and_stop_fire() {
         }
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         start_count.load(Ordering::Relaxed) >= num_workers,
@@ -62,37 +70,39 @@ fn each_runtime_gets_own_hooks() {
     let ca = count_a.clone();
     let cb = count_b.clone();
 
-    // Unused current-thread primary; the runtimes under test attach below.
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-    builder_a.worker_threads(2).enable_all();
-    let (runtime_a, _handle_a) = traced
-        .trace_runtime("a")
-        .with_tokio_hooks(|h| {
-            h.on_before_task_poll(move |_meta| {
-                ca.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build(builder_a)
-        .unwrap();
+    let mut hooks_a = TokioHooks::default();
+    hooks_a.on_before_task_poll(move |_meta| {
+        ca.fetch_add(1, Ordering::Relaxed);
+    });
+    let (recorder, runtime_a) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .runtime_name("a")
+                .tokio_hooks(hooks_a)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("attach runtime a");
 
-    let mut builder_b = tokio::runtime::Builder::new_multi_thread();
-    builder_b.worker_threads(2).enable_all();
-    let (runtime_b, _handle_b) = traced
-        .trace_runtime("b")
-        .with_tokio_hooks(|h| {
-            h.on_before_task_poll(move |_meta| {
-                cb.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build(builder_b)
-        .unwrap();
+    let mut hooks_b = TokioHooks::default();
+    hooks_b.on_before_task_poll(move |_meta| {
+        cb.fetch_add(1, Ordering::Relaxed);
+    });
+    let (recorder, runtime_b) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .runtime_name("b")
+                .tokio_hooks(hooks_b)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("attach runtime b");
 
     // Generate work only on runtime A
     runtime_a.block_on(async {
@@ -137,7 +147,7 @@ fn each_runtime_gets_own_hooks() {
 
     drop(runtime_a);
     drop(runtime_b);
-    traced.graceful_shutdown(Duration::from_secs(1));
+    recorder.graceful_shutdown(Duration::from_secs(1));
 }
 
 #[test]
@@ -145,24 +155,30 @@ fn on_thread_park_fires() {
     let park_count = Arc::new(AtomicUsize::new(0));
     let pc = park_count.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_park(move || {
-                pc.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_park(move || {
+        pc.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         // Sleep to let workers park
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         park_count.load(Ordering::Relaxed) > 0,
@@ -175,19 +191,24 @@ fn on_thread_unpark_fires() {
     let unpark_count = Arc::new(AtomicUsize::new(0));
     let uc = unpark_count.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_unpark(move || {
-                uc.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_unpark(move || {
+        uc.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         // Generate work to trigger unparks
         let mut handles = Vec::new();
         for _ in 0..20 {
@@ -200,7 +221,8 @@ fn on_thread_unpark_fires() {
         }
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         unpark_count.load(Ordering::Relaxed) > 0,
@@ -215,29 +237,35 @@ fn task_poll_hooks_fire() {
     let bc = before_count.clone();
     let ac = after_count.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_before_task_poll(move |_meta| {
-                bc.fetch_add(1, Ordering::Relaxed);
-            });
-            h.on_after_task_poll(move |_meta| {
-                ac.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_before_task_poll(move |_meta| {
+        bc.fetch_add(1, Ordering::Relaxed);
+    });
+    hooks.on_after_task_poll(move |_meta| {
+        ac.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         let handle = tokio::spawn(async {
             tokio::task::yield_now().await;
         });
         handle.await.unwrap();
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         before_count.load(Ordering::Relaxed) > 0,
@@ -262,23 +290,30 @@ fn task_lifecycle_hooks_fire() {
     let tc = terminate_count.clone();
 
     let num_tasks = 10;
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
-        .with_tokio_hooks(|h| {
-            h.on_task_spawn(move |_meta| {
-                sc.fetch_add(1, Ordering::Relaxed);
-            });
-            h.on_task_terminate(move |_meta| {
-                tc.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_task_spawn(move |_meta| {
+        sc.fetch_add(1, Ordering::Relaxed);
+    });
+    hooks.on_task_terminate(move |_meta| {
+        tc.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .tokio_hooks(hooks)
+                .build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
             handles.push(tokio::spawn(async {
@@ -290,7 +325,8 @@ fn task_lifecycle_hooks_fire() {
         }
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         spawn_count.load(Ordering::Relaxed) >= num_tasks,
@@ -310,20 +346,27 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
     let sc = spawn_count.clone();
 
     let num_tasks = 5;
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(false)
-        .with_tokio_hooks(|h| {
-            h.on_task_spawn(move |_meta| {
-                sc.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_task_spawn(move |_meta| {
+        sc.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(false)
+                .tokio_hooks(hooks)
+                .build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
             handles.push(tokio::spawn(async {
@@ -335,7 +378,8 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
         }
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         spawn_count.load(Ordering::Relaxed) >= num_tasks,
@@ -350,20 +394,27 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
     let tc = terminate_count.clone();
 
     let num_tasks = 5;
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(false)
-        .with_tokio_hooks(|h| {
-            h.on_task_terminate(move |_meta| {
-                tc.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_task_terminate(move |_meta| {
+        tc.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(false)
+                .tokio_hooks(hooks)
+                .build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
             handles.push(tokio::spawn(async {
@@ -375,7 +426,8 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
         }
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         terminate_count.load(Ordering::Relaxed) >= num_tasks,
@@ -391,25 +443,30 @@ fn dial9_hooks_run_before_user_hooks() {
     let hook_fired = Arc::new(AtomicUsize::new(0));
     let hf = hook_fired.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_start(move || {
-                // dial9's hook must have already run and installed Dial9Handle
-                let handle = Dial9Handle::current();
-                assert!(
-                    handle.is_enabled(),
-                    "Dial9Handle should be installed by dial9 before user hook runs"
-                );
-                hf.fetch_add(1, Ordering::Relaxed);
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_start(move || {
+        // dial9's hook must have already run and installed Dial9Handle
+        let handle = Dial9Handle::current();
+        assert!(
+            handle.is_enabled(),
+            "Dial9Handle should be installed by dial9 before user hook runs"
+        );
+        hf.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         tokio::spawn(async {
             tokio::task::yield_now().await;
         })
@@ -417,7 +474,8 @@ fn dial9_hooks_run_before_user_hooks() {
         .unwrap();
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     assert!(
         hook_fired.load(Ordering::Relaxed) > 0,
@@ -430,24 +488,30 @@ fn hook_stacking_single_callback_fires() {
     let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
     let log_c = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(1);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_park(move || {
-                log_c.lock().unwrap().push("park_a");
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_park(move || {
+        log_c.lock().unwrap().push("park_a");
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(1);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         // Sleep to let the worker park at least once
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     let entries = log.lock().unwrap();
     assert!(
@@ -462,26 +526,32 @@ fn hook_stacking_multiple_callbacks_fire_in_order() {
     let log_a = log.clone();
     let log_b = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(1);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_park(move || {
-                log_a.lock().unwrap().push("park_a");
-            });
-            h.on_thread_park(move || {
-                log_b.lock().unwrap().push("park_b");
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_park(move || {
+        log_a.lock().unwrap().push("park_a");
+    });
+    hooks.on_thread_park(move || {
+        log_b.lock().unwrap().push("park_b");
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(1);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     let entries = log.lock().unwrap();
     assert!(
@@ -507,28 +577,34 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
     let log_a = log.clone();
     let log_b = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(1);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_park(move || {
-                log_a.lock().unwrap().push("call_1");
-            });
-        })
-        .with_tokio_hooks(|h| {
-            h.on_thread_park(move || {
-                log_b.lock().unwrap().push("call_2");
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    // Stacking hooks the same way multiple `with_tokio_hooks` calls did: register
+    // onto the same `TokioHooks` value, preserving registration order.
+    let mut hooks = TokioHooks::default();
+    hooks.on_thread_park(move || {
+        log_a.lock().unwrap().push("call_1");
+    });
+    hooks.on_thread_park(move || {
+        log_b.lock().unwrap().push("call_2");
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(1);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     let entries = log.lock().unwrap();
     assert!(
@@ -553,22 +629,27 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
     let log_a = log.clone();
     let log_b = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(1);
-        })
-        .with_tokio_hooks(|h| {
-            h.on_before_task_poll(move |_meta| {
-                log_a.lock().unwrap().push("poll_a");
-            });
-            h.on_before_task_poll(move |_meta| {
-                log_b.lock().unwrap().push("poll_b");
-            });
-        })
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
 
-    traced.runtime().block_on(async {
+    let mut hooks = TokioHooks::default();
+    hooks.on_before_task_poll(move |_meta| {
+        log_a.lock().unwrap().push("poll_a");
+    });
+    hooks.on_before_task_poll(move |_meta| {
+        log_b.lock().unwrap().push("poll_b");
+    });
+
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(1);
+            },
+        )
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
         tokio::spawn(async {
             tokio::task::yield_now().await;
         })
@@ -576,7 +657,8 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
         .unwrap();
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     let entries = log.lock().unwrap();
     assert!(

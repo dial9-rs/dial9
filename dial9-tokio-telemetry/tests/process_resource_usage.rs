@@ -5,7 +5,8 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
-    MemoryBuffer, ProcessResourceUsageConfig, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
+    MemoryBuffer, ProcessResourceUsageConfig, RecorderPerfExt, RecorderPipelineExt,
+    RecorderTokioExt, recorder,
 };
 use std::time::Duration;
 
@@ -13,16 +14,19 @@ use std::time::Duration;
 fn traced_runtime_records_process_resource_usage() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_process_resource_usage(ProcessResourceUsageConfig::default())
-        .with_tokio(|t| {
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);
@@ -46,15 +50,18 @@ fn traced_runtime_records_process_resource_usage() {
 fn traced_runtime_does_not_record_process_resource_usage_by_default() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);

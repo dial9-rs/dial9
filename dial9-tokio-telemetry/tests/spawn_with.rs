@@ -4,8 +4,10 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
+use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TaskId, TracedRuntime, recorder,
+    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TaskId,
+    TokioAttachOptions, recorder,
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -30,30 +32,36 @@ enum SpawnEvent {
 }
 
 /// Standard 2-worker multi_thread runtime with task tracking enabled.
-fn build_capturing_runtime() -> (TracedRuntime, Arc<Mutex<Vec<Vec<u8>>>>) {
+fn build_capturing_runtime() -> (Recorder, tokio::runtime::Runtime, Arc<Mutex<Vec<Vec<u8>>>>) {
     let (capture, batches) = capture_processor();
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
-    (traced, batches)
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
+    (recorder, rt, batches)
 }
 
 /// `spawn_with(fut, |f| set.spawn(f))` produces `WakeEvent`s for the
 /// spawned task — the same as `handle.spawn(fut)` would.
 #[test]
 fn spawn_with_joinset_emits_wake_events() {
-    let (traced, batches) = build_capturing_runtime();
+    let (recorder, rt, batches) = build_capturing_runtime();
 
-    let handle = traced.handle();
+    let handle = Dial9TokioHandle::current();
     let spawned_id: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
     let id_w = spawned_id.clone();
 
-    traced.runtime().block_on(async move {
+    rt.block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
         handle.spawn_with(
             async move {
@@ -66,7 +74,8 @@ fn spawn_with_joinset_emits_wake_events() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<SpawnEvent> = decode_all(&b);
@@ -86,17 +95,22 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
-    let traced = recorder(writer)
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
-        .build()
-        .unwrap();
+    let recorder = recorder(writer).build();
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    let handle = traced.handle();
+    let handle = Dial9TokioHandle::current();
 
-    traced.runtime().block_on(async move {
+    rt.block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
 
         // Inside `spawn_with`: marked instrumented, caller = this file.
@@ -109,7 +123,8 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     let sealed = dir.path().join("trace.0.bin");
     let events: Vec<SpawnEvent> = decode_file(&sealed);
@@ -144,56 +159,68 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
 /// `spawn_with` returns whatever the closure returns.
 #[test]
 fn spawn_with_returns_closure_value() {
-    let traced = recorder(common::small_mem_writer())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
-        .build()
-        .unwrap();
+    let recorder = recorder(common::small_mem_writer()).build();
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.enable_all();
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    let handle = traced.handle();
+    let handle = Dial9TokioHandle::current();
 
-    traced.runtime().block_on(async move {
+    rt.block_on(async move {
         let join = handle.spawn_with(async { 42u32 }, tokio::spawn);
         let value = join.await.unwrap();
         assert_eq!(value, 42);
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 }
 
 /// `Dial9TokioHandle::spawn_with` composes with `JoinSet::spawn_on`
 /// to target a specific runtime.
 #[test]
 fn runtime_handle_spawn_with_targets_correct_runtime() {
-    use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
-
     let (capture, batches) = capture_processor();
-    // Unused current-thread primary; the runtimes under test attach below.
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-        })
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .build();
 
-    let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-    builder_a.worker_threads(1).enable_all().thread_name("rt-a");
-    let (rt_a, handle_a) = traced
-        .trace_runtime("a")
-        .task_tracking(true)
-        .build(builder_a)
-        .unwrap();
+    let (recorder, rt_a) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .runtime_name("a")
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(1).enable_all().thread_name("rt-a");
+            },
+        )
+        .expect("attach runtime a");
 
-    let mut builder_b = tokio::runtime::Builder::new_multi_thread();
-    builder_b.worker_threads(1).enable_all().thread_name("rt-b");
-    let (rt_b, handle_b) = traced
-        .trace_runtime("b")
-        .task_tracking(true)
-        .build(builder_b)
-        .unwrap();
+    let (recorder, rt_b) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .runtime_name("b")
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(1).enable_all().thread_name("rt-b");
+            },
+        )
+        .expect("attach runtime b");
+
+    // Both handles spawn through the same recorder; `spawn_with` runs the spawn
+    // in the closure, so each task lands on the runtime its closure targets.
+    let handle_a = Dial9TokioHandle::current();
+    let handle_b = Dial9TokioHandle::current();
 
     let task_id_a: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
     let task_id_b: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
@@ -228,7 +255,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
 
     drop(rt_a);
     drop(rt_b);
-    traced.graceful_shutdown(Duration::from_secs(1));
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let task_id_a = task_id_a.lock().unwrap().expect("task id a captured");
     let task_id_b = task_id_b.lock().unwrap().expect("task id b captured");

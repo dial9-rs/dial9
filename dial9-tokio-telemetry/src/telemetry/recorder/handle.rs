@@ -22,9 +22,8 @@ pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<TracedHandle> {
 ///
 /// Spawned futures are wrapped with wake-event tracking when telemetry is live
 /// on this handle. Otherwise they spawn plainly. Obtain one for the current
-/// runtime with [`current`](Self::current), or bound to a specific runtime
-/// from [`TracedRuntime::tokio_handle`](super::builder::TracedRuntime::tokio_handle)
-/// or [`trace_runtime`](super::builder::TracedRuntime::trace_runtime)'s builder.
+/// runtime with [`current`](Self::current). To spawn onto a specific runtime
+/// from any thread, use [`spawn_in`].
 ///
 /// This handle only spawns. For recording and control, use [`Dial9Handle`].
 #[derive(Clone)]
@@ -64,9 +63,9 @@ impl Dial9TokioHandle {
         }
     }
 
-    /// Handle bound to a specific runtime. Used by the guard's runtime builder
-    /// and [`TracedRuntime::tokio_handle`](super::builder::TracedRuntime::tokio_handle).
-    pub(super) fn for_runtime(
+    /// Handle bound to a specific runtime, so it spawns from any thread.
+    #[cfg(test)]
+    pub(crate) fn for_runtime(
         runtime: tokio::runtime::Handle,
         traced: Option<crate::traced::TracedHandle>,
     ) -> Self {
@@ -173,6 +172,55 @@ where
     F::Output: Send + 'static,
 {
     Dial9TokioHandle::current().spawn(future)
+}
+
+/// Spawn a traced task onto a specific runtime, from any thread.
+///
+/// Like [`tokio::runtime::Handle::spawn`], but the task's polls are instrumented
+/// when `runtime` is dial9-traced. Unlike [`spawn`], the calling thread need not
+/// belong to a dial9 runtime: instrumentation resolves on the target runtime's
+/// worker at the task's first poll. Spawning into an untraced runtime records
+/// nothing, the same as [`spawn`] on an untraced runtime.
+#[track_caller]
+pub fn spawn_in<F>(
+    runtime: &tokio::runtime::Handle,
+    future: F,
+) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    // The spawn hook fires synchronously on this thread, so the guard marks the
+    // task instrumented; the future resolves its handle lazily at first poll.
+    let _guard = InstrumentedSpawnGuard::enter();
+    runtime.spawn(TracedFuture::new_lazy(future))
+}
+
+/// Run `future` to completion on `runtime`, instrumented.
+///
+/// [`Runtime::block_on`](tokio::runtime::Runtime::block_on) polls the future on
+/// the calling thread, outside any task, so its polls and wakes are not
+/// recorded. This spawns it through [`spawn_in`] instead and waits, so the root
+/// future shows up in the trace like any other task.
+///
+/// # Panics
+///
+/// Resumes the future's panic on the calling thread, matching
+/// [`Runtime::block_on`](tokio::runtime::Runtime::block_on).
+#[track_caller]
+pub fn block_on<F>(runtime: &tokio::runtime::Runtime, future: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let join = spawn_in(runtime.handle(), future);
+    runtime.block_on(async move {
+        match join.await {
+            Ok(output) => output,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+        }
+    })
 }
 
 /// RAII guard that increments `INSTRUMENTED_SPAWN` on creation and

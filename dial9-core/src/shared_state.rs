@@ -63,6 +63,15 @@ impl SharedState {
         self.sources.lock().ok().map(|mut sources| f(&mut sources))
     }
 
+    /// Like [`with_sources_mut`](Self::with_sources_mut), but `f` receives the
+    /// list itself so it can register sources too.
+    pub fn with_sources_vec<R>(
+        &self,
+        f: impl FnOnce(&mut Vec<Box<dyn crate::source::Source>>) -> R,
+    ) -> Option<R> {
+        self.sources.lock().ok().map(|mut sources| f(&mut sources))
+    }
+
     /// Trace-start `CLOCK_MONOTONIC` timestamp.
     pub fn start_time_ns(&self) -> u64 {
         self.start_time_ns

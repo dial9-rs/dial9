@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/dial9-tokio-telemetry.svg)](https://crates.io/crates/dial9-tokio-telemetry)
 ![License](https://img.shields.io/crates/l/dial9-tokio-telemetry.svg)
 
-The Tokio integration internals for [dial9](https://crates.io/crates/dial9): `#[dial9::main]`, `TracedRuntime`, `dial9::spawn`, and the `recorder(..).with_tokio(..)` builder.
+The Tokio integration internals for [dial9](https://crates.io/crates/dial9): `#[dial9::main]`, `recorder.attach_runtime(..)`, and `dial9::spawn` / `dial9::spawn_in`.
 
 Use the [`dial9`](https://crates.io/crates/dial9) crate directly and enable its `tokio` feature, to add tokio instrumentation
 capabilities to the dial9 recorder and access this crate's APIs.

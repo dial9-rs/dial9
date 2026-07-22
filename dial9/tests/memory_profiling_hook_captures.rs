@@ -8,7 +8,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9::analysis::analysis_events::Dial9Event;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder};
 use std::time::Duration;
 
 #[global_allocator]
@@ -18,15 +18,17 @@ static ALLOC: Dial9Allocator = Dial9Allocator::system();
 fn hook_captures_sampled_allocations() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("attach tokio");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(1024)
@@ -36,7 +38,7 @@ fn hook_captures_sampled_allocations() {
     .install(handle)
     .expect("install should succeed");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         for _ in 0..100 {
             let v: Vec<u8> = Vec::with_capacity(1024);
             std::hint::black_box(v);
@@ -45,7 +47,8 @@ fn hook_captures_sampled_allocations() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

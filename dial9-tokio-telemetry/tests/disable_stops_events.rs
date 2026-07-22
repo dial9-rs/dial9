@@ -1,5 +1,7 @@
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
+};
 use dial9_trace_format::decoder::Decoder;
 use std::path::Path;
 use std::time::Duration;
@@ -40,18 +42,22 @@ fn disable_stops_all_event_production() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
-        .build()
-        .unwrap();
+    let recorder = recorder(writer).build();
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
 
     // Phase 1: produce events while enabled
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -77,7 +83,7 @@ fn disable_stops_all_event_production() {
         .count();
 
     // Phase 2: produce more work while disabled
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..500 {
             handles.push(tokio::spawn(async {
@@ -107,7 +113,8 @@ fn disable_stops_all_event_production() {
         count_after_phase2 - count_after_disable,
     );
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 }
 
 /// After `disable()` with CPU profiling enabled, no new events should
@@ -123,19 +130,24 @@ fn disable_stops_cpu_sample_production() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
-        .build()
-        .unwrap();
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
 
     // Phase 1: burn CPU to generate perf samples while enabled.
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(async {
@@ -170,7 +182,7 @@ fn disable_stops_cpu_sample_production() {
     let total_after_disable = read_events_on_disk(dir.path()).len();
 
     // Phase 2: burn CPU while disabled — should NOT produce any events
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(async {
@@ -196,7 +208,8 @@ fn disable_stops_cpu_sample_production() {
         total_after_phase2 - total_after_disable,
     );
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 }
 
 /// After `disable()`, the DiskBuffer must not produce new segments.
@@ -216,17 +229,17 @@ fn disable_stops_segment_rotation() {
         .build()
         .unwrap();
 
-    let traced = recorder(writer)
-        .with_tokio(|t| {
+    let recorder = recorder(writer).build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
             t.worker_threads(2);
         })
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
 
     // Phase 1: produce events while enabled, let a few rotations happen.
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -275,7 +288,8 @@ fn disable_stops_segment_rotation() {
         segments_after_wait.saturating_sub(segments_after_disable),
     );
 
-    traced.graceful_shutdown(Duration::from_secs(2));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(2));
 }
 
 /// After `disable()`, re-enabling with `enable()` should resume event production.
@@ -285,22 +299,26 @@ fn enable_after_disable_resumes_events() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
-        .build()
-        .unwrap();
+    let recorder = recorder(writer).build();
+    let (recorder, rt) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
 
     // Disable, then re-enable
     handle.disable();
     std::thread::sleep(Duration::from_millis(50));
     handle.enable();
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -312,8 +330,9 @@ fn enable_after_disable_resumes_events() {
         }
     });
 
-    // Drop runtime to flush TL buffers, then guard to flush collector
-    drop(traced);
+    // Drop runtime to flush TL buffers, then drain the recorder to flush the collector
+    drop(rt);
+    drop(recorder);
 
     let runtime_event_count = read_events_on_disk(dir.path())
         .iter()

@@ -48,7 +48,7 @@
 use dial9::analysis::analysis_events::{CpuSampleSource, Dial9Event};
 use dial9::cpu::SchedEventConfig;
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
+use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
@@ -67,27 +67,32 @@ fn main() {
     let trace_read_path = format!("{trace_dir}/kernel_sched_trace.0.bin");
 
     let writer = DiskBuffer::single_file(&trace_base).unwrap();
-    let traced = recorder(writer)
+    let (recorder, rt) = recorder(writer)
         .with_sched_events(
             SchedEventConfig::default()
                 .sampling_interval(5)
                 .include_kernel(true),
         )
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
         .build()
-        .unwrap();
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let tasks: Vec<_> = (0..4).map(|i| tokio::spawn(blocking_task(i))).collect();
         for t in tasks {
             let _ = t.await;
         }
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_read_path} ===");

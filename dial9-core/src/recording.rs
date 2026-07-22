@@ -175,7 +175,10 @@ impl Recorder {
     /// Call this after any runtime that owns worker threads has been dropped, so
     /// their thread-local buffers have already been flushed. Consumes the
     /// recorder so `Drop` becomes a no-op.
-    pub fn graceful_shutdown(mut self, timeout: Duration) -> std::io::Result<()> {
+    ///
+    /// Failures during the drain are logged rather than returned; there is
+    /// nothing a caller can usefully do about them at this point.
+    pub fn graceful_shutdown(mut self, timeout: Duration) {
         // `timeout` only bounds the worker drain, which exists under `pipeline`.
         #[cfg(not(feature = "pipeline"))]
         let _ = timeout;
@@ -195,8 +198,6 @@ impl Recorder {
                 tracing::error!(target: "dial9", panic = ?e, "worker thread panicked during shutdown");
             }
         }
-
-        Ok(())
     }
 }
 

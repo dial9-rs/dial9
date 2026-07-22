@@ -17,12 +17,13 @@
 
 mod bmf;
 
+use dial9_core::recording::Recorder;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TracedRuntime, recorder,
+    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -107,9 +108,25 @@ struct BenchResult {
 
 fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     enum Server {
-        Traced(TracedRuntime),
+        Traced(Recorder, tokio::runtime::Runtime),
         Plain(tokio::runtime::Runtime),
     }
+
+    /// Attach a 4-worker runtime to `recorder` (already recording).
+    fn attach(recorder: Recorder, task_tracking: bool) -> Server {
+        let (recorder, runtime) = recorder
+            .attach_runtime_with(
+                TokioAttachOptions::builder()
+                    .task_tracking_enabled(task_tracking)
+                    .build(),
+                |t| {
+                    t.worker_threads(4);
+                },
+            )
+            .unwrap();
+        Server::Traced(recorder, runtime)
+    }
+
     let server: Server = match mode {
         "telemetry" => {
             let writer = DiskBuffer::single_file("/tmp/overhead_bench_trace.bin").unwrap();
@@ -119,22 +136,11 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
             {
                 rec = rec.with_cpu_profiling(CpuProfilingConfig::default());
             }
-            Server::Traced(
-                rec.with_tokio(|t| {
-                    t.worker_threads(4);
-                })
-                .with_task_tracking(true)
-                .build()
-                .unwrap(),
-            )
+            attach(rec.build(), true)
         }
-        "noop" => Server::Traced(
-            recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
-                .with_tokio(|t| {
-                    t.worker_threads(4);
-                })
-                .build()
-                .unwrap(),
+        "noop" => attach(
+            recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build(),
+            false,
         ),
         "baseline" => {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -147,14 +153,16 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
         }
     };
 
-    let (server_rt, handle): (&tokio::runtime::Runtime, Option<Dial9TokioHandle>) = match &server {
-        Server::Traced(s) => (s.runtime(), Some(s.handle())),
-        Server::Plain(rt) => (rt, None),
+    let (server_rt, instrumented): (&tokio::runtime::Runtime, bool) = match &server {
+        Server::Traced(_, rt) => (rt, true),
+        Server::Plain(rt) => (rt, false),
     };
 
     let port = server_rt.block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        // Inside the runtime, so `current()` picks up the attached recorder.
+        let handle = instrumented.then(Dial9TokioHandle::current);
         tokio::spawn(echo_server(listener, handle));
         port
     });
@@ -195,7 +203,14 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     });
 
     drop(client_rt);
-    drop(server);
+    // Drop the runtime before draining, so its workers flush first.
+    match server {
+        Server::Traced(recorder, runtime) => {
+            drop(runtime);
+            recorder.graceful_shutdown(Duration::from_secs(1));
+        }
+        Server::Plain(runtime) => drop(runtime),
+    }
 
     BenchResult { hist, wall }
 }

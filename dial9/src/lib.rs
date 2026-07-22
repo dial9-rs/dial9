@@ -3,7 +3,7 @@
 // Core recording API
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
 pub use dial9_core::handle::Dial9Handle;
-pub use dial9_core::recorder::{RecorderBuilder, RecorderSourceExt, recorder};
+pub use dial9_core::recorder::{RecorderBuilder, RecorderSourceExt, recorder, recorder_disabled};
 pub use dial9_core::recording::Recorder;
 
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
@@ -57,11 +57,12 @@ pub fn record_event(event: impl Encodable) {
 #[cfg(feature = "tokio")]
 pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::{TracedFuture, TracedRuntime, spawn};
+pub use dial9_tokio_telemetry::{TracedFuture, block_on, spawn, spawn_in};
 
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, RecorderBuilderTokioExt, TaskDumpConfig, TokioHooks, TracedRuntimeBuilder,
+    AttachedRuntime, Dial9TokioHandle, RecorderPipelineExt, RecorderTokioExt, TaskDumpConfig,
+    TokioAttachOptions, TokioHooks,
 };
 
 /// Offline trace reading and analysis.
@@ -74,49 +75,48 @@ pub mod analysis {
 #[cfg(feature = "tokio")]
 mod env_config;
 #[cfg(feature = "tokio")]
-pub use env_config::recorder_from_env;
+pub use env_config::{recorder_from_env, recorder_from_env_with};
 
 #[cfg(feature = "tokio")]
 use crate::core::{BufferMode, SegmentWriter};
 
-/// Build a [`TracedRuntimeBuilder`] from a writer result, or fall back to a disabled
-/// (writer-free) one when the writer cannot be created. Works with any writer:
-/// [`DiskBuffer`] or [`MemoryBuffer`]. Telemetry stays best-effort: a failed
-/// writer logs at `error!` and runs a plain Tokio runtime rather than panicking
-/// your service. `configure` is applied on both paths, so your Tokio settings
-/// survive the downgrade.
+/// Build a [`Recorder`] with dial9's default pipeline from a writer result, or
+/// fall back to a disabled (writer-free) one when the writer cannot be created.
+/// Telemetry stays best-effort: a failed writer logs at `error!` and yields a disabled recorder
+/// rather than panicking your service.
+///
+/// Get an instrumented runtime out of it with
+/// [`RecorderTokioExt::attach_runtime`]; a disabled recorder yields a plain one.
 ///
 /// ```no_run
-/// use dial9::DiskBuffer;
-/// fn config() -> dial9::TracedRuntimeBuilder {
-///     let writer = DiskBuffer::builder()
-///         .base_path("/tmp/dial9-traces")
-///         .max_total_size(64 * 1024 * 1024)
-///         .build();
-///     dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); })
-///         .with_task_tracking(true)
-/// }
+/// use dial9::RecorderTokioExt;
+/// # fn demo() -> std::io::Result<()> {
+/// let writer = dial9::DiskBuffer::builder()
+///     .base_path("/tmp/dial9-traces")
+///     .max_total_size(64 * 1024 * 1024)
+///     .build();
+/// let (recorder, runtime) = dial9::recorder_or_disabled(writer)
+///     .attach_runtime(|t| { t.worker_threads(4); })?;
+/// # let _ = (recorder, runtime);
+/// # Ok(())
+/// # }
 /// ```
 ///
-/// To plug sources that belong on the recorder before `with_tokio`
-/// (e.g. `.with_cpu_profiling`), match on the writer result yourself instead.
+/// To add sources (e.g. `.with_cpu_profiling`) or a custom pipeline, match on
+/// the writer result yourself and build the recorder directly.
 #[cfg(feature = "tokio")]
-pub fn recorder_or_disabled<M, F>(
-    writer: std::io::Result<SegmentWriter<M>>,
-    configure: F,
-) -> TracedRuntimeBuilder<M>
+pub fn recorder_or_disabled<M>(writer: std::io::Result<SegmentWriter<M>>) -> Recorder
 where
     M: BufferMode,
-    F: Fn(&mut ::tokio::runtime::Builder) + Send + Sync + 'static,
 {
     match writer {
-        Ok(writer) => recorder(writer).with_tokio(configure),
+        Ok(writer) => recorder(writer).build(),
         Err(e) => {
             tracing::error!(
                 target: "dial9_telemetry",
                 "dial9: trace writer setup failed; running without telemetry: {e}"
             );
-            TracedRuntimeBuilder::disabled().with_tokio(configure)
+            recorder_disabled()
         }
     }
 }

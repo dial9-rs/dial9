@@ -18,3 +18,4 @@ proc-macro2 = "1"
 insta = "1"
 prettyplease = "0.2"
 dial9 = { path = "../dial9", default-features = false, features = ["tokio"] }
+tokio = { version = "1.52.0", features = ["rt-multi-thread"] }

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dial9::{DiskBuffer, RecorderBuilderTokioExt};
+use dial9::{DiskBuffer, RecorderPipelineExt, RecorderTokioExt};
 
 /// Names a directory entry that looks like a boot_id (`{4-alpha}-{pid}`).
 fn is_boot_id_dir(path: &Path) -> bool {
@@ -58,16 +58,19 @@ fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskBuffer {
 /// Build a disk-backed runtime under `trace_dir`, run a trivial workload, and
 /// shut it down so segments are sealed.
 fn run_workload(trace_dir: &Path, gc_dead_namespaces: bool) {
-    let traced = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces))
-        .with_tokio(|_| {})
-        .build()
-        .expect("runtime should build");
-    assert!(traced.is_enabled());
-    traced.block_on(async {
+    let recorder = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces)).build();
+    let (recorder, runtime) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
+        })
+        .expect("attach tokio");
+    assert!(recorder.handle().is_enabled());
+    runtime.block_on(async {
         tokio::task::yield_now().await;
     });
-    // Dropping the runtime drops its guard, which flushes and seals segments.
-    drop(traced);
+    // Dropping the runtime + recorder flushes and seals segments.
+    drop(runtime);
+    drop(recorder);
 }
 
 #[test]
@@ -158,20 +161,24 @@ fn s3_boot_id_matches_namespace_dir() {
     use dial9_trace_format::decoder::Decoder;
 
     let dir = tempfile::tempdir().unwrap();
-    let traced = dial9::recorder(namespaced_writer(dir.path(), true))
-        .with_tokio(|_| {})
+    let recorder = dial9::recorder(namespaced_writer(dir.path(), true))
         .with_s3_uploader(
             S3Config::builder()
                 .bucket("test-bucket")
                 .service_name("test-svc")
                 .build(),
         )
-        .build()
-        .expect("runtime should build");
-    traced.block_on(async {
+        .build();
+    let (recorder, runtime) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
+        })
+        .expect("attach tokio");
+    runtime.block_on(async {
         tokio::task::yield_now().await;
     });
-    drop(traced);
+    drop(runtime);
+    drop(recorder);
 
     let boot_dir = boot_id_dirs(dir.path())
         .into_iter()

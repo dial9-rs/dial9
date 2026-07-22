@@ -8,7 +8,7 @@ mod common;
 use common::decode_file;
 use dial9::analysis::analysis_events::Dial9Event;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{DiskBuffer, RecorderTokioExt, recorder};
 use std::time::Duration;
 
 #[global_allocator]
@@ -21,14 +21,15 @@ fn memory_sample_rate_appears_in_segment_metadata() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
-        .with_tokio(|t| {
+    let recorder = recorder(writer).build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .build()
-        .unwrap();
+        .expect("attach tokio");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(2048)
@@ -38,11 +39,12 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     .install(handle)
     .expect("install should succeed");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(5));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
     let mut found = false;
     let files: Vec<_> = std::fs::read_dir(dir.path())

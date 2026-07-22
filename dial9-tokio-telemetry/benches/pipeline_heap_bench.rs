@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
+    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPerfExt, RecorderPipelineExt,
+    RecorderTokioExt, TokioAttachOptions, recorder,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -194,7 +195,7 @@ fn measure(mode: Mode) -> Sample {
 
     // Scope writer/runtime so they drop before we sample post_shutdown.
     let steady_state = {
-        let traced = match mode {
+        let recorder = match mode {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let writer = DiskBuffer::builder()
@@ -205,13 +206,8 @@ fn measure(mode: Mode) -> Sample {
                     .build()
                     .unwrap();
                 let r = recorder(writer)
-                    .with_tokio(|t| {
-                        t.worker_threads(WORKER_THREADS);
-                    })
-                    .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .build()
-                    .expect("build (disk)");
+                    .build();
                 // Keep tmp alive for the duration; leak it intentionally so
                 // its Drop doesn't show up in the measurement window.
                 std::mem::forget(tmp);
@@ -228,13 +224,8 @@ fn measure(mode: Mode) -> Sample {
                     .unwrap();
                 let r = recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
-                    .with_tokio(|t| {
-                        t.worker_threads(WORKER_THREADS);
-                    })
-                    .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .build()
-                    .expect("build (disk+cpu)");
+                    .build();
                 std::mem::forget(tmp);
                 r
             }
@@ -246,13 +237,8 @@ fn measure(mode: Mode) -> Sample {
                     .build()
                     .expect("MemoryBuffer build");
                 recorder(writer)
-                    .with_tokio(|t| {
-                        t.worker_threads(WORKER_THREADS);
-                    })
-                    .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
                     .build()
-                    .expect("build (mem)")
             }
             Mode::MemCpu => {
                 let writer = MemoryBuffer::builder()
@@ -263,22 +249,26 @@ fn measure(mode: Mode) -> Sample {
                     .expect("MemoryBuffer build");
                 recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
-                    .with_tokio(|t| {
-                        t.worker_threads(WORKER_THREADS);
-                    })
-                    .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
                     .build()
-                    .expect("build (mem+cpu)")
             }
         };
-        traced.enable();
-        let handle = traced.handle();
-        traced
-            .runtime()
-            .block_on(workload(handle, tasks_done.clone()));
+        let (recorder, runtime) = recorder
+            .attach_runtime_with(
+                TokioAttachOptions::builder()
+                    .task_tracking_enabled(true)
+                    .build(),
+                |t| {
+                    t.worker_threads(WORKER_THREADS);
+                },
+            )
+            .expect("build runtime");
+
+        let handle = runtime.block_on(async { Dial9TokioHandle::current() });
+        runtime.block_on(workload(handle, tasks_done.clone()));
         let steady = ALLOC.peak();
-        traced.graceful_shutdown(Duration::from_secs(30));
+        drop(runtime);
+        recorder.graceful_shutdown(Duration::from_secs(30));
         steady
     };
 

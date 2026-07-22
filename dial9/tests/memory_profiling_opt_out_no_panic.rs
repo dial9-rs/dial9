@@ -8,7 +8,7 @@
 //! would panic. With OPT_OUT, they bail out cleanly.
 
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{MemoryBuffer, RecorderTokioExt, recorder};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -56,14 +56,15 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     PANICS.store(0, Ordering::Relaxed);
 
-    let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
-        .with_tokio(|t| {
+    let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .build()
-        .unwrap();
+        .expect("attach tokio");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64) // sample aggressively
@@ -76,7 +77,7 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     const N_THREADS: usize = 16;
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         // Give time for the profiler to fully initialize.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -109,7 +110,8 @@ fn opt_out_prevents_tls_teardown_panic() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     // Restore the original panic hook.
     std::panic::set_hook(prev_hook);

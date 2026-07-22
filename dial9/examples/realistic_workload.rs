@@ -1,20 +1,25 @@
+use std::io;
 use std::time::Duration;
 
-use dial9::Dial9TokioHandle;
-use dial9::{DiskBuffer, TracedRuntimeBuilder};
+use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-fn my_config() -> TracedRuntimeBuilder {
+fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
         .base_path("realistic_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
-    dial9::recorder_or_disabled(writer, |t| {
-        t.worker_threads(4);
-    })
-    .with_task_tracking(true)
+    let recorder = dial9::recorder_or_disabled(writer);
+    recorder.attach_runtime_with(
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+        |t| {
+            t.worker_threads(4);
+        },
+    )
 }
 
 async fn cpu_bound_work(n: u64) -> u64 {
@@ -26,10 +31,9 @@ async fn cpu_bound_work(n: u64) -> u64 {
 }
 
 async fn network_server(listener: TcpListener) {
-    let handle = Dial9TokioHandle::current();
     loop {
         if let Ok((mut socket, _)) = listener.accept().await {
-            handle.spawn(async move {
+            dial9::spawn(async move {
                 let mut buf = [0u8; 1024];
                 if let Ok(n) = socket.read(&mut buf).await {
                     let result = cpu_bound_work(10000).await;
@@ -59,15 +63,13 @@ async fn network_client(port: u16, id: usize) {
 }
 
 async fn mixed_workload(port: u16) {
-    let handle = Dial9TokioHandle::current();
-
     let clients: Vec<_> = (0..5)
-        .map(|i| handle.spawn(network_client(port, i)))
+        .map(|i| dial9::spawn(network_client(port, i)))
         .collect();
 
     let cpu_tasks: Vec<_> = (0..3)
         .map(|_| {
-            handle.spawn(async {
+            dial9::spawn(async {
                 for _ in 0..10 {
                     cpu_bound_work(50000).await;
                     tokio::task::yield_now().await;
@@ -87,11 +89,9 @@ async fn mixed_workload(port: u16) {
 #[dial9::main(config = my_config)]
 async fn main() {
     println!("Running realistic workload...");
-
-    let handle = Dial9TokioHandle::current();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    handle.spawn(network_server(listener));
+    dial9::spawn(network_server(listener));
 
     tokio::time::timeout(Duration::from_secs(5), mixed_workload(port))
         .await

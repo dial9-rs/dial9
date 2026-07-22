@@ -8,7 +8,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9::analysis::analysis_events::Dial9Event;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -40,15 +40,17 @@ static ALLOC: Dial9Allocator<CountingAllocator> = Dial9Allocator::new(CountingAl
 fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("attach tokio");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64)
@@ -59,7 +61,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     .install(handle)
     .expect("install should succeed");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut v: Vec<u8> = Vec::new();
         for i in 0..1000u16 {
             v.push((i & 0xff) as u8);
@@ -70,7 +72,8 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     assert!(
         ALLOC_COUNT.load(Ordering::Relaxed) > 0,

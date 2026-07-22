@@ -3,10 +3,11 @@
 
 mod bmf;
 
-use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RecorderPerfExt};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
+};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -72,16 +73,21 @@ fn main() {
     {
         rec = rec.with_cpu_profiling(CpuProfilingConfig::default());
     }
-    let traced = rec
-        .with_tokio(|t| {
-            t.worker_threads(4);
-        })
-        .with_task_tracking(true)
-        .build()
+    let recorder = rec.build();
+
+    let (recorder, runtime) = recorder
+        .attach_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(4);
+            },
+        )
         .unwrap();
 
     let start = Instant::now();
-    traced.runtime().block_on(async {
+    runtime.block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(workload_server(listener));
@@ -103,7 +109,8 @@ fn main() {
     });
     let wall = start.elapsed();
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let rps = TOTAL_REQUESTS as f64 / wall.as_secs_f64();
     let mut report = bmf::Report::new();

@@ -6,7 +6,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -30,15 +30,17 @@ enum OverflowEvent {
 fn overflow_event_emitted_when_ring_overflows() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("attach tokio");
 
-    let handle = traced.record_handle();
+    let handle = recorder.handle().clone();
     // Use a tiny ring (capacity 4) so it overflows easily under allocation pressure.
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
@@ -51,7 +53,7 @@ fn overflow_event_emitted_when_ring_overflows() {
     .expect("install should succeed");
 
     // Generate enough allocations to overflow the tiny ring.
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         for _ in 0..1000 {
             let v: Vec<u8> = vec![0u8; 64];
             std::hint::black_box(&v);
@@ -61,7 +63,8 @@ fn overflow_event_emitted_when_ring_overflows() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<OverflowEvent> = decode_all(&batches);

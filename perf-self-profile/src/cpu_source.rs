@@ -364,6 +364,11 @@ impl Source for CpuProfiler {
     fn name(&self) -> &'static str {
         Self::SOURCE_NAME
     }
+
+    #[cfg(feature = "symbolize-processor")]
+    fn segment_processor(&mut self) -> Option<Box<dyn dial9_core::pipeline::SegmentProcessor>> {
+        Some(Box::new(crate::SymbolizeProcessor::new()))
+    }
 }
 
 // ── SchedProfiler ────────────────────────────────────────────────────────────

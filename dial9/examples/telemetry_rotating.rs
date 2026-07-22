@@ -9,8 +9,7 @@
 //! After running, inspect the trace files:
 //!   cargo run --example analyze_trace -- /tmp/telemetry_rotating/trace.0.bin
 
-use dial9::RecorderBuilderTokioExt;
-use dial9::{DiskBuffer, recorder};
+use dial9::{DiskBuffer, RecorderTokioExt, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -27,16 +26,16 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB of trace data on disk
         .build()?;
 
-    // recorder(writer).with_tokio(..).build() installs telemetry hooks on the
-    // tokio runtime and returns a traced runtime that owns the background
-    // flush/sampler thread.
-    let traced = recorder(writer)
-        .with_tokio(|t| {
+    // recorder(writer).build() plus attach_runtime installs telemetry hooks on the
+    // tokio runtime; the recorder owns the background flush/sampler thread.
+    let (recorder, rt) = recorder(writer)
+        .build()
+        .attach_runtime(|t| {
             t.worker_threads(4);
         })
-        .build()?;
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    dial9::block_on(&rt, async {
         println!("Starting rotating-writer telemetry demo...");
 
         // Spawn a batch of tasks that do a mix of yielding and sleeping to
@@ -61,8 +60,9 @@ fn main() -> std::io::Result<()> {
         println!("All tasks completed");
     });
 
-    // Dropping the traced runtime flushes remaining events.
-    drop(traced);
+    // Dropping the runtime then the recorder flushes remaining events.
+    drop(rt);
+    drop(recorder);
 
     // List the trace files that were written.
     println!("\nTrace files in {trace_dir}/:");
