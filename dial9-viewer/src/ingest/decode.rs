@@ -36,7 +36,7 @@ use spans::span_builder;
 use spans::{interval_pairing, legacy};
 
 pub(crate) use types::{
-    DecodeResult, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan,
+    DecodeResult, DecodeStats, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan,
 };
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
@@ -91,6 +91,21 @@ fn is_date(s: &str) -> bool {
 /// Returns the resolved samples and a map of stack_id → frame names for the
 /// stacks dictionary.
 pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeResult> {
+    decode_samples_with_stats(data, source_key).map(|(result, _stats)| result)
+}
+
+/// Like [`decode_samples`], but also returns per-phase [`DecodeStats`] so the
+/// fold pipeline can emit a per-file timing metric. The extra bookkeeping is a
+/// handful of `Instant::now()` calls and counter reads, so this is the real
+/// implementation and [`decode_samples`] delegates to it.
+pub(crate) fn decode_samples_with_stats(
+    data: &[u8],
+    source_key: &str,
+) -> anyhow::Result<(DecodeResult, DecodeStats)> {
+    use std::time::Instant;
+
+    let mut stats = DecodeStats::default();
+    let t_wire = Instant::now();
     let events::DecodedTrace {
         interner,
         mut addr_to_keys,
@@ -101,6 +116,12 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
         legacy_exits,
         legacy_closes,
     } = events::decode_trace(data, source_key)?;
+    stats.wire_decode = t_wire.elapsed();
+    stats.span_events_decoded =
+        (legacy_enters.len() + legacy_exits.len() + legacy_closes.len()) as u64;
+    // Span events are collected separately and never enter the sorted event stream.
+    stats.events_decoded = events.len() as u64 + stats.span_events_decoded;
+
     let timestamp_bounds = events
         .iter()
         .map(TraceEvent::timestamp_ns)
@@ -129,14 +150,20 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
     }
     tracing::info!("sorting {} events", events.len());
     // Sort events by timestamp for correct worker_id inference.
+    let t_sort = Instant::now();
     events.sort_unstable_by_key(|e| e.timestamp_ns());
 
     // Pre-sort symbol entries by inline depth.
     for entries in addr_to_keys.values_mut() {
         entries.sort_unstable_by_key(|(d, _)| *d);
     }
-    let mut poll_timeline = polls::PollTimeline::reconstruct(&events);
+    stats.sort_events = t_sort.elapsed();
 
+    let t_polls = Instant::now();
+    let mut poll_timeline = polls::PollTimeline::reconstruct(&events);
+    stats.poll_reconstruct = t_polls.elapsed();
+
+    let t_samples = Instant::now();
     let mut stacks_dict: FxHashMap<[u8; 16], Vec<String>> = FxHashMap::default();
     let mut stack_cache: FxHashMap<Vec<u64>, [u8; 16]> = FxHashMap::default();
     let mut samples = Vec::new();
@@ -219,6 +246,8 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
 
     let resolved_polls =
         poll_timeline.resolved(clock_offset, &parsed_host, &parsed_service, &parsed_date);
+    stats.sample_resolve = t_samples.elapsed();
+
     // ── Stage 2: Reconstruct tracing spans from enter/exit/close events ──────
     //
     // Decode the authoritative boot_id from SegmentMetadata when available.
@@ -253,6 +282,7 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
     let mut legacy_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>> =
         FxHashMap::default();
 
+    let t_spans = Instant::now();
     if !legacy_enters.is_empty() || !legacy_closes.is_empty() {
         let legacy_resolution = resolve_legacy_spans(
             &legacy_enters,
@@ -269,6 +299,8 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
         legacy_intervals = legacy_resolution.instance_intervals;
         resolved_spans.extend(legacy_resolution.spans);
     }
+    stats.span_resolve = t_spans.elapsed();
+
     // ── Stage 3: Attribute samples to spans using entered intervals ──────────
     //
     // Build a flat sorted interval index for O(n log n + m log n) sweep instead
@@ -279,6 +311,7 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
     // intervals — never to lifecycle envelopes. An async span that is exited
     // (waiting) must NOT claim samples that fire during its idle gap.
 
+    let t_attr = Instant::now();
     attribution::attribute_samples_to_spans(
         &mut samples,
         &mut resolved_spans,
@@ -286,11 +319,16 @@ pub(crate) fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<De
         &boot_id,
         clock_offset,
     );
+    stats.sample_attribution = t_attr.elapsed();
+
     Ok((
-        samples,
-        stacks_dict.into_iter().collect(),
-        resolved_polls,
-        resolved_spans,
+        (
+            samples,
+            stacks_dict.into_iter().collect(),
+            resolved_polls,
+            resolved_spans,
+        ),
+        stats,
     ))
 }
 

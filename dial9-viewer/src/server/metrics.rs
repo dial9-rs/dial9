@@ -11,7 +11,7 @@
 //!   `/api/browse`, `/api/object`), so you can alarm a single noisy endpoint.
 //! - `[]` (the empty set) — a service-wide aggregate across all operations.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
@@ -20,7 +20,7 @@ use metrique::ServiceMetrics;
 use metrique::emf::Emf;
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::timers::Timer;
-use metrique::unit::{Count, Millisecond};
+use metrique::unit::{Byte, Count, Millisecond};
 use metrique::unit_of_work::metrics;
 use metrique::writer::sink::AttachHandle;
 use metrique::writer::{AttachGlobalEntrySinkExt, FormatExt};
@@ -200,6 +200,188 @@ impl ObjectStreamMetrics {
             truncated_mid_stream: 0,
         }
         .append_on_drop(ServiceMetrics::sink_or_discard())
+    }
+}
+
+/// One entry per source file folded, carrying the per-phase timing breakdown of
+/// processing that file — emitted so we can see *where* fold time goes without a
+/// profiler. This is the metric that answers "why is the server slow": it splits
+/// a fold into fetch (S3 GET) → gunzip → the individual decode phases →
+/// parquet-encode → write (S3 PUTs), alongside the file's size and event count.
+///
+/// Standalone (not part of [`RequestMetrics`]): one HTTP request folds many
+/// files, so folding to the request entry would collapse per-file detail. Each
+/// fold appends its own entry to the global sink on drop, sharing the same empty
+/// global dimension set so per-file timings aggregate across the fleet.
+///
+/// All phase durations are wall-clock and measured in sequence, so they sum
+/// (modulo scheduling gaps) to `total`.
+#[metrics(emf::dimension_sets = [[]])]
+pub struct FoldFileMetrics {
+    #[metrics(timestamp)]
+    timestamp: SystemTime,
+
+    /// Always `1`: the count of folded files (denominator for per-file rates).
+    #[metrics(unit = Count)]
+    count: u32,
+
+    /// `1` when the fold failed (fetch/decode/write error). The phase timings up
+    /// to the failure point are still emitted; later phases are zero.
+    #[metrics(unit = Count)]
+    failed: u32,
+
+    /// Compressed size of the source object as fetched from S3 (bytes).
+    #[metrics(unit = Byte)]
+    source_bytes: u64,
+
+    /// Decompressed size handed to the decoder (bytes). The ratio to
+    /// `source_bytes` is the gzip ratio.
+    #[metrics(unit = Byte)]
+    decompressed_bytes: u64,
+
+    /// Total events decoded off the wire (all event types).
+    #[metrics(unit = Count)]
+    events_decoded: u64,
+
+    /// Span enter/exit/close events (subset of `events_decoded`) — the span path
+    /// is the one under scrutiny, so it gets its own count.
+    #[metrics(unit = Count)]
+    span_events_decoded: u64,
+
+    // ── Phase timings (sum ≈ total) ──────────────────────────────────────────
+    /// S3 GET of the source object.
+    #[metrics(unit = Millisecond)]
+    fetch: Duration,
+    /// gunzip of the fetched bytes.
+    #[metrics(unit = Millisecond)]
+    gunzip: Duration,
+    /// One-pass wire decode into typed events.
+    #[metrics(unit = Millisecond)]
+    wire_decode: Duration,
+    /// Sort the event stream by timestamp.
+    #[metrics(unit = Millisecond)]
+    sort_events: Duration,
+    /// Reconstruct the poll timeline from park/unpark/poll events.
+    #[metrics(unit = Millisecond)]
+    poll_reconstruct: Duration,
+    /// Sample loop: symbolication + per-sample poll attribution.
+    #[metrics(unit = Millisecond)]
+    sample_resolve: Duration,
+    /// Legacy span reconstruction (enter/exit pairing, close segmentation).
+    #[metrics(unit = Millisecond)]
+    span_resolve: Duration,
+    /// Sweep-line sample→span attribution.
+    #[metrics(unit = Millisecond)]
+    sample_attribution: Duration,
+    /// Parquet-encode of the four part-files (samples, dict, polls, spans).
+    #[metrics(unit = Millisecond)]
+    parquet_encode: Duration,
+    /// S3 PUTs of the four part-files.
+    #[metrics(unit = Millisecond)]
+    write_parts: Duration,
+    /// Wall-clock time for the whole fold (fetch → write), including any time
+    /// spent waiting on the fold concurrency semaphores.
+    #[metrics(unit = Millisecond)]
+    total: Duration,
+}
+
+/// Builder for a [`FoldFileMetrics`] entry. The fold path fills phases in as it
+/// runs, then calls [`emit`](Self::emit) once to append the entry to the global
+/// sink. Kept separate from the metric struct so the metric's fields stay
+/// private (new phases are non-breaking).
+#[derive(Default)]
+pub struct FoldFileMetricsBuilder {
+    source_bytes: u64,
+    decompressed_bytes: u64,
+    events_decoded: u64,
+    span_events_decoded: u64,
+    fetch: Duration,
+    gunzip: Duration,
+    wire_decode: Duration,
+    sort_events: Duration,
+    poll_reconstruct: Duration,
+    sample_resolve: Duration,
+    span_resolve: Duration,
+    sample_attribution: Duration,
+    parquet_encode: Duration,
+    write_parts: Duration,
+    total: Duration,
+    failed: bool,
+}
+
+impl FoldFileMetricsBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn source_bytes(&mut self, n: u64) -> &mut Self {
+        self.source_bytes = n;
+        self
+    }
+    pub fn decompressed_bytes(&mut self, n: u64) -> &mut Self {
+        self.decompressed_bytes = n;
+        self
+    }
+    pub fn fetch(&mut self, d: Duration) -> &mut Self {
+        self.fetch = d;
+        self
+    }
+    pub fn gunzip(&mut self, d: Duration) -> &mut Self {
+        self.gunzip = d;
+        self
+    }
+    /// Set every decode sub-phase at once from the decoder's own [`DecodeStats`].
+    pub fn decode_phases(&mut self, s: &crate::ingest::decode::DecodeStats) -> &mut Self {
+        self.wire_decode = s.wire_decode;
+        self.sort_events = s.sort_events;
+        self.poll_reconstruct = s.poll_reconstruct;
+        self.sample_resolve = s.sample_resolve;
+        self.span_resolve = s.span_resolve;
+        self.sample_attribution = s.sample_attribution;
+        self.events_decoded = s.events_decoded;
+        self.span_events_decoded = s.span_events_decoded;
+        self
+    }
+    pub fn parquet_encode(&mut self, d: Duration) -> &mut Self {
+        self.parquet_encode = d;
+        self
+    }
+    pub fn write_parts(&mut self, d: Duration) -> &mut Self {
+        self.write_parts = d;
+        self
+    }
+    pub fn total(&mut self, d: Duration) -> &mut Self {
+        self.total = d;
+        self
+    }
+    pub fn failed(&mut self, failed: bool) -> &mut Self {
+        self.failed = failed;
+        self
+    }
+
+    /// Append the assembled entry to the global metrics sink. A no-op sink is
+    /// used when none is attached (tests), matching the rest of this module.
+    pub fn emit(self) {
+        FoldFileMetrics {
+            timestamp: SystemTime::now(),
+            count: 1,
+            failed: self.failed as u32,
+            source_bytes: self.source_bytes,
+            decompressed_bytes: self.decompressed_bytes,
+            events_decoded: self.events_decoded,
+            span_events_decoded: self.span_events_decoded,
+            fetch: self.fetch,
+            gunzip: self.gunzip,
+            wire_decode: self.wire_decode,
+            sort_events: self.sort_events,
+            poll_reconstruct: self.poll_reconstruct,
+            sample_resolve: self.sample_resolve,
+            span_resolve: self.span_resolve,
+            sample_attribution: self.sample_attribution,
+            parquet_encode: self.parquet_encode,
+            write_parts: self.write_parts,
+            total: self.total,
+        }
+        .append_on_drop(ServiceMetrics::sink_or_discard());
     }
 }
 
@@ -496,5 +678,53 @@ mod tests {
 
         let e = inspector.get(0);
         assert_eq!(e.metrics["truncated_mid_stream"].as_u64(), 0);
+    }
+
+    #[tokio::test]
+    async fn fold_file_metric_carries_phases_size_and_counts() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+
+        let mut b = FoldFileMetricsBuilder::new();
+        b.source_bytes(1_257_686)
+            .decompressed_bytes(2_314_769)
+            .fetch(Duration::from_millis(120))
+            .gunzip(Duration::from_millis(5))
+            .parquet_encode(Duration::from_millis(8))
+            .write_parts(Duration::from_millis(30));
+        let decode = crate::ingest::decode::DecodeStats {
+            events_decoded: 1_300_000,
+            span_events_decoded: 4_368,
+            wire_decode: Duration::from_millis(20),
+            span_resolve: Duration::from_millis(3),
+            ..Default::default()
+        };
+        b.decode_phases(&decode).total(Duration::from_millis(200));
+        b.emit();
+
+        let e = inspector.get(0);
+        assert_eq!(e.metrics["count"].as_u64(), 1);
+        assert_eq!(e.metrics["failed"].as_u64(), 0);
+        assert_eq!(e.metrics["source_bytes"].as_u64(), 1_257_686);
+        assert_eq!(e.metrics["decompressed_bytes"].as_u64(), 2_314_769);
+        assert_eq!(e.metrics["events_decoded"].as_u64(), 1_300_000);
+        assert_eq!(e.metrics["span_events_decoded"].as_u64(), 4_368);
+        // A representative phase and the total are present.
+        assert_eq!(e.metrics["wire_decode"].num_observations(), 1);
+        assert_eq!(e.metrics["span_resolve"].num_observations(), 1);
+        assert_eq!(e.metrics["total"].num_observations(), 1);
+    }
+
+    #[tokio::test]
+    async fn fold_file_metric_marks_failure() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+
+        let mut b = FoldFileMetricsBuilder::new();
+        b.failed(true).total(Duration::from_millis(50));
+        b.emit();
+
+        let e = inspector.get(0);
+        assert_eq!(e.metrics["failed"].as_u64(), 1);
     }
 }
