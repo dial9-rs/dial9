@@ -332,11 +332,11 @@
   }
 
   /**
-   * List the buckets the stored credentials can see (`GET /api/buckets`), so
-   * the UI can offer a picker. Browser-only. Throws on HTTP error with the
+   * List the buckets the stored credentials can see (`GET /api/buckets`) with
+   * the region returned by S3. Browser-only. Throws on HTTP error with the
    * server's message (e.g. credentials rejected).
    *
-   * @returns {Promise<string[]>}
+   * @returns {Promise<Array<{name: string, region: string|null}>>}
    */
   async function listBuckets() {
     const resp = await fetch("/api/buckets", { headers: headers() });

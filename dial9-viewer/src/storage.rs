@@ -13,6 +13,27 @@ pub struct ObjectInfo {
     pub last_modified: Option<String>,
 }
 
+/// A bucket visible to the current credentials and its AWS region, when S3
+/// included it in the `ListBuckets` response.
+///
+/// `#[non_exhaustive]` keeps this additive response type extensible without
+/// preventing callers from reading the current fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BucketInfo {
+    pub name: String,
+    pub region: Option<String>,
+}
+
+impl BucketInfo {
+    pub fn new(name: impl Into<String>, region: Option<String>) -> Self {
+        Self {
+            name: name.into(),
+            region,
+        }
+    }
+}
+
 /// A bounded page of object listings, plus whether the cap was reached.
 ///
 /// `truncated` is the signal the old listing path lacked: when a prefix fans
@@ -62,12 +83,13 @@ pub struct ObjectStream {
 
 /// Abstraction over trace storage (S3, local FS, etc.)
 pub trait StorageBackend: Send + Sync {
-    /// List the buckets the current credentials can see. Lets the viewer offer
-    /// a bucket picker instead of requiring the user to know the name. Backends
+    /// List the buckets the current credentials can see, including their AWS
+    /// regions when available. Lets the viewer offer a region-aware bucket
+    /// picker instead of requiring the user to know either value. Backends
     /// without a bucket concept (local FS) return an empty list.
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>>;
 
     /// List objects under `prefix`, paginating up to `cap` results.
     ///
@@ -245,7 +267,16 @@ where
         // was built for, so S3 refuses with `PermanentRedirect` (the classic
         // form) or the generic `Redirect`. Surface a clear message rather than
         // the opaque "unclassified S3 error" this used to fall through to.
-        Some("PermanentRedirect" | "Redirect") => StorageError::WrongRegion,
+        //
+        // `IllegalLocationConstraintException` is the same mismatch reported
+        // differently: an opt-in region (e.g. `af-south-1`) whose bucket is
+        // addressed through a region-specific endpoint the request wasn't signed
+        // for returns this (HTTP 400) instead of the 301 `PermanentRedirect`. It
+        // is still "wrong region", so classify it alongside the others rather
+        // than letting it fall through to the `Other` arm's 500 `fault`.
+        Some("PermanentRedirect" | "Redirect" | "IllegalLocationConstraintException") => {
+            StorageError::WrongRegion
+        }
         // Missing bucket/key: the user pointed at something that does not exist
         // (typo'd bucket name, deleted object). This is a client mistake, so map
         // it to 404 rather than letting it fall through to the `Other` arm —
@@ -327,6 +358,45 @@ impl S3Backend {
     /// Create from an existing S3 client (useful for testing with s3s).
     pub fn from_client(client: aws_sdk_s3::Client) -> Self {
         Self { client }
+    }
+
+    async fn fetch_bucket_details(&self) -> Result<Vec<BucketInfo>, StorageError> {
+        const MAX_BUCKETS: usize = 200;
+
+        // S3 only includes BucketRegion when ListBuckets has at least one valid
+        // parameter. Setting the page size both enables that field and keeps
+        // pagination bounded by the viewer's existing display cap.
+        let mut pages = self
+            .client
+            .list_buckets()
+            .max_buckets(MAX_BUCKETS as i32)
+            .into_paginator()
+            .send();
+        let mut buckets = Vec::new();
+        let mut truncated = false;
+        'pages: while let Some(page) = pages.next().await {
+            let page = page.map_err(|e| classify_s3_error(&e))?;
+            for bucket in page.buckets() {
+                if let Some(name) = bucket.name() {
+                    buckets.push(BucketInfo::new(
+                        name,
+                        bucket.bucket_region().map(str::to_string),
+                    ));
+                }
+                if buckets.len() >= MAX_BUCKETS {
+                    truncated = true;
+                    break 'pages;
+                }
+            }
+        }
+        if truncated {
+            tracing::warn!(
+                max = MAX_BUCKETS,
+                "bucket listing truncated at cap; some buckets are not shown"
+            );
+        }
+        buckets.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(buckets)
     }
 
     /// Build an ephemeral backend from user-supplied credentials.
@@ -424,33 +494,8 @@ pub fn build_credentialed_client(
 impl StorageBackend for S3Backend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
-        Box::pin(async move {
-            const MAX_BUCKETS: usize = 200;
-            let mut pages = self.client.list_buckets().into_paginator().send();
-            let mut names = Vec::new();
-            let mut truncated = false;
-            'pages: while let Some(page) = pages.next().await {
-                let page = page.map_err(|e| classify_s3_error(&e))?;
-                for b in page.buckets() {
-                    if let Some(name) = b.name() {
-                        names.push(name.to_string());
-                    }
-                    if names.len() >= MAX_BUCKETS {
-                        truncated = true;
-                        break 'pages;
-                    }
-                }
-            }
-            if truncated {
-                tracing::warn!(
-                    max = MAX_BUCKETS,
-                    "bucket listing truncated at cap; some buckets are not shown"
-                );
-            }
-            names.sort();
-            Ok(names)
-        })
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
+        Box::pin(self.fetch_bucket_details())
     }
 
     fn list_objects(
@@ -823,7 +868,7 @@ impl Drop for LocalBackend {
 impl StorageBackend for LocalBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         // Local mode has no bucket concept; the synthetic "local" bucket is
         // wired in by the caller.
         Box::pin(async { Ok(Vec::new()) })
@@ -1249,6 +1294,59 @@ mod tests {
         S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg))
     }
 
+    #[tokio::test]
+    async fn list_buckets_requests_and_preserves_regions() {
+        use aws_smithy_http_client::test_util::infallible_client_fn;
+
+        let http_client = infallible_client_fn(|req: http::Request<_>| {
+            assert!(
+                req.uri()
+                    .query()
+                    .is_some_and(|query| query.contains("max-buckets=200")),
+                "ListBuckets must include a valid parameter so S3 returns BucketRegion: {}",
+                req.uri()
+            );
+            let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+                <ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Buckets>
+                    <Bucket>
+                      <Name>dial9-cape-town</Name>
+                      <CreationDate>2026-07-21T00:00:00.000Z</CreationDate>
+                      <BucketRegion>af-south-1</BucketRegion>
+                    </Bucket>
+                    <Bucket>
+                      <Name>dial9-oregon</Name>
+                      <CreationDate>2026-07-21T00:00:00.000Z</CreationDate>
+                      <BucketRegion>us-west-2</BucketRegion>
+                    </Bucket>
+                  </Buckets>
+                </ListAllMyBucketsResult>"#;
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/xml")
+                .body(body)
+                .unwrap()
+        });
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client)
+            .build();
+        let backend = S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg));
+
+        let buckets = backend.list_buckets().await.unwrap();
+        assert_eq!(
+            buckets,
+            vec![
+                BucketInfo::new("dial9-cape-town", Some("af-south-1".to_string())),
+                BucketInfo::new("dial9-oregon", Some("us-west-2".to_string())),
+            ]
+        );
+    }
+
     /// A `PermanentRedirect` (the error S3 returns when a bucket is addressed in
     /// the wrong region) must classify to [`StorageError::WrongRegion`], not the
     /// opaque `Other` that produced the "unclassified S3 error" log. This is the
@@ -1268,6 +1366,35 @@ mod tests {
             .list_prefixes("my-bucket", "")
             .await
             .expect_err("a PermanentRedirect must surface as an error");
+        assert!(
+            matches!(err, StorageError::WrongRegion),
+            "expected WrongRegion, got {err:?}"
+        );
+        // The message points the user at the fix (set/detect the region).
+        assert!(err.to_string().contains("region"), "message: {err}");
+    }
+
+    /// An `IllegalLocationConstraintException` is a region mismatch reported
+    /// differently: an opt-in region (e.g. `af-south-1`) whose bucket is
+    /// addressed through an endpoint the request wasn't signed for returns this
+    /// (HTTP 400) instead of a 301 `PermanentRedirect`. It must classify to
+    /// [`StorageError::WrongRegion`] like the redirect forms, not the opaque
+    /// `Other` that produced the "unclassified S3 error" log and a 500 `fault`.
+    #[tokio::test]
+    async fn illegal_location_constraint_classifies_as_wrong_region() {
+        // The XML S3 sends for an opt-in-region bucket hit through the wrong
+        // regional endpoint (HTTP 400) — the exact shape seen in prod.
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>IllegalLocationConstraintException</Code>
+              <Message>The af-south-1 location constraint is incompatible for the region specific endpoint this request was sent to.</Message>
+            </Error>"#;
+        let backend = replay_error_backend(400, body);
+
+        let err = backend
+            .list_prefixes("my-bucket", "")
+            .await
+            .expect_err("an IllegalLocationConstraintException must surface as an error");
         assert!(
             matches!(err, StorageError::WrongRegion),
             "expected WrongRegion, got {err:?}"

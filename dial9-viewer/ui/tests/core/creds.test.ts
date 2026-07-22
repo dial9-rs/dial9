@@ -25,6 +25,11 @@ interface SetResult {
   error?: string | null;
 }
 
+interface BucketInfo {
+  name: string;
+  region: string | null;
+}
+
 interface StorageLike {
   getItem: (k: string) => string | null;
   setItem: (k: string, v: string) => void;
@@ -43,7 +48,7 @@ const { Dial9Creds } = require("../../creds.js") as {
     clear: () => void;
     headers: () => Record<string, string>;
     parse: (text: string) => StoredCreds;
-    listBuckets: () => Promise<string[]>;
+    listBuckets: () => Promise<BucketInfo[]>;
   };
 };
 
@@ -334,7 +339,7 @@ describe("Dial9Creds", () => {
     ).toThrow(/could not find/);
   });
 
-  it("listBuckets() sends cred headers and returns the list", async () => {
+  it("listBuckets() returns each bucket's ListBuckets region", async () => {
     freshStore();
     await Dial9Creds.set({ accessKeyId: "AK", secretAccessKey: "SK" });
     let seen: { url: string; opts: { headers: Record<string, string> } } | undefined;
@@ -346,14 +351,20 @@ describe("Dial9Creds", () => {
           ok: true,
           status: 200,
           async json() {
-            return ["a", "dial9-traces", "b"];
+            return [
+              { name: "dial9-cape-town", region: "af-south-1" },
+              { name: "dial9-legacy", region: null },
+            ];
           },
         };
       },
     );
     try {
-      const names = await Dial9Creds.listBuckets();
-      expect(names).toEqual(["a", "dial9-traces", "b"]);
+      const buckets = await Dial9Creds.listBuckets();
+      expect(buckets).toEqual([
+        { name: "dial9-cape-town", region: "af-south-1" },
+        { name: "dial9-legacy", region: null },
+      ]);
       expect(seen!.url).toBe("/api/buckets");
       expect(seen!.opts.headers[H_AKID]).toBe("AK");
       expect(seen!.opts.headers[H_SECRET]).toBe("SK");
