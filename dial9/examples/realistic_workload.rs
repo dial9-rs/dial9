@@ -11,7 +11,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
-    let recorder = dial9::recorder_or_disabled(writer);
+    let recorder = dial9::recorder_or_disabled(writer).build();
     recorder.attach_runtime_with(
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)

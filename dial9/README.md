@@ -49,7 +49,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     // Downgrades to a disabled recorder if the writer can't be created; use
     // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
-    dial9::recorder_or_disabled(writer).attach_runtime_with(
+    dial9::recorder_or_disabled(writer).build().attach_runtime_with(
         TokioAttachOptions::builder()
             .runtime_name("main")
             .task_tracking_enabled(true)
@@ -97,7 +97,7 @@ knobs to set, that is one expression:
 ```rust,no_run
 use dial9::RecorderTokioExt;
 # fn writer() -> std::io::Result<dial9::DiskBuffer> { unimplemented!() }
-#[dial9::main(config = || dial9::recorder_or_disabled(writer()).attach_runtime(|_| {}))]
+#[dial9::main(config = || dial9::recorder_or_disabled(writer()).build().attach_runtime(|_| {}))]
 async fn main() {
     /* ... */
 }

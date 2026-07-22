@@ -51,6 +51,33 @@ pub(crate) fn merge_segment_metadata(
 /// Register data sources with [`RecorderBuilder::source`], then
 /// [`build`](RecorderBuilder::build), which starts recording.
 pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
+    builder_with(Some(writer))
+}
+
+/// Begin building a recorder backed by `writer`, or a writer-free disabled one
+/// when the writer could not be created.
+///
+/// Configure it exactly like [`recorder`]: register sources, set a pipeline,
+/// then [`build`](RecorderBuilder::build). When the writer failed, every one of
+/// those is retained but inert, and `build` yields the same recorder
+/// [`recorder_disabled`] does. A bad trace path therefore costs telemetry, not
+/// the process.
+pub fn recorder_or_disabled<M: BufferMode>(
+    writer: std::io::Result<SegmentWriter<M>>,
+) -> RecorderBuilder<M> {
+    match writer {
+        Ok(writer) => builder_with(Some(writer)),
+        Err(e) => {
+            tracing::error!(
+                target: "dial9_telemetry",
+                "dial9: trace writer setup failed; running without telemetry: {e}"
+            );
+            builder_with(None)
+        }
+    }
+}
+
+fn builder_with<M: BufferMode>(writer: Option<SegmentWriter<M>>) -> RecorderBuilder<M> {
     RecorderBuilder {
         writer,
         sources: Vec::new(),
@@ -121,7 +148,9 @@ fn default_pipeline(
 /// Builder for a runtime-agnostic [`Recorder`]. See [`recorder`].
 #[must_use = "call `.build()` to start recording"]
 pub struct RecorderBuilder<M: BufferMode = Disk> {
-    writer: SegmentWriter<M>,
+    /// `None` when the writer could not be created (see
+    /// [`recorder_or_disabled`]); `build` then yields a disabled recorder.
+    writer: Option<SegmentWriter<M>>,
     sources: Vec<Box<dyn Source>>,
     recording_start_hooks: Vec<RecordingStartHook>,
     segment_metadata: Vec<(String, String)>,
@@ -170,7 +199,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
     /// The writer's per-process namespace boot id, or `None` before
     /// [`set_namespace`](SegmentWriter::set_namespace) has run.
     pub fn writer_boot_id(&self) -> Option<&str> {
-        self.writer.boot_id()
+        self.writer.as_ref()?.boot_id()
     }
 
     /// Static metadata written into every rotated segment header. Merged across
@@ -203,7 +232,16 @@ impl<M: BufferMode> RecorderBuilder<M> {
     ///
     /// Chain [`paused`](Self::paused) beforehand to build without recording, then
     /// start it later with [`Recorder::enable`].
+    ///
+    /// Yields a disabled recorder when the writer could not be created (see
+    /// [`recorder_or_disabled`]); the sources and pipeline configured on the way
+    /// here are simply never started.
     pub fn build(self) -> Recorder {
+        #[allow(unused_mut)]
+        let Some(mut writer) = self.writer else {
+            return recorder_disabled();
+        };
+
         let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
 
         // Install the on-demand dump trigger so `Dial9Handle::dump_trigger` can
@@ -213,8 +251,6 @@ impl<M: BufferMode> RecorderBuilder<M> {
             shared.set_dump_trigger(trigger);
         }
 
-        #[allow(unused_mut)]
-        let mut writer = self.writer;
         // Sync any `boot_id` metadata to the writer's per-process namespace, so a
         // trace's identity matches its on-disk `{boot_id}/` directory (and its
         // S3 keys).

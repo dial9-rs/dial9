@@ -23,7 +23,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_file_size(10_000_000) // 10MB per file
         .max_total_size(50_000_000) // 50MB total
         .build();
-    let recorder = dial9::recorder_or_disabled(writer);
+    let recorder = dial9::recorder_or_disabled(writer).build();
 
     recorder.attach_runtime_with(
         TokioAttachOptions::builder()

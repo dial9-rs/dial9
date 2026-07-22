@@ -3,7 +3,9 @@
 // Core recording API
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
 pub use dial9_core::handle::Dial9Handle;
-pub use dial9_core::recorder::{RecorderBuilder, RecorderSourceExt, recorder, recorder_disabled};
+pub use dial9_core::recorder::{
+    RecorderBuilder, RecorderSourceExt, recorder, recorder_disabled, recorder_or_disabled,
+};
 pub use dial9_core::recording::Recorder;
 
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
@@ -76,50 +78,6 @@ pub mod analysis {
 mod env_config;
 #[cfg(feature = "tokio")]
 pub use env_config::{recorder_from_env, recorder_from_env_with};
-
-#[cfg(feature = "tokio")]
-use crate::core::{BufferMode, SegmentWriter};
-
-/// Build a [`Recorder`] with dial9's default pipeline from a writer result, or
-/// fall back to a disabled (writer-free) one when the writer cannot be created.
-/// Telemetry stays best-effort: a failed writer logs at `error!` and yields a disabled recorder
-/// rather than panicking your service.
-///
-/// Get an instrumented runtime out of it with
-/// [`RecorderTokioExt::attach_runtime`]; a disabled recorder yields a plain one.
-///
-/// ```no_run
-/// use dial9::RecorderTokioExt;
-/// # fn demo() -> std::io::Result<()> {
-/// let writer = dial9::DiskBuffer::builder()
-///     .base_path("/tmp/dial9-traces")
-///     .max_total_size(64 * 1024 * 1024)
-///     .build();
-/// let (recorder, runtime) = dial9::recorder_or_disabled(writer)
-///     .attach_runtime(|t| { t.worker_threads(4); })?;
-/// # let _ = (recorder, runtime);
-/// # Ok(())
-/// # }
-/// ```
-///
-/// To add sources (e.g. `.with_cpu_profiling`) or a custom pipeline, match on
-/// the writer result yourself and build the recorder directly.
-#[cfg(feature = "tokio")]
-pub fn recorder_or_disabled<M>(writer: std::io::Result<SegmentWriter<M>>) -> Recorder
-where
-    M: BufferMode,
-{
-    match writer {
-        Ok(writer) => recorder(writer).build(),
-        Err(e) => {
-            tracing::error!(
-                target: "dial9_telemetry",
-                "dial9: trace writer setup failed; running without telemetry: {e}"
-            );
-            recorder_disabled()
-        }
-    }
-}
 
 // One-call `.with_*` source sugar on the recorder builder. Available whenever a
 // perf source is compiled in.

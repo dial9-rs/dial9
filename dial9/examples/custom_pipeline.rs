@@ -192,9 +192,10 @@ async fn worker_task(id: usize) {
         .max_file_size(512 * 1024)
         .max_total_size(16 * 1024 * 1024)
         .rotation_period(Duration::from_secs(2))
-        .build()
-        .expect("open trace writer");
-    let recorder = dial9::recorder(writer)
+        .build();
+    // A writer that fails to open downgrades to a disabled recorder, the
+    // pipeline below is still configured, just never started.
+    let recorder = dial9::recorder_or_disabled(writer)
         .with_custom_pipeline(|p| p
             .pipe(MetadataTagger::new([
                 ("service", "custom-pipeline-demo"),

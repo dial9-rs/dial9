@@ -31,7 +31,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
             .max_file_size(64 * 1024 * 1024)
             .max_total_size(256 * 1024 * 1024)
             .build();
-        dial9::recorder_or_disabled(writer)
+        dial9::recorder_or_disabled(writer).build()
     } else {
         dial9::recorder_disabled()
     };

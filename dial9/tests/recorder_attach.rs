@@ -117,7 +117,7 @@ fn recorder_or_disabled_downgrades_on_writer_failure() {
         .max_total_size(4 * 1024 * 1024)
         .build();
 
-    let recorder = dial9::recorder_or_disabled(writer);
+    let recorder = dial9::recorder_or_disabled(writer).build();
     let (recorder, runtime) = attach(recorder, 1, TokioAttachOptions::default());
 
     assert!(
@@ -129,6 +129,37 @@ fn recorder_or_disabled_downgrades_on_writer_failure() {
     recorder.graceful_shutdown(Duration::from_secs(1));
 }
 
+/// The downgrade composes with builder configuration: sources and a custom
+/// pipeline can be chained onto a writer that failed to open, and `build` still
+/// yields a disabled recorder instead of panicking.
+#[test]
+fn recorder_or_disabled_keeps_builder_config_on_writer_failure() {
+    use dial9::RecorderPipelineExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(blocker.join("traces"))
+        .max_total_size(4 * 1024 * 1024)
+        .build();
+
+    let recorder = dial9::recorder_or_disabled(writer)
+        .with_custom_pipeline(|p| p.gzip().write_back())
+        .segment_metadata([("service".to_string(), "demo".to_string())])
+        .build();
+
+    assert!(
+        !recorder.handle().is_enabled(),
+        "a failed writer must downgrade even with a pipeline configured"
+    );
+
+    let (recorder, runtime) = attach(recorder, 1, TokioAttachOptions::default());
+    assert_eq!(runtime.block_on(async { 11u32 }), 11);
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+}
+
 /// `recorder_or_disabled` is generic over writer mode: a valid in-memory writer
 /// builds an enabled, memory-backed recorder just like disk does.
 #[test]
@@ -136,7 +167,7 @@ fn recorder_or_disabled_accepts_in_memory_writer() {
     use dial9::MemoryBuffer;
 
     let writer = MemoryBuffer::new(4 * 1024 * 1024);
-    let recorder = dial9::recorder_or_disabled(writer);
+    let recorder = dial9::recorder_or_disabled(writer).build();
     let (recorder, runtime) = attach(recorder, 1, TokioAttachOptions::default());
 
     assert!(
@@ -157,7 +188,7 @@ fn recorder_or_disabled_downgrades_on_in_memory_writer_failure() {
     let writer: std::io::Result<MemoryBuffer> =
         Err(std::io::Error::other("simulated in-memory writer failure"));
 
-    let recorder = dial9::recorder_or_disabled(writer);
+    let recorder = dial9::recorder_or_disabled(writer).build();
     let (recorder, runtime) = attach(recorder, 1, TokioAttachOptions::default());
 
     assert!(

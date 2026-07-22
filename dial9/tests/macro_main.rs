@@ -327,9 +327,11 @@ mod fluent_builder_fallback {
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build();
-        dial9::recorder_or_disabled(writer).attach_runtime(|t| {
-            t.enable_all();
-        })
+        dial9::recorder_or_disabled(writer)
+            .build()
+            .attach_runtime(|t| {
+                t.enable_all();
+            })
     }
 
     fn fallback_config() -> io::Result<AttachedRuntime> {
