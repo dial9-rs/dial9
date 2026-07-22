@@ -54,6 +54,7 @@ function frozenCoreDevInterop(): Plugin {
     "sse",
     "tokio_stats_api",
     "trace_scope",
+    "span_explorer",
   ];
   const VIRT = "\0d9core:";
   const uiRoot = process.cwd(); // npm scripts run from ui/
@@ -269,6 +270,10 @@ export default defineConfig({
         // new/tokio_stats.html (registered in ui-switch.js NEW_UI_ENTRIES;
         // the canonical /tokio_stats.html keeps serving the legacy page).
         "new-tokio-stats": "new/tokio_stats.html",
+        // The Span Explorer. Born after the migration, so it has NO legacy
+        // twin and is served at its CANONICAL root path rather than under
+        // new/: there is nothing for ui-switch.js to switch between.
+        "span-explorer": "span_explorer.html",
       },
     },
   },

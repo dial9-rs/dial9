@@ -71,11 +71,13 @@ export interface BrowserEls {
   viewBtn: HTMLButtonElement;
   cpuBtn: HTMLButtonElement;
   healthBtn: HTMLButtonElement;
+  spansBtn: HTMLButtonElement;
   selectionWarn: HTMLSpanElement;
   selectionCount: HTMLSpanElement;
   // Footer
   footerDrop: HTMLElement;
   loadDemoBtn: HTMLButtonElement;
+  exploreDemoSpansBtn: HTMLButtonElement;
 }
 
 export function queryEls(): BrowserEls {
@@ -129,9 +131,11 @@ export function queryEls(): BrowserEls {
     viewBtn: byId("view-btn"),
     cpuBtn: byId("cpu-btn"),
     healthBtn: byId("health-btn"),
+    spansBtn: byId("spans-btn"),
     selectionWarn: byId("selection-warn"),
     selectionCount: byId("selection-count"),
     footerDrop: byId("footer-drop"),
     loadDemoBtn: byId("load-demo-btn"),
+    exploreDemoSpansBtn: byId("explore-demo-spans-btn"),
   };
 }

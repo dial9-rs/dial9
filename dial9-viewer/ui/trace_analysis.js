@@ -1231,8 +1231,8 @@
     const closedSpans = []; // finalized span records (after SpanClose or end-of-trace)
     const spanMeta = new Map();
 
-    const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "parent_span_id", "span_name"]);
-    const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_name"]);
+    const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
+    const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "span_name"]);
 
     function finalizeSpan(spanId) {
       const rec = spanMap.get(spanId);

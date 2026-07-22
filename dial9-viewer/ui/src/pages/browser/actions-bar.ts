@@ -17,6 +17,9 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
   els.healthBtn.addEventListener("click", () => {
     actions.viewTokioStats();
   });
+  els.spansBtn.addEventListener("click", () => {
+    actions.viewSpanExplorer();
+  });
 
   store.subscribe(["browse", "raw", "ui", "config"], (state) => {
     assertInScheduledRender("actions-bar render");
@@ -28,6 +31,7 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
         els.viewBtn.disabled = true;
         els.cpuBtn.disabled = true;
         els.healthBtn.disabled = true;
+        els.spansBtn.disabled = true;
         els.selectionWarn.textContent = "";
         els.selectionCount.textContent = "";
         return;
@@ -39,6 +43,9 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       els.viewBtn.disabled = over;
       els.cpuBtn.disabled = over && !agg;
       els.healthBtn.disabled = !agg;
+      // Span Explorer is aggregate-only: /api/span-stats is the only source of
+      // span statistics, and it never client-decodes.
+      els.spansBtn.disabled = !agg;
       els.selectionWarn.textContent =
         over && !agg
           ? `Too large to open (${formatSize(sel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
@@ -50,7 +57,7 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       return;
     }
 
-    // Raw mode. The (hidden) Flamegraph / Tokio Stats buttons are
+    // Raw mode. The (hidden) Flamegraph / Tokio Stats / Spans buttons are
     // browse-selection territory; leave their disabled state untouched.
     const count = state.raw.selected.size;
     els.selectionWarn.textContent = "";

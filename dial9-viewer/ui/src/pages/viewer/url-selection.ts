@@ -4,6 +4,7 @@
 // filters still restore.
 
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
+import type { LaneData } from "../../components/canvas/lanes/index.js";
 import {
   buildPinnedEvent,
   resolveClusterTask,
@@ -13,6 +14,111 @@ import {
 import type { ParsedTrace, CustomTraceEvent } from "../../lib/trace/index.js";
 import type { SelectionSlice } from "../../types/state.js";
 import type { ViewerUrlState } from "./url-state.js";
+import {
+  focusViewport,
+  matchFocusSpan,
+  type FocusCandidate,
+  type FocusLink,
+} from "./focus-link.js";
+
+
+/**
+ * The spans a focus link may match, from whichever representation this trace
+ * uses. The columnar path never materializes fat span objects - `allSpans` is
+ * empty there - so adapt its rows lazily rather than building 900K views.
+ */
+function* focusCandidates(lane: LaneData): Generator<FocusCandidate> {
+  const cs = lane.columnarSpans;
+  if (cs) {
+    for (let r = 0; r < cs.length; r++) {
+      yield {
+        spanId: cs.spanIdAt(r),
+        start: cs.startAt(r),
+        end: cs.endAt(r),
+        spanName: cs.spanNameAt(r),
+        taskId: cs.taskIdAt(r),
+      };
+    }
+    return;
+  }
+  for (const s of lane.allSpans) {
+    yield {
+      spanId: s.spanId,
+      start: s.start,
+      end: s.end,
+      spanName: s.spanName,
+      taskId: s.taskId,
+    };
+  }
+}
+
+
+/**
+ * The focused span plus its ancestor chain - the set the lanes highlight.
+ *
+ * Walks the parents off the ALREADY-DERIVED lane data. computeSpanTrackData
+ * would re-run buildSpanData over every event in the trace, which the viewer
+ * deliberately does once per trace and shares. Cycle-safe: stops when a parent
+ * is already in the chain.
+ */
+function focusChain(lane: LaneData, spanId: string): Set<string> {
+  const chain = new Set<string>([spanId]);
+  const cs = lane.columnarSpans;
+  const parentOf = cs
+    ? (id: string): string | null => {
+        const r = cs.spanIdToRow.get(id);
+        return r === undefined ? null : cs.parentSpanIdAt(r);
+      }
+    : (id: string): string | null => lane.spanByIdSingle.get(id)?.parentSpanId ?? null;
+  let parentId = parentOf(spanId);
+  while (parentId != null && !chain.has(parentId)) {
+    chain.add(parentId);
+    parentId = parentOf(parentId);
+  }
+  return chain;
+}
+
+/**
+ * A resolved `focus_*` deep link: the selection patch to apply plus the window
+ * to frame. Null viewport means "no span matched" - the caller falls back to a
+ * plain pan onto the requested time window.
+ */
+export interface ResolvedFocus {
+  patch: Partial<SelectionSlice>;
+  viewport: { viewStart: number; viewEnd: number };
+}
+
+/**
+ * Resolve a `focus_*` link onto the loaded trace, landing ON the span rather
+ * than merely near it in time. Returns null when nothing matches, so the caller
+ * can fall back to the plain time-window pan.
+ */
+export function resolveFocusLink(
+  trace: ParsedTrace,
+  link: FocusLink,
+): ResolvedFocus | null {
+  const lane = deriveLaneData(trace);
+  const span = matchFocusSpan(focusCandidates(lane), link, trace.clockOffsetNs);
+  if (span === null) return null;
+
+  const patch: Partial<SelectionSlice> = {
+    spanFocus: { spanId: span.spanId, chain: focusChain(lane, span.spanId) },
+    focusedSpanId: span.spanId,
+  };
+  // The owning task, when the trace resolved one, so the task detail track
+  // opens on the same instance the span belongs to.
+  if (span.taskId != null) patch.selectedTaskId = span.taskId;
+
+  // A trace with no resolved bounds cannot clamp; fall back to the span's own
+  // extent, which focusViewport then pads.
+  return {
+    patch,
+    viewport: focusViewport(span, {
+      minTs: trace.minTs ?? span.start,
+      maxTs: trace.maxTs ?? span.end,
+    }),
+  };
+}
 
 /** Resolve the URL's selection anchors into a selection-slice patch. */
 export function resolveUrlSelection(

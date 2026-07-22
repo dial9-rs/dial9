@@ -1104,6 +1104,31 @@ describe("buildSpanData", () => {
     ).toBe(true);
   });
 
+  it("handles old and new span event fields without leaking built-ins", () => {
+    const oldEvents = [
+      { name: "SpanEnter:test::op", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "op" } },
+      { name: "SpanExit:test::op", timestamp: 2000, fields: { worker_id: 0, span_id: 1, span_name: "op" } },
+      { name: "SpanCloseEvent", timestamp: 2001, fields: { span_id: 1 } },
+    ];
+    const oldResult = buildSpanData(oldEvents);
+    expect(oldResult.allSpans).toHaveLength(1);
+    expect(oldResult.allSpans[0].spanName).toBe("op");
+    expect(oldResult.allSpans[0].fields.span_instance_id).toBeFalsy();
+    expect(oldResult.allSpans[0].fields.tid).toBeFalsy();
+
+    const newEvents = [
+      { name: "SpanEnter:test::op", timestamp: 1000, fields: { worker_id: 0, span_id: 1, span_instance_id: 42, tid: 12345, parent_span_id: null, span_name: "op", user_field: "val" } },
+      { name: "SpanExit:test::op", timestamp: 2000, fields: { worker_id: 0, span_id: 1, span_instance_id: 42, tid: 12345, span_name: "op", user_field: "val" } },
+      { name: "SpanCloseEvent", timestamp: 2001, fields: { span_id: 1 } },
+    ];
+    const newResult = buildSpanData(newEvents);
+    expect(newResult.allSpans).toHaveLength(1);
+    expect(newResult.allSpans[0].spanName).toBe("op");
+    expect(newResult.allSpans[0].fields.span_instance_id).toBeFalsy();
+    expect(newResult.allSpans[0].fields.tid).toBeFalsy();
+    expect(newResult.allSpans[0].fields.user_field).toBe("val");
+  });
+
   it("derived-struct span schema (SpanEnter__/SpanExit__) parsed correctly", () => {
     // Hand-written `#[derive(TraceEvent)]` span structs cannot put ':' in their
     // wire name (it's a Rust identifier), so they use the "SpanEnter__"/

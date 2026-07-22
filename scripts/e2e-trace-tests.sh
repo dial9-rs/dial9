@@ -67,4 +67,7 @@ if [ ! -d node_modules ]; then
 fi
 npx vitest run "${TRACE_SUITES[@]}"
 
+echo "--- Checking span explorer helpers (catalog, histogram, composition, deep-link) ---"
+node test_span_explorer.js
+
 echo "All E2E trace checks passed."

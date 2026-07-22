@@ -52,11 +52,19 @@ function isBaseEnterField(k: string): boolean {
     k === "span_id" ||
     k === "worker_id" ||
     k === "parent_span_id" ||
-    k === "span_name"
+    k === "span_name" ||
+    k === "span_instance_id" ||
+    k === "tid"
   );
 }
 function isBaseExitField(k: string): boolean {
-  return k === "span_id" || k === "worker_id" || k === "span_name";
+  return (
+    k === "span_id" ||
+    k === "worker_id" ||
+    k === "span_name" ||
+    k === "span_instance_id" ||
+    k === "tid"
+  );
 }
 
 const INITIAL_CAP = 1 << 16;

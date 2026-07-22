@@ -269,6 +269,23 @@ assertEq(
   assertEq(out.get("x-dial9-aws-access-key-id"), null, "credential-shaped param never carried");
 }
 
+// ── fullScopeQuery: span-type filter params survive (span-explorer deep link) ──
+// Regression: the span explorer's "🔥 On-CPU Flamegraph" link carries
+// span_type_uid (+ optional min/max_span_ns) so the flamegraph is scoped to one
+// span type. If fullScopeQuery drops them, the copy/diff/scope link silently
+// widens back to the whole scope — the "span filter does nothing" bug.
+{
+  const src = new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1" +
+    "&span_type_uid=aabbccddeeff00112233445566778899" +
+    "&min_span_ns=1000000&max_span_ns=50000000");
+  const out = fullScopeQuery(src);
+  assertEq(out.get("span_type_uid"), "aabbccddeeff00112233445566778899",
+    "span_type_uid survives fullScopeQuery");
+  assertEq(out.get("min_span_ns"), "1000000", "min_span_ns survives fullScopeQuery");
+  assertEq(out.get("max_span_ns"), "50000000", "max_span_ns survives fullScopeQuery");
+}
+
 // ── fullScopeQuery: empty/absent values are omitted (not emitted as "") ──
 {
   const src = new URLSearchParams("api=1&service=&bucket=b");

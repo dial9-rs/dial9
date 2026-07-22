@@ -15,6 +15,9 @@ process.env["TZ"] = "America/New_York"; // UTC-4 (DST) / UTC-5
 
 import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const require = createRequire(import.meta.url);
 
@@ -41,6 +44,8 @@ const {
   coveragePercent,
   foldErrorNotice,
   nextMaxFiles,
+  refinementWorkDepth,
+  shouldAdoptRefinementSnapshot,
   nsToPickerUtc,
   pickerUtcToNs,
   msToNs,
@@ -65,6 +70,15 @@ const {
   msToNs: (val: string) => string | null;
   nsToMs: (ns: string | null) => string;
   nextMaxFiles: (folded: number, opts?: { cap?: number; min?: number }) => number;
+  refinementWorkDepth: (
+    coverage: { files_folded: number; fold_work_cap?: number },
+    currentMaxFiles: number | null,
+  ) => number;
+  shouldAdoptRefinementSnapshot: (
+    preserveExisting: boolean,
+    baselineFilesFolded: number,
+    incomingFilesFolded: number,
+  ) => boolean;
   nsToPickerUtc: (ns: string | null) => string;
   pickerUtcToNs: (picker: string) => string | null;
   sourceFacetOptions: (present?: string[]) => FacetOption[];
@@ -138,6 +152,27 @@ describe("nextMaxFiles", () => {
   });
   it("respects custom min", () => {
     expect(nextMaxFiles(1, { min: 100 })).toBe(100);
+  });
+});
+
+describe("refinement work depth and snapshot adoption", () => {
+  it("grows from the work cap rather than all cached files", () => {
+    expect(refinementWorkDepth({ files_folded: 500, fold_work_cap: 100 }, null)).toBe(100);
+    expect(
+      nextMaxFiles(refinementWorkDepth({ files_folded: 500, fold_work_cap: 100 }, null)),
+    ).toBe(400);
+  });
+
+  it("falls back through the requested cap and folded coverage", () => {
+    expect(refinementWorkDepth({ files_folded: 500 }, 80)).toBe(80);
+    expect(refinementWorkDepth({ files_folded: 12 }, null)).toBe(12);
+  });
+
+  it("keeps the current tree until a same-scope snapshot reaches its baseline", () => {
+    expect(shouldAdoptRefinementSnapshot(false, 80, 1)).toBe(true);
+    expect(shouldAdoptRefinementSnapshot(true, 80, 79)).toBe(false);
+    expect(shouldAdoptRefinementSnapshot(true, 80, 80)).toBe(true);
+    expect(shouldAdoptRefinementSnapshot(true, 80, 96)).toBe(true);
   });
 });
 
@@ -314,5 +349,37 @@ describe("data-driven facet options", () => {
   });
   it("no hosts -> just All", () => {
     expect(hostFacetOptions([])).toEqual([{ value: "", label: "All" }]);
+  });
+});
+
+describe("flamegraph refinement wiring", () => {
+  it("persists max_files and preserves the live view during refinement", () => {
+    const html = readFileSync(
+      fileURLToPath(new URL("../../flamegraph.html", import.meta.url)),
+      "utf8",
+    );
+    expect(html).toContain('if (maxFiles != null) p.set("max_files", String(maxFiles));');
+    expect(html).toContain("shouldAdoptRefinementSnapshot(");
+    expect(html).toContain("if (preserveSplit) {");
+    expect(html).toContain("const preservedView = preserveSplit && viewRestored");
+    expect(html).toContain("fg.applyViewState(preservedView);");
+    expect(html).toContain("updateBrowserUrl();\n                        startStreaming(true)");
+  });
+
+  it("publishes refinement helpers through the browser namespace", () => {
+    const browserGlobal: {
+      window?: unknown;
+      FlamegraphApi?: Record<string, unknown>;
+    } = {};
+    browserGlobal.window = browserGlobal;
+    runInNewContext(
+      readFileSync(
+        fileURLToPath(new URL("../../flamegraph_api.js", import.meta.url)),
+        "utf8",
+      ),
+      browserGlobal,
+    );
+    expect(typeof browserGlobal.FlamegraphApi?.["refinementWorkDepth"]).toBe("function");
+    expect(typeof browserGlobal.FlamegraphApi?.["nextMaxFiles"]).toBe("function");
   });
 });
