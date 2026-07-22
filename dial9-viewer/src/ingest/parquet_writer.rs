@@ -951,4 +951,148 @@ mod tests {
         assert_eq!((keys.value(0), values.value(0)), ("http.method", "GET"));
         assert_eq!((keys.value(1), values.value(1)), ("http.status", "200"));
     }
+
+    /// Finding 4: Build an actual old-schema Parquet fixture WITHOUT the
+    /// `enclosing_spans` column (simulating a pre-v4 part-file). The fixture
+    /// faithfully includes the non-null metadata Map column that was present in
+    /// the historical v3 samples schema, so the only difference from the
+    /// current schema is the absent `enclosing_spans` column.
+    /// Verify that `span_filter_matches` fails closed on this fixture.
+    #[test]
+    fn test_old_schema_parquet_fixture_no_enclosing_spans() {
+        use arrow::array::{
+            ArrayRef, FixedSizeBinaryBuilder, Int64Builder, MapBuilder, StringBuilder,
+            UInt8Builder, UInt32Builder,
+        };
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+        use std::sync::Arc;
+
+        // Build old v3 schema: includes metadata Map column but omits
+        // enclosing_spans (which was added in v4).
+        let old_schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp_ns", DataType::Int64, false),
+            Field::new("stack_id", DataType::FixedSizeBinary(16), false),
+            Field::new("worker_id", DataType::UInt32, true),
+            Field::new("source", DataType::UInt8, false),
+            Field::new("source_key", DataType::Utf8, false),
+            Field::new("host", DataType::Utf8, false),
+            Field::new("service", DataType::Utf8, false),
+            Field::new("date", DataType::Utf8, false),
+            Field::new("poll_duration_ns", DataType::Int64, true),
+            Field::new("spawn_location", DataType::Utf8, true),
+            // The metadata Map column was present in v3.
+            Field::new(
+                "metadata",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(
+                            vec![
+                                Field::new("keys", DataType::Utf8, false),
+                                Field::new("values", DataType::Utf8, true),
+                            ]
+                            .into(),
+                        ),
+                        false,
+                    )),
+                    false, // keys_sorted
+                ),
+                false,
+            ),
+        ]));
+
+        let mut ts_builder = Int64Builder::with_capacity(1);
+        let mut stack_id_builder = FixedSizeBinaryBuilder::with_capacity(1, 16);
+        let mut worker_id_builder = UInt32Builder::with_capacity(1);
+        let mut source_builder = UInt8Builder::with_capacity(1);
+        let mut source_key_builder = StringBuilder::with_capacity(1, 64);
+        let mut host_builder = StringBuilder::with_capacity(1, 64);
+        let mut service_builder = StringBuilder::with_capacity(1, 32);
+        let mut date_builder = StringBuilder::with_capacity(1, 10);
+        let mut poll_duration_builder = Int64Builder::with_capacity(1);
+        let mut spawn_location_builder = StringBuilder::with_capacity(1, 64);
+
+        // Build metadata map column with a representative entry.
+        let map_keys_builder = StringBuilder::new();
+        let map_values_builder = StringBuilder::new();
+        let mut map_builder = MapBuilder::new(None, map_keys_builder, map_values_builder);
+
+        ts_builder.append_value(1000);
+        stack_id_builder.append_value([1u8; 16]).unwrap();
+        worker_id_builder.append_value(1);
+        source_builder.append_value(0);
+        source_key_builder.append_value("old/key/path.bin.gz");
+        host_builder.append_value("old-host");
+        service_builder.append_value("old-svc");
+        date_builder.append_value("2024-01-01");
+        poll_duration_builder.append_value(5_000_000);
+        spawn_location_builder.append_value("src/old.rs:10");
+
+        // Populate metadata map with a source_key entry (matching historical behavior).
+        map_builder.keys().append_value("source_key");
+        map_builder.values().append_value("old/key/path.bin.gz");
+        map_builder.append(true).unwrap();
+
+        let batch = RecordBatch::try_new(
+            old_schema.clone(),
+            vec![
+                Arc::new(ts_builder.finish()) as ArrayRef,
+                Arc::new(stack_id_builder.finish()) as ArrayRef,
+                Arc::new(worker_id_builder.finish()) as ArrayRef,
+                Arc::new(source_builder.finish()) as ArrayRef,
+                Arc::new(source_key_builder.finish()) as ArrayRef,
+                Arc::new(host_builder.finish()) as ArrayRef,
+                Arc::new(service_builder.finish()) as ArrayRef,
+                Arc::new(date_builder.finish()) as ArrayRef,
+                Arc::new(poll_duration_builder.finish()) as ArrayRef,
+                Arc::new(spawn_location_builder.finish()) as ArrayRef,
+                Arc::new(map_builder.finish()) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(true)
+            .build();
+        let mut buf = Vec::new();
+        let mut arrow_writer =
+            ArrowWriter::try_new(&mut buf, old_schema.clone(), Some(props)).unwrap();
+        arrow_writer.write(&batch).unwrap();
+        arrow_writer.close().unwrap();
+
+        // Verify: reading back the old-schema file, the enclosing_spans column is absent
+        // but metadata is present.
+        let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
+            bytes::Bytes::from(buf.clone()),
+            1024,
+        )
+        .unwrap();
+        let batches: Vec<_> = reader.into_iter().collect::<Result<_, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        let read_batch = &batches[0];
+        assert_eq!(read_batch.num_rows(), 1);
+        // Confirm metadata column IS present (faithful v3 representation).
+        assert!(
+            read_batch.column_by_name("metadata").is_some(),
+            "old v3 schema fixture must have the metadata Map column"
+        );
+        // Confirm enclosing_spans column is absent.
+        assert!(
+            read_batch.column_by_name("enclosing_spans").is_none(),
+            "old v3 schema fixture must NOT have enclosing_spans column"
+        );
+
+        // Now test that the span_filter_matches function fails closed.
+        // Import from aggregate module.
+        use crate::ingest::aggregate::span_filter_matches;
+        let wanted_uid = [42u8; 16];
+        let result = span_filter_matches(read_batch, 0, &wanted_uid, None, None);
+        assert!(
+            !result,
+            "span_filter_matches must fail closed (return false) for old v3 schema without enclosing_spans"
+        );
+    }
 }
