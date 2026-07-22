@@ -28,6 +28,9 @@ function state(over: Partial<ApiQueryState> = {}): ApiQueryState {
     minPollNs: null,
     maxPollNs: null,
     maxFiles: null,
+    spanTypeUid: null,
+    minSpanNs: null,
+    maxSpanNs: null,
     ...over,
   };
 }
@@ -147,9 +150,30 @@ describe("buildApiUrl (legacy buildApiUrl parity)", () => {
 });
 
 describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
-  it("api=1 leads; no max_files, no ui param", () => {
+  // max_files used to be omitted here (legacy parity). It now rides along, so a
+  // link copied after "Refine more" reopens at the depth on screen instead of
+  // silently resetting to the backend default.
+  it("api=1 leads; max_files persists; no ui param", () => {
     expect(buildBrowserQuery(state({ maxFiles: 640 }))).toBe(
+      "api=1&bucket=demo-traces&prefix=traces&source=cpu&max_files=640",
+    );
+  });
+  it("an unset depth adds no max_files", () => {
+    expect(buildBrowserQuery(state())).toBe(
       "api=1&bucket=demo-traces&prefix=traces&source=cpu",
+    );
+  });
+
+  // Span Explorer deep links: the span filter is load scope, so it must survive
+  // every URL rewrite the page does.
+  it("carries the span-type filter and duration band", () => {
+    expect(
+      buildBrowserQuery(
+        state({ spanTypeUid: "abc123", minSpanNs: "1000", maxSpanNs: "5000" }),
+      ),
+    ).toBe(
+      "api=1&bucket=demo-traces&prefix=traces&source=cpu" +
+        "&span_type_uid=abc123&min_span_ns=1000&max_span_ns=5000",
     );
   });
   it("full scope round-trips in legacy order", () => {

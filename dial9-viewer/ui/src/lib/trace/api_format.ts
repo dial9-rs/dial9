@@ -15,6 +15,8 @@ export {
   nsToMs,
   nsToPickerUtc,
   pickerUtcToNs,
+  refinementWorkDepth,
+  shouldAdoptRefinementSnapshot,
 } from "../../../flamegraph_api.js";
 export type { FacetOption, LegacyCoverage } from "../../../flamegraph_api.js";
 

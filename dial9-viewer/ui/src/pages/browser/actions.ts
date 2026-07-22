@@ -59,6 +59,7 @@ export interface BrowserActions {
   viewSelected(): void;
   viewCpuProfile(): void;
   viewTokioStats(): void;
+  viewSpanExplorer(): void;
   addToDiff(): void;
   clearDiff(): void;
   swapDiff(): void;

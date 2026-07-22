@@ -14,6 +14,8 @@ import {
   nsToPickerUtc,
   openSse,
   pickerUtcToNs,
+  refinementWorkDepth,
+  shouldAdoptRefinementSnapshot,
 } from "../../lib/trace/index.js";
 import type {
   ApiFlamegraphNode,
@@ -104,6 +106,12 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const scopeBucket = params.get("bucket");
   const scopePrefix = params.get("prefix");
 
+  // Span-type filter from a Span Explorer deep link. Fixed for the life of the
+  // view (no toolbar control), so read once alongside the other scope params.
+  const scopeSpanTypeUid = params.get("span_type_uid");
+  const scopeMinSpanNs = params.get("min_span_ns");
+  const scopeMaxSpanNs = params.get("max_span_ns");
+
   // The poll-duration band minimap (aggregated mode). Seeded from the URL,
   // read into the query via minimap.band(); a brush/Apply re-streams. Assigned
   // below (before the first startStreaming), so queryState always sees it.
@@ -123,6 +131,9 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       minPollNs: band.minPollNs,
       maxPollNs: band.maxPollNs,
       maxFiles,
+      spanTypeUid: scopeSpanTypeUid,
+      minSpanNs: scopeMinSpanNs,
+      maxSpanNs: scopeMaxSpanNs,
     };
   }
 
@@ -358,34 +369,65 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
   }
 
-  // (Re)start the stream from scratch: aborts any in-flight stream and shows the
-  // loading overlay. The server emits the already-folded snapshot immediately,
-  // then refines to the cap and closes the stream.
-  function startStreaming(): void {
+  // (Re)start the stream. `preserveExisting` marks a SAME-SCOPE deepening
+  // ("Refine more"): cached state is reconstructed from bounded seed batches,
+  // so snapshots shallower than what is already rendered are ignored rather
+  // than allowed to momentarily shrink the tree, the full-page loading overlay
+  // is skipped, and the live zoom/inspect view is restored across the swap.
+  // A fresh scope adopts everything and resets.
+  function startStreaming(preserveExisting = false): void {
+    const baselineFilesFolded =
+      preserveExisting && lastCoverage ? lastCoverage.files_folded : 0;
     stopStreaming();
     setRefiningUi(true);
     gotEvent = false;
-    loadingEl.classList.remove("hidden");
-    loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
-    containerEl.style.display = "none";
     errorEl.style.display = "none";
+    if (preserveExisting) {
+      statsEl.innerHTML =
+        lastBadge +
+        ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
+    } else {
+      loadingEl.classList.remove("hidden");
+      loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
+      containerEl.style.display = "none";
+    }
     const token = ++streamToken;
     abortCtl = new AbortController();
     void openSse(buildApiUrl(queryState(), window.location.origin), {
       headers: Dial9Creds.headers(),
       signal: abortCtl.signal,
       onEvent: (obj) => {
-        if (token === streamToken) renderEvent(obj as FlamegraphResponse);
+        if (token !== streamToken) return;
+        const resp = obj as FlamegraphResponse;
+        if (
+          !shouldAdoptRefinementSnapshot(
+            preserveExisting,
+            baselineFilesFolded,
+            resp.coverage?.files_folded ?? 0,
+          )
+        ) {
+          return;
+        }
+        // setTreeDirect resets the canvas view, so carry the live zoom across
+        // a same-scope refine - the user did not ask to be moved.
+        const preservedView = preserveExisting ? fg.getViewState() : null;
+        renderEvent(resp);
+        if (preservedView) fg.applyViewState(preservedView);
       },
       onClose: () => {
         if (token !== streamToken) return;
-        // Server folded to the cap and closed the stream.
-        statsEl.textContent = lastBadge + (gotEvent ? " \u00b7 refined" : "");
+        // Cached reconstruction and the bounded work are both complete.
+        statsEl.textContent =
+          lastBadge +
+          (gotEvent ? " \u00b7 refined" : preserveExisting ? " \u00b7 refinement incomplete" : "");
         setRefiningUi(false);
       },
       onError: (err) => {
         if (token !== streamToken) return;
-        if (!gotEvent) {
+        if (preserveExisting) {
+          // Reconstruction is best-effort; keep the same-scope tree on screen.
+          statsEl.textContent = lastBadge + " \u00b7 refinement interrupted";
+        } else if (!gotEvent) {
           els.showError("Failed to load flamegraph: " + err.message);
         } else {
           // Mid-stream drop: keep the rendered tree but clear the
@@ -405,12 +447,13 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   });
 
   moreBtn.addEventListener("click", () => {
-    // Request deeper sampling for the current scope: raise the ceiling to ~4x
-    // the files folded so far, then reopen the stream. The server folds from
-    // where it left off (already-folded files served instantly) up to the cap.
-    const folded = lastCoverage ? lastCoverage.files_folded : 0;
-    maxFiles = nextMaxFiles(folded);
-    startStreaming();
+    // Deeper sampling for the current scope. Grow from the BOUNDED WORK the
+    // server was allowed this request, not from how many cached files the
+    // snapshot covers: an all-cache scope reports a deep files_folded that
+    // would otherwise jump straight to the ceiling in a single click.
+    maxFiles = nextMaxFiles(refinementWorkDepth(lastCoverage, maxFiles));
+    updateBrowserUrl();
+    startStreaming(true); // same scope -> keep the tree and the live view
   });
 
   stopBtn.addEventListener("click", () => {

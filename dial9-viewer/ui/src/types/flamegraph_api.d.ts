@@ -76,6 +76,32 @@ declare module "*/flamegraph_api.js" {
   ): number;
 
   /**
+   * The depth `nextMaxFiles` should grow from on a "Refine more": the BOUNDED
+   * WORK the server was allowed this request (`fold_work_cap`), not how many
+   * cached files the snapshot happens to cover. An all-cache scope reports a
+   * deep `files_folded` that would otherwise make one click jump straight to
+   * the ceiling. Falls back to `currentMaxFiles`, then to `files_folded`, for
+   * servers predating the cap.
+   */
+  export function refinementWorkDepth(
+    coverage: (LegacyCoverage & { fold_work_cap?: number }) | null | undefined,
+    currentMaxFiles: number | null
+  ): number;
+
+  /**
+   * May a streamed snapshot replace the rendered tree? Refinement reconstructs
+   * cached state from bounded seed batches, so a same-scope refine
+   * (`preserveExisting`) must ignore snapshots shallower than the baseline
+   * already on screen rather than momentarily shrinking it. A fresh scope
+   * always adopts.
+   */
+  export function shouldAdoptRefinementSnapshot(
+    preserveExisting: boolean,
+    baselineFilesFolded: number,
+    incomingFilesFolded: number
+  ): boolean;
+
+  /**
    * Epoch-ns -> `datetime-local` value ("YYYY-MM-DDTHH:MM:SS"), shown as
    * UTC wall-clock (S3 trace keys are bucketed in UTC). Empty string for
    * null/empty input. Accepts the string form for > 2^53 ns precision.

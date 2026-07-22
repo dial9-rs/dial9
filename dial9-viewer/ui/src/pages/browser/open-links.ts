@@ -70,6 +70,7 @@ export interface OpenLinks {
   viewSelected(): void;
   viewCpuProfile(): void;
   viewTokioStats(): void;
+  viewSpanExplorer(): void;
 }
 
 export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
@@ -185,5 +186,25 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
     window.open("tokio_stats.html?" + query, "_blank");
   }
 
-  return { viewSelected, viewCpuProfile, viewTokioStats };
+  // Span Explorer button: the same aggregation scope as the demand-driven
+  // flamegraph and tokio-stats (/api/span-stats reads the same param
+  // vocabulary). No diff route - the Span Explorer has no two-sided view.
+  function viewSpanExplorer(): void {
+    const sel = store.getState().browse.selection;
+    if (!sel || !sel.keys.length) return;
+    const bucket = els.bucketInput.value.trim();
+    if (!bucket) {
+      alert("Bucket is required");
+      return;
+    }
+    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion(els));
+    if (!scope) return; // window always present for a box selection
+    const base = new URLSearchParams();
+    base.set("api", "1");
+    const { query, hostsDropped } = encodeAggregationParams(base, scope);
+    if (hostsDropped) warnHostsDropped();
+    window.open("span_explorer.html?" + query, "_blank");
+  }
+
+  return { viewSelected, viewCpuProfile, viewTokioStats, viewSpanExplorer };
 }

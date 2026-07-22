@@ -38,7 +38,8 @@ import {
   mirrorViewerToQuery,
   readViewerUrlState,
 } from "./url-state.js";
-import { resolveUrlSelection } from "./url-selection.js";
+import { resolveFocusLink, resolveUrlSelection } from "./url-selection.js";
+import { focusWindow, readFocusLink } from "./focus-link.js";
 import { mountViewerSearch } from "./search-overlay.js";
 import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
@@ -76,6 +77,10 @@ function boot(): void {
   // shared URL wins. The viewport window + task selection apply after the trace
   // loads (below), once minTs/maxTs and the task set exist.
   const urlView = readViewerUrlState(window.location.search);
+  // Non-destructive exemplar deep link, read once alongside the view state.
+  // Unlike `start`/`end` this never filters the parse - it only pans/zooms and
+  // selects (see focus-link.ts).
+  const focusLink = readFocusLink(window.location.search);
   const urlHash = resolveViewState({
     search: window.location.search,
     hash: window.location.hash,
@@ -272,6 +277,27 @@ function boot(): void {
       // spawned) against the loaded trace, plus the task, into one patch.
       // Unresolvable anchors are silently dropped.
       const selPatch = resolveUrlSelection(trace, urlView);
+
+      // A `focus_*` deep link (Span Explorer / Tokio Stats exemplar). Prefer
+      // landing ON the span: a long span's window overlaps dozens of others, so
+      // a plain pan leaves the user hunting. Falls back to that plain pan when
+      // nothing matches.
+      if (focusLink !== null) {
+        const focused = resolveFocusLink(trace, focusLink);
+        if (focused !== null) {
+          Object.assign(selPatch, focused.patch);
+          store.update("viewport", focused.viewport);
+        } else {
+          const w = focusWindow(focusLink, trace.clockOffsetNs);
+          if (Number.isFinite(w.start)) {
+            const pad = Math.max((w.end - w.start) * 2, 1e6);
+            store.update("viewport", {
+              viewStart: Math.max(trace.minTs ?? w.start, w.start - pad),
+              viewEnd: Math.min(trace.maxTs ?? w.end, w.end + pad),
+            });
+          }
+        }
+      }
       if (urlView.selectedTaskId !== undefined) {
         selPatch.selectedTaskId = urlView.selectedTaskId;
       }

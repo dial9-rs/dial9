@@ -12,6 +12,12 @@ export function mountFooter({ store, els }: PageCtx): void {
     window.open("viewer.html?trace=demo-trace.bin", "_blank");
   });
 
+  // The same demo trace in the Span Explorer's raw mode: it parses the trace
+  // client-side, so this needs no bucket, scope or aggregation backend.
+  els.exploreDemoSpansBtn.addEventListener("click", () => {
+    window.open("span_explorer.html?trace=demo-trace.bin", "_blank");
+  });
+
   // Global drag-and-drop -> open viewer; footer border highlights purple
   // while dragging (transient channel).
   document.body.addEventListener("dragover", (e) => {

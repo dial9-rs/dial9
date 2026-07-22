@@ -62,6 +62,15 @@ export interface ApiQueryState {
   maxPollNs: string | null;
   /** "Refine more" ceiling; null = backend default. */
   maxFiles: number | null;
+  /**
+   * Span-type filter carried by Span Explorer deep links: scope the tree to
+   * samples enclosed by a span of this type, optionally within a duration band.
+   * FIXED for the life of the view - not toolbar-editable - so these live
+   * alongside the other load-scope fields rather than in the facet state.
+   */
+  spanTypeUid: string | null;
+  minSpanNs: string | null;
+  maxSpanNs: string | null;
 }
 
 /** Seed the non-host facet filters from the page URL. */
@@ -88,6 +97,9 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
   if (state.endNs) p.set("end_ns", state.endNs);
   if (state.minPollNs) p.set("min_poll_ns", state.minPollNs);
   if (state.maxPollNs) p.set("max_poll_ns", state.maxPollNs);
+  if (state.spanTypeUid) p.set("span_type_uid", state.spanTypeUid);
+  if (state.minSpanNs) p.set("min_span_ns", state.minSpanNs);
+  if (state.maxSpanNs) p.set("max_span_ns", state.maxSpanNs);
 }
 
 /**
@@ -105,12 +117,15 @@ export function buildApiUrl(state: ApiQueryState, origin: string): string {
 
 /**
  * The browser-URL query for Apply / facet changes. Rebuilt from scratch -
- * `api=1` + scope + facet state + picker times, with no max_files and no `ui`
- * param.
+ * `api=1` + scope + facet state + picker times, with no `ui` param.
+ *
+ * `max_files` rides along so a copied link reopens at the depth on screen
+ * rather than resetting to the backend default.
  */
 export function buildBrowserQuery(state: ApiQueryState): string {
   const p = new URLSearchParams();
   p.set("api", "1");
   appendScope(p, state);
+  if (state.maxFiles != null) p.set("max_files", String(state.maxFiles));
   return p.toString();
 }

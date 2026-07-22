@@ -920,69 +920,16 @@ assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown
 
 // ── Demo trace integration test ──
 async function testDemoTrace() {
-  const tracePath = path.join(__dirname, "demo-trace.bin");
+  // The demo trace moved under public/ when the UI became a Vite build.
+  const tracePath = path.join(__dirname, "public", "demo-trace.bin");
 
-// ── Browser dependency order regression ──
-{
-  const html = fs.readFileSync(path.join(__dirname, "span_explorer.html"), "utf8");
-  const decoderPos = html.indexOf('<script src="decode.js"></script>');
-  const flamegraphApiPos = html.indexOf(
-    '<script src="flamegraph_api.js?v=fold-work-cap-1"></script>',
-  );
-  const inlinePagePos = html.indexOf("<script>\n(function() {");
+  // The page's request/URL wiring used to be pinned here by grepping the
+  // inline page script out of span_explorer.html. That script is gone - the
+  // page is a Vite entry whose behavior lives in src/pages/span-explorer - so
+  // those assertions now live as real unit tests in
+  // src/pages/span-explorer/scope.test.ts. The `<script src>` ordering
+  // assertions retired with the inline page: module order is the bundler's job.
 
-  const parserPos = html.indexOf('<script src="trace_parser.js"></script>');
-  assert(flamegraphApiPos >= 0, "span_explorer.html: cache-busts the fold-work helper asset");
-  assert(
-    flamegraphApiPos < inlinePagePos,
-    "span_explorer.html: loads FlamegraphApi before inline page code",
-  );
-  assert(
-    html.includes("const FG_API = window.FlamegraphApi;") &&
-      html.includes("FG_API.refinementWorkDepth(lastCoverage, maxFiles)") &&
-      html.includes("FG_API.nextMaxFiles(workDepth)"),
-    "span_explorer.html: Refine uses the explicit FlamegraphApi namespace",
-  );
-  assert(decoderPos >= 0, "span_explorer.html: loads decode.js");
-  assert(parserPos >= 0, "span_explorer.html: loads trace_parser.js");
-  assert(decoderPos < parserPos, "span_explorer.html: loads TraceDecoder before trace_parser.js");
-  assert(
-    html.includes('u.searchParams.set("min_span_ns", String(bandMinNs))'),
-    "span_explorer.html: sends selected duration minimum to span-stats",
-  );
-  assert(
-    html.includes('u.searchParams.set("max_span_ns", String(bandMaxNs))'),
-    "span_explorer.html: sends selected duration maximum to span-stats",
-  );
-  assert(
-    html.includes('if (selectedUid) u.searchParams.set("span_type_uid", selectedUid)'),
-    "span_explorer.html: scopes exemplar refreshes to the selected span type",
-  );
-  assert(
-    html.includes("SE.classifyExemplarSnapshot(") &&
-      html.includes("exemplarPreviewAvailable = merged.matched") &&
-      html.includes("exemplarSnapshotAdopted = membership.complete && merged.matched"),
-    "span_explorer.html: previews target-matched subsets but completes only on the exact folded set",
-  );
-  assert(
-    html.includes("if (exemplarSnapshotAdopted) {\n            exemplarScopeByUid.set"),
-    "span_explorer.html: caches exemplar scope only after clean stream completion",
-  );
-  assert(
-    html.includes('cpuLink.addEventListener("click", openFlamegraphWithSession)') &&
-      html.includes('blockLink.addEventListener("click", openFlamegraphWithSession)'),
-    "span_explorer.html: flamegraph tabs inherit session-backed BYOC credentials",
-  );
-  assert(
-    html.includes('if (mode === "replace") {\n      loadingEl.classList.remove'),
-    "span_explorer.html: exemplar and refine streams do not show the reflowing loading panel",
-  );
-  assert(
-    html.includes('SE.setMaxFilesParam(p, maxFiles)') &&
-      html.includes('startStreaming("refine")'),
-    "span_explorer.html: Refine persists depth and uses the preserving stream mode",
-  );
-}
   if (!fs.existsSync(tracePath)) {
     console.log("· demo-trace.bin absent — skipping demo trace integration tests");
     return;
