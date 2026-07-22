@@ -86,7 +86,7 @@ fn builder_with<M: BufferMode>(writer: Option<SegmentWriter<M>>) -> RecorderBuil
         metrics_sink: None,
         thread_init: noop_thread_hook(),
         #[cfg(feature = "pipeline")]
-        pipeline: Pipeline::Default,
+        pipeline: None,
         #[cfg(feature = "pipeline")]
         terminal_processor: None,
         #[cfg(feature = "pipeline")]
@@ -107,15 +107,6 @@ fn builder_with<M: BufferMode>(writer: Option<SegmentWriter<M>>) -> RecorderBuil
 /// `recorder_or_disabled`: application code runs unchanged, recording nothing.
 pub fn recorder_disabled() -> crate::recording::Recorder {
     crate::recording::Recorder::new(crate::handle::Dial9Handle::disabled(), None)
-}
-
-/// What the background worker runs over sealed segments.
-#[cfg(feature = "pipeline")]
-enum Pipeline {
-    /// dial9's own pipeline, assembled at build from the registered sources.
-    Default,
-    /// Exactly these processors, in this order.
-    Custom(Vec<Box<dyn crate::pipeline::SegmentProcessor>>),
 }
 
 /// Assemble dial9's default pipeline: source-requested stages
@@ -156,8 +147,10 @@ pub struct RecorderBuilder<M: BufferMode = Disk> {
     segment_metadata: Vec<(String, String)>,
     metrics_sink: Option<metrique::writer::BoxEntrySink>,
     thread_init: RecordingThreadHook,
+    /// The segment-processing pipeline. `Some` runs exactly these processors,
+    /// `None` assembles dial9's default from the registered sources at build.
     #[cfg(feature = "pipeline")]
-    pipeline: Pipeline,
+    pipeline: Option<Vec<Box<dyn crate::pipeline::SegmentProcessor>>>,
     /// Final stage of the default pipeline, replacing write-back (the S3
     /// uploader sets it). Applied at build, so it does not depend on the order
     /// the builder was called in.
@@ -273,8 +266,8 @@ impl<M: BufferMode> RecorderBuilder<M> {
         // shared state; only the default pipeline uses them.
         #[cfg(feature = "pipeline")]
         let processors = match self.pipeline {
-            Pipeline::Custom(processors) => processors,
-            Pipeline::Default => {
+            Some(processors) => processors,
+            None => {
                 let source_stages = sources
                     .iter_mut()
                     .filter_map(|source| source.segment_processor())
@@ -392,12 +385,9 @@ impl<M: BufferMode> RecorderBuilder<M> {
     /// Append a segment processor (compress, symbolize, upload, write-back),
     /// replacing dial9's default pipeline with your own stages.
     pub fn pipe(mut self, processor: impl crate::pipeline::SegmentProcessor + 'static) -> Self {
-        match &mut self.pipeline {
-            Pipeline::Custom(processors) => processors.push(Box::new(processor)),
-            Pipeline::Default => {
-                self.pipeline = Pipeline::Custom(vec![Box::new(processor)]);
-            }
-        }
+        self.pipeline
+            .get_or_insert_default()
+            .push(Box::new(processor));
         self
     }
 
@@ -408,7 +398,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         mut self,
         processors: Vec<Box<dyn crate::pipeline::SegmentProcessor>>,
     ) -> Self {
-        self.pipeline = Pipeline::Custom(processors);
+        self.pipeline = Some(processors);
         self
     }
 
