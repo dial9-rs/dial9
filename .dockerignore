@@ -7,6 +7,7 @@ node_modules/
 *.bin
 *.bin.gz
 dial9-viewer/ui/demo-trace.bin
+dial9-viewer/ui/public/demo-trace.bin
 .vscode/
 .idea/
 compose.yml

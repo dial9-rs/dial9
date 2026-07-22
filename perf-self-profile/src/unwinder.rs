@@ -122,7 +122,7 @@ impl Unwinder {
 }
 
 #[cfg(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "android"),
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod platform {
@@ -251,7 +251,7 @@ mod platform {
 }
 
 #[cfg(not(all(
-    target_os = "linux",
+    any(target_os = "linux", target_os = "android"),
     any(target_arch = "x86_64", target_arch = "aarch64")
 )))]
 mod platform {

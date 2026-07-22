@@ -1,22 +1,22 @@
 pub(crate) use dial9_core::thread::current_tid;
 
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.
-/// This is a vDSO call on Linux (~20-40ns), no actual syscall.
-#[cfg(target_os = "linux")]
+/// This is a vDSO call on Linux and Android (~20-40ns), no actual syscall.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn thread_cpu_time_nanos() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: `ts` is a valid, initialized timespec on the stack.
-    // CLOCK_THREAD_CPUTIME_ID is always available on Linux and always succeeds.
+    // CLOCK_THREAD_CPUTIME_ID is available on Linux and Android and always succeeds.
     unsafe {
         libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
     }
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub(crate) fn thread_cpu_time_nanos() -> u64 {
     0
 }
@@ -90,7 +90,7 @@ impl SchedStat {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad schedstat"))?;
         Ok(Self {
             wait_time_ns,
-            #[cfg(all(test, target_os = "linux"))]
+            #[cfg(all(test, any(target_os = "linux", target_os = "android")))]
             fd,
         })
     }

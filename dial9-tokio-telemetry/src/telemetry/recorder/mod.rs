@@ -1229,19 +1229,14 @@ mod tests {
             )
             .unwrap();
 
-        for rt in [&runtime_a, &runtime_b] {
-            rt.block_on(async {
-                let mut handles = Vec::new();
-                for _ in 0..50 {
-                    handles.push(tokio::spawn(async {
-                        tokio::task::yield_now().await;
-                    }));
-                }
-                for h in handles {
-                    h.await.unwrap();
-                }
-            });
-        }
+        let worker_id = |runtime: &tokio::runtime::Runtime| {
+            runtime.block_on(async { tokio::spawn(async { current_worker_id() }).await.unwrap() })
+        };
+        let runtime_a_id = worker_id(&runtime_a);
+        let runtime_b_id = worker_id(&runtime_b);
+        assert_ne!(runtime_a_id, crate::telemetry::format::WorkerId::UNKNOWN);
+        assert_ne!(runtime_b_id, crate::telemetry::format::WorkerId::UNKNOWN);
+        assert_ne!(runtime_a_id, runtime_b_id);
 
         // Read each runtime's worker-id block from the context registry instead
         // of assuming absolute ranges: IDs are reserved when a runtime's workers

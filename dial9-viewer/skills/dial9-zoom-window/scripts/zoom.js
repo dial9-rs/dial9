@@ -184,6 +184,14 @@ async function main() {
         console.log(`\ninner tracing spans of dominant ${dominant.durMs.toFixed(1)}ms poll (task ${dominant.task}): ${summary}`);
       }
     }
+
+    // ── Viewer deep link for this window ──
+    // `start`/`end` are ABSOLUTE monotonic ns, per the URL contract
+    // (dial9-viewer/ui/README.md, "URL contract (stable deep-link API)").
+    // The trace URL placeholder needs filling in because this script reads
+    // local files; the viewer needs the trace served over HTTP.
+    console.log(`\nviewer deep link (replace <TRACE_URL> with the served trace URL):`);
+    console.log(`  viewer.html?trace=<TRACE_URL>&start=${Math.round(lo)}&end=${Math.round(hi)}`);
   }
 }
 

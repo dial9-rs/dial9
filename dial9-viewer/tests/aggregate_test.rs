@@ -4,10 +4,10 @@
 //! the whole flow" coverage: folding, ordering, coverage reporting, the
 //! sampling cap, idempotency, zero-sample files, and scope filtering.
 //!
-//! The endpoint streams: one request folds to the sampling cap and emits a
-//! Server-Sent Event per file (the first is the already-folded snapshot, the
-//! last is the fully-refined snapshot). [`stream`] collects every event;
-//! [`stream_final`] returns just the last (at-cap) one — the natural replacement
+//! The endpoint streams: one request folds to the sampling cap and emits
+//! cumulative events after bounded cached batches, then one event per newly
+//! folded file; the last event has drained the bounded new-work list. [`stream`]
+//! collects every event; [`stream_final`] returns just that final one — the natural
 //! for the old "poll until coverage stops climbing" loops.
 
 use dial9_trace_format::encoder::Encoder;
@@ -424,7 +424,10 @@ impl dial9_viewer::storage::StorageBackend for FailingPuts {
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<Vec<String>, dial9_viewer::storage::StorageError>,
+                    Output = Result<
+                        Vec<dial9_viewer::storage::BucketInfo>,
+                        dial9_viewer::storage::StorageError,
+                    >,
                 > + Send
                 + '_,
         >,
@@ -617,8 +620,8 @@ fn parse_sse_events(body: &str) -> Vec<String> {
 
 /// Open the flamegraph SSE stream for `query` and collect every event. The
 /// server folds to the sampling cap then closes, so `reqwest`'s buffered
-/// `.text()` returns the whole finite stream. The first event is the
-/// already-folded snapshot; the last is the fully-refined (at-cap) snapshot.
+/// `.text()` returns the whole finite stream. Cached state may occupy several
+/// bounded cumulative events; the last event has drained bounded new work.
 async fn stream(client: &reqwest::Client, base: &str, query: &str) -> Vec<Resp> {
     let url = format!("{base}/api/flamegraph?{query}");
     let r = client.get(&url).send().await.unwrap();
@@ -651,8 +654,8 @@ async fn stream(client: &reqwest::Client, base: &str, query: &str) -> Vec<Resp> 
         .collect()
 }
 
-/// The final (fully-refined) event of a flamegraph stream — the natural
-/// replacement for the old "poll to the cap" loop.
+/// The final event after cached reconstruction and bounded new work drain — the
+/// natural replacement for the old client polling loop.
 async fn stream_final(client: &reqwest::Client, base: &str, query: &str) -> Resp {
     stream(client, base, query).await.pop().unwrap()
 }
@@ -1147,16 +1150,27 @@ async fn folded_outside_cap_does_not_starve_budget() {
         "host-00 folded several files, got {host_folded}"
     );
 
-    // 2. Now query the whole fleet at the DEFAULT cap (5). Pre-fix, the folded
-    //    host-00 files (counted across the whole 100-file order) would make
-    //    room = 5 - host_folded <= 0, folding nothing. Post-fix, budgeting is
-    //    scoped to the capped prefix, so the fleet stream folds toward its cap.
-    let fleet = stream_final(&http, &base, "service=shale").await;
-    let cf = fleet.coverage.unwrap();
-    assert_eq!(cf.files_matched, 100);
+    // 2. Now query the whole fleet at the DEFAULT new-fold cap (5). Every
+    // cached host-00 part applies to this broader scope and must be streamed,
+    // including those outside its capped prefix. Missing files inside the prefix
+    // must still fold; cached reuse cannot consume that bounded work budget.
+    let fleet = stream(&http, &base, "service=shale").await;
+    let first = fleet.first().unwrap().coverage.as_ref().unwrap();
+    assert_eq!(first.files_matched, 100);
     assert_eq!(
-        cf.files_folded, 5,
-        "fleet refines to its 5% cap despite folded host-00 files outside the cap"
+        first.files_folded, host_folded,
+        "the first cumulative cached snapshot reuses every matching host-00 part"
+    );
+    let cf = fleet.last().unwrap().coverage.as_ref().unwrap();
+    assert!(
+        cf.files_folded > host_folded,
+        "missing in-cap files still fold after reusing {host_folded} cached files; got {}",
+        cf.files_folded
+    );
+    assert!(
+        cf.files_folded <= host_folded + 5,
+        "new work remains bounded by the five-file capped prefix; got {} from {host_folded} cached",
+        cf.files_folded
     );
 }
 
@@ -1235,11 +1249,14 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
 
     // The output bucket should contain exactly `files_folded` samples part-files
     // (one per folded source file) — no duplicates from re-polling. The output
-    // is namespaced by source bucket: `…/v1/bucket={src}/samples/…`.
+    // is namespaced by source bucket: `…/v{VERSION}/bucket={src}/samples/…`.
+    let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
     let listed = uploader
         .list_objects_v2()
         .bucket("out-bucket")
-        .prefix("flamegraph-data/v3/bucket=src-bucket/samples/")
+        .prefix(format!(
+            "flamegraph-data/v{version}/bucket=src-bucket/samples/"
+        ))
         .send()
         .await
         .unwrap();
@@ -1604,45 +1621,182 @@ async fn fold_failures_are_reported_in_coverage() {
 }
 
 /// Regression for the fold commit ordering: when a fold's part-file writes only
-/// PARTIALLY succeed (here: `polls/` PUTs fail while everything else works —
-/// the same interleaving a fold task cancelled mid-write can produce, and with
-/// SSE streams a client disconnect cancels in-flight folds routinely), the file
-/// must NOT be recorded as folded. The `samples/` part is the durable folded
-/// record (`list_folded_leaves` lists it), so it must be written last: a file
-/// recorded as folded with its polls part missing would serve incomplete
-/// tokio-stats silently, forever — folded files are never re-folded.
+/// PARTIALLY succeed, failure of any prerequisite part must prevent the samples
+/// commit marker from landing. The `samples/` part is the durable folded record
+/// (`list_folded_leaves` lists it), so a committed file is never re-folded.
 #[tokio::test]
 async fn partial_write_failure_does_not_commit_fold() {
+    for fail_substr in ["/polls/", "/spans/"] {
+        let fs = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+        std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+        let uploader = fake_s3_client(fs.path());
+        let body = mini_trace_gz();
+        seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+
+        let output = Arc::new(FailingPuts {
+            inner: Arc::new(S3Backend::from_client(fake_s3_client(fs.path()))),
+            fail_substr,
+        });
+        let base =
+            start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
+        let http = reqwest::Client::new();
+
+        let r = stream_final(&http, &base, "service=shale").await;
+        let c = r.coverage.unwrap();
+        assert_eq!(
+            c.fold_errors, 4,
+            "all capped folds must fail for {fail_substr}"
+        );
+        assert_eq!(
+            c.files_folded, 0,
+            "a failed {fail_substr} write must not count as folded"
+        );
+
+        let again = stream(&http, &base, "service=shale").await;
+        let c0 = again[0].coverage.as_ref().unwrap();
+        assert_eq!(
+            c0.files_folded, 0,
+            "no samples part may exist after a {fail_substr} write failure"
+        );
+    }
+}
+
+/// Regression test: `fetch_folded_sample_parts` uses `buffer_unordered` which
+/// returns results in arbitrary completion order. Previously the flamegraph
+/// stream associated seed results by positional index — so a reordered response
+/// would mark the WRONG leaf as folded and misattribute merge errors to the
+/// wrong file. After the fix, each result carries its own leaf key, making
+/// association order-independent.
+///
+/// This test seeds 4 source files, folds them fully (first stream), then runs
+/// a second stream that primes from the folded set. It verifies:
+/// 1. All 4 files are correctly reported as folded (no misses from reordering).
+/// 2. The sample count is exact (no duplicates or drops from misassociation).
+/// 3. If one file's GET returns corrupted data (simulated by a backend that
+///    returns garbage for one specific leaf), only THAT leaf is excluded from
+///    the folded count — not a positionally-adjacent one.
+#[tokio::test]
+async fn seed_association_is_order_independent() {
     let fs = tempfile::tempdir().unwrap();
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
 
     let uploader = fake_s3_client(fs.path());
     let body = mini_trace_gz();
-    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+    // Seed 4 segments across 4 hosts so the order_key permutation shuffles them.
+    let epoch = 1_744_224_000i64;
+    for (i, host) in ["host-a", "host-b", "host-c", "host-d"].iter().enumerate() {
+        let key = segment_key(
+            "2026-04-09",
+            "1900",
+            "shale",
+            host,
+            epoch + i as i64 * 60,
+            0,
+        );
+        put(&uploader, "src-bucket", &key, body.clone()).await;
+    }
 
-    let output = Arc::new(FailingPuts {
-        inner: Arc::new(S3Backend::from_client(fake_s3_client(fs.path()))),
-        fail_substr: "/polls/",
-    });
-    let base =
-        start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
+    // First stream: fold all 4 files.
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
-
-    // Every fold attempt fails at the polls write and is reported as an error.
-    let r = stream_final(&http, &base, "service=shale").await;
+    let r = stream_final(&http, &base, "service=shale&source=all").await;
     let c = r.coverage.unwrap();
-    assert_eq!(c.fold_errors, 4, "all 4 capped folds failed");
-    assert_eq!(c.files_folded, 0, "a failed fold is not counted as folded");
+    assert_eq!(c.files_matched, 4);
+    assert_eq!(c.files_folded, 4, "all 4 should fold on first stream");
+    let expected_samples = r.total_samples;
+    assert!(expected_samples > 0);
 
-    // The load-bearing assertion: a fresh stream must ALSO see nothing folded.
-    // If the samples part had been written before (or concurrently with) the
-    // failing polls part, the folded-set listing would now claim these files
-    // are folded — committing them with their polls data missing forever.
-    let again = stream(&http, &base, "service=shale").await;
-    let c0 = again[0].coverage.as_ref().unwrap();
+    // Second stream: all 4 are already folded → primed from fetch_folded_sample_parts.
+    // Because buffer_unordered can return them in any order, the keyed results
+    // must still associate correctly.
+    let r2 = stream_final(&http, &base, "service=shale&source=all").await;
+    let c2 = r2.coverage.unwrap();
     assert_eq!(
-        c0.files_folded, 0,
-        "no samples part may exist after a partial write failure (samples must be written last)"
+        c2.files_folded, 4,
+        "keyed fetch must correctly identify all 4 leaves regardless of completion order"
+    );
+    assert_eq!(
+        r2.total_samples, expected_samples,
+        "sample count must be identical (no duplicates/drops from misassociation)"
+    );
+    assert_eq!(c2.fold_errors, 0, "no errors in healthy seed path");
+}
+
+/// Regression: when one folded file's seed GET fails (e.g. the part-file was
+/// garbage-collected or corrupted), only THAT file should be excluded from
+/// files_folded — not a neighboring file that happened to arrive at the same
+/// positional index. This pins down the keyed-result association: a merge error
+/// on leaf X must decrement leaf X's presence, not leaf Y's.
+#[tokio::test]
+async fn seed_merge_error_excludes_only_the_failed_leaf() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    let epoch = 1_744_224_000i64;
+    let hosts = ["host-a", "host-b", "host-c", "host-d"];
+    for (i, host) in hosts.iter().enumerate() {
+        let key = segment_key(
+            "2026-04-09",
+            "1900",
+            "shale",
+            host,
+            epoch + i as i64 * 60,
+            0,
+        );
+        put(&uploader, "src-bucket", &key, body.clone()).await;
+    }
+
+    // First stream: fold all 4 files normally.
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+    let r = stream_final(&http, &base, "service=shale&source=all").await;
+    assert_eq!(r.coverage.unwrap().files_folded, 4);
+
+    // Now corrupt one file's samples part-file on disk so its merge fails on the
+    // second stream's seed read-back. Find a .parquet in the host=host-b
+    // partition of the samples directory.
+    let out_dir = fs.path().join("out-bucket");
+    fn find_and_corrupt_host_b(dir: &std::path::Path) -> bool {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if find_and_corrupt_host_b(&path) {
+                        return true;
+                    }
+                } else if path.extension().is_some_and(|e| e == "parquet") {
+                    // Only corrupt a file in the host=host-b partition under samples/
+                    let path_str = path.to_string_lossy();
+                    if path_str.contains("/samples/") && path_str.contains("host=host-b") {
+                        std::fs::write(&path, b"corrupted garbage data").unwrap();
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    assert!(
+        find_and_corrupt_host_b(&out_dir),
+        "could not find a samples part-file for host-b"
+    );
+
+    // Second stream: seed read-back hits the corrupted file. The keyed result
+    // must correctly attribute the failure to host-b's leaf, not any other.
+    let r2 = stream_final(&http, &base, "service=shale&source=all").await;
+    let c2 = r2.coverage.unwrap();
+    assert_eq!(
+        c2.files_folded, 3,
+        "only the corrupted leaf should be excluded from files_folded"
+    );
+    assert_eq!(
+        c2.fold_errors, 1,
+        "exactly one merge error from the corrupted part"
     );
 }

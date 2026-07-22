@@ -3,7 +3,7 @@ name = "dial9-perf-self-profile"
 version = "0.5.0-rc0"
 edition.workspace = true
 repository.workspace = true
-description = "Minimal self-profiling via Linux perf_event_open with frame-pointer-based stack traces"
+description = "Minimal self-profiling via Linux/Android perf_event_open with frame-pointer-based stack traces"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
@@ -49,10 +49,10 @@ scc = { version = "2", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true, default-features = false }
 tracing = "0.1.44"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))'.dependencies]
 blazesym = "0.2"
 crossbeam-utils = "0.8"
-libc = "0.2"
+libc = "0.2.186"
 perf-event-data = "0.1.8"
 perf-event-open-sys2 = "5.0.6"
 netlink-packet-core = { version = "0.7", optional = true }

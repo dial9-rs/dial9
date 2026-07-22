@@ -28,6 +28,15 @@ When your output names a domain concept (in an issue title, a refactor proposal,
 
 If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/grill-with-docs`).
 
+## Emitting viewer links
+
+Any skill or agent output that links into the viewer UI (viewer, flamegraph,
+trace browser) must follow the URL contract:
+`dial9-viewer/ui/README.md`, section "URL contract (stable deep-link API)".
+It documents every stable query param and hash key, the additive-only
+stability promise, and ready-made deep-link recipes. Do not invent params:
+unknown ones are silently ignored.
+
 ## Flag ADR conflicts
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:

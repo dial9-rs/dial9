@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Tokio Stats</title>
+<script src="ui-switch.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; padding: 20px; }
@@ -416,9 +417,140 @@
       </tr>`;
     }
     html += "</tbody></table>";
+    html += renderWorkerActivity(data, threshNs);
     html += renderLongPolls(data, threshNs);
     tableEl.innerHTML = html;
   }
+
+  // "Worker activity": per-host busyness summary with expandable per-worker
+  // detail. Per-worker busyness = busy_ns / observed active time (span_ns); a
+  // host's busyness pools its workers (Σ busy_ns / Σ span_ns — see hostBusyPct),
+  // which is bounded ≤100% and weights each worker by observed time. One row per
+  // host (runtime), click to expand individual workers. Each worker row shows a
+  // verification breakdown: busy_ns / span_ns = busy_pct.
+  let workerSortKey = "busy_pct"; // sort key for host rows
+  let workerSortDesc = true;
+  let expandedHosts = new Set(); // hosts whose worker details are visible
+
+  function renderWorkerActivity(data, threshNs) {
+    const workers = (data && data.worker_activity) || [];
+    if (!workers.length) return "";
+
+    // Group workers by host.
+    const hostMap = {};
+    for (const w of workers) {
+      const h = w.host || "(unknown)";
+      if (!hostMap[h]) hostMap[h] = [];
+      hostMap[h].push(w);
+    }
+
+    // Compute per-host aggregates. Busyness is the POOLED ratio Σ busy_ns /
+    // Σ span_ns (see hostBusyPct) — weighting workers by observed time so a
+    // host with sparse sampling doesn't read as spuriously busier than one
+    // doing more work.
+    const hostRows = Object.entries(hostMap).map(([host, ws]) => {
+      const totalPolls = ws.reduce((s, w) => s + w.total_polls, 0);
+      const notablePolls = ws.reduce((s, w) => s + w.notable_polls, 0);
+      const busyPct = hostBusyPct(ws);
+      const worstPollNs = Math.max(...ws.map(w => w.worst_poll_ns || 0));
+      // "active / total" workers: active = observed, total = configured (Tokio
+      // numbers workers 0..N-1, so max id + 1). Sort by total (numWorkers).
+      const { active: activeWorkers, total: numWorkers } = hostWorkerCounts(ws);
+      return { host, workers: ws, totalPolls, notablePolls, busyPct, worstPollNs, activeWorkers, numWorkers };
+    });
+
+    // Sort host rows.
+    hostRows.sort((a, b) => {
+      const av = a[workerSortKey] ?? a.busyPct, bv = b[workerSortKey] ?? b.busyPct;
+      const cmp = typeof av === "string" ? av.localeCompare(bv) : av - bv;
+      return workerSortDesc ? -cmp : cmp;
+    });
+
+    const totalWorkers = workers.length;
+    const numHosts = hostRows.length;
+    const sortInd = (key) => workerSortKey === key ? (workerSortDesc ? " ▼" : " ▲") : "";
+    const th = (label, key) => `<th style="cursor:pointer" onclick="sortWorkers('${key}')">${label}${sortInd(key)}</th>`;
+
+    let html = `<h3 style="margin:20px 0 8px">⚙️ Worker activity</h3>
+      <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">${totalWorkers} workers across ${numHosts} host${numHosts > 1 ? "s" : ""} — busyness = poll time / observed active time; a host's busyness pools its workers (Σ busy / Σ observed). Click a host row to expand individual workers.</p>
+      <table><thead><tr>
+        ${th("Host", "host")}${th("Workers<br><span style='font-weight:normal;color:#8b949e'>active / total</span>", "numWorkers")}${th("Busy", "busyPct")}<th>Bar</th>${th("Polls", "totalPolls")}${th("Notable", "notablePolls")}${th("Worst poll", "worstPollNs")}
+      </tr></thead><tbody>`;
+
+    for (const hr of hostRows) {
+      const expanded = expandedHosts.has(hr.host);
+      const toggle = expanded ? "▾" : "▸";
+      const busyFmt = hr.busyPct.toFixed(3) + "%";
+      const busyColor = busynessHeat(hr.busyPct);
+      const barWidth = Math.min(hr.busyPct, 100);
+      const barHtml = `<div style="background:${busyColor}33;border-radius:2px;height:14px;width:${barWidth}%"></div>`;
+      const worstDur = hr.worstPollNs > 0
+        ? `<span style="color:${latencyHeat(hr.worstPollNs)};font-weight:600">${formatDuration(hr.worstPollNs)}</span>`
+        : "—";
+      // Pass the host through a data-attribute (read back via this.dataset.host),
+      // never interpolated into the inline handler's JS: a host containing a
+      // quote would break `toggleWorkerHost('…')`. escapeHtml is the right (and
+      // sufficient) escaping for both the attribute value and the cell text —
+      // same pattern as openExemplar's data-url.
+      const hostLabel = escapeHtml(hr.host);
+
+      html += `<tr style="cursor:pointer;font-weight:600" data-host="${hostLabel}" onclick="toggleWorkerHost(this.dataset.host)">
+        <td>${toggle} ${hostLabel}</td>
+        <td>${hr.activeWorkers} / ${hr.numWorkers}</td>
+        <td><span style="color:${busyColor}">${busyFmt}</span></td>
+        <td style="width:120px">${barHtml}</td>
+        <td>${hr.totalPolls.toLocaleString()}</td>
+        <td>${hr.notablePolls.toLocaleString()}</td>
+        <td>${worstDur}</td>
+      </tr>`;
+
+      if (expanded) {
+        const sortedWorkers = hr.workers.slice().sort((a, b) => b.busy_pct - a.busy_pct);
+        for (const w of sortedWorkers) {
+          const url = w.worst_exemplar ? exemplarLink(w.worst_exemplar, data) : "";
+          const wBusyFmt = w.busy_pct.toFixed(3) + "%";
+          const wBusyColor = busynessHeat(w.busy_pct);
+          const wBarWidth = Math.min(w.busy_pct, 100);
+          const wBarHtml = `<div style="background:${wBusyColor}33;border-radius:2px;height:14px;width:${wBarWidth}%"></div>`;
+          const wWorstDur = w.worst_poll_ns > 0
+            ? `<span style="color:${latencyHeat(w.worst_poll_ns)};font-weight:600">${formatDuration(w.worst_poll_ns)}</span>`
+            : "—";
+          // Verification tooltip: busy_ns / span_ns = busy_pct
+          const spanFmt = w.span_ns ? formatDuration(w.span_ns) : "?";
+          const busyNsFmt = formatDuration(w.busy_ns);
+          const verifyTitle = `${busyNsFmt} busy / ${spanFmt} span = ${wBusyFmt}`;
+          const cells = `<td style="padding-left:28px;font-weight:normal">w${w.worker_id}</td>
+            <td></td>
+            <td title="${verifyTitle}"><span style="color:${wBusyColor}">${wBusyFmt}</span></td>
+            <td style="width:120px">${wBarHtml}</td>
+            <td>${w.total_polls.toLocaleString()}</td>
+            <td>${w.notable_polls.toLocaleString()}</td>
+            <td>${wWorstDur}</td>`;
+          html += url
+            ? `<tr style="cursor:pointer;background:#1a1f26" onclick="openExemplar(this)" data-url="${url.replace(/"/g, "&quot;")}">${cells}</tr>`
+            : `<tr style="background:#1a1f26">${cells}</tr>`;
+        }
+      }
+    }
+    html += "</tbody></table>";
+    return html;
+  }
+
+  window.toggleWorkerHost = function(host) {
+    if (expandedHosts.has(host)) expandedHosts.delete(host);
+    else expandedHosts.add(host);
+    renderFromCache();
+  };
+
+  window.sortWorkers = function(key) {
+    if (workerSortKey === key) {
+      workerSortDesc = !workerSortDesc;
+    } else {
+      workerSortKey = key;
+      workerSortDesc = true;
+    }
+    renderFromCache();
+  };
 
   // "Longest polls": the single futures that held a worker thread longest in one
   // poll — long polls starve every other task on that worker. Ported from IRIS's

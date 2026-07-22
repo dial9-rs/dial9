@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate the block_in_place test trace used by test_block_in_place.js.
+# Regenerate the block_in_place test trace used by tests/core/block_in_place.test.ts.
 # Run from anywhere; the script finds the repo root automatically.
 set -e
 

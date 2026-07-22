@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>dial9 Trace Browser</title>
+    <script src="ui-switch.js"></script>
     <style>
         :root {
             /* Width of the heatmap host-label column. Read from JS (see LABEL_W)
@@ -576,23 +577,23 @@
         let showAllBuckets = false;
         // The last full bucket list from /api/buckets, so the toggle can
         // re-render without another list call.
-        let lastBucketNames = [];
+        let lastBuckets = [];
 
         // Buckets whose name contains "dial9" are the trace buckets — surfaced
         // by default. Everything else is hidden unless "Show all" is on.
-        const isTraceBucket = (n) => n.toLowerCase().includes('dial9');
+        const isTraceBucket = (bucket) => bucket.name.toLowerCase().includes('dial9');
 
         // Render the bucket picker from the last listing. Shows the dial9 trace
         // buckets by default, or every visible bucket when "Show all" is on. A
         // toggle button lets the user switch (some deployments don't put "dial9"
         // in the bucket name, so the filtered view can hide the real bucket).
-        function renderBucketPicker(names) {
-            if (names) lastBucketNames = names;
-            names = lastBucketNames;
+        function renderBucketPicker(buckets) {
+            if (buckets) lastBuckets = buckets;
+            buckets = lastBuckets;
             bucketsBox.innerHTML = '';
             bucketsRow.style.display = '';
 
-            const all = [...names].sort((a, b) => a.localeCompare(b));
+            const all = [...buckets].sort((a, b) => a.name.localeCompare(b.name));
             const matches = all.filter(isTraceBucket);
             const shown = showAllBuckets ? all : matches;
 
@@ -613,19 +614,19 @@
             }
 
             if (!shown.length) {
-                bucketsBox.textContent = names.length
+                bucketsBox.textContent = buckets.length
                     ? 'No dial9 trace buckets visible to these credentials.'
                     : 'No buckets visible to these credentials.';
                 appendToggle();
                 return;
             }
 
-            for (const name of shown) {
+            for (const bucket of shown) {
                 const b = document.createElement('button');
-                b.textContent = name;
+                b.textContent = bucket.name;
                 // Highlight the trace buckets even within the full list.
-                if (isTraceBucket(name)) b.classList.add('match');
-                b.addEventListener('click', () => selectBucket(name, b));
+                if (isTraceBucket(bucket)) b.classList.add('match');
+                b.addEventListener('click', () => selectBucket(bucket, b));
                 bucketsBox.appendChild(b);
             }
             appendToggle();
@@ -637,13 +638,23 @@
             }
         }
 
-        // Choose a bucket: fill the bucket field, detect its region via
-        // /api/credentials/check, then run the search.
-        async function selectBucket(name, el) {
+        // Choose a bucket. ListBuckets normally supplies its region directly;
+        // fall back to /api/credentials/check for compatible S3 implementations
+        // that omit the newer BucketRegion field.
+        async function selectBucket(bucket, el) {
+            const { name } = bucket;
             [...bucketsBox.children].forEach(c => c.classList.remove('selected'));
             if (el) el.classList.add('selected');
             bucketInput.value = name;
             syncUrl();
+            if (bucket.region) {
+                region.value = bucket.region;
+                Dial9Creds.setRegion(bucket.region);
+                syncUrl();
+                setStatus(`Using ${name} · region ${bucket.region}`, 'ok');
+                discoverPrefixes().then(() => reRunCurrentSearch());
+                return;
+            }
             setStatus(`Detecting region for ${name}…`, null);
             const result = await Dial9Creds.check(name);
             if (result.ok) {

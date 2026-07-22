@@ -6,7 +6,25 @@ license.workspace = true
 repository.workspace = true
 description = "CLI trace viewer and S3 browser for dial9-tokio-telemetry"
 default-run = "dial9-viewer"
-exclude = ["src/bin/dev_server.rs", "design/", "benchmarks/"]
+# The published crate must carry the BUILT viewer UI: rust-embed embeds
+# ui/dist/ at compile time, and release CI runs `npm ci && npm run build`
+# before publishing (.github/workflows/release.yml), so cargo-install users
+# never need Node (ADR-0004 section 3, constraint H1). ui/dist/* is
+# gitignored, and without an explicit `include` cargo drops gitignored files
+# from the package - so this list is load-bearing. It also keeps UI sources,
+# test_*.js, node_modules, design/, and benchmarks/ out of the archive.
+# src/bin/dev_server.rs stays unpublished (dev-only bin, as before).
+include = [
+    "/build.rs",
+    "/src/**",
+    "!/src/bin/dev_server.rs",
+    "!/src/bin/gen_fixtures.rs",
+    "/benches/**",
+    "/skills/**",
+    "/README.md",
+    "/skill-source.md",
+    "/ui/dist/**",
+]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
@@ -21,6 +39,14 @@ path = "src/main.rs"
 [[bin]]
 name = "dev-server"
 path = "src/bin/dev_server.rs"
+required-features = ["dev-server"]
+
+# T42 test infrastructure: synthetic trace fixture generator (see the file's
+# module docs and ui/README.md "Parity gate tooling"). Gated behind the
+# dev-server feature and excluded from the published package, like dev-server.
+[[bin]]
+name = "gen-fixtures"
+path = "src/bin/gen_fixtures.rs"
 required-features = ["dev-server"]
 
 [dependencies]
@@ -62,6 +88,8 @@ blake3 = "1"
 lasso = "0.7"
 rustc-hash = "2"
 dial9-core.workspace = true
+hex = "0.4"
+urlencoding = "2"
 
 [dev-dependencies]
 assert2 = { workspace = true }
@@ -72,7 +100,6 @@ s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
 tempfile = "3"
-urlencoding = "2"
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-types = "1"
 aws-smithy-async = { version = "1", features = ["rt-tokio"] }

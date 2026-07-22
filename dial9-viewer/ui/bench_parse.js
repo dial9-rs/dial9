@@ -77,7 +77,7 @@ async function timeIt(fn, iters) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const file = args.file || path.join(__dirname, "demo-trace.bin");
+  const file = args.file || path.join(__dirname, "public", "demo-trace.bin");
   const raw = loadRaw(file);
 
   console.log(`\nTrace: ${file}`);

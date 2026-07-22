@@ -41,6 +41,8 @@ const LONG_POLL_SOFT_CAP: usize = LONG_POLL_TOP * 4;
 pub struct TokioStatsParams {
     pub bucket: Option<String>,
     pub prefix: Option<String>,
+    /// Region for ambient-credential S3 reads, carried by browse deep links.
+    pub aws_region: Option<String>,
     pub service: Option<String>,
     #[serde(default)]
     pub host: Vec<String>,
@@ -68,6 +70,11 @@ pub struct TokioStatsResponse {
     /// coordinates to deep-link its trace segment. Ported from IRIS's
     /// `longPolls.top` (rust-ingest `analyze.rs`).
     pub top_long_polls: Vec<LongPoll>,
+    /// Per-worker busyness + poll distribution, ranked by busyness descending.
+    /// Ported from IRIS's `workers` rollup, extended with a busyness metric
+    /// (sum of poll durations / worker's own observed time span). Workers are
+    /// keyed per-host so multi-runtime deployments don't conflate worker IDs.
+    pub worker_activity: Vec<WorkerStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<aggregate::Coverage>,
 }
@@ -113,6 +120,41 @@ pub struct LongPoll {
     pub source_key: String,
 }
 
+/// Per-worker poll distribution + busyness, for the "Worker activity" card.
+/// Ported from IRIS's `workers` rollup, extended with a busyness metric (sum of
+/// poll durations / wall-clock time) as the best utilization proxy available
+/// without park/unpark events. Workers are scoped per-host so multi-runtime
+/// (multi-host) deployments don't conflate worker IDs across different runtimes.
+#[derive(Serialize, Clone)]
+pub struct WorkerStats {
+    pub worker_id: u32,
+    /// Host this worker belongs to. Workers on different hosts are distinct
+    /// runtime instances; this disambiguates worker 0 on host-A from worker 0
+    /// on host-B in multi-host scopes.
+    pub host: String,
+    /// All polls observed on this worker (including sub-floor).
+    pub total_polls: u64,
+    /// Sum of ALL poll durations on this worker (ns).
+    pub busy_ns: i64,
+    /// The worker's observed active time (ns) — the denominator for `busy_pct`,
+    /// exposed so the UI can show the breakdown for verification
+    /// (busy_ns / span_ns = busy_pct). This is observed time, not the wall-clock
+    /// span; see [`WorkerAccum::observed_ns`].
+    pub span_ns: i64,
+    /// Busyness percentage: `busy_ns / span_ns * 100`. Approximates worker
+    /// utilization — 100% means the worker was polling for the whole of its
+    /// observed active time. Bounded to ≤100% because a worker's polls are
+    /// sequential (non-overlapping), so `busy_ns ≤ span_ns`.
+    pub busy_pct: f64,
+    /// Polls above the duration floor on this worker.
+    pub notable_polls: u64,
+    /// Longest poll duration on this worker (for heat-coloring).
+    pub worst_poll_ns: i64,
+    /// Exemplar of the worst poll for deep-linking into the viewer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worst_exemplar: Option<PollExemplar>,
+}
+
 /// Handler for GET /api/tokio-stats — a Server-Sent Events stream.
 ///
 /// [Resolves](refine::resolve) the scope, reads the already-folded `polls/`
@@ -133,7 +175,12 @@ pub async fn get_tokio_stats(
     (StatusCode, String),
 > {
     let Some(agg) = state
-        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .agg_context_for(
+            params.bucket.as_deref(),
+            params.prefix.as_deref(),
+            params.aws_region.as_deref(),
+            creds,
+        )
         .await?
     else {
         return Err((
@@ -179,7 +226,7 @@ pub async fn get_tokio_stats(
     // it is reported as absent rather than a misleading zero.
     let op = OperationMetrics::tokio_stats(
         resolved.files_matched as u32,
-        resolved.files_folded_in(resolved.folded()) as u32,
+        resolved.capped_files_folded_in(resolved.folded()) as u32,
         None,
     );
 
@@ -204,7 +251,7 @@ struct StreamCtx {
 enum Phase {
     Start,
     Folding {
-        acc: TokioStatsAccum,
+        acc: Box<TokioStatsAccum>,
         folded: HashSet<String>,
         errors: FoldErrors,
     },
@@ -260,7 +307,7 @@ fn tokio_stats_stream(
                             ctx,
                             folds,
                             Phase::Folding {
-                                acc,
+                                acc: Box::new(acc),
                                 folded,
                                 errors,
                             },
@@ -357,21 +404,23 @@ fn snapshot_event(
         .collect();
     by_spawn_loc.sort_by_key(|l| std::cmp::Reverse(l.durations_ns.len()));
 
-    let files_folded = ctx.resolved.files_folded_in(folded);
+    let files_folded = ctx.resolved.capped_files_folded_in(folded);
     let resp = TokioStatsResponse {
         time_span_ns,
         total_polls: acc.total_polls,
         bucket: ctx.source_bucket.clone(),
         by_spawn_loc,
         top_long_polls: acc.top_long_polls(),
+        worker_activity: acc.worker_activity(),
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
             files_folded,
+            fold_work_cap: ctx.resolved.fold_work_cap(),
             // tokio-stats counts folded files, not samples, as its "folded" unit.
             samples_folded: files_folded,
             total_bytes: ctx.resolved.total_bytes,
             hosts_matched: ctx.resolved.hosts_matched,
-            hosts_folded: ctx.resolved.folded_hosts(folded),
+            hosts_folded: ctx.resolved.capped_folded_hosts(folded),
             fold_errors: errors.count,
             fold_error_sample: errors.sample.clone(),
         }),
@@ -397,6 +446,12 @@ struct TokioStatsAccum {
     /// Unsorted between compactions; [`TokioStatsAccum::top_long_polls`] produces
     /// the final ranked list.
     long_polls: Vec<LongPoll>,
+    /// Per-worker accumulation for the "Worker activity" rollup. Keyed by
+    /// `(host, worker_id)` so multi-host scopes (multiple runtimes) don't
+    /// conflate workers with the same ID from different hosts. Populated only
+    /// when the polls part-file includes the `worker_id` column (older files are
+    /// silently skipped, same as long polls).
+    by_worker: HashMap<(String, u32), WorkerAccum>,
 }
 
 impl TokioStatsAccum {
@@ -421,6 +476,68 @@ impl TokioStatsAccum {
         top.truncate(LONG_POLL_TOP);
         top
     }
+
+    /// Per-worker activity ranked by busyness descending. Busyness is
+    /// `busy_ns / observed_ns` — poll time over the worker's observed active
+    /// time (the sum of its per-segment windows, NOT the gap-filled span across
+    /// segments; see [`WorkerAccum::observed_ns`]). A worker with no observed
+    /// window (e.g. a single instantaneous poll in every segment) reports 0%
+    /// rather than dividing by zero.
+    fn worker_activity(&self) -> Vec<WorkerStats> {
+        if self.by_worker.is_empty() {
+            return Vec::new();
+        }
+        let mut workers: Vec<WorkerStats> = self
+            .by_worker
+            .iter()
+            .map(|((host, wid), wa)| {
+                let busy_pct = if wa.observed_ns > 0 {
+                    (wa.busy_ns as f64 / wa.observed_ns as f64) * 100.0
+                } else {
+                    0.0
+                };
+                WorkerStats {
+                    worker_id: *wid,
+                    host: host.clone(),
+                    total_polls: wa.total_polls,
+                    busy_ns: wa.busy_ns,
+                    span_ns: wa.observed_ns,
+                    busy_pct,
+                    notable_polls: wa.notable_polls,
+                    worst_poll_ns: wa.worst_poll_ns,
+                    worst_exemplar: wa.worst_exemplar.clone(),
+                }
+            })
+            .collect();
+        workers.sort_unstable_by(|a, b| {
+            b.busy_pct
+                .partial_cmp(&a.busy_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        workers
+    }
+}
+
+/// Per-worker accumulator for the worker activity rollup. Tracks total polls,
+/// busy time (for busyness %), observed active time (the busyness denominator),
+/// and the worst poll (for heat-coloring + deep-link).
+#[derive(Default)]
+struct WorkerAccum {
+    total_polls: u64,
+    /// Sum of all poll durations on this worker (ns), for busyness computation.
+    busy_ns: i64,
+    /// Sum of this worker's per-segment observed windows (ns): for each trace
+    /// segment (= one polls part-file), `max(end_ns) − min(start_ns)` over the
+    /// worker's polls in that segment, accumulated across segments. This is the
+    /// busyness denominator. It deliberately EXCLUDES the idle gaps between
+    /// segments: taking `max − min` across all segments would count that
+    /// unobserved downtime, making a host whose segments cluster in wall-clock
+    /// time read as far busier than one whose segments are spread out —
+    /// independent of actual work.
+    observed_ns: i64,
+    notable_polls: u64,
+    worst_poll_ns: i64,
+    worst_exemplar: Option<PollExemplar>,
 }
 
 struct LocAccum {
@@ -471,6 +588,11 @@ fn read_polls_part(
         4096,
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Per-worker (min start_ns, max end_ns) window within this segment (one
+    // part-file = one segment), accumulated across this file's batches and
+    // folded into each worker's `observed_ns` after the loop.
+    let mut seg_windows: HashMap<(String, u32), (i64, i64)> = HashMap::new();
 
     for batch in reader {
         let batch = batch.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -526,6 +648,31 @@ fn read_polls_part(
             let dur = duration_arr.value(i);
             acc.total_polls += 1;
 
+            // Worker activity: count every poll and accumulate busy_ns (before
+            // the notable floor) so busyness reflects the true distribution.
+            // Keyed by (host, worker_id) so multi-host scopes don't conflate
+            // workers from different runtimes. Skip part-files that predate the
+            // worker_id column rather than fabricating a worker 0.
+            if let Some(workers) = worker_arr {
+                let host_val = host_arr
+                    .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                    .unwrap_or("");
+                let key = (host_val.to_string(), workers.value(i));
+                let wa = acc.by_worker.entry(key.clone()).or_default();
+                wa.total_polls += 1;
+                wa.busy_ns += dur;
+                // Extend this worker's window within this segment. The upper
+                // bound uses end_ns (not start_ns) so it covers the last poll's
+                // full duration, keeping busy_ns ≤ the window. Folded into
+                // `observed_ns` after the batch loop.
+                if let (Some(sa), Some(ea)) = (start_arr, end_arr) {
+                    let (start, end) = (sa.value(i), ea.value(i));
+                    let w = seg_windows.entry(key).or_insert((start, end));
+                    w.0 = w.0.min(start);
+                    w.1 = w.1.max(end);
+                }
+            }
+
             if let Some(sa) = start_arr {
                 let ts = sa.value(i);
                 acc.min_ts = Some(acc.min_ts.map_or(ts, |m| m.min(ts)));
@@ -578,6 +725,27 @@ fn read_polls_part(
                 });
             }
 
+            // Worker activity: track notable polls + worst exemplar per worker
+            // (above the floor, so they're meaningful). Same guard as long-polls:
+            // skip old part-files lacking the worker_id column.
+            if let Some(workers) = worker_arr {
+                let wa = acc
+                    .by_worker
+                    .entry((host.to_string(), workers.value(i)))
+                    .or_default();
+                wa.notable_polls += 1;
+                if dur > wa.worst_poll_ns {
+                    wa.worst_poll_ns = dur;
+                    wa.worst_exemplar = Some(PollExemplar {
+                        start_ns: start_arr.map_or(0, |a| a.value(i)),
+                        end_ns: end_arr.map_or(0, |a| a.value(i)),
+                        duration_ns: dur,
+                        host: host.to_string(),
+                        source_key: source_key.to_string(),
+                    });
+                }
+            }
+
             // Top longest polls (IRIS `longPolls.top`): a poll is only useful in
             // this list if we can attribute it to a worker + task, so skip rows
             // from older part-files that predate those columns rather than
@@ -599,6 +767,15 @@ fn read_polls_part(
             }
         }
     }
+
+    // Fold this segment's per-worker windows into each worker's observed active
+    // time (summed across segments, so inter-segment gaps aren't counted).
+    for (key, (start, end)) in seg_windows {
+        if let Some(wa) = acc.by_worker.get_mut(&key) {
+            wa.observed_ns += (end - start).max(0);
+        }
+    }
+
     Ok(())
 }
 
@@ -610,8 +787,11 @@ mod tests {
 
     #[test]
     fn test_read_polls_from_demo_trace() {
-        let data =
-            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap();
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/public/demo-trace.bin"
+        ))
+        .unwrap();
         let decompressed = {
             use std::io::Read;
             let mut dec = flate2::read::GzDecoder::new(data.as_slice());
@@ -619,7 +799,7 @@ mod tests {
             dec.read_to_end(&mut buf).unwrap();
             buf
         };
-        let (_, _, polls) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
+        let (_, _, polls, _) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
         assert!(!polls.is_empty());
 
         let mut buf = Vec::new();
@@ -658,13 +838,76 @@ mod tests {
             top[0].duration_ns >= DURATION_FLOOR_NS,
             "long polls must clear the notable floor"
         );
+        // Worker activity: populated, ranked by busy_pct descending, busyness
+        // > 0 and bounded ≤100%, host is set, and worst exemplar carries a
+        // source key.
+        let workers = acc.worker_activity();
+        assert!(!workers.is_empty(), "expected at least one worker");
+        assert!(
+            workers.windows(2).all(|w| w[0].busy_pct >= w[1].busy_pct),
+            "worker activity must be ranked descending by busyness"
+        );
+        assert!(
+            workers.iter().all(|w| w.total_polls > 0),
+            "every worker must have at least one poll"
+        );
+        assert!(
+            workers.iter().all(|w| w.busy_ns > 0),
+            "every worker must have accumulated some busy time"
+        );
+        assert!(
+            workers.iter().all(|w| w.busy_pct > 0.0),
+            "every worker must have non-zero busyness"
+        );
+        // Busyness is poll time over observed active time. A worker's polls are
+        // sequential (non-overlapping), so busy_ns ≤ observed_ns ⇒ busy_pct is
+        // bounded to ≤100% (with a small epsilon for float error). This is the
+        // invariant the old gap-filled-span denominator could violate.
+        assert!(
+            workers.iter().all(|w| w.busy_pct <= 100.0 + 1e-6),
+            "busyness must be bounded to 100% (got {:?})",
+            workers.iter().map(|w| w.busy_pct).fold(0.0_f64, f64::max)
+        );
+        assert!(
+            workers.iter().all(|w| w.span_ns >= w.busy_ns),
+            "observed span must be at least the busy time for every worker"
+        );
+        // In real traces, host is non-empty (parsed from source key structure);
+        // in the demo-trace test the source key "test-key" yields "" — which is
+        // fine: workers group by whatever host string the parquet carries. What
+        // matters is that all workers from the same runtime share the same host.
+        let hosts: HashSet<&str> = workers.iter().map(|w| w.host.as_str()).collect();
+        assert_eq!(
+            hosts.len(),
+            1,
+            "demo trace is single-host: all workers should share one host value"
+        );
+        assert!(
+            workers.iter().any(|w| w.worst_exemplar.is_some()),
+            "at least one worker should have a worst exemplar (from above-floor polls)"
+        );
+        assert!(
+            workers
+                .iter()
+                .filter_map(|w| w.worst_exemplar.as_ref())
+                .all(|ex| !ex.source_key.is_empty()),
+            "worker worst exemplars must carry a source key for deep-linking"
+        );
+        let total_worker_polls: u64 = workers.iter().map(|w| w.total_polls).sum();
+        assert_eq!(
+            total_worker_polls, acc.total_polls,
+            "sum of per-worker polls must equal total_polls"
+        );
+
         eprintln!(
-            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns)",
+            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns), {} workers (busiest {:.1}%)",
             acc.total_polls,
             notable,
             with_exemplar,
             top.len(),
             top[0].duration_ns,
+            workers.len(),
+            workers[0].busy_pct,
         );
     }
 }

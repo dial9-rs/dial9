@@ -6,7 +6,7 @@
 //! - [`CpuProfiler`] — process-wide frequency-based CPU sampling.
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
-use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
+use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::types::{EventEncoder, FieldType};
@@ -282,6 +282,13 @@ pub struct CpuProfiler {
     /// OS tid → thread name, eagerly cached at drain time so short-lived
     /// threads are captured before they exit and their `comm` file disappears.
     tid_to_name: HashMap<u32, ThreadName>,
+    /// Original config retained for segment metadata emission.
+    config: CpuProfilingConfig,
+    /// The effective backend that was selected after Auto resolution.
+    /// "perf" or "ctimer" — never "auto".
+    effective_backend: &'static str,
+    /// Whether segment metadata has been emitted yet (emit-once).
+    metadata_emitted: bool,
 }
 
 impl CpuProfiler {
@@ -291,29 +298,43 @@ impl CpuProfiler {
 
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let sampler = match config.backend {
-            CpuBackend::Auto => PerfSampler::start(
-                SamplerConfig::default()
-                    .event_source(config.event_source)
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel),
-            )?,
-            CpuBackend::Perf => PerfSampler::start_perf_only(
-                SamplerConfig::default()
-                    .event_source(config.event_source)
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(config.include_kernel),
-            )?,
-            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
-                SamplerConfig::default()
-                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                    .include_kernel(false),
-            )?,
+        let (sampler, effective_backend) = match config.backend {
+            CpuBackend::Auto => {
+                let s = PerfSampler::start(
+                    SamplerConfig::default()
+                        .event_source(config.event_source)
+                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                        .include_kernel(config.include_kernel),
+                )?;
+                // After Auto resolution, check which backend was actually selected.
+                let backend = if is_ctimer_active() { "ctimer" } else { "perf" };
+                (s, backend)
+            }
+            CpuBackend::Perf => {
+                let s = PerfSampler::start_perf_only(
+                    SamplerConfig::default()
+                        .event_source(config.event_source)
+                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                        .include_kernel(config.include_kernel),
+                )?;
+                (s, "perf")
+            }
+            CpuBackend::Ctimer => {
+                let s = PerfSampler::start_ctimer_only(
+                    SamplerConfig::default()
+                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                        .include_kernel(false),
+                )?;
+                (s, "ctimer")
+            }
         };
         Ok(Self {
             sampler,
             pid: std::process::id(),
             tid_to_name: HashMap::new(),
+            config,
+            effective_backend,
+            metadata_emitted: false,
         })
     }
 
@@ -380,6 +401,51 @@ impl Source for CpuProfiler {
     fn segment_processor(&mut self) -> Option<Box<dyn dial9_core::pipeline::SegmentProcessor>> {
         Some(Box::new(crate::SymbolizeProcessor::new()))
     }
+
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        if self.metadata_emitted {
+            return;
+        }
+        self.metadata_emitted = true;
+        out.push(("cpu.profile.enabled".to_string(), "true".to_string()));
+        out.push((
+            "cpu.profile.frequency_hz".to_string(),
+            self.config.frequency_hz.to_string(),
+        ));
+        // Report the *effective* backend (perf or ctimer), never "auto".
+        // The Auto variant resolves at construction time; self.effective_backend
+        // captures the actual selection.
+        out.push((
+            "cpu.profile.backend".to_string(),
+            self.effective_backend.to_string(),
+        ));
+        // When ctimer is the effective backend, it always samples thread CPU time
+        // (CLOCK_THREAD_CPUTIME_ID), regardless of what EventSource was
+        // originally requested. Report the *effective* source honestly.
+        #[allow(unreachable_patterns)]
+        let event_source_name = if self.effective_backend == "ctimer" {
+            "sw_cpu_clock"
+        } else {
+            match self.config.event_source {
+                EventSource::SwCpuClock => "sw_cpu_clock",
+                EventSource::SwTaskClock => "sw_task_clock",
+                EventSource::HwCpuCycles => "hw_cpu_cycles",
+                EventSource::SwContextSwitches => "sw_context_switches",
+                EventSource::Tracepoint(id) => {
+                    out.push((
+                        "cpu.profile.event_source".to_string(),
+                        format!("tracepoint:{id}"),
+                    ));
+                    return;
+                }
+                _ => "unknown",
+            }
+        };
+        out.push((
+            "cpu.profile.event_source".to_string(),
+            event_source_name.to_string(),
+        ));
+    }
 }
 
 // ── SchedProfiler ────────────────────────────────────────────────────────────
@@ -388,6 +454,10 @@ impl Source for CpuProfiler {
 /// thread that calls [`on_thread_start`](Source::on_thread_start).
 pub struct SchedProfiler {
     sampler: PerfSampler,
+    /// Original config retained for segment metadata emission.
+    config: SchedEventConfig,
+    /// Whether segment metadata has been emitted yet (emit-once).
+    metadata_emitted: bool,
 }
 
 impl SchedProfiler {
@@ -399,7 +469,11 @@ impl SchedProfiler {
                 .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
                 .include_kernel(config.include_kernel),
         )?;
-        Ok(Self { sampler })
+        Ok(Self {
+            sampler,
+            config,
+            metadata_emitted: false,
+        })
     }
 
     pub(crate) fn track_current_thread(&mut self) -> io::Result<()> {
@@ -448,6 +522,21 @@ impl Source for SchedProfiler {
 
     fn name(&self) -> &'static str {
         "sched"
+    }
+
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        if self.metadata_emitted {
+            return;
+        }
+        self.metadata_emitted = true;
+        out.push(("sched.profile.enabled".to_string(), "true".to_string()));
+        // Always report the effective sample interval. The default is 1
+        // (every context switch), matching the Period(1) used in construction.
+        let effective_interval = self.config.sampling_interval.unwrap_or(1);
+        out.push((
+            "sched.profile.sample_interval".to_string(),
+            effective_interval.to_string(),
+        ));
     }
 }
 
@@ -507,5 +596,141 @@ mod cpu_sample_round_trip_tests {
         let (_timestamp_ns, values) = round_trip(None);
         // An absent `cpu` decodes as `FieldValue::None`.
         assert_eq!(*values.last().unwrap(), FieldValue::None);
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use dial9_core::source::Source;
+
+    /// CpuProfiler::segment_metadata must report the effective backend
+    /// ("perf" or "ctimer"), never "auto", even when CpuBackend::Auto was
+    /// configured. This test runs on Linux where `start` resolves Auto.
+    #[test]
+    fn cpu_profiler_metadata_reports_effective_backend_not_auto() {
+        // CpuProfiler::start may fail in CI without perf access and without
+        // ctimer (rare). If it succeeds, the metadata must not say "auto".
+        let config = CpuProfilingConfig::default(); // backend = Auto
+        let Ok(mut profiler) = CpuProfiler::start(config) else {
+            // Can't start the profiler (e.g. kernel restrictions) — skip test.
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+
+        let backend = meta
+            .iter()
+            .find(|(k, _)| k == "cpu.profile.backend")
+            .expect("metadata must contain cpu.profile.backend");
+        assert!(
+            backend.1 == "perf" || backend.1 == "ctimer",
+            "effective backend must be 'perf' or 'ctimer', got '{}'",
+            backend.1
+        );
+        assert_ne!(
+            backend.1, "auto",
+            "metadata must never report 'auto' as the backend"
+        );
+
+        // Verify frequency is reported
+        let freq = meta
+            .iter()
+            .find(|(k, _)| k == "cpu.profile.frequency_hz")
+            .expect("metadata must contain cpu.profile.frequency_hz");
+        assert_eq!(freq.1, "99"); // default frequency
+
+        // Verify emit-once semantics
+        let mut meta2 = Vec::new();
+        profiler.segment_metadata(&mut meta2);
+        assert!(meta2.is_empty(), "metadata should not re-emit");
+    }
+
+    /// SchedProfiler::segment_metadata must always report the effective
+    /// sample_interval (default 1), even when None is configured.
+    #[test]
+    fn sched_profiler_metadata_reports_default_interval() {
+        // SchedProfiler::new requires perf_event_open. If it fails, skip.
+        let config = SchedEventConfig::default(); // sampling_interval = None
+        let Ok(mut profiler) = SchedProfiler::new(config) else {
+            eprintln!("skipping: SchedProfiler::new failed (likely no perf access)");
+            return;
+        };
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+
+        let interval = meta
+            .iter()
+            .find(|(k, _)| k == "sched.profile.sample_interval")
+            .expect("metadata must contain sched.profile.sample_interval");
+        assert_eq!(
+            interval.1, "1",
+            "effective default interval must be 1, got '{}'",
+            interval.1
+        );
+
+        // Verify emit-once semantics
+        let mut meta2 = Vec::new();
+        profiler.segment_metadata(&mut meta2);
+        assert!(meta2.is_empty(), "metadata should not re-emit");
+    }
+
+    /// SchedProfiler reports the user-configured interval when explicitly set.
+    #[test]
+    fn sched_profiler_metadata_reports_explicit_interval() {
+        let config = SchedEventConfig::default().sampling_interval(5);
+        let Ok(mut profiler) = SchedProfiler::new(config) else {
+            eprintln!("skipping: SchedProfiler::new failed (likely no perf access)");
+            return;
+        };
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+
+        let interval = meta
+            .iter()
+            .find(|(k, _)| k == "sched.profile.sample_interval")
+            .expect("metadata must contain sched.profile.sample_interval");
+        assert_eq!(
+            interval.1, "5",
+            "explicit interval must be reported, got '{}'",
+            interval.1
+        );
+    }
+
+    /// When the ctimer backend is active, the effective event source must always
+    /// be reported as `sw_cpu_clock`, regardless of the originally requested
+    /// EventSource. ctimer uses CLOCK_THREAD_CPUTIME_ID which is a CPU clock.
+    #[test]
+    fn ctimer_always_reports_cpu_clock_event_source() {
+        // Use the explicit Ctimer backend with a non-default event source to
+        // verify the override works.
+        let config =
+            CpuProfilingConfig::with_ctimer_backend().event_source(EventSource::HwCpuCycles); // would be "hw_cpu_cycles" if not overridden
+        let Ok(mut profiler) = CpuProfiler::start(config) else {
+            eprintln!("skipping: CpuProfiler::start(Ctimer) failed");
+            return;
+        };
+        let mut meta = Vec::new();
+        profiler.segment_metadata(&mut meta);
+
+        let backend = meta
+            .iter()
+            .find(|(k, _)| k == "cpu.profile.backend")
+            .expect("metadata must contain cpu.profile.backend");
+        assert_eq!(
+            backend.1, "ctimer",
+            "explicit ctimer backend must report 'ctimer'"
+        );
+
+        let event_source = meta
+            .iter()
+            .find(|(k, _)| k == "cpu.profile.event_source")
+            .expect("metadata must contain cpu.profile.event_source");
+        assert_eq!(
+            event_source.1, "sw_cpu_clock",
+            "ctimer backend must always report 'sw_cpu_clock' as event source, got '{}'",
+            event_source.1
+        );
     }
 }

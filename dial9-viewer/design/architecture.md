@@ -31,7 +31,7 @@ x=0          x=LABEL_W                     x=W-sb    x=W
 
 Worker lanes are a slight exception: they use a DOM flex layout (`lane-label` div of width `LABEL_W`, then a `lane-content` div hosting the canvas) rather than a single canvas with an internal offset. The end result — time axis starts at x=LABEL_W — is identical; new panels should prefer the `timePanelLayout` pattern.
 
-Regression history: the span panel was once built with `padding-left: 200px` instead of `100px`, shifting its time axis ~100px right of every other panel. `ui/test_panel_layout.js` now guards the invariant with unit tests.
+Regression history: the span panel was once built with `padding-left: 200px` instead of `100px`, shifting its time axis ~100px right of every other panel. `ui/tests/core/panel_layout.test.ts` now guards the invariant with unit tests.
 
 ## Agent skills (steering)
 
