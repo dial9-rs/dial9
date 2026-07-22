@@ -56,11 +56,14 @@ pub trait Source: Any + Send {
     /// Diagnostic name for this source (e.g. `"cpu_profile"`, `"sched"`).
     fn name(&self) -> &'static str;
 
-    /// Called when a worker thread starts.
+    /// Called when a thread joins the recorder: a Tokio worker's first poll, or
+    /// an explicit [`Dial9Handle::track_current_thread`].
     ///
     /// Per-thread sources (e.g. `SchedProfiler`) use this to begin tracking
     /// the current thread. Returns an error if setup fails.
-    fn on_worker_thread_start(&mut self) -> std::io::Result<()> {
+    ///
+    /// [`Dial9Handle::track_current_thread`]: crate::handle::Dial9Handle::track_current_thread
+    fn on_thread_start(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 

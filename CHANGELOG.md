@@ -99,6 +99,7 @@ they enable it.
 - `#[dial9::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `#[dial9::main(graceful_shutdown = Duration::from_secs(5))]` (default 1s) or skip it with `#[dial9::main(disable_graceful_shutdown)]`. Without the macro, drive it yourself: drop the runtime, then `Recorder::graceful_shutdown(timeout)` ([#479](https://github.com/dial9-rs/dial9/issues/479))
 - `dial9::AttachedRuntime`, the `(Recorder, tokio::runtime::Runtime)` pair `attach_runtime` hands back. A `#[dial9::main]` config is any zero-argument function returning `std::io::Result<AttachedRuntime>`, so it can be a single expression; the macro panics on `Err` ([#356](https://github.com/dial9-rs/dial9/issues/356))
 - `dial9::recorder_from_env_with(|t| ..)` is `recorder_from_env` plus control over the Tokio runtime it builds, so an env-configured service can still set worker counts and thread names. Both return `std::io::Result<AttachedRuntime>`
+- `Dial9Handle::track_current_thread()` starts per-thread profiling of the calling thread and returns a guard that stops it on drop. Sources that sample per thread, such as the scheduler-event profiler, only see threads that opt in; Tokio workers do it themselves, so this is what makes them usable from a plain `std::thread` or a non-Tokio program
 
 ### Changed
 
@@ -107,6 +108,7 @@ they enable it.
 - **Breaking:** `Recorder::graceful_shutdown` returns `()` instead of an always-`Ok` `io::Result<()>`. Drain failures are logged, as they already were
 - **Breaking:** `Source` gains an `Any` supertrait, so a source must be `'static` (boxed sources already were). This lets a layer recover its own concrete source from the recorder, which is how a second `attach_runtime` finds the runtime registry the first one installed
 - **Breaking:** `RecorderBuilder::build()` starts recording; `build_and_start()` is removed and `.paused()` opts out
+- **Breaking:** `Source::on_worker_thread_start` is renamed to `Source::on_thread_start`. It fires whenever a thread joins the recorder, which is no longer only a Tokio worker's first poll
 - **Breaking:** `boot_id` is no longer an `S3Config` builder field. The runtime injects the on-disk namespace `boot_id` into the S3 config at build time, so a local trace segment and its S3 key share one identity. An `S3Config` built outside the managed `recorder_from_env` path falls back to a fresh `{4-alpha}-{pid}` ([#566](https://github.com/dial9-rs/dial9/pull/566))
 
 ### Fixed

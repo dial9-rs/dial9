@@ -11,6 +11,8 @@ use crate::telemetry::task_metadata::TaskId;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use metrique_timesource::{Instant, time_source};
 use std::cell::Cell;
+#[cfg(feature = "cpu-profiling")]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
@@ -44,9 +46,16 @@ thread_local! {
     /// The global worker ID this thread last registered into its runtime's
     /// mapping.
     static WORKER_REGISTERED: Cell<Option<u64>> = const { Cell::new(None) };
-    /// Whether we've registered this thread's OS tid for CPU profiling.
+    /// Keeps this thread enrolled with the recorder's per-thread sources.
+    /// Dropped by the runtime's `on_thread_stop` hook, or by the TLS destructor
+    /// for threads that get none (a `current_thread` runtime's driver).
     #[cfg(feature = "cpu-profiling")]
-    static TID_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    static THREAD_TRACKING: RefCell<Option<dial9_core::thread::ThreadTrackingGuard>> =
+        const { RefCell::new(None) };
+    /// Whether this thread has tried to enroll. Set even when enrollment fails,
+    /// so a thread the sources refuse is not retried on every poll.
+    #[cfg(feature = "cpu-profiling")]
+    static TRACKING_ATTEMPTED: Cell<bool> = const { Cell::new(false) };
     /// Monotonic timestamp captured in `on_before_task_poll`, cleared in
     /// `on_after_task_poll`. Allows code running inside a poll (e.g.
     /// `TaskDumped`, memory profiler) to reuse the timestamp without an extra
@@ -292,7 +301,7 @@ impl RuntimeContext {
 
         register_worker_if_needed(self, local_index, global_id);
         #[cfg(feature = "cpu-profiling")]
-        start_sched_sampling_if_needed(shared);
+        start_sched_sampling_if_needed(&self.session_handle);
 
         Some((WorkerId::from(global_id as usize), local_index))
     }
@@ -318,27 +327,27 @@ fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id
     });
 }
 
-/// Start sched event sampling for this worker thread (once per thread).
+/// Enroll this worker thread with the per-thread sources (once per thread).
+///
+/// Deferred from `on_thread_start` so that only worker threads, not blocking
+/// pool threads, open perf fds.
 #[cfg(feature = "cpu-profiling")]
-fn start_sched_sampling_if_needed(shared: &SharedState) {
-    TID_REGISTERED.with(|cell| {
-        if !cell.get() {
-            // Start sched event sampling for this worker thread. Deferred from
-            // on_thread_start so that only worker threads (not blocking pool
-            // threads) open perf fds.
-            shared.with_sources_mut(|sources| {
-                for source in sources.iter_mut() {
-                    if let Err(e) = source.on_worker_thread_start() {
-                        tracing::warn!(
-                            "failed to start source {} for worker thread: {e}",
-                            source.name()
-                        );
-                    }
-                }
-            });
-            cell.set(true);
-        }
-    });
+fn start_sched_sampling_if_needed(handle: &Dial9Handle) {
+    if TRACKING_ATTEMPTED.with(|attempted| attempted.replace(true)) {
+        return;
+    }
+    match handle.track_current_thread() {
+        Ok(guard) => THREAD_TRACKING.with(|cell| *cell.borrow_mut() = Some(guard)),
+        Err(e) => tracing::warn!("failed to profile worker thread: {e}"),
+    }
+}
+
+/// Stop tracking this thread. Called from the runtime's `on_thread_stop` hook.
+#[cfg(feature = "cpu-profiling")]
+pub(crate) fn stop_sched_sampling() {
+    // `try_with` only fails once TLS teardown has started, and teardown drops
+    // the guard itself.
+    let _ = THREAD_TRACKING.try_with(|cell| cell.borrow_mut().take());
 }
 
 /// Get the current thread's global worker ID.

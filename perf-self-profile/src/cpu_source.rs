@@ -244,10 +244,11 @@ impl CpuProfilingConfig {
     }
 }
 
-/// Configuration for per-worker sched event capture (context switches).
+/// Configuration for per-thread sched event capture (context switches).
 ///
-/// Uses `perf_event_open` with `SwContextSwitches` in per-thread mode,
-/// so each worker thread gets its own perf fd on first poll/park.
+/// Uses `perf_event_open` with `SwContextSwitches` in per-thread mode, so each
+/// tracked thread gets its own perf fd: Tokio workers on their first poll/park,
+/// other threads when they call `Dial9Handle::track_current_thread`.
 #[derive(Debug, Clone, Default)]
 pub struct SchedEventConfig {
     sampling_interval: Option<u64>,
@@ -361,6 +362,16 @@ impl Source for CpuProfiler {
         });
     }
 
+    /// Perf samples the whole process, so this only matters for the ctimer
+    /// fallback, which arms a timer per thread.
+    fn on_thread_start(&mut self) -> io::Result<()> {
+        crate::register_current_thread()
+    }
+
+    fn on_thread_stop(&mut self) {
+        crate::unregister_current_thread();
+    }
+
     fn name(&self) -> &'static str {
         Self::SOURCE_NAME
     }
@@ -374,7 +385,7 @@ impl Source for CpuProfiler {
 // ── SchedProfiler ────────────────────────────────────────────────────────────
 
 /// Per-thread sched event profiler. Captures context switches for each
-/// worker thread that calls [`on_worker_thread_start`](Source::on_worker_thread_start).
+/// thread that calls [`on_thread_start`](Source::on_thread_start).
 pub struct SchedProfiler {
     sampler: PerfSampler,
 }
@@ -427,7 +438,7 @@ impl Source for SchedProfiler {
         });
     }
 
-    fn on_worker_thread_start(&mut self) -> io::Result<()> {
+    fn on_thread_start(&mut self) -> io::Result<()> {
         self.track_current_thread()
     }
 

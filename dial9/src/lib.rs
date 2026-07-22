@@ -19,6 +19,7 @@ pub mod core {
     pub use dial9_core::handle::{self, clear_tl_handle, current_handle, set_tl_handle};
     pub use dial9_core::recorder;
     pub use dial9_core::source::{self, FlushContext, Source};
+    pub use dial9_core::thread::{ThreadTrackingGuard, current_tid};
 
     // Background pipeline (segment worker, on-demand dumps).
     #[cfg(feature = "pipeline")]

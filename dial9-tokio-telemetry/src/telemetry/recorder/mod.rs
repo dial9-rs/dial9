@@ -186,8 +186,6 @@ fn register_hooks(
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
     let handle_for_tl = handle.clone();
-    #[cfg(feature = "cpu-profiling")]
-    let s_stop = shared.clone();
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
         // Install this thread's Dial9Handle so user code can call
@@ -220,11 +218,10 @@ fn register_hooks(
 
         #[cfg(feature = "cpu-profiling")]
         {
-            s_stop.with_sources_mut(|sources| {
-                for source in sources.iter_mut() {
-                    source.on_thread_stop();
-                }
-            });
+            runtime_context::stop_sched_sampling();
+            // Blocking pool threads register with the ctimer fallback in
+            // `on_thread_start` but never enroll with the sources, so they still
+            // need an explicit unregister. Idempotent for worker threads.
             dial9_perf_self_profile::unregister_current_thread();
         }
     });
