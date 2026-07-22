@@ -16,10 +16,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use dial9::Dial9TokioHandle;
-use dial9::RecorderBuilderTokioExt;
 use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
-use dial9::{MemoryBuffer, recorder};
+use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder};
 
 /// Stand-in delivery processor. Inspects each segment, forwards unchanged.
 /// Replace with a real uploader in production.
@@ -45,10 +43,9 @@ impl SegmentProcessor for PrintProcessor {
 }
 
 async fn workload() {
-    let handle = Dial9TokioHandle::current();
     let tasks: Vec<_> = (0..32)
         .map(|id| {
-            handle.spawn(async move {
+            dial9::spawn(async move {
                 for _ in 0..50 {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     let mut acc: u64 = 0;
@@ -68,20 +65,26 @@ async fn workload() {
 fn main() -> std::io::Result<()> {
     let writer = MemoryBuffer::new(16 * 1024 * 1024)?; // 16 MB
 
-    let traced = recorder(writer)
-        .with_tokio(|t| {
-            t.worker_threads(4);
-        })
-        .with_task_tracking(true)
+    let (recorder, rt) = recorder(writer)
         .with_custom_pipeline(|p| p.pipe(PrintProcessor))
-        .build()?;
+        .build()
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(4);
+            },
+        )
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    dial9::block_on(&rt, async {
         println!("Running (no files written to disk)…");
         workload().await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(5));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(5));
     println!("Done.");
     Ok(())
 }

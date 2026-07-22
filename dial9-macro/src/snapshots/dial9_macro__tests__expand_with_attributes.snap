@@ -1,19 +1,18 @@
 ---
 source: dial9-macro/src/lib.rs
-assertion_line: 304
 expression: output
 ---
 #[allow(unused)]
 fn main() {
-    let __dial9_rt = ::dial9::TracedRuntime::new(my_config());
-    let __dial9_out = __dial9_rt
-        .block_on(async move {
+    let (__dial9_recorder, __dial9_rt) = my_config()
+        .expect("dial9::main: config failed");
+    let __dial9_out = ::dial9::block_on(
+        &__dial9_rt,
+        async move {
             let _ = 42;
-        });
-    if let Some(__dial9_timeout) = __dial9_rt.graceful_shutdown_timeout() {
-        __dial9_rt.graceful_shutdown(__dial9_timeout);
-    } else {
-        drop(__dial9_rt);
-    }
+        },
+    );
+    drop(__dial9_rt);
+    __dial9_recorder.graceful_shutdown(::std::time::Duration::from_secs(1));
     __dial9_out
 }

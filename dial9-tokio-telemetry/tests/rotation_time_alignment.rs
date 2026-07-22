@@ -2,7 +2,9 @@
 //! (or minimally overlapping) time ranges.
 
 use common::decode_file;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
+};
 use metrique::local::{LocalFormat, OutputStyle};
 use serde::Deserialize;
 use std::time::Duration;
@@ -127,18 +129,23 @@ fn rotated_segments_have_bounded_time_overlap() {
 
     // Unused current-thread primary; the workload runs on the "main" runtime
     // attached below.
-    let traced = recorder(writer)
-        .metrics_sink(metrics_sink)
-        .with_tokio(|t| {
+    let recorder = recorder(writer).metrics_sink(metrics_sink).build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
+            t.enable_all();
+            t.enable_all();
         })
-        .build()
+        .expect("build tokio runtime");
+
+    let (recorder, runtime) = recorder
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder().runtime_name("main").build(),
+            |t| {
+                t.worker_threads(num_workers);
+            },
+        )
         .unwrap();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
-
-    let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
 
     runtime.block_on(async {
         let start = tokio::time::Instant::now();
@@ -165,7 +172,8 @@ fn rotated_segments_have_bounded_time_overlap() {
     });
 
     drop(runtime);
-    traced.graceful_shutdown(Duration::from_secs(5));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
     let flush_metrics = render_queue.entries();
     eprintln!("flush-thread metrics ({} entries):", flush_metrics.len());

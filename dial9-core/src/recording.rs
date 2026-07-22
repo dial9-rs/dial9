@@ -167,6 +167,17 @@ impl Recorder {
         if let Some(t) = self.flush_thread.take() {
             let _ = t.join();
         }
+
+        // Nothing drains sources once the flush thread is gone, so release them
+        // and whatever they own.
+        if let Some(shared) = self.handle.shared() {
+            shared.clear_sources();
+        }
+
+        // Runtime threads drop their handle in a thread-stop hook, but the
+        // thread that attached the runtime gets no such hook and would hold a
+        // handle to a stopped recorder for the rest of its life.
+        crate::handle::clear_tl_handle();
     }
 
     /// Flush remaining events, seal the final segment, and (with `pipeline`)
@@ -175,7 +186,10 @@ impl Recorder {
     /// Call this after any runtime that owns worker threads has been dropped, so
     /// their thread-local buffers have already been flushed. Consumes the
     /// recorder so `Drop` becomes a no-op.
-    pub fn graceful_shutdown(mut self, timeout: Duration) -> std::io::Result<()> {
+    ///
+    /// Failures during the drain are logged rather than returned; there is
+    /// nothing a caller can usefully do about them at this point.
+    pub fn graceful_shutdown(mut self, timeout: Duration) {
         // `timeout` only bounds the worker drain, which exists under `pipeline`.
         #[cfg(not(feature = "pipeline"))]
         let _ = timeout;
@@ -195,8 +209,6 @@ impl Recorder {
                 tracing::error!(target: "dial9", panic = ?e, "worker thread panicked during shutdown");
             }
         }
-
-        Ok(())
     }
 }
 

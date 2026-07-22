@@ -15,7 +15,7 @@
 use dial9::analysis::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 use dial9::cpu::CpuProfilingConfig;
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
+use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
@@ -51,17 +51,21 @@ fn main() {
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
-    let traced = recorder(writer)
+    let (recorder, rt) = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_tokio(|t| {
-            t.worker_threads(4);
-        })
-        .with_task_tracking(true)
         .build()
-        .unwrap();
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(4);
+            },
+        )
+        .expect("build tokio runtime");
 
     eprintln!("Running workload with CPU profiling at 99 Hz...");
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let tasks: Vec<_> = (0..200).map(|i| tokio::spawn(cpu_heavy_task(i))).collect();
         for task in tasks {
             let _ = task.await;
@@ -74,7 +78,8 @@ fn main() {
     // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
     // (worker exits without draining), so we must use graceful_shutdown here.
     eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
-    traced.graceful_shutdown(Duration::from_secs(30));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(30));
 
     // Read back and report
     eprintln!("\n=== Reading trace from {segment_path} ===");

@@ -1,5 +1,7 @@
 //! Source trait for abstracting flush-thread data sources.
 
+use std::any::Any;
+
 use crate::collector::CentralCollector;
 use crate::encoder::{self, Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
@@ -47,18 +49,21 @@ impl<'a> FlushContext<'a> {
 ///
 /// [`flush`]: Source::flush
 /// [`SharedState::push_source`]: crate::shared_state::SharedState::push_source
-pub trait Source: Send {
+pub trait Source: Any + Send {
     /// Drain pending data into the trace. Called once per flush cycle.
     fn flush(&mut self, ctx: &FlushContext<'_>);
 
     /// Diagnostic name for this source (e.g. `"cpu_profile"`, `"sched"`).
     fn name(&self) -> &'static str;
 
-    /// Called when a worker thread starts.
+    /// Called when a thread joins the recorder: a Tokio worker's first poll, or
+    /// an explicit [`Dial9Handle::track_current_thread`].
     ///
     /// Per-thread sources (e.g. `SchedProfiler`) use this to begin tracking
     /// the current thread. Returns an error if setup fails.
-    fn on_worker_thread_start(&mut self) -> std::io::Result<()> {
+    ///
+    /// [`Dial9Handle::track_current_thread`]: crate::handle::Dial9Handle::track_current_thread
+    fn on_thread_start(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 
@@ -74,6 +79,16 @@ pub trait Source: Send {
     /// cycles allocate nothing. The default reports a source with no metadata.
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
         let _ = out;
+    }
+
+    /// A segment-processing stage this source's data needs, folded into the
+    /// recorder's default pipeline at build. Called once, at build.
+    ///
+    /// A custom pipeline replaces the default outright, so it does not pick
+    /// these up, you must chain the stage yourself in those cases.
+    #[cfg(feature = "pipeline")]
+    fn segment_processor(&mut self) -> Option<Box<dyn crate::pipeline::SegmentProcessor>> {
+        None
     }
 }
 

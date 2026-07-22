@@ -1,6 +1,7 @@
 use crate::encoder::{Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
+use crate::thread::ThreadTrackingGuard;
 use std::cell::RefCell;
 
 crate::primitives::thread_local! {
@@ -136,6 +137,66 @@ impl Dial9Handle {
     pub fn disable(&self) {
         if let Some(inner) = &self.inner {
             inner.shared.disable();
+        }
+    }
+
+    /// Profile the calling thread.
+    ///
+    /// Per-thread sources, such as the scheduler-event profiler, only sample
+    /// threads that opt in. Tokio workers opt in on their own, call this from
+    /// any other thread you want profiled. Profiling lasts until the returned
+    /// guard drops.
+    ///
+    /// Returns an error if a source could not start on this thread. No-op on a
+    /// disabled handle.
+    ///
+    /// ```no_run
+    /// use dial9_core::buffer::MemoryBuffer;
+    /// use dial9_core::recorder::recorder;
+    ///
+    /// let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
+    /// let handle = rec.handle().clone();
+    ///
+    /// std::thread::spawn(move || -> std::io::Result<()> {
+    ///     let _tracking = handle.track_current_thread()?;
+    ///     // work here is sampled by the recorder's per-thread sources
+    ///     Ok(())
+    /// });
+    /// # Ok::<_, std::io::Error>(())
+    /// ```
+    pub fn track_current_thread(&self) -> std::io::Result<ThreadTrackingGuard> {
+        let Some(inner) = &self.inner else {
+            return Ok(ThreadTrackingGuard::new(self.clone()));
+        };
+
+        let started = inner.shared.with_sources_mut(|sources| {
+            let mut done = 0;
+            let mut failure = None;
+            for source in sources.iter_mut() {
+                match source.on_thread_start() {
+                    Ok(()) => done += 1,
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            match failure {
+                // Leave the thread untracked rather than half-tracked.
+                Some(e) => {
+                    for source in &mut sources[..done] {
+                        source.on_thread_stop();
+                    }
+                    Err(e)
+                }
+                None => Ok(()),
+            }
+        });
+
+        match started {
+            Some(Ok(())) => Ok(ThreadTrackingGuard::new(self.clone())),
+            Some(Err(e)) => Err(e),
+            None => Err(std::io::Error::other("dial9: sources lock poisoned")),
         }
     }
 

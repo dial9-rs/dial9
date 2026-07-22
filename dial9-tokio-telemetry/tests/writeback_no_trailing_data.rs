@@ -5,9 +5,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, RecorderTokioExt, recorder};
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::time::Duration;
@@ -23,16 +21,18 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         .build()
         .unwrap();
 
-    let traced = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .worker_poll_interval(std::time::Duration::from_millis(50))
-        .with_tokio(|t| {
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
             t.worker_threads(2);
         })
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         // Spawn enough work to fill thread-local buffers. The bug requires
         // unflushed events in thread-local buffers at graceful_shutdown time,
         // which then get written through a stale fd in Drop.
@@ -51,7 +51,8 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         }
     });
 
-    traced.graceful_shutdown(Duration::from_secs(10));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(10));
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {

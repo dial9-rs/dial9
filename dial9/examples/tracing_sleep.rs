@@ -1,8 +1,7 @@
 //! Demonstrates tracing spans across async sleep boundaries.
 //! Each span is polled multiple times (producing multiple segments in the viewer).
-use dial9::RecorderBuilderTokioExt;
 use dial9::tracing_layer::Dial9TracingLayer;
-use dial9::{DiskBuffer, recorder};
+use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
@@ -21,23 +20,31 @@ async fn inner_work(id: u32) {
 
 fn main() {
     let writer = DiskBuffer::single_file("tracing_sleep_trace.bin").unwrap();
-    let traced = recorder(writer)
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
+    let (recorder, rt) = recorder(writer)
         .build()
-        .unwrap();
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let tasks: Vec<_> = (0..10).map(|i| tokio::spawn(handle_request(i))).collect();
         for t in tasks {
             let _ = t.await;
         }
     });
+
+    // Drop the runtime before draining, so its workers flush their buffers.
+    drop(rt);
+    recorder.graceful_shutdown(std::time::Duration::from_secs(5));
 
     println!("Trace written to tracing_sleep_trace.bin");
 }

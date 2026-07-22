@@ -1,7 +1,7 @@
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
 use std::time::Duration;
 
-/// After TracedRuntime is dropped, all trace files should be sealed (.bin),
+/// After the recorder is dropped, all trace files should be sealed (.bin),
 /// with no .active files remaining. This is the contract the worker depends on.
 #[test]
 fn guard_drop_produces_sealed_bin_files() {
@@ -13,21 +13,22 @@ fn guard_drop_produces_sealed_bin_files() {
         .max_total_size(1024 * 1024)
         .build()
         .unwrap();
-    let traced = recorder(writer)
-        .with_tokio(|t| {
+    let recorder = recorder(writer).build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         for _ in 0..100 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     });
 
-    drop(traced);
+    drop(rt);
+    drop(recorder);
 
     let entries: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
@@ -46,7 +47,7 @@ fn guard_drop_produces_sealed_bin_files() {
     assert!(!bin_files.is_empty(), "should have at least one .bin file");
     assert!(
         active_files.is_empty(),
-        "no .active files should remain after guard drop, found: {:?}",
+        "no .active files should remain after the recorder is dropped, found: {:?}",
         active_files.iter().map(|e| e.path()).collect::<Vec<_>>()
     );
 }

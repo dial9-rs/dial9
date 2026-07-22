@@ -12,24 +12,65 @@ Tokio instrumentation, the perf sources, and the viewer CLI, and owning `#[dial9
 `dial9::record_event`. This is a breaking release: you depend on `dial9` instead of
 `dial9-tokio-telemetry`, and the config, writer, and handle APIs all change.
 
-`Dial9Config` is gone. You build a writer, wrap it in `dial9::recorder(writer)`, and chain
-sources and a runtime onto it:
+`Dial9Config` is gone. You build a writer, wrap it in `dial9::recorder(writer)`, chain sources,
+and build a `Recorder`. Tokio is one more source on it.
 
 ```rust
 let writer = DiskBuffer::builder().base_path("/tmp/dial9-traces").build()?;
-dial9::recorder(writer)
-    .with_cpu_profiling(CpuProfilingConfig::default())
-    .with_tokio(|t| { t.worker_threads(4); })
-    .with_task_tracking(true)
 ```
 
-`recorder(writer)` by itself records with no runtime at all (`.build()` gives a `Recorder`, and any
-`Source` plugs in); `.with_tokio(..)` adds Tokio instrumentation and yields a `TracedRuntime`.
-Sources chain on either side of `.with_tokio`, per-source knobs (`.with_cpu_profiling`,
-`.with_memory_profiling`, …) live on the builder, and `dial9::recorder_from_env()` builds a
-production recorder from the unchanged `DIAL9_*` vars. `dial9::recorder_or_disabled(writer, ..)`
-and `TracedRuntimeBuilder::disabled()` cover the boot-anyway and telemetry-off cases. The
-low-level `TracedRuntime::builder()` and the pipeline / trace-path type-state markers are gone.
+Under `#[dial9::main]`, that is the whole setup: `attach_tokio_runtime` builds the instrumented runtime and
+hands back both, so `config` stays a single expression.
+
+```rust
+#[dial9::main(config = || dial9::recorder(writer)
+    .with_cpu_profiling(CpuProfilingConfig::default())
+    .build()
+    .attach_tokio_runtime(|t| { t.worker_threads(4); }))]
+async fn main() { /* ... */ }
+```
+
+Each `attach_tokio_runtime` attaches another runtime, and returns the recorder so the next call can follow.
+A single and a multi-runtime setup share the same code:
+
+```rust
+let recorder = dial9::recorder(writer)
+    .with_cpu_profiling(CpuProfilingConfig::default())
+    .build();
+
+let (recorder, api_rt) = recorder.attach_tokio_runtime_with(
+    TokioAttachOptions::builder().runtime_name("api").build(),
+    |t| { t.worker_threads(4); },
+)?;
+let (recorder, io_rt) = recorder.attach_tokio_runtime_with(
+    TokioAttachOptions::builder().runtime_name("io").build(),
+    |t| { t.worker_threads(2); },
+)?;
+
+// Drop the runtimes before draining, so their workers flush.
+drop(api_rt);
+drop(io_rt);
+recorder.graceful_shutdown(Duration::from_secs(5));
+```
+
+Without Tokio, a `Recorder` records on its own and any `Source` plugs in:
+
+```rust
+let recorder = dial9::recorder(writer)
+    .with_process_resource_usage(ProcessResourceUsageConfig::default())
+    .build();
+recorder.handle().record_event(MyEvent { .. });
+```
+
+`build()` starts recording. Chain `.paused()` before it to build a quiet recorder and
+start it later with `Recorder::enable()`; `build_and_start()` is gone, since `build()` is
+what it did.
+
+Per-source knobs (`.with_cpu_profiling`, `.with_memory_profiling`, …) and the pipeline overrides
+(`.with_custom_pipeline`, `.with_s3_uploader`) live on the recorder builder. 
+Per-runtime settings (runtime name, task tracking, task dumps, custom hooks) live in
+`TokioAttachOptions`. 
+`dial9::recorder_from_env()` builds a recorder and its runtime from the unchanged `DIAL9_*` vars. `dial9::recorder_or_disabled(writer)` starts a builder that downgrades to a disabled recorder when the writer cannot be created, so sources and a pipeline still chain onto it and a bad trace path costs telemetry rather than the process; `dial9::recorder_disabled()` covers telemetry-off. `TracedRuntime`, the low-level `TracedRuntime::builder()`, and the pipeline / trace-path type-state markers are gone.
 
 The refactor also renamed the trace writers to buffers (`RotatingWriter` → `DiskBuffer`, with
 `DiskBuffer` / `MemoryBuffer` the public storage backends and a fully in-memory pipeline that
@@ -50,12 +91,24 @@ they enable it.
 
 ### Added
 
+- Tokio as a source: `recorder.attach_tokio_runtime(|t| ..)` builds a Tokio runtime instrumented against a plain `Recorder` and returns both, with `attach_tokio_runtime_with(opts, |t| ..)` for per-runtime settings. It hands the recorder back, so calling it again attaches another runtime and a single and a multi-runtime setup are the same code. `dial9::spawn_in(&runtime, future)` spawns an instrumented task onto a specific runtime from any thread ([#356](https://github.com/dial9-rs/dial9/issues/356))
+- `dial9::block_on(&runtime, future)` runs a future to completion on `runtime` with the future itself instrumented. Plain `Runtime::block_on` polls outside any task, so the root future's polls and wakes are not recorded
+- `RecorderPipelineExt` on the recorder builder for departing from the default segment pipeline: `.with_custom_pipeline(..)`, `.with_s3_uploader(cfg)` / `.with_s3_uploader_client(cfg, client)`. The default pipeline itself needs no opt-in, and the S3 uploader may now be set before or after the sources whose data it symbolizes
+- `Source::segment_processor` lets a source contribute a stage to the default pipeline. The CPU profiler uses it to pull in symbolization, so a trace with stack samples is symbolized without the caller wiring anything up ([#356](https://github.com/dial9-rs/dial9/issues/356))
 - Explicit CPU profiling backend selection via `CpuProfilingConfig::with_perf_backend()` and `CpuProfilingConfig::with_ctimer_backend()` constructors. The default (Auto: try perf, fall back to ctimer) is unchanged ([#579](https://github.com/dial9-rs/dial9/issues/579), [#660](https://github.com/dial9-rs/dial9/pull/660))
-- `#[dial9::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `.graceful_shutdown(Duration)` on the traced-runtime builder (default 1s) or skip it with `.disable_graceful_shutdown()`. Without the macro, drive it yourself via `Recorder::graceful_shutdown(timeout)` ([#479](https://github.com/dial9-rs/dial9/issues/479))
+- `#[dial9::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `#[dial9::main(graceful_shutdown = Duration::from_secs(5))]` (default 1s) or skip it with `#[dial9::main(disable_graceful_shutdown)]`. Without the macro, drive it yourself: drop the runtime, then `Recorder::graceful_shutdown(timeout)` ([#479](https://github.com/dial9-rs/dial9/issues/479))
+- `dial9::AttachedRuntime`, the `(Recorder, tokio::runtime::Runtime)` pair `attach_tokio_runtime` hands back. A `#[dial9::main]` config is any zero-argument function returning `std::io::Result<AttachedRuntime>`, so it can be a single expression; the macro panics on `Err` ([#356](https://github.com/dial9-rs/dial9/issues/356))
+- `dial9::recorder_from_env_with(|t| ..)` is `recorder_from_env` plus control over the Tokio runtime it builds, so an env-configured service can still set worker counts and thread names. Both return `std::io::Result<AttachedRuntime>`
+- `Dial9Handle::track_current_thread()` starts per-thread profiling of the calling thread and returns a guard that stops it on drop. Sources that sample per thread, such as the scheduler-event profiler, only see threads that opt in; Tokio workers do it themselves, so this is what makes them usable from a plain `std::thread` or a non-Tokio program
 
 ### Changed
 
-- Programs using `#[dial9::main]` now drain the telemetry worker on clean exit (up to the graceful-shutdown deadline, default 1s) instead of exiting immediately. This adds a bounded amount of shutdown latency but ensures the final segment is processed; opt out with `.disable_graceful_shutdown()` ([#479](https://github.com/dial9-rs/dial9/issues/479))
+- Programs using `#[dial9::main]` now drain the telemetry worker on clean exit (up to the graceful-shutdown deadline, default 1s) instead of exiting immediately. This adds a bounded amount of shutdown latency but ensures the final segment is processed; opt out with `#[dial9::main(disable_graceful_shutdown)]` ([#479](https://github.com/dial9-rs/dial9/issues/479))
+- Worker IDs are now reserved when a runtime's workers first poll, rather than at attach time (the caller builds the runtime, so there is nothing to count when hooks are registered). A runtime's `runtime.{name}` → worker-ID mapping therefore appears in segment metadata once that runtime has run work, and the ID blocks follow worker start-up order rather than attach order ([#356](https://github.com/dial9-rs/dial9/issues/356))
+- **Breaking:** `Recorder::graceful_shutdown` returns `()` instead of an always-`Ok` `io::Result<()>`. Drain failures are logged, as they already were
+- **Breaking:** `Source` gains an `Any` supertrait, so a source must be `'static` (boxed sources already were). This lets a layer recover its own concrete source from the recorder, which is how a second `attach_tokio_runtime` finds the runtime registry the first one installed
+- **Breaking:** `RecorderBuilder::build()` starts recording; `build_and_start()` is removed and `.paused()` opts out
+- **Breaking:** `Source::on_worker_thread_start` is renamed to `Source::on_thread_start`. It fires whenever a thread joins the recorder, which is no longer only a Tokio worker's first poll
 - **Breaking:** `boot_id` is no longer an `S3Config` builder field. The runtime injects the on-disk namespace `boot_id` into the S3 config at build time, so a local trace segment and its S3 key share one identity. An `S3Config` built outside the managed `recorder_from_env` path falls back to a fresh `{4-alpha}-{pid}` ([#566](https://github.com/dial9-rs/dial9/pull/566))
 
 ### Fixed

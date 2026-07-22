@@ -3,7 +3,8 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
 use dial9_core::recorder::RecorderSourceExt;
 use dial9_tokio_telemetry::telemetry::{
-    CustomEventsConfig, MemoryBuffer, RecorderBuilderTokioExt, recorder,
+    CustomEventsConfig, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions,
+    recorder,
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
@@ -42,20 +43,22 @@ fn traced_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
             }
         })
-        .with_tokio(|t| {
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
@@ -76,25 +79,34 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
             }
         })
-        .with_tokio(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+            t.enable_all();
+            t.enable_all();
+        })
+        .expect("build tokio runtime");
+
+    let (recorder, runtime) = recorder
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder().runtime_name("main").build(),
+            |t| {
+                t.worker_threads(1);
+            },
+        )
         .unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
-
     drop(runtime);
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);

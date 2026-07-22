@@ -12,6 +12,6 @@ fn main() {
         },
     );
     drop(__dial9_rt);
-    __dial9_recorder.graceful_shutdown(::std::time::Duration::from_secs(1));
+    __dial9_recorder.graceful_shutdown(std::time::Duration::from_secs(7));
     __dial9_out
 }

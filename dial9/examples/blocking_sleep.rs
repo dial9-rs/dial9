@@ -1,5 +1,5 @@
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
+use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {
@@ -13,22 +13,29 @@ async fn blocking_task(id: usize) {
 
 fn main() {
     let writer = DiskBuffer::single_file("blocking_sleep_trace.bin").unwrap();
-    let traced = recorder(writer)
+    let (recorder, rt) = recorder(writer)
         .with_cpu_profiling(Default::default())
         .with_sched_events(Default::default())
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .with_task_tracking(true)
         .build()
-        .unwrap();
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+            |t| {
+                t.worker_threads(2);
+            },
+        )
+        .expect("build tokio runtime");
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let tasks: Vec<_> = (0..4).map(|i| tokio::spawn(blocking_task(i))).collect();
         for t in tasks {
             let _ = t.await;
         }
     });
+
+    drop(rt);
+    recorder.graceful_shutdown(std::time::Duration::from_secs(5));
 
     println!("Trace written to blocking_sleep_trace.bin");
 }

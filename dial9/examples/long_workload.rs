@@ -1,20 +1,25 @@
+use std::io;
 use std::time::Duration;
 
-use dial9::Dial9TokioHandle;
-use dial9::{DiskBuffer, TracedRuntimeBuilder};
+use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-fn my_config() -> TracedRuntimeBuilder {
+fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
         .base_path("long_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
-    dial9::recorder_or_disabled(writer, |t| {
-        t.worker_threads(4);
-    })
-    .with_task_tracking(true)
+    let recorder = dial9::recorder_or_disabled(writer).build();
+    recorder.attach_tokio_runtime_with(
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+        |t| {
+            t.worker_threads(4);
+        },
+    )
 }
 
 async fn cpu_work(iterations: u64) -> u64 {
@@ -26,10 +31,9 @@ async fn cpu_work(iterations: u64) -> u64 {
 }
 
 async fn echo_server(listener: TcpListener) {
-    let handle = Dial9TokioHandle::current();
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
-        handle.spawn(async move {
+        dial9::spawn(async move {
             let mut buf = [0u8; 1024];
             loop {
                 match socket.read(&mut buf).await {
@@ -72,10 +76,9 @@ async fn chatty_client(port: u16, id: usize) {
 }
 
 async fn background_cpu_bursts() {
-    let handle = Dial9TokioHandle::current();
     loop {
         for _ in 0..20 {
-            handle.spawn(async { cpu_work(100_000).await });
+            dial9::spawn(async { cpu_work(100_000).await });
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -98,17 +101,15 @@ async fn main() {
         .unwrap_or(30u64);
 
     println!("Running workload for {}s...", duration_secs);
-
-    let handle = Dial9TokioHandle::current();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    handle.spawn(echo_server(listener));
+    dial9::spawn(echo_server(listener));
     for i in 0..8 {
-        handle.spawn(chatty_client(port, i));
+        dial9::spawn(chatty_client(port, i));
     }
-    handle.spawn(background_cpu_bursts());
-    handle.spawn(periodic_yielder());
+    dial9::spawn(background_cpu_bursts());
+    dial9::spawn(periodic_yielder());
 
     tokio::time::sleep(Duration::from_secs(duration_secs)).await;
     println!("Done. Trace written to long_trace/trace.*.bin");

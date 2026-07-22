@@ -11,9 +11,10 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9::cpu::CpuProfilingConfig;
-use dial9::{DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, TracedRuntimeBuilder};
+use dial9::{AttachedRuntime, DiskBuffer, RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
+use std::io;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 static TRACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-fn macro_test_config() -> TracedRuntimeBuilder {
+fn macro_test_config() -> io::Result<AttachedRuntime> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trace.bin");
     let output = dir.path().join("output");
@@ -38,12 +39,11 @@ fn macro_test_config() -> TracedRuntimeBuilder {
         .build()
         .unwrap();
 
-    dial9::recorder(writer)
+    let recorder = dial9::recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .with_tokio(|_| {})
-        // Generous deadline so the drain finishes symbolizing the segment.
-        .graceful_shutdown(Duration::from_secs(10))
         .with_custom_pipeline(move |p| p.symbolize().gzip().write_back_to(output.clone()))
+        .build();
+    recorder.attach_tokio_runtime(|_| {})
 }
 
 /// Burn CPU for a fixed window so the profiler reliably captures stack samples.
@@ -61,7 +61,7 @@ fn burn_cpu_work() {
     }
 }
 
-#[dial9::main(config = macro_test_config)]
+#[dial9::main(config = macro_test_config, graceful_shutdown = Duration::from_secs(10))]
 async fn run_workload() {
     let mut handles = Vec::new();
     for _ in 0..4 {

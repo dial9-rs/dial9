@@ -101,7 +101,7 @@ pub fn small_mem_writer() -> MemoryBuffer {
 ///
 /// Pair with an [`MemoryBuffer`](dial9_tokio_telemetry::telemetry::MemoryBuffer)
 /// via `.with_custom_pipeline(|p| p.pipe(capture))`, then
-/// `guard.graceful_shutdown(..)` to drain the worker before reading the captured segments.
+/// `recorder.graceful_shutdown(..)` to drain the worker before reading the captured segments.
 pub struct CapturingProcessor {
     segments: Arc<Mutex<Vec<Vec<u8>>>>,
 }

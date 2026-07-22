@@ -26,12 +26,12 @@
 use std::time::Duration;
 
 use dial9::Dial9Handle;
-use dial9::Dial9TokioHandle;
 use dial9::DiskBuffer;
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
 
 #[dial9::main(config = || {
+    use dial9::{RecorderPipelineExt, RecorderTokioExt};
     let _ = std::fs::remove_dir_all(TRACE_DIR);
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let writer = DiskBuffer::builder()
@@ -40,15 +40,19 @@ const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
         .max_file_size(4 * 1024)
         .max_total_size(10 * 1024 * 1024)
         .rotation_period(Duration::from_millis(500))
-        .build();
-    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(2); })
+        .build()
+        .expect("open trace writer");
+    let recorder = dial9::recorder(writer)
         // No debounce here: we want the two concurrent dumps to each register,
         // not fold into one another.
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
+        .build();
+    recorder.attach_tokio_runtime(|t| {
+            t.worker_threads(2);
+        })
 })]
 async fn main() {
-    let handle = Dial9TokioHandle::current();
     // Reach the dump trigger through the ambient handle; the runtime stashed
     // it when `with_dump_trigger` was configured.
     let trigger = Dial9Handle::current()
@@ -59,7 +63,7 @@ async fn main() {
     // The pipeline stays parked: nothing is gzipped or written back until a
     // dump asks for data.
     for id in 0..8 {
-        handle.spawn(async move {
+        dial9::spawn(async move {
             for _ in 0..800 {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 std::hint::black_box(id);

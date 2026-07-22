@@ -63,6 +63,28 @@ impl SharedState {
         self.sources.lock().ok().map(|mut sources| f(&mut sources))
     }
 
+    /// Drop every registered source.
+    ///
+    /// Sources own OS resources (perf fds, mmap rings) and may hold a
+    /// [`Dial9Handle`](crate::handle::Dial9Handle) back to this state, which
+    /// would otherwise keep the `Arc` alive forever. Releasing them here bounds
+    /// both to the recorder's lifetime.
+    pub(crate) fn clear_sources(&self) {
+        match self.sources.lock() {
+            Ok(mut sources) => sources.clear(),
+            Err(_) => tracing::warn!("sources lock poisoned, sources left registered"),
+        }
+    }
+
+    /// Like [`with_sources_mut`](Self::with_sources_mut), but `f` receives the
+    /// list itself so it can register sources too.
+    pub fn with_sources_vec<R>(
+        &self,
+        f: impl FnOnce(&mut Vec<Box<dyn crate::source::Source>>) -> R,
+    ) -> Option<R> {
+        self.sources.lock().ok().map(|mut sources| f(&mut sources))
+    }
+
     /// Trace-start `CLOCK_MONOTONIC` timestamp.
     pub fn start_time_ns(&self) -> u64 {
         self.start_time_ns

@@ -6,9 +6,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, RecorderTokioExt, recorder};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -28,7 +26,8 @@ fn burn_cpu_work() {
     std::hint::black_box(x);
 }
 
-/// Build a TracedRuntime with cpu-profiling, run a CPU-burning workload,
+/// Build a recorder with cpu-profiling and an attached runtime, run a
+/// CPU-burning workload,
 /// shut down gracefully, then read the symbolized segments and verify
 /// that SymbolTableEntry events contain real resolved symbol names.
 #[test]
@@ -44,18 +43,19 @@ fn background_symbolization_produces_symbol_table_entries() {
         .build()
         .unwrap();
 
-    let traced = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(std::time::Duration::from_millis(50))
-        .with_tokio(|t| {
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
             t.worker_threads(2);
         })
-        .graceful_shutdown(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
     // Burn CPU across multiple threads to generate CpuSample events.
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(tokio::task::spawn_blocking(burn_cpu_work)));
@@ -69,12 +69,19 @@ fn background_symbolization_produces_symbol_table_entries() {
     });
 
     // Graceful shutdown: seals final segment, worker drains all remaining.
-    traced.graceful_shutdown(Duration::from_secs(1));
+    // The deadline bounds the drain, it is not a sleep, so give the worker room
+    // to symbolize every segment on a slow or loaded machine.
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(15));
 
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).
     let mut all_symbol_names: Vec<String> = Vec::new();
     let mut all_source_files: Vec<String> = Vec::new();
+    // Counted so a failure says which stage came up empty.
+    let mut segments = 0usize;
+    let mut decoded = 0usize;
+    let mut samples_with_frames = 0usize;
 
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {
         let entry = entry.unwrap();
@@ -83,6 +90,7 @@ fn background_symbolization_produces_symbol_table_entries() {
         if !name.ends_with(".bin") && !name.ends_with(".bin.gz") {
             continue;
         }
+        segments += 1;
 
         let raw = std::fs::read(&path).unwrap();
         if raw.is_empty() {
@@ -99,7 +107,11 @@ fn background_symbolization_produces_symbol_table_entries() {
         let Some(mut dec) = Decoder::new(&bytes) else {
             continue;
         };
+        decoded += 1;
         dec.for_each_event(|ev| {
+            if ev.name == "CpuSampleEvent" {
+                samples_with_frames += 1;
+            }
             if ev.name == "SymbolTableEntry"
                 && let Some(dial9_trace_format::types::FieldValueRef::PooledString(id)) =
                     ev.fields.get(2)
@@ -126,7 +138,8 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     assert!(
         !all_symbol_names.is_empty(),
-        "expected SymbolTableEntry events with resolved symbol names, found none"
+        "expected SymbolTableEntry events with resolved symbol names, found none \
+         ({segments} segment files, {decoded} decoded, {samples_with_frames} CPU samples)"
     );
 
     // Verify at least one symbol name contains our burn function.

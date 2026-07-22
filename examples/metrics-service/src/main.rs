@@ -15,9 +15,9 @@ use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
 use dial9::socket::SocketAcceptQueuesConfig;
 use dial9::tracing_layer::Dial9TracingLayer;
-use dial9::{Dial9TokioHandle, TaskDumpConfig};
+use dial9::{Dial9TokioHandle, TaskDumpConfig, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
+use dial9::{RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt};
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
@@ -225,20 +225,7 @@ fn main() -> std::io::Result<()> {
         .with_sched_events(SchedEventConfig::default().include_kernel(true))
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
-    let worker_threads = args.worker_threads;
-    let mut traced_builder = rec
-        .with_tokio(move |t| {
-            t.worker_threads(worker_threads);
-        })
-        .with_task_tracking(true);
-    if !args.no_task_dumps {
-        traced_builder = traced_builder.with_task_dumps(
-            TaskDumpConfig::builder()
-                .idle_threshold(Duration::from_millis(5))
-                .build(),
-        );
-    }
-    if let Some(bucket) = &args.s3_bucket {
+    let recorder = if let Some(bucket) = &args.s3_bucket {
         use dial9::core::pipeline::s3::S3Config;
 
         let s3_config = S3Config::builder()
@@ -254,10 +241,25 @@ fn main() -> std::io::Result<()> {
             .maybe_region(args.s3_region.as_ref())
             .build();
 
-        traced_builder = traced_builder.with_s3_uploader(s3_config);
-    }
-    let traced = traced_builder.build()?;
-    let handle = traced.tokio_handle(traced.runtime().handle());
+        rec.with_s3_uploader(s3_config).build()
+    } else {
+        rec.build()
+    };
+
+    let task_dumps = (!args.no_task_dumps).then(|| {
+        TaskDumpConfig::builder()
+            .idle_threshold(Duration::from_millis(5))
+            .build()
+    });
+    let (recorder, runtime) = recorder.attach_tokio_runtime_with(
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(task_dumps)
+            .build(),
+        |t| {
+            t.worker_threads(args.worker_threads);
+        },
+    )?;
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -268,14 +270,14 @@ fn main() -> std::io::Result<()> {
             .build();
         Some(
             MemoryProfiler::from_config(config)
-                .install(traced.record_handle())
+                .install(recorder.handle().clone())
                 .expect("failed to install memory profiler"),
         )
     };
 
     // Wrap the body in a spawned task so the root future is instrumented.
-    traced.runtime().block_on(async {
-        handle
+    runtime.block_on(async {
+        Dial9TokioHandle::current()
             .spawn(async move {
                 let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
 
@@ -293,12 +295,10 @@ fn main() -> std::io::Result<()> {
                     .await
                     .expect("failed to ensure DynamoDB table");
 
-                let handle = Dial9TokioHandle::current();
-
                 // background flush worker
                 let flush_state = state.clone();
                 let flush_interval = Duration::from_secs(args.flush_interval);
-                handle.spawn(async move {
+                dial9::spawn(async move {
                     let mut interval = tokio::time::interval(flush_interval);
                     loop {
                         interval.tick().await;
@@ -308,7 +308,7 @@ fn main() -> std::io::Result<()> {
 
                 // intentional leak task: accumulates memory without freeing it
                 if args.leak {
-                    handle.spawn(async move {
+                    dial9::spawn(async move {
                         let mut sink: Vec<Vec<u8>> = Vec::new();
                         let mut interval = tokio::time::interval(Duration::from_millis(10));
                         loop {
@@ -353,7 +353,7 @@ fn main() -> std::io::Result<()> {
                 });
 
                 // Reap the child when it exits so it doesn't become a zombie.
-                handle.spawn(async move {
+                dial9::spawn(async move {
                     match client_child.wait().await {
                         Ok(status) => println!("Client process exited: {status}"),
                         Err(e) => eprintln!("Error waiting for client process: {e}"),
@@ -369,9 +369,10 @@ fn main() -> std::io::Result<()> {
             .unwrap();
     });
 
-    // graceful_shutdown drops the runtime so worker threads flush their
-    // thread-local telemetry buffers, then drains the background worker.
-    traced.graceful_shutdown(Duration::from_secs(5));
+    // Drop the runtime first so worker threads flush their thread-local
+    // telemetry buffers, then drain the background worker.
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
     Ok(())
 }

@@ -1,6 +1,8 @@
 use crate::telemetry::task_metadata::TaskId;
+#[cfg(any(feature = "taskdump", test))]
+use dial9_trace_format::InternedStackFrames;
 use dial9_trace_format::types::{EventEncoder, FieldType};
-use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
+use dial9_trace_format::{InternedString, TraceEvent, TraceField};
 use serde::Serialize;
 use std::fmt;
 use std::io::{self, Write};
@@ -172,6 +174,7 @@ pub(crate) struct TaskTerminateEvent {
 /// after the task stayed idle past the configured threshold.
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg(any(feature = "taskdump", test))]
 pub(crate) struct TaskDumpEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
