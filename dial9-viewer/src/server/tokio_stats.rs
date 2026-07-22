@@ -791,7 +791,7 @@ mod tests {
             dec.read_to_end(&mut buf).unwrap();
             buf
         };
-        let (_, _, polls) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
+        let (_, _, polls, _) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
         assert!(!polls.is_empty());
 
         let mut buf = Vec::new();

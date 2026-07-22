@@ -4,7 +4,7 @@
 //!
 //! ## Why this exists
 //!
-//! `decode.rs` is a Rust port of the CPU-event decode logic that the JS viewer
+//! The Rust decoder is a port of the CPU-event decode logic that the JS viewer
 //! (`trace_parser.js` + `trace_analysis.js` + `flamegraph.js`) has long
 //! implemented. The port produced "clearly wrong" output, and ad-hoc spot
 //! checks weren't catching it. This test makes the two decoders comparable on a
@@ -35,7 +35,7 @@
 //!     `worker_id.is_some()`.
 //!
 //! NOTE (block-in-place): the JS reference rewrites samples inside a
-//! block_in_place tid handoff to off-runtime; `decode.rs` does not do that gap
+//! block_in_place tid handoff to off-runtime; the Rust decoder does not do that gap
 //! detection yet (rare in practice — see its TODO). The demo trace has no such
 //! gaps, so parity holds; a trace that exercised them could diverge on the
 //! on/off split until that TODO is closed.
@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use dial9_viewer::ingest::decode::{ResolvedSample, decode_samples};
+use super::{ResolvedSample, decode_samples};
 
 // ── Source codes (wire values), mirror `CpuSampleSource`. ───────────────────
 const SOURCE_CPU_PROFILE: u8 = 0;
@@ -279,7 +279,7 @@ fn load_trace_file(path: &std::path::Path) -> Vec<u8> {
 /// divergence the demo trace can't expose:
 ///
 ///   DIAL9_PARITY_TRACE=/path/to/trace.bin.gz \
-///     cargo test -p dial9-viewer --test parser_parity_test external -- --nocapture
+///     cargo test -p dial9-viewer parser_parity_test::external -- --nocapture
 ///
 /// The `source_key` passed to the decoder is the file's own path; the decoder
 /// only parses date/service/host out of it for partition columns, which the
@@ -293,7 +293,7 @@ fn external_trace_parity() {
     let path = std::path::PathBuf::from(path);
     let data = load_trace_file(&path);
     let key = path.to_string_lossy().to_string();
-    let (samples, dict, _) = decode_samples(&data, &key).unwrap();
+    let (samples, dict, _, _) = decode_samples(&data, &key).unwrap();
     let rust = rust_properties(&samples, &dict);
 
     let js = js_properties(&path).expect("node JS oracle must be available for external parity");
@@ -337,7 +337,7 @@ fn external_trace_parity() {
 #[test]
 fn rust_decode_matches_js_reference_properties() {
     let data = load_demo_trace();
-    let (samples, dict, _) = decode_samples(&data, "demo-trace.bin").unwrap();
+    let (samples, dict, _, _) = decode_samples(&data, "demo-trace.bin").unwrap();
     let rust = rust_properties(&samples, &dict);
 
     let golden = golden_properties();

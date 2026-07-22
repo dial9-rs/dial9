@@ -39,8 +39,10 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// Storage-format version baked into the output key path
 /// (`{output_prefix}/v{N}/…`). Bump when changing *what* we persist and we want
 /// a deliberate recompute; reads/writes then target a fresh empty tree that
-/// repopulates lazily. The old tree is abandoned and GC'd out-of-band.
-pub(crate) const SAMPLES_FORMAT_VERSION: u32 = 3;
+/// repopulates lazily. The value is a monotonic cache namespace, not a schema
+/// revision, so skipped values are expected. The old tree is abandoned and
+/// GC'd out-of-band.
+pub const SAMPLES_FORMAT_VERSION: u32 = 6;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this
@@ -132,6 +134,15 @@ fn dict_part_key(output_prefix: &str, source_key: &str) -> String {
 fn polls_part_key(output_prefix: &str, source_key: &str) -> String {
     format!(
         "{root}/polls/{leaf}.parquet",
+        root = versioned_root(output_prefix, &parse_source_bucket(source_key)),
+        leaf = part_leaf_of(source_key),
+    )
+}
+
+fn spans_part_key(output_prefix: &str, source_key: &str) -> String {
+    let (date, service, host) = parse_scope_fields(source_key);
+    format!(
+        "{root}/spans/service={service}/date={date}/host={host}/{leaf}.parquet",
         root = versioned_root(output_prefix, &parse_source_bucket(source_key)),
         leaf = part_leaf_of(source_key),
     )
@@ -339,6 +350,7 @@ struct EncodedParts {
     samples_buf: Vec<u8>,
     dict_buf: Vec<u8>,
     polls_buf: Vec<u8>,
+    spans_buf: Vec<u8>,
 }
 
 /// CPU-bound stage of a fold: gunzip + decode + parquet-encode over
@@ -348,7 +360,7 @@ struct EncodedParts {
 /// the async executor thread; moving it here keeps CPU work off the runtime.)
 fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedParts> {
     let raw = maybe_gunzip(bytes);
-    let (samples, stacks, polls) = decode::decode_samples(&raw, full_key)
+    let (samples, stacks, polls, spans) = decode::decode_samples(&raw, full_key)
         .map_err(|e| anyhow::anyhow!("decode {full_key}: {e}"))?;
 
     // Always encode the samples part-file, even with zero rows: its existence is
@@ -364,10 +376,15 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
     let mut polls_buf = Vec::new();
     parquet_writer::write_polls(&mut polls_buf, &polls)?;
 
+    // Write spans part-file (may be empty for files with no tracing spans).
+    let mut spans_buf = Vec::new();
+    parquet_writer::write_spans(&mut spans_buf, &spans)?;
+
     Ok(EncodedParts {
         samples_buf,
         dict_buf,
         polls_buf,
+        spans_buf,
     })
 }
 
@@ -375,13 +392,14 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
 ///
 /// The `samples/` part is the durable record of "this file is folded"
 /// ([`list_folded_leaves`] lists it; see ADR-0003), so it MUST be written LAST,
-/// only after the dict and polls parts have landed. Writing it concurrently
-/// would let a mid-write failure — or a cancelled fold task (the streaming
-/// endpoints abort in-flight folds whenever the client disconnects) — commit a
-/// file as folded while its dict/polls parts are missing, permanently: a folded
-/// file is never re-folded, so the gap would never heal. Orphaned dict/polls
-/// parts from the reverse interleaving are harmless — the file stays unfolded
-/// and a later re-fold idempotently overwrites the same keys.
+/// only after the dict, polls, and spans parts have landed. Writing it
+/// concurrently would let a mid-write failure — or a cancelled fold task (the
+/// streaming endpoints abort in-flight folds whenever the client disconnects) —
+/// commit a file as folded while its dict/polls/spans parts are missing,
+/// permanently: a folded file is never re-folded, so the gap would never heal.
+/// Orphaned dict/polls/spans parts from the reverse interleaving are harmless —
+/// the file stays unfolded and a later re-fold idempotently overwrites the same
+/// keys.
 async fn write_parts(
     output: &dyn StorageBackend,
     output_bucket: &str,
@@ -392,12 +410,17 @@ async fn write_parts(
     let part_key = samples_part_key(output_prefix, full_key);
     let dict_key = dict_part_key(output_prefix, full_key);
     let polls_key = polls_part_key(output_prefix, full_key);
-    let (dict_res, polls_res) = tokio::join!(
+    let spans_key = spans_part_key(output_prefix, full_key);
+    // Write dict, polls, and spans concurrently — all before the samples commit marker.
+    let (dict_res, polls_res, spans_res) = tokio::join!(
         output.put_object(output_bucket, &dict_key, encoded.dict_buf),
         output.put_object(output_bucket, &polls_key, encoded.polls_buf),
+        output.put_object(output_bucket, &spans_key, encoded.spans_buf),
     );
     dict_res.map_err(|e| anyhow::anyhow!("write dict {dict_key}: {e}"))?;
     polls_res.map_err(|e| anyhow::anyhow!("write polls {polls_key}: {e}"))?;
+    spans_res.map_err(|e| anyhow::anyhow!("write spans {spans_key}: {e}"))?;
+    // Samples part LAST — its presence is the folded-set record (ADR-0003).
     output
         .put_object(output_bucket, &part_key, encoded.samples_buf)
         .await
@@ -1297,6 +1320,7 @@ mod tests {
                 date: "2026-06-19".to_string(),
                 poll_duration_ns: *poll,
                 spawn_location: Some("src/main.rs:42".to_string()),
+                enclosing_spans: Vec::new(),
             })
             .collect();
         let mut buf = Vec::new();
@@ -1461,9 +1485,11 @@ mod tests {
         let sk = "s3://bkt/2026-06-19/1300/shale/host-a/boot-1/1-0.bin.gz";
         let pk = samples_part_key("flamegraph-data", sk);
         // Output is namespaced by source bucket, then partitioned by scope.
-        assert!(pk.starts_with(
-            "flamegraph-data/v3/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
-        ));
+        // Reference the version constant so bumping it doesn't break this test.
+        let expected_prefix = format!(
+            "flamegraph-data/v{SAMPLES_FORMAT_VERSION}/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
+        );
+        assert!(pk.starts_with(&expected_prefix));
         assert!(pk.ends_with(".parquet"));
         // Leaf is the content hash, idempotent across calls.
         assert_eq!(pk, samples_part_key("flamegraph-data", sk));
