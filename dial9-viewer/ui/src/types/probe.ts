@@ -428,7 +428,8 @@ export async function probeCreds(blob: string): Promise<void> {
   if (!active) Dial9Creds.clear();
   const check = await Dial9Creds.check("some-bucket");
   void check.ok;
-  const buckets: string[] = await Dial9Creds.listBuckets();
+  const buckets: { name: string; region: string | null }[] =
+    await Dial9Creds.listBuckets();
   void buckets;
   const headers: Record<string, string> = Dial9Creds.headers();
   await fetch("/api/browse", { headers });

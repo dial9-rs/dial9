@@ -11,6 +11,7 @@
 
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
+import type { BucketInfo } from "../../lib/trace/creds.js";
 import { DEFAULT_BUCKET_FILTER } from "./bucket-filter.js";
 import type { RawSort } from "./raw-rows.js";
 
@@ -153,7 +154,7 @@ export interface CredsSlice {
   panelOpen: boolean;
   status: { text: string; kind: "ok" | "error" | null };
   /** Last /api/buckets listing. */
-  buckets: readonly string[];
+  buckets: readonly BucketInfo[];
   bucketsRowVisible: boolean;
   /** "Show all" vs filtered picker view. */
   showAll: boolean;

@@ -238,6 +238,7 @@ export type {
 // x-dial9-aws-* headers.
 export { Dial9Creds } from "./creds.js";
 export type {
+  BucketInfo,
   CredentialCheckResult,
   Dial9CredsApi,
   SetCredentialsInput,

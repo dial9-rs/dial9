@@ -10,6 +10,7 @@
 // open, status line, bucket picker).
 
 import { assertInScheduledRender } from "../../store/store.js";
+import type { BucketInfo } from "../../lib/trace/creds.js";
 import { bucketMatchesFilter } from "./bucket-filter.js";
 import type { PageCtx } from "./ctx.js";
 
@@ -24,8 +25,8 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   // on. The predicate is config-driven (URL `bucket_filter=` override >
   // /api/config > "dial9" - bucket-filter.ts). An empty filter matches
   // every bucket, so filtering is effectively off and the toggle disappears.
-  const isTraceBucket = (n: string) =>
-    bucketMatchesFilter(n, store.getState().config.bucketFilter);
+  const isTraceBucket = (bucket: BucketInfo) =>
+    bucketMatchesFilter(bucket.name, store.getState().config.bucketFilter);
 
   function setStatus(msg: string | null, kind: "ok" | "error" | null): void {
     store.update("creds", { status: { text: msg || "", kind } });
@@ -54,14 +55,24 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     store.update("creds", { panelOpen: open });
   }
 
-  // Choose a bucket: fill the bucket field, detect its region via
-  // /api/credentials/check, then run the search.
-  async function selectBucket(name: string): Promise<void> {
+  // Choose a bucket. ListBuckets normally supplies its region directly;
+  // fall back to /api/credentials/check for compatible S3 implementations
+  // that omit the newer BucketRegion field.
+  async function selectBucket(bucket: BucketInfo): Promise<void> {
     const creds = window.Dial9Creds;
     if (!creds) return;
+    const { name } = bucket;
     store.update("creds", { selectedBucket: name });
     els.bucketInput.value = name;
     actions.syncUrl();
+    if (bucket.region) {
+      els.credsRegion.value = bucket.region;
+      creds.setRegion(bucket.region);
+      actions.syncUrl();
+      setStatus(`Using ${name} · region ${bucket.region}`, "ok");
+      void actions.discoverPrefixes().then(() => actions.reRunCurrentSearch());
+      return;
+    }
     setStatus(`Detecting region for ${name}…`, null);
     const result = await creds.check(name);
     if (result.ok) {
@@ -70,12 +81,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
         // Persist the resolved region so it rides on every request, then
         // mirror it into the URL (aws_region) so a shared link reproduces
         // the cross-region bucket.
-        void creds.set({
-          accessKeyId: els.credsAkid.value,
-          secretAccessKey: els.credsSecret.value,
-          sessionToken: els.credsToken.value,
-          region: result.region,
-        });
+        creds.setRegion(result.region);
         actions.syncUrl();
       }
       setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ""}`, "ok");
@@ -91,7 +97,9 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   function autoSelectSingleMatch(): void {
     const s = store.getState().creds;
     if (s.showAll) return;
-    const matches = [...s.buckets].sort((a, b) => a.localeCompare(b)).filter(isTraceBucket);
+    const matches = [...s.buckets]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .filter(isTraceBucket);
     if (matches.length === 1) void selectBucket(matches[0]!);
   }
 
@@ -117,14 +125,14 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   // toggle when the two lists differ. The filter name renders into the
   // messages ("dial9" by default).
   function renderPicker(
-    buckets: readonly string[],
+    buckets: readonly BucketInfo[],
     showAll: boolean,
     selectedBucket: string | null,
   ): void {
     els.credsBuckets.textContent = "";
     const filter = store.getState().config.bucketFilter;
 
-    const all = [...buckets].sort((a, b) => a.localeCompare(b));
+    const all = [...buckets].sort((a, b) => a.name.localeCompare(b.name));
     const matches = all.filter(isTraceBucket);
     const shown = showAll ? all : matches;
 
@@ -156,14 +164,15 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       return;
     }
 
-    for (const name of shown) {
+    for (const bucket of shown) {
+      const { name } = bucket;
       const b = document.createElement("button");
       b.textContent = name;
       // Highlight the trace buckets even within the full list.
-      if (isTraceBucket(name)) b.classList.add("match");
+      if (isTraceBucket(bucket)) b.classList.add("match");
       if (name === selectedBucket) b.classList.add("selected");
       b.addEventListener("click", () => {
-        void selectBucket(name);
+        void selectBucket(bucket);
       });
       els.credsBuckets.appendChild(b);
     }
@@ -175,7 +184,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   // predicate/messages read), so the pre-init state - hidden button, closed
   // panel - is just the initial state.
   let lastPicker: {
-    buckets: readonly string[];
+    buckets: readonly BucketInfo[];
     showAll: boolean;
     selectedBucket: string | null;
     bucketFilter: string;

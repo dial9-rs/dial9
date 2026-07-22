@@ -39,6 +39,12 @@ declare module "*/creds.js" {
    */
   export type StoredCredentials = StaticCredentials | RoleCredentials;
 
+  /** One bucket returned by S3's region-bearing ListBuckets response. */
+  export interface BucketInfo {
+    name: string;
+    region: string | null;
+  }
+
   export interface SetCredentialsInput {
     accessKeyId: string;
     secretAccessKey: string;
@@ -115,10 +121,11 @@ declare module "*/creds.js" {
      */
     check(bucket?: string): Promise<CredentialCheckResult>;
     /**
-     * Buckets visible to the stored credentials (GET /api/buckets).
+     * Buckets and their AWS regions visible to the stored credentials
+     * (GET /api/buckets).
      * Throws on HTTP error with the server's message.
      */
-    listBuckets(): Promise<string[]>;
+    listBuckets(): Promise<BucketInfo[]>;
     /** Clear stored credentials and notify listeners. */
     clear(): void;
     /**
