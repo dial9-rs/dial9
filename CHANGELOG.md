@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc0.1](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.5.0-rc0...dial9-tokio-telemetry-v0.5.0-rc0.1) - 2026-07-22
+
+### Other
+
+- [**breaking**] tokio instrumentation as a source ([#698](https://github.com/dial9-rs/dial9/pull/698))
+- make dial9 the facade ([#614](https://github.com/dial9-rs/dial9/pull/614))
+- move memory profiling to dial9-perf-self-profile ([#591](https://github.com/dial9-rs/dial9/pull/591))
+- move event bus to dial9-core ([#549](https://github.com/dial9-rs/dial9/pull/549))
+- setup dial9-core ([#540](https://github.com/dial9-rs/dial9/pull/540))
+- Drop aws-sdk-s3-transfer-manager, upload segments via aws-sdk-s3 PutObject ([#668](https://github.com/dial9-rs/dial9/pull/668))
+- *(deps)* bump s3s crates to 0.14.1 to pull in patched quick-xml ([#611](https://github.com/dial9-rs/dial9/pull/611))
+
 `dial9` is now the facade for all dial9 features: one dependency, `dial9 = "0.5"`, re-exporting the recorder, the
 Tokio instrumentation, the perf sources, and the viewer CLI, and owning `#[dial9::main]` and
 `dial9::record_event`. This is a breaking release: you depend on `dial9` instead of
