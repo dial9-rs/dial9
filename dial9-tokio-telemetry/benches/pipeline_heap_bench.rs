@@ -254,7 +254,7 @@ fn measure(mode: Mode) -> Sample {
             }
         };
         let (recorder, runtime) = recorder
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(true)
                     .build(),

@@ -128,7 +128,7 @@ fn span_events_appear_in_trace() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
     let (recorder, runtime) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(4);
         })
         .unwrap();
@@ -344,7 +344,7 @@ fn span_events_on_current_thread_runtime() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
     let (recorder, runtime) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
             t.enable_all();

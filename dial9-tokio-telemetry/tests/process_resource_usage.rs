@@ -19,7 +19,7 @@ fn traced_runtime_records_process_resource_usage() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })
@@ -54,7 +54,7 @@ fn traced_runtime_does_not_record_process_resource_usage_by_default() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

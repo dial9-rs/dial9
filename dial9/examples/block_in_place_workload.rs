@@ -59,7 +59,7 @@ fn main() {
     let (recorder, rt) = recorder(writer)
         .with_cpu_profiling(Default::default())
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

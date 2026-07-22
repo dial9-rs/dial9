@@ -23,7 +23,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
 
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

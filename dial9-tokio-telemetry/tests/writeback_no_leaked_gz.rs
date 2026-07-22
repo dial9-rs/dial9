@@ -41,7 +41,7 @@ fn eviction_cleans_up_processed_gz_segments() {
         .worker_poll_interval(Duration::from_millis(50))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(2);
         })

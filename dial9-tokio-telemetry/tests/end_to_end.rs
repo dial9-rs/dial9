@@ -21,7 +21,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(num_workers);
         })
         .expect("build tokio runtime");
@@ -141,7 +141,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -187,7 +187,7 @@ fn task_terminate_events_are_captured() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -240,7 +240,7 @@ fn custom_event_appears_in_trace() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");
@@ -284,7 +284,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

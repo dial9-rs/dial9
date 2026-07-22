@@ -48,7 +48,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
         .with_sched_events(SchedEventConfig::default())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(num_workers);
         })
@@ -109,7 +109,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
             .with_sched_events(SchedEventConfig::default())
             .build();
         let (recorder, rt) = recorder
-            .attach_runtime(|t| {
+            .attach_tokio_runtime(|t| {
                 t.enable_all();
                 t.worker_threads(num_workers);
             })

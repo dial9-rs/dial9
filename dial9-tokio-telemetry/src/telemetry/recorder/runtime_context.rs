@@ -186,7 +186,7 @@ impl TokioRuntimesSource {
         }
     }
 
-    /// The registry of attached runtimes. `attach_runtime` shares it so every
+    /// The registry of attached runtimes. `attach_tokio_runtime` shares it so every
     /// runtime on a recorder lands in the same source.
     pub(crate) fn registry(&self) -> &RuntimeContextRegistry {
         &self.contexts

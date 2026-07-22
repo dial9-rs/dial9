@@ -31,7 +31,7 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");

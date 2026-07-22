@@ -13,7 +13,7 @@ fn install_publishes_active_inner() {
 
     let recorder = recorder(common::small_mem_writer()).build();
     let (recorder, _rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

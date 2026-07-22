@@ -44,7 +44,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

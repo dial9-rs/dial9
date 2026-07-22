@@ -26,7 +26,7 @@ fn on_thread_start_and_stop_fire() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -77,7 +77,7 @@ fn each_runtime_gets_own_hooks() {
         ca.fetch_add(1, Ordering::Relaxed);
     });
     let (recorder, runtime_a) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .runtime_name("a")
                 .tokio_hooks(hooks_a)
@@ -93,7 +93,7 @@ fn each_runtime_gets_own_hooks() {
         cb.fetch_add(1, Ordering::Relaxed);
     });
     let (recorder, runtime_b) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .runtime_name("b")
                 .tokio_hooks(hooks_b)
@@ -163,7 +163,7 @@ fn on_thread_park_fires() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -199,7 +199,7 @@ fn on_thread_unpark_fires() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -248,7 +248,7 @@ fn task_poll_hooks_fire() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -301,7 +301,7 @@ fn task_lifecycle_hooks_fire() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .tokio_hooks(hooks)
@@ -354,7 +354,7 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(false)
                 .tokio_hooks(hooks)
@@ -402,7 +402,7 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(false)
                 .tokio_hooks(hooks)
@@ -457,7 +457,7 @@ fn dial9_hooks_run_before_user_hooks() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -496,7 +496,7 @@ fn hook_stacking_single_callback_fires() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -537,7 +537,7 @@ fn hook_stacking_multiple_callbacks_fire_in_order() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -590,7 +590,7 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();
@@ -640,7 +640,7 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
     });
 
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.enable_all();

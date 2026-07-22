@@ -25,7 +25,7 @@ fn sched_events_capture_context_switches() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(num_workers as usize);
         })
@@ -100,7 +100,7 @@ fn sched_events_sampling_reduces_count() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(num_workers as usize);
         })

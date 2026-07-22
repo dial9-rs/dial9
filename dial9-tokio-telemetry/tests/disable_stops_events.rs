@@ -44,7 +44,7 @@ fn disable_stops_all_event_production() {
 
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -134,7 +134,7 @@ fn disable_stops_cpu_sample_production() {
         .with_cpu_profiling(CpuProfilingConfig::default())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -231,7 +231,7 @@ fn disable_stops_segment_rotation() {
 
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");
@@ -301,7 +301,7 @@ fn enable_after_disable_resumes_events() {
 
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

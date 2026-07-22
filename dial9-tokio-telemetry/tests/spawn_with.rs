@@ -38,7 +38,7 @@ fn build_capturing_runtime() -> (Recorder, tokio::runtime::Runtime, Arc<Mutex<Ve
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -97,7 +97,7 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -161,7 +161,7 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
 fn spawn_with_returns_closure_value() {
     let recorder = recorder(common::small_mem_writer()).build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -194,7 +194,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
         .build();
 
     let (recorder, rt_a) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .runtime_name("a")
                 .task_tracking_enabled(true)
@@ -206,7 +206,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
         .expect("attach runtime a");
 
     let (recorder, rt_b) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .runtime_name("b")
                 .task_tracking_enabled(true)

@@ -72,7 +72,7 @@ impl TokioHook<TaskMetaCb> {
 ///
 /// let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
 /// let (rec, runtime) = rec
-///     .attach_runtime_with(
+///     .attach_tokio_runtime_with(
 ///         TokioAttachOptions::builder().tokio_hooks(hooks).build(),
 ///         |t| { t.worker_threads(4); },
 ///     )

@@ -146,7 +146,7 @@ fn main() -> std::io::Result<()> {
         .metrics_sink(metrics_sink)
         .with_s3_uploader(s3_config)
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

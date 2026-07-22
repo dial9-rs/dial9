@@ -52,7 +52,7 @@ fn traced_runtime_records_custom_events_callback_events() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .expect("build tokio runtime");
@@ -88,7 +88,7 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
             t.enable_all();
@@ -96,7 +96,7 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
         .expect("build tokio runtime");
 
     let (recorder, runtime) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().runtime_name("main").build(),
             |t| {
                 t.worker_threads(1);

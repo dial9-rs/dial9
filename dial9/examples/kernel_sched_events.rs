@@ -74,7 +74,7 @@ fn main() {
                 .include_kernel(true),
         )
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

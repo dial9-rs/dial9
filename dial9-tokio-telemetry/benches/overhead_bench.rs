@@ -115,7 +115,7 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     /// Attach a 4-worker runtime to `recorder` (already recording).
     fn attach(recorder: Recorder, task_tracking: bool) -> Server {
         let (recorder, runtime) = recorder
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(task_tracking)
                     .build(),

@@ -22,7 +22,7 @@ fn main() {
     let writer = DiskBuffer::single_file("tracing_sleep_trace.bin").unwrap();
     let (recorder, rt) = recorder(writer)
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

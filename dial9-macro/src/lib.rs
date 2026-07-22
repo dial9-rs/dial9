@@ -24,12 +24,12 @@ struct MainArgs {
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
                            #[dial9::main(config = dial9::recorder_from_env)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || dial9::recorder(writer).build().attach_runtime(|_| {}))]";
+                           #[dial9::main(config = || dial9::recorder(writer).build().attach_tokio_runtime(|_| {}))]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure returning `std::io::Result<dial9::AttachedRuntime>`, e.g.\n  \
                            #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || dial9::recorder(writer).build().attach_runtime(|_| {}))]";
+                           #[dial9::main(config = || dial9::recorder(writer).build().attach_tokio_runtime(|_| {}))]";
 
 /// `config`'s value: a bare function path or a zero-argument closure. Anything
 /// else (a call, a literal) is the mistake `CONFIG_MUST_BE_ZERO_ARG_HELP` names.
@@ -224,7 +224,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// * `config` — a zero-argument function path or closure returning
 ///   `std::io::Result<`[`dial9::AttachedRuntime`]`>`, which is what
-///   [`RecorderTokioExt::attach_runtime`](dial9::RecorderTokioExt::attach_runtime)
+///   [`RecorderTokioExt::attach_tokio_runtime`](dial9::RecorderTokioExt::attach_tokio_runtime)
 ///   hands back. The macro panics if it is an `Err`. Use
 ///   [`dial9::recorder_from_env`] for the env-driven setup. Required.
 /// * `graceful_shutdown` — the drain deadline (a `Duration`); defaults to 1s.
@@ -267,7 +267,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .expect("writer build failed");
 ///     dial9::recorder(writer)
 ///         .build()
-///         .attach_runtime(|t| { t.worker_threads(4); })
+///         .attach_tokio_runtime(|t| { t.worker_threads(4); })
 /// }
 ///
 /// #[dial9::main(config = my_config, graceful_shutdown = std::time::Duration::from_secs(5))]
@@ -282,7 +282,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// ```no_run
 /// use dial9::RecorderTokioExt;
 ///
-/// #[dial9::main(config = || dial9::recorder_disabled().attach_runtime(|_| {}))]
+/// #[dial9::main(config = || dial9::recorder_disabled().attach_tokio_runtime(|_| {}))]
 /// async fn main() {
 ///     /* ... */
 /// }
@@ -300,7 +300,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("writer build failed");
-///     dial9::recorder(writer).build().attach_runtime(|_| {})
+///     dial9::recorder(writer).build().attach_tokio_runtime(|_| {})
 /// })]
 /// async fn main() {
 ///     /* ... */

@@ -25,7 +25,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     let recorder = dial9::recorder_or_disabled(writer).build();
 
-    recorder.attach_runtime_with(
+    recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .build(),

@@ -345,7 +345,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         }
     );
     let recorder = configure_dial9(&opts);
-    recorder.attach_runtime_with(
+    recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .build(),

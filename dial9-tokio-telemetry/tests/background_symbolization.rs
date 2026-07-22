@@ -48,7 +48,7 @@ fn background_symbolization_produces_symbol_table_entries() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(2);
         })

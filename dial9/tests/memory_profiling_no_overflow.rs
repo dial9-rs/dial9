@@ -36,7 +36,7 @@ fn no_overflow_event_when_ring_has_capacity() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

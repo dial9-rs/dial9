@@ -206,7 +206,7 @@ async fn worker_task(id: usize) {
             .gzip()
             .write_back())
         .build();
-    recorder.attach_runtime_with(
+    recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder().task_tracking_enabled(true).build(),
         |t| {
             t.worker_threads(4);

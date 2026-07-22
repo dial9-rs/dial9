@@ -26,11 +26,11 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB of trace data on disk
         .build()?;
 
-    // recorder(writer).build() plus attach_runtime installs telemetry hooks on the
+    // recorder(writer).build() plus attach_tokio_runtime installs telemetry hooks on the
     // tokio runtime; the recorder owns the background flush/sampler thread.
     let (recorder, rt) = recorder(writer)
         .build()
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(4);
         })
         .expect("build tokio runtime");

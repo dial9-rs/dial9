@@ -101,7 +101,7 @@ fn install_profiler() {
     // This is intentional — the profiler is process-permanent anyway.
     let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
     let (recorder, runtime) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .unwrap();

@@ -69,7 +69,7 @@ fn sealed_segments() -> usize {
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|t| t.debounce(Duration::from_secs(30)))
         .build();
-    recorder.attach_runtime_with(
+    recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder().task_tracking_enabled(true).build(),
         |t| {
             t.worker_threads(2);

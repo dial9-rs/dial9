@@ -1,6 +1,6 @@
 //! Build Tokio runtimes instrumented against a [`Recorder`].
 //!
-//! [`RecorderTokioExt::attach_runtime`] registers dial9 hooks on a
+//! [`RecorderTokioExt::attach_tokio_runtime`] registers dial9 hooks on a
 //! `tokio::runtime::Builder`, builds the runtime, and returns both. Call it once
 //! per runtime, all attached runtimes feed the same recorder/trace.
 //! `#[dial9::main]` builds on this.
@@ -17,12 +17,12 @@
 //! # fn main() -> std::io::Result<()> {
 //! let rec = recorder(DiskBuffer::single_file("/tmp/trace.bin")?).build();
 //!
-//! let (rec, main_rt) = rec.attach_runtime_with(
+//! let (rec, main_rt) = rec.attach_tokio_runtime_with(
 //!     TokioAttachOptions::builder().runtime_name("main").build(),
 //!     |t| { t.worker_threads(4); },
 //! )?;
 //!
-//! let (rec, io_rt) = rec.attach_runtime_with(
+//! let (rec, io_rt) = rec.attach_tokio_runtime_with(
 //!     TokioAttachOptions::builder().runtime_name("io").build(),
 //!     |t| { t.worker_threads(2); },
 //! )?;
@@ -181,7 +181,7 @@ impl std::fmt::Debug for TokioAttachOptions {
 }
 
 /// A recorder and a Tokio runtime instrumented against it, as returned by
-/// [`RecorderTokioExt::attach_runtime`].
+/// [`RecorderTokioExt::attach_tokio_runtime`].
 ///
 /// Name it in a `#[dial9::main]` config function's signature:
 ///
@@ -204,8 +204,8 @@ pub trait RecorderTokioExt {
     /// Each call attaches another runtime (it does not replace earlier ones):
     ///
     /// ```ignore
-    /// let (rec, api) = rec.attach_runtime(|t| { t.worker_threads(4); })?;
-    /// let (rec, io)  = rec.attach_runtime(|t| { t.worker_threads(2); })?;
+    /// let (rec, api) = rec.attach_tokio_runtime(|t| { t.worker_threads(4); })?;
+    /// let (rec, io)  = rec.attach_tokio_runtime(|t| { t.worker_threads(2); })?;
     /// ```
     ///
     /// On a disabled recorder this still returns a working, untraced runtime.
@@ -213,7 +213,7 @@ pub trait RecorderTokioExt {
     /// Do not set builder thread/task callbacks directly (`t.on_thread_start`)
     /// because dial9 must install its own hooks. Use
     /// [`TokioHooks`](super::TokioHooks) via
-    /// [`attach_runtime_with`](Self::attach_runtime_with) to compose yours.
+    /// [`attach_tokio_runtime_with`](Self::attach_tokio_runtime_with) to compose yours.
     ///
     /// Drop the runtime before
     /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
@@ -227,22 +227,22 @@ pub trait RecorderTokioExt {
     /// # fn main() -> std::io::Result<()> {
     /// let (recorder, runtime) = recorder(MemoryBuffer::new(1 << 20)?)
     ///     .build()
-    ///     .attach_runtime(|t| { t.worker_threads(4); })?;
+    ///     .attach_tokio_runtime(|t| { t.worker_threads(4); })?;
     /// # let _ = (recorder, runtime);
     /// # Ok(())
     /// # }
     /// ```
-    fn attach_runtime(
+    fn attach_tokio_runtime(
         self,
         configure: impl FnOnce(&mut tokio::runtime::Builder),
     ) -> io::Result<AttachedRuntime>
     where
         Self: Sized,
     {
-        self.attach_runtime_with(TokioAttachOptions::default(), configure)
+        self.attach_tokio_runtime_with(TokioAttachOptions::default(), configure)
     }
 
-    /// [`attach_runtime`](Self::attach_runtime) with dial9 per-runtime options.
+    /// [`attach_tokio_runtime`](Self::attach_tokio_runtime) with dial9 per-runtime options.
     ///
     /// - `options`: dial9 tracing behavior (runtime name, task tracking,
     ///   task-dump config, composed hooks).
@@ -251,7 +251,7 @@ pub trait RecorderTokioExt {
     ///
     /// `tokio_instrumentation_enabled(false)` skips instrumentation for this
     /// runtime only; other recorder-attached runtimes are unaffected.
-    fn attach_runtime_with(
+    fn attach_tokio_runtime_with(
         self,
         options: TokioAttachOptions,
         configure: impl FnOnce(&mut tokio::runtime::Builder),
@@ -261,7 +261,7 @@ pub trait RecorderTokioExt {
 }
 
 impl RecorderTokioExt for Recorder {
-    fn attach_runtime_with(
+    fn attach_tokio_runtime_with(
         self,
         options: TokioAttachOptions,
         configure: impl FnOnce(&mut tokio::runtime::Builder),
@@ -286,7 +286,7 @@ impl RecorderTokioExt for Recorder {
 /// recorder's shared runtime-context source. Worker IDs are reserved lazily on
 /// first poll.
 ///
-/// [`RecorderTokioExt::attach_runtime`] is the public API that also builds the
+/// [`RecorderTokioExt::attach_tokio_runtime`] is the public API that also builds the
 /// runtime.
 pub(crate) fn attach_tokio_builder(
     recorder: &Recorder,

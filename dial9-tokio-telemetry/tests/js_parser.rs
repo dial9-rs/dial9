@@ -45,7 +45,7 @@ fn test_js_parser_matches_rust() {
         }
         let recorder = rec.build();
         let (recorder, rt) = recorder
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(true)
                     .build(),

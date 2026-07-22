@@ -50,7 +50,7 @@ fn worker_thread_starts_and_stops_cleanly() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .expect("build tokio runtime");
@@ -81,7 +81,7 @@ fn graceful_shutdown_seals_segments() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .expect("build tokio runtime");
@@ -134,7 +134,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .runtime_name("test-runtime")
                 .build(),
@@ -316,7 +316,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");
@@ -436,7 +436,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -648,7 +648,7 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");
@@ -717,7 +717,7 @@ fn stress_test_with_s3_failures() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -808,7 +808,7 @@ fn permanently_broken_s3_produces_failure_metrics() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");
@@ -887,7 +887,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");

@@ -28,7 +28,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(num_workers as usize);
         })

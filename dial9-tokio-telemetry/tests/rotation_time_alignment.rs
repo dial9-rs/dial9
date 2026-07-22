@@ -131,7 +131,7 @@ fn rotated_segments_have_bounded_time_overlap() {
     // attached below.
     let recorder = recorder(writer).metrics_sink(metrics_sink).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
             t.enable_all();
@@ -139,7 +139,7 @@ fn rotated_segments_have_bounded_time_overlap() {
         .expect("build tokio runtime");
 
     let (recorder, runtime) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().runtime_name("main").build(),
             |t| {
                 t.worker_threads(num_workers);

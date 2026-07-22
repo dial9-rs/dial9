@@ -48,7 +48,7 @@ const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
         .build();
-    recorder.attach_runtime(|t| {
+    recorder.attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
 })]

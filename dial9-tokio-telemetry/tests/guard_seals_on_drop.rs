@@ -15,7 +15,7 @@ fn guard_drop_produces_sealed_bin_files() {
         .unwrap();
     let recorder = recorder(writer).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");

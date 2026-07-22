@@ -58,7 +58,7 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

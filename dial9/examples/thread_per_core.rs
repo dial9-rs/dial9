@@ -3,7 +3,7 @@
 //! Some applications pin one single-threaded tokio runtime per CPU core for
 //! cache locality and predictable latency. This example shows how to trace
 //! that pattern: a recorder is built, then each per-core runtime is attached to
-//! it with `attach_runtime`.
+//! it with `attach_tokio_runtime`.
 //!
 //! After the workload completes, the trace file is read back and all
 //! PollStart/PollEnd worker IDs are printed alongside the runtime→worker
@@ -52,13 +52,13 @@ fn main() -> std::io::Result<()> {
 
     println!("Spawning {num_cores} current-thread runtimes...");
 
-    // `attach_runtime_with` hands the recorder back each round, so the loop
+    // `attach_tokio_runtime_with` hands the recorder back each round, so the loop
     // threads it from core to core.
     let mut recorder = recorder;
     let mut threads = Vec::with_capacity(num_cores);
     for core_id in 0..num_cores {
         let (rec, core_rt) = recorder
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name(format!("core-{core_id}"))
                     .build(),

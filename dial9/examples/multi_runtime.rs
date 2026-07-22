@@ -2,7 +2,7 @@
 //!
 //! A common pattern is to run separate runtimes for different workload types
 //! (e.g. request handling vs background I/O). This example builds a recorder and
-//! attaches two named runtimes to it with `attach_runtime_with`, so all workers
+//! attaches two named runtimes to it with `attach_tokio_runtime_with`, so all workers
 //! appear in a single trace file with their runtime names in the segment
 //! metadata. Requests run on one runtime and push their flush work onto the
 //! other with `dial9::spawn_in`, so the trace attributes each to its own
@@ -30,7 +30,7 @@ fn main() -> std::io::Result<()> {
     let recorder = recorder(writer).build();
 
     // Primary runtime for request handling.
-    let (recorder, main_rt) = recorder.attach_runtime_with(
+    let (recorder, main_rt) = recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder().runtime_name("main").build(),
         |t| {
             t.worker_threads(2);
@@ -38,7 +38,7 @@ fn main() -> std::io::Result<()> {
     )?;
 
     // Secondary runtime for background I/O, sharing the same recorder.
-    let (recorder, io_rt) = recorder.attach_runtime_with(
+    let (recorder, io_rt) = recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder().runtime_name("io").build(),
         |t| {
             t.worker_threads(2);

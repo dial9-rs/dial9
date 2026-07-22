@@ -60,7 +60,7 @@ fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskBuffer {
 fn run_workload(trace_dir: &Path, gc_dead_namespaces: bool) {
     let recorder = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces)).build();
     let (recorder, runtime) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
         })
         .expect("attach tokio");
@@ -170,7 +170,7 @@ fn s3_boot_id_matches_namespace_dir() {
         )
         .build();
     let (recorder, runtime) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
         })
         .expect("attach tokio");

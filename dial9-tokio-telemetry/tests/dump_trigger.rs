@@ -38,7 +38,7 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
 
     let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })
@@ -74,7 +74,7 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(2);
         })

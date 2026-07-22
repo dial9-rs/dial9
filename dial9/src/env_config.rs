@@ -572,7 +572,7 @@ fn recorder_from_env_source(
 ) -> io::Result<AttachedRuntime> {
     let (recorder, runtime_config) = env_recorder(resolve_env_config(parse_env_config(env)));
     let recorder = recorder.unwrap_or_else(dial9_core::recorder::recorder_disabled);
-    recorder.attach_runtime_with(env_tokio_options(runtime_config), configure)
+    recorder.attach_tokio_runtime_with(env_tokio_options(runtime_config), configure)
 }
 
 /// Build the enabled recorder from resolved env config, plus the runtime knobs for the Tokio

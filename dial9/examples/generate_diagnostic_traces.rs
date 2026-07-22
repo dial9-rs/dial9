@@ -51,7 +51,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(Duration::from_millis(50))
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -89,7 +89,7 @@ fn generate_good_trace(dir: &PathBuf) {
         .with_sched_events(SchedEventConfig::default())
         .worker_poll_interval(Duration::from_millis(50))
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
@@ -126,7 +126,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
         // Deliberately omit .with_sched_events()
         .worker_poll_interval(Duration::from_millis(50))
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

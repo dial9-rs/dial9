@@ -39,7 +39,7 @@ fn build_capturing_recorder() -> (
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (rec, rt) = rec
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),

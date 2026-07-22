@@ -321,7 +321,7 @@ mod tests {
         // BUFFER accesses — share a single thread with the test itself.
         let rec = recorder(DiskBuffer::single_file(&trace_path).unwrap()).build();
         let (rec, runtime) = rec
-            .attach_runtime(|t| {
+            .attach_tokio_runtime(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
                 t.enable_all();

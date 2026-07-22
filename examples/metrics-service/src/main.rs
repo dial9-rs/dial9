@@ -251,7 +251,7 @@ fn main() -> std::io::Result<()> {
             .idle_threshold(Duration::from_millis(5))
             .build()
     });
-    let (recorder, runtime) = recorder.attach_runtime_with(
+    let (recorder, runtime) = recorder.attach_tokio_runtime_with(
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .maybe_task_dump_config(task_dumps)

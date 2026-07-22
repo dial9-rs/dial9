@@ -36,7 +36,7 @@ struct Harness {
 fn attached_runtime() -> AttachedRuntime {
     recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
         .build()
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
         })

@@ -17,7 +17,7 @@ fn graceful_shutdown_releases_shared_state() {
     let weak = Arc::downgrade(rec.shared().expect("enabled recorder"));
 
     let (rec, rt) = rec
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .expect("attach runtime");
@@ -39,7 +39,7 @@ fn drop_releases_shared_state() {
     let weak = Arc::downgrade(rec.shared().expect("enabled recorder"));
 
     let (rec, rt) = rec
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .expect("attach runtime");
@@ -68,7 +68,7 @@ fn hook_closures_are_released() {
     });
 
     let (rec, rt) = rec
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().tokio_hooks(hooks).build(),
             |t| {
                 t.worker_threads(1);

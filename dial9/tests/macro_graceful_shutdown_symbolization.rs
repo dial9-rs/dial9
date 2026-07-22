@@ -43,7 +43,7 @@ fn macro_test_config() -> io::Result<AttachedRuntime> {
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_custom_pipeline(move |p| p.symbolize().gzip().write_back_to(output.clone()))
         .build();
-    recorder.attach_runtime(|_| {})
+    recorder.attach_tokio_runtime(|_| {})
 }
 
 /// Burn CPU for a fixed window so the profiler reliably captures stack samples.

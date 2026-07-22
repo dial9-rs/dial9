@@ -1,5 +1,5 @@
 #![cfg(feature = "analysis")]
-//! Regression: core-side `.segment_metadata(..)` survives `attach_runtime(..)`.
+//! Regression: core-side `.segment_metadata(..)` survives `attach_tokio_runtime(..)`.
 
 mod common;
 
@@ -17,7 +17,7 @@ fn core_segment_metadata_survives_attach_runtime() {
         .segment_metadata([("service".to_string(), "checkout".to_string())])
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(1);
         })
         .expect("build tokio runtime");
@@ -47,6 +47,6 @@ fn core_segment_metadata_survives_attach_runtime() {
 
     assert!(
         found,
-        "core-side segment_metadata must survive attach_runtime(), files: {files:?}"
+        "core-side segment_metadata must survive attach_tokio_runtime(), files: {files:?}"
     );
 }

@@ -1,4 +1,4 @@
-//! Usage of `recorder(writer).<sources>.build()` + `attach_runtime(..)`: a Tokio
+//! Usage of `recorder(writer).<sources>.build()` + `attach_tokio_runtime(..)`: a Tokio
 //! runtime instrumented against a recorder, producing poll instrumentation.
 #![cfg(feature = "tokio")]
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 /// Attach a multi-thread runtime with `workers` threads and the given options.
 fn attach(recorder: Recorder, workers: usize, options: TokioAttachOptions) -> AttachedRuntime {
     recorder
-        .attach_runtime_with(options, |t| {
+        .attach_tokio_runtime_with(options, |t| {
             t.worker_threads(workers);
         })
         .expect("build tokio runtime")

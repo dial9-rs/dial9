@@ -50,7 +50,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })
@@ -173,7 +173,7 @@ fn lookforward_dump_captures_post_trigger_segments() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })
@@ -244,7 +244,7 @@ fn lookforward_dump_resolves_after_deadline() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })
@@ -284,7 +284,7 @@ fn off_s3_pipeline_dumps_without_manifest() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })
@@ -335,7 +335,7 @@ fn shutdown_truncates_open_lookforward_dump() {
         .with_dump_trigger(|_| {})
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.enable_all();
             t.worker_threads(1);
         })

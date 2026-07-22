@@ -44,7 +44,7 @@ fn task_dump_emitted_for_long_sleep() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
@@ -93,7 +93,7 @@ fn no_task_dump_for_short_sleep() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .maybe_task_dump_config(Some(
@@ -141,7 +141,7 @@ fn task_dump_does_not_produce_extra_events() {
             .with_custom_pipeline(|p| p.pipe(capture))
             .build();
         let (recorder, rt) = recorder
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(true)
                     .maybe_task_dump_config(
@@ -201,7 +201,7 @@ fn spawn_with_joinset_emits_task_dump() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
@@ -281,7 +281,7 @@ fn task_dump_capture_repoll_does_not_cause_poll_after_ready() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
     let (recorder, rt) = recorder
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))

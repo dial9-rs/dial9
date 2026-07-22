@@ -49,7 +49,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     // Downgrades to a disabled recorder if the writer can't be created; use
     // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
-    dial9::recorder_or_disabled(writer).build().attach_runtime_with(
+    dial9::recorder_or_disabled(writer).build().attach_tokio_runtime_with(
         TokioAttachOptions::builder()
             .runtime_name("main")
             .task_tracking_enabled(true)
@@ -91,13 +91,13 @@ async fn main() {
 ```
 
 Every `config` returns `std::io::Result<dial9::AttachedRuntime>`: the recorder plus its
-instrumented runtime, which is exactly what `attach_runtime` hands back. With no runtime
+instrumented runtime, which is exactly what `attach_tokio_runtime` hands back. With no runtime
 knobs to set, that is one expression:
 
 ```rust,no_run
 use dial9::RecorderTokioExt;
 # fn writer() -> std::io::Result<dial9::DiskBuffer> { unimplemented!() }
-#[dial9::main(config = || dial9::recorder_or_disabled(writer()).build().attach_runtime(|_| {}))]
+#[dial9::main(config = || dial9::recorder_or_disabled(writer()).build().attach_tokio_runtime(|_| {}))]
 async fn main() {
     /* ... */
 }
@@ -195,7 +195,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 1. The wake event, when your future was _ready_ to run vs. when Tokio actually started running it.
 2. A "task dump", a stack trace of what your future was doing when it went idle.
 
-`recorder.attach_runtime(..)` builds an instrumented runtime and hands back both. It returns the
+`recorder.attach_tokio_runtime(..)` builds an instrumented runtime and hands back both. It returns the
 recorder too, so calling it again attaches another runtime to the same trace. Its return type,
 `std::io::Result<dial9::AttachedRuntime>`, is what a `#[dial9::main]` config must produce.
 
@@ -222,7 +222,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
     dial9::recorder(writer)
         .with_s3_uploader(s3_config)
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().task_tracking_enabled(true).build(),
             |t| { t.worker_threads(4); },
         )
@@ -233,7 +233,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
 
 #### Instrumenting multiple runtimes
 
-`dial9` can also capture data from multiple runtimes: call `attach_runtime` once per runtime and
+`dial9` can also capture data from multiple runtimes: call `attach_tokio_runtime` once per runtime and
 they all feed the same trace.
 See [`examples/thread_per_core.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/thread_per_core.rs) and [`examples/multi_runtime.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/multi_runtime.rs) for complete examples.
 
@@ -483,7 +483,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_total_size(64 * 1024 * 1024)
         .build()
         .expect("build trace writer");
-    dial9::recorder(writer).build().attach_runtime_with(
+    dial9::recorder(writer).build().attach_tokio_runtime_with(
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .task_dump_config(
@@ -581,7 +581,7 @@ hooks.on_thread_stop(|| {
 
 let (recorder, runtime) = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
     .build()
-    .attach_runtime_with(
+    .attach_tokio_runtime_with(
         TokioAttachOptions::builder().tokio_hooks(hooks).build(),
         |t| { t.worker_threads(4); },
     )
@@ -590,7 +590,7 @@ let (recorder, runtime) = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
 
 dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `Dial9Handle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
 
-**Important:** Do not set thread or task hooks on the `tokio::runtime::Builder` inside your `attach_runtime` closure; dial9 installs its own and yours would be overwritten. Always go through `TokioHooks` so your callbacks compose with dial9's instrumentation.
+**Important:** Do not set thread or task hooks on the `tokio::runtime::Builder` inside your `attach_tokio_runtime` closure; dial9 installs its own and yours would be overwritten. Always go through `TokioHooks` so your callbacks compose with dial9's instrumentation.
 
 ## Getting data out of dial9
 
@@ -630,7 +630,7 @@ fn my_config() -> io::Result<AttachedRuntime> {
     dial9::recorder(writer)
         .with_s3_uploader(s3_config)
         .build()
-        .attach_runtime_with(
+        .attach_tokio_runtime_with(
             TokioAttachOptions::builder().task_tracking_enabled(true).build(),
             |_| {},
         )

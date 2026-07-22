@@ -298,7 +298,7 @@ mod tests {
             .build();
 
         let (rec, rt) = rec
-            .attach_runtime(|t| {
+            .attach_tokio_runtime(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
                 t.enable_all();
@@ -361,7 +361,7 @@ mod tests {
             .build();
 
         let (rec, rt) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .tokio_instrumentation_enabled(false)
                     .task_tracking_enabled(true)
@@ -447,7 +447,7 @@ mod tests {
         let rec = dial9_core::recorder::recorder_disabled();
 
         let (rec, rt) = rec
-            .attach_runtime(|t| {
+            .attach_tokio_runtime(|t| {
                 t.enable_all();
             })
             .unwrap();
@@ -577,13 +577,13 @@ mod tests {
         let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
 
         let (rec, runtime_a) = rec
-            .attach_runtime(|t| {
+            .attach_tokio_runtime(|t| {
                 t.enable_all();
             })
             .unwrap();
 
         let (rec, runtime_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("attached")
                     .build(),
@@ -624,7 +624,7 @@ mod tests {
         let rec = recorder(writer).build();
 
         let (rec, runtime_a) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("main").build(),
                 |t| {
                     t.worker_threads(2);
@@ -633,7 +633,7 @@ mod tests {
             .unwrap();
 
         let (rec, runtime_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("io").build(),
                 |t| {
                     t.worker_threads(2);
@@ -742,7 +742,7 @@ mod tests {
         let rec = recorder(writer).build();
 
         let (rec, runtime_a) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("first")
                     .task_tracking_enabled(true)
@@ -770,7 +770,7 @@ mod tests {
         // Attach B to the same recorder and drive it once, so its worker
         // resolves its ID and the runtime→worker mapping is populated.
         let (rec, runtime_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("second").build(),
                 |t| {
                     *t = tokio::runtime::Builder::new_current_thread();
@@ -842,7 +842,7 @@ mod tests {
             .build();
 
         let (rec, runtime_a) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("main")
                     .task_tracking_enabled(true)
@@ -854,7 +854,7 @@ mod tests {
             .unwrap();
 
         let (rec, runtime_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("attached")
                     .task_tracking_enabled(true)
@@ -1134,7 +1134,7 @@ mod tests {
         let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
 
         let (rec, runtime) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("main").build(),
                 |t| {
                     t.worker_threads(2);
@@ -1159,7 +1159,7 @@ mod tests {
             .build();
 
         let (rec, runtime) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("main")
                     .task_tracking_enabled(true)
@@ -1206,7 +1206,7 @@ mod tests {
             .build();
 
         let (rec, runtime_a) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("main")
                     .task_tracking_enabled(true)
@@ -1218,7 +1218,7 @@ mod tests {
             .unwrap();
 
         let (rec, runtime_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("io")
                     .task_tracking_enabled(true)
@@ -1291,7 +1291,7 @@ mod tests {
         );
     }
 
-    // The public `recorder.attach_runtime_with(..)` flow: one recorder, two runtimes
+    // The public `recorder.attach_tokio_runtime_with(..)` flow: one recorder, two runtimes
     // attached as feeds, driven and shut down by the caller. Both runtimes'
     // polls land in one trace.
     #[test]
@@ -1304,7 +1304,7 @@ mod tests {
             .build();
 
         let (rec, rt_a) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .runtime_name("a")
                     .task_tracking_enabled(true)
@@ -1316,7 +1316,7 @@ mod tests {
             .unwrap();
 
         let (rec, rt_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("b").build(),
                 |t| {
                     t.worker_threads(2);
@@ -1373,7 +1373,7 @@ mod tests {
             .build();
 
         let (rec, rt) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(true)
                     .build(),
@@ -1422,13 +1422,13 @@ mod tests {
         );
     }
 
-    /// Repeated `attach_runtime` calls share one runtime-context source. A second
+    /// Repeated `attach_tokio_runtime` calls share one runtime-context source. A second
     /// source would double-count the queue depth, so the count must stay at one
     /// however many runtimes are attached.
     #[test]
     fn repeated_attach_installs_one_source() {
         let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
-        // Cloned, not borrowed: `attach_runtime` consumes the recorder each round.
+        // Cloned, not borrowed: `attach_tokio_runtime` consumes the recorder each round.
         let shared = rec.shared().expect("live recorder").clone();
 
         let source_count = || {
@@ -1445,7 +1445,7 @@ mod tests {
         let mut rec = rec;
         for _ in 0..3 {
             let (next, runtime) = rec
-                .attach_runtime(|t| {
+                .attach_tokio_runtime(|t| {
                     *t = tokio::runtime::Builder::new_current_thread();
                     t.enable_all();
                 })
@@ -1475,7 +1475,7 @@ mod tests {
             .build();
 
         let (rec, runtime) = rec
-            .attach_runtime(|t| {
+            .attach_tokio_runtime(|t| {
                 t.worker_threads(2);
             })
             .unwrap();
@@ -1531,7 +1531,7 @@ mod tests {
         let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
 
         let (rec, rt_a) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("a").build(),
                 |t| {
                     t.worker_threads(1).enable_all().thread_name("rt-a");
@@ -1540,7 +1540,7 @@ mod tests {
             .unwrap();
 
         let (rec, rt_b) = rec
-            .attach_runtime_with(
+            .attach_tokio_runtime_with(
                 TokioAttachOptions::builder().runtime_name("b").build(),
                 |t| {
                     t.worker_threads(1).enable_all().thread_name("rt-b");

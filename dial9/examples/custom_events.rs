@@ -68,7 +68,7 @@ fn main() -> std::io::Result<()> {
     let writer = DiskBuffer::single_file(&trace_path)?;
     let (recorder, rt) = recorder(writer)
         .build()
-        .attach_runtime(|t| {
+        .attach_tokio_runtime(|t| {
             t.worker_threads(2);
         })
         .expect("build tokio runtime");
