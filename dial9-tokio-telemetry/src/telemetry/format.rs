@@ -144,6 +144,7 @@ pub(crate) struct QueueSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub global_queue: u8,
+    pub active_tasks: u64,
 }
 
 /// Wire-format event for a task spawn.
