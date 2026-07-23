@@ -3,6 +3,7 @@ pub mod ingest;
 pub mod report_serve;
 pub mod server;
 pub mod storage;
+mod trace_shape;
 
 pub use report_serve::report_serve_router;
 
