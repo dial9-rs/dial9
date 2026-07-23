@@ -227,9 +227,15 @@ impl Source for TokioRuntimesSource {
             .iter()
             .map(|m| m.global_queue_depth())
             .sum();
+        let total_active_tasks: usize = self
+            .runtime_metrics
+            .iter()
+            .map(|m| m.num_alive_tasks())
+            .sum();
         ctx.record_event(&QueueSampleEvent {
             timestamp_ns: clock_monotonic_ns(),
             global_queue: total_global_queue as u8,
+            active_tasks: total_active_tasks as u64,
         });
     }
 

@@ -827,6 +827,7 @@ mod tests {
             Dial9Event::QueueSampleEvent(QueueSampleEvent {
                 timestamp_ns: 2_000_000,
                 global_queue: 42,
+                active_tasks: None,
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 3_000_000,
@@ -875,6 +876,7 @@ mod tests {
             Dial9Event::QueueSampleEvent(QueueSampleEvent {
                 timestamp_ns: 1_000_000,
                 global_queue: 15,
+                active_tasks: None,
             }),
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 2_000_000,
@@ -886,6 +888,7 @@ mod tests {
             Dial9Event::QueueSampleEvent(QueueSampleEvent {
                 timestamp_ns: 5_000_000,
                 global_queue: 20,
+                active_tasks: None,
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 6_000_000,
@@ -1402,6 +1405,7 @@ mod tests {
             Dial9Event::QueueSampleEvent(QueueSampleEvent {
                 timestamp_ns: 1_000_000,
                 global_queue: 0,
+                active_tasks: None,
             }),
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 2_000_000,
