@@ -62,6 +62,8 @@ pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::{TracedFuture, block_on, spawn, spawn_in};
 
+#[cfg(all(feature = "tokio", feature = "worker-s3"))]
+pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9TokioHandle, RecorderPipelineExt, RecorderTokioExt, TaskDumpConfig,

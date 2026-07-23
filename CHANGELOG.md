@@ -67,9 +67,9 @@ start it later with `Recorder::enable()`; `build_and_start()` is gone, since `bu
 what it did.
 
 Per-source knobs (`.with_cpu_profiling`, `.with_memory_profiling`, …) and the pipeline overrides
-(`.with_custom_pipeline`, `.with_s3_uploader`) live on the recorder builder. 
+(`.with_custom_pipeline`, `.with_s3_uploader`) live on the recorder builder.
 Per-runtime settings (runtime name, task tracking, task dumps, custom hooks) live in
-`TokioAttachOptions`. 
+`TokioAttachOptions`.
 `dial9::recorder_from_env()` builds a recorder and its runtime from the unchanged `DIAL9_*` vars. `dial9::recorder_or_disabled(writer)` starts a builder that downgrades to a disabled recorder when the writer cannot be created, so sources and a pipeline still chain onto it and a bad trace path costs telemetry rather than the process; `dial9::recorder_disabled()` covers telemetry-off. `TracedRuntime`, the low-level `TracedRuntime::builder()`, and the pipeline / trace-path type-state markers are gone.
 
 The refactor also renamed the trace writers to buffers (`RotatingWriter` → `DiskBuffer`, with

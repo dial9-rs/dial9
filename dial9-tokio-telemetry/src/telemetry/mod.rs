@@ -45,6 +45,8 @@ pub use format::{
     PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId, WorkerParkEvent,
     WorkerUnparkEvent,
 };
+#[cfg(feature = "worker-s3")]
+pub use recorder::RecorderS3ClientExt;
 pub use recorder::{
     AttachedRuntime, Dial9Handle, Dial9TokioHandle, RecorderPipelineExt, RecorderTokioExt,
     TokioAttachOptions, TokioHooks, block_on, current_worker_id, spawn, spawn_in,
