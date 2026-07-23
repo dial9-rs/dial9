@@ -9,23 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0-rc0](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.5.0-rc0...dial9-tokio-telemetry-v0.5.0-rc0) - 2026-07-23
 
-### Other
-
-- [**breaking**] tokio instrumentation as a source ([#698](https://github.com/dial9-rs/dial9/pull/698))
-- make dial9 the facade ([#614](https://github.com/dial9-rs/dial9/pull/614))
-- move memory profiling to dial9-perf-self-profile ([#591](https://github.com/dial9-rs/dial9/pull/591))
-- move event bus to dial9-core ([#549](https://github.com/dial9-rs/dial9/pull/549))
-- setup dial9-core ([#540](https://github.com/dial9-rs/dial9/pull/540))
-- Drop aws-sdk-s3-transfer-manager, upload segments via aws-sdk-s3 PutObject ([#668](https://github.com/dial9-rs/dial9/pull/668))
-- *(deps)* bump s3s crates to 0.14.1 to pull in patched quick-xml ([#611](https://github.com/dial9-rs/dial9/pull/611))
-
 `dial9` is now the facade for all dial9 features: one dependency, `dial9 = "0.5"`, re-exporting the recorder, the
 Tokio instrumentation, the perf sources, and the viewer CLI, and owning `#[dial9::main]` and
 `dial9::record_event`. This is a breaking release: you depend on `dial9` instead of
 `dial9-tokio-telemetry`, and the config, writer, and handle APIs all change.
 
 `Dial9Config` is gone. You build a writer, wrap it in `dial9::recorder(writer)`, chain sources,
-and build a `Recorder`. Tokio is one more source on it.
+and build a `Recorder`. Tokio instrumentation is one more source on it.
 
 ```rust
 let writer = DiskBuffer::builder().base_path("/tmp/dial9-traces").build()?;
@@ -42,8 +32,7 @@ hands back both, so `config` stays a single expression.
 async fn main() { /* ... */ }
 ```
 
-Each `attach_tokio_runtime` attaches another runtime, and returns the recorder so the next call can follow.
-A single and a multi-runtime setup share the same code:
+Each `attach_tokio_runtime` attaches another runtime and returns the recorder, so the next call chains on. Attaching two looks like attaching one:
 
 ```rust
 let recorder = dial9::recorder(writer)
@@ -79,27 +68,41 @@ start it later with `Recorder::enable()`; `build_and_start()` is gone, since `bu
 what it did.
 
 Per-source knobs (`.with_cpu_profiling`, `.with_memory_profiling`, …) and the pipeline overrides
-(`.with_custom_pipeline`, `.with_s3_uploader`) live on the recorder builder. 
-Per-runtime settings (runtime name, task tracking, task dumps, custom hooks) live in
-`TokioAttachOptions`. 
-`dial9::recorder_from_env()` builds a recorder and its runtime from the unchanged `DIAL9_*` vars. `dial9::recorder_or_disabled(writer)` starts a builder that downgrades to a disabled recorder when the writer cannot be created, so sources and a pipeline still chain onto it and a bad trace path costs telemetry rather than the process; `dial9::recorder_disabled()` covers telemetry-off. `TracedRuntime`, the low-level `TracedRuntime::builder()`, and the pipeline / trace-path type-state markers are gone.
+(`.with_custom_pipeline`, `.with_s3_uploader`) live on the recorder builder.
+Per-runtime settings (runtime name, task tracking, task dumps, custom hooks) live in `TokioAttachOptions`.
+`dial9::recorder_from_env()` builds a recorder and its runtime from the unchanged `DIAL9_*` vars. `dial9::recorder_or_disabled(writer)` starts a builder that downgrades to a disabled recorder when the writer cannot be created, so sources and a pipeline still chain onto it and a bad trace path costs telemetry rather than the process. `dial9::recorder_disabled()` covers telemetry-off.
 
-The refactor also renamed the trace writers to buffers (`RotatingWriter` → `DiskBuffer`, with
-`DiskBuffer` / `MemoryBuffer` the public storage backends and a fully in-memory pipeline that
-needs no filesystem: `SegmentData::segment()` now returns `&SegmentRef`), collapsed the handles
-(`TelemetryHandle` / `RuntimeTelemetryHandle` into `Dial9Handle` for record/control and
-`Dial9TokioHandle` for spawn, so `record_event(event, &handle)` becomes `handle.record_event(event)`),
-and moved the non-Tokio pieces (custom events, symbolization, process-resource and socket sources,
-memory profiling) into `dial9-core` / `dial9-perf-self-profile` with their public APIs
-(`Dial9Allocator`, `MemoryProfiler`, …) unchanged. 
+`TracedRuntime`, the low-level `TracedRuntime::builder()`, and the pipeline / trace-path type-state markers are gone.
+
+The refactor also renamed the trace writers to buffers: `RotatingWriter` → `DiskBuffer`, with
+`DiskBuffer` / `MemoryBuffer` the public storage backends and a fully in-memory pipeline that needs
+no filesystem (`SegmentData::segment()` now returns `&SegmentRef`). It collapsed the handles:
+`TelemetryHandle` / `RuntimeTelemetryHandle` into `Dial9Handle` for record/control and
+`Dial9TokioHandle` for spawn, so `record_event(event, &handle)` becomes `handle.record_event(event)`.
+And it moved the non-Tokio pieces (custom events, symbolization, process-resource and socket sources,
+memory profiling) into `dial9-core` / `dial9-perf-self-profile`, with their public APIs
+(`Dial9Allocator`, `MemoryProfiler`, …) unchanged.
+
 Custom processors gain `SegmentProcessor::finalize_dump` and `ProcessError::into_parts`.
 
 Profiling features (`cpu-profiling`, `memory-profiling`, `process-resource`, `linux-socket`) are
 now standalone sources that no longer pull in `tokio`: they auto-wire when `tokio` is on, and the
-facade defaults to `["cli"]` so `cargo install dial9` still works. 
-One behavior flip to watch on upgrade: process resource usage (rusage) sampling is now opt-in behind the `process-resource`
-feature. It was on by default on Unix, so Unix users stop getting rss / page-fault events until
-they enable it.
+facade defaults to `["cli"]` so `cargo install dial9` still works.
+
+### Migrating from 0.3
+
+| You had | You now write |
+| --- | --- |
+| `dial9-tokio-telemetry` dependency | `dial9` (enable the `tokio` feature) |
+| `#[dial9_tokio_telemetry::main]` | `#[dial9::main]` |
+| `Dial9Config::builder()…build()` | `dial9::recorder(writer).attach_tokio_runtime(..)` (build the writer first) |
+| `.on_disk_buffer(p)` / `.in_memory_buffer()` | `DiskBuffer::builder().base_path(p)…build()` / `MemoryBuffer::new(cap)` |
+| `Dial9Config::from_env()` | `dial9::recorder_from_env()` |
+| `TelemetryHandle` / `RuntimeTelemetryHandle` | `Dial9Handle` (spawn via `Dial9TokioHandle`) |
+| `record_event(event, &handle)` | `handle.record_event(event)` |
+| `build_and_start()` | `build()` (`.paused()` to opt out) |
+
+Process resource usage (rusage) sampling is now opt-in behind the `process-resource` feature. It was on by default on Unix, so Unix users stop getting rss / page-fault events until they enable it.
 
 ### Added
 
@@ -115,7 +118,7 @@ they enable it.
 
 ### Changed
 
-- Programs using `#[dial9::main]` now drain the telemetry worker on clean exit (up to the graceful-shutdown deadline, default 1s) instead of exiting immediately. This adds a bounded amount of shutdown latency but ensures the final segment is processed; opt out with `#[dial9::main(disable_graceful_shutdown)]` ([#479](https://github.com/dial9-rs/dial9/issues/479))
+- Programs using `#[dial9::main]` no longer exit immediately: clean exit now blocks up to the graceful-shutdown deadline (default 1s) to drain the final segment, a bounded amount of added latency (see Added for the config and opt-out) ([#479](https://github.com/dial9-rs/dial9/issues/479))
 - Worker IDs are now reserved when a runtime's workers first poll, rather than at attach time (the caller builds the runtime, so there is nothing to count when hooks are registered). A runtime's `runtime.{name}` → worker-ID mapping therefore appears in segment metadata once that runtime has run work, and the ID blocks follow worker start-up order rather than attach order ([#356](https://github.com/dial9-rs/dial9/issues/356))
 - **Breaking:** `Recorder::graceful_shutdown` returns `()` instead of an always-`Ok` `io::Result<()>`. Drain failures are logged, as they already were
 - **Breaking:** `Source` gains an `Any` supertrait, so a source must be `'static` (boxed sources already were). This lets a layer recover its own concrete source from the recorder, which is how a second `attach_tokio_runtime` finds the runtime registry the first one installed
@@ -126,6 +129,35 @@ they enable it.
 ### Fixed
 
 - Viewer: browsing a nonexistent bucket now returns HTTP 404 instead of 500, and a syntactically invalid bucket name returns HTTP 400. The S3 `NoSuchBucket`/`NoSuchKey` and `InvalidBucketName` error codes were falling through to the generic error arm, which logged an "unclassified S3 error" and reported a server `fault` — so a user typo in the bucket name polluted the viewer's fault metric. They now classify as `NotFound` (404) and `BadRequest` (400) respectively.
+
+### Viewer
+
+The trace viewer is rebuilt as a Vite + TypeScript app. The trace decoder and parser are unchanged (a frozen core), so the wire format and decoding behavior are identical.
+
+New:
+
+- Shareable URL state. Viewport, selection, canvas selections, issues-rail, span filters, and span focus all ride the URL, so a view links and reproduces exactly.
+- Search palette. `/` opens a search over tasks, spans, and points of interest.
+- Inspector sidebar. Tabbed, with poll detail, a related view, and an embedded region-analysis panel.
+- New tracks: worker lanes, CPU usage, queue depth, spans, task detail, and custom events, each with hover, click-to-pin, and a legend.
+- Per-track collapse and drag-reorder, persisted across sessions, with animated collapse.
+- Overview minimap and status bar, plus a responsive toolbar showing trace service and host.
+- Flamegraph inspect and diff modes, with a histogram and minimap.
+- Tokio Stats worker-activity rollup with focus deep-linking.
+- Large-trace handling. Columnar events and a main-thread loader remove the structured-clone OOM. Viewport scans are bounded, Set/Clear Range reparses instead of re-rendering, and POI counts are capped.
+- Keyboard shortcuts. Press `?` in the viewer for the list.
+
+Under the hood, all four pages (viewer, browser, flamegraph, tokio_stats) move from hand-written HTML/JS to typed modules under `dial9-viewer/ui/src`, bundled to `dist/` and embedded via rust-embed as before. The port is guarded by a parity harness and a Vitest suite, with an import-boundary check keeping pages out of the frozen core. The browser page also reaches WCAG AA contrast.
+
+### Other
+
+- [**breaking**] tokio instrumentation as a source ([#698](https://github.com/dial9-rs/dial9/pull/698))
+- make dial9 the facade ([#614](https://github.com/dial9-rs/dial9/pull/614))
+- move memory profiling to dial9-perf-self-profile ([#591](https://github.com/dial9-rs/dial9/pull/591))
+- move event bus to dial9-core ([#549](https://github.com/dial9-rs/dial9/pull/549))
+- setup dial9-core ([#540](https://github.com/dial9-rs/dial9/pull/540))
+- Drop aws-sdk-s3-transfer-manager, upload segments via aws-sdk-s3 PutObject ([#668](https://github.com/dial9-rs/dial9/pull/668))
+- *(deps)* bump s3s crates to 0.14.1 to pull in patched quick-xml ([#611](https://github.com/dial9-rs/dial9/pull/611))
 
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 
