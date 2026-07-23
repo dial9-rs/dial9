@@ -68,6 +68,9 @@ version_group = "trace-format"
 [[package]]
 name = "dial9-viewer"
 changelog_update = false
+# ui/dist is gitignored but force-included in the package, so the
+# CI-built dist trips cargo publish's dirty check. Allow it for this crate only.
+publish_allow_dirty = true
 
 [[package]]
 name = "dial9"
