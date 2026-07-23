@@ -13,7 +13,19 @@ import {
 import { parseKey } from "../../lib/trace/keys.js";
 import { isDateLayer } from "../../lib/trace/prefixes.js";
 import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
-import { apiFetch, sampleBucketKeys, type BrowseResponse } from "./api.js";
+import {
+  apiFetch,
+  sampleBucketKeys,
+  type BrowseResponse,
+  type ServicesResponse,
+} from "./api.js";
+import {
+  buildBrowseUrl,
+  buildServicesUrl,
+  canSelectService,
+  resolveRequestedService,
+  resolveServiceSelection,
+} from "./browse-query.js";
 import { createDiffActions } from "./diff-actions.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
@@ -33,7 +45,7 @@ import type { UrlStateFields } from "./globals.js";
 export const ROW_H = 26;
 
 export interface BrowserActions {
-  syncUrl(): void;
+  syncUrl(historyMode?: "replace" | "push"): void;
   setRestoring(on: boolean): void;
   mirrorPrefix(): void;
   setQuickRange(hours: number): void;
@@ -43,9 +55,10 @@ export interface BrowserActions {
   doTimeRangeSearch(): Promise<void>;
   doRawSearch(): Promise<void>;
   discoverPrefixes(): Promise<void>;
+  discoverServices(): Promise<void>;
+  selectService(service: string, historyMode?: "replace" | "push"): void;
   detectRegionForBucket(bucket: string): Promise<void>;
-  autoSearch(): void;
-  isAutoSearched(): boolean;
+  canRerunCurrentSearch(): boolean;
   reRunCurrentSearch(): void;
   resetBrowsePane(): void;
   zoomToX(x0: number, x1: number): void;
@@ -73,9 +86,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // rewrite the URL and could drop fields not yet restored.
   let restoring = false;
 
-  // On page load, automatically run the search once so the heatmap is
-  // populated without an extra click.
-  let autoSearched = false;
+  let serviceDiscoveryGeneration = 0;
+  let browseGeneration = 0;
 
   function localTz(): boolean {
     return store.getState().ui.useLocalTz;
@@ -85,7 +97,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // so a stream of actions doesn't stack up Back-button steps. A quick range
   // is stored relative (`last=N`); a manually-edited range as precise
   // epoch-second from/to.
-  function syncUrl(): void {
+  function syncUrl(historyMode: "replace" | "push" = "replace"): void {
     if (restoring) return;
     // The bucket's region rides in the URL (as aws_region) so a cross-region
     // bucket is reproducible from a shared link. The credentials store is
@@ -100,6 +112,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       // transport carries one.
       roleArn: storedCreds && storedCreds.kind === "role" ? storedCreds.roleArn : "",
       prefix: els.prefixInput.value.trim(),
+      service: els.serviceInput.value.trim(),
       tab: s.ui.tab,
       tz: s.ui.useLocalTz ? "local" : "utc",
       q: els.rawSearchInput.value.trim(),
@@ -122,7 +135,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
     // Keep the pathname explicit: a bare "?qs" would resolve against
     // <base href="/"> and rewrite this off-root page's path to "/".
-    history.replaceState(
+    history[historyMode === "push" ? "pushState" : "replaceState"](
       null,
       "",
       window.location.pathname + (qs ? "?" + qs : ""),
@@ -242,6 +255,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     const keyPrefix = !store.getState().config.serverHasPrefix
       ? els.prefixInput.value.trim()
       : "";
+    const service = els.serviceInput.value.trim();
+    if (!service) {
+      await discoverServices();
+      return;
+    }
+    const generation = ++browseGeneration;
 
     store.update("browse", {
       status: { visible: true, kind: "normal", text: "Searching…", sampleKeys: null },
@@ -251,16 +270,20 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     });
 
     try {
-      let url =
-        `/api/browse?bucket=${encodeURIComponent(bucket)}` +
-        `&from=${fromEpoch}&to=${toEpoch}`;
-      if (keyPrefix) url += `&prefix=${encodeURIComponent(keyPrefix)}`;
+      const url = buildBrowseUrl({
+        bucket,
+        from: fromEpoch,
+        to: toEpoch,
+        prefix: keyPrefix,
+        service,
+      });
       const resp = await apiFetch(url);
       if (!resp.ok) {
         const body = await resp.text().catch(() => "");
         throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
       }
       const result = (await resp.json()) as BrowseResponse;
+      if (generation !== browseGeneration) return;
       let allObjects: BrowseObject[] = result.objects || [];
 
       // The server lists whole time buckets, so the first/last bucket can
@@ -292,7 +315,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         // Show sample keys to help the user understand the bucket layout
         let status: StatusState;
         try {
-          const sampleKeys = await sampleBucketKeys(bucket);
+          const sampleKeys = await sampleBucketKeys(bucket, { service });
+          if (generation !== browseGeneration) return;
           status = sampleKeys.length > 0
             ? {
                 visible: true,
@@ -300,6 +324,13 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
                 text: "No traces found in this time range. Sample keys in this bucket:",
                 sampleKeys,
               }
+            : service
+              ? {
+                  visible: true,
+                  kind: "normal",
+                  text: "No traces found for this service in this time range.",
+                  sampleKeys: null,
+                }
             : {
                 visible: true,
                 kind: "normal",
@@ -464,6 +495,161 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
+  async function discoverServices(): Promise<void> {
+    const generation = ++serviceDiscoveryGeneration;
+    browseGeneration++;
+    const bucket = els.bucketInput.value.trim();
+    const waitingForPrefix =
+      store.getState().config.serverHasPrefix && els.prefixInput.value.trim() === "";
+    if (!bucket || waitingForPrefix) {
+      store.update("browse", {
+        services: [],
+        serviceMetadata: [],
+        activeService: null,
+        serviceDiscovery: "idle",
+      });
+      return;
+    }
+
+    const tz = localTz();
+    const from = pickerToDate(els.rangeFrom.value, tz);
+    const to = pickerToDate(els.rangeTo.value, tz);
+    if (!from || !to) return;
+
+    const fromEpoch = Math.floor(from.getTime() / 1000);
+    const toEpoch = Math.floor(to.getTime() / 1000);
+    const keyPrefix = !store.getState().config.serverHasPrefix
+      ? els.prefixInput.value.trim()
+      : "";
+    const requested = els.serviceInput.value.trim();
+    const requestedSelection = resolveRequestedService(requested);
+    if (requestedSelection) {
+      store.update("browse", {
+        services: [requested],
+        serviceMetadata: [],
+        activeService: requestedSelection.active,
+        serviceDiscovery: "ready",
+        segments: [],
+        rows: [],
+        domain: null,
+        fullDomain: null,
+        selection: null,
+        heatmapVisible: false,
+        warning: null,
+        status: {
+          visible: true,
+          kind: "normal",
+          text: "Loading service…",
+          sampleKeys: null,
+        },
+      });
+      syncUrl();
+      await doTimeRangeSearch();
+      return;
+    }
+
+    store.update("browse", {
+      services: [],
+      serviceMetadata: [],
+      activeService: null,
+      serviceDiscovery: "loading",
+      segments: [],
+      rows: [],
+      domain: null,
+      fullDomain: null,
+      selection: null,
+      heatmapVisible: false,
+      warning: null,
+      status: {
+        visible: true,
+        kind: "normal",
+        text: "Finding services…",
+        sampleKeys: null,
+      },
+    });
+
+    try {
+      const resp = await apiFetch(
+        buildServicesUrl({
+          bucket,
+          from: fromEpoch,
+          to: toEpoch,
+          prefix: keyPrefix,
+        }),
+      );
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
+      }
+      const result = (await resp.json()) as ServicesResponse;
+      if (generation !== serviceDiscoveryGeneration) return;
+
+      const services = result.services;
+      const serviceMetadata = result.service_metadata ?? [];
+      const selection = resolveServiceSelection(services, requested);
+      els.serviceInput.value = selection.active ?? "";
+      store.update("browse", {
+        services,
+        serviceMetadata,
+        activeService: selection.active,
+        serviceDiscovery: "ready",
+        warning: result.truncated
+          ? "Service discovery reached its listing limit. Some services may be omitted."
+          : null,
+        status: {
+          visible: true,
+          kind: "normal",
+          text:
+            services.length === 0
+              ? "No services found in this time range."
+              : selection.shouldLoad
+                ? "Loading service…"
+                : "Choose a service to browse its traces.",
+          sampleKeys: null,
+        },
+      });
+      syncUrl();
+      if (selection.shouldLoad) await doTimeRangeSearch();
+    } catch (err) {
+      if (generation !== serviceDiscoveryGeneration) return;
+      store.update("browse", {
+        serviceDiscovery: "error",
+        status: {
+          visible: true,
+          kind: "error",
+          text: "Error: " + (err instanceof Error ? err.message : String(err)),
+          sampleKeys: null,
+        },
+      });
+    }
+  }
+
+  function selectService(
+    service: string,
+    historyMode: "replace" | "push" = "push",
+  ): void {
+    const browse = store.getState().browse;
+    const requested = service.trim();
+    const fromHistory = historyMode === "replace";
+    if (!canSelectService(browse.services, requested, fromHistory)) return;
+    // An explicit tab/history selection supersedes any slower discovery that
+    // was started before it. Its response must not overwrite this service.
+    serviceDiscoveryGeneration++;
+    const knownService = browse.services.includes(requested);
+    // Tab clicks must name a discovered service. History restoration is
+    // different: direct loading deliberately leaves a one-service list, so a
+    // Back/Forward entry may validly name another service not in that list.
+    if (browse.activeService === requested && browse.rows.length > 0) return;
+    els.serviceInput.value = requested;
+    store.update("browse", {
+      services: knownService ? browse.services : [requested],
+      serviceMetadata: knownService ? browse.serviceMetadata : [],
+      activeService: requested,
+    });
+    syncUrl(historyMode);
+    void doTimeRangeSearch();
+  }
+
   // Region auto-detection: resolve a (possibly cross-region) bucket's real
   // region via /api/credentials/check before any data endpoint is hit, and
   // persist it into the stored credentials. No-op without credentials.
@@ -489,24 +675,22 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
-  // Load-time auto-search. Renders are frame-deferred, so evaluate the
-  // search-readiness formula from state rather than the live DOM
-  // `search-btn.disabled` - identical semantics, no scheduler race.
-  function autoSearch(): void {
-    if (autoSearched) return;
-    autoSearched = true;
-    const waitingForPrefix =
-      store.getState().config.serverHasPrefix && els.prefixInput.value.trim() === "";
-    if (els.bucketInput.value.trim() && !waitingForPrefix) {
-      void doTimeRangeSearch();
+  function canRerunCurrentSearch(): boolean {
+    if (store.getState().ui.tab === "raw") {
+      return els.rawSearchInput.value.trim() !== "";
     }
+    return (
+      store.getState().browse.activeService !== null &&
+      els.bucketInput.value.trim() !== ""
+    );
   }
 
   // Re-run whichever search the user last triggered.
   function reRunCurrentSearch(): void {
+    if (!canRerunCurrentSearch()) return;
     if (store.getState().ui.tab === "raw") {
-      if (els.rawSearchInput.value.trim()) void doRawSearch();
-    } else if (els.bucketInput.value.trim()) {
+      void doRawSearch();
+    } else {
       void doTimeRangeSearch();
     }
   }
@@ -514,9 +698,16 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // Wipe the browse pane back to its initial empty state; used when
   // credentials are cleared.
   function resetBrowsePane(): void {
+    serviceDiscoveryGeneration++;
+    browseGeneration++;
+    els.serviceInput.value = "";
     store.update("browse", {
       segments: [],
       rows: [],
+      services: [],
+      serviceMetadata: [],
+      activeService: null,
+      serviceDiscovery: "idle",
       domain: null,
       fullDomain: null,
       selection: null,
@@ -524,10 +715,11 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       status: {
         visible: true,
         kind: "normal",
-        text: "Select a time range and click Search to find traces.",
+        text: "Select a bucket to find services.",
         sampleKeys: null,
       },
     });
+    syncUrl();
   }
 
   function canvasWidth(): number {
@@ -694,9 +886,10 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     doTimeRangeSearch,
     doRawSearch,
     discoverPrefixes,
+    discoverServices,
+    selectService,
     detectRegionForBucket,
-    autoSearch,
-    isAutoSearched: () => autoSearched,
+    canRerunCurrentSearch,
     reRunCurrentSearch,
     resetBrowsePane,
     zoomToX,

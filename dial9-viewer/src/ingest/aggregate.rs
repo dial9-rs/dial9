@@ -604,16 +604,18 @@ pub(crate) async fn fold_one(
     write_result
 }
 
-/// LIST the folded set for one source bucket: the source-file leaf hashes that
-/// already have a samples part-file under that bucket's versioned root. Pruned
-/// to `source_bucket`, so a BYOC source's folded set never mixes with another's.
+/// LIST the folded set for one source bucket and optional service: the
+/// source-file leaf hashes that already have a samples part-file under that
+/// partitioned root. A BYOC source's folded set never mixes with another's, and
+/// a service scope does not enumerate sibling services.
 pub(crate) async fn list_folded_leaves(
     output: &dyn StorageBackend,
     output_bucket: &str,
     output_prefix: &str,
     source_bucket: &str,
+    service: Option<&str>,
 ) -> HashSet<String> {
-    let prefix = samples_prefix(output_prefix, source_bucket);
+    let prefix = folded_set_prefix(output_prefix, source_bucket, service);
     let objects = output
         .list_objects_all(output_bucket, &prefix)
         .await
@@ -638,6 +640,14 @@ pub(crate) async fn list_folded_leaves(
             name.strip_suffix(".parquet").map(|s| s.to_string())
         })
         .collect()
+}
+
+fn folded_set_prefix(output_prefix: &str, source_bucket: &str, service: Option<&str>) -> String {
+    let prefix = samples_prefix(output_prefix, source_bucket);
+    match service {
+        Some(service) => format!("{prefix}service={service}/"),
+        None => prefix,
+    }
 }
 
 /// How much of a scope has been folded so far. Reported on every query.
@@ -1953,6 +1963,15 @@ mod tests {
         assert!(pk.ends_with(".parquet"));
         // Leaf is the content hash, idempotent across calls.
         assert_eq!(pk, samples_part_key("flamegraph-data", sk));
+    }
+
+    #[test]
+    fn folded_set_prefix_is_pruned_to_service() {
+        let prefix = folded_set_prefix("flamegraph-data", "bkt", Some("shale"));
+        assert_eq!(
+            prefix,
+            format!("flamegraph-data/v{SAMPLES_FORMAT_VERSION}/bucket=bkt/samples/service=shale/")
+        );
     }
 
     #[test]

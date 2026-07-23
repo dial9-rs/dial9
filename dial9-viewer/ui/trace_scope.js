@@ -263,6 +263,7 @@
     const q = new URLSearchParams();
     if (scope.bucket) q.set("bucket", scope.bucket);
     if (scope.prefix) q.set("prefix", scope.prefix);
+    if (scope.service) q.set("service", scope.service);
     q.set("from", String(scope.from));
     q.set("to", String(scope.to));
     const result = await fetchJson("/api/browse?" + q.toString());

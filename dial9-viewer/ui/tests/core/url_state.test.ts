@@ -13,6 +13,7 @@ interface UrlStateShape {
   region?: string;
   roleArn?: string;
   prefix?: string;
+  service?: string;
   q?: string;
   tab?: string;
   tz?: string;
@@ -37,16 +38,25 @@ describe("UrlState.parse", () => {
     expect(UrlState.parse("bucket=b")).toStrictEqual({ bucket: "b" });
   });
 
-  it("reads bucket/prefix/q strings", () => {
-    const s = UrlState.parse("?bucket=my-bucket&prefix=traces&q=2026-04-09");
+  it("reads bucket/prefix/service/q strings", () => {
+    const s = UrlState.parse(
+      "?bucket=my-bucket&prefix=traces&service=checkout-api&q=2026-04-09",
+    );
     expect(s.bucket).toBe("my-bucket");
     expect(s.prefix).toBe("traces");
+    expect(s.service).toBe("checkout-api");
     expect(s.q).toBe("2026-04-09");
   });
 
   it("decodes percent-encoded values", () => {
-    const s = UrlState.parse("?prefix=" + encodeURIComponent("a/b c"));
+    const s = UrlState.parse(
+      "?prefix=" +
+        encodeURIComponent("a/b c") +
+        "&service=" +
+        encodeURIComponent("checkout api"),
+    );
     expect(s.prefix).toBe("a/b c");
+    expect(s.service).toBe("checkout api");
   });
 
   it("reads aws_region into region", () => {
@@ -129,7 +139,9 @@ describe("UrlState.serialize", () => {
   });
 
   it("omits empty strings", () => {
-    expect(UrlState.serialize({ bucket: "", prefix: "", q: "" })).toBe("");
+    expect(
+      UrlState.serialize({ bucket: "", prefix: "", service: "", q: "" }),
+    ).toBe("");
   });
 
   it("relative 'last' wins over precise from/to", () => {
@@ -173,17 +185,18 @@ describe("UrlState.serialize", () => {
       tz: "local",
       tab: "raw",
       prefix: "p",
+      service: "checkout",
       region: "us-west-2",
       bucket: "b",
     });
     expect(qs).toBe(
-      "bucket=b&aws_region=us-west-2&prefix=p&tab=raw&tz=local&from=1000&to=2000&q=x",
+      "bucket=b&aws_region=us-west-2&prefix=p&service=checkout&tab=raw&tz=local&from=1000&to=2000&q=x",
     );
   });
 
   it("percent-encodes values", () => {
-    const qs = UrlState.serialize({ prefix: "a/b c" });
-    expect(qs).toBe("prefix=a%2Fb+c");
+    const qs = UrlState.serialize({ prefix: "a/b c", service: "checkout api" });
+    expect(qs).toBe("prefix=a%2Fb+c&service=checkout+api");
   });
 });
 
@@ -192,13 +205,19 @@ describe("UrlState round-trips", () => {
     const state = {
       bucket: "b",
       prefix: "traces",
+      service: "checkout-api",
       tab: "browse",
       tz: "utc",
       last: 3,
     };
     const back = UrlState.parse("?" + UrlState.serialize(state));
     // Defaults (browse/utc) are omitted on serialize, so they won't reappear.
-    expect(back).toStrictEqual({ bucket: "b", prefix: "traces", last: 3 });
+    expect(back).toStrictEqual({
+      bucket: "b",
+      prefix: "traces",
+      service: "checkout-api",
+      last: 3,
+    });
   });
 
   it("precise window in raw tab, local tz", () => {

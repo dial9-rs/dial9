@@ -60,9 +60,14 @@ export function mountBrowserPageKeys({ store, els, actions }: PageCtx): void {
     if (e.key !== "Enter") return;
     if (els.searchBtn.disabled) return;
     e.preventDefault();
-    void actions.doTimeRangeSearch();
+    void actions.discoverServices();
   };
-  for (const el of [els.bucketInput, els.prefixInput, els.rangeFrom, els.rangeTo]) {
+  for (const el of [
+    els.bucketInput,
+    els.prefixInput,
+    els.rangeFrom,
+    els.rangeTo,
+  ]) {
     el.addEventListener("keydown", submitOnEnter);
   }
 

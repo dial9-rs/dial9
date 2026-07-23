@@ -14,7 +14,8 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   els.bucketInput.addEventListener("change", () => {
     void (async () => {
       await actions.detectRegionForBucket(els.bucketInput.value.trim());
-      void actions.discoverPrefixes();
+      await actions.discoverPrefixes();
+      await actions.discoverServices();
       actions.syncUrl();
     })();
   });
@@ -44,7 +45,7 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
 
   // Run the time-range (Browse) search.
   els.searchBtn.addEventListener("click", () => {
-    void actions.doTimeRangeSearch();
+    void actions.discoverServices();
   });
 
   // Renders -------------------------------------------------------------

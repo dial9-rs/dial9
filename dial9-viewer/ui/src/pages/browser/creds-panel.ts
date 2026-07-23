@@ -70,7 +70,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       creds.setRegion(bucket.region);
       actions.syncUrl();
       setStatus(`Using ${name} · region ${bucket.region}`, "ok");
-      void actions.discoverPrefixes().then(() => actions.reRunCurrentSearch());
+      void actions.discoverPrefixes().then(() => actions.discoverServices());
       return;
     }
     setStatus(`Detecting region for ${name}…`, null);
@@ -85,7 +85,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
         actions.syncUrl();
       }
       setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ""}`, "ok");
-      void actions.discoverPrefixes().then(() => actions.reRunCurrentSearch());
+      void actions.discoverPrefixes().then(() => actions.discoverServices());
     } else {
       setStatus(`Cannot use ${name}: ${result.error || "unknown error"}`, "error");
     }
@@ -299,14 +299,17 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     });
 
     // React to programmatic changes (e.g. an injected userscript calling
-    // Dial9Creds.set) as well as the panel's own actions: refresh the UI
-    // and re-run the current search so results reflect the new credentials.
-    // Only re-run when credentials are now present - this event also fires
-    // on Clear, where re-running would query the last-selected bucket with
-    // no credentials and fail.
+    // Dial9Creds.set) as well as the panel's own actions. An active service is
+    // reloaded; an already-picked bucket with no active service runs only the
+    // lightweight discovery query.
     window.addEventListener("dial9:credentials-changed", () => {
       refreshFields();
-      if (actions.isAutoSearched() && creds.has()) actions.reRunCurrentSearch();
+      if (!creds.has()) return;
+      if (actions.canRerunCurrentSearch()) {
+        actions.reRunCurrentSearch();
+      } else if (els.bucketInput.value.trim()) {
+        void actions.discoverPrefixes().then(() => actions.discoverServices());
+      }
     });
 
     refreshFields();
