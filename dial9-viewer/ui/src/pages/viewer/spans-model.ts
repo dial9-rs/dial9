@@ -94,7 +94,17 @@ export function computeSpanTrackData(
   workerSpans?: Record<number, LaneSpans>,
   precomputedSpanData?: SpanData,
 ): SpanTrackData {
-  if (customEvents == null || customEvents.length === 0) {
+  // The columnar path routes SPAN events OUT of `customEvents` into a separate
+  // span-event store, so `customEvents` can be empty even when the trace is
+  // ALL spans (e.g. a shale trace of only SpanEnter/SpanExit). In that case the
+  // authoritative span data lives in `precomputedSpanData`, so only bail early
+  // when there is NEITHER a precomputed result NOR any events to build one from.
+  // (The fat/legacy path keeps span events in `customEvents`, so its guard trips
+  // only for a genuinely span-free trace.)
+  if (
+    precomputedSpanData === undefined &&
+    (customEvents == null || customEvents.length === 0)
+  ) {
     return EMPTY_SPAN_TRACK_DATA;
   }
   // With workerSpans, each span's active segments are reconstructed from its
@@ -104,7 +114,7 @@ export function computeSpanTrackData(
   // so buildSpanData runs once per trace instead of once per span consumer.
   const data =
     precomputedSpanData ??
-    buildSpanData(customEvents, workerSpans && fatLanes(workerSpans));
+    buildSpanData(customEvents!, workerSpans && fatLanes(workerSpans));
   const cs = data.columnarSpans;
   const spanCount = cs ? cs.length : data.allSpans.length;
   if (spanCount === 0 && data.unmatchedSpans.length === 0) {

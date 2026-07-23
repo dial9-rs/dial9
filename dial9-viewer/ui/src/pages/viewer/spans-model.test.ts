@@ -5,7 +5,7 @@
 // case drives buildSpanData through real SpanEnter/SpanExit events.
 
 import { describe, it, expect } from "vitest";
-import type { CustomTraceEvent, TracingSpan, WorkerLane } from "../../lib/trace/index.js";
+import type { CustomTraceEvent, SpanData, TracingSpan, WorkerLane } from "../../lib/trace/index.js";
 import {
   buildSpanRenderModel,
   computeSpanTrackData,
@@ -168,6 +168,31 @@ describe("computeSpanTrackData", () => {
     ]).allSpans[0]!;
     expect(span.taskId).toBeNull();
     expect(span.activeNs).toBe(8000);
+  });
+
+  it("uses precomputedSpanData even when customEvents is empty (columnar all-span trace)", () => {
+    // Regression: the columnar path routes SPAN events OUT of customEvents into
+    // a separate store, so a trace of ONLY spans (e.g. a shale trace of just
+    // SpanEnter__/SpanExit__) leaves customEvents empty while the authoritative
+    // spans live in precomputedSpanData. computeSpanTrackData must NOT bail on
+    // the empty customEvents and discard them (the legacy viewer kept span
+    // events in customEvents, so its guard never tripped - hence the divergence).
+    const a = span("a", "load", 100, 300, { taskId: 7 });
+    const b = span("b", "auth", 150, 400);
+    const precomputed: SpanData = {
+      allSpans: [a, b],
+      spanMeta: new Map([
+        ["a", { spanName: "load", fields: {}, parentSpanId: null }],
+        ["b", { spanName: "auth", fields: {}, parentSpanId: null }],
+      ]),
+      childrenByParent: new Map(),
+      maxDepth: 0,
+      unmatchedSpans: [],
+    };
+    const data = computeSpanTrackData([], undefined, precomputed);
+    expect(data.allSpans.map((s) => s.spanId)).toEqual(["a", "b"]);
+    expect(data.spanNames).toEqual(["auth", "load"]);
+    expect(data.durationsByName.get("load")).toEqual([200]);
   });
 });
 
