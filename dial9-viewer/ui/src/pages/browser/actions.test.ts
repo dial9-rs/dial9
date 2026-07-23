@@ -127,3 +127,104 @@ describe("URL service loading", () => {
     );
   });
 });
+
+describe("submitBrowseSearch validation", () => {
+  function stubEnv() {
+    vi.stubGlobal("history", { replaceState: vi.fn(), pushState: vi.fn() });
+    vi.stubGlobal("window", {
+      location: { pathname: "/browser.html" },
+      Dial9Creds: undefined,
+      Dial9UrlState: { serialize: () => "" },
+    });
+    const fetchMock = vi.fn(async () => browseResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("alerts and does not fetch when the bucket is empty", () => {
+    const fetchMock = stubEnv();
+    const alertMock = vi.fn();
+    vi.stubGlobal("alert", alertMock);
+
+    const els = browserEls("");
+    els.bucketInput.value = "";
+    const actions = createActions(createBrowserStore(), els);
+
+    actions.submitBrowseSearch();
+
+    expect(alertMock).toHaveBeenCalledWith("Bucket is required");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("alerts and does not fetch when the time range is unparseable", () => {
+    const fetchMock = stubEnv();
+    const alertMock = vi.fn();
+    vi.stubGlobal("alert", alertMock);
+
+    const els = browserEls("");
+    els.rangeFrom.value = "";
+    const actions = createActions(createBrowserStore(), els);
+
+    actions.submitBrowseSearch();
+
+    expect(alertMock).toHaveBeenCalledWith("Select a time range");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("runs discovery when the bucket and range are valid", async () => {
+    const fetchMock = stubEnv();
+    const alertMock = vi.fn();
+    vi.stubGlobal("alert", alertMock);
+
+    const els = browserEls("checkout-api");
+    const actions = createActions(createBrowserStore(), els);
+
+    actions.submitBrowseSearch();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    expect(alertMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("clearBrowseNoService", () => {
+  it("invalidates an in-flight browse so a late response cannot repopulate the cleared pane", async () => {
+    vi.stubGlobal("history", { replaceState: vi.fn(), pushState: vi.fn() });
+    vi.stubGlobal("window", {
+      location: { pathname: "/browser.html" },
+      Dial9Creds: undefined,
+      Dial9UrlState: { serialize: () => "" },
+    });
+    vi.stubGlobal("alert", vi.fn());
+
+    let resolveBrowse!: (response: Response) => void;
+    const delayedBrowse = new Promise<Response>((resolve) => {
+      resolveBrowse = resolve;
+    });
+    const fetchMock = vi.fn(() => delayedBrowse);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createBrowserStore();
+    const els = browserEls("checkout-api");
+    const actions = createActions(store, els);
+
+    // A browse search is in flight for the previously-selected service.
+    const search = actions.doTimeRangeSearch();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    // Back-navigation to a no-service entry clears the pane.
+    actions.clearBrowseNoService();
+    expect(store.getState().browse.activeService).toBeNull();
+    expect(els.serviceInput.value).toBe("");
+
+    // The stale response resolves; the generation guard must drop it so the
+    // cleared no-service pane survives.
+    resolveBrowse(browseResponse());
+    await search;
+
+    expect(store.getState().browse.activeService).toBeNull();
+    expect(store.getState().browse.rows).toEqual([]);
+    expect(store.getState().browse.status.text).toBe(
+      "Choose a service to browse its traces.",
+    );
+  });
+});

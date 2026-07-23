@@ -50,7 +50,7 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       els.spansBtn.disabled = !agg;
       els.selectionWarn.textContent =
         over && !agg
-          ? `Too large to open (${formatSize(sel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
+          ? `Too large to open (${formatSize(profileSel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
           : "";
       const tz = state.ui.useLocalTz;
       const win =

@@ -60,7 +60,7 @@ export function mountBrowserPageKeys({ store, els, actions }: PageCtx): void {
     if (e.key !== "Enter") return;
     if (els.searchBtn.disabled) return;
     e.preventDefault();
-    void actions.discoverServices();
+    actions.submitBrowseSearch();
   };
   for (const el of [
     els.bucketInput,

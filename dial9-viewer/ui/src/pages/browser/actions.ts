@@ -56,6 +56,8 @@ export interface BrowserActions {
   doRawSearch(): Promise<void>;
   discoverPrefixes(): Promise<void>;
   discoverServices(): Promise<void>;
+  submitBrowseSearch(): void;
+  clearBrowseNoService(): void;
   selectService(service: string, historyMode?: "replace" | "push"): void;
   detectRegionForBucket(bucket: string): Promise<void>;
   canRerunCurrentSearch(): boolean;
@@ -495,6 +497,25 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
+  // Explicit user gesture (Search button / Enter). Validates with visible
+  // feedback before delegating to discovery, which otherwise returns silently
+  // on a missing bucket or unparseable range (it also runs from background
+  // chains that must not alert). Restores the pre-refactor alert behavior.
+  function submitBrowseSearch(): void {
+    if (!els.bucketInput.value.trim()) {
+      alert("Bucket is required");
+      return;
+    }
+    // pickerToDate returns null for a non-empty but unparseable value too, so
+    // an emptiness check alone would let a bad range slip through silently.
+    const tz = localTz();
+    if (!pickerToDate(els.rangeFrom.value, tz) || !pickerToDate(els.rangeTo.value, tz)) {
+      alert("Select a time range");
+      return;
+    }
+    void discoverServices();
+  }
+
   async function discoverServices(): Promise<void> {
     const generation = ++serviceDiscoveryGeneration;
     browseGeneration++;
@@ -722,6 +743,30 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     syncUrl();
   }
 
+  // Back/Forward landed on a history entry with no service. Clear the browse
+  // pane to the "pick a service" state. Bumping browseGeneration invalidates
+  // any in-flight doTimeRangeSearch so its late response can't repopulate the
+  // pane we just cleared (every other reset path bumps it too).
+  function clearBrowseNoService(): void {
+    browseGeneration++;
+    els.serviceInput.value = "";
+    store.update("browse", {
+      activeService: null,
+      segments: [],
+      rows: [],
+      domain: null,
+      fullDomain: null,
+      selection: null,
+      heatmapVisible: false,
+      status: {
+        visible: true,
+        kind: "normal",
+        text: "Choose a service to browse its traces.",
+        sampleKeys: null,
+      },
+    });
+  }
+
   function canvasWidth(): number {
     return (
       els.heatmapCanvas.clientWidth || parseFloat(els.heatmapCanvas.style.width) || 1
@@ -887,11 +932,13 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     doRawSearch,
     discoverPrefixes,
     discoverServices,
+    submitBrowseSearch,
     selectService,
     detectRegionForBucket,
     canRerunCurrentSearch,
     reRunCurrentSearch,
     resetBrowsePane,
+    clearBrowseNoService,
     zoomToX,
     resetHeatmapZoom,
     selectSegmentAt,

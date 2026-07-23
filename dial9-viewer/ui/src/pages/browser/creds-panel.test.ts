@@ -76,6 +76,7 @@ function fakeEls(): BrowserEls {
     credsBucketsRow: el(),
     credsBuckets: el(),
     bucketInput: el(),
+    serviceInput: el(),
   } as unknown as BrowserEls;
 }
 

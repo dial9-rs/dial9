@@ -215,22 +215,7 @@ function boot(): void {
     if (service) {
       actions.selectService(service, "replace");
     } else {
-      els.serviceInput.value = "";
-      store.update("browse", {
-        activeService: null,
-        segments: [],
-        rows: [],
-        domain: null,
-        fullDomain: null,
-        selection: null,
-        heatmapVisible: false,
-        status: {
-          visible: true,
-          kind: "normal",
-          text: "Choose a service to browse its traces.",
-          sampleKeys: null,
-        },
-      });
+      actions.clearBrowseNoService();
     }
   });
 }

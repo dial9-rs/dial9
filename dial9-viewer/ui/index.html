@@ -965,6 +965,10 @@
         renderServiceTabs();
         heatmapSegments = [];
         heatmapRows = [];
+        // Drop the previous service's selection so the profiling buttons don't
+        // stay enabled against stale keys (setHeatmapSelection also refreshes
+        // the selection count). Mirrors resetBrowsePane's clearing.
+        setHeatmapSelection(null);
         heatmapView.style.display = 'none';
         browseStatus.style.display = '';
         browseStatus.className = 'status';

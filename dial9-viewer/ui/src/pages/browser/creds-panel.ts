@@ -62,6 +62,12 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     const creds = window.Dial9Creds;
     if (!creds) return;
     const { name } = bucket;
+    // Switching to a different bucket invalidates any active/leftover service:
+    // it belongs to the previous bucket, and discoverServices would otherwise
+    // bypass discovery and browse it against the new bucket. Clearing it forces
+    // fresh discovery. A same-bucket re-select (e.g. boot-time auto-select of a
+    // URL-restored bucket) keeps a URL-requested service intact.
+    if (els.bucketInput.value.trim() !== name) els.serviceInput.value = "";
     store.update("creds", { selectedBucket: name });
     els.bucketInput.value = name;
     actions.syncUrl();
