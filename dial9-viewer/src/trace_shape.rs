@@ -1101,15 +1101,6 @@ struct ExtractContext {
     // String sanitization
     string_remap: HashMap<String, String>,
     next_string_id: u64,
-    // Cardinality tracking
-    worker_ids: HashSet<u64>,
-    task_id_set: HashSet<u64>,
-    // H: Poll quantiles: track starts per (worker_id) using a stack for nested/repeated
-    poll_starts: HashMap<u64, Vec<u64>>,
-    poll_durations: Vec<u64>,
-    // H: Span quantiles: track SpanEnter per (span_id) -> stack of timestamps
-    span_enters: HashMap<u64, Vec<u64>>,
-    span_durations: Vec<u64>,
 }
 
 impl ExtractContext {
@@ -1139,12 +1130,6 @@ impl ExtractContext {
             next_socket_inode: 1,
             string_remap: HashMap::new(),
             next_string_id: 0,
-            worker_ids: HashSet::new(),
-            task_id_set: HashSet::new(),
-            poll_starts: HashMap::new(),
-            poll_durations: Vec::new(),
-            span_enters: HashMap::new(),
-            span_durations: Vec::new(),
         }
     }
 
@@ -1371,11 +1356,6 @@ impl ExtractContext {
             FieldSemantics::Structural => {
                 if field_name == "worker_id" || field_name == "target_worker" {
                     if let FieldValueRef::Varint(v) = value {
-                        // H: Only count worker_id (not target_worker) for cardinality,
-                        // excluding sentinels 254/255
-                        if field_name == "worker_id" && *v != 254 && *v != 255 {
-                            self.worker_ids.insert(*v);
-                        }
                         return Ok(ShapeValue::U(*v));
                     }
                 }
@@ -1570,13 +1550,7 @@ impl ExtractContext {
         match value {
             FieldValueRef::Varint(v) => {
                 let remapped = match ns {
-                    NamespaceId::Task => {
-                        // H: Exclude task ID 0 from cardinality
-                        if *v != 0 {
-                            self.task_id_set.insert(*v);
-                        }
-                        self.remap_task_id(*v)
-                    }
+                    NamespaceId::Task => self.remap_task_id(*v),
                     NamespaceId::Span => self.remap_span_id(*v),
                     NamespaceId::Tid => self.remap_thread_id(*v),
                     NamespaceId::Addr => self.remap_address(*v),
@@ -1807,63 +1781,6 @@ fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
                 anyhow::anyhow!("event for schema '{}' has no timestamp", original_name)
             })?;
             let offset = quantize_ns(ts.saturating_sub(source_base_ts));
-
-            // H: Track poll quantiles using stack-based pairing
-            if original_name == "PollStartEvent" {
-                if let Some(dial9_trace_format::types::FieldValueRef::Varint(wid)) =
-                    ev.fields.first()
-                {
-                    ctx.poll_starts.entry(*wid).or_default().push(ts);
-                }
-            }
-            if original_name == "PollEndEvent" {
-                if let Some(dial9_trace_format::types::FieldValueRef::Varint(wid)) =
-                    ev.fields.first()
-                {
-                    if let Some(starts) = ctx.poll_starts.get_mut(wid) {
-                        if let Some(start) = starts.pop() {
-                            if ts > start {
-                                ctx.poll_durations.push(quantize_ns(ts - start));
-                            }
-                        }
-                    }
-                }
-            }
-
-            // H: Track span quantiles using stack-based pairing (SpanEnter:/SpanExit: only)
-            let orig_flds = original_fields.get(original_name);
-            if let Some(("SpanEnter:", _)) = span_prefix(original_name) {
-                if let Some(flds) = orig_flds {
-                    for (i, (fname, _)) in flds.iter().enumerate() {
-                        if fname == "span_id" {
-                            if let Some(dial9_trace_format::types::FieldValueRef::Varint(sid)) =
-                                ev.fields.get(i)
-                            {
-                                ctx.span_enters.entry(*sid).or_default().push(ts);
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(("SpanExit:", _)) = span_prefix(original_name) {
-                if let Some(flds) = orig_flds {
-                    for (i, (fname, _)) in flds.iter().enumerate() {
-                        if fname == "span_id" {
-                            if let Some(dial9_trace_format::types::FieldValueRef::Varint(sid)) =
-                                ev.fields.get(i)
-                            {
-                                if let Some(enters) = ctx.span_enters.get_mut(sid) {
-                                    if let Some(enter_ts) = enters.pop() {
-                                        if ts > enter_ts {
-                                            ctx.span_durations.push(quantize_ns(ts - enter_ts));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             // Remap field values using active pools from the RawEvent
             let orig_flds = original_fields.get(original_name).ok_or_else(|| {
