@@ -115,6 +115,49 @@ describe("downsampleSeriesToColumns", () => {
     expect(out[0]!.y).toBe(90);
   });
 
+  it("stepClose: emits the peak AND a close vertex at the column's last sample", () => {
+    // Spike (v=5) then drain-to-0 collapse into column 0; a far sample in col 8.
+    const pts: Pt[] = [
+      { t: 0.1, v: 5 }, // the spike
+      { t: 0.9, v: 0 }, // drained to 0, still column 0
+      { t: 8, v: 0 },
+    ];
+    const opts = {
+      xOf: (p: Pt) => p.t,
+      yOf: (p: Pt) => p.v,
+      weightOf: (p: Pt) => p.v,
+      drawW: 10,
+    };
+    // Without stepClose the drain is dropped: only the spike represents col 0.
+    expect(downsampleSeriesToColumns(pts, opts)).toEqual([
+      { x: 0.1, y: 5 },
+      { x: 8, y: 0 },
+    ]);
+    // With stepClose the column closes at its true ending level (0), so a step
+    // line carries 0 forward, not the spike's height.
+    expect(downsampleSeriesToColumns(pts, { ...opts, stepClose: true })).toEqual([
+      { x: 0.1, y: 5 },
+      { x: 0.9, y: 0 },
+      { x: 8, y: 0 },
+    ]);
+  });
+
+  it("stepClose: no close vertex when the peak IS the column's last sample", () => {
+    // Monotonic-up column: peak == last, so no zero-length close is emitted.
+    const pts: Pt[] = [
+      { t: 0.1, v: 1 },
+      { t: 0.9, v: 5 }, // peak and last
+    ];
+    const out = downsampleSeriesToColumns(pts, {
+      xOf: (p) => p.t,
+      yOf: (p) => p.v,
+      weightOf: (p) => p.v,
+      stepClose: true,
+      drawW: 10,
+    });
+    expect(out).toEqual([{ x: 0.9, y: 5 }]);
+  });
+
   it("clamps off-view samples into the edge columns (line keeps entry height)", () => {
     const pts: Pt[] = [
       { t: -50, v: 7 }, // the lowerBound-1 sample before the view
@@ -269,6 +312,30 @@ describe("makeStrokeBatcher", () => {
       { x: 19, y: 5 },
     ]);
     expect(pl!.length).toBeLessThanOrEqual(2 * Math.ceil(drawW));
+  });
+
+  it("stepSeries: a spike + drain in one column carries 0 forward, not the spike", () => {
+    // Regression for the per-worker queue line: a queue spike and its drain-to-0
+    // collapsing into one pixel column must not paint a high plateau across the
+    // following gap (a parked worker with local queue 0). weightOf keeps the
+    // spike visible; stepClose (auto-enabled by stepSeries) closes the column at
+    // 0 so the carried-forward level is the truth.
+    const b = makeStrokeBatcher();
+    const drawW = 10;
+    b.stepSeries(
+      "queue",
+      [
+        { t: 0.1, v: 5 }, // spike
+        { t: 0.9, v: 0 }, // drained, same column
+        { t: 8, v: 0 }, // far sample after a long gap (parked)
+      ] as Pt[],
+      { xOf: (p) => p.t, yOf: (p) => p.v, weightOf: (p) => p.v, drawW },
+    );
+    const [pl] = b.batches().get("queue")!.polylines;
+    // The spike is preserved at the left edge...
+    expect(pl!.some((v) => v.y === 5 && v.x < 1)).toBe(true);
+    // ...but everything from the drain onward is at 0 (no high plateau).
+    expect(pl!.filter((v) => v.x >= 1).every((v) => v.y === 0)).toBe(true);
   });
 });
 
