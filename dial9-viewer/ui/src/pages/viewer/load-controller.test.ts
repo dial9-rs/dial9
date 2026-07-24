@@ -505,3 +505,16 @@ describe("progress render coalescing", () => {
       });
   });
 });
+
+
+describe("URL load parse range", () => {
+  it("forwards a deep-linked Set Range window to the first parse", () => {
+    const h = makeHarness();
+    h.ctrl.loadUrls(["/trace.bin"], "Loading trace...", {
+      startNs: 100,
+      endNs: 900,
+    });
+    expect(h.loads[0]?.opts.startTime).toBe(100);
+    expect(h.loads[0]?.opts.endTime).toBe(900);
+  });
+});

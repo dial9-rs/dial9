@@ -44,6 +44,7 @@ import { mountViewerSearch } from "./search-overlay.js";
 import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
+import { taskIndexFor } from "./tasks-model.js";
 import type { StoreState } from "../../types/state.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
@@ -102,7 +103,41 @@ function boot(): void {
   if (urlView.eventNames !== undefined) {
     bootPrefs.selectedEventNames = new Set(urlView.eventNames);
   }
+  if (urlView.collapsedRuntimes !== undefined) {
+    bootPrefs.collapsedRuntimes = Object.fromEntries(
+      urlView.collapsedRuntimes.map((name) => [name, true]),
+    );
+  }
+  if (urlView.inspectorWidth !== undefined) bootPrefs.sidebarWidth = urlView.inspectorWidth;
+  if (urlView.lanesHeight !== undefined) bootPrefs.lanesViewportHeight = urlView.lanesHeight;
+  if (urlView.lanesScrollTop !== undefined) bootPrefs.lanesScrollTop = urlView.lanesScrollTop;
+  if (urlView.stacksAsFlamegraph !== undefined) {
+    bootPrefs.stacksAsFlamegraph = urlView.stacksAsFlamegraph;
+  }
   if (Object.keys(bootPrefs).length > 0) store.update("uiPrefs", bootPrefs);
+
+  const viewPatch: Partial<StoreState["view"]> = {};
+  if (urlView.inspectorTab !== undefined) viewPatch.inspectorTab = urlView.inspectorTab;
+  if (urlView.pollSection !== undefined) viewPatch.pollFlamegraphSection = urlView.pollSection;
+  if (urlView.expandedPollGroups !== undefined) {
+    viewPatch.expandedPollGroups = new Set(urlView.expandedPollGroups);
+  }
+  if (urlView.pollWorkerZoom !== undefined) viewPatch.pollWorkerZoom = urlView.pollWorkerZoom;
+  if (urlView.pollOffworkerZoom !== undefined) viewPatch.pollOffworkerZoom = urlView.pollOffworkerZoom;
+  if (urlView.relatedCollapsed !== undefined) {
+    viewPatch.relatedCollapsed = Object.fromEntries(
+      urlView.relatedCollapsed.map((title) => [title, true]),
+    );
+  }
+  if (urlView.relatedExpand !== undefined) viewPatch.relatedExpand = urlView.relatedExpand;
+  if (urlView.relatedCorrelate !== undefined) viewPatch.relatedCorrelate = urlView.relatedCorrelate;
+  if (urlView.regionMode !== undefined) viewPatch.regionMode = urlView.regionMode;
+  if (urlView.regionHeapMode !== undefined) viewPatch.regionHeapMode = urlView.regionHeapMode;
+  if (urlView.regionGroupBy !== undefined) viewPatch.regionGroupBy = urlView.regionGroupBy;
+  if (urlView.regionWorkerZoom !== undefined) viewPatch.regionWorkerZoom = urlView.regionWorkerZoom;
+  if (urlView.regionOffworkerZoom !== undefined) viewPatch.regionOffworkerZoom = urlView.regionOffworkerZoom;
+  if (urlView.spanNavIndex !== undefined) viewPatch.spanNavIndex = urlView.spanNavIndex;
+  if (Object.keys(viewPatch).length > 0) store.update("view", viewPatch);
 
   // Issues-rail restore. Filter/sort/index are plain values (index maps into
   // the trace-derived list once it exists, so setting it now is safe); no part
@@ -114,6 +149,12 @@ function boot(): void {
     poiPatch.sortDir = urlView.poiSort.dir;
   }
   if (urlView.poiIndex !== undefined) poiPatch.index = urlView.poiIndex;
+  if (urlView.railTab !== undefined) poiPatch.railTab = urlView.railTab;
+  if (urlView.taskSort !== undefined) {
+    poiPatch.taskSort = urlView.taskSort.key;
+    poiPatch.taskSortDir = urlView.taskSort.dir;
+  }
+  if (urlView.taskIndex !== undefined) poiPatch.taskIndex = urlView.taskIndex;
   if (Object.keys(poiPatch).length > 0) store.update("poi", poiPatch);
 
   // The URL sync binding, assigned after mount; forward-referenced by the
@@ -227,7 +268,23 @@ function boot(): void {
   // imperatively into the shell's empty inspector aside; re-scopes to the
   // selection in the same action. Registered with the esc-cascade so its
   // content selection clears before the entry's task-selection fallback.
-  const inspector = mountInspector(shell.inspectorRegion, store, { esc, regionPanel });
+  const inspector = mountInspector(shell.inspectorRegion, store, {
+    esc,
+    regionPanel,
+    preserveInitialTab: urlView.inspectorTab !== undefined,
+    preserveInitialPollView:
+      urlView.poll !== undefined &&
+      (urlView.pollSection !== undefined ||
+        urlView.expandedPollGroups !== undefined ||
+        urlView.pollWorkerZoom !== undefined ||
+        urlView.pollOffworkerZoom !== undefined),
+    preserveInitialRelatedView:
+      urlView.pinnedEventTs !== undefined &&
+      (urlView.relatedCollapsed !== undefined ||
+        urlView.relatedExpand !== undefined ||
+        urlView.relatedCorrelate !== undefined),
+    preserveInitialWidth: urlView.inspectorWidth !== undefined,
+  });
 
   // Overview minimap: tier-1 density + POI ticks + a draggable viewport box,
   // filling the shell's minimap host. Drag/click dispatch store viewport
@@ -247,8 +304,21 @@ function boot(): void {
         pinnedEvent: null,
       });
     },
-    // Flush the debounced URL write so copy-link copies the live state.
-    beforeCopyLink: () => urlBinding?.flush(),
+    // Flush the debounced URL write so copy-link copies the live state. Local
+    // files/demo loads have no reproducible source encoded in the URL, so do
+    // not put a misleading link on the clipboard.
+    beforeCopyLink: () => {
+      if (loadChrome?.isSourceShareable() !== true) {
+        toasts.show({
+          id: "copy-unshareable",
+          type: "error",
+          message: "This trace came from a local or demo file; load it from a URL or trace scope to copy a reproducible link.",
+        });
+        return false;
+      }
+      urlBinding?.flush();
+      return true;
+    },
   });
 
   // Initialize the viewport from the trace the moment it loads. Registered
@@ -268,10 +338,13 @@ function boot(): void {
       applied = true;
       unsubUrlRestore();
       if (urlView.viewStart !== undefined && urlView.viewEnd !== undefined) {
-        store.update("viewport", {
-          viewStart: urlView.viewStart,
-          viewEnd: urlView.viewEnd,
-        });
+        const minTs = trace.minTs;
+        const maxTs = trace.maxTs;
+        const viewStart = minTs != null ? Math.max(minTs, urlView.viewStart) : urlView.viewStart;
+        const viewEnd = maxTs != null ? Math.min(maxTs, urlView.viewEnd) : urlView.viewEnd;
+        if (viewEnd > viewStart) {
+          store.update("viewport", { viewStart, viewEnd });
+        }
       }
       // Re-resolve the canvas-selection anchors (span/poll/event/region/
       // spawned) against the loaded trace, plus the task, into one patch.
@@ -298,7 +371,10 @@ function boot(): void {
           }
         }
       }
-      if (urlView.selectedTaskId !== undefined) {
+      if (
+        urlView.selectedTaskId !== undefined &&
+        taskIndexFor(trace).rows.some((row) => row.taskId === urlView.selectedTaskId)
+      ) {
         selPatch.selectedTaskId = urlView.selectedTaskId;
       }
       if (Object.keys(selPatch).length > 0) {
@@ -361,6 +437,7 @@ function boot(): void {
     ...(source.urls.length > 0
       ? { initialUrls: source.urls, initialLabel: source.label }
       : {}),
+    ...(urlView.dataRange !== undefined ? { initialRange: urlView.dataRange } : {}),
   });
   loadChrome = boot;
 
@@ -373,13 +450,14 @@ function boot(): void {
     loadChrome: boot,
     onError: (message) =>
       toasts.show({ id: "load-error", type: "error", message }),
+    ...(urlView.dataRange !== undefined ? { dataRange: urlView.dataRange } : {}),
   });
 
   // Mirror the shareable state INTO the URL as it changes, debounced.
   // Registered last so the boot-time restore above does not fight it; the
   // copy-link button flushes it first (beforeCopyLink) so a copy is current.
   urlBinding = bindViewStateToUrl(store, {
-    slices: ["viewport", "selection", "uiPrefs", "poi"],
+    slices: ["trace", "viewport", "selection", "uiPrefs", "poi", "view"],
     project: projectViewerState,
     mirrorToQuery: mirrorViewerToQuery,
   });

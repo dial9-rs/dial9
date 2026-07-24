@@ -41,6 +41,8 @@ export interface LoadChromeOptions {
   initialUrls?: readonly string[];
   /** Toolbar label for the boot source (shown once it loads). */
   initialLabel?: string;
+  /** Deep-linked parse filter applied to the first URL load. */
+  initialRange?: ReparseRange;
   /** Test seams. */
   document?: Document;
   startLoad?: LoadControllerDeps["startLoad"];
@@ -50,6 +52,8 @@ export interface LoadChromeOptions {
 export interface LoadChrome {
   /** Toolbar "New File" click: the controller runs the confirm. */
   requestNewFile(): void;
+  /** Whether another browser can reload the current trace from this URL. */
+  isSourceShareable(): boolean;
   /** The current source label for the toolbar (updates on each load). */
   currentLabel(): string;
   /**
@@ -65,7 +69,7 @@ export interface LoadChrome {
    * remains true only while this scope load is current.
    */
   scopeLoading(label: string): () => boolean;
-  loadUrls(urls: readonly string[], label: string): void;
+  loadUrls(urls: readonly string[], label: string, range?: ReparseRange): void;
   scopeFailed(): void;
   dispose(): void;
 }
@@ -91,6 +95,8 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
   let controller: LoadController;
   let committedLabel = options.initialLabel ?? "";
   let pendingLabel = options.initialLabel ?? "";
+  let committedShareable = (options.initialUrls?.length ?? 0) > 0;
+  let pendingShareable = committedShareable;
 
   // The file input and the lit-html render target are persistent siblings:
   // lit-html owns the render target's children, so the input lives OUTSIDE it
@@ -105,6 +111,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     fileInput.value = "";
     if (file) {
       pendingLabel = file.name;
+      pendingShareable = false;
       controller.loadFile(file);
     }
   });
@@ -123,6 +130,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     onChange: renderLayer,
     onLoaded: () => {
       committedLabel = pendingLabel;
+      committedShareable = pendingShareable;
     },
     onTiming: (timing) => {
       if (!isLoadPerfEnabled()) return;
@@ -168,6 +176,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     const file = e.dataTransfer?.files[0];
     if (file) {
       pendingLabel = file.name;
+      pendingShareable = false;
       controller.loadFile(file);
     }
   };
@@ -221,6 +230,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
             e.preventDefault();
             e.stopPropagation();
             pendingLabel = "demo-trace.bin";
+            pendingShareable = false;
             controller.loadDemo();
           }}
           >or load demo trace</a
@@ -281,7 +291,11 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
 
   // Boot: auto-load `?trace=` components, else leave the drop zone waiting.
   if (options.initialUrls && options.initialUrls.length > 0) {
-    controller.loadUrls(options.initialUrls, initialUrlLabel(options.initialUrls.length));
+    controller.loadUrls(
+      options.initialUrls,
+      initialUrlLabel(options.initialUrls.length),
+      options.initialRange,
+    );
   }
 
   return {
@@ -291,15 +305,20 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
       pendingLabel = committedLabel;
       controller.requestNewFile();
     },
+    isSourceShareable: () => committedShareable,
     currentLabel: () => committedLabel,
-    reparseToRange: (range) => controller.reparse(range),
+    reparseToRange: (range) => {
+      pendingShareable = committedShareable;
+      controller.reparse(range);
+    },
     scopeLoading: (label) => {
       const token = controller.showLoading(label);
       return () => controller.isCurrentLoad(token);
     },
-    loadUrls: (urls, label) => {
+    loadUrls: (urls, label, range) => {
       pendingLabel = label;
-      controller.loadUrls(urls, label);
+      pendingShareable = true;
+      controller.loadUrls(urls, label, range);
     },
     scopeFailed: () => controller.cancel(),
     dispose(): void {

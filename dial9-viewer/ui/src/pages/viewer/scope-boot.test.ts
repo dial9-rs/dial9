@@ -19,7 +19,11 @@ const TRACE_KEY =
 describe("scope boot", () => {
   it("dispatches the reported s_* viewer URL through browse and into the loader", async () => {
     const events: string[] = [];
-    const loads: Array<{ urls: readonly string[]; label: string }> = [];
+    const loads: Array<{
+      urls: readonly string[];
+      label: string;
+      dataRange?: { startNs?: number; endNs?: number };
+    }> = [];
     const errors: string[] = [];
     let region = "us-east-1";
     let requested = "";
@@ -29,9 +33,9 @@ describe("scope boot", () => {
         events.push(`loading:${label}`);
         return () => true;
       },
-      loadUrls(urls, label) {
+      loadUrls(urls, label, dataRange) {
         events.push("loadUrls");
-        loads.push({ urls, label });
+        loads.push({ urls, label, dataRange });
       },
       scopeFailed() {
         events.push("failed");
@@ -50,6 +54,7 @@ describe("scope boot", () => {
       search: REPORTED_SEARCH,
       hasInlineUrls: false,
       loadChrome,
+      dataRange: { startNs: 1_784_588_999_000_000_000, endNs: 1_784_589_010_000_000_000 },
       onError: (message) => errors.push(message),
       creds,
       fetchJson: async (url) => {
@@ -81,6 +86,10 @@ describe("scope boot", () => {
             encodeURIComponent(TRACE_KEY),
         ],
         label: "Loading trace...",
+        dataRange: {
+          startNs: 1_784_588_999_000_000_000,
+          endNs: 1_784_589_010_000_000_000,
+        },
       },
     ]);
   });

@@ -165,6 +165,11 @@ export function mountLaneInteraction(
         } else {
           // Hand the range to the store; the region panel opens by data
           // present. This also retains the range (blocks kb-selection).
+          store.update("view", {
+            regionMode: null,
+            regionWorkerZoom: [],
+            regionOffworkerZoom: [],
+          });
           store.update("selection", { sidebarRange: { startNs: cmd.startNs, endNs: cmd.endNs } });
         }
         return;

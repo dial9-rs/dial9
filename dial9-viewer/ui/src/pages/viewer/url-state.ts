@@ -10,9 +10,16 @@
 // Range, which reduces the resident data).
 
 import type { ReadonlyState } from "../../store/store.js";
-import type { StoreState, PoiSortKey } from "../../types/state.js";
+import type {
+  StoreState,
+  PoiSortKey,
+  TaskSortKey,
+  InspectorTab,
+  RegionAnalysisMode,
+} from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
+import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
 import { POI_FILTERS } from "./poi.js";
 
 const P_START = "start";
@@ -33,11 +40,53 @@ const P_ISSUE_INDEX = "issue-index";
 const P_SPAN_PCT = "span-pct";
 const P_SPAN_NAMES = "span-names";
 const P_EVENT_NAMES = "event-names";
+const P_RAIL_TAB = "rail";
+const P_TASK_SORT = "task-sort";
+const P_TASK_INDEX = "task-index";
+const P_RUNTIME_COLLAPSED = "runtime-collapsed";
+const P_INSPECTOR_WIDTH = "inspector-width";
+const P_LANES_HEIGHT = "lanes-height";
+const P_LANES_SCROLL = "lanes-scroll";
+const P_STACK_VIEW = "stack-view";
+const P_INSPECTOR_TAB = "inspector";
+const P_POLL_SECTION = "poll-section";
+const P_POLL_EXPANDED = "poll-expanded";
+const P_POLL_WORKER_ZOOM = "poll-worker-zoom";
+const P_POLL_OFFWORKER_ZOOM = "poll-offworker-zoom";
+const P_RELATED_COLLAPSED = "related-collapsed";
+const P_RELATED_EXPAND = "related-expand";
+const P_RELATED_KEY = "related-key";
+const P_RELATED_VALUE = "related-value";
+const P_ANALYSIS = "analysis";
+const P_HEAP_WEIGHT = "heap-weight";
+const P_BLOCKING_GROUP = "blocking-group";
+const P_ANALYSIS_WORKER_ZOOM = "analysis-worker-zoom";
+const P_ANALYSIS_OFFWORKER_ZOOM = "analysis-offworker-zoom";
+const P_SPAN_INDEX = "span-index";
+const P_DATA_START = "data-start";
+const P_DATA_END = "data-end";
 
 /** Valid rail sort keys (drop anything else on read). */
 const POI_SORT_KEYS: readonly PoiSortKey[] = ["worker", "kind", "time", "duration"];
 /** Valid span percentile-filter steps (0/All is the default, never emitted). */
 const SPAN_PCTS: readonly number[] = [50, 90, 95, 99];
+
+/** Stable readable query vocabulary owned only by `/new/viewer.html`. */
+export const VIEWER_VIEW_QUERY_PARAMS: readonly string[] = [
+  P_START, P_END, P_TASK, P_SPAN_FILTER, P_TRACK_ORDER, P_COLLAPSED,
+  P_SPAN, P_SPAN_FOCUS, P_POLL, P_EVENT, P_REGION, P_SPAWNED,
+  P_ISSUE, P_ISSUE_SORT, P_ISSUE_INDEX, P_SPAN_PCT, P_SPAN_NAMES,
+  P_EVENT_NAMES, P_RAIL_TAB, P_TASK_SORT, P_TASK_INDEX,
+  P_RUNTIME_COLLAPSED, P_INSPECTOR_WIDTH, P_LANES_HEIGHT, P_LANES_SCROLL,
+  P_STACK_VIEW, P_INSPECTOR_TAB, P_POLL_SECTION, P_POLL_EXPANDED,
+  P_POLL_WORKER_ZOOM, P_POLL_OFFWORKER_ZOOM, P_RELATED_COLLAPSED,
+  P_RELATED_EXPAND, P_RELATED_KEY, P_RELATED_VALUE, P_ANALYSIS,
+  P_HEAP_WEIGHT, P_BLOCKING_GROUP, P_ANALYSIS_WORKER_ZOOM,
+  P_ANALYSIS_OFFWORKER_ZOOM, P_SPAN_INDEX, P_DATA_START, P_DATA_END,
+];
+const TASK_SORT_KEYS: readonly TaskSortKey[] = ["id", "loc", "polls", "total", "longest", "lifetime"];
+const INSPECTOR_TABS: readonly InspectorTab[] = ["task", "poll", "event", "related", "stack"];
+const REGION_MODES: readonly RegionAnalysisMode[] = ["cpu", "blocking", "heap"];
 
 /** Project the store into the shareable ViewState. */
 export function projectViewerState(state: ReadonlyState<StoreState>): ViewState {
@@ -75,7 +124,7 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   }
   const collapsed = Object.keys(state.uiPrefs.collapsed).filter(
     (id) => state.uiPrefs.collapsed[id] === true,
-  );
+  ).sort();
   if (collapsed.length > 0) vs.collapsed = collapsed;
   if (sel.focusedSpanId !== null) vs.focusedSpanId = sel.focusedSpanId;
   // Issues rail: only the deltas from the resting defaults (filter "sched",
@@ -88,10 +137,74 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (poi.index >= 0) vs.poiIndex = poi.index;
   if (state.uiPrefs.spanPctFilter !== 0) vs.spanPct = state.uiPrefs.spanPctFilter;
   if (state.uiPrefs.selectedSpanNames.size > 0) {
-    vs.spanNames = [...state.uiPrefs.selectedSpanNames];
+    vs.spanNames = [...state.uiPrefs.selectedSpanNames].sort();
   }
   if (state.uiPrefs.selectedEventNames.size > 0) {
-    vs.eventNames = [...state.uiPrefs.selectedEventNames];
+    vs.eventNames = [...state.uiPrefs.selectedEventNames].sort();
+  }
+  if (poi.railTab !== "issues") vs.railTab = poi.railTab;
+  if (poi.taskSort !== "total" || poi.taskSortDir !== "desc") {
+    vs.taskSort = `${poi.taskSort},${poi.taskSortDir}`;
+  }
+  if (poi.taskIndex >= 0) vs.taskIndex = poi.taskIndex;
+
+  const runtimeCollapsed = Object.keys(state.uiPrefs.collapsedRuntimes)
+    .filter((name) => state.uiPrefs.collapsedRuntimes[name] === true)
+    .sort();
+  if (runtimeCollapsed.length > 0) vs.collapsedRuntimes = runtimeCollapsed;
+  if (state.uiPrefs.sidebarWidth !== DEFAULT_INSPECTOR_WIDTH) {
+    vs.inspectorWidth = state.uiPrefs.sidebarWidth;
+  }
+  if (state.uiPrefs.lanesViewportHeight !== DEFAULT_LANES_HEIGHT) {
+    vs.lanesHeight = state.uiPrefs.lanesViewportHeight;
+  }
+  if (state.uiPrefs.lanesScrollTop > 0) vs.lanesScrollTop = state.uiPrefs.lanesScrollTop;
+  if (state.uiPrefs.stacksAsFlamegraph) vs.stackView = "flame";
+
+  const view = state.view;
+  const inferredInspectorTab: InspectorTab =
+    sel.pollDetail !== null
+      ? "poll"
+      : sel.pinnedEvent !== null
+        ? "event"
+        : sel.spawnedTasksRange !== null || sel.sidebarRange !== null
+          ? "stack"
+          : "task";
+  if (view.inspectorTab !== inferredInspectorTab) vs.inspectorTab = view.inspectorTab;
+  if (view.pollFlamegraphSection !== "cpu") vs.pollSection = view.pollFlamegraphSection;
+  if (view.expandedPollGroups.size > 0) {
+    vs.expandedPollGroups = [...view.expandedPollGroups].sort();
+  }
+  if (view.pollWorkerZoom.length > 0) vs.pollWorkerZoom = view.pollWorkerZoom;
+  if (view.pollOffworkerZoom.length > 0) vs.pollOffworkerZoom = view.pollOffworkerZoom;
+  const relatedCollapsed = Object.keys(view.relatedCollapsed)
+    .filter((title) => view.relatedCollapsed[title] === true)
+    .sort();
+  if (relatedCollapsed.length > 0) vs.relatedCollapsed = relatedCollapsed;
+  const relatedExpand = Object.entries(view.relatedExpand)
+    .filter(([, amount]) => amount.before > 0 || amount.after > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([title, amount]) => `${title}\t${amount.before}\t${amount.after}`);
+  if (relatedExpand.length > 0) vs.relatedExpand = relatedExpand;
+  if (view.relatedCorrelate !== null) {
+    vs.relatedCorrelateKey = view.relatedCorrelate.key;
+    vs.relatedCorrelateValue = view.relatedCorrelate.val;
+  }
+  if (view.regionMode !== null) vs.regionMode = view.regionMode;
+  if (view.regionHeapMode !== "bytes") vs.regionHeapMode = view.regionHeapMode;
+  if (view.regionGroupBy !== "leaf") vs.regionGroupBy = view.regionGroupBy;
+  if (view.regionWorkerZoom.length > 0) vs.regionWorkerZoom = view.regionWorkerZoom;
+  if (view.regionOffworkerZoom.length > 0) vs.regionOffworkerZoom = view.regionOffworkerZoom;
+  if (view.spanNavIndex >= 0) vs.spanNavIndex = view.spanNavIndex;
+
+  const trace = state.trace.trace;
+  if (trace !== null) {
+    if (trace.filterStartTime != null && Number.isFinite(trace.filterStartTime)) {
+      vs.dataStart = trace.filterStartTime;
+    }
+    if (trace.filterEndTime != null && Number.isFinite(trace.filterEndTime)) {
+      vs.dataEnd = trace.filterEndTime;
+    }
   }
   return vs;
 }
@@ -117,18 +230,56 @@ export function mirrorViewerToQuery(
   set(params, P_ISSUE_SORT, vs.poiSort ?? null);
   set(params, P_ISSUE_INDEX, vs.poiIndex != null ? String(Math.round(vs.poiIndex)) : null);
   set(params, P_SPAN_PCT, vs.spanPct != null ? String(vs.spanPct) : null);
-  set(params, P_SPAN_NAMES, encodeNames(vs.spanNames));
-  set(params, P_EVENT_NAMES, encodeNames(vs.eventNames));
+  set(params, P_SPAN_NAMES, encodeList(vs.spanNames));
+  set(params, P_EVENT_NAMES, encodeList(vs.eventNames));
+  set(params, P_RAIL_TAB, vs.railTab ?? null);
+  set(params, P_TASK_SORT, vs.taskSort ?? null);
+  set(params, P_TASK_INDEX, finiteString(vs.taskIndex));
+  set(params, P_RUNTIME_COLLAPSED, encodeList(vs.collapsedRuntimes));
+  set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
+  set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
+  set(params, P_LANES_SCROLL, finiteString(vs.lanesScrollTop));
+  set(params, P_STACK_VIEW, vs.stackView ?? null);
+  set(params, P_INSPECTOR_TAB, vs.inspectorTab ?? null);
+  set(params, P_POLL_SECTION, vs.pollSection ?? null);
+  set(params, P_POLL_EXPANDED, encodeList(vs.expandedPollGroups));
+  set(params, P_POLL_WORKER_ZOOM, encodePath(vs.pollWorkerZoom));
+  set(params, P_POLL_OFFWORKER_ZOOM, encodePath(vs.pollOffworkerZoom));
+  set(params, P_RELATED_COLLAPSED, encodeList(vs.relatedCollapsed));
+  set(params, P_RELATED_EXPAND, encodeEntries(vs.relatedExpand));
+  set(params, P_RELATED_KEY, vs.relatedCorrelateKey ?? null);
+  set(params, P_RELATED_VALUE, vs.relatedCorrelateValue ?? null);
+  set(params, P_ANALYSIS, vs.regionMode ?? null);
+  set(params, P_HEAP_WEIGHT, vs.regionHeapMode ?? null);
+  set(params, P_BLOCKING_GROUP, vs.regionGroupBy ?? null);
+  set(params, P_ANALYSIS_WORKER_ZOOM, encodePath(vs.regionWorkerZoom));
+  set(params, P_ANALYSIS_OFFWORKER_ZOOM, encodePath(vs.regionOffworkerZoom));
+  set(params, P_SPAN_INDEX, finiteString(vs.spanNavIndex));
+  set(params, P_DATA_START, finiteString(vs.dataStart));
+  set(params, P_DATA_END, finiteString(vs.dataEnd));
 }
 
 /**
- * Encode a name-chip list into ONE param value: each name percent-encoded
- * (so a name containing a comma survives), joined by ",". Null when empty, so
- * the param is dropped rather than written blank.
+ * Encode arbitrary labels without delimiter ambiguity. `v1:` distinguishes the
+ * modern TAB-separated grammar from the legacy comma/pre-encoded form. Values
+ * are passed to URLSearchParams unescaped so they are encoded exactly once.
  */
-function encodeNames(names?: readonly string[]): string | null {
-  if (names === undefined || names.length === 0) return null;
-  return names.map((n) => encodeURIComponent(n)).join(",");
+function encodeList(values?: readonly string[]): string | null {
+  return values !== undefined && values.length > 0 ? `v1:${values.join("\t")}` : null;
+}
+
+/** Structured Related entries already contain TAB fields, so separate entries
+ * with newline under the same modern marker. */
+function encodeEntries(values?: readonly string[]): string | null {
+  return values !== undefined && values.length > 0 ? `v1:${values.join("\n")}` : null;
+}
+
+function encodePath(path?: readonly string[]): string | null {
+  return path !== undefined && path.length > 0 ? path.join("\t") : null;
+}
+
+function finiteString(value?: number): string | null {
+  return value !== undefined && Number.isFinite(value) ? String(Math.round(value)) : null;
 }
 
 function set(params: URLSearchParams, key: string, value: string | null): void {
@@ -159,6 +310,29 @@ export interface ViewerUrlState {
   spanPct?: number;
   spanNames?: string[];
   eventNames?: string[];
+  railTab?: "issues" | "tasks";
+  taskSort?: { key: TaskSortKey; dir: "asc" | "desc" };
+  taskIndex?: number;
+  collapsedRuntimes?: string[];
+  inspectorWidth?: number;
+  lanesHeight?: number;
+  lanesScrollTop?: number;
+  stacksAsFlamegraph?: boolean;
+  inspectorTab?: InspectorTab;
+  pollSection?: "cpu" | "sched";
+  expandedPollGroups?: string[];
+  pollWorkerZoom?: string[];
+  pollOffworkerZoom?: string[];
+  relatedCollapsed?: string[];
+  relatedExpand?: Record<string, { before: number; after: number }>;
+  relatedCorrelate?: { key: string; val: string };
+  regionMode?: RegionAnalysisMode;
+  regionHeapMode?: "bytes" | "count";
+  regionGroupBy?: "leaf" | "full";
+  regionWorkerZoom?: string[];
+  regionOffworkerZoom?: string[];
+  spanNavIndex?: number;
+  dataRange?: { startNs?: number; endNs?: number };
 }
 
 /** Read the viewer fields from a URL query string. */
@@ -191,7 +365,7 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (poll != null) {
     const colon = poll.indexOf(":");
     const startNs = num(colon > 0 ? poll.slice(0, colon) : poll);
-    const taskId = colon > 0 ? num(poll.slice(colon + 1)) : null;
+    const taskId = colon > 0 ? nonNegativeInt(poll.slice(colon + 1)) : null;
     if (startNs != null && taskId != null) out.poll = { startNs, taskId };
   }
   const event = num(p.get(P_EVENT));
@@ -213,26 +387,152 @@ export function readViewerUrlState(search: string): ViewerUrlState {
       out.poiSort = { key: key as PoiSortKey, dir };
     }
   }
-  const issueIndex = num(p.get(P_ISSUE_INDEX));
-  if (issueIndex != null && issueIndex >= 0) out.poiIndex = Math.round(issueIndex);
+  const issueIndex = nonNegativeInt(p.get(P_ISSUE_INDEX));
+  if (issueIndex != null) out.poiIndex = issueIndex;
   const spanPct = num(p.get(P_SPAN_PCT));
   if (spanPct != null && SPAN_PCTS.includes(spanPct)) out.spanPct = spanPct;
-  const spanNames = decodeNames(p.get(P_SPAN_NAMES));
+  const spanNames = decodeList(p.get(P_SPAN_NAMES));
   if (spanNames != null) out.spanNames = spanNames;
-  const eventNames = decodeNames(p.get(P_EVENT_NAMES));
+  const eventNames = decodeList(p.get(P_EVENT_NAMES));
   if (eventNames != null) out.eventNames = eventNames;
+
+  const rail = p.get(P_RAIL_TAB);
+  if (rail === "issues" || rail === "tasks") out.railTab = rail;
+  const taskSort = sortPair<TaskSortKey>(p.get(P_TASK_SORT), TASK_SORT_KEYS);
+  if (taskSort !== null) out.taskSort = taskSort;
+  const taskIndex = nonNegativeInt(p.get(P_TASK_INDEX));
+  if (taskIndex !== null) out.taskIndex = taskIndex;
+  const collapsedRuntimes = decodeList(p.get(P_RUNTIME_COLLAPSED));
+  if (collapsedRuntimes !== null) out.collapsedRuntimes = collapsedRuntimes;
+  const inspectorWidth = positiveInt(p.get(P_INSPECTOR_WIDTH));
+  if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
+  const lanesHeight = positiveInt(p.get(P_LANES_HEIGHT));
+  if (lanesHeight !== null) out.lanesHeight = lanesHeight;
+  const lanesScrollTop = nonNegativeInt(p.get(P_LANES_SCROLL));
+  if (lanesScrollTop !== null) out.lanesScrollTop = lanesScrollTop;
+  const stackView = p.get(P_STACK_VIEW);
+  if (stackView === "list" || stackView === "flame") {
+    out.stacksAsFlamegraph = stackView === "flame";
+  }
+  const inspectorTab = p.get(P_INSPECTOR_TAB);
+  if (inspectorTab !== null && (INSPECTOR_TABS as readonly string[]).includes(inspectorTab)) {
+    out.inspectorTab = inspectorTab as InspectorTab;
+  }
+  const pollSection = p.get(P_POLL_SECTION);
+  if (pollSection === "cpu" || pollSection === "sched") out.pollSection = pollSection;
+  const expandedPollGroups = decodeList(p.get(P_POLL_EXPANDED));
+  if (expandedPollGroups !== null) out.expandedPollGroups = expandedPollGroups;
+  const pollWorkerZoom = decodePath(p.get(P_POLL_WORKER_ZOOM));
+  if (pollWorkerZoom !== null) out.pollWorkerZoom = pollWorkerZoom;
+  const pollOffworkerZoom = decodePath(p.get(P_POLL_OFFWORKER_ZOOM));
+  if (pollOffworkerZoom !== null) out.pollOffworkerZoom = pollOffworkerZoom;
+  const relatedCollapsed = decodeList(p.get(P_RELATED_COLLAPSED));
+  if (relatedCollapsed !== null) out.relatedCollapsed = relatedCollapsed;
+  const relatedExpandEntries = decodeEntries(p.get(P_RELATED_EXPAND));
+  if (relatedExpandEntries !== null) {
+    const expanded: Record<string, { before: number; after: number }> = {};
+    for (const entry of relatedExpandEntries) {
+      const [title, beforeRaw, afterRaw, ...extra] = entry.split("\t");
+      const before = nonNegativeInt(beforeRaw ?? null);
+      const after = nonNegativeInt(afterRaw ?? null);
+      if (title && extra.length === 0 && before !== null && after !== null) {
+        expanded[title] = { before, after };
+      }
+    }
+    if (Object.keys(expanded).length > 0) out.relatedExpand = expanded;
+  }
+  const relatedKey = p.get(P_RELATED_KEY);
+  const relatedValue = p.get(P_RELATED_VALUE);
+  if (relatedKey && relatedValue !== null) {
+    out.relatedCorrelate = { key: relatedKey, val: relatedValue };
+  }
+  const analysis = p.get(P_ANALYSIS);
+  if (analysis !== null && (REGION_MODES as readonly string[]).includes(analysis)) {
+    out.regionMode = analysis as RegionAnalysisMode;
+  }
+  const heapWeight = p.get(P_HEAP_WEIGHT);
+  if (heapWeight === "bytes" || heapWeight === "count") out.regionHeapMode = heapWeight;
+  const blockingGroup = p.get(P_BLOCKING_GROUP);
+  if (blockingGroup === "leaf" || blockingGroup === "full") out.regionGroupBy = blockingGroup;
+  const regionWorkerZoom = decodePath(p.get(P_ANALYSIS_WORKER_ZOOM));
+  if (regionWorkerZoom !== null) out.regionWorkerZoom = regionWorkerZoom;
+  const regionOffworkerZoom = decodePath(p.get(P_ANALYSIS_OFFWORKER_ZOOM));
+  if (regionOffworkerZoom !== null) out.regionOffworkerZoom = regionOffworkerZoom;
+  const spanNavIndex = nonNegativeInt(p.get(P_SPAN_INDEX));
+  if (spanNavIndex !== null) out.spanNavIndex = spanNavIndex;
+  const dataStart = num(p.get(P_DATA_START));
+  const dataEnd = num(p.get(P_DATA_END));
+  if (dataStart !== null || dataEnd !== null) {
+    if (dataStart === null || dataEnd === null || dataEnd > dataStart) {
+      out.dataRange = {
+        ...(dataStart !== null ? { startNs: dataStart } : {}),
+        ...(dataEnd !== null ? { endNs: dataEnd } : {}),
+      };
+    }
+  }
   return out;
 }
 
-/** Inverse of encodeNames: split on "," and percent-decode each name. Null
- * when empty so an absent/blank param leaves the field unset. */
-function decodeNames(v: string | null): string[] | null {
+/** Decode the modern marked list, falling back to the previously emitted
+ * comma-separated percent-encoded grammar for old links. */
+function decodeList(v: string | null): string[] | null {
   if (v == null || v.length === 0) return null;
-  const names = v
-    .split(",")
-    .map((s) => decodeURIComponent(s))
-    .filter((s) => s.length > 0);
-  return names.length > 0 ? names : null;
+  if (v.startsWith("v1:")) {
+    const values = v.slice(3).split("\t");
+    return values.length > 0 && values.every((value) => value.length > 0) ? values : null;
+  }
+  return decodeLegacyList(v);
+}
+
+function decodeEntries(v: string | null): string[] | null {
+  if (v == null || v.length === 0) return null;
+  if (v.startsWith("v1:")) {
+    const values = v.slice(3).split("\n");
+    return values.length > 0 && values.every((value) => value.length > 0) ? values : null;
+  }
+  return decodeLegacyList(v);
+}
+
+function decodeLegacyList(v: string): string[] | null {
+  try {
+    const values = v
+      .split(",")
+      .map((part) => decodeURIComponent(part))
+      .filter((part) => part.length > 0);
+    return values.length > 0 ? values : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodePath(v: string | null): string[] | null {
+  if (v === null || v.length === 0) return null;
+  const path = v.split("\t");
+  return path.every((part) => part.length > 0) ? path : null;
+}
+
+function sortPair<K extends string>(
+  value: string | null,
+  keys: readonly K[],
+): { key: K; dir: "asc" | "desc" } | null {
+  if (value === null) return null;
+  const comma = value.indexOf(",");
+  const key = comma > 0 ? value.slice(0, comma) : "";
+  const dir = comma > 0 ? value.slice(comma + 1) : "";
+  if (!(keys as readonly string[]).includes(key) || (dir !== "asc" && dir !== "desc")) {
+    return null;
+  }
+  return { key: key as K, dir };
+}
+
+function nonNegativeInt(v: string | null): number | null {
+  const n = num(v);
+  return n !== null && Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+function positiveInt(v: string | null): number | null {
+  const n = nonNegativeInt(v);
+  return n !== null && n > 0 ? n : null;
 }
 
 /** Parse a `"startNs-endNs"` param into a range, or null. */
@@ -247,13 +547,13 @@ function rangePair(v: string | null): { startNs: number; endNs: number } | null 
 }
 
 function num(v: string | null): number | null {
-  if (v === null) return null;
+  if (v === null || !/^-?(?:\d+(?:\.\d+)?|\.\d+)$/.test(v)) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
 function intMaybeHex(v: string | null): number | null {
-  if (v === null) return null;
-  const n = /^0x/i.test(v) ? parseInt(v.slice(2), 16) : Number(v);
-  return Number.isFinite(n) ? n : null;
+  if (v === null || !/^(?:0x[0-9a-f]+|\d+)$/i.test(v)) return null;
+  const n = /^0x/i.test(v) ? Number.parseInt(v.slice(2), 16) : Number(v);
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 0 ? n : null;
 }

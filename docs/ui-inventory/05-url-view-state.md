@@ -14,9 +14,11 @@ journey J9.
 
 ## Carrier and format
 
-View state (what the reader is LOOKING at - not what data is loaded)
-travels in the URL **hash**, as a form-encoded payload with a leading
-version field:
+Shared cross-page view state travels in the URL **hash**. The migrated trace
+viewer additionally owns a readable **query-param projection** for its durable
+analytical state, because those semantic anchors must be constructible and
+inspectable without rendering the UI. The hash remains a form-encoded payload
+with a leading version field:
 
 ```
 #v=1&fg.w=<tab-joined frame path>&tm=abs
@@ -27,10 +29,12 @@ version field:
   `URLSearchParams`, so any value that survives it round-trips.
 - Empty state = **no hash at all** (a pristine page keeps a clean URL,
   the same omit-defaults rule url_state.js uses on the browser page).
-- The hash was chosen over new query params so view state never reaches
-  the server, never collides with backend-read params, and is dropped -
-  by design - by the raw dual-UI switch (T38 maintainer decision: no
-  state porting across UI generations).
+- The hash was chosen for shared cross-page state so it never reaches the
+  server, never collides with backend-read params, and is dropped - by design -
+  by the raw dual-UI switch (T38 maintainer decision: no state porting across
+  UI generations). `/new/viewer.html` is the intentional exception: its
+  additional query params are page-owned, backend-opaque, and preserved across
+  writes so humans and agents can read and construct exact analytical views.
 
 ## Version rules
 
@@ -55,14 +59,14 @@ version field:
 | `v` | live | integer | schema version (`1`) |
 | `fg.w` | live (flamegraph page) | frame names joined by TAB (`%09`), root -> target | worker-tree zoom path (legacy `worker-zoom` format, features/03 F150) |
 | `fg.o` | live (flamegraph page) | same | off-worker-tree zoom path |
-| `tm` | defined, unwritten | `rel` \| `abs` | clock display mode (viewer E1); no migrated page has the control yet - the chunk-2 viewer writes it |
-| `tz` | defined, unwritten | `utc` \| `local` | timezone for absolute timestamps (viewer E2); meaningful with `tm=abs` |
-| `vp` | reserved (chunk 2) | suggested `<startNs>-<endNs>` | viewport time window (ViewportSlice) |
-| `sel.*` | reserved (chunk 2) | per field | selection slice (e.g. `sel.task`, `sel.span`, `sel.event`) |
-| `poi` | reserved (chunk 2) | TBD | POI position for n/p stepping |
+| `tm` | live (new viewer) | `rel` \| `abs` | clock display mode (viewer E1) |
+| `tz` | live (new viewer) | `utc` \| `local` | timezone for absolute timestamps (viewer E2); meaningful with `tm=abs` |
+| `vp` | reserved hash name | suggested `<startNs>-<endNs>` | not emitted or restored from hash; the new viewer owns readable query `start`/`end` instead |
+| `sel.*` | reserved hash names | per field | not emitted or restored from hash; the new viewer owns readable query selection anchors instead |
+| `poi` | reserved hash name | TBD | not emitted or restored from hash; issues/task cursors are page-owned query params |
 
-Reserved rows claim the NAME only; the implementing ticket defines the
-exact value grammar here when it lands. Grammar rules for new keys:
+Reserved hash rows claim the NAME only. The new viewer's query implementation
+does not activate or reinterpret them. Grammar rules for future hash keys:
 values must round-trip `URLSearchParams` (they do, for any string); path-
 like values reuse the TAB-join convention, which means TAB cannot appear
 inside a component (the legacy zoom params' own limitation). `timeMode`/
@@ -108,11 +112,28 @@ links must keep working, on both page generations:
 | flamegraph exact mode | `trace`, `start`, `end`, `svc`, `host`, `segs`, `from`, `to` (query) | page-owned LOAD SCOPE, read-only, preserved verbatim by every codec write |
 | flamegraph exact mode | `worker-zoom`, `offworker-zoom` (query) | legacy view state; codec-mirrored (see precedence above) |
 | flamegraph api mode | `api`, `data_dir`, `bucket`, `prefix`, `service`, `host`*, `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`, `max_files` (query) | page-owned scope/facets, `pushState` on Apply/facet change (F180); canvas zoom NOT URL-synced in this mode by legacy design - the codec stays out |
+| migrated trace viewer (`new/viewer.html`) | viewport, selection, filters, rail/cursors, runtime folds, layout/lanes, inspector/disclosures/correlation, region modes, embedded zoom paths, and `data-start`/`data-end` (query) | page-owned readable durable state in `src/pages/viewer/url-state.ts`; the exact registry is `VIEWER_VIEW_QUERY_PARAMS` and is contract-pinned to the README table. Defaults omitted, unordered values sorted, invalid known values dropped, unknown params preserved, and settled updates use debounced `replaceState`. `start`/`end` are viewport bounds; `data-start`/`data-end` are parse bounds. |
 | all pages | `ui` (query) | ui-switch.js (T38); the switch preserves the query minus `ui` and DROPS the hash (raw switch, recorded maintainer policy) |
 | all migrated pages | the hash | this codec, exclusively - EXCEPT foreign hashes, which are left alone |
 
 The machine-usable form of the flamegraph rows (with inventory anchors)
 is `src/lib/url/legacy-params.fixture.ts`.
+
+## Durable versus transient viewer state
+
+The migrated viewer serializes settled state that changes the durable
+analytical view: semantic selections, visible windows and parse bounds, active
+analytical surfaces, filters/sorts/cursors, disclosures, layout, lane position,
+and embedded flamegraph zoom paths. It deliberately excludes pointer hover and
+tooltips, in-flight drag/keyboard gestures, temporary search/help modals, load
+progress/timers, toasts/check flashes, and zoom undo history. These values are
+interaction process, not the resulting analytical view.
+
+Trace-dependent anchors are restored only after the first trace load. An anchor
+that does not exist in the loaded trace is ignored without invalidating other
+URL state. Local-file bytes are not carried by the URL, so only URL/scope-backed
+trace sources are shareable across machines. Copy Link refuses local-file and
+demo sources rather than copying a URL that cannot reproduce the loaded data.
 
 ## Extending in chunk 2 (checklist)
 

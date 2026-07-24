@@ -114,11 +114,10 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     null;
   // The buckets last painted, for canvas hit-testing (click, hover).
   let lastHits: readonly SpanDrawBucket[] = [];
-  // Nav: the filtered match list + cursor, rebuilt when the filter or trace
-  // changes; the cursor is ephemeral track state (not the store).
+  // Nav: the filtered match list is cached; its user-visible cursor lives in
+  // state.view so it is deep-linkable.
   let navMatches: { data: SpanTrackData; key: string; spans: TracingSpan[] } | null =
     null;
-  let navIndex = -1;
   // One tooltip element for hover, created lazily.
   let tooltipEl: HTMLDivElement | null = null;
   let sizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
@@ -200,11 +199,11 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
   // ── Store dispatch helpers ─────────────────────────────────────────────
 
   function setFilterText(text: string): void {
-    navIndex = -1;
+    store.update("view", { spanNavIndex: -1 });
     store.update("uiPrefs", { spanFilter: text });
   }
   function setPctFilter(pct: number): void {
-    navIndex = -1;
+    store.update("view", { spanNavIndex: -1 });
     store.update("uiPrefs", { spanPctFilter: pct });
   }
   function toggleName(name: string): void {
@@ -212,11 +211,11 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     const next = new Set(cur);
     if (next.has(name)) next.delete(name);
     else next.add(name);
-    navIndex = -1;
+    store.update("view", { spanNavIndex: -1 });
     store.update("uiPrefs", { selectedSpanNames: next });
   }
   function clearNames(): void {
-    navIndex = -1;
+    store.update("view", { spanNavIndex: -1 });
     store.update("uiPrefs", { selectedSpanNames: new Set<string>() });
   }
 
@@ -259,7 +258,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     const s = state();
     const matches = getNavMatches(data, filterState(s));
     if (matches.length === 0) return;
-    navIndex = (((navIndex + delta) % matches.length) + matches.length) % matches.length;
+    const navIndex = (((s.view.spanNavIndex + delta) % matches.length) + matches.length) % matches.length;
     const span = matches[navIndex]!;
     const spanDur = span.end - span.start;
     const viewDur = Math.max(spanDur * 10, 1e6);
@@ -267,6 +266,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     const viewStart = Math.max(minTs, span.start - viewDur * 0.3);
     const viewEnd = Math.min(maxTs, viewStart + viewDur);
     store.update("viewport", { viewStart, viewEnd });
+    store.update("view", { spanNavIndex: navIndex });
     store.update("selection", {
       spanFocus: { spanId: span.spanId, chain: spanFocusChain(span.spanId, data) },
     });
@@ -367,8 +367,8 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     const active = isFilterActive(filter);
     const countText = !active
       ? ""
-      : navIndex >= 0
-        ? `${navIndex + 1}/${matches.length}`
+      : s.view.spanNavIndex >= 0
+        ? `${Math.min(s.view.spanNavIndex, Math.max(0, matches.length - 1)) + 1}/${matches.length}`
         : matches.length > 0
           ? `${matches.length} matches`
           : "";

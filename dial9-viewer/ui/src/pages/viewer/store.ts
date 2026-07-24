@@ -61,6 +61,7 @@ export function initialViewerState(): StoreState {
       collapsedRuntimes: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       lanesViewportHeight: DEFAULT_LANES_HEIGHT,
+      lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
       // Span filter resting state: no text, no percentile floor.
@@ -73,6 +74,22 @@ export function initialViewerState(): StoreState {
       // Stack lists start as lists; the toggle in the poll/blocking views flips
       // this and it persists across selections.
       stacksAsFlamegraph: false,
+    },
+    view: {
+      inspectorTab: "task",
+      expandedPollGroups: new Set<string>(),
+      pollFlamegraphSection: "cpu",
+      pollWorkerZoom: [],
+      pollOffworkerZoom: [],
+      relatedCollapsed: {},
+      relatedExpand: {},
+      relatedCorrelate: null,
+      regionMode: null,
+      regionHeapMode: "bytes",
+      regionGroupBy: "leaf",
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+      spanNavIndex: -1,
     },
     transient: {
       mouseNs: null,

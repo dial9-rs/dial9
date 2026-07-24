@@ -181,7 +181,7 @@ export interface LoadController {
   /** Load a dropped/picked file via an object URL. */
   loadFile(file: Blob & { name?: string }): void;
   /** Load one or more URLs (boot `?trace=`). `label` is the initial label. */
-  loadUrls(urls: readonly string[], label: string): void;
+  loadUrls(urls: readonly string[], label: string, range?: ReparseRange): void;
   /**
    * Show the loading view without starting a load, for the async gap while a
    * boot `s_*` scope is resolved to its URLs. The caller follows with loadUrls
@@ -432,8 +432,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         objectUrl,
       });
     },
-    loadUrls(urls, label): void {
-      begin(urls, { label, withHeaders: true, objectUrl: null });
+    loadUrls(urls, label, range): void {
+      begin(urls, { label, withHeaders: true, objectUrl: null, range });
     },
     showLoading(label): number {
       // Show the loading view WITHOUT starting a worker load, for the async

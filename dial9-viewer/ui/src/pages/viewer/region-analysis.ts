@@ -93,21 +93,31 @@ export function createRegionAnalysis(
     s.trace.trace ? deriveLaneData(s.trace.trace) : null,
   );
 
-  // ── local UI state ──────────────────────────────────────────────────────
-  let mode: RegionMode | null = null;
-  let pendingMode: RegionMode | null = null; // set by a toolbar open
-  let heapMode: "bytes" | "count" = "bytes";
-  let groupBy: "leaf" | "full" = "leaf";
-  let showExtent: TimeRange | null = null; // extent for the current zoom
+  // ── durable UI state mirrors ───────────────────────────────────────────
+  // The store is authoritative; locals are render caches used by this
+  // imperative controller and are refreshed by its `view` subscription.
+  let mode: RegionMode | null = store.getState().view.regionMode;
+  let heapMode: "bytes" | "count" = store.getState().view.regionHeapMode;
+  let groupBy: "leaf" | "full" = store.getState().view.regionGroupBy;
+  let showExtent: TimeRange | null = null; // derived from the current zoom
   let lastRangeKey: string | null = null;
+  let applyingView = false;
 
   // ── widget lifecycle (lazy, single instance reused) ─────────────────────
-  // The container/instance/ResizeObserver/appliedSig discipline lives in the
-  // shared host helper (the inspector hosts a second instance the same way).
   const fg = createFlamegraphHost({
     doc: deps.inspectorHost.ownerDocument,
     className: "d9-region-fg",
-    onZoom: onZoomChange,
+    onZoom: () => {
+      if (applyingView) return;
+      const path = fg.instance()?.getZoomPath();
+      if (path !== undefined) {
+        store.update("view", {
+          regionWorkerZoom: path.worker,
+          regionOffworkerZoom: path.offworker,
+        });
+      }
+      onZoomChange();
+    },
   });
   let computedView: ComputedView = { kind: "empty" };
   let computedSig: string | null = null;
@@ -231,11 +241,12 @@ export function createRegionAnalysis(
       // toolbar's forced kind, else the data-present default (reset to the
       // default on each fresh region, not the previous mode).
       lastRangeKey = key;
-      mode = pendingMode ?? defaultRegionMode(present);
-      pendingMode = null;
+      mode = state().view.regionMode ?? defaultRegionMode(present);
+      if (mode !== state().view.regionMode) store.update("view", { regionMode: mode });
       showExtent = null;
     } else if (mode !== null && !present[mode]) {
       mode = defaultRegionMode(present);
+      store.update("view", { regionMode: mode });
     }
 
     const coverage = regionCoverage(state().segments, range);
@@ -304,6 +315,33 @@ export function createRegionAnalysis(
       instance.setData(computedView.samples, trace.callframeSymbols, {
         exportTitle: `Blocking calls - ${regionTitle(range)}`,
         runtimeWorkers: trace.runtimeWorkers,
+      });
+    }
+    const view = state().view;
+    applyingView = true;
+    try {
+      instance.applyViewState(
+        {
+          ...(view.regionWorkerZoom.length > 0
+            ? { workerZoom: view.regionWorkerZoom }
+            : {}),
+          ...(view.regionOffworkerZoom.length > 0
+            ? { offworkerZoom: view.regionOffworkerZoom }
+            : {}),
+        },
+        { silent: true },
+      );
+    } finally {
+      applyingView = false;
+    }
+    const actual = instance.getZoomPath();
+    if (
+      actual.worker.join("\t") !== view.regionWorkerZoom.join("\t") ||
+      actual.offworker.join("\t") !== view.regionOffworkerZoom.join("\t")
+    ) {
+      store.update("view", {
+        regionWorkerZoom: actual.worker,
+        regionOffworkerZoom: actual.offworker,
       });
     }
   }
@@ -567,18 +605,29 @@ export function createRegionAnalysis(
     if (m === mode) return;
     mode = m;
     showExtent = null;
+    store.update("view", {
+      regionMode: m,
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+    });
     sync();
   }
 
   function setHeapMode(m: "bytes" | "count"): void {
     if (m === heapMode) return;
     heapMode = m;
+    store.update("view", {
+      regionHeapMode: m,
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+    });
     sync();
   }
 
   function onGroupByChange(e: Event): void {
     const v = (e.target as HTMLSelectElement).value;
     groupBy = v === "full" ? "full" : "leaf";
+    store.update("view", { regionGroupBy: groupBy });
     sync();
   }
 
@@ -636,7 +685,12 @@ export function createRegionAnalysis(
     // The whole-trace analysis reuses the retained-region mechanism so the Stack
     // tab activates and the analyzed scope is boxed; the forced kind opens the
     // requested analysis even when other data is present.
-    pendingMode = kind;
+    mode = kind;
+    store.update("view", {
+      regionMode: kind,
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+    });
     store.update("selection", {
       sidebarRange: { startNs: vp.minTs, endNs: vp.maxTs },
       pinnedEvent: null,
@@ -647,7 +701,14 @@ export function createRegionAnalysis(
 
   // Own subscription: viewport + segments drive the badge/extent (the inspector
   // re-renders on trace/selection/uiPrefs and calls sync too).
-  const unsubscribe = store.subscribe(["viewport", "segments"], () => sync());
+  const unsubscribe = store.subscribe(["viewport", "segments", "view"], (s, changed) => {
+    if (changed.has("view")) {
+      mode = s.view.regionMode;
+      heapMode = s.view.regionHeapMode;
+      groupBy = s.view.regionGroupBy;
+    }
+    sync();
+  });
 
   return {
     sync,
