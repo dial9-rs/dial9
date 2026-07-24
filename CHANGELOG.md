@@ -83,8 +83,9 @@ memory profiling) into `dial9-core` / `dial9-perf-self-profile` with their publi
 Custom processors gain `SegmentProcessor::finalize_dump` and `ProcessError::into_parts`.
 
 Profiling features (`cpu-profiling`, `memory-profiling`, `process-resource`, `linux-socket`) are
-now standalone sources that no longer pull in `tokio`: they auto-wire when `tokio` is on, and the
-facade defaults to `["cli"]` so `cargo install dial9` still works. 
+now standalone sources that no longer pull in `tokio`: they auto-wire when `tokio` is on. The
+facade ships no default features, so a `dial9` library dependency pulls no viewer or CLI weight;
+install the CLI with `cargo install dial9 --features cli`. 
 One behavior flip to watch on upgrade: process resource usage (rusage) sampling is now opt-in behind the `process-resource`
 feature. It was on by default on Unix, so Unix users stop getting rss / page-fault events until
 they enable it.

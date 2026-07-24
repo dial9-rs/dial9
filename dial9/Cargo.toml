@@ -39,7 +39,7 @@ bon = { version = "3", optional = true }
 tracing = { version = "0.1.44", optional = true }
 
 [features]
-default = ["cli"]
+default = []
 
 ## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
 cli = ["dep:dial9-viewer", "dep:anyhow"]
