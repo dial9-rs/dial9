@@ -56,8 +56,8 @@
 //! comparable to the cost of a single poll event, so the layer is suitable
 //! for production use with appropriate span filtering.
 
+use crate::span::SpanCloseEvent;
 use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
-use dial9_trace_format::TraceEvent;
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
@@ -67,14 +67,6 @@ use std::sync::Mutex;
 use tracing::callsite::Identifier;
 use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
-
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-struct SpanCloseEvent {
-    #[traceevent(timestamp)]
-    timestamp_ns: u64,
-    span_id: u64,
-}
 
 // ── Per-callsite schema cache ───────────────────────────────────────────────
 

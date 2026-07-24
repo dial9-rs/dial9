@@ -1743,6 +1743,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1849,6 +1851,8 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tower-layer",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
 ]

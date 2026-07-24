@@ -98,6 +98,10 @@ unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 ## Tracing-subscriber layer emitting span events into dial9 traces.
 tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
 
+## Ad-hoc span tower middleware (`span::Dial9SpanLayer`). The core span
+## wrappers are always available; this only adds the tower integration.
+tower = ["tokio", "dial9-tokio-telemetry/tower"]
+
 ## Trace file reading + analysis toolkit (offline decode).
 analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
 
@@ -123,6 +127,7 @@ dial9 = { path = ".", features = [
     "process-resource",
     "linux-socket",
     "tracing-layer",
+    "tower",
     "unstable-events",
     "worker-s3",
 ] }
@@ -137,6 +142,8 @@ tokio = { version = "1", features = [
     "test-util",
 ] }
 tempfile = "3"
+tower-layer = "0.3"
+tower-service = "0.3"
 flate2 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 metrique = { version = "0.1.23", features = ["local-format"] }
@@ -261,3 +268,7 @@ required-features = ["tokio", "cpu-profiling", "analysis"]
 [[example]]
 name = "kernel_sched_events"
 required-features = ["tokio", "cpu-profiling", "analysis"]
+
+[[example]]
+name = "adhoc_spans"
+required-features = ["tokio"]

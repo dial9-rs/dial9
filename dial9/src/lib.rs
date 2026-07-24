@@ -127,3 +127,8 @@ pub mod socket {
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
 pub use dial9_tokio_telemetry::tracing_layer;
+
+/// Ad-hoc span wrappers (sync guard, future wrapper, tower layer) that emit
+/// span events directly into a dial9 trace with no `tracing` subscriber.
+#[cfg(feature = "tokio")]
+pub use dial9_tokio_telemetry::span;
