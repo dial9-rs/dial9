@@ -1125,6 +1125,21 @@
         const toEpoch = Math.floor(to.getTime() / 1000);
         const keyPrefix = !serverHasPrefix ? prefixInput.value.trim() : '';
         const requested = serviceInput.value.trim();
+        if (requested) {
+            // A service in the URL is an exact navigation target, not a hint to
+            // validate through discovery. Discovery intentionally scans only a
+            // recent subset and can therefore omit a valid, quiet service.
+            availableServices = [requested];
+            availableServiceMetadata = new Map();
+            renderServiceTabs();
+            setBrowseWarning(null);
+            browseStatus.textContent = 'Loading service…';
+            browseStatus.className = 'status';
+            browseStatus.style.display = '';
+            syncUrl();
+            await doTimeRangeSearch();
+            return;
+        }
         resetBrowsePane(false);
         browseStatus.textContent = 'Finding services…';
 
