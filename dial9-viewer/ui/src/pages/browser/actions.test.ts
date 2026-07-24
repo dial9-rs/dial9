@@ -42,7 +42,8 @@ describe("URL service loading", () => {
           state.service ? `service=${encodeURIComponent(state.service)}` : "",
       },
     });
-    const fetchMock = vi.fn(async () => browseResponse());
+    // Typed arg so mock.calls[n][0] (the request URL) is indexable (TS2493).
+    const fetchMock = vi.fn(async (_url: string) => browseResponse());
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("alert", vi.fn());
 
