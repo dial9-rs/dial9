@@ -11,6 +11,9 @@ categories = ["asynchronous", "development-tools::profiling"]
 
 [package.metadata.docs.rs]
 all-features = true
+# `--all-features` turns on `taskdump`, which requires `--cfg tokio_unstable`.
+rustdoc-args = ["--cfg", "tokio_unstable"]
+rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ target }-v{ version }{ archive-suffix }"
@@ -20,6 +23,10 @@ bin-dir = "dial9{ binary-ext }"
 [[bin]]
 name = "dial9"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli_trace_shape"
 required-features = ["cli"]
 
 [dependencies]
@@ -39,7 +46,7 @@ bon = { version = "3", optional = true }
 tracing = { version = "0.1.44", optional = true }
 
 [features]
-default = ["cli"]
+default = []
 
 ## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
 cli = ["dep:dial9-viewer", "dep:anyhow"]

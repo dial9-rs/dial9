@@ -693,8 +693,8 @@ For custom upload destinations or post-processing (e.g. shipping to a different 
 Pre-built binaries are available from [GitHub Releases](https://github.com/dial9-rs/dial9/releases) for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
 
 ```bash
-# From source via crates.io
-cargo install --locked dial9
+# From source via crates.io (the viewer/CLI is behind the `cli` feature)
+cargo install --locked dial9 --features cli
 
 # Or with cargo-binstall (downloads a pre-built binary, faster)
 cargo binstall dial9

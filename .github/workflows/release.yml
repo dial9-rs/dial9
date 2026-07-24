@@ -134,9 +134,16 @@ jobs:
         shell: bash
         run: npm ci && npm run build
 
-      - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer -p dial9
+      - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer -p dial9 --features dial9/cli
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
+
+      - name: Smoke-test the dial9 binary
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/dial9"
+          [ "${{ matrix.archive }}" = "zip" ] && bin="${bin}.exe"
+          "$bin" --help
 
       - name: Determine tag and version
         id: version
