@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum_core_0_4::{body::Body, extract::Request, response::Response};
-use dial9_tokio_telemetry::telemetry::{Dial9Handle, clock_monotonic_ns};
+use dial9_core::{clock::clock_monotonic_ns, handle::Dial9Handle};
 use futures_util::FutureExt as _;
 use hyper::body::Incoming;
 use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
@@ -13,9 +13,7 @@ use tokio::{net::TcpListener, sync::watch};
 use tower::ServiceExt as _;
 use tower_service::Service;
 
-use super::{
-    ConnectionAccepted, ConnectionClosed, CurrentDial9Executor, Executor, HyperExecutor, elapsed_us,
-};
+use super::{ConnectionAccepted, ConnectionClosed, Executor, HyperExecutor, elapsed_us};
 
 /// The connection information passed to the make-service.
 ///
@@ -54,14 +52,14 @@ where
     Serve {
         listener,
         make_service,
-        executor: CurrentDial9Executor,
+        executor: (),
         _marker: PhantomData,
     }
 }
 
 /// A traced Axum 0.7 server.
-#[must_use = "servers must be awaited"]
-pub struct Serve<M, S, E = CurrentDial9Executor> {
+#[must_use = "servers must be given an executor and awaited"]
+pub struct Serve<M, S, E = ()> {
     listener: TcpListener,
     make_service: M,
     executor: E,
@@ -69,7 +67,7 @@ pub struct Serve<M, S, E = CurrentDial9Executor> {
 }
 
 impl<M, S, E> Serve<M, S, E> {
-    /// Use `executor` instead of resolving dial9 from the current runtime.
+    /// Use `executor` to spawn connection and Hyper tasks.
     pub fn with_executor<E2>(self, executor: E2) -> Serve<M, S, E2>
     where
         E2: Executor,
@@ -120,8 +118,8 @@ where
 }
 
 /// A traced Axum 0.7 server with graceful shutdown.
-#[must_use = "servers must be awaited"]
-pub struct WithGracefulShutdown<M, S, F, E = CurrentDial9Executor> {
+#[must_use = "servers must be given an executor and awaited"]
+pub struct WithGracefulShutdown<M, S, F, E = ()> {
     listener: TcpListener,
     make_service: M,
     signal: F,
@@ -130,7 +128,7 @@ pub struct WithGracefulShutdown<M, S, F, E = CurrentDial9Executor> {
 }
 
 impl<M, S, F, E> WithGracefulShutdown<M, S, F, E> {
-    /// Use `executor` instead of resolving dial9 from the current runtime.
+    /// Use `executor` to spawn connection and Hyper tasks.
     pub fn with_executor<E2>(self, executor: E2) -> WithGracefulShutdown<M, S, F, E2>
     where
         E2: Executor,

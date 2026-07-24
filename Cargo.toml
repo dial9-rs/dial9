@@ -8,7 +8,6 @@ members = [
     "dial9-macro",
     "dial9-viewer",
     "dial9",
-    "dial9-util",
     "dial9-utils",
     "perf-self-profile",
     "examples/metrics-service",

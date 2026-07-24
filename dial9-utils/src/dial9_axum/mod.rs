@@ -4,9 +4,14 @@
 //! `axum::serve(listener, service)` with this module's `serve` function:
 //!
 //! ```ignore
-//! use dial9_util::dial9_axum::axum_0_8;
+//! use dial9::Dial9TokioHandle;
+//! use dial9_utils::dial9_axum::axum_0_8;
 //!
+//! let handle = Dial9TokioHandle::current();
 //! axum_0_8::serve(listener, app.into_make_service())
+//!     .with_executor(move |future| {
+//!         handle.spawn(future);
+//!     })
 //!     .with_graceful_shutdown(shutdown_signal())
 //!     .await?;
 //! ```
@@ -29,20 +34,21 @@
 //!     .await?;
 //! ```
 //!
-//! The custom executor controls task instrumentation. Connection lifecycle
-//! events continue to use the dial9 version linked by `dial9-util`.
+//! The executor controls task instrumentation and is required to avoid coupling
+//! `dial9-utils` to a particular async runtime integration. Connection lifecycle
+//! events use the `dial9-core` version linked by `dial9-utils`.
 
 use std::{future::Future, pin::Pin};
 
-use dial9_tokio_telemetry::telemetry::{Dial9TokioHandle, Encodable, ThreadLocalEncoder};
+use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_trace_format::{InternedString, TraceEvent};
 
 /// Axum 0.7 support.
-#[cfg(feature = "axum-0-7")]
+#[cfg(feature = "axum-07")]
 pub mod axum_0_7;
 
 /// Axum 0.8 support.
-#[cfg(feature = "axum-0-8")]
+#[cfg(feature = "axum-08")]
 pub mod axum_0_8;
 
 /// A boxed task accepted by an [`Executor`].
@@ -73,16 +79,6 @@ where
 {
     fn execute(&self, future: BoxFuture) {
         self(future);
-    }
-}
-
-/// The default executor, which resolves dial9 from the current runtime.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CurrentDial9Executor;
-
-impl Executor for CurrentDial9Executor {
-    fn execute(&self, future: BoxFuture) {
-        Dial9TokioHandle::current().spawn(future);
     }
 }
 

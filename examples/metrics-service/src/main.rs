@@ -359,7 +359,10 @@ fn main() -> std::io::Result<()> {
                     }
                 });
 
-                dial9_util::dial9_axum::axum_0_8::serve(listener, app.into_make_service())
+                dial9_utils::dial9_axum::axum_0_8::serve(listener, app.into_make_service())
+                    .with_executor(move |future| {
+                        handle.spawn(future);
+                    })
                     .with_graceful_shutdown(async move { shutdown.cancelled().await })
                     .await
                     .unwrap();

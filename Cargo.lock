@@ -1932,25 +1932,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dial9-util"
-version = "0.1.0"
-dependencies = [
- "axum 0.7.9",
- "axum 0.8.9",
- "axum-core 0.4.5",
- "axum-core 0.5.6",
- "dial9-tokio-telemetry",
- "dial9-trace-format",
- "futures-util",
- "hyper",
- "hyper-util",
- "tokio",
- "tower",
- "tower-service",
- "tracing",
-]
-
-[[package]]
 name = "dial9-utils"
 version = "0.5.0-rc0"
 dependencies = [
@@ -1958,10 +1939,18 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
+ "axum 0.7.9",
+ "axum 0.8.9",
+ "axum-core 0.4.5",
+ "axum-core 0.5.6",
  "bon",
  "dial9-core",
+ "dial9-trace-format",
  "flate2",
+ "futures-util",
  "hostname",
+ "hyper",
+ "hyper-util",
  "s3s",
  "s3s-aws",
  "s3s-fs",
@@ -1970,6 +1959,8 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tower",
+ "tower-service",
  "tracing",
 ]
 
@@ -3202,7 +3193,7 @@ dependencies = [
  "axum 0.8.9",
  "clap",
  "dial9",
- "dial9-util",
+ "dial9-utils",
  "hostname",
  "libc",
  "metrique",
