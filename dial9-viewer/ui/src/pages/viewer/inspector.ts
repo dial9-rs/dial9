@@ -14,8 +14,9 @@
 //
 // The heavy derivations are the pure inspector-model plus consumed contracts:
 // the Task-tab derivation, transient.atCursor (readout), selection.pinnedEvent
-// (Event/Related KV), and selection.spawnedTasksRange + computeSpawnedTasks.
-// Trace-invariant lookups are cached in a store.derived over the trace slice.
+// (Event/Related KV), selection.taskDump (async-stack flamegraph), and
+// selection.spawnedTasksRange + computeSpawnedTasks. Trace-invariant lookups
+// are cached in a store.derived over the trace slice.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
@@ -45,6 +46,7 @@ import {
   buildSpawnedTasksView,
   hasNoSelection,
   preferredTab,
+  resolveTaskDumpCaptures,
   tabAvailability,
   type FrameLine,
   type InspectorTab,
@@ -165,6 +167,20 @@ export function mountInspector(
     doc: host.ownerDocument,
     className: "d9-poll-fg",
   });
+  const taskDumpFg = createFlamegraphHost({
+    doc: host.ownerDocument,
+    className: "d9-task-dump-fg",
+  });
+  const traceIds = new WeakMap<object, number>();
+  let nextTraceId = 1;
+  function traceId(trace: StoreState["trace"]["trace"]): number {
+    if (trace === null) return 0;
+    const existing = traceIds.get(trace);
+    if (existing !== undefined) return existing;
+    const id = nextTraceId++;
+    traceIds.set(trace, id);
+    return id;
+  }
   // Related tab UI state; reset when the detail event changes.
   let relatedUi: RelatedUiState = { collapsed: {}, expand: {}, correlate: null };
   let lastDetailEventRef: CustomTraceEvent | null = null;
@@ -191,6 +207,9 @@ export function mountInspector(
     return [
       sel.selectedTaskId ?? "-",
       sel.pollDetail ? `${sel.pollDetail.start}-${sel.pollDetail.end}` : "-",
+      sel.taskDump
+        ? `${sel.taskDump.taskId}:${sel.taskDump.timestamps.join(",")}`
+        : "-",
       sel.pinnedEvent ? `${sel.pinnedEvent.timestamp}:${sel.pinnedEvent.events.length}` : "-",
       sel.pinnedEvent?.detailEvent ? sel.pinnedEvent.detailEvent.timestamp : "-",
       sel.spawnedTasksRange ? `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}` : "-",
@@ -271,6 +290,9 @@ export function mountInspector(
     // Same, for the Poll tab's flamegraph: the host node exists only after the
     // render above.
     syncPollFlamegraph(s);
+    // A task-dump click also renders a flamegraph in the Stack tab from the
+    // selection stored by the task-detail track.
+    syncTaskDumpFlamegraph(s);
   }
 
   /** Readout-only render (transient channel; the at-moment surface). */
@@ -354,6 +376,10 @@ export function mountInspector(
       return p.events.length > 1
         ? `Cluster of ${p.events.length} events selected`
         : `Event ${p.name} selected`;
+    }
+    if (sel.taskDump !== null) {
+      const count = sel.taskDump.timestamps.length;
+      return `Task dump trace selected · ${count} capture${count === 1 ? "" : "s"}`;
     }
     if (sel.spawnedTasksRange !== null) return "Spawn-range selected";
     if (sel.sidebarRange !== null) return "Region selected";
@@ -612,6 +638,38 @@ export function mountInspector(
     });
   }
 
+  function syncTaskDumpFlamegraph(s: StoreState): void {
+    const selected = s.selection.taskDump;
+    if (activeTab !== "stack" || selected === null) {
+      taskDumpFg.detach();
+      return;
+    }
+    const hostEl = host.querySelector<HTMLElement>("[data-task-dump-fg-host]");
+    if (hostEl === null) {
+      taskDumpFg.detach();
+      return;
+    }
+    const dumps = resolveTaskDumpCaptures(s.trace.trace, selected);
+    const samples = dumps.map((dump) => ({
+      callchain: dump.callchain,
+      workerId: 0,
+    }));
+    if (samples.length === 0) {
+      taskDumpFg.detach();
+      return;
+    }
+    const count = samples.length;
+    const sig = `${traceId(s.trace.trace)}:${selected.taskId}:${selected.timestamps.join(",")}`;
+    taskDumpFg.sync({
+      hostEl,
+      sig,
+      apply: (instance) =>
+        instance.setData(samples, data().callframeSymbols, {
+          exportTitle: `Waiting on — ${count} async stack capture${count === 1 ? "" : "s"}`,
+        }),
+    });
+  }
+
   function sampleGroup(g: SampleGroupView, kind: "sched" | "cpu", idx: number): TemplateResult {
     const key = `${kind}-${idx}`;
     const expanded = expandedGroups.has(key);
@@ -791,9 +849,26 @@ export function mountInspector(
     </button>`;
   }
 
-  // ── Stack tab (spawned tasks + region analysis) ──────────────────────────
+  // ── Stack tab (task dumps + spawned tasks + region analysis) ─────────────
 
   function stackTemplate(sel: SelectionSlice): TemplateResult {
+    if (sel.taskDump !== null) {
+      const dumps = resolveTaskDumpCaptures(state().trace.trace, sel.taskDump);
+      const count = dumps.length;
+      if (count === 0) {
+        return html`<p class="d9-inspector-hint">
+          The selected task-dump captures are not present in the current trace.
+        </p>`;
+      }
+      return html`
+        <div class="d9-task-dump">
+          <div class="d9-spawned-head">
+            Waiting on — ${count} async stack capture${count === 1 ? "" : "s"}
+          </div>
+          <div class="d9-task-dump-fg-host" data-task-dump-fg-host></div>
+        </div>
+      `;
+    }
     if (sel.spawnedTasksRange !== null) {
       const range = sel.spawnedTasksRange;
       const result = computeSpawnedTasks(data().queueData, range);
@@ -927,6 +1002,7 @@ export function mountInspector(
       },
       selectedTaskId: null,
       pollDetail: null,
+      taskDump: null,
     });
     centerViewOn(ev.timestamp);
   }
@@ -951,7 +1027,12 @@ export function mountInspector(
 
   function selectTask(taskId: number): void {
     // A spawned-task link selects the task (re-scopes to the Task tab).
-    store.update("selection", { selectedTaskId: taskId, pinnedEvent: null, pollDetail: null });
+    store.update("selection", {
+      selectedTaskId: taskId,
+      pinnedEvent: null,
+      pollDetail: null,
+      taskDump: null,
+    });
   }
 
   function clearSelection(): void {
@@ -962,6 +1043,7 @@ export function mountInspector(
       focusedSpanId: null,
       pinnedEvent: null,
       pollDetail: null,
+      taskDump: null,
       sidebarRange: null,
       spawnedTasksRange: null,
       hoveredWakerTaskId: null,
@@ -1035,6 +1117,7 @@ export function mountInspector(
       const sel = state().selection;
       return (
         sel.pollDetail !== null ||
+        sel.taskDump !== null ||
         sel.pinnedEvent !== null ||
         sel.sidebarRange !== null ||
         sel.spawnedTasksRange !== null
@@ -1044,6 +1127,7 @@ export function mountInspector(
       store.update("selection", {
         pinnedEvent: null,
         pollDetail: null,
+        taskDump: null,
         sidebarRange: null,
         spawnedTasksRange: null,
       });
@@ -1059,6 +1143,7 @@ export function mountInspector(
       unsubReadout();
       unregisterEsc();
       pollFg.destroy();
+      taskDumpFg.destroy();
       window.removeEventListener("mousemove", onResizeMove);
       window.removeEventListener("mouseup", onResizeUp);
     },

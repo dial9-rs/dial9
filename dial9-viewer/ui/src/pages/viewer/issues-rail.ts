@@ -139,7 +139,10 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     if (poi === undefined) return;
     const jump = poiJump(poi, store.getState().viewport);
     store.update("viewport", { viewStart: jump.viewStart, viewEnd: jump.viewEnd });
-    store.update("selection", { selectedTaskId: jump.selectedTaskId });
+    store.update("selection", {
+      selectedTaskId: jump.selectedTaskId,
+      taskDump: null,
+    });
     store.update("poi", { index });
     // Moving the time window is not enough: the lanes box scrolls
     // independently, so a POI on a lane below the fold would leave the user
@@ -163,6 +166,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       selectedTaskId: task.taskId,
       pinnedEvent: null,
       pollDetail: null,
+      taskDump: null,
     });
     store.update("poi", { taskIndex: index });
     if (task.firstPollWorker >= 0) revealWorker(task.firstPollWorker);

@@ -324,7 +324,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
       return;
     }
     if (cur !== null && cur.startNs === range.startNs && cur.endNs === range.endNs) return;
-    store.update("selection", { spawnedTasksRange: range });
+    store.update("selection", { spawnedTasksRange: range, taskDump: null });
   }
 
   function queueSeries(): QueueData {
