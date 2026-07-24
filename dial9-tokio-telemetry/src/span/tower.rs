@@ -1,119 +1,91 @@
-//! Tower middleware that wraps one ad-hoc span per request.
+//! [`tower`](https://docs.rs/tower) middleware that instruments each request
+//! future with a [`Dial9Span`].
 //!
-//! Behind the `tower` feature. See the module docs on
-//! [`span`](crate::span) for the wire format and lifecycle; this layer is
-//! generic over the request and response types and depends on nothing from
-//! `http`.
+//! Requires the `tower` feature.
 
+use super::{Dial9Span, Instrument, Instrumented};
 use std::fmt;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
+use tower_layer::Layer;
+use tower_service::Service;
 
-use pin_project_lite::pin_project;
-
-use super::{Dial9Handle, Span, SpanHandle, SpanInner, emit_close};
-
-type MakeSpan<Req> = Arc<dyn Fn(&Req) -> Span + Send + Sync>;
-type OnResponse<Res> = Arc<dyn Fn(&SpanHandle, &Res) + Send + Sync>;
-
-/// A [`tower::Layer`](tower_layer::Layer) that emits one span per request.
+/// A [`tower::Layer`](tower_layer::Layer) that wraps a service so each request's
+/// response future is recorded as a span.
 ///
-/// Build it with [`Dial9SpanLayer::builder`]. `make_span` (required) turns the
-/// request into a [`Span`]; `on_response` (optional) records late fields once
-/// the response is available. The response future is entered/exited per poll
-/// and closed when it resolves or is dropped.
+/// The span for each request is produced by a `make_span` closure, letting you
+/// give every request the same name or vary it per call. For a fixed name, use
+/// [`Dial9SpanLayer::named`].
 ///
-/// Streaming response bodies are not covered by the span in v1: the span
-/// closes when the response future resolves (the response head for HTTP).
-///
-/// ```ignore
-/// let layer = Dial9SpanLayer::builder()
-///     .make_span(|req: &Request| span("http_request").field("path", req.uri().path()))
-///     .on_response(|span, res: &Response| span.record("status", res.status().as_u16()))
-///     .build();
+/// ```no_run
+/// use dial9_tokio_telemetry::span::Dial9SpanLayer;
+/// # use tower_layer::Layer;
+/// # fn demo<S>(service: S) {
+/// // Every request becomes a span named "http_request":
+/// let layer = Dial9SpanLayer::named("http_request");
+/// let instrumented = layer.layer(service);
+/// # let _ = instrumented;
+/// # }
 /// ```
-pub struct Dial9SpanLayer<Req, Res> {
-    make_span: MakeSpan<Req>,
-    on_response: Option<OnResponse<Res>>,
+#[derive(Clone)]
+pub struct Dial9SpanLayer<F> {
+    make_span: F,
 }
 
-#[bon::bon]
-impl<Req, Res> Dial9SpanLayer<Req, Res> {
-    /// Start building a layer. `make_span` is required; `on_response` is
-    /// optional.
-    #[builder]
-    pub fn new(
-        #[builder(with = |f: impl Fn(&Req) -> Span + Send + Sync + 'static| {
-            let boxed: MakeSpan<Req> = Arc::new(f);
-            boxed
-        })]
-        make_span: MakeSpan<Req>,
-        #[builder(with = |f: impl Fn(&SpanHandle, &Res) + Send + Sync + 'static| {
-            let boxed: OnResponse<Res> = Arc::new(f);
-            boxed
-        })]
-        on_response: Option<OnResponse<Res>>,
-    ) -> Self {
-        Self {
-            make_span,
-            on_response,
-        }
-    }
-}
-
-impl<Req, Res> Clone for Dial9SpanLayer<Req, Res> {
-    fn clone(&self) -> Self {
-        Self {
-            make_span: Arc::clone(&self.make_span),
-            on_response: self.on_response.clone(),
-        }
-    }
-}
-
-impl<Req, Res> fmt::Debug for Dial9SpanLayer<Req, Res> {
+impl<F> fmt::Debug for Dial9SpanLayer<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Dial9SpanLayer")
-            .field("on_response", &self.on_response.is_some())
-            .finish_non_exhaustive()
+        f.debug_struct("Dial9SpanLayer").finish_non_exhaustive()
     }
 }
 
-impl<S, Req, Res> tower_layer::Layer<S> for Dial9SpanLayer<Req, Res> {
-    type Service = Dial9SpanService<S, Req, Res>;
+impl Dial9SpanLayer<()> {
+    /// Build a layer that names every request span `name`.
+    pub fn named(name: impl Into<String>) -> Dial9SpanLayer<impl Fn() -> Dial9Span + Clone> {
+        let name = name.into();
+        Dial9SpanLayer {
+            make_span: move || Dial9Span::new(name.clone()),
+        }
+    }
+}
+
+impl<F> Dial9SpanLayer<F>
+where
+    F: Fn() -> Dial9Span + Clone,
+{
+    /// Build a layer that produces a fresh span per request via `make_span`.
+    ///
+    /// Use this to attach fields, e.g.
+    /// `Dial9SpanLayer::new(|| dial9_span!("rpc", service = "auth"))`.
+    pub fn new(make_span: F) -> Self {
+        Self { make_span }
+    }
+}
+
+impl<S, F> Layer<S> for Dial9SpanLayer<F>
+where
+    F: Clone,
+{
+    type Service = Dial9SpanService<S, F>;
 
     fn layer(&self, inner: S) -> Self::Service {
         Dial9SpanService {
             inner,
-            make_span: Arc::clone(&self.make_span),
-            on_response: self.on_response.clone(),
-            _pd: PhantomData,
+            make_span: self.make_span.clone(),
         }
     }
 }
 
-/// The [`Service`](tower_service::Service) produced by [`Dial9SpanLayer`].
-pub struct Dial9SpanService<S, Req, Res> {
+/// The [`Service`] produced by [`Dial9SpanLayer`]. Instruments each
+/// [`call`](Service::call)'s future with a freshly-created span.
+#[derive(Clone)]
+pub struct Dial9SpanService<S, F> {
     inner: S,
-    make_span: MakeSpan<Req>,
-    on_response: Option<OnResponse<Res>>,
-    _pd: PhantomData<fn(Req) -> Res>,
+    make_span: F,
 }
 
-impl<S: Clone, Req, Res> Clone for Dial9SpanService<S, Req, Res> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            make_span: Arc::clone(&self.make_span),
-            on_response: self.on_response.clone(),
-            _pd: PhantomData,
-        }
-    }
-}
-
-impl<S: fmt::Debug, Req, Res> fmt::Debug for Dial9SpanService<S, Req, Res> {
+impl<S, F> fmt::Debug for Dial9SpanService<S, F>
+where
+    S: fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Dial9SpanService")
             .field("inner", &self.inner)
@@ -121,94 +93,21 @@ impl<S: fmt::Debug, Req, Res> fmt::Debug for Dial9SpanService<S, Req, Res> {
     }
 }
 
-impl<S, Req, Res> tower_service::Service<Req> for Dial9SpanService<S, Req, Res>
+impl<S, F, Req> Service<Req> for Dial9SpanService<S, F>
 where
-    S: tower_service::Service<Req, Response = Res>,
+    S: Service<Req>,
+    F: Fn() -> Dial9Span,
 {
-    type Response = Res;
+    type Response = S::Response;
     type Error = S::Error;
-    type Future = Dial9SpanFuture<S::Future, Res>;
+    type Future = Instrumented<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Req) -> Self::Future {
-        let shared = SpanInner::from_span((self.make_span)(&req));
-        let handle = SpanHandle {
-            inner: Arc::clone(&shared),
-        };
-        Dial9SpanFuture {
-            inner: self.inner.call(req),
-            shared,
-            handle,
-            on_response: self.on_response.clone(),
-            closed: false,
-        }
-    }
-}
-
-pin_project! {
-    /// The response future produced by [`Dial9SpanService`].
-    ///
-    /// Enters/exits the span per poll and, once the inner future yields
-    /// `Ok(response)`, invokes `on_response` *before* that poll's exit so the
-    /// recorded fields ride the exit event. Closes when the future resolves or
-    /// is dropped (e.g. on cancellation).
-    pub struct Dial9SpanFuture<F, Res> {
-        #[pin]
-        inner: F,
-        shared: Arc<SpanInner>,
-        handle: SpanHandle,
-        on_response: Option<OnResponse<Res>>,
-        closed: bool,
-    }
-
-    impl<F, Res> PinnedDrop for Dial9SpanFuture<F, Res> {
-        fn drop(this: Pin<&mut Self>) {
-            let this = this.project();
-            if !*this.closed {
-                *this.closed = true;
-                emit_close(&Dial9Handle::current(), this.shared.id);
-            }
-        }
-    }
-}
-
-impl<F, Res> fmt::Debug for Dial9SpanFuture<F, Res> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Dial9SpanFuture").finish_non_exhaustive()
-    }
-}
-
-impl<F, Res, E> Future for Dial9SpanFuture<F, Res>
-where
-    F: Future<Output = Result<Res, E>>,
-{
-    type Output = Result<Res, E>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        let handle = Dial9Handle::current();
-
-        this.shared.emit_enter(&handle);
-        let result = this.inner.poll(cx);
-
-        // Record response fields before the exit so they ride this poll's exit
-        // event (the exit fires below, then close — there is no later exit).
-        if let Poll::Ready(Ok(res)) = &result
-            && let Some(cb) = this.on_response.as_ref()
-        {
-            cb(this.handle, res);
-        }
-
-        this.shared.emit_exit(&handle);
-
-        if result.is_ready() && !*this.closed {
-            *this.closed = true;
-            emit_close(&handle, this.shared.id);
-        }
-
-        result
+        let span = (self.make_span)();
+        self.inner.call(req).instrument(span)
     }
 }

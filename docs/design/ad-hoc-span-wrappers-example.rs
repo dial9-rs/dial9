@@ -7,7 +7,8 @@
 //! This file is documentation, not a build target: it is not a member of any
 //! crate and is not compiled by CI. The `axum` usage and the fake domain
 //! plumbing below stand in for a real service. For compiled, asserted usage of
-//! the same API see `dial9-tokio-telemetry/tests/span_wrappers.rs`.
+//! the same API see `dial9-tokio-telemetry/tests/span_wrappers.rs`, and for a
+//! runnable version see `dial9/examples/adhoc_spans.rs`.
 //!
 //! The program is a small order-checkout service: an axum/tower HTTP API in
 //! front of a fake database and payment client, plus a background settlement
@@ -19,43 +20,37 @@
 use std::time::Duration;
 
 use axum::{Router, extract::Path, routing::post};
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
+use dial9::{DiskBuffer, RecorderTokioExt, recorder};
 
-// The entire new surface. Core wrappers are dep-free and unconditional;
-// `Dial9SpanLayer` is behind the `tower` cargo feature.
-use dial9_tokio_telemetry::span::{Dial9SpanLayer, SpanFutureExt as _, span};
-
-fn my_config() -> Dial9Config {
-    Dial9Config::builder()
-        .on_disk_buffer("/tmp/checkout-traces/trace.bin")
-        .max_file_size(10_000_000)
-        .max_total_size(50_000_000)
-        .build_or_disabled()
-}
+// The entire new surface. The macro + core wrappers are dep-free and
+// unconditional; `Dial9SpanLayer` is behind the `tower` cargo feature.
+use dial9::dial9_span;
+use dial9::span::{Dial9Span, Dial9SpanLayer, Instrument as _};
 
 // Note what is absent here: no tracing_subscriber::registry(), no
 // Dial9TracingLayer, no `tracing` dependency at all.
-#[dial9_tokio_telemetry::main(config = my_config)]
-async fn main() {
-    let handle = Dial9TokioHandle::current();
-    handle.spawn(settlement_worker());
+fn main() {
+    let writer = DiskBuffer::single_file("/tmp/checkout-traces/trace.bin").unwrap();
+    let recorder = recorder(writer).build();
+    let (recorder, runtime) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
+        })
+        .unwrap();
+
+    runtime.block_on(serve());
+    drop(recorder);
+}
+
+async fn serve() {
+    tokio::spawn(settlement_worker());
 
     // ── UX 1: the tower layer ────────────────────────────────────────────
-    // One span per request. `make_span` is the only required setter; it
-    // receives the request and returns a `Span` description. `on_response`
-    // records late fields (status is unknowable at request time) — they
-    // surface in the viewer's span inspector like any other field.
-    let span_layer = Dial9SpanLayer::builder()
-        .make_span(|req: &axum::extract::Request| {
-            span("http_request")
-                .field("method", req.method())
-                .field("path", req.uri().path())
-        })
-        .on_response(|span, res: &axum::response::Response| {
-            span.record("status", res.status().as_u16());
-        })
-        .build();
+    // One span per request. The `make_span` closure runs per call, so it can
+    // name the span and attach fields captured from the request. The response
+    // future is entered/exited around each poll and closed when it resolves.
+    let span_layer =
+        Dial9SpanLayer::new(|| dial9_span!("http_request", service = "checkout"));
 
     let app = Router::new()
         .route("/orders/{id}/checkout", post(checkout))
@@ -66,31 +61,30 @@ async fn main() {
 }
 
 async fn checkout(Path(order_id): Path<u64>) -> String {
-    // ── UX 2: the future wrapper ─────────────────────────────────────────
-    // `.in_span(...)` is the async workhorse. The span enters/exits around
-    // each poll (so awaits show as idle, and each on-CPU segment is
-    // attributed to the worker that ran it) and closes when the future
-    // completes or is cancelled. Fields are interned; u64/Display values
-    // need no `.to_string()`.
+    // ── UX 2: the future combinator ──────────────────────────────────────
+    // `.instrument(...)` is the async workhorse. The span enters/exits around
+    // each poll (so awaits show as idle, and each on-CPU segment is attributed
+    // to the worker that ran it) and closes when the future completes or is
+    // cancelled. Fields are captured at the call site by the macro; u64/Display
+    // values need no `.to_string()`.
     let order = load_order(order_id)
-        .in_span(span("db.load_order").field("order_id", order_id))
+        .instrument(dial9_span!("db.load_order", order_id = order_id))
         .await;
 
-    // Shorthand for the common no-fields case. Open question #2 in the
-    // design doc: is this worth having next to `span("...")`?
-    let rate = fetch_tax_rate(&order).in_span("tax.fetch_rate").await;
+    // A name-only span (no fields) needs no macro — `Dial9Span::new` builds one
+    // whose name is chosen at runtime.
+    let rate = fetch_tax_rate(&order)
+        .instrument(Dial9Span::new("tax.fetch_rate"))
+        .await;
 
     // ── UX 3: the sync guard ─────────────────────────────────────────────
-    // RAII for blocking/CPU-bound sections. `EnteredSpan` is !Send and must
-    // not be held across .await — for async, use `in_span` above. `record`
-    // attaches results discovered mid-span.
+    // RAII for blocking/CPU-bound sections. `Entered` is !Send and must not be
+    // held across .await — for async, use `.instrument` above. The macro's
+    // fields ride every segment, including the exit.
     let quote = {
-        let mut s = span("pricing.compute")
-            .field("order_id", order_id)
-            .entered();
-        let quote = compute_quote(&order, rate); // pure CPU
-        s.record("total_cents", quote.total_cents);
-        quote
+        let span = dial9_span!("pricing.compute", order_id = order_id);
+        let _entered = span.enter();
+        compute_quote(&order, rate) // pure CPU
     }; // exit + close here
 
     // ── UX 4: explicit parenting across a spawn ──────────────────────────
@@ -98,11 +92,11 @@ async fn checkout(Path(order_id): Path<u64>) -> String {
     // everything above. A spawned task can outlive this request, so
     // containment breaks — link it explicitly instead. `span.id()` is the
     // only handle that crosses the task boundary.
-    let charge_span = span("payment.charge").field("order_id", order_id);
-    let audit = span("audit.emit").parent(charge_span.id());
-    tokio::spawn(emit_audit_record(order_id).in_span(audit));
+    let charge_span = dial9_span!("payment.charge", order_id = order_id);
+    let audit = Dial9Span::new("audit.emit").with_parent_id(charge_span.id());
+    tokio::spawn(emit_audit_record(order_id).instrument(audit));
 
-    let receipt = charge(&order, &quote).in_span(charge_span).await;
+    let receipt = charge(&order, &quote).instrument(charge_span).await;
 
     format!("charged: {}", receipt.confirmation)
 }
@@ -119,7 +113,7 @@ async fn settlement_worker() {
     loop {
         let batch = next_settlement_batch().await;
         settle(&batch)
-            .in_span(span("settlement.run").field("batch_len", batch.len()))
+            .instrument(dial9_span!("settlement.run", batch_len = batch.len()))
             .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -129,6 +123,7 @@ async fn settlement_worker() {
 
 struct Order;
 struct Quote {
+    #[allow(dead_code)]
     total_cents: u64,
 }
 struct Receipt {

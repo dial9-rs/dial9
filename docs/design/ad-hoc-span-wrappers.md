@@ -2,268 +2,230 @@
 
 Issue: [dial9-rs/dial9#498](https://github.com/dial9-rs/dial9/issues/498)
 
-Status: **implemented.** The core wrappers live in
-`dial9-tokio-telemetry/src/span.rs` and the tower layer in
-`dial9-tokio-telemetry/src/span/tower.rs` (feature `tower`), with tests in
-`dial9-tokio-telemetry/tests/span_wrappers.rs`. This document is the design
-rationale; the code is the source of truth for the exact signatures.
+Status: **implemented.** The core lives in `dial9-tokio-telemetry/src/span.rs`
+(+ `span/future.rs`, `span/wire.rs`) and the tower layer in
+`dial9-tokio-telemetry/src/span/tower.rs` (feature `tower`), re-exported from
+the `dial9` umbrella crate. Tests are in
+`dial9-tokio-telemetry/tests/span_wrappers.rs`; a runnable example is
+`dial9/examples/adhoc_spans.rs`. This document is the design rationale; the code
+is the source of truth for the exact signatures.
 
 Companion UX artifact: [`ad-hoc-span-wrappers-example.rs`](./ad-hoc-span-wrappers-example.rs).
-A complete program written against the API, showing it in context on an
-axum stack. Read that file first, then come back here for the mechanics.
+A complete program written against the API, showing it in context on an axum
+stack. Read that file first, then come back here for the mechanics.
 
 ## Motivation
 
-`Dial9TracingLayer` works well when an application is already instrumented
-with `tracing`, but it demands:
+`Dial9TracingLayer` works well when an application is already instrumented with
+`tracing`, but it demands:
 
-1. a `tracing-subscriber` registry wired the way the layer expects, which
-   may conflict with how the application already configures logging, and
+1. a `tracing-subscriber` registry wired the way the layer expects, which may
+   conflict with how the application already configures logging, and
 2. `tracing` instrumentation in the first place.
 
-Many services have neither. This design adds ad-hoc wrappers (a manual
-span guard, a future wrapper, and a tower layer) that emit span metadata
-directly into the dial9 trace with no tracing subscriber and no `tracing`
-dependency. The goal is turnkey: add one line where you care, spans appear
-in the viewer.
+Many services have neither. This design adds ad-hoc wrappers (a `dial9_span!`
+macro, a synchronous guard, a future combinator, and a tower layer) that emit
+span metadata directly into the dial9 trace with no tracing subscriber and no
+`tracing` dependency. The goal is turnkey: add one line where you care, spans
+appear in the viewer.
 
 ## Non-goals
 
-- Replacing `Dial9TracingLayer`. Applications already on `tracing` should
-  keep using it; the two coexist in one process (see *Span ID space*).
-- Context propagation / implicit parenting. Contextual parents are
-  unreliable across tasks (see the comment in `tracing_layer.rs::on_enter`);
-  the viewer infers nesting from timestamp containment. We only support
-  *explicit* parenting, same as the tracing layer.
-- Log-style events (one-shot points without duration). `record_event` with
-  a custom `#[derive(TraceEvent)]` struct already covers that.
+- Replacing `Dial9TracingLayer`. Applications already on `tracing` should keep
+  using it; the two coexist in one process (see *Span ID space*).
+- Context propagation / implicit parenting. Contextual parents are unreliable
+  across tasks (see the comment in `tracing_layer.rs::on_enter`); the viewer
+  infers nesting from timestamp containment. We only support *explicit*
+  parenting, same as the tracing layer.
+- Late / deferred fields. Fields are captured at the call site when the span is
+  built (that is what lets each callsite have a compile-time schema — see below).
+  A value only knowable later (e.g. an HTTP status) is recorded by building the
+  span where that value is in scope, not by mutating a live span. This is a
+  deliberate trade against the runtime-schema alternative.
+- Log-style events (one-shot points without duration). `record_event` with a
+  custom `#[derive(TraceEvent)]` struct already covers that.
 
 ## Wire format: reuse the existing standardized span events
 
 The viewer already recognizes span events *by schema-name prefix*
-(`trace_analysis.js::buildSpanData`, lines 1252-1308): `SpanEnter:*` /
-`SpanEnter__*`, `SpanExit:*` / `SpanExit__*`, `SpanClose__*` /
-`SpanCloseEvent`, with base fields `worker_id`, `span_id`,
-`parent_span_id`, `span_name` and arbitrary extra fields. The ad-hoc
-wrappers emit exactly this format:
+(`trace_analysis.js::buildSpanData`): `SpanEnter:*`, `SpanExit:*`, and
+`SpanCloseEvent`, with base fields `worker_id`, `span_id`, `parent_span_id`,
+`span_name` and arbitrary extra fields. The ad-hoc wrappers emit exactly this
+format:
 
 | event | schema name | fields |
 |---|---|---|
-| enter | `SpanEnter:adhoc::{file}:{line}[:{field-names}]` | base + user fields (`OptionalPooledString`) |
-| exit | `SpanExit:adhoc::{file}:{line}[:{field-names}]` | base (minus `parent_span_id`) + user fields |
-| close | `SpanCloseEvent` (existing struct) | `timestamp_ns`, `span_id` |
+| enter | `SpanEnter:<file>:<line>:<col>` (macro) or `SpanEnter:adhoc::runtime` (name-only) | base + user fields |
+| exit  | `SpanExit:<file>:<line>:<col>` (macro) or `SpanExit:adhoc::runtime` (name-only) | base (minus `parent_span_id`) + user fields |
+| close | `SpanCloseEvent` (existing struct, shared with the tracing layer) | `timestamp_ns`, `span_id` |
 
-The schema id is the callsite (`{file}:{line}`), not the span name. The
-name is `impl Into<String>` and may be dynamic, so it rides in the
-`span_name` field (which is what the viewer reads, `buildSpanData:1261`),
-never in the schema id. When user fields are present, the comma-joined
-field-name list is appended to the id (`...:{line}:{a,b}`), so that a
-callsite emitting different field sets — e.g. an exit carrying a late
-field the enter did not — resolves distinct, consistent schema
-definitions rather than colliding on one id. Keying the id on the callsite
-(plus field-name list) keeps schema cardinality bounded by code, not data.
+The schema id is the callsite (`file:line:col`), not the span name. The name is
+`impl Into<String>` and may be dynamic, so it rides in the `span_name` field
+(which is what the viewer reads), never in the schema id. Keying the id on the
+callsite keeps schema cardinality bounded by code, not data.
 
-No viewer changes are required. Old viewers render new traces; new
-viewers render old traces. This satisfies the issue's "standardized format
-that can be automatically rendered as spans in the UI": the format already
-exists, this design just gives it a second producer.
+No viewer changes are required. Old viewers render new traces; new viewers
+render old traces. This satisfies the issue's "standardized format that can be
+automatically rendered as spans in the UI": the format already exists, this
+design just gives it a second producer.
 
-The `adhoc::` pseudo-target keeps ad-hoc schema ids disjoint from the
-tracing layer's `{target}::{name}:{file}:{line}` ids. A real Rust module
-path can't be the literal `adhoc` crate root; even on collision, schemas
-only need to be *consistent*, not unique, so this is cosmetic.
+## Compile-time schemas: no runtime schema cache, no lock
+
+The `tracing` layer builds a `Schema` at runtime and memoizes it in a
+`Mutex<HashMap<callsite, Schema>>`, taking that lock on every enter/exit. The
+ad-hoc wrappers avoid the map and the lock entirely by making the schema a
+**compile-time artifact per callsite**.
+
+`dial9_span!(...)` expands, at each call site, to a pair of generated
+`#[derive(TraceEvent)]` structs — `SpanEnter:<file>:<line>:<col>` and the
+matching `SpanExit` — whose fields are exactly the framework fields plus the
+user fields written at that call site. The derive already produces the schema
+for a type at compile time, so emitting a span is just encoding a typed event:
+no runtime schema build, no `HashMap`, no lock on the hot path. Two call sites
+with different field sets are two different generated types with two different
+(stable) schema names, so the encoder never sees "same name, different
+definition".
+
+The span carries only `&'static SpanWire` — two function pointers to the
+generated enter/exit writers — plus its id, name, parent, and the already
+formatted field-value strings. Emitting bridges a writer fn into the normal
+`record_event` path (so the enabled-check and flush accounting are unchanged).
+
+### Enabling derive change: `#[traceevent(name = <expr>)]`
+
+The generated schema name (`"SpanEnter:…"`) is not a valid Rust identifier and
+must vary per call site, so the `TraceEvent` derive gained a struct-level
+`name = <expr>` attribute that overrides the default (the struct name) with any
+`&'static str` expression. The macro uses
+`concat!("SpanEnter:", file!(), ":", line!(), ":", column!())`. Because the
+override is evaluated at the derive site, `file!()`/`line!()`/`column!()`
+resolve to the user's callsite. This is the only change outside the `span`
+module and is purely additive.
 
 ## API surface
 
-New module `dial9_tokio_telemetry::span`. The core (guard + future
-wrapper) has zero new dependencies and is always compiled. The tower
-layer sits behind a new `tower` feature (adds a `tower-service` /
-`tower-layer` dep, the small trait crates, not `tower` itself).
+New module `dial9_tokio_telemetry::span`, re-exported as `dial9::span`; the
+`dial9_span!` macro is exported at the crate root. The core (macro + guard +
+future combinator) has zero new dependencies and is always compiled. The tower
+layer sits behind a new `tower` feature (adds the small `tower-service` /
+`tower-layer` trait crates, not `tower` itself).
 
 ```rust
-// Core vocabulary. See the example program for usage in context.
-pub fn span(name: impl Into<String>) -> Span;          // #[track_caller]
+// Build a span, capturing the callsite and fields. tracing-style syntax:
+// bare / `%` Display, `?` Debug, `~` prefix stores a value inline (not pooled).
+dial9_span!("db.load", order_id = id, path = %p, cfg = ?c, req = ~request_id) -> Dial9Span;
 
-pub struct Span;                                        // description, not yet entered
-impl Span {
-    pub fn field(self, name: &'static str, value: impl fmt::Display) -> Span;
-    pub fn parent(self, parent: SpanId) -> Span;        // explicit only
-    pub fn id(&self) -> SpanId;                         // pre-allocated, for parenting
-    pub fn entered(self) -> EnteredSpan;                // sync RAII guard
+pub struct Dial9Span;                         // not Clone: one identity, one close
+impl Dial9Span {
+    pub fn new(name: impl Into<String>) -> Dial9Span;   // name-only, runtime name
+    pub fn with_parent(self, parent: &Dial9Span) -> Dial9Span;  // explicit only
+    pub fn with_parent_id(self, parent_span_id: u64) -> Dial9Span;
+    pub fn id(&self) -> u64;                  // for parenting across a boundary
+    pub fn enter(&self) -> Entered<'_>;       // sync RAII guard
 }
 
-pub struct EnteredSpan;                                 // !Send
-impl EnteredSpan {
-    pub fn record(&mut self, name: &'static str, value: impl fmt::Display);
-    pub fn exit(self);                                  // also on Drop
-}
+pub struct Entered<'_>;                        // !Send; emits exit + close on drop
 
-pub trait SpanFutureExt: Future + Sized {
-    #[track_caller]                                     // stamps the shorthand's callsite
-    fn in_span(self, span: impl Into<Span>) -> SpanFuture<Self>;
+pub trait Instrument: Future + Sized {
+    fn instrument(self, span: Dial9Span) -> Instrumented<Self>;
 }
-impl<F: Future> SpanFutureExt for F {}
-impl From<&str> for Span;                               // `.in_span("name")` shorthand
-impl From<String> for Span;
-
-pub struct SpanFuture<F>;                               // Future, transparent output
-impl<F: Future> SpanFuture<F> {
-    pub fn handle(&self) -> SpanHandle;                 // record fields after the fact
-}
-
-#[derive(Clone)]
-pub struct SpanHandle;                                  // cheap, Send
-impl SpanHandle {
-    pub fn record(&self, name: &'static str, value: impl fmt::Display);
-    pub fn id(&self) -> SpanId;
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct SpanId;
-impl SpanId {
-    pub fn as_u64(self) -> u64;                         // raw wire id
-}
+pub struct Instrumented<F>;                    // Future, transparent output
 ```
 
-Tower layer (feature `tower`), configured with a `bon` builder per repo
-API guidelines (all fields private, non-required fields defaulted):
+Tower layer (feature `tower`):
 
 ```rust
-pub struct Dial9SpanLayer<Req, Res>;
-// Dial9SpanLayer::builder()
-//     .make_span(|req: &Req| Span)          // required
-//     .on_response(|&SpanHandle, &Res|)     // optional
-//     .build()
+// Fixed name:
+Dial9SpanLayer::named("http_request")
+// Per-request span (attach fields via the macro):
+Dial9SpanLayer::new(|| dial9_span!("rpc", service = "auth"))
 ```
 
 ### Design decisions
 
-**Field names are `&'static str`, values are `impl Display`.**
-Names become wire-schema field names. A schema is cached per
-`(callsite, field-name list)`, so names must be low-cardinality and are
-almost always literals; `&'static str` makes the cheap path the obvious
-one. Values are interned as `PooledString`s (same as the tracing layer),
-so repeated values are cheap; `impl Display` accepts ints, status codes,
-paths, etc. without `.to_string()` noise at every call site. This
-deliberately deviates from the `impl Into<String>` builder guideline for
-*names* only, for the schema-cardinality reason above.
+**Field names are macro identifiers; values are `Display`/`Debug`.** Names
+become wire-schema field names, so they are fixed per callsite by construction —
+exactly the low-cardinality property the schema story needs. Values are
+formatted to strings eagerly at construction. By default they are **interned**
+(pooled) on the wire, since a span re-emits its fields on every poll and
+low-cardinality values dedup well; a `~` prefix stores a value **inline**
+instead, for high-cardinality values (request ids) that would otherwise grow the
+string pool.
 
-**The sync guard emits one enter/exit pair; the future wrapper emits one
-pair per poll.** The guard covers on-thread blocking work, so a single
-segment is exact. A future's span would otherwise report the entire await
-as active. Per-poll pairs match what `tracing::Instrument` + the tracing
-layer produce today, carry per-segment worker attribution, and cost the
-same ~300ns/pair. (The viewer also reconstructs active/idle from
-task polls, so both shapes render correctly either way.)
+**The sync guard emits one enter/exit pair; the future combinator emits one
+pair per poll.** The guard covers on-thread blocking work, so a single segment
+is exact. `Instrumented::poll` enters at the top of each poll and exits when the
+guard drops at the end of that poll, so a future that suspends and resumes shows
+as multiple segments with gaps — matching what `tracing::Instrument` + the
+tracing layer produce, and carrying per-segment worker attribution.
 
-**`EnteredSpan` is `!Send` and must not be held across `.await`.** Same
-rule as `tracing`'s `EnteredSpan`, for the same reason: the exit event
-must be emitted on the entering thread's stream with a timestamp ordered
-after the enter. Holding it across an await would attribute other tasks'
-work to the span. The async story is `in_span`, full stop. We cannot make
-holding-across-await a compile error without a lint, but `!Send` catches
-the spawn case, and docs + the example program model the correct split.
+**`Entered` is `!Send` and must not be held across `.await`.** Same rule as
+`tracing::span::Entered`, enforced the same way: a `PhantomData<*const ()>`
+field makes the guard `!Send`, so holding one across an await in a `Send` task
+is a compile error. The exit must land on the entering thread's stream ordered
+after the enter; holding across an await would attribute other tasks' work to
+the span. The async story is `instrument`, full stop. (The future combinator is
+unaffected: its guard is a synchronous local inside `poll`.)
 
-**`SpanClose` is emitted on drop of the wrapper/guard,** whether the
-future completed or was cancelled. Close is what lets the viewer finalize
-and recycle the span id; a cancelled request still renders as a span
-ending at cancellation time.
+**`SpanCloseEvent` is emitted on drop of the `Dial9Span`,** whether the future
+completed or was cancelled. Close is what lets the viewer finalize and recycle
+the span id; a cancelled request still renders as a span ending at cancellation
+time. `Dial9Span` is deliberately **not** `Clone` — one identity, one close.
 
-**Late fields via `SpanHandle::record` ride the next exit event.** The
-viewer already prefers non-empty exit fields over enter fields
-(`buildSpanData:1288-1297`: a non-empty exit-field set replaces the enter
-fields), so recording e.g. `status` after the response head is available
-needs no new event type. `SpanHandle` holds
-`Arc<Mutex<Vec<(&'static str, String)>>>`-grade state; recording off the
-polling thread is allowed (it's picked up at the next poll's exit). A
-field recorded after the future's final poll has no later exit to ride, so
-it is dropped; record before or during the last poll (the tower layer's
-`on_response` fires inside the poll that yields the response, so it is
-always in time).
-
-**Off-runtime threads are silently skipped**, identical to the tracing
-layer: every emit checks `Dial9Handle::current().is_enabled()`. Wrappers
-are always safe to leave in code paths that sometimes run outside a
-dial9-traced runtime, and are no-ops (branch + return) when dial9 is
-disabled.
+**Off-runtime threads are silently skipped**, identical to the tracing layer:
+every emit checks `Dial9Handle::is_enabled()` (and close uses
+`Dial9Handle::try_current`, a no-op when no handle is installed). Wrappers are
+always safe to leave in code paths that sometimes run outside a dial9-traced
+runtime, and are no-ops (branch + return) when dial9 is disabled.
 
 ## Span ID space
 
 The tracing layer uses `tracing`'s subscriber-allocated `span::Id` (small
 integers starting at 1, recycled on close). Ad-hoc spans allocate from a
 process-global `AtomicU64` counter **with the top bit set**
-(`id = (1 << 63) | next`), so the two producers can never collide when
-both run in one process. The viewer keys spans by the id's string form and
-already handles id recycling via `SpanClose`, so no viewer change is
+(`id = (1 << 63) | next`, `next` starting at 1), so the two producers can never
+collide when both run in one process. The viewer keys spans by the id's string
+form and already handles id recycling via `SpanClose`, so no viewer change is
 needed. 2^63 ids does not wrap in practice (at 1B spans/sec: ~292 years).
-
-## Schema caching
-
-`span()` captures `std::panic::Location::caller()` via `#[track_caller]`,
-so the callsite is the user's `span(...)` line. The `From<&str>` shorthand
-*cannot* capture the caller: `.in_span("name")` reaches the `Span` through
-the blanket `Into`, which is not `#[track_caller]`, so a location captured
-inside `From::from` would point at library code, not the call site. The
-`Span` therefore carries `Option<&'static Location>`: `span()` fills it,
-`From<&str>` leaves it `None`, and `in_span` (itself `#[track_caller]`)
-stamps its own caller when the location is still `None`. Both forms end up
-with the correct user callsite.
-
-The enter/exit schemas are cached in a global
-`Mutex<HashMap<(&'static Location, FieldNames), CallsiteSchemas>>`,
-mirroring the tracing layer's per-`Identifier` cache. Keying on the
-field-name list as well as the location means a callsite that
-conditionally adds a field gets two (stable) schemas rather than dropped
-fields, and it is also how late fields work: an exit whose field set
-differs from the enter's simply resolves a different (stable) schema.
-Schema count stays bounded by code, not data.
 
 ## Tower layer semantics (v1)
 
-- One span per `call`, created by `make_span(&req)` on the request path.
-- `on_response` fires when the inner future yields `Ok(response)` (for
-  HTTP: the response *head*), recording late fields via the span's handle.
-- The response future does **not** reuse `SpanFuture`. It has to sequence
-  enter → poll → `on_response` → exit → close within a single poll, because
-  the final exit is the last one that can carry a late field. Wrapping
-  `SpanFuture` from the outside would fire its exit and close before
-  `on_response` ran, silently dropping the recorded fields. The two futures
-  share the emit helpers on `SpanInner` instead.
-- The span closes when the response future resolves. **Streaming bodies
-  are not covered by the span** in v1. Wrapping the body to hold the span
-  open until end-of-stream is a documented follow-up (requires an
-  `http-body` dep and per-frame enter/exit policy decisions).
-- `Req` / `Res` are fully generic; nothing in the layer depends on `http`.
-  The example program shows it on an axum stack because that is the
-  motivating case.
+- One span per `call`, created by the `make_span` closure (`named` for a fixed
+  name, `new` for a per-request span). The span is attached to the inner
+  service's response future via `instrument`.
+- The response future is entered/exited per poll and closed when it resolves or
+  is dropped (e.g. on cancellation). **Streaming bodies are not covered by the
+  span** in v1: the span closes when the response future resolves (the response
+  head for HTTP). Holding the span open until end-of-stream is a documented
+  follow-up (requires an `http-body` dep and per-frame policy decisions).
+- The layer is fully generic over the request/response types; nothing in it
+  depends on `http`. The example program shows it on an axum stack because that
+  is the motivating case.
 
 ## Feature flags & semver
 
-- Core `span` module: unconditional (no new deps). All new API, purely
-  additive.
-- `tower` feature: gates `Dial9SpanLayer` (+ `tower-layer` / `tower-service`
-  deps). Layer config via `#[bon::builder]`, private fields, optional
-  everything except `make_span`; future fields (classifier, body
-  wrapping, sampling) are non-breaking additions.
-- No trace-format changes: only new instances of the existing
-  self-describing span schemas. Old JS viewers render new traces unchanged.
+- Core `span` module (macro, guard, future combinator): unconditional, no new
+  deps. All new API, purely additive.
+- `tower` feature: gates `Dial9SpanLayer`/`Dial9SpanService` (+ `tower-layer` /
+  `tower-service` deps). Mirrored as a passthrough `tower` feature on the `dial9`
+  umbrella crate.
+- `#[traceevent(name = <expr>)]`: additive attribute on the existing derive; no
+  effect on types that don't use it.
+- No trace-format changes: only new instances of the existing self-describing
+  span schemas. Old JS viewers render new traces unchanged.
 
 ## Open questions for review
 
-1. `field` value type: `impl Display` (shipped) vs. a `Value` enum that
-   preserves ints on the wire (`Varint` instead of interned string). The
-   tracing layer stringifies everything today; matching it keeps the
-   decoder story uniform, but a typed `Value` would help future numeric
-   aggregation in the viewer. Shipped as stringify-in-v1; typed values
-   remain a compatible schema addition later.
-2. Should `.in_span("name")` (the `From<&str>` shorthand) exist, or is the
-   two-step `span("name")` always better? Shipped with both. Note the
-   location caveat under *Schema caching*: the shorthand's callsite is
-   stamped by `in_span`, not by `From`, so a bare `Span::from("x")` that is
-   never passed to `in_span` has no location. Today that combination is
-   unreachable (the only consumer of a `From`-built `Span` is `in_span`),
-   but it is why `Span::location` is an `Option`.
+1. Field value encoding: values are stringified (interned or inline) today,
+   matching the tracing layer. A typed `Value` (varint for ints, etc.) would
+   help future numeric aggregation in the viewer and remains a compatible schema
+   addition later.
+2. Tower `make_span` takes no arguments today (`Fn() -> Dial9Span`), so fields
+   are constants or captured from the environment, not read off the request. A
+   `Fn(&Req) -> Dial9Span` form would let callers pull request fields in, at the
+   cost of tying the closure to the request type. Deferred until there is a
+   concrete need.
 3. Module name: `span` (shipped) vs `spans` vs re-exports at crate root.
-4. Does the tower layer belong in this crate behind a feature (shipped),
-   or in a separate `dial9-tower` crate? Feature keeps versioning simple;
-   separate crate keeps the core dep-free even at compile time.
+4. Does the tower layer belong in this crate behind a feature (shipped), or in a
+   separate `dial9-tower` crate? Feature keeps versioning simple; a separate
+   crate keeps the core dep-free even at compile time.

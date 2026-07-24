@@ -1,16 +1,16 @@
 //! Ad-hoc span wrappers: spans in a dial9 trace with no `tracing` subscriber.
 //!
 //! Note what is absent: no `tracing_subscriber::registry()`, no
-//! `Dial9TracingLayer`. Each wrapper emits span events directly, and they
-//! render in the viewer's span lanes exactly like tracing-layer spans.
+//! `Dial9TracingLayer`. Each span emits its events directly, and they render in
+//! the viewer's span lanes exactly like tracing-layer spans.
 //!
 //! Run with the `tower` feature to include the middleware section:
 //!
 //! ```sh
 //! cargo run -p dial9 --example adhoc_spans --features tokio,tower
 //! ```
-use dial9::span::{SpanFutureExt as _, span};
-use dial9::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9::span::{Dial9Span, Instrument as _};
+use dial9::{DiskBuffer, RecorderTokioExt, dial9_span, recorder};
 use std::time::Duration;
 
 struct Order {
@@ -36,38 +36,33 @@ async fn charge(order_id: u64) {
 
 /// One checkout request, instrumented three different ways.
 async fn checkout(order_id: u64) {
-    // 1. Future wrapper. Enters/exits around each poll, so the awaits inside
-    //    show as idle rather than as span time.
+    // 1. Instrumented future. Enters/exits around each poll, so the awaits
+    //    inside show as idle rather than as span time.
     let order = load_order(order_id)
-        .in_span(span("db.load_order").field("order_id", order_id))
+        .instrument(dial9_span!("db.load_order", order_id = order_id))
         .await;
 
-    // 2. Sync RAII guard for a blocking/CPU section. `record` attaches a value
-    //    discovered mid-span; it rides the exit event.
+    // 2. Sync RAII guard for a blocking/CPU section. The macro captures fields
+    //    at construction; they ride every segment.
     let tax = {
-        let mut guard = span("pricing.compute_tax")
-            .field("order_id", order_id)
-            .entered();
-        let tax = compute_tax(&order);
-        guard.record("tax_cents", tax);
-        tax
+        let span = dial9_span!("pricing.compute_tax", order_id = order_id);
+        let _entered = span.enter();
+        compute_tax(&order)
     }; // exit + close here
 
     // 3. Explicit parenting across a spawn. The viewer nests spans by timestamp
     //    containment, which breaks when a task outlives its parent, so link the
     //    audit span explicitly. `id()` is the handle that crosses the boundary.
-    let charge_span = span("payment.charge")
-        .field("order_id", order_id)
-        .field("tax_cents", tax);
-    let audit = span("audit.emit").parent(charge_span.id());
+    let charge_span = dial9_span!("payment.charge", order_id = order_id, tax_cents = tax);
+    let audit = Dial9Span::new("audit.emit").with_parent_id(charge_span.id());
     let audit_task = tokio::spawn(
         async {
             tokio::time::sleep(Duration::from_millis(3)).await;
         }
-        .in_span(audit),
+        .instrument(audit),
     );
 
-    charge(order_id).in_span(charge_span).await;
+    charge(order_id).instrument(charge_span).await;
     let _ = audit_task.await;
 }
 
@@ -78,7 +73,7 @@ async fn settlement_worker() {
         async {
             tokio::time::sleep(Duration::from_millis(6)).await;
         }
-        .in_span(span("settlement.run").field("batch", batch))
+        .instrument(dial9_span!("settlement.run", batch = batch))
         .await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -113,12 +108,8 @@ async fn tower_demo() {
         }
     }
 
-    // `make_span` runs on the request path; `on_response` records fields that
-    // are only knowable once the response exists (here, the status).
-    let layer = Dial9SpanLayer::builder()
-        .make_span(|order_id: &u64| span("http_request").field("order_id", *order_id))
-        .on_response(|handle, status: &u16| handle.record("status", *status))
-        .build();
+    // `make_span` runs per request, so it can name the span and attach fields.
+    let layer = Dial9SpanLayer::new(|| dial9_span!("http_request", route = "/checkout"));
 
     let mut svc = layer.layer(Checkout);
     for order_id in 0..3u64 {
@@ -140,7 +131,7 @@ fn main() {
     runtime.block_on(async {
         let settlement = tokio::spawn(settlement_worker());
 
-        // Plain wrappers, no middleware involved.
+        // Plain spans, no middleware involved.
         let checkouts: Vec<_> = (0..5).map(|i| tokio::spawn(checkout(i))).collect();
         for c in checkouts {
             let _ = c.await;

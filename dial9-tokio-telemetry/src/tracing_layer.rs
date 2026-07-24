@@ -56,7 +56,7 @@
 //! comparable to the cost of a single poll event, so the layer is suitable
 //! for production use with appropriate span filtering.
 
-use crate::span::SpanCloseEvent;
+use crate::span::wire::SpanCloseEvent;
 use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;

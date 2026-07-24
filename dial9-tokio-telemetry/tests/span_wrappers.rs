@@ -4,7 +4,8 @@
 //! `SpanExit:*` / `SpanCloseEvent` wire events, the same format the tracing
 //! layer produces.
 
-use dial9_tokio_telemetry::span::{Dial9SpanLayer, SpanFutureExt as _, span};
+use dial9_tokio_telemetry::dial9_span;
+use dial9_tokio_telemetry::span::{Dial9Span, Dial9SpanLayer, Instrument as _};
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
@@ -27,6 +28,19 @@ struct SpanEvents {
     enter_schema_names: HashSet<String>,
 }
 
+/// Read a field value as a string whether it was interned (pooled) or written
+/// inline as a raw string.
+fn field_string(
+    pool: &dial9_trace_format::decoder::StringPool,
+    fv: &FieldValueRef,
+) -> Option<String> {
+    match fv {
+        FieldValueRef::PooledString(id) => pool.get(*id).map(|s| s.to_owned()),
+        FieldValueRef::String(s) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
 fn decode(path: &std::path::Path) -> SpanEvents {
     let data = std::fs::read(path).unwrap();
     let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
@@ -39,9 +53,9 @@ fn decode(path: &std::path::Path) -> SpanEvents {
                 r.enter_schema_names.insert(ev.name.to_owned());
                 for (fd, fv) in ev.schema.fields().iter().zip(ev.fields.iter()) {
                     match (fd.name(), fv) {
-                        ("span_name", FieldValueRef::PooledString(id)) => {
-                            if let Some(n) = ev.string_pool.get(*id) {
-                                r.enter_names.push(n.to_owned());
+                        ("span_name", _) => {
+                            if let Some(n) = field_string(ev.string_pool, fv) {
+                                r.enter_names.push(n);
                             }
                         }
                         ("span_id", FieldValueRef::Varint(v)) => {
@@ -50,12 +64,12 @@ fn decode(path: &std::path::Path) -> SpanEvents {
                         ("parent_span_id", FieldValueRef::Varint(v)) => {
                             r.parent_span_ids.insert(*v);
                         }
-                        (name, FieldValueRef::PooledString(id))
+                        (name, _)
                             if !["worker_id", "span_id", "parent_span_id", "span_name"]
                                 .contains(&name) =>
                         {
-                            if let Some(v) = ev.string_pool.get(*id) {
-                                r.enter_fields.push((name.to_owned(), v.to_owned()));
+                            if let Some(v) = field_string(ev.string_pool, fv) {
+                                r.enter_fields.push((name.to_owned(), v));
                             }
                         }
                         _ => {}
@@ -65,10 +79,9 @@ fn decode(path: &std::path::Path) -> SpanEvents {
                 r.exit_count += 1;
                 for (fd, fv) in ev.schema.fields().iter().zip(ev.fields.iter()) {
                     if !["worker_id", "span_id", "span_name"].contains(&fd.name())
-                        && let FieldValueRef::PooledString(id) = fv
-                        && let Some(v) = ev.string_pool.get(*id)
+                        && let Some(v) = field_string(ev.string_pool, fv)
                     {
-                        r.exit_fields.push((fd.name().to_owned(), v.to_owned()));
+                        r.exit_fields.push((fd.name().to_owned(), v));
                     }
                 }
             } else if ev.name == "SpanCloseEvent" {
@@ -116,16 +129,17 @@ where
     decode(&dir.path().join("trace.0.bin"))
 }
 
-/// The sync guard emits exactly one enter/exit pair plus one close, with
-/// construction-time fields on enter and late `record`ed fields on exit.
+/// The sync guard emits exactly one enter/exit pair plus one close, with the
+/// macro's construction-time fields on both enter and exit.
 #[test]
 fn sync_guard_emits_one_pair_and_closes() {
     let events = run_traced(1, || async {
-        let mut guard = span("pricing.compute").field("order_id", 7u64).entered();
+        let span = dial9_span!("pricing.compute", order_id = 7u64, total_cents = 4950u64);
+        let entered = span.enter();
         // pretend CPU work
-        let total: u64 = (0..100).sum();
-        guard.record("total_cents", total);
-        guard.exit();
+        let _total: u64 = (0..100).sum();
+        drop(entered); // exit here
+        // span drops at end of scope → close
     });
 
     assert_eq!(events.enter_count, 1, "one enter");
@@ -133,7 +147,6 @@ fn sync_guard_emits_one_pair_and_closes() {
     assert_eq!(events.close_count, 1, "one close");
     assert!(events.enter_names.contains(&"pricing.compute".to_string()));
 
-    // Construction-time field is on enter.
     assert!(
         events
             .enter_fields
@@ -142,7 +155,7 @@ fn sync_guard_emits_one_pair_and_closes() {
         "enter fields: {:?}",
         events.enter_fields
     );
-    // Late-recorded field rides the exit.
+    // Macro fields ride every segment, including the exit.
     assert!(
         events
             .exit_fields
@@ -164,18 +177,17 @@ fn sync_guard_emits_one_pair_and_closes() {
     );
 }
 
-/// The future wrapper emits one enter/exit pair per poll and a single close,
-/// and late fields recorded via the handle ride an exit.
+/// The instrumented future emits one enter/exit pair per poll and a single
+/// close, with the span's fields on each segment.
 #[test]
-fn future_wrapper_emits_per_poll_and_late_fields() {
+fn instrumented_future_emits_per_poll() {
     let events = run_traced(2, || async {
         async fn two_polls() {
             tokio::task::yield_now().await; // forces a second poll
         }
-        let fut = two_polls().in_span(span("db.query").field("table", "orders"));
-        let handle = fut.handle();
-        handle.record("rows", 3u64);
-        fut.await;
+        two_polls()
+            .instrument(dial9_span!("db.query", table = "orders", rows = 3u64))
+            .await;
     });
 
     // yield_now → at least two polls → at least two enter/exit pairs.
@@ -188,7 +200,6 @@ fn future_wrapper_emits_per_poll_and_late_fields() {
     assert_eq!(events.close_count, 1, "exactly one close for the span");
     assert!(events.enter_names.contains(&"db.query".to_string()));
 
-    // Construction field on enter, late field (via handle) on exit.
     assert!(
         events
             .enter_fields
@@ -200,27 +211,69 @@ fn future_wrapper_emits_per_poll_and_late_fields() {
             .exit_fields
             .iter()
             .any(|(k, v)| k == "rows" && v == "3"),
-        "late field via handle should ride an exit: {:?}",
+        "field should ride an exit: {:?}",
         events.exit_fields
     );
 }
 
-/// `.in_span("name")` shorthand works and produces a callsite schema.
+/// A name-only `Dial9Span::new` span shares the runtime schema, while a
+/// `dial9_span!` span gets a distinct call-site schema.
 #[test]
-fn in_span_str_shorthand() {
+fn name_only_and_macro_schemas() {
     let events = run_traced(1, || async {
-        async {}.in_span("tax.fetch_rate").await;
+        async {}.instrument(Dial9Span::new("tax.fetch_rate")).await;
+        async {}.instrument(dial9_span!("tax.compute")).await;
     });
     assert!(events.enter_names.contains(&"tax.fetch_rate".to_string()));
-    assert_eq!(events.close_count, 1);
-    // Schema id is callsite-based (this file), not the span name.
+    assert!(events.enter_names.contains(&"tax.compute".to_string()));
+    assert_eq!(events.close_count, 2);
+
+    // Name-only spans share one runtime schema.
     assert!(
         events
             .enter_schema_names
             .iter()
-            .any(|n| n.contains("adhoc::") && n.contains("span_wrappers.rs")),
+            .any(|n| n.contains("adhoc::runtime")),
         "schema names: {:?}",
         events.enter_schema_names
+    );
+    // Macro spans get a call-site-based schema id (this file).
+    assert!(
+        events
+            .enter_schema_names
+            .iter()
+            .any(|n| n.contains("span_wrappers.rs")),
+        "schema names: {:?}",
+        events.enter_schema_names
+    );
+}
+
+/// Two call sites with different field sets register distinct, non-colliding
+/// schemas (the schema id embeds `file:line:col`).
+#[test]
+fn distinct_callsites_get_distinct_schemas() {
+    let events = run_traced(1, || async {
+        async {}.instrument(dial9_span!("op.a", base = 1u64)).await;
+        async {}
+            .instrument(dial9_span!("op.b", base = 1u64, extra = 2u64))
+            .await;
+    });
+
+    let adhoc: Vec<_> = events
+        .enter_schema_names
+        .iter()
+        .filter(|n| n.contains("span_wrappers.rs"))
+        .collect();
+    assert!(
+        adhoc.len() >= 2,
+        "expected >= 2 distinct call-site schemas, got {:?}",
+        events.enter_schema_names
+    );
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "extra" && v == "2")
     );
 }
 
@@ -229,13 +282,13 @@ fn in_span_str_shorthand() {
 #[test]
 fn explicit_parent_across_spawn() {
     let events = run_traced(2, || async {
-        let parent = span("payment.charge").field("order_id", 1u64);
-        let parent_id = parent.id().as_u64();
-        let child = span("audit.emit").parent(parent.id());
+        let parent = dial9_span!("payment.charge", order_id = 1u64);
+        let parent_id = parent.id();
+        let child = Dial9Span::new("audit.emit").with_parent_id(parent_id);
 
-        tokio::spawn(async {}.in_span(child)).await.unwrap();
+        tokio::spawn(async {}.instrument(child)).await.unwrap();
         // Drive the parent too so it appears in the trace.
-        async {}.in_span(parent).await;
+        async {}.instrument(parent).await;
 
         assert!(parent_id & ADHOC_ID_BIT != 0);
     });
@@ -267,13 +320,16 @@ fn off_runtime_is_silent_noop() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         // Sync guard off-runtime.
-        let mut g = span("x").field("k", "v").entered();
-        g.record("late", 1u64);
-        drop(g);
+        let span = dial9_span!("x", k = "v");
+        let entered = span.enter();
+        drop(entered);
+        drop(span);
 
-        // Future wrapper off-runtime, polled to completion.
-        async {}.in_span(span("y")).await;
-        async { tokio::task::yield_now().await }.in_span("z").await;
+        // Instrumented futures off-runtime, polled to completion.
+        async {}.instrument(dial9_span!("y")).await;
+        async { tokio::task::yield_now().await }
+            .instrument(Dial9Span::new("z"))
+            .await;
     });
     // Reaching here without panicking is the assertion.
 }
@@ -284,7 +340,7 @@ fn off_runtime_is_silent_noop() {
 fn cancelled_future_still_closes() {
     let events = run_traced(1, || async {
         // A future that never completes; poll it once then drop it.
-        let mut fut = Box::pin(std::future::pending::<()>().in_span(span("stuck")));
+        let mut fut = Box::pin(std::future::pending::<()>().instrument(dial9_span!("stuck")));
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
         let poll = fut.as_mut().poll(&mut cx);
@@ -297,48 +353,27 @@ fn cancelled_future_still_closes() {
     assert_eq!(events.entered_span_ids, events.closed_span_ids);
 }
 
-/// Regression: a callsite that emits more than one field set must not collide
-/// on the wire.
-///
-/// A future that yields `Pending` before `Ready` exits twice: the first exit
-/// carries only the base fields, the second also carries a field recorded via
-/// the handle in between. Both come from the same callsite, so if the schema
-/// name did not encode the field list the encoder would reject the second
-/// definition ("schema already registered with different definition").
+/// A high-cardinality field prefixed with `~` is written inline (not interned)
+/// and still decodes back to its value.
 #[test]
-fn late_field_after_pending_poll_does_not_collide() {
+fn inline_field_roundtrips() {
     let events = run_traced(1, || async {
-        let fut = async { tokio::task::yield_now().await }.in_span(span("op").field("base", 1u64));
-        let handle = fut.handle();
-        let driver = tokio::spawn(fut);
-        // Record while the future is parked, so an earlier exit already went
-        // out with the base field set only.
-        tokio::task::yield_now().await;
-        handle.record("late", 2u64);
-        driver.await.unwrap();
+        async {}
+            .instrument(dial9_span!("request", id = ~"req-abc123"))
+            .await;
     });
-
-    assert!(events.enter_count >= 2, "expected multiple polls");
-    assert_eq!(events.enter_count, events.exit_count);
-    assert_eq!(events.close_count, 1);
-    // Both field sets reached the wire.
-    assert!(
-        events.exit_fields.iter().any(|(k, _)| k == "base"),
-        "exit fields: {:?}",
-        events.exit_fields
-    );
     assert!(
         events
-            .exit_fields
+            .enter_fields
             .iter()
-            .any(|(k, v)| k == "late" && v == "2"),
-        "late field must land on a later exit: {:?}",
-        events.exit_fields
+            .any(|(k, v)| k == "id" && v == "req-abc123"),
+        "inline field should roundtrip: {:?}",
+        events.enter_fields
     );
 }
 
-/// The tower layer creates one span per request and `on_response` records a
-/// late field that lands on the exit.
+/// The tower layer creates one span per request; a `make_span` closure names
+/// it, and the response future is entered/exited per poll and closed once.
 #[test]
 fn tower_layer_wraps_request() {
     use std::convert::Infallible;
@@ -346,8 +381,7 @@ fn tower_layer_wraps_request() {
     use tower_service::Service;
 
     // Doubles the request, but yields first so the response future is polled
-    // more than once — the realistic case, and the one where the first exit
-    // goes out before `on_response` has recorded anything.
+    // more than once — the realistic case.
     struct Doubler;
     impl Service<u32> for Doubler {
         type Response = u32;
@@ -369,10 +403,7 @@ fn tower_layer_wraps_request() {
 
     let events = run_traced(1, || async {
         use tower_layer::Layer;
-        let layer = Dial9SpanLayer::builder()
-            .make_span(|req: &u32| span("request").field("n", *req))
-            .on_response(|h, res: &u32| h.record("doubled", *res))
-            .build();
+        let layer = Dial9SpanLayer::new(|| dial9_span!("request", service = "checkout"));
         let mut svc = layer.layer(Doubler);
         let out = svc.call(21).await.unwrap();
         assert_eq!(out, 42);
@@ -381,19 +412,15 @@ fn tower_layer_wraps_request() {
     assert!(events.enter_names.contains(&"request".to_string()));
     assert_eq!(events.close_count, 1, "one span per request");
     assert!(
-        events
-            .enter_fields
-            .iter()
-            .any(|(k, v)| k == "n" && v == "21"),
-        "request field on enter: {:?}",
-        events.enter_fields
+        events.enter_count >= 2,
+        "response future polled more than once"
     );
     assert!(
         events
-            .exit_fields
+            .enter_fields
             .iter()
-            .any(|(k, v)| k == "doubled" && v == "42"),
-        "on_response late field should ride the exit: {:?}",
-        events.exit_fields
+            .any(|(k, v)| k == "service" && v == "checkout"),
+        "request field on enter: {:?}",
+        events.enter_fields
     );
 }
