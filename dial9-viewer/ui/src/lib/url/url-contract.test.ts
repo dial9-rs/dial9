@@ -125,6 +125,7 @@ describe("URL contract: README tables match the recorded fixtures", () => {
       bucket: "b",
       region: "eu-west-1",
       prefix: "p",
+      service: "svc",
       tab: "raw",
       tz: "local",
       q: "query",

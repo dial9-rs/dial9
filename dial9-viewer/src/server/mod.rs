@@ -19,6 +19,7 @@ pub(crate) mod flamegraph;
 pub(crate) mod fold_stream;
 pub(crate) mod metrics;
 mod prefixes;
+mod services;
 pub(crate) mod span_stats;
 pub(crate) mod tokio_stats;
 mod trace;
@@ -566,6 +567,7 @@ fn api_router(state: AppState) -> Router {
             axum::routing::post(check::check_credentials),
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
+        .route("/services", axum::routing::get(services::list_services))
         .route("/browse", axum::routing::get(browse::browse))
         .route("/object", axum::routing::get(trace::get_object))
         .route(

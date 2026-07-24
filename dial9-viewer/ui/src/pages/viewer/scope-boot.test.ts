@@ -69,7 +69,8 @@ describe("scope boot", () => {
     expect(handled).toBe(true);
     expect(region).toBe("us-west-2");
     expect(requested).toBe(
-      "/api/browse?bucket=cell1-prod-pdx-dial9-traces&from=1784588998&to=1784589014",
+      "/api/browse?bucket=cell1-prod-pdx-dial9-traces&service=shale" +
+        "&from=1784588998&to=1784589014",
     );
     expect(events).toEqual(["loading:Loading trace selection…", "loadUrls"]);
     expect(errors).toEqual([]);

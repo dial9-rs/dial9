@@ -23,8 +23,10 @@ function check(cond, msg) {
 try {
   const { context, page } = await newPage(browser, { fixedClock: true });
 
-  // Legacy page with in-page state: bucket + prefix + Last 24hr.
-  await page.goto(`${base}/index.html?bucket=demo-traces&prefix=traces&last=24`);
+  // Legacy page with in-page state: bucket + prefix + service + Last 24hr.
+  await page.goto(
+    `${base}/index.html?bucket=demo-traces&prefix=traces&service=demo-service&last=24`,
+  );
   await waitBrowserBootstrap(page);
   const legacyQuery = new URL(page.url()).search;
   await page.waitForSelector("#d9-ui-switch", { state: "visible" });
@@ -53,6 +55,10 @@ try {
     "prefix restored on the new page",
   );
   check(
+    (await page.inputValue("#service-input")) === "demo-service",
+    "service restored on the new page",
+  );
+  check(
     (await page.locator(".quick-btns button.selected").textContent()) === "Last 24hr",
     "last=24 quick range restored on the new page",
   );
@@ -78,6 +84,10 @@ try {
   check(
     (await page.inputValue("#bucket-input")) === "demo-traces",
     "bucket restored back on legacy",
+  );
+  check(
+    (await page.inputValue("#service-input")) === "demo-service",
+    "service restored back on legacy",
   );
 
   await context.close();

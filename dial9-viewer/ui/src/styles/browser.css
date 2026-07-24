@@ -109,6 +109,24 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 .tab-bar button:hover { color: #ccc; background: transparent; }
 .tab-bar button.active { color: #6c63ff; border-bottom-color: #6c63ff; background: transparent; }
 
+/* Service tabs are discovered before any browse rows are loaded. */
+.service-tabs {
+    display: flex; gap: 4px; padding: 8px 20px 0;
+    background: #1a1a2e; border-bottom: 1px solid #333; flex-wrap: wrap;
+}
+.service-tabs button {
+    border-radius: 4px 4px 0 0; border-bottom-color: transparent;
+    padding: 6px 12px; display: inline-flex; align-items: baseline; gap: 7px;
+}
+.service-tab-meta {
+    color: #85859d; font-size: 0.78em; font-weight: 400;
+}
+.service-tabs button.active {
+    background: #222244; border-color: #6c63ff; border-bottom-color: #222244;
+    color: #fff;
+}
+.service-tabs button.active .service-tab-meta { color: #aaaac0; }
+
 /* Host picker */
 .host-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));

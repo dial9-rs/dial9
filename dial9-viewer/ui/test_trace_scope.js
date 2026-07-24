@@ -21,6 +21,10 @@ function key(host, epoch, i) {
   return `traces/2026-06-29/1915/shale/${host}/abcd-boot/${epoch}-${i}.bin.gz`;
 }
 
+function keyForService(service, host, epoch, i) {
+  return `traces/2026-06-29/1915/${service}/${host}/abcd-boot/${epoch}-${i}.bin.gz`;
+}
+
 // --- parseKey / extractPrefix (moved here; keep parity) --------------------
 
 test("parseKey reads the boot_id layout", () => {
@@ -263,7 +267,9 @@ test("scopeFromKeys returns null when no window and no parseable epochs", () => 
   assert.strictEqual(s.to, 1782760800);
 });
 
-testAsync("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
+const asyncTests = [];
+
+asyncTests.push(testAsync("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
   const s = {
     bucket: "bkt",
     prefix: "traces",
@@ -292,9 +298,51 @@ testAsync("resolveScope lists the window, filters to the host set, maps to /api/
   assert.strictEqual(urls.length, 1, "only the in-window h1 object survives");
   assert.ok(urls[0].startsWith("/api/object?"), "maps to /api/object");
   assert.ok(urls[0].includes(encodeURIComponent(key("h1", 1782760100, 1))), "carries the right key");
-});
+}));
 
-testAsync("resolveScope with an empty host set keeps all in-window hosts", async () => {
+asyncTests.push(testAsync("resolveScope sends an encoded service and retains client-side service filtering", async () => {
+  const service = "checkout api+canary?";
+  const s = {
+    bucket: "bkt",
+    prefix: "traces",
+    service,
+    hosts: [],
+    from: 1782760000,
+    to: 1782760800,
+  };
+  const matchingKey = keyForService(service, "h1", 1782760100, 1);
+  const browse = {
+    objects: [
+      { key: matchingKey, size: 10, last_modified: "2026-06-29T19:15:05Z" },
+      {
+        key: keyForService("other-service", "h1", 1782760150, 1),
+        size: 10,
+        last_modified: "2026-06-29T19:15:06Z",
+      },
+    ],
+  };
+  let requested = "";
+  const urls = await scope.resolveScope(s, async (url) => {
+    requested = url;
+    return browse;
+  });
+
+  assert.ok(
+    requested.includes("service=checkout+api%2Bcanary%3F"),
+    "service is URL-encoded on /api/browse",
+  );
+  assert.strictEqual(
+    new URL(requested, "http://dial9.test").searchParams.get("service"),
+    service,
+    "browse receives the exact service value",
+  );
+  assert.strictEqual(urls.length, 1, "client-side filtering rejects a mismatched service from browse");
+  const objectParams = new URL(urls[0], "http://dial9.test").searchParams;
+  assert.strictEqual(objectParams.get("bucket"), "bkt");
+  assert.strictEqual(objectParams.get("key"), matchingKey);
+}));
+
+asyncTests.push(testAsync("resolveScope with an empty host set keeps all in-window hosts", async () => {
   const s = { bucket: "bkt", prefix: "traces", service: "", hosts: [], from: 1782760000, to: 1782760800 };
   const browse = {
     objects: [
@@ -304,6 +352,6 @@ testAsync("resolveScope with an empty host set keeps all in-window hosts", async
   };
   const urls = await scope.resolveScope(s, async () => browse);
   assert.strictEqual(urls.length, 2, "empty host set = all hosts in window");
-});
+}));
 
-summarize();
+Promise.all(asyncTests).then(summarize);

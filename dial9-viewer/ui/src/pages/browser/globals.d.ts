@@ -24,6 +24,8 @@ export interface UrlStateFields {
    * static BYOC keys, which are header-only and never in the URL). */
   roleArn?: string;
   prefix?: string;
+  /** Optional service filter for Browse mode. */
+  service?: string;
   tab?: "browse" | "raw";
   tz?: "utc" | "local";
   /** Relative quick-range window in hours; mutually exclusive with from/to. */

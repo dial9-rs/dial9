@@ -7,7 +7,7 @@
 // (loaded via require). Keep this dependency-free so both contexts can use it.
 //
 // State shape (all fields optional):
-//   { bucket, region, roleArn, prefix, tab, tz, last, from, to, q }
+//   { bucket, region, roleArn, prefix, service, tab, tz, last, from, to, q }
 //     bucket : S3 bucket name (string)
 //     region : S3 region the bucket lives in (string) — serialized as
 //              `aws_region`. Carried so a cross-region bucket is signed for the
@@ -21,6 +21,7 @@
 //              backend relies on, and why it round-trips like `aws_region`
 //              rather than being hidden like the secret BYOC keys.
 //     prefix : user-entered key prefix (string)
+//     service: optional service filter for browse-mode searches (string)
 //     tab    : 'browse' | 'raw'   (default 'browse' — omitted from URL)
 //     tz     : 'utc' | 'local'    (default 'utc'    — omitted from URL)
 //     last   : relative window in hours (number) — a quick range like "Last
@@ -59,6 +60,9 @@
 
     const prefix = p.get("prefix");
     if (prefix) out.prefix = prefix;
+
+    const service = p.get("service");
+    if (service) out.service = service;
 
     const q = p.get("q");
     if (q) out.q = q;
@@ -101,6 +105,7 @@
     // panel or a prior link is reflected back into the address bar.
     if (s.roleArn) p.set("aws_role_arn", s.roleArn);
     if (s.prefix) p.set("prefix", s.prefix);
+    if (s.service) p.set("service", s.service);
     // 'browse' is the default tab, so only the non-default 'raw' is recorded.
     if (s.tab === "raw") p.set("tab", s.tab);
     // 'utc' is the default timezone, so only 'local' is recorded.

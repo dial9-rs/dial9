@@ -6,6 +6,7 @@ import { MAX_OPEN_BYTES } from "../../lib/canvas/heatmap.js";
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { fmtTick, formatSize } from "./format.js";
+import { effectiveProfileSelection } from "./open-links.js";
 
 export function mountActionsBar({ store, els, actions }: PageCtx): void {
   els.viewBtn.addEventListener("click", () => {
@@ -27,7 +28,8 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
 
     if (state.ui.tab === "browse") {
       const sel = state.browse.selection;
-      if (!sel || !sel.keys.length) {
+      const profileSel = effectiveProfileSelection(state.browse);
+      if (!profileSel) {
         els.viewBtn.disabled = true;
         els.cpuBtn.disabled = true;
         els.healthBtn.disabled = true;
@@ -39,8 +41,8 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       // Selection size cap (MAX_OPEN_BYTES). Flamegraph is exempt in
       // aggregation mode (the server samples; no client decode) and Tokio
       // Stats is never capped.
-      const over = sel.bytes > MAX_OPEN_BYTES;
-      els.viewBtn.disabled = over;
+      const over = profileSel.bytes > MAX_OPEN_BYTES;
+      els.viewBtn.disabled = !sel || over;
       els.cpuBtn.disabled = over && !agg;
       els.healthBtn.disabled = !agg;
       // Span Explorer is aggregate-only: /api/span-stats is the only source of
@@ -48,12 +50,15 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       els.spansBtn.disabled = !agg;
       els.selectionWarn.textContent =
         over && !agg
-          ? `Too large to open (${formatSize(sel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
+          ? `Too large to open (${formatSize(profileSel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
           : "";
       const tz = state.ui.useLocalTz;
       const win =
-        sel.t0 && sel.t1 ? ` · ${fmtTick(sel.t0, tz)}–${fmtTick(sel.t1, tz)}` : "";
-      els.selectionCount.textContent = `${sel.keys.length} segment${sel.keys.length !== 1 ? "s" : ""} · ${formatSize(sel.bytes)}${win}`;
+        profileSel.t0 && profileSel.t1
+          ? ` · ${fmtTick(profileSel.t0, tz)}–${fmtTick(profileSel.t1, tz)}`
+          : "";
+      const scopeLabel = sel ? "" : "Current service · ";
+      els.selectionCount.textContent = `${scopeLabel}${profileSel.keys.length} segment${profileSel.keys.length !== 1 ? "s" : ""} · ${formatSize(profileSel.bytes)}${win}`;
       return;
     }
 
