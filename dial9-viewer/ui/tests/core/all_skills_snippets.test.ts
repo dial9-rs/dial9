@@ -77,6 +77,39 @@ function fixPlaceholders(code: string, tracePath: string): string {
     .replace(/['"]trace\.bin['"]/g, JSON.stringify(tracePath));
 }
 
+// Runs a recipe snippet exactly as the example tests do: drop `require()` lines
+// and demote `const` redeclarations of context vars to assignments (they are
+// already bound as function params), then eval with the context. Returns logs.
+async function runRecipeSnippet(
+  code: string,
+  ctxNames: string[],
+  ctxValues: unknown[],
+  tracePath: string,
+): Promise<string[]> {
+  const origLog = console.log;
+  const logs: string[] = [];
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    const cleanCode = code
+      .split("\n")
+      .filter((line) => !line.match(/^\s*const\s*\{.*\}\s*=\s*require\(/))
+      .map((line) => {
+        for (const v of ctxNames) {
+          if (new RegExp(`^(\\s*)const\\s+${v}\\s*=`).test(line))
+            return line.replace(/const\s+/, "");
+        }
+        return line;
+      })
+      .join("\n");
+    const body = `return (async () => { ${fixPlaceholders(cleanCode, tracePath)} })();`;
+    const fn = new Function(...ctxNames, body);
+    await fn(...ctxValues);
+  } finally {
+    console.log = origLog;
+  }
+  return logs;
+}
+
 // Walk skills/ subdirectories and collect all SKILL.md files
 function collectSkillMds(): { name: string; path: string }[] {
   const results: { name: string; path: string }[] = [];
@@ -89,16 +122,6 @@ function collectSkillMds(): { name: string; path: string }[] {
   }
   return results.sort((a, b) => a.name.localeCompare(b.name));
 }
-
-// Recipes whose snippet is O(polls x spans) and runs ~77s on the real demo
-// trace (kept readable as user-facing example code, not optimized). Under
-// Vitest's parallel workers on a slow CI runner they exceed the suite's 120s
-// ceiling; give them a wider per-test ceiling. Per AGENTS.md these are
-// "ceilings for stragglers, not expected durations".
-const SLOW_RECIPES = new Set([
-  "dial9-trace-recipes: Detect tight loops (many spans per poll)",
-]);
-const SLOW_RECIPE_TIMEOUT = 300_000;
 
 const skillMds = collectSkillMds();
 
@@ -226,48 +249,109 @@ for (const input of inputs) {
         continue;
       }
 
-      // Slow O(polls x spans) recipes do identical work in both modes (both
-      // read the single prelude trace), so run them once (file mode) rather
-      // than paying the ~77s cost twice: the dir-mode run adds no coverage and
-      // only doubles the timeout-flake surface.
-      if (input.label === "dir" && SLOW_RECIPES.has(recipe.heading)) {
-        it.skip(recipe.heading, () => {});
-        continue;
-      }
-
-      const recipeTimeout = SLOW_RECIPES.has(recipe.heading)
-        ? SLOW_RECIPE_TIMEOUT
-        : 120_000;
-      it(recipe.heading, { timeout: recipeTimeout }, async () => {
-        const origLog = console.log;
-        const logs: string[] = [];
-        console.log = (...args: unknown[]) => logs.push(args.join(" "));
-
-        try {
-          // Strip require() lines (already provided via context) and
-          // convert const redeclarations of context vars to assignments
-          const cleanCode = recipe.code
-            .split("\n")
-            .filter((line) => !line.match(/^\s*const\s*\{.*\}\s*=\s*require\(/))
-            .map((line) => {
-              for (const v of ctxNames) {
-                if (new RegExp(`^(\\s*)const\\s+${v}\\s*=`).test(line))
-                  return line.replace(/const\s+/, "");
-              }
-              return line;
-            })
-            .join("\n");
-
-          const body = `return (async () => { ${fixPlaceholders(cleanCode, input.path)} })();`;
-          const fn = new Function(...ctxNames, body);
-          await fn(...ctxValues);
-        } finally {
-          console.log = origLog;
-        }
+      it(recipe.heading, async () => {
+        await runRecipeSnippet(recipe.code, ctxNames, ctxValues, input.path);
       });
     }
   });
 }
+
+// Guards the recipe against a return to O(polls x spans) (its original form,
+// which flaked CI as a ~77s timeout). Counts array touches instead of wall-clock
+// so pass/fail is machine-independent: filter/some/for-of index each element a
+// spec-defined number of times, so the count is the same integer everywhere.
+// Linear sweep = ~2N touches, quadratic = ~2N^2; the threshold sits between them.
+describe("recipe performance guard", () => {
+  const TIGHT_LOOP =
+    "dial9-trace-recipes: Detect tight loops (many spans per poll)";
+  const recipe = allRecipes.find((r) => r.heading === TIGHT_LOOP);
+
+  function countingArray(arr: any[], counter: { n: number }): any[] {
+    return new Proxy(arr, {
+      get(target, prop, recv) {
+        if (typeof prop === "string" && /^\d+$/.test(prop)) counter.n++;
+        return Reflect.get(target, prop, recv);
+      },
+    });
+  }
+
+  function instrumentedBuildSpanData(counter: { n: number }) {
+    return (...args: unknown[]) => {
+      const res = (buildSpanData as (...a: unknown[]) => any)(...args);
+      for (const s of res.allSpans) s.segments = countingArray(s.segments, counter);
+      res.allSpans = countingArray(res.allSpans, counter);
+      return res;
+    };
+  }
+
+  // `hotPollSpans` extra spans are packed into poll 0 to trip the >10 branch;
+  // every other poll holds one span, disjoint in time.
+  function syntheticCtx(
+    N: number,
+    counter: { n: number },
+    hotPollSpans = 0,
+  ): { names: string[]; values: unknown[] } {
+    const polls: unknown[] = [];
+    const customEvents: unknown[] = [];
+    let spanId = 0;
+    const addSpan = (start: number, end: number) => {
+      customEvents.push({
+        name: "SpanEnterEvent",
+        timestamp: start,
+        fields: { worker_id: 0, span_id: spanId, span_name: "work", parent_span_id: null },
+      });
+      customEvents.push({
+        name: "SpanExitEvent",
+        timestamp: end,
+        fields: { worker_id: 0, span_id: spanId, span_name: "work" },
+      });
+      spanId++;
+    };
+    for (let i = 0; i < N; i++) {
+      const s = i * 100;
+      polls.push({ start: s, end: s + 50, taskId: i + 1, tid: 0, workerId: 0 });
+      if (i === 0 && hotPollSpans > 0) {
+        for (let k = 0; k < hotPollSpans; k++) addSpan(s + 1 + k, s + 2 + k);
+      } else {
+        addSpan(s + 10, s + 20);
+      }
+    }
+    const ctx: Record<string, unknown> = {
+      trace: { customEvents },
+      workerIds: [0],
+      minTs: 0,
+      spans: { workerSpans: { 0: { polls } } },
+      buildSpanData: instrumentedBuildSpanData(counter),
+      console,
+    };
+    return { names: Object.keys(ctx), values: Object.values(ctx) };
+  }
+
+  it("recipe is present in SKILL.md", () => {
+    expect(recipe, `recipe '${TIGHT_LOOP}' not found`).toBeDefined();
+  });
+
+  it("touches spans a linear number of times, not O(polls x spans)", async () => {
+    const N = 2000;
+    const counter = { n: 0 };
+    const { names, values } = syntheticCtx(N, counter);
+    await runRecipeSnippet(recipe!.code, names, values, "");
+    expect(
+      counter.n,
+      `recipe indexed span arrays ${counter.n} times for ${N} polls; a linear ` +
+        `sweep does ~${2 * N}, an O(polls x spans) regression does ~${2 * N * N}`,
+    ).toBeLessThan(50 * N);
+  });
+
+  it("still reports polls whose span count exceeds the threshold", async () => {
+    const counter = { n: 0 };
+    const { names, values } = syntheticCtx(200, counter, 15);
+    const logs = await runRecipeSnippet(recipe!.code, names, values, "");
+    const hits = logs.filter((l) => /\b15 spans\b/.test(l));
+    expect(hits, `expected one poll reported with 15 spans, got: ${JSON.stringify(logs)}`)
+      .toHaveLength(1);
+  });
+});
 
 // ── Script validation ──
 // Verify that scripts/ files in each skill load without errors

@@ -257,13 +257,15 @@ view-state params here.
 ### Query params - index.html (trace browser)
 
 Owned by `url_state.js` (its header is the field-level contract); serialized
-with `history.replaceState` on every state change, defaults omitted:
+with the History API on state changes, defaults omitted. Service-tab changes
+push history entries so Back/Forward restores the focused service:
 
 | Param | Value | Meaning |
 |-------|-------|---------|
 | `bucket` | string | S3 bucket name. |
 | `aws_region` | string | Region the bucket lives in (cross-region buckets). |
 | `prefix` | string | User-entered key prefix. |
+| `service` | string | Focused Browse service tab and exact backend filter. |
 | `tab` | `raw` | Active tab; `browse` is the default and omitted. |
 | `tz` | `local` | Timezone toggle; `utc` is the default and omitted. |
 | `last` | positive number | Relative quick range in hours ("last N hours from now"). Mutually exclusive with `from`/`to`; wins when both present. |

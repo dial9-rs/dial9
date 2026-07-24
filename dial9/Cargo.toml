@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.5.0-rc0"
+version = "0.5.0-rc1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,6 +11,9 @@ categories = ["asynchronous", "development-tools::profiling"]
 
 [package.metadata.docs.rs]
 all-features = true
+# `--all-features` turns on `taskdump`, which requires `--cfg tokio_unstable`.
+rustdoc-args = ["--cfg", "tokio_unstable"]
+rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ target }-v{ version }{ archive-suffix }"
@@ -22,13 +25,17 @@ name = "dial9"
 path = "src/main.rs"
 required-features = ["cli"]
 
+[[test]]
+name = "cli_trace_shape"
+required-features = ["cli"]
+
 [dependencies]
 dial9-core = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
 dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry", optional = true }
 dial9-macro = { workspace = true, optional = true }
 
-dial9-viewer = { version = "0.5.0-rc0", path = "../dial9-viewer", optional = true }
+dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
 
 tokio = { version = "1.52.0", optional = true, default-features = false, features = [
@@ -39,7 +46,7 @@ bon = { version = "3", optional = true }
 tracing = { version = "0.1.44", optional = true }
 
 [features]
-default = ["cli"]
+default = []
 
 ## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
 cli = ["dep:dial9-viewer", "dep:anyhow"]

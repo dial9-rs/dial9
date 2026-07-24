@@ -76,6 +76,7 @@ function fakeEls(): BrowserEls {
     credsBucketsRow: el(),
     credsBuckets: el(),
     bucketInput: el(),
+    serviceInput: el(),
   } as unknown as BrowserEls;
 }
 
@@ -118,12 +119,11 @@ describe("mountCredsPanel", () => {
     });
 
     const discoverPrefixes = vi.fn(async () => {});
-    const reRunCurrentSearch = vi.fn();
+    const discoverServices = vi.fn(async () => {});
     const actions = {
       syncUrl: vi.fn(),
       discoverPrefixes,
-      reRunCurrentSearch,
-      isAutoSearched: vi.fn(() => false),
+      discoverServices,
     } as unknown as BrowserActions;
     const els = fakeEls();
     const panel = mountCredsPanel({
@@ -143,6 +143,105 @@ describe("mountCredsPanel", () => {
     expect(setRegion).toHaveBeenCalledWith("af-south-1");
     expect(check).not.toHaveBeenCalled();
     expect(discoverPrefixes).toHaveBeenCalledOnce();
-    expect(reRunCurrentSearch).toHaveBeenCalledOnce();
+    expect(discoverServices).toHaveBeenCalledOnce();
+  });
+
+  it("discovers services after credentials supply the only bucket", async () => {
+    const creds = {
+      has: vi.fn(() => false),
+      get: vi.fn(() => null),
+      set: vi.fn(async () => ({ ok: true, error: null })),
+      setRegion: vi.fn(),
+      check: vi.fn(),
+      listBuckets: vi.fn(async () => [
+        { name: "dial9-traces", region: "us-east-1" },
+      ]),
+      clear: vi.fn(),
+      parse: vi.fn(),
+    } as unknown as Dial9CredsApi;
+    vi.stubGlobal("window", {
+      Dial9Creds: creds,
+      addEventListener: vi.fn(),
+    });
+    vi.stubGlobal("document", {
+      createElement: () => new FakeElement(),
+      createTextNode: (text: string) => {
+        const node = new FakeElement();
+        node.textContent = text;
+        return node;
+      },
+    });
+
+    const discoverServices = vi.fn(async () => {});
+    const actions = {
+      syncUrl: vi.fn(),
+      discoverPrefixes: vi.fn(async () => {}),
+      discoverServices,
+    } as unknown as BrowserActions;
+    const els = fakeEls();
+    const panel = mountCredsPanel({
+      store: createBrowserStore(),
+      els,
+      actions,
+    });
+    panel.init();
+
+    els.credsAkid.value = "AK";
+    els.credsSecret.value = "SK";
+    els.credsApply.click();
+    await drainMicrotasks();
+
+    expect(els.bucketInput.value).toBe("dial9-traces");
+    expect(discoverServices).toHaveBeenCalledOnce();
+  });
+
+  it("discovers services when userscript credentials arrive for a picked bucket", async () => {
+    let active = false;
+    let credentialsChanged: Listener | undefined;
+    const creds = {
+      has: vi.fn(() => active),
+      get: vi.fn(() => null),
+    } as unknown as Dial9CredsApi;
+    vi.stubGlobal("window", {
+      Dial9Creds: creds,
+      addEventListener: vi.fn((type: string, listener: Listener) => {
+        if (type === "dial9:credentials-changed") credentialsChanged = listener;
+      }),
+    });
+    vi.stubGlobal("document", {
+      createElement: () => new FakeElement(),
+      createTextNode: (text: string) => {
+        const node = new FakeElement();
+        node.textContent = text;
+        return node;
+      },
+    });
+
+    const discoverPrefixes = vi.fn(async () => {});
+    const discoverServices = vi.fn(async () => {});
+    const actions = {
+      canRerunCurrentSearch: vi.fn(() => false),
+      reRunCurrentSearch: vi.fn(),
+      discoverPrefixes,
+      discoverServices,
+    } as unknown as BrowserActions;
+    const els = fakeEls();
+    els.bucketInput.value = "dial9-traces";
+    const panel = mountCredsPanel({
+      store: createBrowserStore(),
+      els,
+      actions,
+    });
+    panel.init();
+
+    active = true;
+    expect(credentialsChanged).toBeDefined();
+    credentialsChanged!();
+    await drainMicrotasks();
+
+    expect(actions.canRerunCurrentSearch).toHaveBeenCalledOnce();
+    expect(actions.reRunCurrentSearch).not.toHaveBeenCalled();
+    expect(discoverPrefixes).toHaveBeenCalledOnce();
+    expect(discoverServices).toHaveBeenCalledOnce();
   });
 });

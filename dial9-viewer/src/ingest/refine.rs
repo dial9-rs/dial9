@@ -295,7 +295,11 @@ pub(crate) async fn resolve(agg: &AggContext, scope: &Scope, opts: RefineOpts) -
     //    a time range, generate date/hour prefixes to avoid listing the entire
     //    bucket (which can be 100k+ objects).
     let listing_prefixes = time_scoped_prefixes(&agg.source_prefixes, scope);
-    tracing::info!(listing_prefixes = ?listing_prefixes, "resolve: listing prefixes");
+    tracing::info!(
+        listing_prefix_count = listing_prefixes.len(),
+        sample_listing_prefixes = ?listing_prefixes.iter().take(5).collect::<Vec<_>>(),
+        "resolve: listing prefixes"
+    );
 
     // List the prefixes concurrently: a wide window is many independent LISTs,
     // and serializing them is a major latency driver. Bounded by LIST_CONCURRENCY.
@@ -363,6 +367,7 @@ pub(crate) async fn resolve(agg: &AggContext, scope: &Scope, opts: RefineOpts) -
         &agg.output_bucket,
         &agg.output_prefix,
         &agg.source_bucket,
+        scope.service.as_deref(),
     )
     .await;
 
@@ -481,13 +486,15 @@ fn sampling_cap(files_matched: usize, max_files_override: Option<usize>) -> usiz
 /// every minute (`1930/`, `1931/`, …, `1939/`).
 ///
 /// When the query window is narrow (≤ 2 hours), we emit **per-minute** prefixes
-/// (e.g. `2026-06-22/1303`) padded by 2 minutes on each side. This avoids
-/// listing thousands of files in the surrounding hours when only a handful
-/// match. For wider windows (> 2 hours) we fall back to **per-hour** prefixes
-/// (e.g. `2026-06-22/13`) padded by 1 hour, capped at 72 hours.
+/// (e.g. `2026-06-22/1303`) padded by 2 minutes on each side. A service-scoped
+/// query always uses exact minute prefixes ending in `/{service}/`, regardless
+/// of window width, because the service component follows the full `HHMM`
+/// component in the key. This excludes sibling services at S3 LIST time.
 ///
-/// Service/host pruning happens in-memory in `scope_matches` — it can't go into
-/// the prefix because both sit *after* `HHMM` in the key.
+/// Wider all-service windows (> 2 hours) use **per-hour** prefixes (e.g.
+/// `2026-06-22/13`) padded by 1 hour. Both paths are capped at 72 hours.
+///
+/// Host pruning remains in-memory in `scope_matches`.
 ///
 /// Falls back to the raw `source_prefixes` when no time range is given.
 fn time_scoped_prefixes(source_prefixes: &[String], scope: &Scope) -> Vec<String> {
@@ -503,10 +510,12 @@ fn time_scoped_prefixes(source_prefixes: &[String], scope: &Scope) -> Vec<String
     // This reduces a 1341-file listing to ~10 files for a single segment selection.
     const MINUTE_THRESHOLD_SECS: i64 = 2 * 3600;
     const MINUTE_PAD_SECS: i64 = 2 * 60;
+    const MAX_WINDOW_SECS: i64 = 72 * 3600;
 
-    if span_secs <= MINUTE_THRESHOLD_SECS {
+    if scope.service.is_some() || span_secs <= MINUTE_THRESHOLD_SECS {
         let padded_start = (start_secs - MINUTE_PAD_SECS) / 60 * 60;
-        let padded_end = (end_secs + MINUTE_PAD_SECS) / 60 * 60;
+        let padded_end =
+            ((end_secs + MINUTE_PAD_SECS) / 60 * 60).min(padded_start + MAX_WINDOW_SECS);
 
         let mut prefixes = Vec::new();
         for base in source_prefixes {
@@ -518,7 +527,11 @@ fn time_scoped_prefixes(source_prefixes: &[String], scope: &Scope) -> Vec<String
             let mut t = padded_start;
             while t <= padded_end {
                 let (date, hhmm) = epoch_to_date_hour(t);
-                prefixes.push(format!("{base_slash}{date}/{hhmm}"));
+                let minute_prefix = format!("{base_slash}{date}/{hhmm}");
+                prefixes.push(match scope.service.as_deref() {
+                    Some(service) => format!("{minute_prefix}/{service}/"),
+                    None => minute_prefix,
+                });
                 t += 60;
             }
         }
@@ -527,8 +540,7 @@ fn time_scoped_prefixes(source_prefixes: &[String], scope: &Scope) -> Vec<String
         // Wide window: hour-level prefixes with 1-hour padding.
         let start_hour = (start_secs / 3600 - 1) * 3600;
         let end_hour = (end_secs / 3600 + 1) * 3600;
-        let max_hours: i64 = 72;
-        let end_hour = end_hour.min(start_hour + max_hours * 3600);
+        let end_hour = end_hour.min(start_hour + MAX_WINDOW_SECS);
 
         let mut prefixes = Vec::new();
         for base in source_prefixes {
@@ -715,6 +727,45 @@ mod tests {
         assert!(prefixes.contains(&"traces/2026-06-19/13".to_string()));
         assert!(prefixes.contains(&"traces/2026-06-19/16".to_string()));
         assert!(prefixes.contains(&"traces/2026-06-19/17".to_string()));
+    }
+
+    #[test]
+    fn time_scoped_service_prefixes_include_service_for_narrow_window() {
+        let start_ns = 1781874000i64 * 1_000_000_000;
+        let end_ns = (1781874000i64 + 60) * 1_000_000_000;
+        let scope = Scope {
+            start_ns: Some(start_ns),
+            end_ns: Some(end_ns),
+            service: Some("shale".to_string()),
+            hosts: vec![],
+        };
+        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
+
+        assert!(
+            prefixes.iter().all(|prefix| prefix.ends_with("/shale/")),
+            "service-scoped LIST prefixes must exclude sibling services: {prefixes:?}"
+        );
+        assert!(prefixes.contains(&"traces/2026-06-19/1300/shale/".to_string()));
+    }
+
+    #[test]
+    fn time_scoped_service_prefixes_include_service_for_wide_window() {
+        let start_ns = 1781874000i64 * 1_000_000_000;
+        let end_ns = 1781884800i64 * 1_000_000_000;
+        let scope = Scope {
+            start_ns: Some(start_ns),
+            end_ns: Some(end_ns),
+            service: Some("shale".to_string()),
+            hosts: vec![],
+        };
+        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
+
+        assert!(
+            prefixes.iter().all(|prefix| prefix.ends_with("/shale/")),
+            "wide service scopes must not fall back to all-service hour prefixes: {prefixes:?}"
+        );
+        assert!(prefixes.contains(&"traces/2026-06-19/1300/shale/".to_string()));
+        assert!(prefixes.contains(&"traces/2026-06-19/1600/shale/".to_string()));
     }
 
     #[test]

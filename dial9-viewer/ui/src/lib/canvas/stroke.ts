@@ -28,6 +28,19 @@ export interface ColumnSeriesOpts<P> {
    * (step semantics - the value that carries into the next column).
    */
   weightOf?: (p: P) => number;
+  /**
+   * Step-carry mode. When set, each column emits its weighted representative
+   * (the spike) AND a CLOSE vertex at the column's last sample (largest x), so a
+   * step line carries the true ending level forward instead of the spike's
+   * height. No-op without `weightOf` (the last sample already wins), so a
+   * plain line is unchanged. See `stepSeries`, which enables it.
+   *
+   * Without this, a spike and a later drain-to-0 that collapse into one pixel
+   * column would keep only the spike, and `expandSteps` would carry that spike's
+   * height across the whole gap to the right (wrong: the level had already
+   * dropped). Default false.
+   */
+  stepClose?: boolean;
   /** Left edge of the draw area in CSS px. Default 0. */
   x0?: number;
   /** Draw-area width in CSS px. */
@@ -35,9 +48,10 @@ export interface ColumnSeriesOpts<P> {
 }
 
 /**
- * Downsample a series to at most one vertex per pixel column. Returns
- * vertices in ascending column order, at most ceil(drawW) of them,
- * regardless of how many input points are visible.
+ * Downsample a series to at most one vertex per pixel column (at most two with
+ * `stepClose`). Returns vertices in ascending column order, at most ceil(drawW)
+ * of them (2 * ceil(drawW) with `stepClose`), regardless of how many input
+ * points are visible.
  *
  * `points` MUST be sorted ascending by xOf (same contract as the frozen
  * core's pixelDownsampleSpans); out-of-order input throws rather than
@@ -51,6 +65,7 @@ export function downsampleSeriesToColumns<P>(
 ): Vertex[] {
   const { xOf, yOf, weightOf, drawW } = opts;
   const x0 = opts.x0 ?? 0;
+  const stepClose = opts.stepClose ?? false;
   const nCols = Math.ceil(drawW);
   if (nCols <= 0 || points.length === 0) return [];
 
@@ -60,9 +75,21 @@ export function downsampleSeriesToColumns<P>(
   let repY = 0;
   let repWeight = -Infinity;
   let hasRep = false;
+  // The column's last sample (largest x), for stepClose. Input is x-sorted so
+  // the last point processed in a column has the largest x, i.e. lastX >= repX.
+  let lastX = 0;
+  let lastP: P | null = null;
 
   const flush = () => {
-    if (hasRep) out.push({ x: repX, y: repY });
+    if (!hasRep) return;
+    out.push({ x: repX, y: repY });
+    // Close the column at its true ending level so the carried-forward step is
+    // the last value, not the spike. Skip when the last sample IS the rep
+    // (monotonic-up / single-sample columns) to avoid a zero-length segment.
+    if (stepClose && lastP !== null) {
+      const ly = yOf(lastP);
+      if (lastX !== repX || ly !== repY) out.push({ x: lastX, y: ly });
+    }
   };
 
   for (const p of points) {
@@ -78,6 +105,7 @@ export function downsampleSeriesToColumns<P>(
       col = c;
       repWeight = -Infinity;
       hasRep = false;
+      lastP = null;
     }
     if (weightOf === undefined) {
       // Last point in the column wins.
@@ -92,6 +120,10 @@ export function downsampleSeriesToColumns<P>(
         repY = yOf(p);
         hasRep = true;
       }
+    }
+    if (stepClose) {
+      lastX = xc;
+      lastP = p;
     }
   }
   flush();
@@ -181,7 +213,11 @@ export function makeStrokeBatcher(): StrokeBatcher {
       if (vertices.length > 0) entry(styleKey).batch.polylines.push(vertices);
     },
     stepSeries(styleKey, points, opts) {
-      const vertices = expandSteps(downsampleSeriesToColumns(points, opts));
+      // stepClose: a step line must carry the column's LAST value forward, not
+      // its weighted spike. No-op when opts has no weightOf (last already wins).
+      const vertices = expandSteps(
+        downsampleSeriesToColumns(points, { ...opts, stepClose: true }),
+      );
       if (vertices.length > 0) entry(styleKey).batch.polylines.push(vertices);
     },
     polyline(styleKey, vertices) {

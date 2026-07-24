@@ -22,6 +22,7 @@ import { mountHeatmapKeys } from "./heatmap-keys.js";
 import { mountBrowserPageKeys } from "./page-keys.js";
 import { mountRawView } from "./raw-view.js";
 import { mountSearchControls } from "./search-controls.js";
+import { mountServiceTabs } from "./service-tabs.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
@@ -66,6 +67,7 @@ function boot(): void {
   mountHeader(ctx);
   mountSearchControls(ctx);
   mountTabs(ctx);
+  mountServiceTabs(ctx);
   mountBrowseView(ctx);
   mountSelectionOverlay(ctx);
   mountHeatmapInteraction(ctx);
@@ -92,6 +94,7 @@ function boot(): void {
   }
   if (urlState.bucket) els.bucketInput.value = urlState.bucket;
   if (urlState.prefix) els.prefixInput.value = urlState.prefix;
+  if (urlState.service) els.serviceInput.value = urlState.service;
   if (urlState.q) els.rawSearchInput.value = urlState.q;
   actions.mirrorPrefix();
   if (urlState.tab === "raw") actions.switchTab("raw");
@@ -200,11 +203,21 @@ function boot(): void {
       return actions
         .detectRegionForBucket(els.bucketInput.value.trim())
         .then(() => actions.discoverPrefixes())
-        .then(() => actions.autoSearch());
+        .then(() => actions.discoverServices());
     })
     .catch(() => {
-      void actions.discoverPrefixes().then(() => actions.autoSearch());
+      void actions.discoverPrefixes().then(() => actions.discoverServices());
     });
+
+  window.addEventListener("popstate", () => {
+    const state = window.Dial9UrlState.parse(window.location.search);
+    const service = state.service ?? "";
+    if (service) {
+      actions.selectService(service, "replace");
+    } else {
+      actions.clearBrowseNoService();
+    }
+  });
 }
 
 /** Run every subscriber once so the first frame renders the initial state. */

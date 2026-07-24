@@ -26,6 +26,11 @@ enum Commands {
         #[command(subcommand)]
         action: Option<AgentsAction>,
     },
+    /// Extract or generate trace shapes (sanitized structural fingerprints)
+    TraceShape {
+        #[command(subcommand)]
+        action: TraceShapeAction,
+    },
     /// Start the web server
     Serve {
         /// Port to listen on
@@ -115,6 +120,37 @@ enum ReportAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum TraceShapeAction {
+    /// Extract a sanitized shape from a trace file
+    Extract {
+        /// Input trace file (binary or gzip)
+        trace: PathBuf,
+        /// Output shape JSON file
+        shape_json: PathBuf,
+    },
+    /// Generate a synthetic trace from a shape file
+    Generate {
+        /// Input shape JSON file
+        shape_json: PathBuf,
+        /// Output trace file (binary)
+        trace: PathBuf,
+        /// Number of repetitions of the template (default 1, must be >= 1)
+        #[arg(long, default_value = "1")]
+        repeat: u32,
+    },
+    /// Sanitize a source trace directly into a synthetic trace without JSON
+    Synthesize {
+        /// Input source trace file (binary or gzip)
+        source_trace: PathBuf,
+        /// Output synthetic trace file (binary)
+        synthetic_trace: PathBuf,
+        /// Number of repetitions of the template (default 1, must be >= 1)
+        #[arg(long, default_value = "1")]
+        repeat: u32,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum AgentsAction {
     /// Copy the analysis toolkit (JS modules) to a directory
     Toolkit {
@@ -186,6 +222,28 @@ pub async fn run() -> anyhow::Result<()> {
                 let abs = std::fs::canonicalize(&path)?;
                 eprintln!("Skills unpacked to {}", abs.display());
                 eprintln!("Add to .kiro/skills/ or point your agent at this directory.");
+            }
+        },
+        Commands::TraceShape { action } => match action {
+            TraceShapeAction::Extract { trace, shape_json } => {
+                crate::trace_shape::extract(&trace, &shape_json)?;
+                eprintln!("Shape extracted to {}", shape_json.display());
+            }
+            TraceShapeAction::Generate {
+                shape_json,
+                trace,
+                repeat,
+            } => {
+                crate::trace_shape::generate(&shape_json, &trace, repeat)?;
+                eprintln!("Trace generated at {}", trace.display());
+            }
+            TraceShapeAction::Synthesize {
+                source_trace,
+                synthetic_trace,
+                repeat,
+            } => {
+                crate::trace_shape::synthesize(&source_trace, &synthetic_trace, repeat)?;
+                eprintln!("Synthetic trace generated at {}", synthetic_trace.display());
             }
         },
         Commands::Serve {

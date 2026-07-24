@@ -22,6 +22,12 @@ export interface BrowseObject {
   last_modified?: string | undefined;
 }
 
+/** Additive per-service metadata from GET /api/services. */
+export interface ServiceMetadata {
+  service: string;
+  host_count: number;
+}
+
 /** Normalized heatmap segment. */
 export interface HeatmapSegment {
   key: string;
@@ -116,6 +122,13 @@ export interface SearchSlice {
 }
 
 export interface BrowseSlice {
+  /** Services found by the lightweight `/api/services` query. */
+  services: readonly string[];
+  /** Metadata for discovered services; absent on older servers. */
+  serviceMetadata: readonly ServiceMetadata[];
+  /** Focused service tab; null while multiple services await a click. */
+  activeService: string | null;
+  serviceDiscovery: "idle" | "loading" | "ready" | "error";
   status: StatusState;
   /** Truncation warning banner text; null = hidden. */
   warning: string | null;
@@ -213,10 +226,14 @@ export function initialBrowserState(): BrowserState {
       prefixPlaceholder: "detecting…",
     },
     browse: {
+      services: [],
+      serviceMetadata: [],
+      activeService: null,
+      serviceDiscovery: "idle",
       status: {
         visible: true,
         kind: "normal",
-        text: "Select a time range and click Search to find traces.",
+        text: "Select a bucket to find services.",
         sampleKeys: null,
       },
       warning: null,

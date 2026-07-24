@@ -81,6 +81,7 @@
         <label>Prefix:</label>
         <input type="text" id="prefix-input" placeholder="detecting…" style="width:120px" />
         <span id="prefix-suggestions" style="display:inline-flex;gap:4px"></span>
+        <input type="hidden" id="service-input" />
         <span style="color:#444">|</span>
         <div class="quick-btns">
             <button data-hours="1">Last 1hr</button>
@@ -98,6 +99,7 @@
         <button class="active" id="tab-browse">Browse</button>
         <button id="tab-raw">Raw Search</button>
     </div>
+    <div class="service-tabs" id="service-tabs" role="tablist" aria-label="Services" style="display:none"></div>
 
     <div class="main-area" id="main-area">
         <!-- Browse mode: status / density heatmap timeline -->

@@ -243,10 +243,10 @@ With the `process-resource` feature, dial9 can sample process-level resource
 usage from `getrusage(RUSAGE_SELF)`. Programmatic builders leave it disabled
 unless you opt in:
 
-```rust,ignore
+```rust,no_run
 use dial9::process::ProcessResourceUsageConfig;
 use dial9::RecorderPerfExt;
-
+# let writer = dial9::MemoryBuffer::new(1 << 20).unwrap();
 let recorder = dial9::recorder(writer)
     .with_process_resource_usage(ProcessResourceUsageConfig::default())
     .build();
@@ -269,10 +269,10 @@ process.
 Programmatic builders leave socket accept queue sampling disabled unless you
 opt in:
 
-```rust,ignore
+```rust,no_run
 use dial9::socket::SocketAcceptQueuesConfig;
 use dial9::RecorderPerfExt;
-
+# let writer = dial9::MemoryBuffer::new(1 << 20).unwrap();
 let recorder = dial9::recorder(writer)
     .with_socket_accept_queues(SocketAcceptQueuesConfig::default())
     .build();
@@ -310,39 +310,42 @@ rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 **Enable CPU profiling** (`.with_cpu_profiling` on the recorder):
 
-```rust,ignore
+```rust,no_run
 use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
 use dial9::RecorderPerfExt;
-dial9::recorder(writer)
+# let writer = dial9::MemoryBuffer::new(1 << 20).unwrap();
+let recorder = dial9::recorder(writer)
     // Enable normal CPU profiles
     .with_cpu_profiling(CpuProfilingConfig::default())
     // Enable per-worker scheduler event capture
     .with_sched_events(SchedEventConfig::default().include_kernel(true))
-    // ...
+    .build();
 ```
 
 By default, dial9 tries the perf backend and falls back to ctimer if
 `perf_event_open` is blocked. You can select the backend explicitly:
 
-```rust,ignore
+```rust,no_run
+use dial9::cpu::{CpuProfilingConfig, EventSource};
+
 // Use ctimer directly — zero thread lifecycle overhead, ideal for workloads
 // with high thread churn (e.g. saturated block_in_place usage).
-CpuProfilingConfig::with_ctimer_backend()
+let ctimer = CpuProfilingConfig::with_ctimer_backend();
 
 // Require perf — fail instead of silently degrading. Needed for kernel
 // stacks or hardware event sources.
-CpuProfilingConfig::with_perf_backend()
+let perf = CpuProfilingConfig::with_perf_backend()
     .event_source(EventSource::SwCpuClock)
-    .include_kernel(true)
+    .include_kernel(true);
 ```
 
 To use dial9 as a CPU profiler without installing Tokio runtime hooks, build a
 recorder and don't attach a runtime to it:
 
-```rust,ignore
+```rust,no_run
 use dial9::cpu::CpuProfilingConfig;
 use dial9::RecorderPerfExt;
-
+# let writer = dial9::MemoryBuffer::new(1 << 20).unwrap();
 let recorder = dial9::recorder(writer)
     .with_cpu_profiling(CpuProfilingConfig::default())
     .build();
@@ -536,7 +539,7 @@ You can also register a callback that runs from dial9's flush thread and emits
 custom events. This is useful for draining application-owned queues or taking
 periodic snapshots without passing a [`Dial9Handle`] through your code:
 
-```rust,ignore
+```rust,no_run
 use dial9::core::CustomEventsConfig;
 use dial9::{RecorderSourceExt, recorder};
 use dial9_trace_format::TraceEvent;
@@ -547,7 +550,8 @@ struct CacheEvent {
     timestamp_ns: u64,
     entries: u64,
 }
-
+# let writer = dial9::MemoryBuffer::new(1 << 20).unwrap();
+# let (_tx, rx) = std::sync::mpsc::channel::<CacheEvent>();
 let recorder = recorder(writer)
     .with_custom_events(CustomEventsConfig::default(), move |ctx| {
         while let Ok(event) = rx.try_recv() {
@@ -730,8 +734,8 @@ For custom upload destinations or post-processing (e.g. shipping to a different 
 Pre-built binaries are available from [GitHub Releases](https://github.com/dial9-rs/dial9/releases) for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
 
 ```bash
-# From source via crates.io
-cargo install --locked dial9
+# From source via crates.io (the viewer/CLI is behind the `cli` feature)
+cargo install --locked dial9 --features cli
 
 # Or with cargo-binstall (downloads a pre-built binary, faster)
 cargo binstall dial9
@@ -739,7 +743,7 @@ cargo binstall dial9
 
 ## Usage
 
-The binary has two subcommands: `serve` and `agents`. Run `dial9 --help` or `dial9 <subcommand> --help` for full options.
+The binary has several subcommands: `serve`, `agents`, `trace-shape`, and `report`. Run `dial9 --help` or `dial9 <subcommand> --help` for full options.
 
 ### `serve`
 
@@ -779,6 +783,38 @@ If you use [Symposium](https://symposium.dev), skills auto-install when your pro
 ```bash
 cargo agents sync
 ```
+
+### `trace-shape`
+
+Extracts sanitized structural fingerprints ("shapes") from traces, or generates
+synthetic traces from shapes. Useful for sharing trace structure with raw
+payloads, labels, and identifiers removed.
+
+```bash
+# Sanitize directly into a synthetic trace, bypassing shape JSON (recommended for large traces)
+dial9 trace-shape synthesize /tmp/traces/trace.bin synthetic.bin --repeat 3
+
+# Extract a portable shape (accepts gzip trace input)
+dial9 trace-shape extract /tmp/traces/trace.bin shape.json
+
+# Generate a synthetic trace from a previously extracted shape
+dial9 trace-shape generate shape.json synthetic.bin --repeat 3
+```
+
+The `synthesize` operation keeps the sanitized replay template in memory and
+writes the synthetic binary directly. It uses the same validation and privacy
+transformations as the two-step workflow, but does not serialize or reparse the
+verbose per-event JSON representation.
+
+**Privacy caveat:** Shape extraction applies deterministic transformations to
+remove string contents, byte payloads, custom names, and exact timestamps. Small
+structural integers (e.g. `worker_id`, task counts) are intentionally preserved.
+This is **not an anonymization or security boundary**. Exact booleans, small
+quantized integers, and already-round floats survive. Shapes intentionally
+**retain sensitive operational structure** including relative timing, event
+ordering, cardinality, byte payload sizes, stack depths, value magnitude
+distributions, and inter-event correlations. Synthetic traces should be treated
+as confidential operational data.
 
 ## License
 
