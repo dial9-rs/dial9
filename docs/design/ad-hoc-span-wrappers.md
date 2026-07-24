@@ -69,22 +69,35 @@ render old traces. This satisfies the issue's "standardized format that can be
 automatically rendered as spans in the UI": the format already exists, this
 design just gives it a second producer.
 
-## Compile-time schemas: no runtime schema cache, no lock
+## Compile-time schema shape: no lock on the hot path
 
 The `tracing` layer builds a `Schema` at runtime and memoizes it in a
-`Mutex<HashMap<callsite, Schema>>`, taking that lock on every enter/exit. The
-ad-hoc wrappers avoid the map and the lock entirely by making the schema a
-**compile-time artifact per callsite**.
+`Mutex<HashMap<callsite, {enter, exit} Schema>>`, taking that lock on **every**
+enter/exit — a cross-thread contention point on the hot path. The ad-hoc
+wrappers remove that lock by making the schema *shape* a **compile-time artifact
+per callsite**: one generated `TraceEvent` type per call site, so there is no
+span-owned schema map to guard.
 
 `dial9_span!(...)` expands, at each call site, to a pair of generated
 `#[derive(TraceEvent)]` structs — `SpanEnter:<file>:<line>:<col>` and the
 matching `SpanExit` — whose fields are exactly the framework fields plus the
-user fields written at that call site. The derive already produces the schema
-for a type at compile time, so emitting a span is just encoding a typed event:
-no runtime schema build, no `HashMap`, no lock on the hot path. Two call sites
-with different field sets are two different generated types with two different
-(stable) schema names, so the encoder never sees "same name, different
-definition".
+user fields written at that call site. Emitting a span is then just encoding a
+typed event through the encoder's normal path. Two call sites with different
+field sets are two different generated types with two different (stable) schema
+names, so the encoder never sees "same name, different definition".
+
+Emitting still resolves the type to a wire id through the encoder's per-type
+cache — a `HashMap<TypeId, wire_id>` lookup, and a one-time schema build (from
+the type's compile-time-known `field_defs`) on the first emit per flush cycle.
+The point is *not* that this is free: it is that the cache lives on the
+**per-thread** encoder, so it is **lock-free**, and it is the same path every
+`#[derive(TraceEvent)]` event already takes. What the ad-hoc wrappers remove is
+the tracing layer's *additional* `Mutex<HashMap<callsite, …>>`, which sits on
+top of that same encoder path and is contended across worker threads on every
+enter/exit. (The generated types deliberately stay on this dynamic path rather
+than claiming a `wire_slot` fast-path id: those static slots are a scarce
+resource — `STATIC_WIRE_ID_LIMIT` of them — and per-callsite span types could
+exhaust them.)
 
 The span carries only `&'static SpanWire` — two function pointers to the
 generated enter/exit writers — plus its id, name, parent, and the already
