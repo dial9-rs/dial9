@@ -106,10 +106,27 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     }
 
     /// Variant of [`s3`](Self::s3) that uses the supplied pre-built S3 client.
+    /// For asynchronous client construction, use
+    /// [`s3_with_client_future`](Self::s3_with_client_future).
     #[cfg(feature = "worker-s3")]
     pub fn s3_with_client(mut self, config: s3::S3Config, client: aws_sdk_s3::Client) -> Self {
         self.processors
             .push(Box::new(S3PipelineUploader::new(config, Some(client))));
+        self
+    }
+
+    /// Variant of [`s3`](Self::s3) that constructs the S3 client asynchronously
+    /// on the pipeline worker's Tokio runtime.
+    ///
+    /// The future is polled when the pipeline worker starts.
+    #[cfg(feature = "worker-s3")]
+    pub fn s3_with_client_future<F>(mut self, config: s3::S3Config, client_future: F) -> Self
+    where
+        F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
+    {
+        self.processors.push(Box::new(
+            S3PipelineUploader::new(config, None).with_client_future(client_future),
+        ));
         self
     }
 }

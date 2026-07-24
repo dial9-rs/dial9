@@ -649,6 +649,47 @@ async fn main() {
 # fn main() {}
 ```
 
+For custom credentials or AWS SDK settings, defer client construction to the
+pipeline worker runtime:
+
+```rust,no_run
+use dial9::core::pipeline::s3::S3Config;
+use dial9::{DiskBuffer, RecorderS3ClientExt, RecorderTokioExt};
+use std::time::Duration;
+
+# fn main() -> std::io::Result<()> {
+let writer = DiskBuffer::builder()
+    .base_path("/tmp/dial9")
+    .max_total_size(1 << 30)
+    .build()?;
+let s3_config = S3Config::builder()
+    .bucket("my-trace-bucket")
+    .service_name("my-service")
+    .build();
+let custom_credentials_provider: aws_sdk_s3::config::Credentials = todo!();
+let custom_endpoint = "https://s3.example.com";
+
+let (recorder, runtime) = dial9::recorder(writer)
+    .with_s3_uploader_client_future(s3_config, async move {
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .credentials_provider(custom_credentials_provider)
+            .endpoint_url(custom_endpoint)
+            .load()
+            .await;
+        aws_sdk_s3::Client::new(&sdk_config)
+    })
+    .build()
+    .attach_tokio_runtime(|_| {})?;
+
+drop(runtime);
+recorder.graceful_shutdown(Duration::from_secs(5));
+# Ok(())
+# }
+```
+
+The future is polled when the pipeline worker starts. The resulting client,
+including its credential refresh support, remains on the worker runtime.
+
 When you use `#[dial9::main]`, this shutdown drain happens
 automatically once `main` returns: the macro drops the runtime, then calls
 `graceful_shutdown` with a 1s deadline so the final segment is uploaded. Tune it

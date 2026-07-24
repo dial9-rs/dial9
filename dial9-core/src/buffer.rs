@@ -2931,7 +2931,9 @@ mod tests {
                 stop,
                 metrique_writer::sink::DevNullSink::boxed(),
                 None,
-            );
+            )
+            .await
+            .expect("initialize worker");
             worker.run().await;
 
             let segments = captured.lock().unwrap();

@@ -9,7 +9,8 @@ use aws_sdk_s3::Client;
 use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder, spawn,
+    DiskBuffer, RecorderPipelineExt, RecorderS3ClientExt, RecorderTokioExt, TokioAttachOptions,
+    recorder, spawn,
 };
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
@@ -18,6 +19,8 @@ use fake_s3::{
 use flate2::read::GzDecoder;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Create a dummy S3 config + client for tests.
@@ -61,6 +64,85 @@ fn worker_thread_starts_and_stops_cleanly() {
 
     drop(rt);
     drop(recorder);
+}
+
+#[test]
+fn client_future_runs_once_when_pipeline_starts() {
+    let trace_dir = tempfile::tempdir().unwrap();
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("future-bucket")).unwrap();
+
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir.path())
+        .max_file_size(1024)
+        .max_total_size(10 * 1024)
+        .build()
+        .unwrap();
+    let s3_config = S3Config::builder()
+        .bucket("future-bucket")
+        .prefix("traces")
+        .service_name("test")
+        .instance_path("test")
+        .region("us-east-1")
+        .build();
+    let client = fake_s3_client(s3_root.path());
+    let client_for_future = client.clone();
+    let future_calls = Arc::new(AtomicUsize::new(0));
+    let future_calls_inner = future_calls.clone();
+
+    let recorder = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_s3_uploader_client_future(s3_config, async move {
+            tokio::runtime::Handle::try_current()
+                .expect("client future must run inside a Tokio runtime");
+            assert_eq!(
+                std::thread::current().name(),
+                Some("dial9-worker"),
+                "client future must run on the pipeline worker"
+            );
+            future_calls_inner.fetch_add(1, Ordering::SeqCst);
+            client_for_future
+        })
+        .with_dump_trigger(|_| {})
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.worker_threads(1);
+        })
+        .expect("build tokio runtime");
+
+    rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while future_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("client future should run when the pipeline starts");
+    });
+    assert_eq!(future_calls.load(Ordering::SeqCst), 1);
+
+    let trigger = recorder.handle().dump_trigger().expect("trigger wired");
+    let receipt = rt
+        .block_on(async { trigger.dump_current_data().await })
+        .expect("empty dump resolves");
+    assert_eq!(receipt.segments_processed, 0);
+    let manifest_key = receipt
+        .manifest_key
+        .expect("empty dump writes an S3 manifest");
+
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(5));
+
+    assert_eq!(future_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        s3_root
+            .path()
+            .join("future-bucket")
+            .join(manifest_key)
+            .is_file(),
+        "manifest should be uploaded with the asynchronously built client"
+    );
 }
 
 #[test]

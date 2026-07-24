@@ -16,6 +16,8 @@ pub use handle::{Dial9TokioHandle, block_on, spawn, spawn_in};
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
 
+#[cfg(feature = "worker-s3")]
+pub use recorder_tokio::RecorderS3ClientExt;
 pub use recorder_tokio::{
     AttachedRuntime, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions,
 };
