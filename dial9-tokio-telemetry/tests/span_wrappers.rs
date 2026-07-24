@@ -5,7 +5,7 @@
 //! layer produces.
 
 use dial9_tokio_telemetry::dial9_span;
-use dial9_tokio_telemetry::span::{Dial9Span, Dial9SpanLayer, Instrument as _};
+use dial9_tokio_telemetry::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
@@ -28,8 +28,9 @@ struct SpanEvents {
     enter_schema_names: HashSet<String>,
 }
 
-/// Read a field value as a string whether it was interned (pooled) or written
-/// inline as a raw string.
+/// Render a field value as a string for assertions, whether it rode the wire as
+/// a pooled/inline string or a typed scalar (numerics are now `Varint`/etc.,
+/// not stringified).
 fn field_string(
     pool: &dial9_trace_format::decoder::StringPool,
     fv: &FieldValueRef,
@@ -37,6 +38,10 @@ fn field_string(
     match fv {
         FieldValueRef::PooledString(id) => pool.get(*id).map(|s| s.to_owned()),
         FieldValueRef::String(s) => Some(s.to_string()),
+        FieldValueRef::Varint(v) => Some(v.to_string()),
+        FieldValueRef::I64(v) => Some(v.to_string()),
+        FieldValueRef::F64(v) => Some(v.to_string()),
+        FieldValueRef::Bool(v) => Some(v.to_string()),
         _ => None,
     }
 }
@@ -353,21 +358,31 @@ fn cancelled_future_still_closes() {
     assert_eq!(events.entered_span_ids, events.closed_span_ids);
 }
 
-/// A high-cardinality field prefixed with `~` is written inline (not interned)
-/// and still decodes back to its value.
+/// A `%`-formatted string field (owned `String` on the wire) round-trips, and a
+/// bare typed `u64` field decodes back to its value — confirming numeric fields
+/// keep their type rather than being stringified.
 #[test]
-fn inline_field_roundtrips() {
+fn typed_and_display_fields_roundtrip() {
     let events = run_traced(1, || async {
+        let id = "req-abc123";
         async {}
-            .instrument(dial9_span!("request", id = ~"req-abc123"))
+            .instrument(dial9_span!("request", request_id = %id, attempt = 2u64))
             .await;
     });
     assert!(
         events
             .enter_fields
             .iter()
-            .any(|(k, v)| k == "id" && v == "req-abc123"),
-        "inline field should roundtrip: {:?}",
+            .any(|(k, v)| k == "request_id" && v == "req-abc123"),
+        "display field should roundtrip: {:?}",
+        events.enter_fields
+    );
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "attempt" && v == "2"),
+        "typed numeric field should roundtrip: {:?}",
         events.enter_fields
     );
 }

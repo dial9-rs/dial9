@@ -25,7 +25,7 @@ use dial9::{DiskBuffer, RecorderTokioExt, recorder};
 // The entire new surface. The macro + core wrappers are dep-free and
 // unconditional; `Dial9SpanLayer` is behind the `tower` cargo feature.
 use dial9::dial9_span;
-use dial9::span::{Dial9Span, Dial9SpanLayer, Instrument as _};
+use dial9::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
 
 // Note what is absent here: no tracing_subscriber::registry(), no
 // Dial9TracingLayer, no `tracing` dependency at all.
@@ -113,7 +113,7 @@ async fn settlement_worker() {
     loop {
         let batch = next_settlement_batch().await;
         settle(&batch)
-            .instrument(dial9_span!("settlement.run", batch_len = batch.len()))
+            .instrument(dial9_span!("settlement.run", batch_len = batch.len() as u64))
             .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
     }

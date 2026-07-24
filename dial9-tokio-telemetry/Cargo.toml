@@ -224,3 +224,7 @@ harness = false
 [[bench]]
 name = "writer_write_encoded_iai"
 harness = false
+
+[[bench]]
+name = "span_encode_bench"
+harness = false

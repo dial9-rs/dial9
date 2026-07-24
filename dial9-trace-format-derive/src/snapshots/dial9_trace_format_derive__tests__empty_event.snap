@@ -2,6 +2,7 @@
 source: dial9-trace-format-derive/src/lib.rs
 expression: "expand_to_string(quote!\n{ struct EmptyEvent { #[traceevent(timestamp)] timestamp_ns: u64, } })"
 ---
+#[allow(non_camel_case_types, non_snake_case)]
 impl ::dial9_trace_format::TraceEvent for EmptyEvent {
     fn event_name() -> &'static str {
         "EmptyEvent"

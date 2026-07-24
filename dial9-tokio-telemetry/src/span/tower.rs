@@ -1,9 +1,9 @@
 //! [`tower`](https://docs.rs/tower) middleware that instruments each request
-//! future with a [`Dial9Span`].
+//! future with a span.
 //!
 //! Requires the `tower` feature.
 
-use super::{Dial9Span, Instrument, Instrumented};
+use super::{Dial9Span, Instrument as _, Instrumented, Span};
 use std::fmt;
 use std::task::{Context, Poll};
 use tower_layer::Layer;
@@ -26,6 +26,15 @@ use tower_service::Service;
 /// # let _ = instrumented;
 /// # }
 /// ```
+///
+/// To attach fields, return a [`dial9_span!`](crate::dial9_span) span from
+/// [`new`](Dial9SpanLayer::new):
+///
+/// ```no_run
+/// # use dial9_tokio_telemetry::span::Dial9SpanLayer;
+/// # use dial9_tokio_telemetry::dial9_span;
+/// let layer = Dial9SpanLayer::new(|| dial9_span!("rpc", service = "auth"));
+/// ```
 #[derive(Clone)]
 pub struct Dial9SpanLayer<F> {
     make_span: F,
@@ -47,26 +56,24 @@ impl Dial9SpanLayer<()> {
     }
 }
 
-impl<F> Dial9SpanLayer<F>
+impl<F, S> Dial9SpanLayer<F>
 where
-    F: Fn() -> Dial9Span + Clone,
+    F: Fn() -> S + Clone,
+    S: Span,
 {
     /// Build a layer that produces a fresh span per request via `make_span`.
-    ///
-    /// Use this to attach fields, e.g.
-    /// `Dial9SpanLayer::new(|| dial9_span!("rpc", service = "auth"))`.
     pub fn new(make_span: F) -> Self {
         Self { make_span }
     }
 }
 
-impl<S, F> Layer<S> for Dial9SpanLayer<F>
+impl<Svc, F> Layer<Svc> for Dial9SpanLayer<F>
 where
     F: Clone,
 {
-    type Service = Dial9SpanService<S, F>;
+    type Service = Dial9SpanService<Svc, F>;
 
-    fn layer(&self, inner: S) -> Self::Service {
+    fn layer(&self, inner: Svc) -> Self::Service {
         Dial9SpanService {
             inner,
             make_span: self.make_span.clone(),
@@ -77,14 +84,14 @@ where
 /// The [`Service`] produced by [`Dial9SpanLayer`]. Instruments each
 /// [`call`](Service::call)'s future with a freshly-created span.
 #[derive(Clone)]
-pub struct Dial9SpanService<S, F> {
-    inner: S,
+pub struct Dial9SpanService<Svc, F> {
+    inner: Svc,
     make_span: F,
 }
 
-impl<S, F> fmt::Debug for Dial9SpanService<S, F>
+impl<Svc, F> fmt::Debug for Dial9SpanService<Svc, F>
 where
-    S: fmt::Debug,
+    Svc: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Dial9SpanService")
@@ -93,14 +100,15 @@ where
     }
 }
 
-impl<S, F, Req> Service<Req> for Dial9SpanService<S, F>
+impl<Svc, F, S, Req> Service<Req> for Dial9SpanService<Svc, F>
 where
-    S: Service<Req>,
-    F: Fn() -> Dial9Span,
+    Svc: Service<Req>,
+    F: Fn() -> S,
+    S: Span,
 {
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = Instrumented<S::Future>;
+    type Response = Svc::Response;
+    type Error = Svc::Error;
+    type Future = Instrumented<Svc::Future, S>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)

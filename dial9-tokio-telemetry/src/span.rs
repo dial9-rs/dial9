@@ -8,14 +8,23 @@
 //! Spans produced here use the exact same wire format as the tracing layer, so
 //! the viewer renders them on the same span timeline.
 //!
-//! # Instrumenting a future
+//! # Zero-cost
 //!
-//! The common case is to attach a span to a future so the viewer shows when it
-//! was being polled (one segment per poll, gaps where it was suspended):
+//! [`dial9_span!`] generates a monomorphized [`TraceEvent`](dial9_trace_format::TraceEvent)
+//! per call site with **typed** fields, and emits through the encoder's direct
+//! typed path — no runtime schema map, no per-emit `format!`, no boxed
+//! closures, and numeric fields ride the wire as `Varint`s. The result compiles
+//! down to what you would write by hand with `#[derive(TraceEvent)]` +
+//! `record_event`. `Copy` fields are free to re-emit; the only allocation is a
+//! per-emit clone of owned `String` fields — the same cost a hand-written
+//! re-emitting span pays (interned ids are not stable across flush cycles, so a
+//! stored value must be re-materialized each emit).
+//!
+//! # Instrumenting a future
 //!
 //! ```no_run
 //! use dial9_tokio_telemetry::dial9_span;
-//! use dial9_tokio_telemetry::span::Instrument;
+//! use dial9_tokio_telemetry::span::Instrument as _;
 //!
 //! # async fn handle(req: u32) {
 //! async {
@@ -28,46 +37,31 @@
 //!
 //! # Fields
 //!
-//! The [`dial9_span!`](crate::dial9_span) macro captures arbitrary key/value
-//! fields with `tracing`-style syntax — bare and `%` format with [`Display`],
-//! `?` with [`Debug`]:
+//! The [`dial9_span!`] macro captures typed key/value fields with
+//! `tracing`-style syntax: a bare value keeps its type (a `u64` is a `Varint`
+//! on the wire), `%` formats via [`Display`] and `?` via [`Debug`] (both
+//! producing a `String`):
 //!
 //! ```no_run
 //! # use dial9_tokio_telemetry::dial9_span;
-//! # let path = "/x"; let retries = 1u32;
+//! # let retries = 1u32; let path = "/x";
 //! # #[derive(Debug)] struct Cfg; let cfg = Cfg;
-//! let span = dial9_span!("load", path = %path, retries = retries, config = ?cfg);
+//! let span = dial9_span!("load", retries = retries, path = %path, config = ?cfg);
 //! ```
-//!
-//! Fields added through the macro are encoded through a per-call-site
-//! [`TraceEvent`](dial9_trace_format::TraceEvent) struct generated on your
-//! behalf, so a span with fields costs no more to emit than a hand-written
-//! event — and there is no runtime schema cache or lock on the emit path.
-//! Spans built with [`Dial9Span::new`] (e.g. by
-//! [`Dial9SpanLayer`](crate::span::Dial9SpanLayer)) carry only their name; to
-//! attach fields, use the macro.
-//!
-//! Values are **interned** (pooled) by default — the right choice for
-//! low-cardinality fields, since a span re-emits its fields on every poll.
-//! Prefix a macro value with `~` to store a high-cardinality value **inline**
-//! instead, avoiding string-pool growth.
 //!
 //! # Instrumenting a synchronous scope
 //!
-//! For synchronous code, hold the guard returned by [`Dial9Span::enter`]; the
-//! span is open until the guard drops:
-//!
 //! ```no_run
 //! use dial9_tokio_telemetry::dial9_span;
+//! use dial9_tokio_telemetry::span::Span as _;
 //!
 //! let span = dial9_span!("expensive_computation");
 //! let _entered = span.enter();
 //! // ... work attributed to the span ...
 //! ```
 //!
-//! Do **not** hold an [`Entered`] guard across an `.await` point — it records a
-//! single contiguous segment and cannot represent suspension. Use
-//! [`Instrument::instrument`] for futures instead.
+//! Do **not** hold an [`Entered`] guard across an `.await` point — it is `!Send`
+//! for exactly that reason. Use [`Instrument::instrument`] for futures instead.
 //!
 //! # Tower middleware
 //!
@@ -85,7 +79,7 @@ pub use future::{Instrument, Instrumented};
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
 pub use tower::{Dial9SpanLayer, Dial9SpanService};
 
-use crate::telemetry::{Dial9Handle, ThreadLocalEncoder, clock_monotonic_ns, current_worker_id};
+use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::fmt;
 use std::marker::PhantomData;
@@ -94,56 +88,146 @@ use std::marker::PhantomData;
 /// Not a stable API.
 #[doc(hidden)]
 pub mod __rt {
-    pub use super::{SpanEmit, SpanWire};
-    pub use crate::telemetry::ThreadLocalEncoder;
-    pub use dial9_trace_format::{InternedString, TraceEvent};
+    pub use super::wire::next_span_id;
+    pub use super::{Span, current_worker_id_u64, emit_close};
+    pub use crate::telemetry::{Dial9Handle, clock_monotonic_ns};
+    pub use dial9_trace_format::{InternedString, TraceEvent, TraceField};
 }
 
-/// A span: a named, optionally-parented region of work that is recorded into
-/// the trace with timing information.
-///
-/// A span carries an identity (a process-unique id), a name, optional parent,
-/// and a set of fields. It does nothing on its own — timing is recorded when
-/// you either:
-///
-/// - attach it to a future with [`Instrument::instrument`], or
-/// - open it over a synchronous scope with [`enter`](Self::enter).
+/// A named, optionally-parented region of work recorded into the trace with
+/// timing information.
 ///
 /// Construct one with the [`dial9_span!`](crate::dial9_span) macro (which
-/// captures the call site and fields for you), or with [`Dial9Span::new`] for a
-/// name-only span assembled at runtime.
+/// captures the call site and typed fields for you), or with [`Dial9Span::new`]
+/// for a name-only span whose name is chosen at runtime.
 ///
-/// When the span is dropped, a close event is recorded, telling the viewer the
-/// span is complete. `Dial9Span` is intentionally **not** `Clone`: it owns a
-/// single span identity with a single close.
+/// Timing is recorded when you attach the span to a future with
+/// [`Instrument::instrument`], or open it over a synchronous scope with
+/// [`enter`](Self::enter). A `SpanCloseEvent` is recorded when the span is
+/// dropped, telling the viewer the span is complete — so span types are
+/// intentionally **not** `Clone`: one identity, one close.
+pub trait Span: Sized {
+    /// This span's process-unique id, for explicit parenting via
+    /// [`with_parent_id`](Self::with_parent_id).
+    fn id(&self) -> u64;
+
+    /// Set the parent span id. Implementation detail of the parenting setters.
+    #[doc(hidden)]
+    fn __set_parent(&mut self, parent_span_id: u64);
+
+    /// Emit the enter segment on `handle`. Implementation detail of
+    /// [`enter`](Self::enter) and [`Instrumented`].
+    #[doc(hidden)]
+    fn __emit_enter(&self, handle: &Dial9Handle);
+
+    /// Emit the exit segment on `handle`.
+    #[doc(hidden)]
+    fn __emit_exit(&self, handle: &Dial9Handle);
+
+    /// Set this span's parent explicitly. The viewer nests the child under the
+    /// parent; without a parent it infers nesting from timestamp containment.
+    #[must_use]
+    fn with_parent_id(mut self, parent_span_id: u64) -> Self {
+        self.__set_parent(parent_span_id);
+        self
+    }
+
+    /// Set this span's parent from another span (see [`with_parent_id`](Self::with_parent_id)).
+    #[must_use]
+    fn with_parent(self, parent: &impl Span) -> Self {
+        let id = parent.id();
+        self.with_parent_id(id)
+    }
+
+    /// Open the span over the current scope, recording a single enter/exit
+    /// segment that runs until the returned guard is dropped.
+    ///
+    /// For synchronous code only — the guard is `!Send` so it cannot be held
+    /// across `.await`.
+    fn enter(&self) -> Entered<'_, Self> {
+        // Acquire the current handle once and reuse it for the matching exit:
+        // the guard is `!Send`, so exit lands on this same thread.
+        let handle = Dial9Handle::current();
+        self.__emit_enter(&handle);
+        Entered {
+            span: self,
+            handle,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+/// A guard representing an open span scope, returned by [`Span::enter`].
+///
+/// The span's exit segment is recorded when this guard is dropped. `Entered` is
+/// `!Send` — like [`tracing::span::Entered`] — so holding one across an `.await`
+/// in a `Send` task is a compile error: its exit must land on the entering
+/// thread, ordered after the enter. Use [`Instrument::instrument`] for futures.
+///
+/// [`tracing::span::Entered`]: https://docs.rs/tracing/latest/tracing/span/struct.Entered.html
+#[must_use = "the span is exited as soon as the guard is dropped; bind it to a variable"]
+pub struct Entered<'a, S: Span> {
+    span: &'a S,
+    /// The handle captured at enter, reused for the matching exit (safe because
+    /// the guard is `!Send`, so exit runs on the entering thread).
+    handle: Dial9Handle,
+    /// Makes the guard `!Send` (a raw pointer is neither `Send` nor `Sync`).
+    _not_send: PhantomData<*const ()>,
+}
+
+impl<S: Span> fmt::Debug for Entered<'_, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entered").finish_non_exhaustive()
+    }
+}
+
+impl<S: Span> Drop for Entered<'_, S> {
+    fn drop(&mut self) {
+        self.span.__emit_exit(&self.handle);
+    }
+}
+
+// ── Shared emit helpers (used by macro-generated spans and `Dial9Span`) ───────
+
+/// The current thread's global worker id as a raw `u64`, for the `worker_id`
+/// wire field. Used by the [`dial9_span!`](crate::dial9_span) expansion.
+#[doc(hidden)]
+pub fn current_worker_id_u64() -> u64 {
+    current_worker_id().as_u64()
+}
+
+/// Record a span's `SpanCloseEvent`. No-op off a dial9 runtime. Used by the
+/// [`dial9_span!`](crate::dial9_span) expansion; not a stable API.
+#[doc(hidden)]
+pub fn emit_close(span_id: u64) {
+    let handle = Dial9Handle::current();
+    if !handle.is_enabled() {
+        return;
+    }
+    handle.record_event(wire::SpanCloseEvent {
+        timestamp_ns: clock_monotonic_ns(),
+        span_id,
+    });
+}
+
+// ── Name-only runtime span ────────────────────────────────────────────────────
+
+/// A span whose name is chosen at runtime and which carries no user fields.
+///
+/// When the fields are known at the call site, prefer the
+/// [`dial9_span!`](crate::dial9_span) macro (typed fields, zero-cost). This type
+/// is for names assembled at runtime, e.g. by
+/// [`Dial9SpanLayer::named`](crate::span::Dial9SpanLayer::named). All name-only
+/// spans share one wire schema (`adhoc::runtime`).
 pub struct Dial9Span {
     span_id: u64,
-    name: String,
     parent_span_id: Option<u64>,
-    /// Field values in field order, lining up with the generated [`SpanWire`]'s
-    /// fields. Empty for spans built with [`Dial9Span::new`].
-    field_values: Vec<String>,
-    /// The per-call-site (or, for [`Dial9Span::new`], the shared name-only)
-    /// generated enter/exit writers this span emits through.
-    wire: &'static SpanWire,
+    name: String,
 }
-
-/// Whether we are recording the start or the end of a span segment.
-#[derive(Clone, Copy)]
-enum Phase {
-    Enter,
-    Exit,
-}
-
-// ── Name-only runtime span (used by `Dial9Span::new`) ────────────────────────
-//
-// Spans built with `Dial9Span::new` carry no user fields, so they all share one
-// generated schema rather than one per call site. The framework field set is
-// fixed, so this is sound: every name-only span has the same wire shape.
 
 #[derive(TraceEvent)]
 #[traceevent(name = "SpanEnter:adhoc::runtime")]
-struct RuntimeSpanEnter {
+struct RuntimeEnter {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     worker_id: u64,
@@ -154,7 +238,7 @@ struct RuntimeSpanEnter {
 
 #[derive(TraceEvent)]
 #[traceevent(name = "SpanExit:adhoc::runtime")]
-struct RuntimeSpanExit {
+struct RuntimeExit {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     worker_id: u64,
@@ -162,66 +246,14 @@ struct RuntimeSpanExit {
     span_name: InternedString,
 }
 
-fn runtime_enter(enc: &mut ThreadLocalEncoder<'_>, e: SpanEmit<'_>) {
-    let span_name = enc.intern_string(e.name);
-    enc.encode(&RuntimeSpanEnter {
-        timestamp_ns: e.timestamp_ns,
-        worker_id: e.worker_id,
-        span_id: e.span_id,
-        parent_span_id: e.parent_span_id,
-        span_name,
-    });
-}
-
-fn runtime_exit(enc: &mut ThreadLocalEncoder<'_>, e: SpanEmit<'_>) {
-    let span_name = enc.intern_string(e.name);
-    enc.encode(&RuntimeSpanExit {
-        timestamp_ns: e.timestamp_ns,
-        worker_id: e.worker_id,
-        span_id: e.span_id,
-        span_name,
-    });
-}
-
-static RUNTIME_SPAN_WIRE: SpanWire = SpanWire {
-    enter: runtime_enter,
-    exit: runtime_exit,
-};
-
-// ── Generated-path plumbing (used by the macro) ──────────────────────────────
-
-/// The per-call-site values an event-writer function needs. Borrowed from the
-/// [`Dial9Span`] for the duration of one emit.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug)]
-pub struct SpanEmit<'a> {
-    pub timestamp_ns: u64,
-    pub worker_id: u64,
-    pub span_id: u64,
-    pub parent_span_id: Option<u64>,
-    pub name: &'a str,
-    pub field_values: &'a [String],
-}
-
-/// `&'static` function pointers to a call site's generated enter/exit writers.
-/// Produced by the [`dial9_span!`](crate::dial9_span) macro.
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct SpanWire {
-    pub enter: fn(&mut ThreadLocalEncoder<'_>, SpanEmit<'_>),
-    pub exit: fn(&mut ThreadLocalEncoder<'_>, SpanEmit<'_>),
-}
-
-/// Bridges a generated writer fn into the [`Encodable`](crate::telemetry::Encodable)
-/// path so it goes through `record_event` (enabled-check, flush accounting).
-struct GeneratedEvent<'a> {
-    write: fn(&mut ThreadLocalEncoder<'_>, SpanEmit<'_>),
-    emit: SpanEmit<'a>,
-}
-
-impl crate::telemetry::Encodable for GeneratedEvent<'_> {
-    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
-        (self.write)(enc, self.emit);
+impl Dial9Span {
+    /// Create a name-only span.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            span_id: wire::next_span_id(),
+            parent_span_id: None,
+            name: name.into(),
+        }
     }
 }
 
@@ -235,149 +267,57 @@ impl fmt::Debug for Dial9Span {
     }
 }
 
-impl Dial9Span {
-    /// Create a name-only span.
-    ///
-    /// The span carries no user fields. When the fields are known at the call
-    /// site, prefer the [`dial9_span!`](crate::dial9_span) macro, which captures
-    /// them for you. This constructor is for spans whose name is chosen at
-    /// runtime (for example by
-    /// [`Dial9SpanLayer::named`](crate::span::Dial9SpanLayer::named)).
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            span_id: wire::next_span_id(),
-            name: name.into(),
-            parent_span_id: None,
-            field_values: Vec::new(),
-            wire: &RUNTIME_SPAN_WIRE,
-        }
-    }
-
-    /// Set this span's parent. The viewer nests the child under the parent in
-    /// the span tree.
-    ///
-    /// If no parent is set, the viewer infers nesting from timestamp
-    /// containment instead.
-    #[must_use]
-    pub fn with_parent(mut self, parent: &Dial9Span) -> Self {
-        self.parent_span_id = Some(parent.span_id);
-        self
-    }
-
-    /// Set this span's parent by id (see [`Dial9Span::id`]).
-    #[must_use]
-    pub fn with_parent_id(mut self, parent_span_id: u64) -> Self {
-        self.parent_span_id = Some(parent_span_id);
-        self
-    }
-
-    /// This span's process-unique id, for use with
-    /// [`with_parent_id`](Self::with_parent_id).
-    pub fn id(&self) -> u64 {
+impl Span for Dial9Span {
+    fn id(&self) -> u64 {
         self.span_id
     }
 
-    /// Open the span over the current scope, recording a single enter/exit
-    /// segment that runs until the returned guard is dropped.
-    ///
-    /// For synchronous code only — see the [module docs](self) for why this must
-    /// not be held across `.await`.
-    pub fn enter(&self) -> Entered<'_> {
-        self.emit(Phase::Enter);
-        Entered {
-            span: self,
-            _not_send: PhantomData,
-        }
+    fn __set_parent(&mut self, parent_span_id: u64) {
+        self.parent_span_id = Some(parent_span_id);
     }
 
-    fn emit(&self, phase: Phase) {
-        let handle = Dial9Handle::current();
-        if !handle.is_enabled() {
-            return;
-        }
-        let timestamp_ns = clock_monotonic_ns();
-        let worker_id = current_worker_id().as_u64();
-
-        let write = match phase {
-            Phase::Enter => self.wire.enter,
-            Phase::Exit => self.wire.exit,
-        };
-        handle.record_event(GeneratedEvent {
-            write,
-            emit: SpanEmit {
-                timestamp_ns,
-                worker_id,
+    fn __emit_enter(&self, handle: &Dial9Handle) {
+        handle.with_encoder(|enc| {
+            let span_name = enc.intern_string(&self.name);
+            enc.encode(&RuntimeEnter {
+                timestamp_ns: clock_monotonic_ns(),
+                worker_id: current_worker_id_u64(),
                 span_id: self.span_id,
                 parent_span_id: self.parent_span_id,
-                name: &self.name,
-                field_values: &self.field_values,
-            },
+                span_name,
+            });
         });
     }
 
-    /// Implementation detail of the [`dial9_span!`](crate::dial9_span) macro.
-    /// Not part of the stable API.
-    #[doc(hidden)]
-    pub fn __from_generated(
-        wire: &'static SpanWire,
-        name: impl Into<String>,
-        field_values: Vec<String>,
-    ) -> Self {
-        Self {
-            span_id: wire::next_span_id(),
-            name: name.into(),
-            parent_span_id: None,
-            field_values,
-            wire,
-        }
+    fn __emit_exit(&self, handle: &Dial9Handle) {
+        handle.with_encoder(|enc| {
+            let span_name = enc.intern_string(&self.name);
+            enc.encode(&RuntimeExit {
+                timestamp_ns: clock_monotonic_ns(),
+                worker_id: current_worker_id_u64(),
+                span_id: self.span_id,
+                span_name,
+            });
+        });
     }
 }
 
 impl Drop for Dial9Span {
     fn drop(&mut self) {
-        let Some(handle) = Dial9Handle::try_current() else {
-            return;
-        };
-        handle.record_event(wire::SpanCloseEvent {
-            timestamp_ns: clock_monotonic_ns(),
-            span_id: self.span_id,
-        });
+        emit_close(self.span_id);
     }
 }
 
-/// A guard representing an open span scope, returned by [`Dial9Span::enter`].
-///
-/// The span's exit segment is recorded when this guard is dropped.
-///
-/// `Entered` is `!Send` — like [`tracing::span::Entered`] — so that holding one
-/// across an `.await` in a `Send` task is a compile error. This enforces the
-/// rule from the [module docs](self): a guard records a single contiguous
-/// segment and its exit must land on the entering thread, so it must never
-/// cross a suspension point. Use [`Instrument::instrument`] for futures instead.
-///
-/// [`tracing::span::Entered`]: https://docs.rs/tracing/latest/tracing/span/struct.Entered.html
-#[must_use = "the span is exited as soon as the guard is dropped; bind it to a variable"]
-#[derive(Debug)]
-pub struct Entered<'a> {
-    span: &'a Dial9Span,
-    /// Makes the guard `!Send` (a raw pointer is neither `Send` nor `Sync`).
-    _not_send: PhantomData<*const ()>,
-}
+// ── The `dial9_span!` macro ───────────────────────────────────────────────────
 
-impl Drop for Entered<'_> {
-    fn drop(&mut self) {
-        self.span.emit(Phase::Exit);
-    }
-}
-
-/// Construct a [`Dial9Span`], capturing the call site and (optionally) fields.
+/// Construct a span, capturing the call site and typed fields.
 ///
-/// This is the ergonomic, lowest-overhead way to create a span: it generates a
-/// typed [`TraceEvent`](dial9_trace_format::TraceEvent) per call site so
-/// emitting is as cheap as a hand-written event — no runtime schema lookup.
+/// This is the ergonomic, zero-cost way to create a span: it generates a
+/// monomorphized [`TraceEvent`](dial9_trace_format::TraceEvent) per call site,
+/// so emitting is as cheap as a hand-written event and numeric fields stay
+/// numeric on the wire.
 ///
-/// Field syntax mirrors `tracing` — bare and `%` format with [`Display`], `?`
-/// with [`Debug`]:
+/// Field syntax mirrors `tracing`:
 ///
 /// ```
 /// use dial9_tokio_telemetry::dial9_span;
@@ -385,34 +325,20 @@ impl Drop for Entered<'_> {
 /// // Just a name:
 /// let span = dial9_span!("load_config");
 ///
-/// // With fields:
-/// # let path = "/etc/app.toml";
+/// // Typed fields — bare keeps the type (Varint), `%` is Display, `?` is Debug:
 /// # let retries = 3u32;
-/// let span = dial9_span!("load_config", path = %path, retries = retries);
+/// # let path = "/etc/app.toml";
+/// let span = dial9_span!("load_config", retries = retries, path = %path);
 /// # #[derive(Debug)] struct Cfg;
 /// # let cfg = Cfg;
 /// let span = dial9_span!("validate", config = ?cfg);
 /// ```
 ///
-/// # Interning
-///
-/// By default field values are **interned** (pooled) on the wire, which dedups
-/// repeated values — a span re-emits its fields on every poll, so this is the
-/// right default for low-cardinality fields. Prefix a value with `~` to store
-/// it **inline** instead, avoiding string-pool growth for high-cardinality
-/// values such as request ids:
-///
-/// ```
-/// # use dial9_tokio_telemetry::dial9_span;
-/// # let request_id = "req-abc123";
-/// # let route = "/users";
-/// let span = dial9_span!("request", route = route, id = ~request_id);
-/// ```
-///
-/// The `~` marker combines with the format sigils: `~%expr` (inline Display),
-/// `~?expr` (inline Debug).
-///
-/// Field values are formatted to strings eagerly at construction.
+/// A bare value keeps its Rust type, so it must implement
+/// [`TraceField`](dial9_trace_format::TraceField) (`u64`, `i64`, `bool`, `f64`,
+/// `String`, …) and be `'static`; use `%`/`?` to render any `Display`/`Debug`
+/// value to an owned `String`. The span name must be a `&'static str`
+/// expression (for a runtime name, use [`Dial9Span::new`](span::Dial9Span::new)).
 #[macro_export]
 macro_rules! dial9_span {
     ($name:expr $(,)?) => {
@@ -423,167 +349,135 @@ macro_rules! dial9_span {
     };
 }
 
-/// Token-muncher that formats each field value (handling the `%`/`?`/bare format
-/// sigils and the optional `~` inline marker) and accumulates
-/// `(key @ kind : value_expr)` triples for the build step. `kind` is `intern` or
-/// `inline`.
+/// Token-muncher that formats each field value (handling the `%`/`?`/bare
+/// sigils) and accumulates `(key : value_expr)` pairs for the build step.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __dial9_span_munch {
     ($name:expr; [$($acc:tt)*] ; ) => {
         $crate::__dial9_span_build!($name; [$($acc)*])
     };
-    // ── Inline (not interned): `~`, `~%`, `~?` ──
-    ($name:expr; [$($acc:tt)*] ; $key:ident = ~ ?$val:expr $(, $($rest:tt)*)?) => {
-        $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key @ inline : ::std::format!("{:?}", $val))] ; $($($rest)*)?
-        )
-    };
-    ($name:expr; [$($acc:tt)*] ; $key:ident = ~ %$val:expr $(, $($rest:tt)*)?) => {
-        $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key @ inline : ::std::format!("{}", $val))] ; $($($rest)*)?
-        )
-    };
-    ($name:expr; [$($acc:tt)*] ; $key:ident = ~ $val:expr $(, $($rest:tt)*)?) => {
-        $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key @ inline : ::std::format!("{}", $val))] ; $($($rest)*)?
-        )
-    };
-    // ── Interned (default): `%`, `?`, bare ──
     ($name:expr; [$($acc:tt)*] ; $key:ident = %$val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key @ intern : ::std::format!("{}", $val))] ; $($($rest)*)?
+            $name; [$($acc)* ($key : ::std::string::ToString::to_string(&$val))] ; $($($rest)*)?
         )
     };
     ($name:expr; [$($acc:tt)*] ; $key:ident = ?$val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key @ intern : ::std::format!("{:?}", $val))] ; $($($rest)*)?
+            $name; [$($acc)* ($key : ::std::format!("{:?}", $val))] ; $($($rest)*)?
         )
     };
     ($name:expr; [$($acc:tt)*] ; $key:ident = $val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key @ intern : ::std::format!("{}", $val))] ; $($($rest)*)?
+            $name; [$($acc)* ($key : $val)] ; $($($rest)*)?
         )
     };
 }
 
-/// Maps a field `kind` token to its generated struct field type.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __dial9_field_ty {
-    (intern) => {
-        $crate::span::__rt::InternedString
-    };
-    (inline) => {
-        ::std::string::String
-    };
-}
-
-/// Maps a field `kind` token to the expression that encodes one value: interned
-/// values are pooled, inline values are written as owned strings.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __dial9_field_enc {
-    (intern, $enc:expr, $val:expr) => {
-        $enc.intern_string($val)
-    };
-    (inline, $enc:expr, $val:expr) => {
-        ::std::clone::Clone::clone($val)
-    };
-}
-
-/// Build step: define the per-call-site enter/exit [`TraceEvent`] structs, the
-/// writer functions, the `&'static` [`SpanWire`], and construct the span.
+/// Build step: define the per-call-site monomorphized span + enter/exit
+/// [`TraceEvent`](dial9_trace_format::TraceEvent) structs and construct the span.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __dial9_span_build {
-    ($name:expr; [$( ($key:ident @ $kind:ident : $val:expr) )*]) => {{
-        // NOTE: the framework field names (`worker_id`, `span_id`,
-        // `parent_span_id`, `span_name`) are the on-wire field names the viewer
-        // looks for — they must match exactly. A user field with one of these
-        // names is a (compile-time) duplicate-field error.
-        //
-        // The wire schema name is made unique per call site
-        // (`SpanEnter:<file>:<line>:<col>`) so that two call sites with
-        // *different* field sets register *different* schemas. The viewer keys
-        // on the `SpanEnter:` / `SpanExit:` prefix, so the suffix is free to
-        // disambiguate. Without this, the encoder rejects a second call site
-        // that reuses the name with a different field set.
+    ($name:expr; [$( ($key:ident : $val:expr) )*]) => {{
+        // The span name must be a `&'static str` so it is baked into the
+        // generated code rather than stored — a runtime name needs `Dial9Span`.
+        const __DIAL9_NAME: &str = $name;
+
+        // Each field's identifier doubles as its own type parameter (fields and
+        // type params live in separate namespaces), so the field keeps its
+        // concrete inferred type — a `u64` stays a `u64`/`Varint`, not a string.
+        // The wire schema name is per call site (`SpanEnter:<file>:<line>:<col>`),
+        // which the viewer groups on by its `SpanEnter:` prefix.
         #[derive($crate::span::__rt::TraceEvent)]
         #[traceevent(name = ::core::concat!(
             "SpanEnter:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
         ))]
-        #[allow(non_snake_case)]
-        struct __Dial9SpanEnter {
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Enter<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: u64,
             span_id: u64,
-            parent_span_id: ::std::option::Option<u64>,
+            parent_span_id: ::core::option::Option<u64>,
             span_name: $crate::span::__rt::InternedString,
-            $( $key: $crate::__dial9_field_ty!($kind), )*
+            $( $key: $key, )*
         }
 
         #[derive($crate::span::__rt::TraceEvent)]
         #[traceevent(name = ::core::concat!(
             "SpanExit:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
         ))]
-        #[allow(non_snake_case)]
-        struct __Dial9SpanExit {
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Exit<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: u64,
             span_id: u64,
             span_name: $crate::span::__rt::InternedString,
-            $( $key: $crate::__dial9_field_ty!($kind), )*
+            $( $key: $key, )*
         }
 
-        fn __dial9_enter(
-            __enc: &mut $crate::span::__rt::ThreadLocalEncoder<'_>,
-            __e: $crate::span::__rt::SpanEmit<'_>,
-        ) {
-            let mut __vals = __e.field_values.iter();
-            let __ev = __Dial9SpanEnter {
-                timestamp_ns: __e.timestamp_ns,
-                worker_id: __e.worker_id,
-                span_id: __e.span_id,
-                parent_span_id: __e.parent_span_id,
-                span_name: __enc.intern_string(__e.name),
-                $( $key: $crate::__dial9_field_enc!(
-                    $kind, __enc,
-                    __vals.next().expect("field value count matches macro fields")
-                ), )*
-            };
-            __enc.encode(&__ev);
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Span<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+            span_id: u64,
+            parent_span_id: ::core::option::Option<u64>,
+            $( $key: $key, )*
         }
 
-        fn __dial9_exit(
-            __enc: &mut $crate::span::__rt::ThreadLocalEncoder<'_>,
-            __e: $crate::span::__rt::SpanEmit<'_>,
-        ) {
-            let mut __vals = __e.field_values.iter();
-            let __ev = __Dial9SpanExit {
-                timestamp_ns: __e.timestamp_ns,
-                worker_id: __e.worker_id,
-                span_id: __e.span_id,
-                span_name: __enc.intern_string(__e.name),
-                $( $key: $crate::__dial9_field_enc!(
-                    $kind, __enc,
-                    __vals.next().expect("field value count matches macro fields")
-                ), )*
-            };
-            __enc.encode(&__ev);
+        #[allow(non_camel_case_types, non_snake_case)]
+        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
+            $crate::span::__rt::Span for __Dial9Span<$($key),*>
+        {
+            fn id(&self) -> u64 {
+                self.span_id
+            }
+
+            fn __set_parent(&mut self, parent_span_id: u64) {
+                self.parent_span_id = ::core::option::Option::Some(parent_span_id);
+            }
+
+            fn __emit_enter(&self, __h: &$crate::span::__rt::Dial9Handle) {
+                __h.with_encoder(|__enc| {
+                    let __name = __enc.intern_string(__DIAL9_NAME);
+                    __enc.encode(&__Dial9Enter {
+                        timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
+                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        span_id: self.span_id,
+                        parent_span_id: self.parent_span_id,
+                        span_name: __name,
+                        $( $key: ::core::clone::Clone::clone(&self.$key), )*
+                    });
+                });
+            }
+
+            fn __emit_exit(&self, __h: &$crate::span::__rt::Dial9Handle) {
+                __h.with_encoder(|__enc| {
+                    let __name = __enc.intern_string(__DIAL9_NAME);
+                    __enc.encode(&__Dial9Exit {
+                        timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
+                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        span_id: self.span_id,
+                        span_name: __name,
+                        $( $key: ::core::clone::Clone::clone(&self.$key), )*
+                    });
+                });
+            }
         }
 
-        static __DIAL9_WIRE: $crate::span::__rt::SpanWire = $crate::span::__rt::SpanWire {
-            enter: __dial9_enter,
-            exit: __dial9_exit,
-        };
+        #[allow(non_camel_case_types, non_snake_case)]
+        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
+            ::core::ops::Drop for __Dial9Span<$($key),*>
+        {
+            fn drop(&mut self) {
+                $crate::span::__rt::emit_close(self.span_id);
+            }
+        }
 
-        $crate::span::Dial9Span::__from_generated(
-            &__DIAL9_WIRE,
-            $name,
-            ::std::vec![ $( $val ),* ],
-        )
+        __Dial9Span {
+            span_id: $crate::span::__rt::next_span_id(),
+            parent_span_id: ::core::option::Option::None,
+            $( $key: $val, )*
+        }
     }};
 }

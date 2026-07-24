@@ -32,7 +32,9 @@ const ADHOC_SPAN_ID_BIT: u64 = 1 << 63;
 
 static NEXT_SPAN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Allocate a process-unique id for an ad-hoc span.
-pub(crate) fn next_span_id() -> u64 {
+/// Allocate a process-unique id for an ad-hoc span. Used by the
+/// [`dial9_span!`](crate::dial9_span) expansion; not a stable API.
+#[doc(hidden)]
+pub fn next_span_id() -> u64 {
     NEXT_SPAN_ID.fetch_add(1, Ordering::Relaxed) | ADHOC_SPAN_ID_BIT
 }

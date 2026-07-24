@@ -9,7 +9,7 @@
 //! ```sh
 //! cargo run -p dial9 --example adhoc_spans --features tokio,tower
 //! ```
-use dial9::span::{Dial9Span, Instrument as _};
+use dial9::span::{Dial9Span, Instrument as _, Span as _};
 use dial9::{DiskBuffer, RecorderTokioExt, dial9_span, recorder};
 use std::time::Duration;
 

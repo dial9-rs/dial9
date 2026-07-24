@@ -187,8 +187,17 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         }
     };
 
+    // Propagate any generics/lifetimes on the struct onto the impl, so the
+    // derive works on generic event structs (e.g. an event that borrows
+    // typed, generically-parameterized fields).
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
     Ok(quote! {
-        impl ::dial9_trace_format::TraceEvent for #name {
+        // The generic params may be named after user fields (e.g. the ad-hoc
+        // span macro uses the field ident as its type param), so silence the
+        // casing lints on the generated impl.
+        #[allow(non_camel_case_types, non_snake_case)]
+        impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
             fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
