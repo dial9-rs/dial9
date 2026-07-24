@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0-rc0.1](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.5.0-rc0...dial9-tokio-telemetry-v0.5.0-rc0.1) - 2026-07-24
+## [0.5.0-rc1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc0...dial9-v0.5.0-rc1) - 2026-07-24
 
 ### Other
 

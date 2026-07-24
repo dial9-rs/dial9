@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.0-rc0.1"
+version = "0.5.0-rc1"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.5.0-rc0.1"
+version = "0.5.0-rc0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.5.0-rc0.1"
+version = "0.5.0-rc1"
 dependencies = [
  "anyhow",
  "arrow",
