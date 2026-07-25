@@ -3,7 +3,7 @@
 
 // Core recording API
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
-pub use dial9_core::handle::{Dial9Handle, InstallGlobalHandleError};
+pub use dial9_core::handle::{Dial9Handle, InstallGlobalHandleError, SegmentRotation};
 pub use dial9_core::recorder::{
     RecorderBuilder, RecorderSourceExt, recorder, recorder_disabled, recorder_or_disabled,
 };

@@ -559,6 +559,19 @@ mod tests {
             .expect("a sealed .bin segment")
     }
 
+    fn sealed_segments(dir: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .expect("trace dir readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy();
+                name.ends_with(".bin") && !name.ends_with(".active")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
     fn decoded_test_values(bytes: &[u8]) -> Vec<u64> {
         let mut decoder = Decoder::new(bytes).expect("valid trace header");
         let mut values = Vec::new();
@@ -633,6 +646,214 @@ mod tests {
         assert!(
             recorder.handle().is_enabled(),
             "handle enabled after enable()"
+        );
+    }
+
+    /// An on-demand rotation seals everything recorded before a disabled
+    /// capture gate, then leaves the recorder ready for a later capture.
+    #[test]
+    fn rotate_segment_seals_and_continues_after_reenable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        let recorder = recorder(writer).build();
+        let handle = recorder.handle().clone();
+
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 41,
+        });
+        handle.disable();
+        assert_eq!(
+            handle
+                .rotate_segment()
+                .timeout(Duration::from_secs(2))
+                .call()
+                .expect("first rotation"),
+            crate::handle::SegmentRotation::Sealed
+        );
+
+        let first = sealed_segments(dir.path());
+        assert_eq!(first.len(), 1, "rotation should seal one segment");
+        assert_eq!(
+            decoded_test_values(&std::fs::read(&first[0]).expect("read first segment")),
+            vec![41]
+        );
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("trace dir readable")
+                .filter_map(Result::ok)
+                .any(|e| e.path().to_string_lossy().ends_with(".bin.active")),
+            "rotation should leave a fresh active segment"
+        );
+
+        handle.enable();
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 42,
+        });
+        recorder.graceful_shutdown(Duration::ZERO);
+
+        let segments = sealed_segments(dir.path());
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            decoded_test_values(&std::fs::read(&segments[1]).expect("read second segment")),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn rotate_segment_on_handle_without_recorder_is_a_noop() {
+        assert_eq!(
+            Dial9Handle::disabled()
+                .rotate_segment()
+                .timeout(Duration::ZERO)
+                .call()
+                .expect("disabled handle"),
+            crate::handle::SegmentRotation::NoRecorder
+        );
+    }
+
+    #[test]
+    fn rotate_segment_flushes_pending_source_after_disable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        // A paused recorder makes the boundary deterministic: the source owns
+        // data captured before the gate closed, but no ordinary enabled flush
+        // can consume it before the explicit checkpoint.
+        let recorder = recorder(writer)
+            .source(OnceSource {
+                emitted: false,
+                value: 72,
+            })
+            .paused()
+            .build();
+        let handle = recorder.handle().clone();
+
+        handle.disable();
+        assert_eq!(
+            handle
+                .rotate_segment()
+                .timeout(Duration::from_secs(2))
+                .call()
+                .expect("rotation"),
+            crate::handle::SegmentRotation::Sealed
+        );
+        let segments = sealed_segments(dir.path());
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            decoded_test_values(&std::fs::read(&segments[0]).expect("read segment")),
+            vec![72],
+            "source data captured before disable must stay in the checkpointed segment"
+        );
+    }
+
+    #[test]
+    fn rotate_segment_drains_flush_thread_events_after_disable() {
+        struct BlockingSource {
+            ready: std::sync::mpsc::SyncSender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+            emitted: bool,
+        }
+
+        impl Source for BlockingSource {
+            fn flush(&mut self, ctx: &FlushContext<'_>) {
+                if self.emitted {
+                    return;
+                }
+                ctx.record_event(&TestEvent {
+                    timestamp_ns: clock::clock_monotonic_ns(),
+                    value: 73,
+                });
+                self.emitted = true;
+                self.ready.send(()).expect("test receiver remains live");
+                self.release.recv().expect("test sender remains live");
+            }
+
+            fn name(&self) -> &'static str {
+                "blocking-once"
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let recorder = recorder(writer)
+            .source(BlockingSource {
+                ready: ready_tx,
+                release: release_rx,
+                emitted: false,
+            })
+            .build();
+        let handle = recorder.handle().clone();
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("source should record on the flush thread");
+        handle.disable();
+        release_tx
+            .send(())
+            .expect("flush thread should still be waiting");
+
+        assert_eq!(
+            handle
+                .rotate_segment()
+                .timeout(Duration::from_secs(2))
+                .call()
+                .expect("rotation"),
+            crate::handle::SegmentRotation::Sealed
+        );
+        let segments = sealed_segments(dir.path());
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            decoded_test_values(&std::fs::read(&segments[0]).expect("read segment")),
+            vec![73]
+        );
+    }
+
+    #[test]
+    fn rotate_segment_returns_flush_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        writer
+            .fail_after_flushes_for_test(0)
+            .expect("install failing writer");
+        let recorder = recorder(writer).build();
+        let handle = recorder.handle().clone();
+
+        let error = handle
+            .rotate_segment()
+            .timeout(Duration::from_secs(2))
+            .call()
+            .expect_err("flush failure must reach the checkpoint caller");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(
+            handle.shared().is_some_and(|shared| shared.is_enabled()),
+            "a pre-rotation flush failure leaves the active writer available and must not close the recording gate"
         );
     }
 

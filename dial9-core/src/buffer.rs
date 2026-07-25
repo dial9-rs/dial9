@@ -586,6 +586,19 @@ impl<M: BufferMode> SegmentWriter<M> {
     }
 
     fn rotate(&mut self) -> std::io::Result<()> {
+        self.rotate_with_flush_policy(false)
+    }
+
+    /// Rotate while propagating every buffered-write failure to the caller.
+    ///
+    /// Automatic rotation remains best-effort for compatibility. Explicit
+    /// checkpoints use this strict path because their acknowledgement must not
+    /// claim a segment was sealed after data failed to reach the backend.
+    fn rotate_strict(&mut self) -> std::io::Result<()> {
+        self.rotate_with_flush_policy(true)
+    }
+
+    fn rotate_with_flush_policy(&mut self, strict_flush: bool) -> std::io::Result<()> {
         if matches!(self.state, WriterState::Finished) {
             return Ok(());
         }
@@ -605,17 +618,24 @@ impl<M: BufferMode> SegmentWriter<M> {
             return Ok(());
         };
 
-        // Best-effort flush. If the underlying file is gone the buffered bytes
-        // are already lost; proceed to rotate rather than erroring.
-        let _ = raw.flush();
+        if strict_flush {
+            raw.flush()?;
+        } else {
+            // Automatic rotation is best-effort. If the underlying file is
+            // gone the buffered bytes are already lost; proceed to rotate
+            // rather than repeatedly retrying a permanently broken segment.
+            let _ = raw.flush();
+        }
         let closed_size = raw.bytes_written();
         let current_index = self.next_index - 1;
 
         // Extract the ActiveHandle for sealing.
         let bw: BufWriter<ActiveHandle> = raw.into_inner();
-        let handle: ActiveHandle = bw
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner().into_parts().0);
+        let handle: ActiveHandle = match bw.into_inner() {
+            Ok(handle) => handle,
+            Err(error) if strict_flush => return Err(error.into_error()),
+            Err(error) => error.into_inner().into_parts().0,
+        };
 
         // Seal the current segment. If `.active` was removed externally
         // (disk only: operator, log rotation, container teardown) abandon the
@@ -754,6 +774,10 @@ impl<M: BufferMode> SegmentWriter<M> {
         self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(self.state, WriterState::Finished)
+    }
+
     pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
         if !self.has_real_events {
             return Ok(false);
@@ -769,6 +793,36 @@ impl<M: BufferMode> SegmentWriter<M> {
         // Periodic drain without rotation; advance the drain timer.
         self.next_drain_time = now + self.drain_interval;
         Ok(false)
+    }
+
+    /// Seal a non-empty current segment immediately and continue writing into
+    /// a fresh segment. The flush loop performs the required thread-local
+    /// drain before calling this.
+    pub(crate) fn rotate_segment(&mut self) -> std::io::Result<bool> {
+        if matches!(self.state, WriterState::Finished) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "dial9 trace writer is closed",
+            ));
+        }
+        if !self.has_real_events {
+            return Ok(false);
+        }
+        self.rotate_strict()?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_after_flushes_for_test(
+        &mut self,
+        successful_flushes: usize,
+    ) -> std::io::Result<()> {
+        self.state =
+            Self::prepare_segment(BufWriter::new(crate::fs::ActiveHandle::FailAfterFlushes {
+                bytes: Vec::new(),
+                successful_flushes,
+            }))?;
+        Ok(())
     }
 
     /// Finalize the writer: flush, seal the active segment, and prevent further
@@ -1083,6 +1137,30 @@ mod tests {
             metadata.len() > 0,
             "file should not be empty after writing an event"
         );
+    }
+
+    #[test]
+    fn explicit_rotation_propagates_final_flush_failure() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .unwrap();
+        writer.fail_after_flushes_for_test(1).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        // Model flush_once succeeding, followed by metadata being buffered for
+        // the explicit checkpoint. The strict rotation must report the second
+        // flush failure rather than sealing and acknowledging success.
+        writer.flush().unwrap();
+        writer.write_current_segment_metadata().unwrap();
+        let error = writer
+            .rotate_segment()
+            .expect_err("checkpoint rotation must propagate its final flush failure");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
     }
 
     #[test]

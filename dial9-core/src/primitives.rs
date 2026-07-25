@@ -55,7 +55,7 @@ pub mod sync {
     /// randomly return `Timeout` instead, so shuttle can explore multiple
     /// flush-loop cycles.
     pub mod mpsc {
-        pub use shuttle::sync::mpsc::{RecvTimeoutError, SyncSender};
+        pub use shuttle::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError};
 
         pub struct Receiver<T> {
             inner: shuttle::sync::mpsc::Receiver<T>,

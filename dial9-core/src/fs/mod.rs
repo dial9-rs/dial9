@@ -108,6 +108,11 @@ impl Drop for SegmentAccounting {
 pub(crate) enum ActiveHandle {
     Disk(fs::File),
     Mem(MemActiveWriter),
+    #[cfg(test)]
+    FailAfterFlushes {
+        bytes: Vec<u8>,
+        successful_flushes: usize,
+    },
 }
 
 impl Write for ActiveHandle {
@@ -115,12 +120,28 @@ impl Write for ActiveHandle {
         match self {
             ActiveHandle::Disk(f) => f.write(data),
             ActiveHandle::Mem(m) => m.write(data),
+            #[cfg(test)]
+            ActiveHandle::FailAfterFlushes { bytes, .. } => {
+                bytes.extend_from_slice(data);
+                Ok(data.len())
+            }
         }
     }
     fn flush(&mut self) -> io::Result<()> {
         match self {
             ActiveHandle::Disk(f) => f.flush(),
             ActiveHandle::Mem(m) => m.flush(),
+            #[cfg(test)]
+            ActiveHandle::FailAfterFlushes {
+                successful_flushes, ..
+            } => {
+                if *successful_flushes == 0 {
+                    Err(io::Error::other("injected flush failure"))
+                } else {
+                    *successful_flushes -= 1;
+                    Ok(())
+                }
+            }
         }
     }
 }
