@@ -226,7 +226,12 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
                 ("sched_wait_ns", V),
             ],
         ]),
-        "QueueSampleEvent" => Some(&[&[("global_queue", U8)], &[("global_queue", V)]]),
+        "QueueSampleEvent" => Some(&[
+            &[("global_queue", U8), ("active_tasks", V)],
+            &[("global_queue", V), ("active_tasks", V)],
+            &[("global_queue", U8)],
+            &[("global_queue", V)],
+        ]),
         "TaskSpawnEvent" => Some(&[
             &[("task_id", V), ("spawn_loc", PS), ("instrumented", B)],
             &[("task_id", V), ("spawn_loc", PS)],
