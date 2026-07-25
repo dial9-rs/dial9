@@ -279,7 +279,21 @@ mod unix {
         fn read_process_resource_usage_returns_metrics() {
             let snapshot = read_process_resource_usage()
                 .expect("getrusage should succeed for the current process");
+            // FreeBSD may report ru_maxrss == 0 until its first accounting
+            // tick, so validate a resource counter populated at startup.
+            #[cfg(target_os = "freebsd")]
+            assert!(snapshot.minor_faults > 0);
+            #[cfg(not(target_os = "freebsd"))]
             assert!(snapshot.max_rss_bytes > 0);
+        }
+
+        #[test]
+        fn max_rss_scales_to_bytes_and_rejects_negative_values() {
+            assert_eq!(
+                max_rss_to_bytes(4).expect("positive ru_maxrss should convert"),
+                4 * RU_MAXRSS_MULTIPLIER
+            );
+            assert!(max_rss_to_bytes(-1).is_err());
         }
 
         #[test]
@@ -297,6 +311,9 @@ mod unix {
             assert_eq!(events.len(), 1);
             let event = &events[0];
             assert!(event.timestamp_ns > 0);
+            #[cfg(target_os = "freebsd")]
+            assert!(event.minor_faults > 0);
+            #[cfg(not(target_os = "freebsd"))]
             assert!(event.max_rss_bytes > 0);
         }
 

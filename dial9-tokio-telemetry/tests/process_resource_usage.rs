@@ -38,6 +38,12 @@ fn traced_runtime_records_process_resource_usage() {
         "expected at least one process resource usage event"
     );
     assert!(metrics[0].timestamp_ns > 0);
+    // A newly started FreeBSD process may report ru_maxrss == 0 until the
+    // kernel's first resource-accounting tick, so validate a resource counter
+    // populated at startup instead.
+    #[cfg(target_os = "freebsd")]
+    assert!(metrics[0].minor_faults > 0);
+    #[cfg(not(target_os = "freebsd"))]
     assert!(metrics[0].max_rss_bytes > 0);
 }
 
