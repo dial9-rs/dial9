@@ -114,7 +114,7 @@ background during agent-driven testing.
 
 ## Demo Trace
 
-If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace:
+If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace. The same applies when changing the metrique sink's emitted event shape or the demo app's `RequestMetrics` entry: `trace_integrity.test.ts` asserts the demo trace contains metrique events with context fields and unit annotations. Regeneration needs a host with `perf_event_paranoid <= 1` so the trace keeps its sched events (see dial9/README.md, CPU profiling).
 
 ```bash
 ./scripts/regenerate_demo_trace.sh

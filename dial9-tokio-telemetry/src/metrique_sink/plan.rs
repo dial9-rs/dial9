@@ -11,10 +11,26 @@ use metrique_writer::core::descriptor::{AvailableDescriptors, FieldShape, KnownS
 use super::context::field_names;
 use super::{Context, Emit, Interned};
 
-/// Annotation key carrying a field's metrique unit (e.g. `"Milliseconds"`).
-/// Matches the key the `TraceEvent` derive emits, so viewers surface both
-/// through the same path.
+/// Annotation key carrying a field's unit. Matches the key the `TraceEvent`
+/// derive emits, so viewers surface both through the same path.
 pub(crate) const UNIT_ANNOTATION_KEY: &str = "unit";
+
+/// Map a metrique unit to the shared unit vocabulary the `TraceEvent` derive
+/// validates and the viewer formats (`ns`/`us`/`ms`/`s`/`bytes`/`count`).
+/// Units outside it keep their CloudWatch name; the viewer renders those
+/// values unformatted.
+fn unit_annotation_value(unit: metrique_writer::Unit) -> &'static str {
+    use metrique_writer::Unit;
+    use metrique_writer::core::unit::{NegativeScale, PositiveScale};
+    match unit {
+        Unit::Second(NegativeScale::Micro) => "us",
+        Unit::Second(NegativeScale::Milli) => "ms",
+        Unit::Second(NegativeScale::One) => "s",
+        Unit::Byte(PositiveScale::One) => "bytes",
+        Unit::Count => "count",
+        other => other.name(),
+    }
+}
 
 /// How the sink handles one `EntryWriter::value` callback, looked up by the
 /// callback's field name (post-rename, post-prefix, matching
@@ -81,10 +97,7 @@ pub(crate) struct Plan {
     /// Used for the first (resolving) walk of each entry type.
     pub(crate) actions: HashMap<String, FieldAction>,
     /// Positional dispatch recorded by the first successful walk: action per
-    /// `value` callback, in write order. Write order is deterministic per
-    /// entry type (generated code), so subsequent walks index directly
-    /// instead of hashing field names; the callback-count check still guards
-    /// against dynamic fields.
+    /// `value` callback, in write order. See `Dispatch` in `writer.rs`.
     pub(crate) positional: Option<Vec<FieldAction>>,
     /// Total `value` callbacks the descriptor declares. A mismatch at walk
     /// time means dynamic fields; the event must be dropped.
@@ -95,20 +108,28 @@ pub(crate) struct Plan {
     /// No `Emit` fields and no context fields: entries of this type are
     /// skipped without walking `Entry::write`.
     pub(crate) inert: bool,
-    /// The descriptor declared the same full field name twice; name-based
-    /// routing cannot disambiguate, so entries of this type are dropped
-    /// (reported once at plan build).
+    /// Duplicate post-rename field name; entries dropped (reported once at
+    /// plan build).
     pub(crate) unusable: bool,
     /// Entry canonical name, for diagnostics.
     pub(crate) entry_name: String,
 }
 
+/// Header field names, in schema order, preceding the payload fields. The
+/// event timestamp is implicit and not part of the schema field list.
+/// `fill_values` in `writer.rs` must push values in exactly this order.
+const HEADER_NAMES: [&str; 4] = ["worker_id", "task_id", "monotonic_ns_end", "wall_clock_ns"];
+
+/// Number of header fields; payload slot `i` is schema field
+/// `HEADER_FIELDS + i`.
+pub(crate) const HEADER_FIELDS: usize = HEADER_NAMES.len();
+
 fn header_field_defs() -> Vec<FieldDef> {
     vec![
-        FieldDef::new("worker_id", FieldType::Varint),
-        FieldDef::new("task_id", FieldType::OptionalVarint),
-        FieldDef::new("monotonic_ns_end", FieldType::OptionalVarint),
-        FieldDef::new("wall_clock_ns", FieldType::OptionalVarint),
+        FieldDef::new(HEADER_NAMES[0], FieldType::Varint),
+        FieldDef::new(HEADER_NAMES[1], FieldType::OptionalVarint),
+        FieldDef::new(HEADER_NAMES[2], FieldType::OptionalVarint),
+        FieldDef::new(HEADER_NAMES[3], FieldType::OptionalVarint),
     ]
 }
 
@@ -134,10 +155,19 @@ pub(crate) fn build_plan(
     let mut payload_optional = Vec::new();
     let mut has_context = false;
     let mut has_emit = false;
+    let mut roles_seen = [false; 4];
 
     let mut insert = |name: String, action: FieldAction, duplicate: &mut Option<String>| {
-        if actions.insert(name.clone(), action).is_some() && duplicate.is_none() {
-            *duplicate = Some(name);
+        use std::collections::hash_map::Entry;
+        match actions.entry(name) {
+            Entry::Occupied(entry) => {
+                if duplicate.is_none() {
+                    *duplicate = Some(entry.key().clone());
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(action);
+            }
         }
     };
 
@@ -156,8 +186,21 @@ pub(crate) fn build_plan(
                 };
                 match role {
                     Some(role) => {
-                        has_context = true;
-                        insert(full_name, FieldAction::Context(role), &mut duplicate_name);
+                        let seen = &mut roles_seen[role as usize];
+                        if *seen {
+                            // Two Dial9Contexts flattened into one entry;
+                            // only the first routes to the header.
+                            tracing::warn!(
+                                entry = %entry_name,
+                                field = %full_name,
+                                "duplicate dial9 context field; ignoring"
+                            );
+                            insert(full_name, FieldAction::Skip, &mut duplicate_name);
+                        } else {
+                            *seen = true;
+                            has_context = true;
+                            insert(full_name, FieldAction::Context(role), &mut duplicate_name);
+                        }
                     }
                     None => {
                         // A foreign field carrying our internal flag; nothing
@@ -179,6 +222,16 @@ pub(crate) fn build_plan(
             }
             has_emit = true;
 
+            if HEADER_NAMES.contains(&full_name.as_str()) {
+                tracing::error!(
+                    entry = %entry_name,
+                    field = %full_name,
+                    "metrique field name collides with a dial9 header field; skipping field"
+                );
+                insert(full_name, FieldAction::Skip, &mut duplicate_name);
+                continue;
+            }
+
             let interned = field.flags().any(|f| f.is::<Interned>());
             match resolve_shape(&field.shape(), interned) {
                 Ok((field_type, kind)) => {
@@ -186,7 +239,7 @@ pub(crate) fn build_plan(
                         annotations.push(FieldAnnotation::new(
                             fields.len() as u16,
                             UNIT_ANNOTATION_KEY,
-                            unit.name(),
+                            unit_annotation_value(unit),
                         ));
                     }
                     let slot = payload_optional.len();
@@ -226,7 +279,7 @@ pub(crate) fn build_plan(
     };
 
     if has_emit && !has_context {
-        tracing::error!(
+        tracing::warn!(
             entry = %entry_name,
             "metrique entry has dial9 Emit fields but no Dial9Context; events will carry \
              an unknown worker and a flush-thread timestamp. Flatten a Dial9Context into \
@@ -238,7 +291,8 @@ pub(crate) fn build_plan(
 
     // Distinct descriptor sequences occasionally share a canonical name
     // (e.g. the same child struct flattened under different prefixes).
-    // Disambiguate so each plan registers its own wire schema.
+    // Disambiguate so each plan registers its own wire schema. The `#N`
+    // suffix follows first-use order, so it is not stable across runs.
     let base = format!("metrique:{entry_name}");
     let n = used_names.entry(base.clone()).or_insert(0);
     *n += 1;
@@ -278,12 +332,8 @@ fn resolve_shape(
     let (base_type, kind) = match inner {
         FieldShape::Known(known) => resolve_known(known, interned)?,
         FieldShape::List(elem) => {
-            // Validate the element shape is encodable, then carry the list
-            // as a comma-joined string: `ForceFlag` (which wraps every
-            // flagged field at write time) does not forward
-            // `ValueWriter::values()`, so list data always reaches the sink
-            // through the default comma-joined string fallback. Typed list
-            // encoding can replace this once metrique forwards `values()`.
+            // Lists are carried comma-joined; see `ValueKind::Str`. Validate
+            // the element shape so garbage text is rejected up front.
             validate_element(elem.get())?;
             if interned {
                 (FieldType::PooledString, ValueKind::Str { interned: true })
@@ -307,8 +357,10 @@ fn resolve_shape(
     }
 
     let field_type = if optional {
+        // Every supported field type has an optional variant; this cannot
+        // fail today, but the flush thread must not panic if that changes.
         FieldType::from_tag(base_type as u8 | FieldType::OPTIONAL_BIT)
-            .expect("every supported field type has an optional variant")
+            .ok_or("field type has no optional variant")?
     } else {
         base_type
     };

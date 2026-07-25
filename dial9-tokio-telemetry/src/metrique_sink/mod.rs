@@ -49,9 +49,10 @@
 //! The sink is descriptor-aware: it reads each entry type's
 //! [`EntryDescriptor`](metrique_writer::core::descriptor) once at first use to
 //! learn its shape (fields, flags, units), then routes values on every
-//! subsequent emission with no per-entry allocation beyond the value buffer.
-//! Entries without descriptors (hand-written `Entry` impls) are skipped with
-//! a rate-limited warning; they still reach the other side of the `tee`.
+//! subsequent emission; per-entry heap traffic is limited to payload string
+//! values. Entries without descriptors (hand-written `Entry` impls) are
+//! skipped with a rate-limited warning; they still reach the other side of
+//! the `tee`.
 //!
 //! All dial9 encoding happens on the thread that drives the metrique
 //! pipeline (the `BackgroundQueue` flush thread for the standard setup).
@@ -75,8 +76,8 @@
 //!   captured off-runtime),
 //! - the wall-clock timestamp when the entry declares
 //!   `#[metrics(timestamp)]`,
-//! - every `Emit`-tagged field, with units carried as `metrique.unit` schema
-//!   annotations.
+//! - every `Emit`-tagged field, with units carried as `unit` schema
+//!   annotations (the same key the `TraceEvent` derive emits).
 //!
 //! # Limitations (initial release)
 //!
@@ -93,6 +94,9 @@
 //!   will switch over once metrique forwards `values()`.
 //! - Fields are routed by their emitted names, so an entry that declares
 //!   the same post-rename field name twice is dropped with a diagnostic.
+//!
+//! Roadmap and tracking for the above: `docs/design/metrique-integration.md`,
+//! "Future evolution".
 
 mod context;
 mod plan;
@@ -155,14 +159,12 @@ impl MetricOptions for ContextOptions {}
 
 /// Dial9-internal field flag carried by [`Dial9Context`]'s own fields.
 ///
-/// Users do not interact with this directly; they flatten [`Dial9Context`]
-/// into their entry and the sink discovers the context fields by walking the
-/// descriptor at first use. The flag identity (and this type's existence) is
-/// not a stable guarantee; a future typed source-extraction mechanism in
-/// metrique would replace this tag-based discovery.
-#[doc(hidden)]
+/// Users never name this type; they flatten [`Dial9Context`] into their
+/// entry and the sink discovers the context fields by walking the descriptor
+/// at first use. A future typed source-extraction mechanism in metrique
+/// would replace this tag-based discovery.
 #[derive(Debug)]
-pub struct Context;
+pub(crate) struct Context;
 
 impl FlagConstructor for Context {
     fn construct() -> MetricFlags<'static> {

@@ -511,7 +511,7 @@ let mut m = RequestMetrics {
 };
 ```
 
-Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs ~25ns on the request path; encoding happens on the metrique flush thread (~570ns per entry). Entries without descriptors (hand-written `Entry` impls), `Flex` dynamic-key fields, and histogram fields are skipped with a diagnostic; see the `dial9::metrique_sink` module docs for details and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Entries without descriptors (hand-written `Entry` impls), `Flex` dynamic-key fields, and histogram fields are skipped with a diagnostic. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

@@ -11,7 +11,7 @@ use metrique_writer::{EntryConfig, EntryWriter, Observation, Value, ValueWriter}
 use crate::rate_limit::rate_limited;
 use crate::telemetry::{ThreadLocalEncoder, WorkerId, clock_monotonic_ns};
 
-use super::plan::{ContextRole, FieldAction, Plan, ValueKind};
+use super::plan::{ContextRole, FieldAction, HEADER_FIELDS, Plan, ValueKind};
 
 /// Captured event-header values, filled in by [`ContextRole`]-routed fields
 /// as the walk encounters them.
@@ -26,7 +26,12 @@ struct ContextValues {
 }
 
 /// How `value` callbacks are routed to actions.
-pub(crate) enum Dispatch<'p> {
+///
+/// A resolving walk routes by name (correct in any order) and records the
+/// order it saw; the cached walk replays that order. A metrique upgrade that
+/// changes write order is re-resolved at process start, so the cache only
+/// needs the count guard against dynamic fields.
+enum Dispatch<'p> {
     /// First walk of an entry type: look actions up by field name and record
     /// them in write order for subsequent walks.
     Resolve {
@@ -129,7 +134,6 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
 
         // Schema fields exclude the timestamp: payload slot i is schema
         // field HEADER_FIELDS + i.
-        const HEADER_FIELDS: usize = 4;
         for (i, (slot, optional)) in self
             .slots
             .iter_mut()
@@ -140,13 +144,11 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
                 Some(value) => out.push(value),
                 None if *optional => out.push(FieldValue::None),
                 None => {
-                    let name = self
-                        .plan
-                        .schema
-                        .fields()
-                        .get(HEADER_FIELDS + i)
-                        .map(|f| f.name().to_owned())
-                        .unwrap_or_default();
+                    let name = match self.plan.schema.fields().get(HEADER_FIELDS + i) {
+                        Some(field) => field.name().to_owned(),
+                        // Slot/schema misalignment is a sink bug; make it visible.
+                        None => format!("<payload slot {i}>"),
+                    };
                     return Err(name);
                 }
             }
@@ -169,7 +171,7 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
         self.ctx.wall_clock_ns = timestamp
             .duration_since(SystemTime::UNIX_EPOCH)
             .ok()
-            .map(|d| d.as_nanos() as u64);
+            .and_then(|d| u64::try_from(d.as_nanos()).ok());
     }
 
     fn value(&mut self, name: impl Into<Cow<'a, str>>, value: &(impl Value + ?Sized)) {
@@ -179,8 +181,7 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
             Dispatch::Cached(actions) => match actions.get(index) {
                 Some(action) => *action,
                 None => {
-                    // More callbacks than the resolved walk saw: dynamic
-                    // fields appeared; `aligned` rejects the event.
+                    // Dynamic fields appeared; `aligned` rejects the event.
                     self.saw_unknown = true;
                     return;
                 }
@@ -193,9 +194,7 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                         *action
                     }
                     None => {
-                        // Dynamic field the descriptor does not declare
-                        // (e.g. Flex): record the mismatch so `aligned`
-                        // rejects the event.
+                        // Field the descriptor does not declare (e.g. Flex).
                         self.saw_unknown = true;
                         return;
                     }
@@ -217,7 +216,7 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                 let mut out = None;
                 value.write(ValueCapture {
                     out: &mut out,
-                    kind: &kind,
+                    kind,
                     enc: self.enc,
                 });
                 self.slots[slot] = out;
@@ -225,7 +224,10 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
         }
     }
 
-    fn config(&mut self, _config: &'a dyn EntryConfig) {}
+    fn config(&mut self, _config: &'a dyn EntryConfig) {
+        // Format-specific configuration (EMF dimensions etc.); nothing maps
+        // to the trace encoding today.
+    }
 }
 
 /// Extract a single unsigned observation from a value (context fields are
@@ -268,7 +270,7 @@ fn capture_u64(value: &(impl Value + ?Sized)) -> Option<u64> {
 /// list element) or drops the event.
 struct ValueCapture<'a, 'enc> {
     out: &'a mut Option<FieldValue>,
-    kind: &'a ValueKind,
+    kind: ValueKind,
     enc: &'a mut ThreadLocalEncoder<'enc>,
 }
 
@@ -306,7 +308,9 @@ impl ValueWriter for ValueCapture<'_, '_> {
         *self.out = match (observation, self.kind) {
             (Observation::Unsigned(v), ValueKind::Bool) => Some(FieldValue::Bool(v != 0)),
             (Observation::Unsigned(v), ValueKind::Uint) => Some(FieldValue::Varint(v)),
-            (Observation::Unsigned(v), ValueKind::Int) => Some(FieldValue::I64(v as i64)),
+            (Observation::Unsigned(v), ValueKind::Int) => {
+                i64::try_from(v).ok().map(FieldValue::I64)
+            }
             (Observation::Unsigned(v), ValueKind::Float) => Some(FieldValue::F64(v as f64)),
             (Observation::Floating(v), ValueKind::Float) => Some(FieldValue::F64(v)),
             _ => None,
@@ -319,8 +323,6 @@ impl ValueWriter for ValueCapture<'_, '_> {
         });
     }
 
-    // No `values()` override: `ForceFlag` (wrapping every flagged field)
-    // does not forward `values()`, so list data reaches this writer through
-    // the default comma-joined `string()` fallback, which the plan maps to
-    // a string carrier. See `ValueKind::Str` for the upstream dependency.
+    // No `values()` override: list data arrives via the default comma-joined
+    // `string()` fallback; see `ValueKind::Str`.
 }

@@ -1,12 +1,13 @@
 //! End-to-end tests for the metrique → dial9 sink: entries flow through
 //! `Dial9Stream`, land in a sealed trace file, and decode back with the
 //! expected schema, header context, payload values, and unit annotations.
+#![cfg(feature = "metrique-sink")]
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, WorkerId, recorder};
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
@@ -176,9 +177,7 @@ fn full_entry_round_trips() {
     assert_eq!(ev.fields["Operation"], "GetPet");
     assert_eq!(ev.fields["LatencyUs"], "1500");
     assert_eq!(ev.fields["Retries"], "2");
-    // Lists arrive comma-joined (metrique's ForceFlag does not forward the
-    // structured `values()` path; see the module docs).
-    assert_eq!(ev.fields["Tags"], "a,b");
+    assert_eq!(ev.fields["Tags"], "a,b"); // lists arrive comma-joined
     assert_eq!(ev.fields["Success"], "true");
     assert_eq!(ev.fields["Load"], "0.5");
     // Duration writes fractional milliseconds.
@@ -188,17 +187,18 @@ fn full_entry_round_trips() {
         "skip(Emit) field leaked into the payload: {ev:#?}"
     );
 
-    // Units arrive as schema annotations.
-    assert_eq!(ev.units["LatencyUs"], "Microseconds");
-    assert_eq!(ev.units["Elapsed"], "Milliseconds");
+    assert_eq!(ev.units["LatencyUs"], "us");
+    assert_eq!(ev.units["Elapsed"], "ms");
 
-    // Interned strings go through the pool; plain strings do not.
     assert!(ev.pooled_fields.contains(&"Route".to_owned()));
     assert!(!ev.pooled_fields.contains(&"Operation".to_owned()));
 
-    // Header context: off-runtime capture still records timestamps; worker
-    // is unknown (255) and the task id is absent.
-    assert_eq!(ev.fields["worker_id"], "255");
+    // Off-runtime capture still records timestamps; worker is unknown and
+    // the task id is absent.
+    assert_eq!(
+        ev.fields["worker_id"],
+        WorkerId::UNKNOWN.as_u64().to_string()
+    );
     assert_eq!(ev.fields["task_id"], "<none>");
     assert!(ev.timestamp_ns > 0, "start timestamp missing");
     let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
@@ -207,7 +207,6 @@ fn full_entry_round_trips() {
         "close-time end timestamp must be >= start"
     );
 
-    // Absent optional in the second event.
     assert_eq!(events[1].fields["Retries"], "<none>");
 }
 
@@ -236,7 +235,11 @@ fn on_runtime_context_captures_worker_and_task() {
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_ne!(ev.fields["worker_id"], "255", "expected a real worker id");
+    assert_ne!(
+        ev.fields["worker_id"],
+        WorkerId::UNKNOWN.as_u64().to_string(),
+        "expected a real worker id"
+    );
     assert_ne!(ev.fields["task_id"], "<none>", "expected a task id");
 }
 
@@ -254,7 +257,10 @@ fn entry_without_context_falls_back() {
     assert_eq!(events.len(), 1);
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "7");
-    assert_eq!(ev.fields["worker_id"], "255");
+    assert_eq!(
+        ev.fields["worker_id"],
+        WorkerId::UNKNOWN.as_u64().to_string()
+    );
     assert_eq!(ev.fields["monotonic_ns_end"], "<none>");
     assert!(
         ev.timestamp_ns > 0,
@@ -330,7 +336,6 @@ fn hand_written_entry_is_skipped() {
 
     let events = run_sink_test(|stream| {
         stream.next(&HandWritten).unwrap();
-        // A descriptor-bearing entry after it still records fine.
         feed_entry!(stream, sample_request(None));
     });
 
@@ -392,7 +397,6 @@ fn panicking_value_drops_event_without_poisoning_the_stream() {
 
     let events = run_sink_test(|stream| {
         feed_entry!(stream, Panicky { bad: PanicOnWrite });
-        // The stream keeps working afterwards.
         feed_entry!(stream, sample_request(None));
     });
 
@@ -407,8 +411,6 @@ fn flex_entry_is_dropped_but_stream_survives() {
     #[metrics(default_flags(Emit))]
     struct WithFlex {
         count: u64,
-        // Dynamic key name, only known at runtime: the dial9 sink cannot
-        // align it with a static descriptor.
         #[metrics(flatten)]
         extras: Flex<u64>,
     }
@@ -457,4 +459,60 @@ fn background_queue_end_to_end() {
     recorder.graceful_shutdown(Duration::from_secs(5));
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 10, "expected all queued entries to record");
+}
+
+#[test]
+fn timestamp_field_lands_in_wall_clock_header() {
+    use std::time::SystemTime;
+
+    #[metrics(default_flags(Emit))]
+    struct Timestamped {
+        #[metrics(timestamp)]
+        at: SystemTime,
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Timestamped {
+                at: SystemTime::now(),
+                count: 1,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1);
+    let wall: u64 = events[0].fields["wall_clock_ns"].parse().unwrap();
+    assert!(
+        wall > 1_500_000_000_000_000_000,
+        "implausible wall clock: {wall}"
+    );
+}
+
+#[test]
+fn payload_field_colliding_with_header_name_is_skipped() {
+    // snake_case keeps the user field named exactly like the header field.
+    #[metrics(default_flags(Emit))]
+    struct Colliding {
+        worker_id: u64,
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Colliding {
+                worker_id: 42,
+                count: 3,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.fields["count"], "3");
+    // The header slot wins; the colliding payload field is dropped rather
+    // than producing a duplicate schema name.
+    assert_ne!(ev.fields["worker_id"], "42");
 }

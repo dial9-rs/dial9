@@ -385,21 +385,21 @@ describe("clock-sync", () => {
 });
 
 describe("metrique events", () => {
-  function metriqueEvents(): CustomEvent[] {
-    return trace.customEvents.filter((e) => e.name.startsWith("metrique:"));
+  // Assertions target the demo app's RequestMetrics specifically, so adding
+  // other metrique entry types to the demo does not break them.
+  function requestMetrics(): CustomEvent[] {
+    return trace.customEvents.filter((e) => e.name === "metrique:RequestMetrics");
   }
 
   it("demo app records metrique request metrics", () => {
-    const events = metriqueEvents();
-    expect(events.length, "No metrique:* events found").toBeGreaterThan(0);
-    const names = new Set(events.map((e) => e.name));
-    expect(names.has("metrique:RequestMetrics"), `names: ${[...names]}`).toBe(true);
+    expect(requestMetrics().length, "No metrique:RequestMetrics events found").toBeGreaterThan(0);
   });
 
   it("metrique events carry context and payload fields", () => {
-    for (const ev of metriqueEvents()) {
+    for (const ev of requestMetrics()) {
       const f = ev.fields;
-      expect(f["worker_id"], `worker_id missing on ${ev.name}`).not.toBeNull();
+      expect(f["worker_id"], `worker_id missing on ${ev.name}`).toBeDefined();
+      expect(f["worker_id"], `worker_id null on ${ev.name}`).not.toBeNull();
       const end = Number(f["monotonic_ns_end"]);
       expect(end, `monotonic_ns_end missing on ${ev.name}`).toBeGreaterThan(0);
       expect(end, "end must be >= start timestamp").toBeGreaterThanOrEqual(ev.timestamp);
@@ -409,10 +409,11 @@ describe("metrique events", () => {
   });
 
   it("metrique unit annotations surface as schema units", () => {
-    const withLatency = metriqueEvents().filter((e) => e.fields["Latency"] != null);
+    const withLatency = requestMetrics().filter((e) => e.fields["Latency"] != null);
     expect(withLatency.length, "No metrique events with a Latency field").toBeGreaterThan(0);
     for (const ev of withLatency) {
-      expect(ev.units?.["Latency"], `Latency unit missing on ${ev.name}`).toBe("Milliseconds");
+      // Normalized to the shared derive/viewer unit vocabulary.
+      expect(ev.units?.["Latency"], `Latency unit missing on ${ev.name}`).toBe("ms");
     }
   });
 });

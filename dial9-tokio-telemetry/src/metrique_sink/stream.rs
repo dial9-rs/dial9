@@ -30,30 +30,14 @@ struct Stats {
 
 /// A metrique [`EntryIoStream`] that records entries into the dial9 trace.
 ///
-/// Compose it into an existing pipeline with
-/// [`tee`](metrique_writer::stream::tee):
-///
-/// ```ignore
-/// use metrique_writer::stream::tee;
-///
-/// let stream = tee(emf_stream, Dial9Stream::new(&handle));
-/// let _join = ServiceMetrics::attach_to_stream(stream);
-/// ```
-///
-/// Runs on whatever thread drives the metrique pipeline (the
-/// `BackgroundQueue` flush thread for the standard setup); all dial9
-/// encoding happens there. When the dial9 handle is disabled the stream is
-/// a cheap no-op and entries still reach the other side of the tee.
-///
-/// See the [module docs](super) for the opt-in model ([`Emit`](super::Emit)
-/// flags plus a flattened [`Dial9Context`](super::Dial9Context)) and the
-/// current limitations.
+/// See the [module docs](super) for wiring, the opt-in model, and current
+/// limitations.
 #[derive(Debug)]
 pub struct Dial9Stream {
     handle: Dial9Handle,
     /// Encode plans keyed on each entry type's descriptor-id sequence.
     /// Bounded by the number of distinct entry types the process
-    /// instantiates, which is a compile-time property.
+    /// instantiates.
     plans: HashMap<Vec<DescriptorId>, Plan>,
     /// Schema-name disambiguation across plans (see `build_plan`).
     used_names: HashMap<String, u32>,
@@ -103,17 +87,14 @@ impl Dial9Stream {
 
 impl EntryIoStream for Dial9Stream {
     fn next(&mut self, entry: &impl Entry) -> Result<(), IoStreamError> {
-        // Inert or disabled handle: no work. Entries still reach the other
-        // streams in the tee.
         if !self.handle.is_enabled() {
             return Ok(());
         }
         self.maybe_report();
 
         let Some(descriptors) = entry.descriptors().into_available() else {
-            // Hand-written `Entry` impls carry no descriptor; dial9 cannot
-            // learn their shape. (No stable way to identify the concrete
-            // type here, so this is rate-limited rather than deduped.)
+            // No stable way to identify the concrete type here, so this is
+            // rate-limited rather than deduped per type.
             self.stats.entries_no_descriptor += 1;
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
@@ -201,6 +182,7 @@ impl EntryIoStream for Dial9Stream {
             && let Some(actions) = resolved
             && let Some(plan) = self.plans.get_mut(self.key_scratch.as_slice())
         {
+            debug_assert_eq!(actions.len(), plan.expected_values);
             plan.positional = Some(actions);
         }
 

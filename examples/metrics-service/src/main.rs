@@ -265,8 +265,8 @@ fn main() -> std::io::Result<()> {
     )?;
 
     // Per-request metrique entries (routes::RequestMetrics) flow into the
-    // dial9 trace.
-    let _metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::new(recorder.handle()));
+    // dial9 trace. A production service would tee this with its EMF stream.
+    let metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::new(recorder.handle()));
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -378,6 +378,8 @@ fn main() -> std::io::Result<()> {
 
     // Drop the runtime first so worker threads flush their thread-local
     // telemetry buffers, then drain the background worker.
+    // Drain the metrique queue into dial9 before sealing the trace.
+    drop(metrics_join);
     drop(runtime);
     recorder.graceful_shutdown(Duration::from_secs(5));
 

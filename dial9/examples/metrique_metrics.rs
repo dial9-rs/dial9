@@ -23,8 +23,7 @@ use metrique::writer::{AttachGlobalEntrySinkExt, GlobalEntrySink};
 use std::time::Duration;
 
 /// One entry per request. `default_flags(Emit)` opts every field into the
-/// dial9 payload; individual fields could opt out with
-/// `#[metrics(flags(skip(Emit)))]`.
+/// dial9 payload.
 #[metrics(rename_all = "PascalCase", default_flags(Emit))]
 struct RequestMetrics {
     /// Captures worker id, task id, and start/end timestamps for the trace.
@@ -44,7 +43,11 @@ struct RequestMetrics {
 async fn handle_request(id: u32) {
     let mut metrics = RequestMetrics {
         dial9: Dial9Context::capture(),
-        operation: if id.is_multiple_of(2) { "GetItem" } else { "PutItem" },
+        operation: if id.is_multiple_of(2) {
+            "GetItem"
+        } else {
+            "PutItem"
+        },
         latency_ms: 0,
         success: false,
     }
@@ -74,7 +77,7 @@ fn main() {
         .expect("build tokio runtime");
 
     // Wire the metrique pipeline: local format on stderr, teed with dial9.
-    let _join = ServiceMetrics::attach_to_stream(tee(
+    let join = ServiceMetrics::attach_to_stream(tee(
         LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
         Dial9Stream::new(recorder.handle()),
     ));
@@ -86,7 +89,9 @@ fn main() {
         }
     });
 
-    // Drop the runtime before draining, so its workers flush their buffers.
+    // Shutdown order matters: dropping the attach handle drains the metrique
+    // queue into dial9; then drop the runtime and seal the trace.
+    drop(join);
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(5));
 

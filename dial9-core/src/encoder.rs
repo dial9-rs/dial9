@@ -85,9 +85,15 @@ impl ThreadLocalEncoder<'_> {
         schema: &dial9_trace_format::encoder::Schema,
         values: &[dial9_trace_format::types::FieldValue],
     ) {
-        self.encoder
-            .write_event(schema, values)
-            .expect("writing to Vec<u8> is infallible");
+        // The underlying writer is a Vec, so any error here is a validation
+        // failure (e.g. schema-name collision, value/schema mismatch), which
+        // is raised before event bytes are written. Drop the event rather
+        // than panicking the calling thread.
+        if let Err(e) = self.encoder.write_event(schema, values) {
+            crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                tracing::error!(schema = %schema.name(), "dropping event: {e}");
+            });
+        }
     }
 
     /// Intern a `&'static Location` (caching the `to_string()` result).
