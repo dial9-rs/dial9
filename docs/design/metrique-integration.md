@@ -107,6 +107,8 @@ Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs` (see the modu
 
 ## Future evolution
 
+- **Viewer span rendering for metrique events.** Events carry start (`timestamp`) and end (`monotonic_ns_end`), so the span pipeline can synthesize a closed span per event (one segment, payload as span fields) with a small branch where span events are classified: `buildSpanData` in the legacy `trace_analysis.js` and its TypeScript port under `dial9-viewer/ui/src/lib/trace/`. Deferred until the UI migration (#672–#674) leaves one implementation to change. Until then, metrique events appear in the events pane with fields and units.
+- **A `Kpi` field flag** emitting a `dial9.kpi` annotation, once the viewer can graph flagged fields; the annotation mechanism needs no format changes.
 - **Streaming event encoder** (transactional begin/commit/abort on the thread-local buffer), removing the buffered `FieldValue` stage here and the per-span allocations in the tracing layer. Drafted in `.kiro/issue-draft-streaming-encoder.md`.
 - **Convenience wiring**: `attach_to_stream_with_dial9` / `metrique_sink(...)` builder, once we accept `metrique-service-metrics` in the public surface (later scope, see "User-facing API").
 - **Typed list encoding**, blocked on metrique forwarding `values()` through `ForceFlag` (delta 2).
