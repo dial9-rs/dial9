@@ -24,7 +24,7 @@ futures-util = { version = "0.3", default-features = false, features = [
     "std",
 ], optional = true }
 flate2 = { version = "1", optional = true }
-metrique = "0.1.23"
+metrique = "0.1.28"
 metrique-timesource = "0.1"
 shuttle = { version = "0.9.1", optional = true }
 tracing = "0.1.44"

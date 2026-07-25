@@ -22,7 +22,10 @@ use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+use dial9::metrique_sink::Dial9Stream;
+use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
+use metrique::writer::AttachGlobalEntrySinkExt;
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
 
@@ -260,6 +263,10 @@ fn main() -> std::io::Result<()> {
             t.worker_threads(args.worker_threads);
         },
     )?;
+
+    // Per-request metrique entries (routes::RequestMetrics) flow into the
+    // dial9 trace.
+    let _metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::new(recorder.handle()));
 
     let _mem_guard = if args.no_memory_profiling {
         None

@@ -186,6 +186,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
 - [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
+- [Metrique metrics](#metrique-metrics-opt-in): dial9 can record metrique unit-of-work metric entries alongside your EMF/JSON pipeline
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace
 
@@ -466,6 +467,51 @@ tracing_subscriber::registry()
 ```
 
 Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs ~300ns total (~50-100ns is dial9 encoding overhead).
+
+### Metrique metrics (opt-in)
+
+If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Events carry the capturing worker, task, and start/end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
+
+**Enable the `metrique-sink` feature:**
+```toml
+[dependencies]
+dial9 = { version = "0.5", features = ["metrique-sink"] }
+```
+
+**Opt fields in and tee the stream:**
+```rust,ignore
+use dial9::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
+use metrique::unit_of_work::metrics;
+use metrique::writer::stream::tee;
+
+#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+struct RequestMetrics {
+    // Worker, task, and start/end timestamps for the trace.
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
+    // Low-cardinality strings can go through dial9's string pool.
+    #[metrics(flags(Interned))]
+    operation: &'static str,
+
+    latency_ms: u64,
+    success: bool,
+}
+
+// dial9 as a peer of the existing pipeline:
+let _join = ServiceMetrics::attach_to_stream(tee(
+    emf_stream,
+    Dial9Stream::new(&handle),
+));
+
+// Use normally.
+let mut m = RequestMetrics {
+    dial9: Dial9Context::capture(),
+    /* ... */
+};
+```
+
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs ~25ns on the request path; encoding happens on the metrique flush thread (~570ns per entry). Entries without descriptors (hand-written `Entry` impls), `Flex` dynamic-key fields, and histogram fields are skipped with a diagnostic; see the `dial9::metrique_sink` module docs for details and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

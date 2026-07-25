@@ -2069,7 +2069,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2835,7 +2835,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2880,7 +2880,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3167,9 +3167,9 @@ dependencies = [
 
 [[package]]
 name = "metrique"
-version = "0.1.24"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2cb1b5bc8898d2cb0da392c35f91826182c4cced80dddf061abd63bb7e34318"
+checksum = "aa466af30a9fe0b1db1dae097e0ce7ddac4b666b1d3a9f5c682e889272511dd8"
 dependencies = [
  "itoa",
  "jiff",
@@ -3189,9 +3189,9 @@ dependencies = [
 
 [[package]]
 name = "metrique-core"
-version = "0.1.19"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67e3d9e65d3978d38102e3c4bd4142b91351467bb9c698db99654375e8f3858b"
+checksum = "8bd60ab3f5d8e13e36aa1d1dd9cc4920012dd21a25bd7311ae3c39810648e068"
 dependencies = [
  "itertools 0.14.0",
  "metrique-writer-core",
@@ -3199,12 +3199,13 @@ dependencies = [
 
 [[package]]
 name = "metrique-macro"
-version = "0.1.15"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07c50c41313eaa762e16c251aa3aa7f1eff170ab403fac8fc688840e93f39b18"
+checksum = "1f5febfaf14fea234b60e0ad43c728db274033893a38d0fa1f87d9b7056d3d61"
 dependencies = [
  "Inflector",
  "darling",
+ "metrique-core",
  "proc-macro2",
  "quote",
  "syn",
@@ -3212,9 +3213,9 @@ dependencies = [
 
 [[package]]
 name = "metrique-metricsrs"
-version = "0.1.24"
+version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f94ae3e46e520e5cb2cce779a7d472fbf08d95a58ded8cea0d1cdafd2402ac9"
+checksum = "96ee8acaaea571b4e4e2f6fe20f3b316693f17cd2edb5bb2658b5279614c7435"
 dependencies = [
  "derive-where",
  "futures",
@@ -3230,27 +3231,27 @@ dependencies = [
 
 [[package]]
 name = "metrique-service-metrics"
-version = "0.1.20"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd93adb879c2d72ea8a23178deb5c9b379a6e459bfa08eb2c86a9c8c213cb3a6"
+checksum = "24ee17caa35f83b730a83c8fa8f7a9aaa61a0becc7a71feb5bfb854bc75440d7"
 dependencies = [
  "metrique-writer",
 ]
 
 [[package]]
 name = "metrique-timesource"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d607939211e4eaaa8cd35394fa5e57faffb7390d0ac513b39992edcaf3cc526c"
+checksum = "2faca4e4480069ff02b1763b3b79f5cec7e8628e24d9dc5b6073f53d2577a4d9"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "metrique-writer"
-version = "0.1.21"
+version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7885027d11fce09ba86f50b11ed8c34166a76e68b1568de3e9cb6689c18ea39"
+checksum = "124326a2ac4c4f61562fa4d071735a1c463f9ba0317d1564f75dc01313dc12d7"
 dependencies = [
  "ahash",
  "crossbeam-queue",
@@ -3270,9 +3271,9 @@ dependencies = [
 
 [[package]]
 name = "metrique-writer-core"
-version = "0.1.15"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2aa7ddd300b7405e6fc576fa57026b45097b5bf7b7c88c9be180dce6f4a1e09"
+checksum = "55b5bbb6d88bde29f6ed74a574cbe49e51ea0c36cccc7e63eee2040db5675b15"
 dependencies = [
  "derive-where",
  "itertools 0.14.0",
@@ -3283,9 +3284,9 @@ dependencies = [
 
 [[package]]
 name = "metrique-writer-format-emf"
-version = "0.1.22"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59fca512de7ed9e29644950426fe3810016fb8f8e478a779fffc33d45b9e9b4e"
+checksum = "48324410658d3fbb08b9d8c863ebfc9e1e2460f24f192b4b826eaee5fa874a80"
 dependencies = [
  "bit-set",
  "dtoa",
@@ -3303,9 +3304,9 @@ dependencies = [
 
 [[package]]
 name = "metrique-writer-macro"
-version = "0.1.8"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7417c002f7b01c3d96792ff553b0b7e333059048a9e40d4f8d4bab23f570773e"
+checksum = "1eef190f855405b9df4166ee0495925162fb2a7985bac62c6ae44f40061fac00"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -3463,7 +3464,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4253,7 +4254,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4875,7 +4876,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4885,7 +4886,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5535,7 +5536,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

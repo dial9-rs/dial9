@@ -40,6 +40,13 @@ interface ClockSyncAnchor {
   realtimeNs: number;
 }
 
+interface CustomEvent {
+  name: string;
+  timestamp: number;
+  fields: Record<string, unknown>;
+  units: Record<string, string> | null;
+}
+
 interface ParsedTrace {
   events: TraceEvent[];
   version: number;
@@ -49,6 +56,7 @@ interface ParsedTrace {
   taskTerminateTimes: Map<number, number>;
   clockSyncAnchors: ClockSyncAnchor[];
   clockOffsetNs: number | null;
+  customEvents: CustomEvent[];
 }
 
 const { parseTrace, EVENT_TYPES } = require("../../trace_parser.js") as {
@@ -373,5 +381,38 @@ describe("clock-sync", () => {
       reconstructedAnchorWall / 1e6,
       `reconstructed wall clock ${reconstructedAnchorWall} is implausibly old`,
     ).toBeGreaterThanOrEqual(MIN_PLAUSIBLE_WALL_CLOCK_MS);
+  });
+});
+
+describe("metrique events", () => {
+  function metriqueEvents(): CustomEvent[] {
+    return trace.customEvents.filter((e) => e.name.startsWith("metrique:"));
+  }
+
+  it("demo app records metrique request metrics", () => {
+    const events = metriqueEvents();
+    expect(events.length, "No metrique:* events found").toBeGreaterThan(0);
+    const names = new Set(events.map((e) => e.name));
+    expect(names.has("metrique:RequestMetrics"), `names: ${[...names]}`).toBe(true);
+  });
+
+  it("metrique events carry context and payload fields", () => {
+    for (const ev of metriqueEvents()) {
+      const f = ev.fields;
+      expect(f["worker_id"], `worker_id missing on ${ev.name}`).not.toBeNull();
+      const end = Number(f["monotonic_ns_end"]);
+      expect(end, `monotonic_ns_end missing on ${ev.name}`).toBeGreaterThan(0);
+      expect(end, "end must be >= start timestamp").toBeGreaterThanOrEqual(ev.timestamp);
+      expect(f["Operation"], `Operation missing on ${ev.name}`).toBeTruthy();
+      expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
+    }
+  });
+
+  it("metrique unit annotations surface as schema units", () => {
+    const withLatency = metriqueEvents().filter((e) => e.fields["Latency"] != null);
+    expect(withLatency.length, "No metrique events with a Latency field").toBeGreaterThan(0);
+    for (const ev of withLatency) {
+      expect(ev.units?.["Latency"], `Latency unit missing on ${ev.name}`).toBe("Milliseconds");
+    }
   });
 });
