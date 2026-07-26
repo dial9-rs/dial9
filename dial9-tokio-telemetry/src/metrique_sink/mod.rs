@@ -71,7 +71,7 @@
 //! - every `Emit`-tagged field, with units carried as `unit` schema
 //!   annotations (the same key the `TraceEvent` derive emits).
 //!
-//! # Limitations (initial release)
+//! # Limitations
 //!
 //! - Hand-written `Entry` impls carry no descriptor and are skipped with a
 //!   rate-limited warning; they still reach the other side of the `tee`.
