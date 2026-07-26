@@ -105,7 +105,10 @@ impl Drop for Dial9Stream {
 
 impl EntryIoStream for Dial9Stream {
     fn next(&mut self, entry: &impl Entry) -> Result<(), IoStreamError> {
-        if !self.handle.is_enabled() {
+        // Also short-circuits a connected-but-paused recorder: descriptor
+        // identification and plan lookup are wasted work when the encode
+        // below would be skipped anyway.
+        if !self.handle.is_recording() {
             return Ok(());
         }
         self.maybe_report();

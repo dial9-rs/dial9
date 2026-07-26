@@ -1226,3 +1226,25 @@ fn boxed_entries_round_trip() {
     let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
     assert!(end > 0, "context must route through the box: {ev:#?}");
 }
+
+#[test]
+fn paused_recorder_records_nothing_until_resumed() {
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+
+    let mut stream = Dial9Stream::new(recorder.handle());
+    // Connected but paused: the entry must be skipped (before plan work
+    // even happens; see `is_recording` in `next`).
+    recorder.disable();
+    feed_entry!(stream, sample_request(None));
+
+    recorder.enable();
+    feed_entry!(stream, sample_request(Some(1)));
+
+    recorder.graceful_shutdown(Duration::from_secs(5));
+    let events = decode_metrique_events(dir.path());
+    assert_eq!(events.len(), 1, "only the post-enable entry records");
+    assert_eq!(events[0].fields["Retries"], "1");
+}

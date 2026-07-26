@@ -77,6 +77,18 @@ impl Dial9Handle {
         self.inner.is_some()
     }
 
+    /// Whether this handle is connected to a live recorder that is currently
+    /// recording (i.e. not paused via [`disable`](Self::disable)).
+    ///
+    /// Cheaper than attempting a record: sources that do per-event work
+    /// before reaching [`with_encoder`](Self::with_encoder) can skip it
+    /// entirely while recording is off. The check is a relaxed atomic load;
+    /// racing a concurrent enable/disable is benign (the event lands or is
+    /// skipped, exactly as if it had arrived a moment earlier or later).
+    pub fn is_recording(&self) -> bool {
+        self.inner.as_ref().is_some_and(|i| i.shared.is_enabled())
+    }
+
     /// Access this handle's [`SharedState`].
     ///
     /// You can use it to subscribe new sources via [`push_source`](SharedState::push_source)
