@@ -46,7 +46,7 @@ Field names still matter for the wire schema: two payload fields that emit the s
 
 ### Event layout
 
-One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `worker_id`, `task_id`, `monotonic_ns_end`, `wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported `Emit`-tagged descriptor field.
+One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `worker_id`, `task_id`, `duration_ns` (absent unless the context captured both timestamps; durations varint-encode in a fraction of the bytes an absolute end timestamp takes), `wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported `Emit`-tagged descriptor field.
 
 Wire types come from the descriptor's `FieldShape`: unsigned widths map to `Varint` (dial9's `FieldValue` carrier for scalar integers; the fixed-width wire types would not match its encoding), signed to `I64`, floats to `F64`, `bool` to `Bool`, strings to `String` or `PooledString` per the `Interned` flag, with `Optional` variants for optional shapes. List shapes (`Vec<T>`, slices) map to the self-describing `DynamicList` type; elements are captured through the `values()` value callback and encode with their own scalar tags, so an `Interned` list of strings pools each element. Absent optional elements are omitted from the encoded list, the same way metrique's other formats leave them out of their arrays.
 
@@ -92,7 +92,7 @@ Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numb
 
 ## Future evolution
 
-- **Viewer span rendering for metrique events.** Events carry start (`timestamp`) and end (`monotonic_ns_end`), so the span pipeline can synthesize a closed span per event (one segment, payload as span fields) with a small branch where span events are classified: `buildSpanData` in the legacy `trace_analysis.js` and its TypeScript port under `dial9-viewer/ui/src/lib/trace/`. Deferred until the UI migration (#672-674) leaves one implementation to change. Until then, metrique events appear in the events pane with fields and units.
+- **Viewer span rendering for metrique events.** Events carry start (`timestamp`) and `duration_ns`, so the span pipeline can synthesize a closed span per event (one segment, payload as span fields) with a small branch where span events are classified: `buildSpanData` in the legacy `trace_analysis.js` and its TypeScript port under `dial9-viewer/ui/src/lib/trace/`. Deferred until the UI migration (#672-674) leaves one implementation to change. Until then, metrique events appear in the events pane with fields and units.
 - **A `Kpi` field flag** emitting a `dial9.kpi` annotation, once the viewer can graph flagged fields; the annotation mechanism needs no format changes.
 - **Streaming event encoder** (transactional begin/commit/abort on the thread-local buffer), removing the buffered `FieldValue` stage here and the per-span allocations in the tracing layer.
 - **Convenience wiring**: `attach_to_stream_with_dial9` / `metrique_sink(...)` builder, once we accept `metrique-service-metrics` in the public surface (later scope, see "User-facing API").

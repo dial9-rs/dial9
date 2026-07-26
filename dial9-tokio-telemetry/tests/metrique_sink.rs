@@ -215,11 +215,9 @@ fn full_entry_round_trips() {
     );
     assert_eq!(ev.fields["task_id"], "<none>");
     assert!(ev.timestamp_ns > 0, "start timestamp missing");
-    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
-    assert!(
-        end >= ev.timestamp_ns,
-        "close-time end timestamp must be >= start"
-    );
+    // Close-time duration: present and numeric (may be arbitrarily small,
+    // since the entry closes right after capture).
+    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
 
     assert_eq!(events[1].fields["Retries"], "<none>");
 }
@@ -275,7 +273,7 @@ fn entry_without_context_falls_back() {
         ev.fields["worker_id"],
         WorkerId::UNKNOWN.as_u64().to_string()
     );
-    assert_eq!(ev.fields["monotonic_ns_end"], "<none>");
+    assert_eq!(ev.fields["duration_ns"], "<none>");
     assert!(
         ev.timestamp_ns > 0,
         "flush-thread fallback timestamp missing"
@@ -308,7 +306,7 @@ fn context_only_entry_emits_header_event() {
         !ev.fields.contains_key("count"),
         "unflagged field leaked: {ev:#?}"
     );
-    assert_ne!(ev.fields["monotonic_ns_end"], "<none>");
+    assert_ne!(ev.fields["duration_ns"], "<none>");
 }
 
 #[test]
@@ -560,8 +558,7 @@ fn payload_field_sharing_a_context_field_name_still_records() {
     assert_eq!(ev.fields["count"], "7");
     // The header slot carries the context's worker id, not the payload 42.
     assert_ne!(ev.fields["worker_id"], "42");
-    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
-    assert!(end > 0, "context must still route: {ev:#?}");
+    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
 }
 
 #[test]
@@ -591,8 +588,7 @@ fn duplicate_contexts_first_wins() {
     assert_eq!(events.len(), 1, "entry must record: {events:#?}");
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "1");
-    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
-    assert!(end > 0, "first context must route: {ev:#?}");
+    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
 }
 
 #[test]
@@ -696,8 +692,7 @@ fn prefixed_context_still_routes() {
     assert_eq!(events.len(), 1, "prefixed entry must record: {events:#?}");
     let ev = &events[0];
     // Context still routes (roles match on base name, prefix-insensitive)...
-    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
-    assert!(end > 0);
+    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
     // ...but the payload field collides with the reserved header name and
     // is skipped; the header slot carries the real worker id.
     assert_ne!(ev.fields["worker_id"], "7");
@@ -808,7 +803,7 @@ fn entry_enum_variants_get_distinct_schemas() {
     assert_eq!(events[2].fields["bytes"], "300");
     // Context routed for every variant.
     for ev in &events {
-        assert!(ev.fields["monotonic_ns_end"].parse::<u64>().unwrap() > 0);
+        let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
     }
 }
 
@@ -1140,7 +1135,7 @@ fn every_context_role_routes() {
         WorkerId::UNKNOWN.as_u64().to_string()
     );
     assert_ne!(ev.fields["task_id"], "<none>");
-    assert_ne!(ev.fields["monotonic_ns_end"], "<none>");
+    assert_ne!(ev.fields["duration_ns"], "<none>");
     assert!(ev.timestamp_ns > 0);
 }
 
@@ -1223,8 +1218,9 @@ fn boxed_entries_round_trip() {
         ev.pooled_fields.contains(&"labels".to_owned()),
         "interning must survive the box: {ev:#?}"
     );
-    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
-    assert!(end > 0, "context must route through the box: {ev:#?}");
+    let _duration: u64 = ev.fields["duration_ns"]
+        .parse()
+        .expect("context must route through the box");
 }
 
 #[test]

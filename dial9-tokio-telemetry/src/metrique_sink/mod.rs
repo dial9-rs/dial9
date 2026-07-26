@@ -65,7 +65,7 @@
 //!
 //! - the entry's canonical name (schema name `metrique:<EntryName>`,
 //!   suffixed `#<layout hash>` when distinct entry types share a name),
-//! - start/end monotonic timestamps, worker id, and task id from
+//! - the start timestamp, request duration, worker id, and task id from
 //!   [`Dial9Context`](crate::metrique_sink::Dial9Context) (worker
 //!   `WorkerId::UNKNOWN` and absent task id when
 //!   captured off-runtime),

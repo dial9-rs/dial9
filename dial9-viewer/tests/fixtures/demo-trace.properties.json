@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 12870,
+  "total_samples": 12770,
   "by_source": {
-    "0": 218,
-    "1": 12652
+    "0": 208,
+    "1": 12562
   },
   "on_off_all": {
-    "on_runtime": 12870,
+    "on_runtime": 12770,
     "off_runtime": 0
   },
   "on_off_by_source": {
     "0": {
-      "on": 218,
+      "on": 208,
       "off": 0
     },
     "1": {
-      "on": 12652,
+      "on": 12562,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 218,
-    "distinct_stacks": 155,
-    "stack_sig_digest": "fcaae18b8aaa0a0e",
-    "ts_count": 218,
-    "ts_span_ns": 4060024190,
-    "ts_delta_digest": "d9995ceb9a9b1ab0",
+    "count": 208,
+    "distinct_stacks": 142,
+    "stack_sig_digest": "352b8e56cbfa7df1",
+    "ts_count": 208,
+    "ts_span_ns": 4079996817,
+    "ts_delta_digest": "605e191ee4bedcf5",
     "top_stacks": [
       {
-        "count": 34,
-        "depth": 76,
+        "count": 26,
+        "depth": 80,
         "leaf": "__GI___writev"
       },
       {
-        "count": 6,
-        "depth": 1,
-        "leaf": "[unknown] 0x7f5037b66277"
+        "count": 8,
+        "depth": 83,
+        "leaf": "__libc_recv"
       },
       {
-        "count": 5,
+        "count": 7,
         "depth": 1,
         "leaf": "_int_malloc"
       },
       {
-        "count": 4,
+        "count": 6,
         "depth": 1,
-        "leaf": "[unknown] 0x7f5037b6627a"
+        "leaf": "__GI___lll_lock_wake_private"
+      },
+      {
+        "count": 4,
+        "depth": 47,
+        "leaf": "epoll_wait"
       },
       {
         "count": 4,
         "depth": 1,
-        "leaf": "__GI___libc_malloc"
-      },
-      {
-        "count": 4,
-        "depth": 1,
-        "leaf": "malloc_consolidate"
-      },
-      {
-        "count": 4,
-        "depth": 95,
-        "leaf": "syscall"
+        "leaf": "_int_free"
       },
       {
         "count": 3,
-        "depth": 79,
-        "leaf": "__libc_recv"
+        "depth": 1,
+        "leaf": "[unknown] 0x7f4d88bea27a"
+      },
+      {
+        "count": 3,
+        "depth": 1,
+        "leaf": "malloc_consolidate"
       }
     ]
   }

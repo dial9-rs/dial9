@@ -118,7 +118,15 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
                     FieldValue::Varint(self.ctx.worker_id.unwrap_or(WorkerId::UNKNOWN.as_u64()))
                 }
                 Header::TaskId => opt(self.ctx.task_id),
-                Header::MonotonicEnd => opt(self.ctx.monotonic_end),
+                // Absent unless the context captured both timestamps; the
+                // flush-thread fallback timestamp would make a nonsense
+                // duration. `MonotonicAtClose` fires after `capture` on the
+                // same clock, so the subtraction cannot wrap in practice.
+                Header::Duration => opt(self
+                    .ctx
+                    .monotonic_start
+                    .zip(self.ctx.monotonic_end)
+                    .map(|(start, end)| end.saturating_sub(start))),
                 Header::WallClock => opt(self.ctx.wall_clock_ns),
             };
         }

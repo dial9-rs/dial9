@@ -403,9 +403,9 @@ describe("metrique events", () => {
       const f = ev.fields;
       expect(f["worker_id"], `worker_id missing on ${ev.name}`).toBeDefined();
       expect(f["worker_id"], `worker_id null on ${ev.name}`).not.toBeNull();
-      const end = Number(f["monotonic_ns_end"]);
-      expect(end, `monotonic_ns_end missing on ${ev.name}`).toBeGreaterThan(0);
-      expect(end, "end must be >= start timestamp").toBeGreaterThanOrEqual(ev.timestamp);
+      const duration = Number(f["duration_ns"]);
+      expect(duration, `duration_ns missing on ${ev.name}`).not.toBeNaN();
+      expect(duration, "duration must be non-negative").toBeGreaterThanOrEqual(0);
       expect(f["Operation"], `Operation missing on ${ev.name}`).toBeTruthy();
       expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
     }

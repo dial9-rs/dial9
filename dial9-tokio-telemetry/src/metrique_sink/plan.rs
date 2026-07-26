@@ -136,7 +136,11 @@ pub(crate) struct Plan {
 pub(crate) enum Header {
     WorkerId,
     TaskId,
-    MonotonicEnd,
+    /// Request duration (`monotonic_ns_end - monotonic_ns_start` from the
+    /// context), encoded instead of an absolute end timestamp: durations
+    /// varint-encode in a fraction of the bytes, and consumers want the
+    /// duration anyway (`end = event timestamp + duration`).
+    Duration,
     WallClock,
 }
 
@@ -144,7 +148,7 @@ impl Header {
     pub(crate) const ALL: [Header; 4] = [
         Header::WorkerId,
         Header::TaskId,
-        Header::MonotonicEnd,
+        Header::Duration,
         Header::WallClock,
     ];
 
@@ -152,7 +156,7 @@ impl Header {
         match self {
             Header::WorkerId => "worker_id",
             Header::TaskId => "task_id",
-            Header::MonotonicEnd => "monotonic_ns_end",
+            Header::Duration => "duration_ns",
             Header::WallClock => "wall_clock_ns",
         }
     }
@@ -160,7 +164,7 @@ impl Header {
     fn field_type(self) -> FieldType {
         match self {
             Header::WorkerId => FieldType::Varint,
-            Header::TaskId | Header::MonotonicEnd | Header::WallClock => FieldType::OptionalVarint,
+            Header::TaskId | Header::Duration | Header::WallClock => FieldType::OptionalVarint,
         }
     }
 }
