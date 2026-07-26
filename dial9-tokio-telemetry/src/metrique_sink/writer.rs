@@ -321,10 +321,26 @@ impl ValueWriter for ValueCapture<'_, '_> {
             (Observation::Unsigned(v), ValueKind::Int) => {
                 i64::try_from(v).ok().map(FieldValue::I64)
             }
+            // `Observation` has no signed variant, so signed-shape values
+            // (necessarily custom `Value` impls) arrive as floats.
+            (Observation::Floating(v), ValueKind::Int) if v.fract() == 0.0 => {
+                (v >= i64::MIN as f64 && v <= i64::MAX as f64).then(|| FieldValue::I64(v as i64))
+            }
             (Observation::Unsigned(v), ValueKind::Float) => Some(FieldValue::F64(v as f64)),
             (Observation::Floating(v), ValueKind::Float) => Some(FieldValue::F64(v)),
             _ => None,
         };
+        if self.out.is_none() {
+            // A metric callback fired but could not be mapped to the planned
+            // shape; unlike an absent optional (which fires no callback at
+            // all), this is data loss worth reporting.
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    kind = ?self.kind,
+                    "metrique observation did not match its declared shape; value lost"
+                );
+            });
+        }
     }
 
     fn error(self, error: metrique_writer::ValidationError) {

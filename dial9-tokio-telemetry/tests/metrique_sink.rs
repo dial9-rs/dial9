@@ -614,3 +614,43 @@ fn identically_named_skipped_fields_are_harmless() {
     );
     assert_eq!(events[0].fields["count"], "9");
 }
+
+#[test]
+fn custom_signed_value_round_trips_negatives() {
+    use metrique_writer::core::descriptor::{FieldShape, KnownShape};
+    use metrique_writer::{MetricFlags, Observation, Unit};
+
+    // Signed values can only travel as floats: metrique's `Observation` has
+    // no signed variant.
+    #[derive(Debug)]
+    struct Signed(i64);
+    impl metrique_writer::Value for Signed {
+        const SHAPE: FieldShape<'static> = FieldShape::Known(KnownShape::I64);
+        fn write(&self, writer: impl metrique_writer::ValueWriter) {
+            writer.metric(
+                [Observation::Floating(self.0 as f64)],
+                Unit::None,
+                [],
+                MetricFlags::empty(),
+            );
+        }
+    }
+    impl metrique::CloseValue for Signed {
+        type Closed = Signed;
+        fn close(self) -> Signed {
+            self
+        }
+    }
+
+    #[metrics(default_flags(Emit))]
+    struct WithSigned {
+        delta: Signed,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(stream, WithSigned { delta: Signed(-42) });
+    });
+
+    assert_eq!(events.len(), 1, "signed entry must record: {events:#?}");
+    assert_eq!(events[0].fields["delta"], "-42");
+}
