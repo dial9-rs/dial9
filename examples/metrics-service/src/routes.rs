@@ -15,9 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 /// Per-request metrics, recorded into the dial9 trace via the
-/// `Dial9Stream` attached in `main`. The trace-integrity CI suite asserts
-/// the demo trace contains these events with these field names; renaming
-/// fields requires a demo trace regeneration (see AGENTS.md).
+/// `Dial9Stream` attached in `main`.
 #[metrics(rename_all = "PascalCase", default_flags(Emit))]
 struct RequestMetrics {
     #[metrics(flatten)]
