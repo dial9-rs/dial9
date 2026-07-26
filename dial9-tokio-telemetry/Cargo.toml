@@ -156,6 +156,9 @@ metrique-timesource = { version = "0.1", features = [
     "tokio",
 ] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
+# `local-format` is only needed by tests (rotation_time_alignment); the
+# production dependency stays feature-lean.
+metrique = { version = "0.1.28", features = ["local-format"] }
 tokio = { version = "1.52.0", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
