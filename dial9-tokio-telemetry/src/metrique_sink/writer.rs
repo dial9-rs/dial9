@@ -295,7 +295,15 @@ impl ValueWriter for ValueCapture<'_, '_> {
             ValueKind::Str { interned: false } => {
                 *self.out = Some(FieldValue::String(value.to_owned()));
             }
-            _ => {}
+            _ => {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        entry = %self.entry_name,
+                        kind = ?self.kind,
+                        "metrique value wrote a string for a non-string shape; value lost"
+                    );
+                });
+            }
         }
     }
 
@@ -322,7 +330,7 @@ impl ValueWriter for ValueCapture<'_, '_> {
             // `Observation` has no signed variant, so signed-shape values
             // (necessarily custom `Value` impls) arrive as floats.
             (Some(Observation::Floating(v)), ValueKind::Int) if v.fract() == 0.0 => {
-                (v >= i64::MIN as f64 && v <= i64::MAX as f64).then_some(FieldValue::I64(v as i64))
+                (v >= i64::MIN as f64 && v < i64::MAX as f64).then_some(FieldValue::I64(v as i64))
             }
             (Some(Observation::Unsigned(v)), ValueKind::Float) => Some(FieldValue::F64(v as f64)),
             (Some(Observation::Floating(v)), ValueKind::Float) => Some(FieldValue::F64(v)),

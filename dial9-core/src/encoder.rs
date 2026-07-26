@@ -85,21 +85,26 @@ impl ThreadLocalEncoder<'_> {
     /// ```
     // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
     #[doc(hidden)]
+    /// Returns `false` when the event was dropped for a validation failure
+    /// (e.g. schema-name collision, value/schema mismatch). The underlying
+    /// writer is a Vec, so IO cannot fail, and the current encode paths
+    /// raise validation errors before writing event bytes; the event is
+    /// dropped rather than panicking the calling thread.
     pub fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
         values: &[dial9_trace_format::types::FieldValue],
-    ) {
-        // The underlying writer is a Vec, so errors here are validation
-        // failures (e.g. schema-name collision, value/schema mismatch),
-        // which the current encode paths raise before writing event bytes.
-        // Drop the event rather than panicking the calling thread.
+    ) -> bool {
         match self.encoder.write_event(schema, values) {
-            Ok(()) => *self.events_written += 1,
+            Ok(()) => {
+                *self.events_written += 1;
+                true
+            }
             Err(e) => {
                 crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::error!(schema = %schema.name(), "dropping event: {e}");
                 });
+                false
             }
         }
     }

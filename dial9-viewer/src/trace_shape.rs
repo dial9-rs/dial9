@@ -60,8 +60,9 @@ const SYNTHETIC_EPOCH_NS: u64 = 1_577_836_800_000_000_000;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 /// Safe annotation keys that are preserved verbatim.
-/// The derive macro emits `"unit"` as the key; the legacy format uses
-/// `"metrique.unit"`. Both are recognized.
+/// The derive macro and the metrique sink emit `"unit"`; `"metrique.unit"`
+/// only appears in SPEC.md examples and annotation tests, kept for
+/// compatibility with traces built from them.
 const SAFE_ANNOTATION_KEYS: &[&str] = &["unit", "metrique.unit"];
 
 /// Safe annotation values (units). Must stay in sync with the derive macro's

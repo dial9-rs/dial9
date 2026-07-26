@@ -287,14 +287,19 @@ pub(crate) fn build_plan(
                 Ok((field_type, kind)) => {
                     // `to_option` filters `Unit::None`, which some custom
                     // `Value` impls surface as `Some(Unit::None)`.
-                    if let Some(unit) = field.unit().and_then(|u| u.to_option())
-                        && let Ok(index) = u16::try_from(fields.len())
-                    {
-                        annotations.push(FieldAnnotation::new(
-                            index,
-                            UNIT_ANNOTATION_KEY,
-                            unit_annotation_value(unit),
-                        ));
+                    if let Some(unit) = field.unit().and_then(|u| u.to_option()) {
+                        match u16::try_from(fields.len()) {
+                            Ok(index) => annotations.push(FieldAnnotation::new(
+                                index,
+                                UNIT_ANNOTATION_KEY,
+                                unit_annotation_value(unit),
+                            )),
+                            Err(_) => tracing::warn!(
+                                entry = %entry_name,
+                                field = %full_name,
+                                "field index exceeds annotation range; unit not recorded"
+                            ),
+                        }
                     }
                     let slot = payload_optional.len();
                     payload_optional.push(field_type.is_optional());
@@ -351,11 +356,12 @@ pub(crate) fn build_plan(
 
     // Distinct descriptor sequences can share a canonical name (the same
     // child struct flattened under different prefixes, an Option-flattened
-    // child present vs absent, same-named types in different modules).
-    // Disambiguate with a hash of the field layout: deterministic across
-    // runs and streams, and identical layouts safely share a wire schema.
-    // Inert and unusable plans never register a schema, so they do not
-    // claim the unsuffixed name.
+    // child present vs absent, same-named types in different modules). The
+    // first arrival keeps the bare name; later ones get a suffix hashed
+    // from the schema layout, so a given layout maps to the same name in
+    // every run of the same binary, and identical layouts safely share a
+    // wire schema. Inert and unusable plans never register a schema, so
+    // they do not claim the unsuffixed name.
     let base = format!("metrique:{entry_name}");
     let schema_name = if inert || unusable {
         base
@@ -371,7 +377,12 @@ pub(crate) fn build_plan(
                 field.name().hash(&mut hasher);
                 (field.field_type() as u8).hash(&mut hasher);
             }
-            format!("{base}#{:08x}", hasher.finish() as u32)
+            for ann in &annotations {
+                ann.field_index().hash(&mut hasher);
+                ann.key().hash(&mut hasher);
+                ann.value().hash(&mut hasher);
+            }
+            format!("{base}#{:016x}", hasher.finish())
         }
     };
 

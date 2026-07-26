@@ -69,10 +69,7 @@ impl Dial9Stream {
         }
     }
 
-    fn maybe_report(&mut self) {
-        if self.last_report.elapsed() < REPORT_INTERVAL {
-            return;
-        }
+    fn report(&mut self) {
         self.last_report = Instant::now();
         tracing::debug!(
             plans = self.plans.len(),
@@ -83,14 +80,19 @@ impl Dial9Stream {
             "dial9 metrique sink counters"
         );
     }
+
+    fn maybe_report(&mut self) {
+        if self.last_report.elapsed() >= REPORT_INTERVAL {
+            self.report();
+        }
+    }
 }
 
 impl Drop for Dial9Stream {
     fn drop(&mut self) {
         // Final counter report; the periodic one never fires for
         // short-lived processes.
-        self.last_report = Instant::now() - REPORT_INTERVAL;
-        self.maybe_report();
+        self.report();
     }
 }
 
@@ -181,8 +183,12 @@ impl EntryIoStream for Dial9Stream {
                 return;
             }
             resolved = walk.take_recorded();
-            enc.write_event(&plan.schema, values);
-            emitted = true;
+            if enc.write_event(&plan.schema, values) {
+                emitted = true;
+            } else {
+                // Encoder validation failure (already logged by dial9-core).
+                dropped = true;
+            }
         });
 
         // Cache the write-order dispatch recorded by a successful resolving
@@ -193,6 +199,8 @@ impl EntryIoStream for Dial9Stream {
         {
             debug_assert_eq!(actions.len(), plan.expected_values);
             plan.positional = Some(actions);
+            // The name-keyed map only serves resolving walks.
+            plan.actions = HashMap::new();
         }
 
         if emitted {
