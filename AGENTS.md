@@ -114,7 +114,7 @@ background during agent-driven testing.
 
 ## Demo Trace
 
-If you modify the trace format (event structure, encoding, parser, etc.), the metrique sink's emitted event shape, or the demo app's `RequestMetrics` entry, you MUST regenerate the demo trace; `trace_integrity.test.ts` asserts on its contents. Regenerate on a host with `perf_event_paranoid <= 1` so sched events survive.
+If you modify the trace format (event structure, encoding, parser, etc.), the metrique sink's emitted event shape, or the demo app's `RequestMetrics` entry, you MUST regenerate the demo trace; `trace_integrity.test.ts` asserts on its contents. Regenerate on a host with `perf_event_paranoid <= 1` so sched events survive, with `DIAL9_SCHED_WAIT_SAMPLE_RATE=1` and CPU load so sched-wait samples are captured (the script validates this). Afterwards refresh the demo-pinned anchors in `flamegraph_search.test.ts` if they fail.
 
 ```bash
 ./scripts/regenerate_demo_trace.sh
