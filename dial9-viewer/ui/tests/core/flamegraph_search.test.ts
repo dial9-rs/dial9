@@ -184,13 +184,18 @@ describe("demo-trace anchors (#593 measurements)", () => {
   });
 
   // [query, expected frames, expected pct of the in-view total]
+  //
+  // These are exact measurements of the committed demo trace and must be
+  // re-measured whenever it is regenerated: rerun this suite and copy the
+  // received frame counts, then recompute pct as
+  // countSearchMatches(...).matchedCount / workerTree.count via pct().
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 146, "100.0"],
-    ["tokio", 230, "100.0"],
-    ["axum", 32, "92.5"],
-    ["dispatcher", 24, "68.7"],
-    ["framebuf", 8, "54.4"],
-    ["spawn", 2, "100.0"],
+    ["poll", 185, "78.0"],
+    ["tokio", 189, "78.0"],
+    ["axum", 31, "69.3"],
+    ["dispatcher", 33, "67.9"],
+    ["framebuf", 4, "3.7"],
+    ["spawn", 2, "78.0"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {

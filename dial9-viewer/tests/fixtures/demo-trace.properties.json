@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 12667,
+  "total_samples": 12870,
   "by_source": {
-    "0": 214,
-    "1": 12453
+    "0": 218,
+    "1": 12652
   },
   "on_off_all": {
-    "on_runtime": 12667,
+    "on_runtime": 12870,
     "off_runtime": 0
   },
   "on_off_by_source": {
     "0": {
-      "on": 214,
+      "on": 218,
       "off": 0
     },
     "1": {
-      "on": 12453,
+      "on": 12652,
       "off": 0
     }
   },
@@ -24,27 +24,22 @@
     1
   ],
   "cpu_profile": {
-    "count": 214,
-    "distinct_stacks": 151,
-    "stack_sig_digest": "f51d47dc03a3f1ce",
-    "ts_count": 214,
-    "ts_span_ns": 4049998458,
-    "ts_delta_digest": "a0b826f751c8544a",
+    "count": 218,
+    "distinct_stacks": 155,
+    "stack_sig_digest": "fcaae18b8aaa0a0e",
+    "ts_count": 218,
+    "ts_span_ns": 4060024190,
+    "ts_delta_digest": "d9995ceb9a9b1ab0",
     "top_stacks": [
       {
-        "count": 30,
+        "count": 34,
         "depth": 76,
         "leaf": "__GI___writev"
       },
       {
-        "count": 8,
-        "depth": 79,
-        "leaf": "__libc_recv"
-      },
-      {
         "count": 6,
-        "depth": 47,
-        "leaf": "epoll_wait"
+        "depth": 1,
+        "leaf": "[unknown] 0x7f5037b66277"
       },
       {
         "count": 5,
@@ -54,21 +49,26 @@
       {
         "count": 4,
         "depth": 1,
-        "leaf": "__strlen_evex"
+        "leaf": "[unknown] 0x7f5037b6627a"
       },
       {
-        "count": 3,
-        "depth": 92,
-        "leaf": "__GI___writev"
+        "count": 4,
+        "depth": 1,
+        "leaf": "__GI___libc_malloc"
       },
       {
-        "count": 3,
+        "count": 4,
+        "depth": 1,
+        "leaf": "malloc_consolidate"
+      },
+      {
+        "count": 4,
         "depth": 95,
         "leaf": "syscall"
       },
       {
         "count": 3,
-        "depth": 95,
+        "depth": 79,
         "leaf": "__libc_recv"
       }
     ]
