@@ -82,8 +82,7 @@
 //! - Distribution-shaped fields (histograms) and other fields whose closed
 //!   shape is `Opaque` are skipped with a diagnostic when tagged `Emit`.
 //! - `Vec<T>` list fields are carried as comma-joined strings until an
-//!   upstream metrique fix lands (the flag wrapper drops the structured
-//!   list callback; design doc, delta 2).
+//!   upstream metrique fix lands (design doc, delta 2).
 //! - Fields are routed by their emitted names. An entry that emits the same
 //!   post-rename name from two fields with different routing (for example a
 //!   payload field named like a `Dial9Context` field, or two unprefixed
