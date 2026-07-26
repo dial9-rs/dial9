@@ -228,6 +228,7 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                 value.write(ValueCapture {
                     out: &mut out,
                     kind,
+                    entry_name: &self.plan.entry_name,
                     enc: self.enc,
                 });
                 self.slots[slot] = out;
@@ -281,6 +282,7 @@ fn capture_u64(value: &(impl Value + ?Sized)) -> Option<u64> {
 struct ValueCapture<'a, 'enc> {
     out: &'a mut Option<FieldValue>,
     kind: ValueKind,
+    entry_name: &'a str,
     enc: &'a mut ThreadLocalEncoder<'enc>,
 }
 
@@ -305,29 +307,25 @@ impl ValueWriter for ValueCapture<'_, '_> {
         _flags: metrique_writer::MetricFlags<'_>,
     ) {
         let mut iter = distribution.into_iter();
-        // An empty distribution is an absent value; more than one observation
-        // is a distribution, which plans never select (those shapes are
-        // Opaque today).
         let first = iter.next();
-        if iter.next().is_some() {
-            return;
-        }
-        let Some(observation) = first else {
-            return;
-        };
-        *self.out = match (observation, self.kind) {
-            (Observation::Unsigned(v), ValueKind::Bool) => Some(FieldValue::Bool(v != 0)),
-            (Observation::Unsigned(v), ValueKind::Uint) => Some(FieldValue::Varint(v)),
-            (Observation::Unsigned(v), ValueKind::Int) => {
+        let single = iter.next().is_none();
+        // Planned kinds are all single-observation scalars (distribution
+        // shapes are Opaque and never planned), so anything else falls
+        // through to the mismatch warn below.
+        *self.out = match (first.filter(|_| single), self.kind) {
+            (None, _) => None,
+            (Some(Observation::Unsigned(v)), ValueKind::Bool) => Some(FieldValue::Bool(v != 0)),
+            (Some(Observation::Unsigned(v)), ValueKind::Uint) => Some(FieldValue::Varint(v)),
+            (Some(Observation::Unsigned(v)), ValueKind::Int) => {
                 i64::try_from(v).ok().map(FieldValue::I64)
             }
             // `Observation` has no signed variant, so signed-shape values
             // (necessarily custom `Value` impls) arrive as floats.
-            (Observation::Floating(v), ValueKind::Int) if v.fract() == 0.0 => {
-                (v >= i64::MIN as f64 && v <= i64::MAX as f64).then(|| FieldValue::I64(v as i64))
+            (Some(Observation::Floating(v)), ValueKind::Int) if v.fract() == 0.0 => {
+                (v >= i64::MIN as f64 && v <= i64::MAX as f64).then_some(FieldValue::I64(v as i64))
             }
-            (Observation::Unsigned(v), ValueKind::Float) => Some(FieldValue::F64(v as f64)),
-            (Observation::Floating(v), ValueKind::Float) => Some(FieldValue::F64(v)),
+            (Some(Observation::Unsigned(v)), ValueKind::Float) => Some(FieldValue::F64(v as f64)),
+            (Some(Observation::Floating(v)), ValueKind::Float) => Some(FieldValue::F64(v)),
             _ => None,
         };
         if self.out.is_none() {
@@ -336,6 +334,7 @@ impl ValueWriter for ValueCapture<'_, '_> {
             // all), this is data loss worth reporting.
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
+                    entry = %self.entry_name,
                     kind = ?self.kind,
                     "metrique observation did not match its declared shape; value lost"
                 );
@@ -345,7 +344,11 @@ impl ValueWriter for ValueCapture<'_, '_> {
 
     fn error(self, error: metrique_writer::ValidationError) {
         rate_limited!(Duration::from_secs(60), {
-            tracing::warn!(%error, "metrique value failed validation; field left absent");
+            tracing::warn!(
+                entry = %self.entry_name,
+                %error,
+                "metrique value failed validation; field left absent"
+            );
         });
     }
 

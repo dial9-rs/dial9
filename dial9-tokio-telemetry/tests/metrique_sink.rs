@@ -568,15 +568,20 @@ fn two_contexts_with_identical_names_drop_the_entry_type() {
                 count: 1,
             }
         );
+        // Positive control so an empty result can't mean a broken pipeline.
+        feed_entry!(stream, sample_request(None));
     });
 
-    // Both flatten sites emit the same four field names; the second set is
-    // skipped by role tracking but the identical names make routing
-    // ambiguous, so the type is dropped.
+    // Both flatten sites emit the same four field names; the identical
+    // names make routing ambiguous, so the type is dropped.
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
     assert!(
-        events.is_empty(),
-        "identically-named duplicate contexts must drop the type: {events:#?}"
+        !names
+            .iter()
+            .any(|n| n.starts_with("metrique:DoubleContext")),
+        "identically-named duplicate contexts must drop the type: {names:?}"
     );
+    assert!(names.contains(&"metrique:RequestMetrics"));
 }
 
 #[test]
@@ -653,4 +658,36 @@ fn custom_signed_value_round_trips_negatives() {
 
     assert_eq!(events.len(), 1, "signed entry must record: {events:#?}");
     assert_eq!(events[0].fields["delta"], "-42");
+}
+
+#[test]
+fn prefixed_context_flatten_avoids_collisions() {
+    // The documented remedy for name collisions: prefix the flatten site.
+    #[metrics(default_flags(Emit))]
+    struct Prefixed {
+        #[metrics(flatten, prefix = "dial9_")]
+        dial9: Dial9Context,
+        // Would collide with the header name without the prefix above
+        // making the context fields distinct.
+        worker_id: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Prefixed {
+                dial9: Dial9Context::capture(),
+                worker_id: 7,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1, "prefixed entry must record: {events:#?}");
+    let ev = &events[0];
+    // Context still routes (roles match on base name, prefix-insensitive)...
+    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
+    assert!(end > 0);
+    // ...but the payload field collides with the reserved header name and
+    // is skipped; the header slot carries the real worker id.
+    assert_ne!(ev.fields["worker_id"], "7");
 }

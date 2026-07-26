@@ -349,14 +349,31 @@ pub(crate) fn build_plan(
 
     let inert = !has_emit && !has_context;
 
-    // Distinct descriptor sequences occasionally share a canonical name
-    // (e.g. the same child struct flattened under different prefixes).
-    // Disambiguate so each plan registers its own wire schema. The `#N`
-    // suffix follows first-use order, so it is not stable across runs.
+    // Distinct descriptor sequences can share a canonical name (the same
+    // child struct flattened under different prefixes, an Option-flattened
+    // child present vs absent, same-named types in different modules).
+    // Disambiguate with a hash of the field layout: deterministic across
+    // runs and streams, and identical layouts safely share a wire schema.
+    // Inert and unusable plans never register a schema, so they do not
+    // claim the unsuffixed name.
     let base = format!("metrique:{entry_name}");
-    let n = used_names.entry(base.clone()).or_insert(0);
-    *n += 1;
-    let schema_name = if *n == 1 { base } else { format!("{base}#{n}") };
+    let schema_name = if inert || unusable {
+        base
+    } else {
+        let n = used_names.entry(base.clone()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            base
+        } else {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for field in &fields {
+                field.name().hash(&mut hasher);
+                (field.field_type() as u8).hash(&mut hasher);
+            }
+            format!("{base}#{:08x}", hasher.finish() as u32)
+        }
+    };
 
     let schema = Schema::from_entry(SchemaEntry::with_annotations(
         schema_name,

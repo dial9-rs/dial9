@@ -85,6 +85,15 @@ impl Dial9Stream {
     }
 }
 
+impl Drop for Dial9Stream {
+    fn drop(&mut self) {
+        // Final counter report; the periodic one never fires for
+        // short-lived processes.
+        self.last_report = Instant::now() - REPORT_INTERVAL;
+        self.maybe_report();
+    }
+}
+
 impl EntryIoStream for Dial9Stream {
     fn next(&mut self, entry: &impl Entry) -> Result<(), IoStreamError> {
         if !self.handle.is_enabled() {
