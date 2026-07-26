@@ -194,14 +194,19 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                 }
             }
             FieldAction::Payload { slot, kind } => {
-                let mut out = None;
+                let mut out = Captured::Absent;
                 value.write(ValueCapture {
                     out: &mut out,
                     kind,
                     entry_name: &self.plan.entry_name,
                     enc: self.enc,
                 });
-                self.slots[slot] = out;
+                // Absent and mismatched both leave the slot empty; required
+                // fields turn that into an event drop in `fill_values`.
+                self.slots[slot] = match out {
+                    Captured::Value(value) => Some(value),
+                    Captured::Absent | Captured::Mismatched => None,
+                };
             }
         }
     }
@@ -248,12 +253,21 @@ fn single_observation(distribution: impl IntoIterator<Item = Observation>) -> Op
     if iter.next().is_some() { None } else { first }
 }
 
+/// Outcome of one capture.
+enum Captured {
+    /// No data callback fired; an absent optional writes nothing.
+    Absent,
+    Value(FieldValue),
+    /// A callback fired but did not match the planned shape (warned,
+    /// rate-limited, at the capture site).
+    Mismatched,
+}
+
 /// [`ValueWriter`] that captures one value as a [`FieldValue`] according to
-/// its planned [`ValueKind`]. Shape/value mismatches leave the slot empty;
-/// the caller decides whether that is legal (optional field) or drops the
-/// event.
+/// its planned [`ValueKind`]. The caller decides whether a missing value is
+/// legal (optional field) or drops the event.
 struct ValueCapture<'a, 'enc> {
-    out: &'a mut Option<FieldValue>,
+    out: &'a mut Captured,
     kind: ValueKind,
     entry_name: &'a str,
     enc: &'a mut ThreadLocalEncoder<'enc>,
@@ -276,7 +290,10 @@ impl ValueWriter for ValueCapture<'_, '_> {
     fn string(self, value: &str) {
         match self.kind {
             ValueKind::Scalar(kind) => self.into_scalar(kind).string(value),
-            ValueKind::List { .. } => shape_mismatch(self.entry_name, self.kind),
+            ValueKind::List { .. } => {
+                shape_mismatch(self.entry_name, self.kind);
+                *self.out = Captured::Mismatched;
+            }
         }
     }
 
@@ -292,13 +309,17 @@ impl ValueWriter for ValueCapture<'_, '_> {
                 self.into_scalar(kind)
                     .metric(distribution, unit, dimensions, flags)
             }
-            ValueKind::List { .. } => shape_mismatch(self.entry_name, self.kind),
+            ValueKind::List { .. } => {
+                shape_mismatch(self.entry_name, self.kind);
+                *self.out = Captured::Mismatched;
+            }
         }
     }
 
     fn values<'v, V: Value + 'v>(self, values: impl IntoIterator<Item = &'v V>) {
         let ValueKind::List { elem } = self.kind else {
             shape_mismatch(self.entry_name, self.kind);
+            *self.out = Captured::Mismatched;
             return;
         };
         let values = values.into_iter();
@@ -307,21 +328,30 @@ impl ValueWriter for ValueCapture<'_, '_> {
         // allocation failure (which catch_unwind cannot contain).
         let mut items = Vec::with_capacity(values.size_hint().0.min(1024));
         for value in values {
-            let mut item = None;
+            let mut item = Captured::Absent;
             value.write(ScalarCapture {
                 out: &mut item,
                 kind: elem,
                 entry_name: self.entry_name,
                 enc: &mut *self.enc,
             });
-            // Absent optional elements write nothing and are omitted, the
-            // same way metrique's own formats leave them out of their
-            // arrays.
-            if let Some(item) = item {
-                items.push(item);
+            match item {
+                Captured::Value(item) => items.push(item),
+                // Absent optional elements write nothing and are omitted,
+                // the same way metrique's own formats leave them out of
+                // their arrays.
+                Captured::Absent => {}
+                // Recording a partial list would misrepresent the data;
+                // poison the whole field instead (boxed entries reaching
+                // dial9 through metrique's dyn bridge stringify numeric
+                // elements and land here; see the module docs' limitations).
+                Captured::Mismatched => {
+                    *self.out = Captured::Mismatched;
+                    return;
+                }
             }
         }
-        *self.out = Some(FieldValue::List(items));
+        *self.out = Captured::Value(FieldValue::List(items));
     }
 
     fn error(self, error: metrique_writer::ValidationError) {
@@ -356,9 +386,9 @@ fn validation_error(entry_name: &str, error: &metrique_writer::ValidationError) 
 
 /// [`ValueWriter`] that captures one scalar observation as a [`FieldValue`]
 /// according to its planned [`ScalarKind`]. Serves scalar payload fields and
-/// each element of a list field. Mismatches leave the slot empty.
+/// each element of a list field.
 struct ScalarCapture<'a, 'enc> {
-    out: &'a mut Option<FieldValue>,
+    out: &'a mut Captured,
     kind: ScalarKind,
     entry_name: &'a str,
     enc: &'a mut ThreadLocalEncoder<'enc>,
@@ -368,10 +398,11 @@ impl ValueWriter for ScalarCapture<'_, '_> {
     fn string(self, value: &str) {
         match self.kind {
             ScalarKind::Str { interned: true } => {
-                *self.out = Some(FieldValue::PooledString(self.enc.intern_string(value)));
+                *self.out =
+                    Captured::Value(FieldValue::PooledString(self.enc.intern_string(value)));
             }
             ScalarKind::Str { interned: false } => {
-                *self.out = Some(FieldValue::String(value.to_owned()));
+                *self.out = Captured::Value(FieldValue::String(value.to_owned()));
             }
             _ => {
                 rate_limited!(Duration::from_secs(60), {
@@ -381,6 +412,7 @@ impl ValueWriter for ScalarCapture<'_, '_> {
                         "metrique value wrote a string for a non-string shape; value lost"
                     );
                 });
+                *self.out = Captured::Mismatched;
             }
         }
     }
@@ -395,7 +427,7 @@ impl ValueWriter for ScalarCapture<'_, '_> {
         // Planned kinds are all single-observation scalars (distribution
         // shapes are Opaque and never planned), so a multi-observation
         // callback falls through to the mismatch warn below.
-        *self.out = match (single_observation(distribution), self.kind) {
+        let captured = match (single_observation(distribution), self.kind) {
             (None, _) => None,
             (Some(Observation::Unsigned(v)), ScalarKind::Bool) => Some(FieldValue::Bool(v != 0)),
             (Some(Observation::Unsigned(v)), ScalarKind::Uint) => Some(FieldValue::Varint(v)),
@@ -419,18 +451,22 @@ impl ValueWriter for ScalarCapture<'_, '_> {
             }
             _ => None,
         };
-        if self.out.is_none() {
-            // A metric callback fired but could not be mapped to the planned
-            // shape; unlike an absent optional (which fires no callback at
-            // all), this is data loss worth reporting.
-            rate_limited!(Duration::from_secs(60), {
-                tracing::warn!(
-                    entry = %self.entry_name,
-                    kind = ?self.kind,
-                    "metrique observation did not match its declared shape; value lost"
-                );
-            });
-        }
+        *self.out = match captured {
+            Some(value) => Captured::Value(value),
+            None => {
+                // A metric callback fired but could not be mapped to the
+                // planned shape; unlike an absent optional (which fires no
+                // callback at all), this is data loss worth reporting.
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        entry = %self.entry_name,
+                        kind = ?self.kind,
+                        "metrique observation did not match its declared shape; value lost"
+                    );
+                });
+                Captured::Mismatched
+            }
+        };
     }
 
     fn error(self, error: metrique_writer::ValidationError) {

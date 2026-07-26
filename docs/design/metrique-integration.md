@@ -80,7 +80,7 @@ Per entry:
 | --- | --- |
 | Inert handle / disabled recording | fast-path return; no work |
 | Value callback count differs from the descriptor (metrique descriptor/write contract violation) | event dropped, rate-limited warn |
-| Required field produced no value (shape/value mismatch) | event dropped, rate-limited warn naming the field |
+| Required field produced no value or mismatched data (including numeric lists through metrique's boxed dyn bridge, which stringifies elements) | event dropped, rate-limited warn naming the field |
 | Panic inside `Value::write` | caught; event dropped, rate-limited warn; no event bytes are written until the walk completes, so at most orphaned string-pool entries remain (harmless) |
 | Encoder rejects the assembled event (validation failure) | event dropped; dial9-core logs the reason |
 
@@ -97,6 +97,7 @@ Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numb
 - **Streaming event encoder** (transactional begin/commit/abort on the thread-local buffer), removing the buffered `FieldValue` stage here and the per-span allocations in the tracing layer.
 - **Convenience wiring**: `attach_to_stream_with_dial9` / `metrique_sink(...)` builder, once we accept `metrique-service-metrics` in the public surface (later scope, see "User-facing API").
 - **`Flex` support**, blocked on metrique giving `Flex` entries a self-describing descriptor shape (today `Flex::descriptors()` is `Unavailable`, which makes any entry containing one unavailable).
+- **Typed lists through boxed entries**, blocked on metrique's dyn bridge forwarding list elements without stringifying them (`ValueWriterFromDyn::values`); until then, boxed entries with numeric list fields are dropped.
 - **Hand-written `Entry` impls opting into descriptors** once metrique ships `DescribeEntry`.
 - **Precomputed descriptor-sequence ids** (upstream), replacing the per-entry `descriptors()` walk and id hashing with a single `u64` read; identification is most of the gap between this sink and plain EMF formatting. Proposed in [awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348).
 - **Typed source extraction for context**, replacing flag-based `Dial9Context` discovery. This is also what would keep context fields out of the other formats: today `worker_id`/`task_id`/`monotonic_ns_start`/`monotonic_ns_end` travel as ordinary fields and appear in EMF/JSON output, and metrique has no per-format field exclusion to suppress them.

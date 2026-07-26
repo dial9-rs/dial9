@@ -1169,43 +1169,60 @@ fn absent_optional_list_elements_are_omitted() {
 fn boxed_entries_round_trip() {
     // The global-sink path (`ServiceMetrics::sink()`, as in the examples)
     // boxes entries; metrique's dyn bridge stringifies list elements
-    // (`ValueWriterFromDyn::values` in metrique-writer-core), so numeric
-    // list elements arrive as strings and must be decoded from that
-    // transport representation.
+    // (`ValueWriterFromDyn::values` in metrique-writer-core), which loses
+    // the element type. String lists survive; numeric lists cannot be
+    // captured and drop the event rather than record a wrong (empty or
+    // partial) list. See the module docs' limitations.
     #[metrics(default_flags(Emit))]
-    struct Boxed {
+    struct BoxedStrings {
         #[metrics(flatten)]
         dial9: Dial9Context,
-        counts: Vec<u64>,
-        loads: Vec<f64>,
         #[metrics(flags(Interned))]
         labels: Vec<String>,
-        sparse: Vec<Option<u64>>,
         count: u64,
     }
 
+    #[metrics(default_flags(Emit))]
+    struct BoxedNumbers {
+        counts: Vec<u64>,
+    }
+
     let events = run_sink_test(|stream| {
-        let entry = metrique::RootEntry::new(metrique::CloseValue::close(Boxed {
+        let strings = metrique::RootEntry::new(metrique::CloseValue::close(BoxedStrings {
             dial9: Dial9Context::capture(),
-            counts: vec![1, 2, 3],
-            loads: vec![0.5, 1.5],
             labels: vec!["a".to_owned(), "b".to_owned()],
-            sparse: vec![Some(7), None, Some(9)],
             count: 4,
         }));
-        stream.next(&metrique_writer::Entry::boxed(entry)).unwrap();
+        stream
+            .next(&metrique_writer::Entry::boxed(strings))
+            .unwrap();
+
+        let numbers = metrique::RootEntry::new(metrique::CloseValue::close(BoxedNumbers {
+            counts: vec![1, 2, 3],
+        }));
+        stream
+            .next(&metrique_writer::Entry::boxed(numbers))
+            .unwrap();
     });
 
-    assert_eq!(events.len(), 1, "boxed entry must record: {events:#?}");
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
+    assert!(
+        !names.contains(&"metrique:BoxedNumbers"),
+        "boxed numeric lists must drop, not record wrong data: {names:?}"
+    );
+
+    assert_eq!(
+        names,
+        ["metrique:BoxedStrings"],
+        "boxed string entry must record"
+    );
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "4");
     assert_eq!(ev.fields["labels"], "[a,b]");
+    assert!(
+        ev.pooled_fields.contains(&"labels".to_owned()),
+        "interning must survive the box: {ev:#?}"
+    );
     let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
     assert!(end > 0, "context must route through the box: {ev:#?}");
-    // INVERTED (bug reproduction): numeric list elements are stringified by
-    // the boxed bridge and currently rejected by the element capture,
-    // leaving empty lists. The fix should flip these to the real values.
-    assert_eq!(ev.fields["counts"], "[]");
-    assert_eq!(ev.fields["loads"], "[]");
-    assert_eq!(ev.fields["sparse"], "[]");
 }
