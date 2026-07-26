@@ -691,3 +691,52 @@ fn prefixed_context_flatten_avoids_collisions() {
     // is skipped; the header slot carries the real worker id.
     assert_ne!(ev.fields["worker_id"], "7");
 }
+
+#[test]
+fn mid_entry_payload_flatten_routes_correctly() {
+    // The upstream write-order defect in its general form: a payload-bearing
+    // child flattened mid-entry emits its values at the declaration position,
+    // while its descriptor segment comes after the parent's. Values must land
+    // in the right slots on the first (name-resolving) walk and on the second
+    // (cached positional) walk.
+    #[metrics(subfield)]
+    struct Inner {
+        x: u64,
+        y: &'static str,
+    }
+
+    #[metrics(default_flags(Emit))]
+    struct Outer {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        a: u64,
+        #[metrics(flatten, default_flags(Emit))]
+        inner: Inner,
+        b: u64,
+    }
+
+    fn entry(a: u64, x: u64, y: &'static str, b: u64) -> Outer {
+        Outer {
+            dial9: Dial9Context::capture(),
+            a,
+            inner: Inner { x, y },
+            b,
+        }
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(stream, entry(1, 2, "first", 3));
+        feed_entry!(stream, entry(10, 20, "second", 30));
+    });
+
+    assert_eq!(events.len(), 2, "both walks must record: {events:#?}");
+    for (ev, (a, x, y, b)) in events
+        .iter()
+        .zip([(1, 2, "first", 3), (10, 20, "second", 30)])
+    {
+        assert_eq!(ev.fields["a"], a.to_string());
+        assert_eq!(ev.fields["x"], x.to_string());
+        assert_eq!(ev.fields["y"], y);
+        assert_eq!(ev.fields["b"], b.to_string());
+    }
+}
