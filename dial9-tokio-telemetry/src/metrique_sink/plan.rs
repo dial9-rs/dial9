@@ -135,10 +135,8 @@ pub(crate) struct Plan {
 pub(crate) enum Header {
     WorkerId,
     TaskId,
-    /// Request duration (`monotonic_ns_end - monotonic_ns_start` from the
-    /// context), encoded instead of an absolute end timestamp: durations
-    /// varint-encode in a fraction of the bytes, and consumers want the
-    /// duration anyway (`end = event timestamp + duration`).
+    /// Request duration, from the context's start and close-time captures
+    /// (`end = event timestamp + duration`).
     Duration,
     WallClock,
 }
