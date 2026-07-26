@@ -84,7 +84,7 @@ fn main() {
     rt.block_on(async {
         let tasks: Vec<_> = (0..20).map(|i| tokio::spawn(handle_request(i))).collect();
         for t in tasks {
-            let _ = t.await;
+            t.await.expect("request task panicked");
         }
     });
 

@@ -357,11 +357,10 @@ pub(crate) fn build_plan(
     // Distinct descriptor sequences can share a canonical name (the same
     // child struct flattened under different prefixes, an Option-flattened
     // child present vs absent, same-named types in different modules). The
-    // first arrival keeps the bare name; later ones get a suffix hashed
-    // from the schema layout, so a given layout maps to the same name in
-    // every run of the same binary, and identical layouts safely share a
-    // wire schema. Inert and unusable plans never register a schema, so
-    // they do not claim the unsuffixed name.
+    // first arrival keeps the bare name (arrival-order-dependent); later
+    // ones get a suffix hashed from the schema layout, which is stable for
+    // a given layout within a binary. Inert and unusable plans never
+    // register a schema, so they do not claim the unsuffixed name.
     let base = format!("metrique:{entry_name}");
     let schema_name = if inert || unusable {
         base
