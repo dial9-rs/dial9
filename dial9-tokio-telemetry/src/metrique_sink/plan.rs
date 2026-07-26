@@ -109,23 +109,20 @@ pub(crate) enum ScalarKind {
 pub(crate) struct Plan {
     /// Wire schema: implicit timestamp, the four header fields, then one
     /// field per supported `Emit`-tagged descriptor field. Payload slot `i`
-    /// is schema field `HEADER_FIELDS + i`, which also carries the slot's
-    /// wire type and optionality.
+    /// is schema field `HEADER_FIELDS + i`.
     pub(crate) schema: Schema,
     /// Action per `value` callback, in descriptor order (= write order).
     pub(crate) actions: Vec<FieldAction>,
+    /// Whether each payload slot may be absent on the wire. Derived from
+    /// the schema's field types at plan build (the schema stays the single
+    /// source of truth); cached so the per-entry hot loop does not chase
+    /// `FieldDef`s.
+    pub(crate) payload_optional: Box<[bool]>,
     /// No `Emit` fields and no context fields: entries of this type are
     /// skipped without walking `Entry::write`.
     pub(crate) inert: bool,
     /// Entry canonical name, for diagnostics.
     pub(crate) entry_name: String,
-}
-
-impl Plan {
-    /// Number of payload capture slots.
-    pub(crate) fn payload_slots(&self) -> usize {
-        self.schema.fields().len() - HEADER_FIELDS
-    }
 }
 
 /// The event-header fields every metrique schema starts with, preceding the
@@ -282,6 +279,10 @@ pub(crate) fn build_plan(
     let inert = !has_emit && !has_context;
 
     let schema_name = schema_name(&entry_name, inert, &fields, &annotations, used_names);
+    let payload_optional = fields[HEADER_FIELDS..]
+        .iter()
+        .map(|f| f.field_type().is_optional())
+        .collect();
     let schema = Schema::from_entry(SchemaEntry::with_annotations(
         schema_name,
         /* has_timestamp */ true,
@@ -292,6 +293,7 @@ pub(crate) fn build_plan(
     Plan {
         schema,
         actions,
+        payload_optional,
         inert,
         entry_name,
     }

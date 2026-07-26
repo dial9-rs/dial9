@@ -35,10 +35,16 @@ struct Stats {
 #[derive(Debug)]
 pub struct Dial9Stream {
     handle: Dial9Handle,
-    /// Encode plans keyed on each entry type's descriptor-id sequence.
+    /// Encode plans, appended on first sight of a descriptor-id sequence.
     /// Bounded by the number of distinct entry types the process
     /// instantiates.
-    plans: HashMap<Vec<DescriptorId>, Plan>,
+    plans: Vec<Plan>,
+    /// Index into `plans` per descriptor-id sequence.
+    plan_index: HashMap<Vec<DescriptorId>, usize>,
+    /// The previous entry's key and plan index. Streams are usually
+    /// monomorphic, so a key compare replaces the map probe.
+    last_key: Vec<DescriptorId>,
+    last_plan: Option<usize>,
     /// Schema-name disambiguation across plans (see `build_plan`).
     used_names: HashSet<String>,
     // Scratch buffers reused across entries (single-threaded: `next` takes
@@ -59,7 +65,10 @@ impl Dial9Stream {
     pub fn new(handle: &Dial9Handle) -> Self {
         Self {
             handle: handle.clone(),
-            plans: HashMap::new(),
+            plans: Vec::new(),
+            plan_index: HashMap::new(),
+            last_key: Vec::new(),
+            last_plan: None,
             used_names: HashSet::new(),
             key_scratch: Vec::new(),
             slots_scratch: Vec::new(),
@@ -119,13 +128,29 @@ impl EntryIoStream for Dial9Stream {
 
         self.key_scratch.clear();
         self.key_scratch.extend(descriptors.iter().map(|d| d.id()));
-        // `Vec<DescriptorId>: Borrow<[DescriptorId]>` lets the lookup reuse
-        // the scratch key; only a first-seen type allocates an owned key.
-        if !self.plans.contains_key(self.key_scratch.as_slice()) {
-            let plan = build_plan(&descriptors, &mut self.used_names);
-            self.plans.insert(self.key_scratch.clone(), plan);
-        }
-        let plan = &self.plans[self.key_scratch.as_slice()];
+        let idx = match self.last_plan {
+            Some(idx) if self.key_scratch == self.last_key => idx,
+            _ => {
+                // `Vec<DescriptorId>: Borrow<[DescriptorId]>` lets the probe
+                // reuse the scratch key; only a first-seen type allocates an
+                // owned key.
+                let idx = match self.plan_index.get(self.key_scratch.as_slice()) {
+                    Some(&idx) => idx,
+                    None => {
+                        let plan = build_plan(&descriptors, &mut self.used_names);
+                        self.plans.push(plan);
+                        self.plan_index
+                            .insert(self.key_scratch.clone(), self.plans.len() - 1);
+                        self.plans.len() - 1
+                    }
+                };
+                self.last_key.clear();
+                self.last_key.extend_from_slice(&self.key_scratch);
+                self.last_plan = Some(idx);
+                idx
+            }
+        };
+        let plan = &self.plans[idx];
 
         if plan.inert {
             self.stats.entries_skipped_inert += 1;

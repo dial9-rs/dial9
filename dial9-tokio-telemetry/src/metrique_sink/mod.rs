@@ -53,8 +53,8 @@
 //! # Overhead
 //!
 //! Measured by `benches/metrique_sink_bench.rs`: `Dial9Context::capture()`
-//! costs ~25 ns on the request path; encoding an entry (6 payload fields,
-//! one interned string) costs ~650 ns on the flush thread; a disabled
+//! costs ~26 ns on the request path; encoding an entry (6 payload fields,
+//! one interned string) costs ~700 ns on the flush thread; a disabled
 //! handle costs ~2 ns per entry.
 //!
 //! # What lands in the trace

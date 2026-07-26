@@ -66,7 +66,7 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
         slots: &'p mut Vec<Option<FieldValue>>,
     ) -> Self {
         slots.clear();
-        slots.resize_with(plan.payload_slots(), || None);
+        slots.resize_with(plan.payload_optional.len(), || None);
         Self {
             plan,
             enc,
@@ -111,17 +111,22 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
             });
         }
 
-        // Payload slot i is schema field HEADER_FIELDS + i; the schema field
-        // also carries the slot's optionality.
+        // Payload slot i is schema field HEADER_FIELDS + i. Optionality
+        // comes from the plan's cache; the schema is consulted only on the
+        // cold path for the field name.
         let plan: &'p Plan = self.plan;
-        let payload_fields = &plan.schema.fields()[HEADER_FIELDS..];
-        for (slot, field) in self.slots.iter_mut().zip(payload_fields) {
+        for (i, (slot, optional)) in self
+            .slots
+            .iter_mut()
+            .zip(&plan.payload_optional)
+            .enumerate()
+        {
             match slot.take() {
                 Some(value) => out.push(value),
-                None if field.field_type().is_optional() => out.push(FieldValue::None),
+                None if *optional => out.push(FieldValue::None),
                 None => {
                     return Err(WalkError::MissingRequired {
-                        field: field.name(),
+                        field: plan.schema.fields()[HEADER_FIELDS + i].name(),
                     });
                 }
             }
