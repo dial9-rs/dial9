@@ -386,7 +386,10 @@ describe("clock-sync", () => {
 
 describe("metrique events", () => {
   // Assertions target the demo app's RequestMetrics specifically, so adding
-  // other metrique entry types to the demo does not break them.
+  // other metrique entry types to the demo does not break them. (If this
+  // ever fails with zero events despite the demo emitting them, check for a
+  // "metrique:RequestMetrics#N" schema-name suffix from a canonical-name
+  // collision.)
   function requestMetrics(): CustomEvent[] {
     return trace.customEvents.filter((e) => e.name === "metrique:RequestMetrics");
   }

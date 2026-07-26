@@ -121,7 +121,7 @@ impl EntryIoStream for Dial9Stream {
             return Ok(());
         }
         if plan.unusable {
-            // Duplicate field names; reported once at plan build.
+            // Conflicting duplicate field names; reported once at plan build.
             self.stats.entries_dropped += 1;
             return Ok(());
         }

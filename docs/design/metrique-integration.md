@@ -2,7 +2,7 @@
 
 > **Status: implemented.** The sink lives in `dial9-tokio-telemetry/src/metrique_sink/` behind the `metrique-sink` feature and is re-exported as `dial9::metrique_sink`. This document records the design and the deltas discovered during implementation; for API details, see the module rustdoc (`dial9_tokio_telemetry::metrique_sink`), which is kept authoritative.
 
-Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EMF/JSON metrique pipeline; every metrique entry that flows through the configured sink is also recorded into the dial9 trace. A single trace file carries both tokio runtime telemetry and per-request application metrics.
+Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EMF/JSON metrique pipeline; every metrique entry that flows through the configured sink is also recorded into the dial9 trace, so application metrics and runtime telemetry share one file.
 
 The sink reads metrique's entry descriptor for each entry to learn its structural shape (fields, flags, units), identifies caller-thread context via a sink-internal field flag on flattened context fields, and encodes the user-selected subset of fields into the dial9 trace. Nothing about the integration requires a dial9-specific metrique macro or dial9-specific newtype wrappers on fields.
 
@@ -11,7 +11,7 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 ## Glossary
 
 - **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `tee(emf, Dial9Stream::new(&handle))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
-- **`Dial9Context`**: metrique subfield users flatten into their entries to capture worker, task, and start/end timestamps (see its rustdoc).
+- **`Dial9Context`**: metrique subfield users flatten into their entries to capture per-request runtime context (see its rustdoc).
 - **`Emit`** / **`Interned`**: the user-facing field flags for payload opt-in and string pooling (see their rustdoc).
 - **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors. Would be replaced by a typed source-extraction mechanism in metrique.
 - **Encode plan**: the cached per-entry-type routing table (`metrique_sink/plan.rs`). Built once per distinct descriptor-id sequence: wire schema with unit annotations, and an action (header slot / payload slot / skip) per field.
@@ -31,7 +31,7 @@ Caller thread: `Dial9Context::capture()` reads the worker-id TLS, `tokio::task::
 
 Flush thread (whatever thread drives the metrique pipeline, e.g. `BackgroundQueue`'s): `Dial9Stream::next` per entry:
 
-1. Disabled handle: return immediately; entries still reach the other side of the tee.
+1. Disabled handle: return immediately (the tee still delivers entries to the other formats).
 2. `entry.descriptors()`: `Unavailable` (hand-written entries) is skipped with a rate-limited warning.
 3. Plan lookup keyed on the descriptor-id sequence; first use walks the descriptor segments and builds the plan (schema registration, unit annotations, diagnostics).
 4. Walk `entry.write` with a capturing `EntryWriter` that routes each value callback per the plan, then assemble and encode the event.
@@ -44,7 +44,7 @@ The sink instead routes the first entry of each type by field name (post-rename 
 
 Two consequences:
 
-- An entry that declares the same post-rename field name twice cannot be routed and is dropped (reported once per type).
+- An entry that emits the same post-rename field name from two fields with different routing cannot be disambiguated and is dropped (reported once per type; two skipped fields sharing a name are harmless).
 - A parent's `rename_all` restyles flattened child names (`worker_id` → `WorkerId`), so `Dial9Context` field discovery matches canonicalized names (separators stripped, lowercased); see `metrique_sink/context.rs`.
 
 ### Event layout
@@ -55,7 +55,7 @@ Wire types come from the descriptor's `FieldShape`: unsigned widths map to `Vari
 
 ### Units
 
-The descriptor carries `Option<Unit>` per field, resolved by metrique from the `Value` trait or an explicit `#[metrics(unit = ..)]`. Dial9 emits units as schema-level annotations with key `"unit"`, normalized to the shared vocabulary the `TraceEvent` derive validates and the viewer formats (`us`/`ms`/`s`/`bytes`/`count`); units outside it keep their CloudWatch name and render unformatted. The original design proposed a `"metrique.unit"` key, dropped because the viewer's unit handling is keyed on `"unit"`.
+The descriptor carries `Option<Unit>` per field, resolved by metrique from the `Value` trait or an explicit `#[metrics(unit = ..)]`. Dial9 emits units as schema-level annotations with key `"unit"`, normalized to the vocabulary the viewer formats (`us`/`ms`/`s`/`bytes`, plus plain `count`); units outside it keep their CloudWatch name and render unformatted. The original design proposed a `"metrique.unit"` key, dropped because the viewer's unit handling is keyed on `"unit"`.
 
 ### Observability
 
@@ -69,13 +69,13 @@ First-use, per descriptor-id sequence (cached, so at most once per type):
 
 | Condition | Behaviour |
 | --- | --- |
-| `descriptors()` unavailable (hand-written entry) | rate-limited warn; entry skipped; other formats unaffected |
+| `descriptors()` unavailable (hand-written entry) | rate-limited warn; skipped on the dial9 side only |
 | `Emit` fields but no `Context`-flagged fields | one `tracing::warn!` per type; entries encode with `WorkerId::UNKNOWN` and flush-thread timestamp fallback |
-| Payload field name collides with a header field (`worker_id`, ...) | one `tracing::error!` per type; field skipped |
-| Two `Dial9Context`s flattened into one entry | one `tracing::warn!` per type; the first routes, the second is skipped |
+| Payload field name collides with a header field (`worker_id`, ...) | one `tracing::error!` per type; field skipped (entries dropped if the emitted names are identical, since name routing cannot separate them) |
+| Two `Dial9Context`s flattened into one entry | one `tracing::warn!` per type; the first routes (entries dropped if the flatten sites produce identical field names) |
 | `Interned` on a non-string shape | one `tracing::error!` per type; field skipped on the wire; rest of entry encodes |
 | `Opaque` shape (histograms, custom `Value` without `SHAPE`) tagged `Emit` | one `tracing::error!` per type; field skipped; rest encodes |
-| Duplicate post-rename field name | one `tracing::error!` per type; entries of this type dropped |
+| Duplicate post-rename field name with conflicting routing | one `tracing::error!` per type; entries of this type dropped |
 
 Per entry:
 
@@ -84,22 +84,22 @@ Per entry:
 | Inert handle / disabled recording | fast-path return; no work |
 | Dynamic fields (`Flex`) or any name/count mismatch vs the descriptor | event dropped, rate-limited warn |
 | Required field produced no value (shape/value mismatch) | event dropped, rate-limited warn naming the field |
-| Panic inside `Value::write` | caught; event dropped, rate-limited warn; capture happens before any event bytes are written, so encoder state stays valid |
+| Panic inside `Value::write` | caught; event dropped, rate-limited warn; encoder state stays valid because nothing is encoded until the walk completes |
 
 The original design called for `debug_assert!` on the no-context and Opaque cases. The implementation logs instead: a `#[cfg]`-gated context field is a legitimate configuration, and uniform debug/release behavior keeps the failure paths testable.
 
 ## Deltas from the original design
 
-Discovered during implementation. Items 1 and 2 are upstream metrique defects with issue drafts ready to file (`.kiro/issue-draft-metrique-write-order.md`, `.kiro/issue-draft-metrique-forceflag-values.md`); item 3 is an upstream feature gap; item 4 is a dial9 encoding choice.
+Discovered during implementation. Items 1 and 2 are upstream metrique defects; drafts for both live in `.kiro/issue-draft-metrique-*.md` pending filing. Item 3 is an upstream feature gap, item 4 a dial9 encoding choice.
 
-1. **Write order ≠ descriptor order** for flattened entries (see "Value routing").
+1. **Write order ≠ descriptor order** for flattened entries (see "Value routing"). If upstream interleaves segments in write order, positional consumption becomes sound and the name routing plus the conflicting-duplicate drop can be removed; if upstream resolves it as a docs clarification, the current behavior is permanent.
 2. **Lists are carried as comma-joined strings, not typed `DynamicList`s.** `#[metrics(flags(..))]` wraps every flagged field in `ForceFlag`, whose write-path wrapper does not forward `ValueWriter::values()`; list data therefore always reaches the sink through metrique's default comma-joined `string()` fallback. The wire format's typed list support is ready; the sink switches over once metrique forwards `values()`.
 3. **`Flex` is unsupported** (dropped with a diagnostic): shipped metrique models `Flex` as its own descriptor segment whose fields are dynamic, so callbacks cannot be matched against the static descriptor.
 4. **`u8`/`u16`/`u32` shapes map to `Varint`**, not the fixed-width wire types: dial9's dynamic-value carrier (`FieldValue`) has a single unsigned-integer representation.
 
 ## Performance
 
-Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. Per-entry heap traffic is limited to payload string values; routing tables, key lookups, and value buffers are cached or reused across entries.
+Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. Steady state allocates only for payload string values: routing tables, key lookups, and value buffers are cached or reused across entries.
 
 ## Future evolution
 

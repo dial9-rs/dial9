@@ -15,10 +15,10 @@ use super::{Context, Emit, Interned};
 /// derive emits, so viewers surface both through the same path.
 pub(crate) const UNIT_ANNOTATION_KEY: &str = "unit";
 
-/// Map a metrique unit to the shared unit vocabulary the `TraceEvent` derive
-/// validates and the viewer formats (`ns`/`us`/`ms`/`s`/`bytes`/`count`).
-/// Units outside it keep their CloudWatch name; the viewer renders those
-/// values unformatted.
+/// Map a metrique unit to the vocabulary the viewer formats
+/// (`ns`/`us`/`ms`/`s`/`bytes`), plus `count` (rendered plain, kept by
+/// trace-shape extraction). Units outside it keep their CloudWatch name and
+/// render unformatted.
 fn unit_annotation_value(unit: metrique_writer::Unit) -> &'static str {
     use metrique_writer::Unit;
     use metrique_writer::core::unit::{NegativeScale, PositiveScale};
@@ -36,11 +36,9 @@ fn unit_annotation_value(unit: metrique_writer::Unit) -> &'static str {
 /// callback's field name (post-rename, post-prefix, matching
 /// `FieldView::name_parts`).
 ///
-/// Routing is by name rather than position: metrique emits `value` callbacks
-/// in field declaration order (flatten children inline at their declared
-/// position), while `descriptors()` yields the parent's own fields as one
-/// segment followed by the child segments, so positions cannot be aligned
-/// between the two.
+/// Routing is by name rather than position because metrique's write order
+/// differs from its descriptor segment order for flattened entries; see
+/// "Value routing" in `docs/design/metrique-integration.md`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum FieldAction {
     /// Field is neither context nor payload (or its shape is unsupported):
@@ -62,6 +60,21 @@ pub(crate) enum ContextRole {
     MonotonicEnd,
 }
 
+impl ContextRole {
+    pub(crate) const COUNT: usize = 4;
+
+    /// Index for per-role bookkeeping; exhaustive so a new role cannot
+    /// silently exceed [`Self::COUNT`].
+    fn index(self) -> usize {
+        match self {
+            ContextRole::WorkerId => 0,
+            ContextRole::TaskId => 1,
+            ContextRole::MonotonicStart => 2,
+            ContextRole::MonotonicEnd => 3,
+        }
+    }
+}
+
 /// The wire value a payload field resolves to. Derived from the descriptor's
 /// [`FieldShape`] plus the `Interned` flag; drives both the schema
 /// [`FieldType`] and how the runtime `Value` callbacks are interpreted.
@@ -77,12 +90,9 @@ pub(crate) enum ValueKind {
     Float,
     /// `string()` callback → `String` or pooled string.
     ///
-    /// Also used for list-shaped fields: `#[metrics(flags(..))]` wraps
-    /// every flagged value in `ForceFlag`, whose write-path wrapper does not
-    /// forward `ValueWriter::values()`, so list data always arrives through
-    /// the default comma-joined `string()` fallback. Typed `DynamicList`
-    /// encoding (the wire support already exists) is blocked on metrique
-    /// forwarding `values()` through `ForceFlag`.
+    /// Also used for list-shaped fields, which arrive comma-joined through
+    /// the default `string()` fallback (design doc, delta 2: `ForceFlag`
+    /// drops the structured `values()` callback).
     Str { interned: bool },
 }
 
@@ -108,8 +118,8 @@ pub(crate) struct Plan {
     /// No `Emit` fields and no context fields: entries of this type are
     /// skipped without walking `Entry::write`.
     pub(crate) inert: bool,
-    /// Duplicate post-rename field name; entries dropped (reported once at
-    /// plan build).
+    /// Duplicate post-rename field name with conflicting routing; entries
+    /// dropped (reported once at plan build).
     pub(crate) unusable: bool,
     /// Entry canonical name, for diagnostics.
     pub(crate) entry_name: String,
@@ -155,13 +165,24 @@ pub(crate) fn build_plan(
     let mut payload_optional = Vec::new();
     let mut has_context = false;
     let mut has_emit = false;
-    let mut roles_seen = [false; 4];
+    let mut roles_seen = [false; ContextRole::COUNT];
 
-    let mut insert = |name: String, action: FieldAction, duplicate: &mut Option<String>| {
+    // Name-keyed routing needs unique names: when two fields share a
+    // post-rename name, every callback with that name hits the same action,
+    // so unless both are Skip the values would be mis-attributed. Skip+Skip
+    // collisions are harmless.
+    fn insert(
+        actions: &mut HashMap<String, FieldAction>,
+        name: String,
+        action: FieldAction,
+        duplicate: &mut Option<String>,
+    ) {
         use std::collections::hash_map::Entry;
         match actions.entry(name) {
             Entry::Occupied(entry) => {
-                if duplicate.is_none() {
+                let harmless =
+                    matches!(entry.get(), FieldAction::Skip) && matches!(action, FieldAction::Skip);
+                if !harmless && duplicate.is_none() {
                     *duplicate = Some(entry.key().clone());
                 }
             }
@@ -169,7 +190,7 @@ pub(crate) fn build_plan(
                 entry.insert(action);
             }
         }
-    };
+    }
 
     for seg in descs.iter() {
         for field in seg.fields() {
@@ -186,20 +207,34 @@ pub(crate) fn build_plan(
                 };
                 match role {
                     Some(role) => {
-                        let seen = &mut roles_seen[role as usize];
+                        let seen = &mut roles_seen[role.index()];
                         if *seen {
-                            // Two Dial9Contexts flattened into one entry;
-                            // only the first routes to the header.
-                            tracing::warn!(
-                                entry = %entry_name,
-                                field = %full_name,
-                                "duplicate dial9 context field; ignoring"
+                            // A second Dial9Context in the same entry. With
+                            // distinct (prefixed) names it is skipped; with
+                            // identical names the insert below records a
+                            // routing conflict and the type is dropped.
+                            if !actions.contains_key(full_name.as_str()) {
+                                tracing::warn!(
+                                    entry = %entry_name,
+                                    field = %full_name,
+                                    "duplicate dial9 context field; ignoring"
+                                );
+                            }
+                            insert(
+                                &mut actions,
+                                full_name,
+                                FieldAction::Skip,
+                                &mut duplicate_name,
                             );
-                            insert(full_name, FieldAction::Skip, &mut duplicate_name);
                         } else {
                             *seen = true;
                             has_context = true;
-                            insert(full_name, FieldAction::Context(role), &mut duplicate_name);
+                            insert(
+                                &mut actions,
+                                full_name,
+                                FieldAction::Context(role),
+                                &mut duplicate_name,
+                            );
                         }
                     }
                     None => {
@@ -210,14 +245,24 @@ pub(crate) fn build_plan(
                             field = %field.base_name(),
                             "unrecognized dial9 context field; skipping"
                         );
-                        insert(full_name, FieldAction::Skip, &mut duplicate_name);
+                        insert(
+                            &mut actions,
+                            full_name,
+                            FieldAction::Skip,
+                            &mut duplicate_name,
+                        );
                     }
                 }
                 continue;
             }
 
             if !field.flags().any(|f| f.is::<Emit>()) {
-                insert(full_name, FieldAction::Skip, &mut duplicate_name);
+                insert(
+                    &mut actions,
+                    full_name,
+                    FieldAction::Skip,
+                    &mut duplicate_name,
+                );
                 continue;
             }
             has_emit = true;
@@ -228,16 +273,25 @@ pub(crate) fn build_plan(
                     field = %full_name,
                     "metrique field name collides with a dial9 header field; skipping field"
                 );
-                insert(full_name, FieldAction::Skip, &mut duplicate_name);
+                insert(
+                    &mut actions,
+                    full_name,
+                    FieldAction::Skip,
+                    &mut duplicate_name,
+                );
                 continue;
             }
 
             let interned = field.flags().any(|f| f.is::<Interned>());
             match resolve_shape(&field.shape(), interned) {
                 Ok((field_type, kind)) => {
-                    if let Some(unit) = field.unit() {
+                    // `to_option` filters `Unit::None`, which some custom
+                    // `Value` impls surface as `Some(Unit::None)`.
+                    if let Some(unit) = field.unit().and_then(|u| u.to_option())
+                        && let Ok(index) = u16::try_from(fields.len())
+                    {
                         annotations.push(FieldAnnotation::new(
-                            fields.len() as u16,
+                            index,
                             UNIT_ANNOTATION_KEY,
                             unit_annotation_value(unit),
                         ));
@@ -246,6 +300,7 @@ pub(crate) fn build_plan(
                     payload_optional.push(field_type.is_optional());
                     fields.push(FieldDef::new(full_name.clone(), field_type));
                     insert(
+                        &mut actions,
                         full_name,
                         FieldAction::Payload { slot, kind },
                         &mut duplicate_name,
@@ -260,7 +315,12 @@ pub(crate) fn build_plan(
                         reason,
                         "metrique field tagged for dial9 cannot be encoded; skipping field"
                     );
-                    insert(full_name, FieldAction::Skip, &mut duplicate_name);
+                    insert(
+                        &mut actions,
+                        full_name,
+                        FieldAction::Skip,
+                        &mut duplicate_name,
+                    );
                 }
             }
         }
@@ -270,8 +330,8 @@ pub(crate) fn build_plan(
         tracing::error!(
             entry = %entry_name,
             field = %name,
-            "metrique entry declares the same field name twice; dial9 routes values by \
-             name and cannot disambiguate, so entries of this type are dropped"
+            "metrique entry declares the same field name twice with conflicting dial9 \
+             routing; entries of this type are dropped"
         );
         true
     } else {

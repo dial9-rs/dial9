@@ -470,7 +470,7 @@ Careful filtering of the data you send to dial9 strongly recommended. dial9 does
 
 ### Metrique metrics (opt-in)
 
-If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Events carry the capturing worker, task, and start/end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
+If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Each event is pinned to the worker and task that served the request, with start and end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
 
 **Enable the `metrique-sink` feature:**
 ```toml
@@ -486,11 +486,9 @@ use metrique::writer::stream::tee;
 
 #[metrics(rename_all = "PascalCase", default_flags(Emit))]
 struct RequestMetrics {
-    // Worker, task, and start/end timestamps for the trace.
     #[metrics(flatten)]
     dial9: Dial9Context,
 
-    // Low-cardinality strings can go through dial9's string pool.
     #[metrics(flags(Interned))]
     operation: &'static str,
 
@@ -511,7 +509,7 @@ let mut m = RequestMetrics {
 };
 ```
 
-Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Entries without descriptors (hand-written `Entry` impls), `Flex` dynamic-key fields, and histogram fields are skipped with a diagnostic. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Hand-written `Entry` impls (no descriptor) and entries containing `Flex` dynamic-key fields are dropped from the dial9 side with a diagnostic; histogram fields are skipped individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

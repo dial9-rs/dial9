@@ -376,9 +376,9 @@ fn main() -> std::io::Result<()> {
             .unwrap();
     });
 
-    // Drop the runtime first so worker threads flush their thread-local
-    // telemetry buffers, then drain the background worker.
-    // Drain the metrique queue into dial9 before sealing the trace.
+    // Shutdown order: drain the metrique queue into dial9, then drop the
+    // runtime so workers flush their thread-local buffers, then seal the
+    // trace.
     drop(metrics_join);
     drop(runtime);
     recorder.graceful_shutdown(Duration::from_secs(5));

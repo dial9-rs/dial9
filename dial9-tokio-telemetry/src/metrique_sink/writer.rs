@@ -120,8 +120,7 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
         }
 
         out.clear();
-        // Event timestamp: request start, or the flush-thread clock when the
-        // entry carried no Dial9Context.
+        // Timestamp: request start, or the flush-thread clock as fallback.
         out.push(FieldValue::Varint(
             self.ctx.monotonic_start.unwrap_or_else(clock_monotonic_ns),
         ));
@@ -205,6 +204,18 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
             FieldAction::Skip => {}
             FieldAction::Context(role) => {
                 let captured = capture_u64(value);
+                // TaskId is legitimately absent off-task; the others always
+                // write a u64, so a missing capture means a broken context
+                // field and a silently degraded event header.
+                if captured.is_none() && !matches!(role, ContextRole::TaskId) {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(
+                            entry = %self.plan.entry_name,
+                            ?role,
+                            "dial9 context field produced no value; event header degraded"
+                        );
+                    });
+                }
                 match role {
                     ContextRole::WorkerId => self.ctx.worker_id = captured,
                     ContextRole::TaskId => self.ctx.task_id = captured,
@@ -264,10 +275,9 @@ fn capture_u64(value: &(impl Value + ?Sized)) -> Option<u64> {
 }
 
 /// [`ValueWriter`] that captures one value as a [`FieldValue`] according to
-/// its planned [`ValueKind`]. Used both for top-level payload fields and
-/// (recursively) for list elements. Shape/value mismatches leave the slot
-/// empty; the caller decides whether that is legal (optional field, omitted
-/// list element) or drops the event.
+/// its planned [`ValueKind`]. Shape/value mismatches leave the slot empty;
+/// the caller decides whether that is legal (optional field) or drops the
+/// event.
 struct ValueCapture<'a, 'enc> {
     out: &'a mut Option<FieldValue>,
     kind: ValueKind,

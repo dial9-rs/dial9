@@ -516,3 +516,101 @@ fn payload_field_colliding_with_header_name_is_skipped() {
     // than producing a duplicate schema name.
     assert_ne!(ev.fields["worker_id"], "42");
 }
+
+#[test]
+fn identical_context_and_payload_names_drop_the_entry_type() {
+    // Unprefixed context puts a Context action at literal "worker_id"; the
+    // snake_case Emit field emits the identical name. Name routing cannot
+    // separate them, so the entry type must be dropped, not mis-recorded.
+    #[metrics(default_flags(Emit))]
+    struct SameNames {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        worker_id: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            SameNames {
+                dial9: Dial9Context::capture(),
+                worker_id: 42,
+            }
+        );
+        feed_entry!(stream, sample_request(None));
+    });
+
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
+    assert!(
+        !names.contains(&"metrique:SameNames"),
+        "conflicting duplicate names must drop the type: {names:?}"
+    );
+    assert!(names.contains(&"metrique:RequestMetrics"));
+}
+
+#[test]
+fn two_contexts_with_identical_names_drop_the_entry_type() {
+    #[metrics(default_flags(Emit))]
+    struct DoubleContext {
+        #[metrics(flatten)]
+        a: Dial9Context,
+        #[metrics(flatten)]
+        b: Dial9Context,
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            DoubleContext {
+                a: Dial9Context::capture(),
+                b: Dial9Context::capture(),
+                count: 1,
+            }
+        );
+    });
+
+    // Both flatten sites emit the same four field names; the second set is
+    // skipped by role tracking but the identical names make routing
+    // ambiguous, so the type is dropped.
+    assert!(
+        events.is_empty(),
+        "identically-named duplicate contexts must drop the type: {events:#?}"
+    );
+}
+
+#[test]
+fn identically_named_skipped_fields_are_harmless() {
+    // Neither duplicate routes anywhere, so the collision is unambiguous
+    // and the entry must still record.
+    #[metrics]
+    struct SkippedTwins {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(name = "twin")]
+        first: u64,
+        #[metrics(name = "twin")]
+        second: u64,
+        #[metrics(flags(Emit))]
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            SkippedTwins {
+                dial9: Dial9Context::capture(),
+                first: 1,
+                second: 2,
+                count: 9,
+            }
+        );
+    });
+
+    assert_eq!(
+        events.len(),
+        1,
+        "Skip+Skip duplicates must not drop: {events:#?}"
+    );
+    assert_eq!(events[0].fields["count"], "9");
+}

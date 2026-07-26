@@ -26,11 +26,10 @@ use std::time::Duration;
 /// dial9 payload.
 #[metrics(rename_all = "PascalCase", default_flags(Emit))]
 struct RequestMetrics {
-    /// Captures worker id, task id, and start/end timestamps for the trace.
     #[metrics(flatten)]
     dial9: Dial9Context,
 
-    /// Low-cardinality string: route it through dial9's string pool.
+    /// Interned: repeated values hit dial9's string pool.
     #[metrics(flags(Interned))]
     operation: &'static str,
 

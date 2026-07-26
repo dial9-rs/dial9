@@ -11,7 +11,7 @@
 //!
 //! Opt fields into the dial9 payload with the [`Emit`] field flag, and
 //! flatten a [`Dial9Context`] into the entry so events carry caller-thread
-//! runtime context (worker, task, start/end timestamps):
+//! runtime context:
 //!
 //! ```ignore
 //! use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
@@ -62,7 +62,7 @@
 //! # Overhead
 //!
 //! Measured by `benches/metrique_sink_bench.rs`: `Dial9Context::capture()`
-//! costs ~25 ns on the request path; encoding an entry (~7 payload fields,
+//! costs ~25 ns on the request path; encoding an entry (6 payload fields,
 //! one interned string) costs ~570 ns on the flush thread; a disabled
 //! handle costs ~2 ns per entry.
 //!
@@ -87,16 +87,16 @@
 //!   against the static descriptor. EMF/JSON output is unaffected.
 //! - Distribution-shaped fields (histograms) and other fields whose closed
 //!   shape is `Opaque` are skipped with a diagnostic when tagged `Emit`.
-//! - `Vec<T>` list fields are carried as comma-joined strings (metrique's
-//!   `ForceFlag` write-path wrapper does not forward the structured
-//!   `ValueWriter::values()` callback, and every flagged field is wrapped in
-//!   `ForceFlag`). The trace format already supports typed lists; the sink
-//!   will switch over once metrique forwards `values()`.
-//! - Fields are routed by their emitted names, so an entry that declares
-//!   the same post-rename field name twice is dropped with a diagnostic.
+//! - `Vec<T>` list fields are carried as comma-joined strings until an
+//!   upstream metrique fix lands (the flag wrapper drops the structured
+//!   list callback; design doc, delta 2).
+//! - Fields are routed by their emitted names. An entry that emits the same
+//!   post-rename name from two fields with different routing (for example a
+//!   payload field named like a `Dial9Context` field, or two unprefixed
+//!   `Dial9Context`s) is dropped with a once-per-type diagnostic and counted
+//!   in the periodic sink counters.
 //!
-//! Roadmap and tracking for the above: `docs/design/metrique-integration.md`,
-//! "Future evolution".
+//! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 
 mod context;
 mod plan;

@@ -63,10 +63,10 @@ aws-sdk-s3 = { version = "1", default-features = false, optional = true, feature
 aws-config = { version = "1", optional = true, default-features = false }
 flate2 = { version = "1" }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
-metrique = { version = "0.1.28", features = ["local-format"] }
 # The metrique -> dial9 sink consumes metrique's entry-descriptor API
 # (`metrique_writer::core::descriptor`), which shipped in metrique-writer
 # 0.1.24 / metrique-writer-core 0.1.16.
+metrique = { version = "0.1.28", optional = true }
 metrique-writer = { version = "0.1.24", optional = true }
 metrique-timesource = "0.1"
 shuttle = { version = "0.9.1", optional = true }
@@ -106,7 +106,7 @@ taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
 ## Metrique -> dial9 sink: records metrique unit-of-work entries into the
 ## dial9 trace alongside the user's existing EMF/JSON pipeline.
-metrique-sink = ["dep:metrique-writer"]
+metrique-sink = ["dep:metrique", "dep:metrique-writer"]
 ## Sampled memory allocation profiling via ring buffers.
 memory-profiling = [
     "dep:dial9-perf-self-profile",
