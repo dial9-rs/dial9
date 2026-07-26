@@ -49,9 +49,6 @@
 //!
 //! All dial9 encoding happens on the thread that drives the metrique
 //! pipeline (the `BackgroundQueue` flush thread for the standard setup).
-//! The caller-thread cost is limited to
-//! [`Dial9Context::capture`](crate::metrique_sink::Dial9Context::capture): a few
-//! thread-local reads and one clock read.
 //!
 //! # Overhead
 //!
