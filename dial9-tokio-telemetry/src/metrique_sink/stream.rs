@@ -1,11 +1,12 @@
 //! The dial9 [`EntryIoStream`]: consumes metrique entries and encodes
 //! dial9-opted ones into the trace.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
+use dial9_trace_format::encoder::FxHashMap;
 use dial9_trace_format::types::FieldValue;
 use metrique_writer::core::descriptor::DescriptorId;
 use metrique_writer::{Entry, EntryIoStream, IoStreamError};
@@ -45,8 +46,10 @@ pub struct Dial9Stream {
     /// Bounded by the number of distinct entry types the process
     /// instantiates.
     plans: Vec<Plan>,
-    /// Index into `plans` per descriptor-id sequence.
-    plan_index: HashMap<Vec<DescriptorId>, usize>,
+    /// Index into `plans` per descriptor-id sequence. Fx-hashed: the keys
+    /// are already hash-like process-internal ids, and this probe is on the
+    /// per-entry path for streams that alternate entry types.
+    plan_index: FxHashMap<Vec<DescriptorId>, usize>,
     /// The previous entry's key and plan index. Streams are usually
     /// monomorphic, so a key compare replaces the map probe.
     last_key: Vec<DescriptorId>,
@@ -74,7 +77,7 @@ impl Dial9Stream {
         Self {
             handle: handle.clone(),
             plans: Vec::new(),
-            plan_index: HashMap::new(),
+            plan_index: FxHashMap::default(),
             last_key: Vec::new(),
             last_plan: None,
             used_names: HashSet::new(),
