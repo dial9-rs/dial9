@@ -61,7 +61,8 @@
 //!
 //! One event per entry, carrying:
 //!
-//! - the entry's canonical name (schema name `metrique:<EntryName>`),
+//! - the entry's canonical name (schema name `metrique:<EntryName>`,
+//!   suffixed `#<layout hash>` when distinct entry types share a name),
 //! - start/end monotonic timestamps, worker id, and task id from
 //!   [`Dial9Context`](crate::metrique_sink::Dial9Context) (worker
 //!   `WorkerId::UNKNOWN` and absent task id when
@@ -69,25 +70,20 @@
 //! - the wall-clock timestamp when the entry declares
 //!   `#[metrics(timestamp)]`,
 //! - every `Emit`-tagged field, with units carried as `unit` schema
-//!   annotations (the same key the `TraceEvent` derive emits).
+//!   annotations (the same key the `TraceEvent` derive emits). List-shaped
+//!   fields (`Vec<T>`, slices) encode as typed lists.
 //!
 //! # Limitations
 //!
-//! - Hand-written `Entry` impls carry no descriptor and are skipped with a
-//!   rate-limited warning; they still reach the other side of the `tee`.
-//! - [`Flex`](metrique::flex::Flex) dynamic-key fields are not supported;
-//!   entries containing them are dropped from the dial9 path (rate-limited
-//!   warning) because their dynamic value callbacks cannot be matched
-//!   against the static descriptor. EMF/JSON output is unaffected.
+//! - Hand-written `Entry` impls and entries containing
+//!   [`Flex`](metrique::flex::Flex) dynamic-key fields carry no descriptors
+//!   and are skipped with a rate-limited warning; they still reach the other
+//!   side of the `tee`, so EMF/JSON output is unaffected.
 //! - Distribution-shaped fields (histograms) and other fields whose closed
 //!   shape is `Opaque` are skipped with a diagnostic when tagged `Emit`.
-//! - `Vec<T>` list fields are carried as comma-joined strings until an
-//!   upstream metrique fix lands (design doc, delta 2).
-//! - Fields are routed by their emitted names. An entry that emits the same
-//!   post-rename name from two fields with different routing (for example a
-//!   payload field named like a `Dial9Context` field, or two unprefixed
-//!   `Dial9Context`s) is dropped with a once-per-type diagnostic and counted
-//!   in the periodic sink counters.
+//! - Two fields that emit the same post-rename name cannot share a schema:
+//!   the first occurrence keeps the name and later ones are skipped with a
+//!   diagnostic. Prefix flatten sites to disambiguate.
 //!
 //! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 
@@ -101,7 +97,11 @@ pub use stream::Dial9Stream;
 
 use metrique_writer::value::{FlagConstructor, MetricFlags, MetricOptions};
 
-/// Runtime payload for [`Emit`]. Formats other than dial9 ignore it.
+// The three flag markers below follow metrique's FlagConstructor pattern:
+// each has a zero-sized MetricOptions payload that only the dial9 sink
+// inspects; other formats carry it through untouched.
+
+/// Runtime payload for [`Emit`].
 #[derive(Debug)]
 struct EmitOptions;
 impl MetricOptions for EmitOptions {}
@@ -121,7 +121,7 @@ impl FlagConstructor for Emit {
     }
 }
 
-/// Runtime payload for [`Interned`]. Formats other than dial9 ignore it.
+/// Runtime payload for [`Interned`].
 #[derive(Debug)]
 struct InternedOptions;
 impl MetricOptions for InternedOptions {}
@@ -131,7 +131,8 @@ impl MetricOptions for InternedOptions {}
 ///
 /// Use for low-cardinality strings that repeat across events (route names,
 /// operation names, status labels): each distinct value is written once per
-/// flush cycle and events carry a compact pool reference. Orthogonal to
+/// flush cycle and events carry a compact pool reference. On list-of-string
+/// fields, each element is interned individually. Orthogonal to
 /// [`Emit`]; a field needs both flags to appear interned in the payload.
 ///
 /// Applying `Interned` to a field whose shape is not string-capable is
@@ -145,7 +146,7 @@ impl FlagConstructor for Interned {
     }
 }
 
-/// Runtime payload for [`Context`]. Formats other than dial9 ignore it.
+/// Runtime payload for [`Context`].
 #[derive(Debug)]
 struct ContextOptions;
 impl MetricOptions for ContextOptions {}

@@ -46,11 +46,9 @@ impl CloseValue for &MonotonicAtClose {
 /// `monotonic_ns_end` (restyled by a parent `rename_all`); use
 /// `#[metrics(flatten, prefix = "...")]` at the flatten site if those names
 /// collide with your own.
-///
-/// This type is neither `Default` nor `Clone`: a defaulted context would
-/// silently look like "valid context captured at monotonic time 0".
-/// Construct it with [`capture`](Dial9Context::capture) at the field
-/// initializer site.
+//
+// Deliberately neither `Default` nor `Clone`: a defaulted context would
+// silently look like "valid context captured at monotonic time 0".
 #[metrics(subfield)]
 #[derive(Debug)]
 pub struct Dial9Context {

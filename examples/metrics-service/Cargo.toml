@@ -27,7 +27,7 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 libc = "0.2"
-metrique = { version = "0.1.28", features = ["local-format"] }
+metrique = { version = "0.1.29", features = ["local-format"] }
 metrique-writer = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]

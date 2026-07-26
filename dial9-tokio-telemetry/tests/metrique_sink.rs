@@ -19,6 +19,10 @@ struct DecodedEvent {
     schema_name: String,
     timestamp_ns: u64,
     fields: HashMap<String, String>,
+    /// Schema field names in wire order. `fields` keys on names, so a
+    /// duplicate schema name would silently overwrite; asserting on this
+    /// list keeps collision tests honest.
+    field_names: Vec<String>,
     /// field name → unit annotation value.
     units: HashMap<String, String>,
     /// Names of fields carried as pooled strings.
@@ -66,11 +70,20 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
                 return;
             }
             let mut fields = HashMap::new();
+            let mut field_names = Vec::new();
             let mut units = HashMap::new();
             let mut pooled_fields = Vec::new();
             for (i, (def, value)) in ev.schema.fields().iter().zip(ev.fields.iter()).enumerate() {
                 fields.insert(def.name().to_owned(), render(value, ev.string_pool));
-                if matches!(value, FieldValueRef::PooledString(_)) {
+                field_names.push(def.name().to_owned());
+                let pooled = match value {
+                    FieldValueRef::PooledString(_) => true,
+                    FieldValueRef::List(items) => items
+                        .iter()
+                        .any(|v| matches!(v, FieldValueRef::PooledString(_))),
+                    _ => false,
+                };
+                if pooled {
                     pooled_fields.push(def.name().to_owned());
                 }
                 for ann in ev.schema.annotations() {
@@ -81,8 +94,9 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
             }
             events.push(DecodedEvent {
                 schema_name: ev.name.to_owned(),
-                timestamp_ns: ev.timestamp_ns.unwrap_or(0),
+                timestamp_ns: ev.timestamp_ns.expect("metrique event missing timestamp"),
                 fields,
+                field_names,
                 units,
                 pooled_fields,
             });
@@ -177,7 +191,7 @@ fn full_entry_round_trips() {
     assert_eq!(ev.fields["Operation"], "GetPet");
     assert_eq!(ev.fields["LatencyUs"], "1500");
     assert_eq!(ev.fields["Retries"], "2");
-    assert_eq!(ev.fields["Tags"], "a,b"); // lists arrive comma-joined
+    assert_eq!(ev.fields["Tags"], "[a,b]"); // typed list encoding
     assert_eq!(ev.fields["Success"], "true");
     assert_eq!(ev.fields["Load"], "0.5");
     // Duration writes fractional milliseconds.
@@ -294,7 +308,7 @@ fn context_only_entry_emits_header_event() {
         !ev.fields.contains_key("count"),
         "unflagged field leaked: {ev:#?}"
     );
-    assert!(ev.fields["monotonic_ns_end"] != "<none>");
+    assert_ne!(ev.fields["monotonic_ns_end"], "<none>");
 }
 
 #[test]
@@ -344,7 +358,7 @@ fn hand_written_entry_is_skipped() {
 }
 
 #[test]
-fn interned_on_numeric_field_is_skipped_but_entry_survives() {
+fn interned_flag_on_numeric_field_skips_only_that_field() {
     #[metrics(default_flags(Emit))]
     struct BadInterned {
         #[metrics(flags(Interned))]
@@ -405,7 +419,7 @@ fn panicking_value_drops_event_without_poisoning_the_stream() {
 }
 
 #[test]
-fn flex_entry_is_dropped_but_stream_survives() {
+fn entries_containing_flex_are_skipped() {
     use metrique::flex::Flex;
 
     #[metrics(default_flags(Emit))]
@@ -426,10 +440,9 @@ fn flex_entry_is_dropped_but_stream_survives() {
         feed_entry!(stream, sample_request(None));
     });
 
-    // The Flex entry either carries no descriptor for its dynamic segment or
-    // emits value callbacks that cannot be aligned with the static
-    // descriptor; the sink must drop it rather than record garbage, and keep
-    // serving other entry types.
+    // Entries containing a Flex have no descriptors at all (`descriptors()`
+    // is `Unavailable` and flatten chaining propagates that), so the sink
+    // must skip them before planning and keep serving other entry types.
     let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
     assert!(
         !names.contains(&"metrique:WithFlex"),
@@ -518,15 +531,17 @@ fn payload_field_colliding_with_header_name_is_skipped() {
 }
 
 #[test]
-fn identical_context_and_payload_names_drop_the_entry_type() {
-    // Unprefixed context puts a Context action at literal "worker_id"; the
-    // snake_case Emit field emits the identical name. Name routing cannot
-    // separate them, so the entry type must be dropped, not mis-recorded.
+fn payload_field_sharing_a_context_field_name_still_records() {
+    // The unprefixed context routes "worker_id" into the event header; the
+    // snake_case Emit field emits the identical name. Routing is positional,
+    // so both land: the context in the header, and the payload field skipped
+    // only because it collides with the reserved header schema name.
     #[metrics(default_flags(Emit))]
     struct SameNames {
         #[metrics(flatten)]
         dial9: Dial9Context,
         worker_id: u64,
+        count: u64,
     }
 
     let events = run_sink_test(|stream| {
@@ -535,21 +550,22 @@ fn identical_context_and_payload_names_drop_the_entry_type() {
             SameNames {
                 dial9: Dial9Context::capture(),
                 worker_id: 42,
+                count: 7,
             }
         );
-        feed_entry!(stream, sample_request(None));
     });
 
-    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
-    assert!(
-        !names.contains(&"metrique:SameNames"),
-        "conflicting duplicate names must drop the type: {names:?}"
-    );
-    assert!(names.contains(&"metrique:RequestMetrics"));
+    assert_eq!(events.len(), 1, "entry must record: {events:#?}");
+    let ev = &events[0];
+    assert_eq!(ev.fields["count"], "7");
+    // The header slot carries the context's worker id, not the payload 42.
+    assert_ne!(ev.fields["worker_id"], "42");
+    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
+    assert!(end > 0, "context must still route: {ev:#?}");
 }
 
 #[test]
-fn two_contexts_with_identical_names_drop_the_entry_type() {
+fn duplicate_contexts_first_wins() {
     #[metrics(default_flags(Emit))]
     struct DoubleContext {
         #[metrics(flatten)]
@@ -568,26 +584,21 @@ fn two_contexts_with_identical_names_drop_the_entry_type() {
                 count: 1,
             }
         );
-        // Positive control so an empty result can't mean a broken pipeline.
-        feed_entry!(stream, sample_request(None));
     });
 
-    // Both flatten sites emit the same four field names; the identical
-    // names make routing ambiguous, so the type is dropped.
-    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.starts_with("metrique:DoubleContext")),
-        "identically-named duplicate contexts must drop the type: {names:?}"
-    );
-    assert!(names.contains(&"metrique:RequestMetrics"));
+    // The first flatten site keeps the header slots; the second's fields are
+    // skipped (warned once at plan build). The entry still records.
+    assert_eq!(events.len(), 1, "entry must record: {events:#?}");
+    let ev = &events[0];
+    assert_eq!(ev.fields["count"], "1");
+    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
+    assert!(end > 0, "first context must route: {ev:#?}");
 }
 
 #[test]
 fn identically_named_skipped_fields_are_harmless() {
-    // Neither duplicate routes anywhere, so the collision is unambiguous
-    // and the entry must still record.
+    // Unflagged fields never enter the schema, so identical names among
+    // them cannot collide with anything; the entry must still record.
     #[metrics]
     struct SkippedTwins {
         #[metrics(flatten)]
@@ -661,7 +672,7 @@ fn custom_signed_value_round_trips_negatives() {
 }
 
 #[test]
-fn prefixed_context_flatten_avoids_collisions() {
+fn prefixed_context_still_routes() {
     // The documented remedy for name collisions: prefix the flatten site.
     #[metrics(default_flags(Emit))]
     struct Prefixed {
@@ -694,11 +705,10 @@ fn prefixed_context_flatten_avoids_collisions() {
 
 #[test]
 fn mid_entry_payload_flatten_routes_correctly() {
-    // The upstream write-order defect in its general form: a payload-bearing
-    // child flattened mid-entry emits its values at the declaration position,
-    // while its descriptor segment comes after the parent's. Values must land
-    // in the right slots on the first (name-resolving) walk and on the second
-    // (cached positional) walk.
+    // A payload-bearing child flattened mid-entry: descriptor segments
+    // interleave with the parent's field runs ([Outer: a], [Inner: x, y],
+    // [Outer: b]), and positional consumption must put every value in the
+    // right slot on the first and subsequent walks.
     #[metrics(subfield)]
     struct Inner {
         x: u64,
@@ -800,4 +810,357 @@ fn entry_enum_variants_get_distinct_schemas() {
     for ev in &events {
         assert!(ev.fields["monotonic_ns_end"].parse::<u64>().unwrap() > 0);
     }
+}
+
+#[test]
+fn typed_lists_round_trip() {
+    #[metrics(default_flags(Emit))]
+    struct WithLists {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        counts: Vec<u64>,
+        #[metrics(flags(Interned))]
+        labels: Vec<String>,
+        empty: Vec<u64>,
+        maybe: Option<Vec<u64>>,
+    }
+
+    fn entry(maybe: Option<Vec<u64>>) -> WithLists {
+        WithLists {
+            dial9: Dial9Context::capture(),
+            counts: vec![1, 2, 3],
+            labels: vec!["a".to_owned(), "b".to_owned()],
+            empty: vec![],
+            maybe,
+        }
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(stream, entry(Some(vec![7])));
+        feed_entry!(stream, entry(None));
+    });
+
+    assert_eq!(events.len(), 2, "both entries must record: {events:#?}");
+    let ev = &events[0];
+    assert_eq!(ev.fields["counts"], "[1,2,3]");
+    assert_eq!(ev.fields["labels"], "[a,b]");
+    assert_eq!(ev.fields["empty"], "[]");
+    assert_eq!(ev.fields["maybe"], "[7]");
+    // Interned lists pool their string elements.
+    assert!(
+        ev.pooled_fields.contains(&"labels".to_owned()),
+        "interned list elements must be pooled: {ev:#?}"
+    );
+    assert_eq!(events[1].fields["maybe"], "<none>");
+}
+
+/// Wraps a descriptor-carrying entry and distorts its write-time callback
+/// count, simulating a metrique descriptor/write contract violation.
+struct SkewedWrites<E> {
+    inner: E,
+    /// Extra trailing `value` callbacks to emit (overflow).
+    extra: usize,
+    /// Real callbacks to swallow from the front (underflow).
+    drop_first: usize,
+}
+
+impl<E: metrique_writer::Entry> metrique_writer::Entry for SkewedWrites<E> {
+    fn write<'a>(&'a self, writer: &mut impl metrique_writer::EntryWriter<'a>) {
+        struct Skimmer<'w, W> {
+            inner: &'w mut W,
+            remaining_to_drop: usize,
+        }
+        impl<'a, W: metrique_writer::EntryWriter<'a>> metrique_writer::EntryWriter<'a> for Skimmer<'_, W> {
+            fn timestamp(&mut self, timestamp: std::time::SystemTime) {
+                self.inner.timestamp(timestamp);
+            }
+            fn value(
+                &mut self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+                value: &(impl metrique_writer::Value + ?Sized),
+            ) {
+                if self.remaining_to_drop > 0 {
+                    self.remaining_to_drop -= 1;
+                    return;
+                }
+                self.inner.value(name, value);
+            }
+            fn config(&mut self, config: &'a dyn metrique_writer::EntryConfig) {
+                self.inner.config(config);
+            }
+        }
+
+        let mut skimmer = Skimmer {
+            inner: writer,
+            remaining_to_drop: self.drop_first,
+        };
+        self.inner.write(&mut skimmer);
+        for _ in 0..self.extra {
+            writer.value("phantom", &1u64);
+        }
+    }
+
+    fn descriptors(&self) -> metrique_writer::core::Descriptors<'_> {
+        self.inner.descriptors()
+    }
+}
+
+#[test]
+fn callback_count_mismatch_drops_the_event() {
+    #[metrics(default_flags(Emit))]
+    struct Counted {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        a: u64,
+        b: u64,
+    }
+
+    fn closed(a: u64, b: u64) -> impl metrique_writer::Entry {
+        metrique::RootEntry::new(metrique::CloseValue::close(Counted {
+            dial9: Dial9Context::capture(),
+            a,
+            b,
+        }))
+    }
+
+    let events = run_sink_test(|stream| {
+        // Overflow: one phantom trailing callback.
+        stream
+            .next(&SkewedWrites {
+                inner: closed(1, 2),
+                extra: 1,
+                drop_first: 0,
+            })
+            .unwrap();
+        // Underflow: the first callback swallowed shifts every later value
+        // one slot left; only the count check can see that.
+        stream
+            .next(&SkewedWrites {
+                inner: closed(3, 4),
+                extra: 0,
+                drop_first: 1,
+            })
+            .unwrap();
+        // Control: an unskewed entry of the same type still records.
+        stream.next(&closed(5, 6)).unwrap();
+    });
+
+    assert_eq!(events.len(), 1, "skewed walks must drop: {events:#?}");
+    assert_eq!(events[0].fields["a"], "5");
+    assert_eq!(events[0].fields["b"], "6");
+}
+
+#[test]
+fn required_field_producing_no_value_drops_the_event() {
+    use metrique_writer::core::descriptor::{FieldShape, KnownShape};
+
+    // SHAPE claims u64 but the impl writes a string: the planned slot stays
+    // empty and the field is non-optional, so the event must drop.
+    #[derive(Debug)]
+    struct LyingShape;
+    impl metrique_writer::Value for LyingShape {
+        const SHAPE: FieldShape<'static> = FieldShape::Known(KnownShape::U64);
+        fn write(&self, writer: impl metrique_writer::ValueWriter) {
+            writer.string("not a number");
+        }
+    }
+    impl metrique::CloseValue for LyingShape {
+        type Closed = LyingShape;
+        fn close(self) -> LyingShape {
+            self
+        }
+    }
+
+    #[metrics(default_flags(Emit))]
+    struct Lying {
+        bad: LyingShape,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(stream, Lying { bad: LyingShape });
+        feed_entry!(stream, sample_request(None));
+    });
+
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
+    assert!(
+        !names.contains(&"metrique:Lying"),
+        "shape/value mismatch on a required field must drop: {names:?}"
+    );
+    assert!(names.contains(&"metrique:RequestMetrics"));
+}
+
+#[test]
+fn scalar_callback_on_list_shaped_field_drops_the_event() {
+    use metrique_writer::core::descriptor::{FieldShape, KnownShape, ShapeRef};
+    use metrique_writer::{MetricFlags, Observation, Unit};
+
+    // SHAPE claims a list but the impl writes a scalar metric; the list slot
+    // stays empty and the field is non-optional.
+    #[derive(Debug)]
+    struct FakeList;
+    impl metrique_writer::Value for FakeList {
+        const SHAPE: FieldShape<'static> =
+            FieldShape::List(ShapeRef::new(&FieldShape::Known(KnownShape::U64)));
+        fn write(&self, writer: impl metrique_writer::ValueWriter) {
+            writer.metric(
+                [Observation::Unsigned(7)],
+                Unit::None,
+                [],
+                MetricFlags::empty(),
+            );
+        }
+    }
+    impl metrique::CloseValue for FakeList {
+        type Closed = FakeList;
+        fn close(self) -> FakeList {
+            self
+        }
+    }
+
+    #[metrics(default_flags(Emit))]
+    struct NotAList {
+        items: FakeList,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(stream, NotAList { items: FakeList });
+        feed_entry!(stream, sample_request(None));
+    });
+
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
+    assert!(
+        !names.contains(&"metrique:NotAList"),
+        "scalar data for a list shape must drop: {names:?}"
+    );
+    assert!(names.contains(&"metrique:RequestMetrics"));
+}
+
+#[test]
+fn duplicate_payload_names_keep_the_first_occurrence() {
+    #[metrics(default_flags(Emit))]
+    struct Twins {
+        #[metrics(name = "twin")]
+        first: u64,
+        #[metrics(name = "twin")]
+        second: u64,
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Twins {
+                first: 1,
+                second: 2,
+                count: 9,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1, "entry must record: {events:#?}");
+    let ev = &events[0];
+    assert_eq!(ev.fields["twin"], "1", "first occurrence keeps the slot");
+    assert_eq!(ev.fields["count"], "9");
+    let dupes: Vec<&String> = ev
+        .field_names
+        .iter()
+        .filter(|n| n.as_str() == "twin")
+        .collect();
+    assert_eq!(dupes.len(), 1, "schema must not carry duplicate names");
+}
+
+#[test]
+fn same_named_entry_types_get_distinct_schemas() {
+    mod first {
+        use super::*;
+        #[metrics(default_flags(Emit))]
+        pub struct Dup {
+            pub a: u64,
+        }
+    }
+    mod second {
+        use super::*;
+        #[metrics(default_flags(Emit))]
+        pub struct Dup {
+            pub b: u64,
+        }
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(stream, first::Dup { a: 1 });
+        feed_entry!(stream, second::Dup { b: 2 });
+    });
+
+    assert_eq!(events.len(), 2, "both types must record: {events:#?}");
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
+    assert_ne!(
+        names[0], names[1],
+        "same-named types must not share a schema"
+    );
+    assert!(
+        names.contains(&"metrique:Dup"),
+        "first arrival keeps the bare name"
+    );
+    assert!(
+        names.iter().any(|n| n.starts_with("metrique:Dup#")),
+        "later arrival gets a layout-hash suffix: {names:?}"
+    );
+}
+
+#[test]
+fn every_context_role_routes() {
+    // Guards the sync between Dial9Context's field set and the role table
+    // in plan.rs: a context field the sink no longer recognizes would
+    // silently degrade to a skip. All four header slots must be populated
+    // from an on-runtime capture.
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    let (recorder, runtime) = recorder
+        .attach_tokio_runtime(|t| {
+            t.worker_threads(1);
+        })
+        .unwrap();
+
+    let mut stream = Dial9Stream::new(recorder.handle());
+    let entry =
+        runtime.block_on(async { tokio::spawn(async { sample_request(None) }).await.unwrap() });
+    feed_entry!(stream, entry);
+
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(5));
+    let events = decode_metrique_events(dir.path());
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    // WorkerId, TaskId, MonotonicEnd routed; MonotonicStart is the event
+    // timestamp.
+    assert_ne!(
+        ev.fields["worker_id"],
+        WorkerId::UNKNOWN.as_u64().to_string()
+    );
+    assert_ne!(ev.fields["task_id"], "<none>");
+    assert_ne!(ev.fields["monotonic_ns_end"], "<none>");
+    assert!(ev.timestamp_ns > 0);
+}
+
+#[test]
+fn absent_optional_list_elements_are_omitted() {
+    #[metrics(default_flags(Emit))]
+    struct Sparse {
+        values: Vec<Option<u64>>,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Sparse {
+                values: vec![Some(1), None, Some(3)],
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1, "entry must record: {events:#?}");
+    // The None element writes nothing and drops out of the encoded list.
+    assert_eq!(events[0].fields["values"], "[1,3]");
 }

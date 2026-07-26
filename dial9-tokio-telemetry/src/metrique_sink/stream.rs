@@ -1,7 +1,7 @@
 //! The dial9 [`EntryIoStream`]: consumes metrique entries and encodes
 //! dial9-opted ones into the trace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use crate::rate_limit::rate_limited;
 use crate::telemetry::Dial9Handle;
 
 use super::plan::{Plan, build_plan};
-use super::writer::EntryWalk;
+use super::writer::{EntryWalk, WalkError};
 
 /// How often aggregate sink counters are reported at `debug` level.
 const REPORT_INTERVAL: Duration = Duration::from_secs(60);
@@ -40,9 +40,9 @@ pub struct Dial9Stream {
     /// instantiates.
     plans: HashMap<Vec<DescriptorId>, Plan>,
     /// Schema-name disambiguation across plans (see `build_plan`).
-    used_names: HashMap<String, u32>,
-    /// Scratch buffers reused across entries (single-threaded: `next` takes
-    /// `&mut self`).
+    used_names: HashSet<String>,
+    // Scratch buffers reused across entries (single-threaded: `next` takes
+    // `&mut self`).
     key_scratch: Vec<DescriptorId>,
     slots_scratch: Vec<Option<FieldValue>>,
     values_scratch: Vec<FieldValue>,
@@ -60,7 +60,7 @@ impl Dial9Stream {
         Self {
             handle: handle.clone(),
             plans: HashMap::new(),
-            used_names: HashMap::new(),
+            used_names: HashSet::new(),
             key_scratch: Vec::new(),
             slots_scratch: Vec::new(),
             values_scratch: Vec::new(),
@@ -110,8 +110,8 @@ impl EntryIoStream for Dial9Stream {
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
                     "metrique entry without descriptors reached the dial9 sink and was \
-                     skipped; hand-written Entry impls need #[metrics] derive to appear \
-                     in dial9 traces"
+                     skipped; hand-written Entry impls and entries containing Flex \
+                     dynamic-key fields carry no descriptors"
                 );
             });
             return Ok(());
@@ -131,15 +131,9 @@ impl EntryIoStream for Dial9Stream {
             self.stats.entries_skipped_inert += 1;
             return Ok(());
         }
-        if plan.unusable {
-            // Conflicting duplicate field names; reported once at plan build.
-            self.stats.entries_dropped += 1;
-            return Ok(());
-        }
 
         let mut emitted = false;
         let mut dropped = false;
-        let mut resolved = None;
         let slots = &mut self.slots_scratch;
         let values = &mut self.values_scratch;
         self.handle.with_encoder(|enc| {
@@ -159,30 +153,32 @@ impl EntryIoStream for Dial9Stream {
                 });
                 return;
             }
-            if !walk.aligned() {
+            if let Err(err) = walk.fill_values(values) {
                 dropped = true;
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(
-                        entry = %plan.entry_name,
-                        "metrique entry emitted values that do not match its descriptor \
-                         (dynamic-key Flex fields are the usual cause); event dropped"
-                    );
-                });
+                match err {
+                    WalkError::PlanMismatch => {
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(
+                                entry = %plan.entry_name,
+                                "metrique entry emitted a different number of values than \
+                                 its descriptor declares (descriptor/write mismatch in \
+                                 metrique); event dropped"
+                            );
+                        });
+                    }
+                    WalkError::MissingRequired { field } => {
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(
+                                entry = %plan.entry_name,
+                                %field,
+                                "metrique entry produced no value for a required field; \
+                                 event dropped"
+                            );
+                        });
+                    }
+                }
                 return;
             }
-            if let Err(field) = walk.fill_values(values) {
-                dropped = true;
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(
-                        entry = %plan.entry_name,
-                        %field,
-                        "metrique entry produced no value for a required field; event \
-                         dropped"
-                    );
-                });
-                return;
-            }
-            resolved = walk.take_recorded();
             if enc.write_event(&plan.schema, values) {
                 emitted = true;
             } else {
@@ -190,18 +186,6 @@ impl EntryIoStream for Dial9Stream {
                 dropped = true;
             }
         });
-
-        // Cache the write-order dispatch recorded by a successful resolving
-        // walk; subsequent entries of this type skip the name lookups.
-        if emitted
-            && let Some(actions) = resolved
-            && let Some(plan) = self.plans.get_mut(self.key_scratch.as_slice())
-        {
-            debug_assert_eq!(actions.len(), plan.expected_values);
-            plan.positional = Some(actions);
-            // The name-keyed map only serves resolving walks.
-            plan.actions = HashMap::new();
-        }
 
         if emitted {
             self.stats.events_emitted += 1;
@@ -212,7 +196,10 @@ impl EntryIoStream for Dial9Stream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // dial9 flushes its thread-local buffers on its own cadence.
+        // No metrique-side flush needed:
+        // `with_encoder` self-flushes on batch thresholds,
+        // dial9's flush thread drains thread-local buffers intrusively on
+        // its own cadence, and the buffer flushes on thread exit.
         Ok(())
     }
 }
