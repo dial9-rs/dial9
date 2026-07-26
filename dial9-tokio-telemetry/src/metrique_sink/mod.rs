@@ -9,8 +9,9 @@
 //!
 //! # Usage
 //!
-//! Opt fields into the dial9 payload with the [`Emit`] field flag, and
-//! flatten a [`Dial9Context`] into the entry so events carry caller-thread
+//! Opt fields into the dial9 payload with the [`Emit`](crate::metrique_sink::Emit)
+//! field flag, and flatten a [`Dial9Context`](crate::metrique_sink::Dial9Context)
+//! into the entry so events carry caller-thread
 //! runtime context:
 //!
 //! ```ignore
@@ -56,7 +57,8 @@
 //!
 //! All dial9 encoding happens on the thread that drives the metrique
 //! pipeline (the `BackgroundQueue` flush thread for the standard setup).
-//! The caller-thread cost is limited to [`Dial9Context::capture`]: a few
+//! The caller-thread cost is limited to
+//! [`Dial9Context::capture`](crate::metrique_sink::Dial9Context::capture): a few
 //! thread-local reads and one clock read.
 //!
 //! # Overhead
@@ -72,7 +74,8 @@
 //!
 //! - the entry's canonical name (schema name `metrique:<EntryName>`),
 //! - start/end monotonic timestamps, worker id, and task id from
-//!   [`Dial9Context`] (worker `WorkerId::UNKNOWN` and absent task id when
+//!   [`Dial9Context`](crate::metrique_sink::Dial9Context) (worker
+//!   `WorkerId::UNKNOWN` and absent task id when
 //!   captured off-runtime),
 //! - the wall-clock timestamp when the entry declares
 //!   `#[metrics(timestamp)]`,

@@ -63,9 +63,6 @@ aws-sdk-s3 = { version = "1", default-features = false, optional = true, feature
 aws-config = { version = "1", optional = true, default-features = false }
 flate2 = { version = "1" }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
-# The metrique -> dial9 sink consumes metrique's entry-descriptor API
-# (`metrique_writer::core::descriptor`), which shipped in metrique-writer
-# 0.1.24 / metrique-writer-core 0.1.16.
 metrique = { version = "0.1.28", optional = true }
 metrique-writer = { version = "0.1.24", optional = true }
 metrique-timesource = "0.1"
@@ -156,8 +153,6 @@ metrique-timesource = { version = "0.1", features = [
     "tokio",
 ] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
-# `local-format` is only needed by tests (rotation_time_alignment); the
-# production dependency stays feature-lean.
 metrique = { version = "0.1.28", features = ["local-format"] }
 tokio = { version = "1.52.0", features = ["test-util"] }
 proptest = "1"

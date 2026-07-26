@@ -319,8 +319,7 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            // Drops are logged by dial9-core.
-            let _ = enc.write_event(&schemas.enter, &values);
+            enc.write_event(&schemas.enter, &values);
         });
     }
 
@@ -354,8 +353,7 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            // Drops are logged by dial9-core.
-            let _ = enc.write_event(&schemas.exit, &values);
+            enc.write_event(&schemas.exit, &values);
         });
     }
 

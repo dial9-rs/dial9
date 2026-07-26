@@ -85,13 +85,8 @@ impl ThreadLocalEncoder<'_> {
     /// ```
     // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
     #[doc(hidden)]
-    /// Returns `false` when the event was dropped for a validation failure
-    /// (e.g. schema-name collision, value/schema mismatch), which is also
-    /// logged rate-limited. The underlying writer is a Vec, so IO cannot
-    /// fail, and the current encode paths raise validation errors before
-    /// writing event bytes; the event is dropped rather than panicking the
-    /// calling thread.
-    #[must_use = "a false return means the event was dropped"]
+    /// Returns `false` if the event was dropped for a validation failure
+    /// (logged rate-limited; never panics the calling thread).
     pub fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
