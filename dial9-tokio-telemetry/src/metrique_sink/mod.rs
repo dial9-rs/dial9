@@ -47,14 +47,6 @@
 //! .append_on_drop(ServiceMetrics::sink());
 //! ```
 //!
-//! The sink is descriptor-aware: it reads each entry type's
-//! [`EntryDescriptor`](metrique_writer::core::descriptor) once at first use to
-//! learn its shape (fields, flags, units), then routes values on every
-//! subsequent emission; per-entry heap traffic is limited to payload string
-//! values. Entries without descriptors (hand-written `Entry` impls) are
-//! skipped with a rate-limited warning; they still reach the other side of
-//! the `tee`.
-//!
 //! All dial9 encoding happens on the thread that drives the metrique
 //! pipeline (the `BackgroundQueue` flush thread for the standard setup).
 //! The caller-thread cost is limited to
@@ -84,6 +76,8 @@
 //!
 //! # Limitations (initial release)
 //!
+//! - Hand-written `Entry` impls carry no descriptor and are skipped with a
+//!   rate-limited warning; they still reach the other side of the `tee`.
 //! - [`Flex`](metrique::flex::Flex) dynamic-key fields are not supported;
 //!   entries containing them are dropped from the dial9 path (rate-limited
 //!   warning) because their dynamic value callbacks cannot be matched
