@@ -189,9 +189,11 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // against drift in the parser/tree/search path between regens, NOT a
   // correctness oracle (the synthetic-tree tests above are). On a demo
   // regen, re-measure (rerun; received values are the new measurements)
-  // but sanity-check before copying: poll/tokio should dominate, spawn
-  // should stay tiny, and large percentage shifts should be explainable
-  // by the new capture's workload.
+  // but first rule out a code regression: point DEMO at the previous
+  // trace bytes (git show <base>:dial9-viewer/ui/public/demo-trace.bin)
+  // and confirm the old anchors still reproduce. Then sanity-check the
+  // new values before copying: poll/tokio should dominate, spawn should
+  // stay tiny, and shifts should be explainable by the capture.
   const ANCHORS: Array<[string, number, string]> = [
     ["poll", 185, "78.0"],
     ["tokio", 189, "78.0"],
