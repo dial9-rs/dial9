@@ -740,3 +740,64 @@ fn mid_entry_payload_flatten_routes_correctly() {
         assert_eq!(ev.fields["b"], b.to_string());
     }
 }
+
+#[test]
+fn entry_enum_variants_get_distinct_schemas() {
+    #[metrics(default_flags(Emit))]
+    enum Request {
+        Read {
+            #[metrics(flatten)]
+            dial9: Dial9Context,
+            bytes: u64,
+        },
+        Write {
+            #[metrics(flatten)]
+            dial9: Dial9Context,
+            bytes: u64,
+            durable: bool,
+        },
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Request::Read {
+                dial9: Dial9Context::capture(),
+                bytes: 100,
+            }
+        );
+        feed_entry!(
+            stream,
+            Request::Write {
+                dial9: Dial9Context::capture(),
+                bytes: 200,
+                durable: true,
+            }
+        );
+        // Second Read exercises the variant's cached positional dispatch.
+        feed_entry!(
+            stream,
+            Request::Read {
+                dial9: Dial9Context::capture(),
+                bytes: 300,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 3, "all variants must record: {events:#?}");
+    let names: Vec<&str> = events.iter().map(|e| e.schema_name.as_str()).collect();
+    // Each variant carries its own descriptor name and schema.
+    assert_eq!(names[0], names[2], "same variant must share a schema");
+    assert_ne!(
+        names[0], names[1],
+        "variants must not share a schema: {names:?}"
+    );
+    assert_eq!(events[0].fields["bytes"], "100");
+    assert_eq!(events[1].fields["bytes"], "200");
+    assert_eq!(events[1].fields["durable"], "true");
+    assert_eq!(events[2].fields["bytes"], "300");
+    // Context routed for every variant.
+    for ev in &events {
+        assert!(ev.fields["monotonic_ns_end"].parse::<u64>().unwrap() > 0);
+    }
+}
