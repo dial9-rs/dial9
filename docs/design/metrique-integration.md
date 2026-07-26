@@ -88,7 +88,7 @@ The original design called for `debug_assert!` on the no-context and Opaque case
 
 ## Performance
 
-Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. Steady state allocates only for payload string and list values: routing tables, key lookups, and value buffers are cached or reused across entries.
+Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. On dial9's side, steady state allocates only for payload string and list values: routing tables, key lookups, and value buffers are cached or reused across entries. Metrique's `descriptors()` itself may allocate per entry once a layout exceeds its inline segment capacity; the precomputed sequence id ([awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348)) removes that walk entirely.
 
 ## Future evolution
 
