@@ -50,7 +50,6 @@ pub struct Dial9Stream {
     // Scratch buffers reused across entries (single-threaded: `next` takes
     // `&mut self`).
     key_scratch: Vec<DescriptorId>,
-    slots_scratch: Vec<Option<FieldValue>>,
     values_scratch: Vec<FieldValue>,
     stats: Stats,
     last_report: Instant,
@@ -71,7 +70,6 @@ impl Dial9Stream {
             last_plan: None,
             used_names: HashSet::new(),
             key_scratch: Vec::new(),
-            slots_scratch: Vec::new(),
             values_scratch: Vec::new(),
             stats: Stats::default(),
             last_report: Instant::now(),
@@ -159,10 +157,9 @@ impl EntryIoStream for Dial9Stream {
 
         let mut emitted = false;
         let mut dropped = false;
-        let slots = &mut self.slots_scratch;
         let values = &mut self.values_scratch;
         self.handle.with_encoder(|enc| {
-            let mut walk = EntryWalk::new(plan, enc, slots);
+            let mut walk = EntryWalk::new(plan, &mut *enc, values);
             // A panicking `Value::write` impl must not poison the flush
             // thread. Capture happens before any event bytes are written,
             // so a mid-walk panic leaves at most orphaned string-pool
@@ -178,7 +175,7 @@ impl EntryIoStream for Dial9Stream {
                 });
                 return;
             }
-            if let Err(err) = walk.fill_values(values) {
+            if let Err(err) = walk.finish() {
                 dropped = true;
                 match err {
                     WalkError::PlanMismatch => {

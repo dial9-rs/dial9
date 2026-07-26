@@ -28,21 +28,29 @@ struct ContextValues {
 ///
 /// Value callbacks are consumed positionally: the `i`-th callback takes
 /// `plan.actions[i]`, relying on metrique's guarantee that `Entry::write`
-/// emits values in descriptor order. [`fill_values`](Self::fill_values)
-/// assembles the final wire value vector.
+/// emits values in descriptor order. Payload callbacks also arrive in
+/// payload order, so captured values append straight to the wire value
+/// vector behind reserved timestamp/header placeholders, which
+/// [`finish`](Self::finish) validates and fills in.
 pub(crate) struct EntryWalk<'p, 'enc> {
     plan: &'p Plan,
     enc: &'p mut ThreadLocalEncoder<'enc>,
-    /// Payload capture slots, reused across entries by the caller.
-    slots: &'p mut Vec<Option<FieldValue>>,
+    /// The wire value vector under construction (caller-owned, reused
+    /// across entries): `[timestamp, headers..., payload...]`.
+    values: &'p mut Vec<FieldValue>,
     ctx: ContextValues,
     /// Index of the next `value` callback into `plan.actions`.
     next: usize,
+    /// Payload actions consumed so far; doubles as the payload index for
+    /// the missing-required diagnostic.
+    payload_seen: usize,
+    /// First required payload field that produced no value, if any.
+    missing_required: Option<usize>,
     /// More `value` callbacks fired than the descriptor declares.
     overflowed: bool,
 }
 
-/// Why [`EntryWalk::fill_values`] refused to assemble an event. The caller
+/// Why [`EntryWalk::finish`] refused to assemble an event. The caller
 /// must drop it either way.
 #[derive(Debug)]
 pub(crate) enum WalkError<'p> {
@@ -63,29 +71,35 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
     pub(crate) fn new(
         plan: &'p Plan,
         enc: &'p mut ThreadLocalEncoder<'enc>,
-        slots: &'p mut Vec<Option<FieldValue>>,
+        values: &'p mut Vec<FieldValue>,
     ) -> Self {
-        slots.clear();
-        slots.resize_with(plan.payload_optional.len(), || None);
+        values.clear();
+        // Placeholders for the implicit timestamp and the header fields;
+        // `finish` overwrites them once the walk has captured the context.
+        values.resize_with(1 + HEADER_FIELDS, || FieldValue::None);
         Self {
             plan,
             enc,
-            slots,
+            values,
             ctx: ContextValues::default(),
             next: 0,
+            payload_seen: 0,
+            missing_required: None,
             overflowed: false,
         }
     }
 
-    /// Assemble the wire value vector into `out`: the implicit timestamp,
-    /// one value per [`Header`] in `Header::ALL` order, then the payload
-    /// slots.
-    ///
-    /// Also where the walk is validated, so a caller cannot encode a
-    /// mis-routed event by forgetting a separate check.
-    pub(crate) fn fill_values(&mut self, out: &mut Vec<FieldValue>) -> Result<(), WalkError<'p>> {
+    /// Validate the walk and fill the timestamp/header placeholders,
+    /// completing the wire value vector handed to [`Self::new`]. Consumes
+    /// the walk, releasing its borrows for the encode call.
+    pub(crate) fn finish(self) -> Result<(), WalkError<'p>> {
         if self.overflowed || self.next != self.plan.actions.len() {
             return Err(WalkError::PlanMismatch);
+        }
+        if let Some(index) = self.missing_required {
+            return Err(WalkError::MissingRequired {
+                field: self.plan.schema.fields()[HEADER_FIELDS + index].name(),
+            });
         }
 
         fn opt(v: Option<u64>) -> FieldValue {
@@ -95,41 +109,18 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
             }
         }
 
-        out.clear();
         // Timestamp: request start, or the flush-thread clock as fallback.
-        out.push(FieldValue::Varint(
-            self.ctx.monotonic_start.unwrap_or_else(clock_monotonic_ns),
-        ));
-        for header in Header::ALL {
-            out.push(match header {
+        self.values[0] =
+            FieldValue::Varint(self.ctx.monotonic_start.unwrap_or_else(clock_monotonic_ns));
+        for (i, header) in Header::ALL.into_iter().enumerate() {
+            self.values[1 + i] = match header {
                 Header::WorkerId => {
                     FieldValue::Varint(self.ctx.worker_id.unwrap_or(WorkerId::UNKNOWN.as_u64()))
                 }
                 Header::TaskId => opt(self.ctx.task_id),
                 Header::MonotonicEnd => opt(self.ctx.monotonic_end),
                 Header::WallClock => opt(self.ctx.wall_clock_ns),
-            });
-        }
-
-        // Payload slot i is schema field HEADER_FIELDS + i. Optionality
-        // comes from the plan's cache; the schema is consulted only on the
-        // cold path for the field name.
-        let plan: &'p Plan = self.plan;
-        for (i, (slot, optional)) in self
-            .slots
-            .iter_mut()
-            .zip(&plan.payload_optional)
-            .enumerate()
-        {
-            match slot.take() {
-                Some(value) => out.push(value),
-                None if *optional => out.push(FieldValue::None),
-                None => {
-                    return Err(WalkError::MissingRequired {
-                        field: plan.schema.fields()[HEADER_FIELDS + i].name(),
-                    });
-                }
-            }
+            };
         }
         Ok(())
     }
@@ -193,7 +184,9 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                     ContextRole::MonotonicEnd => self.ctx.monotonic_end = captured,
                 }
             }
-            FieldAction::Payload { slot, kind } => {
+            FieldAction::Payload { optional, kind } => {
+                let index = self.payload_seen;
+                self.payload_seen += 1;
                 let mut out = Captured::Absent;
                 value.write(ValueCapture {
                     out: &mut out,
@@ -201,12 +194,19 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                     entry_name: &self.plan.entry_name,
                     enc: self.enc,
                 });
-                // Absent and mismatched both leave the slot empty; required
-                // fields turn that into an event drop in `fill_values`.
-                self.slots[slot] = match out {
-                    Captured::Value(value) => Some(value),
-                    Captured::Absent | Captured::Mismatched => None,
-                };
+                match out {
+                    Captured::Value(value) => self.values.push(value),
+                    // Absent and mismatched are treated alike: legal for an
+                    // optional field, an event drop otherwise (in `finish`).
+                    Captured::Absent | Captured::Mismatched if optional => {
+                        self.values.push(FieldValue::None)
+                    }
+                    Captured::Absent | Captured::Mismatched => {
+                        if self.missing_required.is_none() {
+                            self.missing_required = Some(index);
+                        }
+                    }
+                }
             }
         }
     }

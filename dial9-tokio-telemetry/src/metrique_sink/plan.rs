@@ -45,8 +45,12 @@ pub(crate) enum FieldAction {
     /// One of [`Dial9Context`](super::Dial9Context)'s fields: route into the
     /// event header slots.
     Context(ContextRole),
-    /// An `Emit`-tagged field: capture into payload slot `slot` as `kind`.
-    Payload { slot: usize, kind: ValueKind },
+    /// An `Emit`-tagged field: capture as `kind` and append to the event's
+    /// payload values (payload callbacks arrive in payload order, so no slot
+    /// indirection is needed). `optional` mirrors the schema field's wire
+    /// type: an optional payload may be absent, a required one missing
+    /// drops the event.
+    Payload { optional: bool, kind: ValueKind },
 }
 
 /// Which event-header slot a context field feeds.
@@ -113,11 +117,6 @@ pub(crate) struct Plan {
     pub(crate) schema: Schema,
     /// Action per `value` callback, in descriptor order (= write order).
     pub(crate) actions: Vec<FieldAction>,
-    /// Whether each payload slot may be absent on the wire. Derived from
-    /// the schema's field types at plan build (the schema stays the single
-    /// source of truth); cached so the per-entry hot loop does not chase
-    /// `FieldDef`s.
-    pub(crate) payload_optional: Box<[bool]>,
     /// No `Emit` fields and no context fields: entries of this type are
     /// skipped without walking `Entry::write`.
     pub(crate) inert: bool,
@@ -248,9 +247,11 @@ pub(crate) fn build_plan(
                             ),
                         }
                     }
-                    let slot = fields.len() - HEADER_FIELDS;
                     fields.push(FieldDef::new(full_name, field_type));
-                    actions.push(FieldAction::Payload { slot, kind });
+                    actions.push(FieldAction::Payload {
+                        optional: field_type.is_optional(),
+                        kind,
+                    });
                 }
                 Err(reason) => {
                     // Once per descriptor sequence (plans are cached), so no
@@ -279,10 +280,6 @@ pub(crate) fn build_plan(
     let inert = !has_emit && !has_context;
 
     let schema_name = schema_name(&entry_name, inert, &fields, &annotations, used_names);
-    let payload_optional = fields[HEADER_FIELDS..]
-        .iter()
-        .map(|f| f.field_type().is_optional())
-        .collect();
     let schema = Schema::from_entry(SchemaEntry::with_annotations(
         schema_name,
         /* has_timestamp */ true,
@@ -293,7 +290,6 @@ pub(crate) fn build_plan(
     Plan {
         schema,
         actions,
-        payload_optional,
         inert,
         entry_name,
     }
