@@ -185,10 +185,13 @@ describe("demo-trace anchors (#593 measurements)", () => {
 
   // [query, expected frames, expected pct of the in-view total]
   //
-  // These are exact measurements of the committed demo trace and must be
-  // re-measured whenever it is regenerated: rerun this suite and copy the
-  // received frame counts, then recompute pct as
-  // countSearchMatches(...).matchedCount / workerTree.count via pct().
+  // Exact measurements of the committed demo trace: a snapshot guarding
+  // against drift in the parser/tree/search path between regens, NOT a
+  // correctness oracle (the synthetic-tree tests above are). On a demo
+  // regen, re-measure (rerun; received values are the new measurements)
+  // but sanity-check before copying: poll/tokio should dominate, spawn
+  // should stay tiny, and large percentage shifts should be explainable
+  // by the new capture's workload.
   const ANCHORS: Array<[string, number, string]> = [
     ["poll", 185, "78.0"],
     ["tokio", 189, "78.0"],
