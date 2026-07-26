@@ -81,12 +81,10 @@
 //!   side of the `tee`, so EMF/JSON output is unaffected.
 //! - Distribution-shaped fields (histograms) and other fields whose closed
 //!   shape is `Opaque` are skipped with a diagnostic when tagged `Emit`.
-//! - Boxed entries (the global-sink path, e.g. `ServiceMetrics::sink()`)
-//!   lose list element types in metrique's dyn bridge, which stringifies
-//!   them. String lists survive the box; entries with numeric list fields
-//!   are dropped (rate-limited warning) rather than recorded with wrong
-//!   data. Typed sinks (`BackgroundQueue` over a concrete entry type) are
-//!   unaffected.
+//! - Only lists of strings work through a `GlobalEntrySink` (e.g.
+//!   `ServiceMetrics::sink()`); entries with numeric list fields are
+//!   dropped there (rate-limited warning), because boxing stringifies list
+//!   elements. Typed sinks are unaffected.
 //! - Two fields that emit the same post-rename name cannot share a schema:
 //!   the first occurrence keeps the name and later ones are skipped with a
 //!   diagnostic. Prefix flatten sites to disambiguate.
