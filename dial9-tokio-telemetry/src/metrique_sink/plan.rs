@@ -46,10 +46,9 @@ pub(crate) enum FieldAction {
     /// event header slots.
     Context(ContextRole),
     /// An `Emit`-tagged field: capture as `kind` and append to the event's
-    /// payload values (payload callbacks arrive in payload order, so no slot
-    /// indirection is needed). `optional` mirrors the schema field's wire
-    /// type: an optional payload may be absent, a required one missing
-    /// drops the event.
+    /// payload values (walk order is the schema's payload order). `optional`
+    /// mirrors the schema field's wire type: an optional payload may be
+    /// absent, a required one missing drops the event.
     Payload { optional: bool, kind: ValueKind },
 }
 
@@ -169,7 +168,7 @@ impl Header {
     }
 }
 
-/// Number of header fields; payload slot `i` is schema field
+/// Number of header fields; payload value `i` is schema field
 /// `HEADER_FIELDS + i`.
 pub(crate) const HEADER_FIELDS: usize = Header::ALL.len();
 

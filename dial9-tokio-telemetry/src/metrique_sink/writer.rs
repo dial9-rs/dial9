@@ -1,5 +1,5 @@
 //! The flush-thread `Entry::write` walk: routes each metrique value callback
-//! to the event header, a payload slot, or nowhere, per the cached plan.
+//! into the event header, the payload, or nowhere, per the cached plan.
 
 use std::borrow::Cow;
 use std::time::{Duration, SystemTime};

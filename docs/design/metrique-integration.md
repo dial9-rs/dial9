@@ -14,7 +14,7 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 - **`Dial9Context`**: metrique subfield users flatten into their entries to capture per-request runtime context (see its rustdoc).
 - **`Emit`** / **`Interned`**: the user-facing field flags for payload opt-in and string pooling (see their rustdoc).
 - **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors. Would be replaced by a typed source-extraction mechanism in metrique.
-- **Encode plan**: the cached per-entry-type routing table (`metrique_sink/plan.rs`). Built once per distinct descriptor-id sequence: wire schema with unit annotations, and an action (header slot / payload slot / skip) per field position.
+- **Encode plan**: the cached per-entry-type routing table (`metrique_sink/plan.rs`). Built once per distinct descriptor-id sequence: wire schema with unit annotations, and an action (header / payload / skip) per field position.
 - **Trace format**: dial9's wire format (`dial9-trace-format/SPEC.md`). The integration uses the schema-annotations frame (`TAG_SCHEMA_ANNOTATIONS`) for units and the self-describing `DynamicList` field type for list-shaped fields.
 
 ## User-facing API
