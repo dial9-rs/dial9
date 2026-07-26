@@ -1164,3 +1164,48 @@ fn absent_optional_list_elements_are_omitted() {
     // The None element writes nothing and drops out of the encoded list.
     assert_eq!(events[0].fields["values"], "[1,3]");
 }
+
+#[test]
+fn boxed_entries_round_trip() {
+    // The global-sink path (`ServiceMetrics::sink()`, as in the examples)
+    // boxes entries; metrique's dyn bridge stringifies list elements
+    // (`ValueWriterFromDyn::values` in metrique-writer-core), so numeric
+    // list elements arrive as strings and must be decoded from that
+    // transport representation.
+    #[metrics(default_flags(Emit))]
+    struct Boxed {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        counts: Vec<u64>,
+        loads: Vec<f64>,
+        #[metrics(flags(Interned))]
+        labels: Vec<String>,
+        sparse: Vec<Option<u64>>,
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        let entry = metrique::RootEntry::new(metrique::CloseValue::close(Boxed {
+            dial9: Dial9Context::capture(),
+            counts: vec![1, 2, 3],
+            loads: vec![0.5, 1.5],
+            labels: vec!["a".to_owned(), "b".to_owned()],
+            sparse: vec![Some(7), None, Some(9)],
+            count: 4,
+        }));
+        stream.next(&metrique_writer::Entry::boxed(entry)).unwrap();
+    });
+
+    assert_eq!(events.len(), 1, "boxed entry must record: {events:#?}");
+    let ev = &events[0];
+    assert_eq!(ev.fields["count"], "4");
+    assert_eq!(ev.fields["labels"], "[a,b]");
+    let end: u64 = ev.fields["monotonic_ns_end"].parse().unwrap();
+    assert!(end > 0, "context must route through the box: {ev:#?}");
+    // INVERTED (bug reproduction): numeric list elements are stringified by
+    // the boxed bridge and currently rejected by the element capture,
+    // leaving empty lists. The fix should flip these to the real values.
+    assert_eq!(ev.fields["counts"], "[]");
+    assert_eq!(ev.fields["loads"], "[]");
+    assert_eq!(ev.fields["sparse"], "[]");
+}
