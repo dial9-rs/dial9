@@ -19,6 +19,12 @@ use super::writer::{EntryWalk, WalkError};
 /// How often aggregate sink counters are reported at `debug` level.
 const REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Entries between report-deadline checks. Amortizes the monotonic clock
+/// read across entries: at high rates the check cost vanishes, and at low
+/// rates it only stretches the debug-report cadence (the final report on
+/// drop always fires).
+const REPORT_CHECK_STRIDE: u32 = 64;
+
 /// Aggregate counters for periodic reporting.
 #[derive(Debug, Default)]
 struct Stats {
@@ -53,6 +59,9 @@ pub struct Dial9Stream {
     values_scratch: Vec<FieldValue>,
     stats: Stats,
     last_report: Instant,
+    /// Countdown to the next report-deadline check (see
+    /// [`REPORT_CHECK_STRIDE`]).
+    entries_until_report_check: u32,
 }
 
 impl Dial9Stream {
@@ -73,6 +82,7 @@ impl Dial9Stream {
             values_scratch: Vec::new(),
             stats: Stats::default(),
             last_report: Instant::now(),
+            entries_until_report_check: 1,
         }
     }
 
@@ -89,8 +99,12 @@ impl Dial9Stream {
     }
 
     fn maybe_report(&mut self) {
-        if self.last_report.elapsed() >= REPORT_INTERVAL {
-            self.report();
+        self.entries_until_report_check -= 1;
+        if self.entries_until_report_check == 0 {
+            self.entries_until_report_check = REPORT_CHECK_STRIDE;
+            if self.last_report.elapsed() >= REPORT_INTERVAL {
+                self.report();
+            }
         }
     }
 }
