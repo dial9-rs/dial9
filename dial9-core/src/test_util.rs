@@ -155,6 +155,12 @@ mod pipeline_helpers {
         join: JoinHandle<()>,
     }
 
+    impl std::fmt::Debug for TriggeredPipeline {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TriggeredPipeline").finish_non_exhaustive()
+        }
+    }
+
     impl TriggeredPipeline {
         /// Seal one in-memory segment at `index` carrying a clock anchor at
         /// `epoch_secs`.

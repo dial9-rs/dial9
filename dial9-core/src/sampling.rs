@@ -7,6 +7,7 @@
 //! native unit.
 
 /// Minimal splitmix64 PRNG. Fast, no dependencies, good enough for sampling.
+#[derive(Debug)]
 pub struct SplitMix64(u64);
 
 impl SplitMix64 {
