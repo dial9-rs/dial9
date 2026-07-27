@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Metrique sink: dial9 can record [metrique](https://docs.rs/metrique) unit-of-work entries into the trace as a peer of an existing EMF/JSON pipeline, with per-request thread/task/timing context. New tokio-free `dial9-metrique` crate, re-exported as `dial9::metrique_sink` behind the `metrique-sink` feature; combine with the `tokio` feature to capture task ids ([#189](https://github.com/dial9-rs/dial9/issues/189), [#723](https://github.com/dial9-rs/dial9/pull/723)).
+
+  ```rust
+  use dial9::metrique_sink::{Dial9Context, Dial9Stream};
+
+  #[metrics(rename_all = "PascalCase")]
+  struct RequestMetrics {
+      // Including a Dial9Context opts this entry into the trace.
+      #[metrics(flatten)]
+      dial9: Dial9Context,
+      #[metrics(flags(dial9::Interned))]
+      operation: &'static str,
+      latency_ms: u64,
+  }
+
+  // Tee dial9 alongside the existing pipeline; `dial9.*` context fields
+  // stay out of the EMF output.
+  let _join = ServiceMetrics::attach_to_stream(Dial9Stream::tee(&handle, emf_stream));
+
+  let mut m = RequestMetrics {
+      dial9: Dial9Context::capture(),
+      operation: "GetPet",
+      latency_ms: 0,
+  }
+  .append_on_drop(ServiceMetrics::sink());
+  ```
+
+  For entries you cannot (or would rather not) add a field to, `append_on_drop_dial9` attaches the same context from the outside:
+
+  ```rust
+  use dial9::metrique_sink::Dial9EntryExt;
+
+  let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
+      .append_on_drop_dial9(ServiceMetrics::sink());
+  ```
+
+### Breaking
+
+- `dial9-core`: `ThreadLocalEncoder::write_event` returns `io::Result<()>` instead of panicking the calling thread on a validation failure; the event is dropped and callers own reporting ([#723](https://github.com/dial9-rs/dial9/pull/723)).
+- `dial9-core`: `Dial9Handle::is_enabled` now reports whether recording currently does anything (connected AND not paused), not just connectedness. Use `handle.shared().is_some()` to ask only whether the handle is connected ([#723](https://github.com/dial9-rs/dial9/pull/723)).
+
+
 ## [0.5.0-rc1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc0...dial9-v0.5.0-rc1) - 2026-07-24
 
 ### Other

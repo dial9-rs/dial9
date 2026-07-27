@@ -129,3 +129,13 @@ pub mod socket {
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
 pub use dial9_tokio_telemetry::tracing_layer;
+
+// Metrique unit-of-work entry sink.
+#[cfg(feature = "metrique-sink")]
+pub use dial9_metrique as metrique_sink;
+
+// The metrique field flags at the crate root, so `#[metrics(...)]`
+// attributes read as `flags(dial9::Interned)` / `flags(dial9::Skip)`
+// without imports.
+#[cfg(feature = "metrique-sink")]
+pub use dial9_metrique::{Interned, Skip};

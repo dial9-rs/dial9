@@ -186,6 +186,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
 - [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
+- [Metrique metrics](#metrique-metrics-opt-in): dial9 can record metrique unit-of-work metric entries alongside your EMF/JSON pipeline
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace
 
@@ -466,6 +467,67 @@ tracing_subscriber::registry()
 ```
 
 Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs ~300ns total (~50-100ns is dial9 encoding overhead).
+
+### Metrique metrics (opt-in)
+
+If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Each event is pinned to the thread and task that served the request, with start and end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
+
+**Enable the `metrique-sink` feature** (with `tokio` also on, events carry the task id; the sink itself does not need a tokio runtime):
+```toml
+[dependencies]
+dial9 = { version = "0.5", features = ["metrique-sink", "tokio"] }
+```
+
+**Opt an entry in and tee the stream:**
+```rust,ignore
+use dial9::metrique_sink::{Dial9Context, Dial9Stream};
+use metrique::unit_of_work::metrics;
+
+#[metrics(rename_all = "PascalCase")]
+struct RequestMetrics {
+    // Including a Dial9Context opts this entry into the trace.
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
+    #[metrics(flags(dial9::Interned))]
+    operation: &'static str,
+
+    latency_ms: u64,
+    success: bool,
+
+    // Keep bulky or high-cardinality fields out of the trace.
+    #[metrics(flags(dial9::Skip))]
+    debug_blob: String,
+}
+
+// dial9 as a peer of the existing pipeline. `tee` also keeps dial9's own
+// `dial9.` fields out of the EMF output:
+let _join = ServiceMetrics::attach_to_stream(
+    Dial9Stream::tee(&handle, emf_stream),
+);
+
+// Use normally.
+let mut m = RequestMetrics {
+    dial9: Dial9Context::capture(),
+    /* ... */
+};
+```
+
+Entries without a `Dial9Context` record nothing, so teeing the sink into an existing pipeline only picks up the entries you opt in.
+
+If adding a field to the entry is awkward (a shared struct, or dial9 support you want to switch from one place), attach the context from the outside instead and leave the struct alone:
+
+```rust,ignore
+use dial9::metrique_sink::Dial9EntryExt;
+
+// `append_on_drop_dial9` in place of `append_on_drop`; field access reaches
+// through the wrapper, so the rest of the call site is unchanged.
+let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
+    .append_on_drop_dial9(ServiceMetrics::sink());
+m.latency_ms = 5;
+```
+
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Entries the sink cannot describe are not recorded (hand-written `Entry` impls without a `descriptors()` impl, and entries containing `Flex` dynamic-key fields); histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

@@ -22,7 +22,10 @@ use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+use dial9::metrique_sink::Dial9Stream;
+use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
+use metrique::writer::AttachGlobalEntrySinkExt;
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
 
@@ -261,6 +264,19 @@ fn main() -> std::io::Result<()> {
         },
     )?;
 
+    // Per-request metrique entries (routes::RequestMetrics) flow into the
+    // dial9 trace AND a conventional metrics stream, the way a production
+    // service tees dial9 alongside its EMF pipeline. `Dial9Stream::tee`
+    // keeps the `dial9.*` context fields out of the conventional side.
+    let request_metrics_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&args.trace_path).join("request-metrics.log"))?;
+    let metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::tee(
+        recorder.handle(),
+        LocalFormat::new(OutputStyle::Pretty).output_to(request_metrics_file),
+    ));
+
     let _mem_guard = if args.no_memory_profiling {
         None
     } else {
@@ -369,8 +385,10 @@ fn main() -> std::io::Result<()> {
             .unwrap();
     });
 
-    // Drop the runtime first so worker threads flush their thread-local
-    // telemetry buffers, then drain the background worker.
+    // Shutdown order: drain the metrique queue into dial9, then drop the
+    // runtime so workers flush their thread-local buffers, then seal the
+    // trace.
+    drop(metrics_join);
     drop(runtime);
     recorder.graceful_shutdown(Duration::from_secs(5));
 

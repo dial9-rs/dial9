@@ -144,13 +144,11 @@ describe("flamegraph recipes", { timeout: 60_000 }, () => {
 
   // ── Recipe 4: Polls > N ms ──
   //
-  // PRE-EXISTING FAILURE (pre-ruled in the T11 ticket): this recipe finds no
-  // on-CPU samples inside >5ms polls in the COMMITTED demo trace, and already
-  // failed on the untouched lineage (verified by the T04 implementer against
-  // main; the suite was never registered in CI). Data-dependent on
-  // demo-trace.bin: a regenerated demo trace may legitimately make the recipe
-  // find samples again, at which point drop the `.fails` modifier.
-  it.fails("Recipe polls > 5ms", () => {
+  // Data-dependent on demo-trace.bin: requires at least one on-CPU sample
+  // inside a >5ms poll. Earlier committed traces lacked one (this carried
+  // `.fails` until the 2026-07 regen); if a future regen trips this, prefer
+  // regenerating under more load over reinstating `.fails`.
+  it("Recipe polls > 5ms", () => {
     const THRESHOLD_NS = 5_000_000;
     const longPolls: Poll[] = [];
     for (const wid of workerIds) {

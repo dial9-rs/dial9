@@ -40,6 +40,7 @@ dial9-core = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
 dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry", optional = true }
 dial9-macro = { workspace = true, optional = true }
+dial9-metrique = { workspace = true, optional = true }
 
 dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
@@ -80,6 +81,7 @@ tokio = [
     "dep:bon",
     "dep:tracing",
     "pipeline",
+    "dial9-metrique?/tokio",
 ]
 
 ## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
@@ -111,6 +113,10 @@ unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 ## Tracing-subscriber layer emitting span events into dial9 traces.
 tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
 
+## Metrique sink recording unit-of-work metric entries into dial9 traces.
+## Standalone; combine with the `tokio` feature to capture task ids.
+metrique-sink = ["dep:dial9-metrique"]
+
 ## Trace file reading + analysis toolkit (offline decode).
 analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
 
@@ -136,6 +142,7 @@ dial9 = { path = ".", features = [
     "process-resource",
     "linux-socket",
     "tracing-layer",
+    "metrique-sink",
     "unstable-events",
     "worker-s3",
 ] }
@@ -152,7 +159,7 @@ tokio = { version = "1", features = [
 tempfile = "3"
 flate2 = "1"
 clap = { version = "4", features = ["derive", "env"] }
-metrique = { version = "0.1.23", features = ["local-format"] }
+metrique = { version = "0.1.29", features = ["local-format"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -254,6 +261,10 @@ required-features = ["worker-s3"]
 [[example]]
 name = "tracing_sleep"
 required-features = ["tracing-layer"]
+
+[[example]]
+name = "metrique_metrics"
+required-features = ["metrique-sink", "tokio"]
 
 [[example]]
 name = "block_in_place_workload"
