@@ -1,7 +1,7 @@
 //! Caller-thread context capture for metrique entries.
 
 use dial9_core::clock::clock_monotonic_ns;
-use dial9_core::thread::current_tid;
+use dial9_core::thread::cached_tid;
 use metrique::CloseValue;
 use metrique::unit_of_work::metrics;
 
@@ -80,22 +80,12 @@ impl Dial9Context {
     /// calling thread is inside a tokio task; otherwise it is absent.
     pub fn capture() -> Self {
         Self {
-            thread_id: cached_tid(),
+            thread_id: u64::from(cached_tid()),
             task_id: current_task_id(),
             monotonic_ns_start: clock_monotonic_ns(),
             monotonic_ns_end: MonotonicAtClose,
         }
     }
-}
-
-/// The calling thread's OS thread id, read once per thread and cached: a
-/// thread's tid never changes, and `gettid` is a real syscall on the
-/// capture (request) path otherwise.
-fn cached_tid() -> u64 {
-    thread_local! {
-        static TID: u64 = u64::from(current_tid());
-    }
-    TID.with(|tid| *tid)
 }
 
 /// The current tokio task id, converted to the same `u64` dial9's runtime
