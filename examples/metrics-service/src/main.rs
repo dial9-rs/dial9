@@ -265,9 +265,17 @@ fn main() -> std::io::Result<()> {
     )?;
 
     // Per-request metrique entries (routes::RequestMetrics) flow into the
-    // dial9 trace. A production service would keep its EMF stream and use
-    // `Dial9Stream::tee(recorder.handle(), emf_stream)` instead.
-    let metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::new(recorder.handle()));
+    // dial9 trace AND a conventional metrics stream, the way a production
+    // service tees dial9 alongside its EMF pipeline. `Dial9Stream::tee`
+    // keeps the `dial9.*` context fields out of the conventional side.
+    let request_metrics_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&args.trace_path).join("request-metrics.log"))?;
+    let metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::tee(
+        recorder.handle(),
+        LocalFormat::new(OutputStyle::Pretty).output_to(request_metrics_file),
+    ));
 
     let _mem_guard = if args.no_memory_profiling {
         None
