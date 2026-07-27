@@ -72,6 +72,12 @@ impl<E: Entry> Entry for Filtered<'_, E> {
 /// descriptor-aware downstream sink sees a descriptor consistent with the
 /// filtered value stream.
 ///
+/// Only runs when the downstream sink asks for descriptors; the write-driven
+/// formats (EMF, JSON, the local format) never do. Callers are expected to
+/// call it once per entry, the way [`Dial9Stream`](super::Dial9Stream)
+/// consumes descriptors: the `Entry` contract hands out borrowed segments
+/// and gives implementations nowhere to cache, so every call rebuilds.
+///
 /// A segment covers one contiguous run of an entry's write output, and the
 /// context is always its own segment (a flatten site gets one; `Dial9Event`
 /// chains one), so dropping whole segments covers both supported shapes. A
@@ -84,23 +90,31 @@ fn filter_descriptors(descs: Descriptors<'_>) -> Descriptors<'_> {
         return Descriptors::Unavailable;
     };
 
-    let mut kept = Vec::with_capacity(available.len());
-    for seg in available.iter() {
-        let mut dial9 = 0usize;
-        let mut total = 0usize;
-        for field in seg.fields() {
-            total += 1;
-            if is_dial9_field(field.name_parts()) {
-                dial9 += 1;
-            }
-        }
-        if dial9 == 0 {
-            kept.push(seg.clone());
-        } else if dial9 != total {
-            return Descriptors::Unavailable;
-        }
+    // Classify and collect in one pass; `available` collects straight into
+    // the segment SmallVec.
+    let mut mixed = false;
+    let kept = Descriptors::available(
+        available
+            .iter()
+            .filter(|seg| {
+                let mut dial9 = 0usize;
+                let mut total = 0usize;
+                for field in seg.fields() {
+                    total += 1;
+                    if is_dial9_field(field.name_parts()) {
+                        dial9 += 1;
+                    }
+                }
+                mixed |= dial9 != 0 && dial9 != total;
+                dial9 == 0
+            })
+            .cloned(),
+    );
+
+    if mixed {
+        return Descriptors::Unavailable;
     }
-    Descriptors::available(kept)
+    kept
 }
 
 /// Whether a field's resolved name (prefixes then base name) is dial9-owned.

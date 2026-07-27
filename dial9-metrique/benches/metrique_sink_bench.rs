@@ -206,16 +206,43 @@ impl EntryIoStream for NullSink {
 
 /// Cost `WithoutDial9Fields` adds per entry on the other side of the tee.
 fn bench_filter(c: &mut Criterion) {
-    let entry = closed_entry();
+    // A context-free entry: both variants forward every field, so the
+    // delta is the filter's pure per-value overhead (a Cow conversion and
+    // a prefix check per field).
+    #[metrics(rename_all = "PascalCase")]
+    struct PlainMetrics {
+        route: String,
+        operation: &'static str,
+        latency_us: u64,
+        retries: Option<u64>,
+        success: bool,
+        load: f64,
+    }
+
+    let plain = metrique::RootEntry::new(metrique::CloseValue::close(PlainMetrics {
+        route: "/pets".to_owned(),
+        operation: "GetPet",
+        latency_us: 1500,
+        retries: Some(1),
+        success: true,
+        load: 0.4,
+    }));
 
     let mut bare = NullSink;
     c.bench_function("other_sink_bare", |b| {
-        b.iter(|| bare.next(black_box(&entry)).unwrap());
+        b.iter(|| bare.next(black_box(&plain)).unwrap());
     });
 
     let mut filtered = WithoutDial9Fields::new(NullSink);
     c.bench_function("other_sink_filtered", |b| {
-        b.iter(|| filtered.next(black_box(&entry)).unwrap());
+        b.iter(|| filtered.next(black_box(&plain)).unwrap());
+    });
+
+    // With a context present the filter also swallows the four dial9
+    // callbacks, doing less downstream work than the bare variant.
+    let with_ctx = closed_entry();
+    c.bench_function("other_sink_filtered_with_context", |b| {
+        b.iter(|| filtered.next(black_box(&with_ctx)).unwrap());
     });
 }
 
