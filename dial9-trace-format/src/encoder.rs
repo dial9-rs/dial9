@@ -98,7 +98,8 @@ pub type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 /// itself with any encoder on first use. This means a `Schema` created on one
 /// encoder can be passed to a different encoder and it will just work.
 ///
-/// `Schema` is cheap to clone (internally `Arc`-backed).
+/// `Schema` is cheap to clone (internally `Arc`-backed). Create it once and
+/// reuse it across events; see [`Encoder::write_event`].
 #[derive(Clone, Debug)]
 pub struct Schema {
     pub(crate) entry: Arc<SchemaEntry>,
@@ -421,6 +422,12 @@ impl<W: Write> Encoder<W> {
     ///
     /// If this encoder hasn't seen `schema` before, it is auto-registered
     /// (the schema frame is written before the event).
+    ///
+    /// # Performance
+    ///
+    /// Create the `Schema` once and reuse it (or clones of it) across events.
+    /// Reused handles hit an identity cache; a fresh handle per event falls
+    /// back to registration by name (hash and compare) on every write.
     pub fn write_event(
         &mut self,
         schema: &Schema,
