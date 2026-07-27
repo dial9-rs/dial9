@@ -170,7 +170,10 @@ export function mountLaneInteraction(
             regionWorkerZoom: [],
             regionOffworkerZoom: [],
           });
-          store.update("selection", { sidebarRange: { startNs: cmd.startNs, endNs: cmd.endNs } });
+          store.update("selection", {
+            sidebarRange: { startNs: cmd.startNs, endNs: cmd.endNs },
+            taskDump: null,
+          });
         }
         return;
       case "cursor":
@@ -256,7 +259,12 @@ export function mountLaneInteraction(
     const mouseXCol = e.clientX - geom.rectLeft;
     // Any lanes click clears the pinned custom-event marker.
     if (mouseXCol < LABEL_W || mouseXCol > LABEL_W + geom.drawW) {
-      store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
+      store.update("selection", {
+        selectedTaskId: null,
+        pinnedEvent: null,
+        pollDetail: null,
+        taskDump: null,
+      });
       return;
     }
     // A click on a runtime header band folds/unfolds that runtime - never a
@@ -269,7 +277,12 @@ export function mountLaneInteraction(
     const ns = geom.layout.panelXToNs(mouseXCol);
     const workerId = workerAtClientY(e.clientY, data);
     if (workerId === null) {
-      store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
+      store.update("selection", {
+        selectedTaskId: null,
+        pinnedEvent: null,
+        pollDetail: null,
+        taskDump: null,
+      });
       return;
     }
     const polls = data.workerSpans[workerId]?.polls ?? [];
@@ -292,6 +305,7 @@ export function mountLaneInteraction(
       // Detail. `openStackFor` is null in both no-sample cases, so this
       // dispatch doubles as the close.
       pollDetail: result.openStackFor,
+      taskDump: null,
     });
   }
 

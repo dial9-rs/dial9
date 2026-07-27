@@ -20,6 +20,9 @@ pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ t
 pkg-fmt = "tgz"
 bin-dir = "dial9{ binary-ext }"
 
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "dial9"
 path = "src/main.rs"

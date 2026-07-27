@@ -26,6 +26,7 @@ function mkState(over: {
       focusedSpanId: null,
       pinnedEvent: null,
       pollDetail: null,
+      taskDump: null,
       sidebarRange: null,
       hoveredWakerTaskId: null,
       spawnedTasksRange: null,

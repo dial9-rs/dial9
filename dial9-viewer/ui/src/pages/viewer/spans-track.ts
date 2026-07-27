@@ -237,6 +237,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
       focusedSpanId: spanId,
       spanFocus: { spanId, chain },
       pinnedEvent: null,
+      taskDump: null,
     };
     if (taskId !== null) patch.selectedTaskId = taskId;
     store.update("selection", patch);
@@ -248,6 +249,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
       spanFocus: null,
       selectedTaskId: null,
       pinnedEvent: null,
+      taskDump: null,
     });
   }
 
@@ -269,6 +271,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     store.update("view", { spanNavIndex: navIndex });
     store.update("selection", {
       spanFocus: { spanId: span.spanId, chain: spanFocusChain(span.spanId, data) },
+      taskDump: null,
     });
   }
 

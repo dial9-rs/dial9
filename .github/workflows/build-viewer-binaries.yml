@@ -1,0 +1,115 @@
+name: Build viewer binaries
+
+# Builds the dial9-viewer and dial9 binaries for a tag and uploads them
+# to that tag's GitHub release.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build from and upload assets to"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build for (e.g. dial9-viewer-v0.5.0-rc1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+
+    steps:
+      # Archive names carry the bare version, not the crate-name prefix.
+      - name: Resolve version
+        id: r
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: echo "version=${TAG#dial9-viewer-}" >> "$GITHUB_OUTPUT"
+
+      # Build the tagged commit, not a branch head: the branch can move between
+      # release-plz publishing and this job starting.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dial9-viewer/ui/package-lock.json
+
+      # rust-embed embeds ui/dist into dial9-viewer at compile time.
+      - name: Build viewer UI
+        working-directory: dial9-viewer/ui
+        shell: bash
+        run: npm ci && npm run build
+
+      # The dial9 binary is behind the `cli` feature; build it on its own with
+      # the feature (a multi-package `--features dial9/cli` doesn't enable it).
+      - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+      - run: cargo build --release --target ${{ matrix.target }} -p dial9 --features cli
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
+
+      # x86_64-apple-darwin is cross-built on the arm runner and runs under
+      # Rosetta, which the macos-latest image provides.
+      - name: Smoke-test the dial9 binary
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/dial9"
+          [ "${{ matrix.archive }}" = "zip" ] && bin="${bin}.exe"
+          "$bin" --help
+
+      - name: Package (Unix)
+        if: ${{ matrix.archive == 'tar.gz' }}
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ../../../dial9-viewer-${{ matrix.target }}-${{ steps.r.outputs.version }}.tar.gz dial9-viewer dial9
+
+      - name: Package (Windows)
+        if: ${{ matrix.archive == 'zip' }}
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path dial9-viewer.exe,dial9.exe -DestinationPath ../../../dial9-viewer-${{ matrix.target }}-${{ steps.r.outputs.version }}.zip
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: dial9-viewer-${{ matrix.target }}-${{ steps.r.outputs.version }}.${{ matrix.archive }}

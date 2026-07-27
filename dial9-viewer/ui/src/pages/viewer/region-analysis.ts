@@ -695,6 +695,7 @@ export function createRegionAnalysis(
       sidebarRange: { startNs: vp.minTs, endNs: vp.maxTs },
       pinnedEvent: null,
       pollDetail: null,
+      taskDump: null,
       spawnedTasksRange: null,
     });
   }

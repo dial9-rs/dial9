@@ -184,18 +184,25 @@ function boot(): void {
       const j = poiJump(r.nav.poi, vp);
       store.update("viewport", { viewStart: j.viewStart, viewEnd: j.viewEnd });
       if (j.selectedTaskId !== null) {
-        store.update("selection", { selectedTaskId: j.selectedTaskId });
+        store.update("selection", {
+          selectedTaskId: j.selectedTaskId,
+          taskDump: null,
+        });
       }
       return;
     }
     const win = searchWindow(r.nav.startNs, r.nav.endNs, vp.minTs, vp.maxTs);
     store.update("viewport", { viewStart: win.start, viewEnd: win.end });
     if (r.nav.kind === "task") {
-      store.update("selection", { selectedTaskId: r.nav.taskId });
+      store.update("selection", {
+        selectedTaskId: r.nav.taskId,
+        taskDump: null,
+      });
     } else {
       store.update("selection", {
         spanFocus: { spanId: r.nav.spanId, chain: new Set([r.nav.spanId]) },
         focusedSpanId: r.nav.spanId,
+        taskDump: null,
       });
     }
   }
@@ -302,6 +309,7 @@ function boot(): void {
         spanFocus: null,
         focusedSpanId: null,
         pinnedEvent: null,
+        taskDump: null,
       });
     },
     // Flush the debounced URL write so copy-link copies the live state. Local

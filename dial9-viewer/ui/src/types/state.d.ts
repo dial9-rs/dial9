@@ -115,6 +115,18 @@ export interface SpanFocus {
 }
 
 /**
+ * Async stack captures selected by clicking a dump-bearing idle span in the
+ * task-detail track. Store semantic timestamps rather than trace-owned objects
+ * so a reparse resolves against the replacement trace.
+ */
+export interface TaskDumpSelection {
+  /** Task whose idle span produced these captures. */
+  taskId: number;
+  /** Capture timestamps attributed to the clicked idle span. */
+  timestamps: readonly number[];
+}
+
+/**
  * Cross-highlight state. All fields are independently clearable, hence all
  * explicitly nullable.
  */
@@ -138,6 +150,11 @@ export interface SelectionSlice {
    * groups from it.
    */
   pollDetail: PollSpan | null;
+  /**
+   * Task-dump captures shown in the Stack inspector after clicking a dumped
+   * idle span in the task-detail track.
+   */
+  taskDump: TaskDumpSelection | null;
   /**
    * Range retained while the sidebar shows a region analysis (region
    * select -> flamegraph/blocking calls); blocks keyboard selection until

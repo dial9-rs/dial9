@@ -440,6 +440,7 @@ export function dispatchEventPin(
     selectedTaskId: null,
     spanFocus: null,
     focusedSpanId: null,
+    taskDump: null,
   });
 }
 
