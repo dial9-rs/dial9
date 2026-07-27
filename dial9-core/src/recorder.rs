@@ -558,10 +558,23 @@ mod tests {
             !recorder.shared().expect("live recorder").is_enabled(),
             "paused() must leave recording off"
         );
+        // The handle tells the truth: connected but paused reports disabled.
+        assert!(
+            !recorder.handle().is_enabled(),
+            "a paused handle must report disabled"
+        );
+        assert!(
+            recorder.handle().shared().is_some(),
+            "a paused handle is still connected"
+        );
         recorder.enable();
         assert!(
             recorder.shared().expect("live recorder").is_enabled(),
             "recording on after enable()"
+        );
+        assert!(
+            recorder.handle().is_enabled(),
+            "handle enabled after enable()"
         );
     }
 

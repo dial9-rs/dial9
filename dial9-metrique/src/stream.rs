@@ -159,7 +159,7 @@ impl EntryIoStream for Dial9Stream {
         // Also short-circuits a connected-but-paused recorder: descriptor
         // identification and plan lookup are wasted work when the encode
         // below would be skipped anyway.
-        if !self.handle.is_recording() {
+        if !self.handle.is_enabled() {
             return Ok(());
         }
         self.maybe_report();

@@ -1368,7 +1368,7 @@ fn paused_recorder_records_nothing_until_resumed() {
 
     let mut stream = Dial9Stream::new(recorder.handle());
     // Connected but paused: the entry must be skipped (before plan work
-    // even happens; see `is_recording` in `next`).
+    // even happens; see `is_enabled` in `next`).
     recorder.disable();
     feed_entry!(stream, sample_request(None));
 
