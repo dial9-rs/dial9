@@ -94,6 +94,7 @@ export interface ViewState {
    * it (a task's poll at a given start is unique). Re-resolved on load.
    */
   pollAnchor?: string;
+  taskDumpAnchor?: string;
   /** Pinned-event anchor: the cluster timestamp ns (re-resolved on load). */
   pinnedEventTs?: number;
   /** Retained region (`"startNs-endNs"`) -> selection.sidebarRange. */
@@ -144,6 +145,7 @@ export interface ViewState {
   regionGroupBy?: string;
   regionWorkerZoom?: readonly string[];
   regionOffworkerZoom?: readonly string[];
+  regionInspectFocus?: string;
   /** Span match navigation cursor. */
   spanNavIndex?: number;
   /** Active parse filter, distinct from the viewport window. */

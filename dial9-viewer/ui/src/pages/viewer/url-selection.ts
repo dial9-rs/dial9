@@ -20,6 +20,7 @@ import {
   type FocusCandidate,
   type FocusLink,
 } from "./focus-link.js";
+import { resolveTaskDumpCaptures } from "./inspector-model.js";
 
 
 /**
@@ -157,6 +158,20 @@ export function resolveUrlSelection(
         patch.pollDetail = poll;
         break;
       }
+    }
+  }
+
+  if (url.taskDump !== undefined) {
+    const selection = {
+      taskId: url.taskDump.taskId,
+      timestamps: url.taskDump.timestamps,
+    };
+    const captures = resolveTaskDumpCaptures(trace, selection);
+    if (captures.length > 0) {
+      patch.taskDump = {
+        taskId: selection.taskId,
+        timestamps: captures.map((dump) => dump.timestamp),
+      };
     }
   }
 

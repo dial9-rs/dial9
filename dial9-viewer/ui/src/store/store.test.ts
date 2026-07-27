@@ -85,6 +85,7 @@ function initialViewerState(): StoreState {
       regionGroupBy: "leaf",
       regionWorkerZoom: [],
       regionOffworkerZoom: [],
+      regionInspectFocus: null,
       spanNavIndex: -1,
     },
     transient: { mouseNs: null, hoverEventTs: null, drag: null, keyboardSelection: null, atCursor: null },

@@ -37,6 +37,8 @@ import {
   projectViewerState,
   mirrorViewerToQuery,
   readViewerUrlState,
+  hydrateViewerStore,
+  VIEWER_URL_SLICES,
 } from "./url-state.js";
 import { resolveFocusLink, resolveUrlSelection } from "./url-selection.js";
 import { focusWindow, readFocusLink } from "./focus-link.js";
@@ -45,7 +47,6 @@ import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
 import { taskIndexFor } from "./tasks-model.js";
-import type { StoreState } from "../../types/state.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
 // <head> auto-boot is a no-op on this off-root new-UI path.
@@ -86,76 +87,7 @@ function boot(): void {
     search: window.location.search,
     hash: window.location.hash,
   });
-  const bootPrefs: Partial<StoreState["uiPrefs"]> = {};
-  if (urlHash.timeMode !== undefined) bootPrefs.timeMode = urlHash.timeMode;
-  if (urlHash.timeZone !== undefined) bootPrefs.tz = urlHash.timeZone;
-  if (urlView.spanFilter !== undefined) bootPrefs.spanFilter = urlView.spanFilter;
-  if (urlView.trackOrder !== undefined) bootPrefs.trackOrder = urlView.trackOrder;
-  if (urlView.collapsed !== undefined) {
-    bootPrefs.collapsed = Object.fromEntries(
-      urlView.collapsed.map((id) => [id, true]),
-    );
-  }
-  if (urlView.spanPct !== undefined) bootPrefs.spanPctFilter = urlView.spanPct;
-  if (urlView.spanNames !== undefined) {
-    bootPrefs.selectedSpanNames = new Set(urlView.spanNames);
-  }
-  if (urlView.eventNames !== undefined) {
-    bootPrefs.selectedEventNames = new Set(urlView.eventNames);
-  }
-  if (urlView.collapsedRuntimes !== undefined) {
-    bootPrefs.collapsedRuntimes = Object.fromEntries(
-      urlView.collapsedRuntimes.map((name) => [name, true]),
-    );
-  }
-  if (urlView.inspectorWidth !== undefined) bootPrefs.sidebarWidth = urlView.inspectorWidth;
-  if (urlView.lanesHeight !== undefined) bootPrefs.lanesViewportHeight = urlView.lanesHeight;
-  if (urlView.lanesScrollTop !== undefined) bootPrefs.lanesScrollTop = urlView.lanesScrollTop;
-  if (urlView.stacksAsFlamegraph !== undefined) {
-    bootPrefs.stacksAsFlamegraph = urlView.stacksAsFlamegraph;
-  }
-  if (Object.keys(bootPrefs).length > 0) store.update("uiPrefs", bootPrefs);
-
-  const viewPatch: Partial<StoreState["view"]> = {};
-  if (urlView.inspectorTab !== undefined) viewPatch.inspectorTab = urlView.inspectorTab;
-  if (urlView.pollSection !== undefined) viewPatch.pollFlamegraphSection = urlView.pollSection;
-  if (urlView.expandedPollGroups !== undefined) {
-    viewPatch.expandedPollGroups = new Set(urlView.expandedPollGroups);
-  }
-  if (urlView.pollWorkerZoom !== undefined) viewPatch.pollWorkerZoom = urlView.pollWorkerZoom;
-  if (urlView.pollOffworkerZoom !== undefined) viewPatch.pollOffworkerZoom = urlView.pollOffworkerZoom;
-  if (urlView.relatedCollapsed !== undefined) {
-    viewPatch.relatedCollapsed = Object.fromEntries(
-      urlView.relatedCollapsed.map((title) => [title, true]),
-    );
-  }
-  if (urlView.relatedExpand !== undefined) viewPatch.relatedExpand = urlView.relatedExpand;
-  if (urlView.relatedCorrelate !== undefined) viewPatch.relatedCorrelate = urlView.relatedCorrelate;
-  if (urlView.regionMode !== undefined) viewPatch.regionMode = urlView.regionMode;
-  if (urlView.regionHeapMode !== undefined) viewPatch.regionHeapMode = urlView.regionHeapMode;
-  if (urlView.regionGroupBy !== undefined) viewPatch.regionGroupBy = urlView.regionGroupBy;
-  if (urlView.regionWorkerZoom !== undefined) viewPatch.regionWorkerZoom = urlView.regionWorkerZoom;
-  if (urlView.regionOffworkerZoom !== undefined) viewPatch.regionOffworkerZoom = urlView.regionOffworkerZoom;
-  if (urlView.spanNavIndex !== undefined) viewPatch.spanNavIndex = urlView.spanNavIndex;
-  if (Object.keys(viewPatch).length > 0) store.update("view", viewPatch);
-
-  // Issues-rail restore. Filter/sort/index are plain values (index maps into
-  // the trace-derived list once it exists, so setting it now is safe); no part
-  // needs the trace to be valid.
-  const poiPatch: Partial<StoreState["poi"]> = {};
-  if (urlView.poiFilter !== undefined) poiPatch.filter = urlView.poiFilter;
-  if (urlView.poiSort !== undefined) {
-    poiPatch.sortKey = urlView.poiSort.key;
-    poiPatch.sortDir = urlView.poiSort.dir;
-  }
-  if (urlView.poiIndex !== undefined) poiPatch.index = urlView.poiIndex;
-  if (urlView.railTab !== undefined) poiPatch.railTab = urlView.railTab;
-  if (urlView.taskSort !== undefined) {
-    poiPatch.taskSort = urlView.taskSort.key;
-    poiPatch.taskSortDir = urlView.taskSort.dir;
-  }
-  if (urlView.taskIndex !== undefined) poiPatch.taskIndex = urlView.taskIndex;
-  if (Object.keys(poiPatch).length > 0) store.update("poi", poiPatch);
+  hydrateViewerStore(store, urlView, urlHash);
 
   // The URL sync binding, assigned after mount; forward-referenced by the
   // status bar's copy-link flush so a copy always reflects the live state.
@@ -465,7 +397,7 @@ function boot(): void {
   // Registered last so the boot-time restore above does not fight it; the
   // copy-link button flushes it first (beforeCopyLink) so a copy is current.
   urlBinding = bindViewStateToUrl(store, {
-    slices: ["trace", "viewport", "selection", "uiPrefs", "poi", "view"],
+    slices: VIEWER_URL_SLICES,
     project: projectViewerState,
     mirrorToQuery: mirrorViewerToQuery,
   });

@@ -2,10 +2,13 @@ import { describe, it, expect } from "vitest";
 import type { ReadonlyState } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import {
+  hydrateViewerStore,
   projectViewerState,
   mirrorViewerToQuery,
   readViewerUrlState,
+  VIEWER_URL_SLICES,
 } from "./url-state.js";
+import { createViewerStore } from "./store.js";
 
 // A store shape carrying only the slices projectViewerState reads. The other
 // slices are irrelevant to the projection, so a partial cast keeps the fixture
@@ -73,6 +76,7 @@ function mkState(over: {
       regionGroupBy: "leaf",
       regionWorkerZoom: [],
       regionOffworkerZoom: [],
+      regionInspectFocus: null,
       spanNavIndex: -1,
       ...over.view,
     },
@@ -153,6 +157,40 @@ describe("viewer URL state: focused span", () => {
     const { params, out } = roundTrip(mkState({ selection: { focusedSpanId: "0xabc" } }));
     expect(params.get("span-focus")).toBe("0xabc");
     expect(out.focusedSpanId).toBe("0xabc");
+  });
+});
+
+describe("viewer URL state: task dump", () => {
+  it("round-trips the selected task and capture timestamps", () => {
+    const { params, out } = roundTrip(
+      mkState({
+        selection: {
+          selectedTaskId: 7,
+          taskDump: { taskId: 7, timestamps: [101, 205] },
+        },
+        view: { inspectorTab: "stack" },
+      }),
+    );
+    expect(params.get("task-dump")).toBe("7:101,205");
+    expect(out.taskDump).toEqual({ taskId: 7, timestamps: [101, 205] });
+  });
+});
+
+describe("viewer URL state: embedded flamegraph focus", () => {
+  it("round-trips a region flamegraph inspect focus", () => {
+    const { params, out } = roundTrip(
+      mkState({
+        view: {
+          regionInspectFocus: "tokio::runtime::task::harness::poll_future",
+        },
+      }),
+    );
+    expect(params.get("analysis-inspect")).toBe(
+      "tokio::runtime::task::harness::poll_future",
+    );
+    expect(out.regionInspectFocus).toBe(
+      "tokio::runtime::task::harness::poll_future",
+    );
   });
 });
 
@@ -289,5 +327,44 @@ describe("viewer URL state: constructible and strict values", () => {
     const params = new URLSearchParams();
     mirrorViewerToQuery(params, projectViewerState(state));
     expect(params.get("inspector")).toBe("task");
+  });
+});
+
+describe("viewer URL state: store hydration", () => {
+  it("applies decoded durable controls through one boot entry point", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    const decoded = readViewerUrlState(
+      "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
+        "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
+        "&stack-view=flame&inspector-width=444",
+    );
+
+    hydrateViewerStore(store, decoded, {
+      timeMode: "abs",
+      timeZone: "local",
+    });
+
+    expect(store.getState().poi).toMatchObject({
+      railTab: "tasks",
+      taskSort: "lifetime",
+      taskSortDir: "asc",
+    });
+    expect(store.getState().uiPrefs).toMatchObject({
+      timeMode: "abs",
+      tz: "local",
+      stacksAsFlamegraph: true,
+      sidebarWidth: 444,
+    });
+    expect(store.getState().view).toMatchObject({
+      inspectorTab: "stack",
+      regionMode: "cpu",
+      regionInspectFocus: "tokio::poll",
+    });
+  });
+
+  it("derives the binding slices from field ownership", () => {
+    expect([...VIEWER_URL_SLICES].sort()).toEqual(
+      ["trace", "viewport", "selection", "poi", "uiPrefs", "view"].sort(),
+    );
   });
 });

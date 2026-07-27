@@ -366,6 +366,8 @@ export interface ViewerViewSlice {
   regionGroupBy: "leaf" | "full";
   regionWorkerZoom: readonly string[];
   regionOffworkerZoom: readonly string[];
+  /** Butterfly/inspect focus in the region flamegraph, by full frame key. */
+  regionInspectFocus: string | null;
   /** Current next/previous cursor in the filtered span list. */
   spanNavIndex: number;
 }

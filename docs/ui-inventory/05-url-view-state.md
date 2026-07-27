@@ -124,10 +124,18 @@ is `src/lib/url/legacy-params.fixture.ts`.
 The migrated viewer serializes settled state that changes the durable
 analytical view: semantic selections, visible windows and parse bounds, active
 analytical surfaces, filters/sorts/cursors, disclosures, layout, lane position,
-and embedded flamegraph zoom paths. It deliberately excludes pointer hover and
+and embedded flamegraph zoom/inspect focus. It deliberately excludes pointer hover and
 tooltips, in-flight drag/keyboard gestures, temporary search/help modals, load
 progress/timers, toasts/check flashes, and zoom undo history. These values are
 interaction process, not the resulting analytical view.
+
+`VIEWER_STATE_OWNERSHIP` in `src/pages/viewer/url-state.ts` is the exhaustive
+store-field gate. Adding a field to any viewer store slice fails TypeScript
+until it is classified as URL-owned, derived, source, transient, or retired.
+URL-owned fields name their query/hash keys there; the query registry and URL
+binding slice list are derived from that matrix. Boot-time application goes
+through `hydrateViewerStore`; trace-dependent anchors go through
+`resolveUrlSelection` after load.
 
 Trace-dependent anchors are restored only after the first trace load. An anchor
 that does not exist in the loaded trace is ignored without invalidating other
@@ -137,14 +145,15 @@ demo sources rather than copying a URL that cannot reproduce the loaded data.
 
 ## Extending in chunk 2 (checklist)
 
-1. Add the key to the registry table above with its value grammar.
-2. Add the field to `ViewState` + `KNOWN_KEYS` + encode/decode in
+1. Add the store field and classify it in `VIEWER_STATE_OWNERSHIP`. For a
+   durable field, name its query/hash keys there.
+2. Add the key to the registry table above with its value grammar.
+3. Add the field to `ViewState` + `KNOWN_KEYS` + encode/decode in
    `view-state.ts` (drop invalid values on decode; omit empty on encode).
-3. Wire the owning page: project the store slice in its
-   `bindViewStateToUrl` call; restore on load BEFORE binding effects (and
-   outside the store update path, so restoring writes nothing).
-4. No version bump. Old links: the field is simply absent - the page
+4. Wire projection/parsing in `url-state.ts`; apply trace-independent state in
+   `hydrateViewerStore` or semantic trace anchors in `resolveUrlSelection`.
+5. No version bump. Old links: the field is simply absent - the page
    falls back to its defaults; the JS reader must tolerate absence.
-5. Round-trip cases in the codec property test; a restore case in the
+6. Round-trip cases in the codec property test; a restore case in the
    owning page's test; extend J9 (or add a page journey) if the state is
    observable in a readout.

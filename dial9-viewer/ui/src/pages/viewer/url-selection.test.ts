@@ -93,3 +93,34 @@ describe("URL range selection restoration", () => {
     expect(patch.spawnedTasksRange).toEqual({ startNs: 150, endNs: 200 });
   });
 });
+
+describe("URL task-dump restoration", () => {
+  beforeEach(() => deriveLaneDataMock.mockReset());
+
+  it("keeps only capture timestamps present for the anchored task", () => {
+    deriveLaneDataMock.mockReturnValue({
+      columnarSpans: undefined,
+      spanByIdSingle: new Map(),
+      workerIds: [],
+      workerSpans: {},
+    } as unknown as LaneData);
+    const withDumps = {
+      customEvents: [],
+      taskDumps: new Map([
+        [
+          7,
+          [
+            { timestamp: 101, callchain: ["a"] },
+            { timestamp: 205, callchain: ["b"] },
+          ],
+        ],
+      ]),
+    } as unknown as ParsedTrace;
+
+    const patch = resolveUrlSelection(withDumps, {
+      taskDump: { taskId: 7, timestamps: [101, 999] },
+    });
+
+    expect(patch.taskDump).toEqual({ taskId: 7, timestamps: [101] });
+  });
+});

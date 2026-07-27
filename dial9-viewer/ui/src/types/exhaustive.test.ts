@@ -212,6 +212,7 @@ const initialState: StoreState = {
     regionGroupBy: "full",
     regionWorkerZoom: ["root", "alloc"],
     regionOffworkerZoom: [],
+    regionInspectFocus: "alloc::slow",
     spanNavIndex: 3,
   },
   transient: {

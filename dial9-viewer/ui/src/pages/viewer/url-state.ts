@@ -9,9 +9,10 @@
 // the same window but keeps the full trace and can zoom out (distinct from Set
 // Range, which reduces the resident data).
 
-import type { ReadonlyState } from "../../store/store.js";
+import type { ReadonlyState, ViewerStore } from "../../store/store.js";
 import type {
   StoreState,
+  StoreSliceName,
   PoiSortKey,
   TaskSortKey,
   InspectorTab,
@@ -31,6 +32,7 @@ const P_COLLAPSED = "collapsed";
 const P_SPAN = "span";
 const P_SPAN_FOCUS = "span-focus";
 const P_POLL = "poll";
+const P_TASK_DUMP = "task-dump";
 const P_EVENT = "event";
 const P_REGION = "region";
 const P_SPAWNED = "spawned";
@@ -62,6 +64,7 @@ const P_HEAP_WEIGHT = "heap-weight";
 const P_BLOCKING_GROUP = "blocking-group";
 const P_ANALYSIS_WORKER_ZOOM = "analysis-worker-zoom";
 const P_ANALYSIS_OFFWORKER_ZOOM = "analysis-offworker-zoom";
+const P_ANALYSIS_INSPECT = "analysis-inspect";
 const P_SPAN_INDEX = "span-index";
 const P_DATA_START = "data-start";
 const P_DATA_END = "data-end";
@@ -71,22 +74,127 @@ const POI_SORT_KEYS: readonly PoiSortKey[] = ["worker", "kind", "time", "duratio
 /** Valid span percentile-filter steps (0/All is the default, never emitted). */
 const SPAN_PCTS: readonly number[] = [50, 90, 95, 99];
 
-/** Stable readable query vocabulary owned only by `/new/viewer.html`. */
-export const VIEWER_VIEW_QUERY_PARAMS: readonly string[] = [
-  P_START, P_END, P_TASK, P_SPAN_FILTER, P_TRACK_ORDER, P_COLLAPSED,
-  P_SPAN, P_SPAN_FOCUS, P_POLL, P_EVENT, P_REGION, P_SPAWNED,
-  P_ISSUE, P_ISSUE_SORT, P_ISSUE_INDEX, P_SPAN_PCT, P_SPAN_NAMES,
-  P_EVENT_NAMES, P_RAIL_TAB, P_TASK_SORT, P_TASK_INDEX,
-  P_RUNTIME_COLLAPSED, P_INSPECTOR_WIDTH, P_LANES_HEIGHT, P_LANES_SCROLL,
-  P_STACK_VIEW, P_INSPECTOR_TAB, P_POLL_SECTION, P_POLL_EXPANDED,
-  P_POLL_WORKER_ZOOM, P_POLL_OFFWORKER_ZOOM, P_RELATED_COLLAPSED,
-  P_RELATED_EXPAND, P_RELATED_KEY, P_RELATED_VALUE, P_ANALYSIS,
-  P_HEAP_WEIGHT, P_BLOCKING_GROUP, P_ANALYSIS_WORKER_ZOOM,
-  P_ANALYSIS_OFFWORKER_ZOOM, P_SPAN_INDEX, P_DATA_START, P_DATA_END,
-];
 const TASK_SORT_KEYS: readonly TaskSortKey[] = ["id", "loc", "polls", "total", "longest", "lifetime"];
 const INSPECTOR_TABS: readonly InspectorTab[] = ["task", "poll", "event", "related", "stack"];
 const REGION_MODES: readonly RegionAnalysisMode[] = ["cpu", "blocking", "heap"];
+
+type FieldOwnership =
+  | { readonly kind: "url"; readonly params: readonly string[] }
+  | { readonly kind: "derived" | "source" | "transient" | "retired" };
+type StateOwnership = {
+  readonly [S in keyof StoreState]: {
+    readonly [F in keyof StoreState[S]]: FieldOwnership;
+  };
+};
+
+const url = (...params: string[]): FieldOwnership => ({ kind: "url", params });
+const derived: FieldOwnership = { kind: "derived" };
+const source: FieldOwnership = { kind: "source" };
+const transient: FieldOwnership = { kind: "transient" };
+const retired: FieldOwnership = { kind: "retired" };
+
+/**
+ * Exhaustive ownership gate for the viewer store. Adding any store field fails
+ * TypeScript until the author classifies it here. Durable fields must name
+ * their URL keys; non-durable fields must state why they are excluded.
+ */
+export const VIEWER_STATE_OWNERSHIP = {
+  trace: {
+    trace: url(P_DATA_START, P_DATA_END),
+  },
+  viewport: {
+    viewStart: url(P_START),
+    viewEnd: url(P_END),
+    minTs: derived,
+    maxTs: derived,
+  },
+  selection: {
+    selectedTaskId: url(P_TASK),
+    spanFocus: url(P_SPAN),
+    focusedSpanId: url(P_SPAN_FOCUS),
+    pinnedEvent: url(P_EVENT),
+    pollDetail: url(P_POLL),
+    taskDump: url(P_TASK_DUMP),
+    sidebarRange: url(P_REGION),
+    hoveredWakerTaskId: transient,
+    spawnedTasksRange: url(P_SPAWNED),
+  },
+  poi: {
+    filter: url(P_ISSUE),
+    sortKey: url(P_ISSUE_SORT),
+    sortDir: url(P_ISSUE_SORT),
+    index: url(P_ISSUE_INDEX),
+    railTab: url(P_RAIL_TAB),
+    taskSort: url(P_TASK_SORT),
+    taskSortDir: url(P_TASK_SORT),
+    taskIndex: url(P_TASK_INDEX),
+  },
+  uiPrefs: {
+    panelCollapsed: retired,
+    trackOrder: url(P_TRACK_ORDER),
+    collapsed: url(P_COLLAPSED),
+    collapsedRuntimes: url(P_RUNTIME_COLLAPSED),
+    sidebarWidth: url(P_INSPECTOR_WIDTH),
+    lanesViewportHeight: url(P_LANES_HEIGHT),
+    lanesScrollTop: url(P_LANES_SCROLL),
+    selectedSpanNames: url(P_SPAN_NAMES),
+    selectedEventNames: url(P_EVENT_NAMES),
+    spanFilter: url(P_SPAN_FILTER),
+    spanPctFilter: url(P_SPAN_PCT),
+    timeMode: url("#tm"),
+    tz: url("#tz"),
+    stacksAsFlamegraph: url(P_STACK_VIEW),
+  },
+  view: {
+    inspectorTab: url(P_INSPECTOR_TAB),
+    expandedPollGroups: url(P_POLL_EXPANDED),
+    pollFlamegraphSection: url(P_POLL_SECTION),
+    pollWorkerZoom: url(P_POLL_WORKER_ZOOM),
+    pollOffworkerZoom: url(P_POLL_OFFWORKER_ZOOM),
+    relatedCollapsed: url(P_RELATED_COLLAPSED),
+    relatedExpand: url(P_RELATED_EXPAND),
+    relatedCorrelate: url(P_RELATED_KEY, P_RELATED_VALUE),
+    regionMode: url(P_ANALYSIS),
+    regionHeapMode: url(P_HEAP_WEIGHT),
+    regionGroupBy: url(P_BLOCKING_GROUP),
+    regionWorkerZoom: url(P_ANALYSIS_WORKER_ZOOM),
+    regionOffworkerZoom: url(P_ANALYSIS_OFFWORKER_ZOOM),
+    regionInspectFocus: url(P_ANALYSIS_INSPECT),
+    spanNavIndex: url(P_SPAN_INDEX),
+  },
+  transient: {
+    mouseNs: transient,
+    hoverEventTs: transient,
+    drag: transient,
+    keyboardSelection: transient,
+    atCursor: transient,
+  },
+  segments: {
+    segments: source,
+  },
+} satisfies StateOwnership;
+
+function urlOwnedSlices(): StoreSliceName[] {
+  return (Object.keys(VIEWER_STATE_OWNERSHIP) as StoreSliceName[]).filter(
+    (slice) =>
+      Object.values(VIEWER_STATE_OWNERSHIP[slice]).some(
+        (field) => field.kind === "url",
+      ),
+  );
+}
+
+/** Store slices that can change the shareable analytical view. */
+export const VIEWER_URL_SLICES: readonly StoreSliceName[] = urlOwnedSlices();
+
+/** Stable readable query vocabulary owned only by `/new/viewer.html`. */
+export const VIEWER_VIEW_QUERY_PARAMS: readonly string[] = [
+  ...new Set(
+    Object.values(VIEWER_STATE_OWNERSHIP)
+      .flatMap((slice) => Object.values(slice))
+      .flatMap((field) => (field.kind === "url" ? field.params : []))
+      .filter((param) => !param.startsWith("#")),
+  ),
+];
 
 /** Project the store into the shareable ViewState. */
 export function projectViewerState(state: ReadonlyState<StoreState>): ViewState {
@@ -110,6 +218,10 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (sel.spanFocus !== null) vs.selectedSpanId = sel.spanFocus.spanId;
   if (sel.pollDetail !== null) {
     vs.pollAnchor = `${sel.pollDetail.start}:${sel.pollDetail.taskId}`;
+  }
+  if (sel.taskDump !== null && sel.taskDump.timestamps.length > 0) {
+    vs.taskDumpAnchor =
+      `${sel.taskDump.taskId}:${sel.taskDump.timestamps.join(",")}`;
   }
   if (sel.pinnedEvent !== null) vs.pinnedEventTs = sel.pinnedEvent.timestamp;
   if (sel.sidebarRange !== null) {
@@ -167,7 +279,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
       ? "poll"
       : sel.pinnedEvent !== null
         ? "event"
-        : sel.spawnedTasksRange !== null || sel.sidebarRange !== null
+        : sel.taskDump !== null ||
+            sel.spawnedTasksRange !== null ||
+            sel.sidebarRange !== null
           ? "stack"
           : "task";
   if (view.inspectorTab !== inferredInspectorTab) vs.inspectorTab = view.inspectorTab;
@@ -195,6 +309,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (view.regionGroupBy !== "leaf") vs.regionGroupBy = view.regionGroupBy;
   if (view.regionWorkerZoom.length > 0) vs.regionWorkerZoom = view.regionWorkerZoom;
   if (view.regionOffworkerZoom.length > 0) vs.regionOffworkerZoom = view.regionOffworkerZoom;
+  if (view.regionInspectFocus !== null) {
+    vs.regionInspectFocus = view.regionInspectFocus;
+  }
   if (view.spanNavIndex >= 0) vs.spanNavIndex = view.spanNavIndex;
 
   const trace = state.trace.trace;
@@ -223,6 +340,7 @@ export function mirrorViewerToQuery(
   set(params, P_SPAN, vs.selectedSpanId ?? null);
   set(params, P_SPAN_FOCUS, vs.focusedSpanId ?? null);
   set(params, P_POLL, vs.pollAnchor ?? null);
+  set(params, P_TASK_DUMP, vs.taskDumpAnchor ?? null);
   set(params, P_EVENT, vs.pinnedEventTs != null ? String(Math.round(vs.pinnedEventTs)) : null);
   set(params, P_REGION, vs.sidebarRange ?? null);
   set(params, P_SPAWNED, vs.spawnedRange ?? null);
@@ -254,6 +372,7 @@ export function mirrorViewerToQuery(
   set(params, P_BLOCKING_GROUP, vs.regionGroupBy ?? null);
   set(params, P_ANALYSIS_WORKER_ZOOM, encodePath(vs.regionWorkerZoom));
   set(params, P_ANALYSIS_OFFWORKER_ZOOM, encodePath(vs.regionOffworkerZoom));
+  set(params, P_ANALYSIS_INSPECT, vs.regionInspectFocus ?? null);
   set(params, P_SPAN_INDEX, finiteString(vs.spanNavIndex));
   set(params, P_DATA_START, finiteString(vs.dataStart));
   set(params, P_DATA_END, finiteString(vs.dataEnd));
@@ -300,6 +419,7 @@ export interface ViewerUrlState {
   selectedSpanId?: string;
   focusedSpanId?: string;
   poll?: { startNs: number; taskId: number };
+  taskDump?: { taskId: number; timestamps: number[] };
   pinnedEventTs?: number;
   sidebarRange?: { startNs: number; endNs: number };
   spawnedRange?: { startNs: number; endNs: number };
@@ -331,8 +451,117 @@ export interface ViewerUrlState {
   regionGroupBy?: "leaf" | "full";
   regionWorkerZoom?: string[];
   regionOffworkerZoom?: string[];
+  regionInspectFocus?: string;
   spanNavIndex?: number;
   dataRange?: { startNs?: number; endNs?: number };
+}
+
+/**
+ * Apply every trace-independent URL field to the store before components
+ * mount. Trace-dependent semantic anchors are resolved later by
+ * resolveUrlSelection, after the first trace exists.
+ */
+export function hydrateViewerStore(
+  store: ViewerStore,
+  urlView: ViewerUrlState,
+  sharedView: ViewState,
+): void {
+  const uiPrefs: Partial<StoreState["uiPrefs"]> = {};
+  if (sharedView.timeMode !== undefined) uiPrefs.timeMode = sharedView.timeMode;
+  if (sharedView.timeZone !== undefined) uiPrefs.tz = sharedView.timeZone;
+  if (urlView.spanFilter !== undefined) uiPrefs.spanFilter = urlView.spanFilter;
+  if (urlView.trackOrder !== undefined) uiPrefs.trackOrder = urlView.trackOrder;
+  if (urlView.collapsed !== undefined) {
+    uiPrefs.collapsed = Object.fromEntries(
+      urlView.collapsed.map((id) => [id, true]),
+    );
+  }
+  if (urlView.spanPct !== undefined) uiPrefs.spanPctFilter = urlView.spanPct;
+  if (urlView.spanNames !== undefined) {
+    uiPrefs.selectedSpanNames = new Set(urlView.spanNames);
+  }
+  if (urlView.eventNames !== undefined) {
+    uiPrefs.selectedEventNames = new Set(urlView.eventNames);
+  }
+  if (urlView.collapsedRuntimes !== undefined) {
+    uiPrefs.collapsedRuntimes = Object.fromEntries(
+      urlView.collapsedRuntimes.map((name) => [name, true]),
+    );
+  }
+  if (urlView.inspectorWidth !== undefined) {
+    uiPrefs.sidebarWidth = urlView.inspectorWidth;
+  }
+  if (urlView.lanesHeight !== undefined) {
+    uiPrefs.lanesViewportHeight = urlView.lanesHeight;
+  }
+  if (urlView.lanesScrollTop !== undefined) {
+    uiPrefs.lanesScrollTop = urlView.lanesScrollTop;
+  }
+  if (urlView.stacksAsFlamegraph !== undefined) {
+    uiPrefs.stacksAsFlamegraph = urlView.stacksAsFlamegraph;
+  }
+  if (Object.keys(uiPrefs).length > 0) store.update("uiPrefs", uiPrefs);
+
+  const view: Partial<StoreState["view"]> = {};
+  if (urlView.inspectorTab !== undefined) view.inspectorTab = urlView.inspectorTab;
+  if (urlView.pollSection !== undefined) {
+    view.pollFlamegraphSection = urlView.pollSection;
+  }
+  if (urlView.expandedPollGroups !== undefined) {
+    view.expandedPollGroups = new Set(urlView.expandedPollGroups);
+  }
+  if (urlView.pollWorkerZoom !== undefined) {
+    view.pollWorkerZoom = urlView.pollWorkerZoom;
+  }
+  if (urlView.pollOffworkerZoom !== undefined) {
+    view.pollOffworkerZoom = urlView.pollOffworkerZoom;
+  }
+  if (urlView.relatedCollapsed !== undefined) {
+    view.relatedCollapsed = Object.fromEntries(
+      urlView.relatedCollapsed.map((title) => [title, true]),
+    );
+  }
+  if (urlView.relatedExpand !== undefined) {
+    view.relatedExpand = urlView.relatedExpand;
+  }
+  if (urlView.relatedCorrelate !== undefined) {
+    view.relatedCorrelate = urlView.relatedCorrelate;
+  }
+  if (urlView.regionMode !== undefined) view.regionMode = urlView.regionMode;
+  if (urlView.regionHeapMode !== undefined) {
+    view.regionHeapMode = urlView.regionHeapMode;
+  }
+  if (urlView.regionGroupBy !== undefined) {
+    view.regionGroupBy = urlView.regionGroupBy;
+  }
+  if (urlView.regionWorkerZoom !== undefined) {
+    view.regionWorkerZoom = urlView.regionWorkerZoom;
+  }
+  if (urlView.regionOffworkerZoom !== undefined) {
+    view.regionOffworkerZoom = urlView.regionOffworkerZoom;
+  }
+  if (urlView.regionInspectFocus !== undefined) {
+    view.regionInspectFocus = urlView.regionInspectFocus;
+  }
+  if (urlView.spanNavIndex !== undefined) {
+    view.spanNavIndex = urlView.spanNavIndex;
+  }
+  if (Object.keys(view).length > 0) store.update("view", view);
+
+  const poi: Partial<StoreState["poi"]> = {};
+  if (urlView.poiFilter !== undefined) poi.filter = urlView.poiFilter;
+  if (urlView.poiSort !== undefined) {
+    poi.sortKey = urlView.poiSort.key;
+    poi.sortDir = urlView.poiSort.dir;
+  }
+  if (urlView.poiIndex !== undefined) poi.index = urlView.poiIndex;
+  if (urlView.railTab !== undefined) poi.railTab = urlView.railTab;
+  if (urlView.taskSort !== undefined) {
+    poi.taskSort = urlView.taskSort.key;
+    poi.taskSortDir = urlView.taskSort.dir;
+  }
+  if (urlView.taskIndex !== undefined) poi.taskIndex = urlView.taskIndex;
+  if (Object.keys(poi).length > 0) store.update("poi", poi);
 }
 
 /** Read the viewer fields from a URL query string. */
@@ -368,6 +597,8 @@ export function readViewerUrlState(search: string): ViewerUrlState {
     const taskId = colon > 0 ? nonNegativeInt(poll.slice(colon + 1)) : null;
     if (startNs != null && taskId != null) out.poll = { startNs, taskId };
   }
+  const taskDump = taskDumpAnchor(p.get(P_TASK_DUMP));
+  if (taskDump !== null) out.taskDump = taskDump;
   const event = num(p.get(P_EVENT));
   if (event != null) out.pinnedEventTs = event;
   const region = rangePair(p.get(P_REGION));
@@ -458,6 +689,10 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (regionWorkerZoom !== null) out.regionWorkerZoom = regionWorkerZoom;
   const regionOffworkerZoom = decodePath(p.get(P_ANALYSIS_OFFWORKER_ZOOM));
   if (regionOffworkerZoom !== null) out.regionOffworkerZoom = regionOffworkerZoom;
+  const regionInspectFocus = p.get(P_ANALYSIS_INSPECT);
+  if (regionInspectFocus !== null && regionInspectFocus.length > 0) {
+    out.regionInspectFocus = regionInspectFocus;
+  }
   const spanNavIndex = nonNegativeInt(p.get(P_SPAN_INDEX));
   if (spanNavIndex !== null) out.spanNavIndex = spanNavIndex;
   const dataStart = num(p.get(P_DATA_START));
@@ -509,6 +744,24 @@ function decodePath(v: string | null): string[] | null {
   if (v === null || v.length === 0) return null;
   const path = v.split("\t");
   return path.every((part) => part.length > 0) ? path : null;
+}
+
+function taskDumpAnchor(
+  value: string | null,
+): { taskId: number; timestamps: number[] } | null {
+  if (value === null) return null;
+  const colon = value.indexOf(":");
+  if (colon <= 0 || colon === value.length - 1) return null;
+  const taskId = nonNegativeInt(value.slice(0, colon));
+  const timestamps = value.slice(colon + 1).split(",").map(nonNegativeInt);
+  if (
+    taskId === null ||
+    timestamps.length === 0 ||
+    timestamps.some((timestamp) => timestamp === null)
+  ) {
+    return null;
+  }
+  return { taskId, timestamps: timestamps as number[] };
 }
 
 function sortPair<K extends string>(

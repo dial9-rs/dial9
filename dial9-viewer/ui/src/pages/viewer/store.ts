@@ -90,6 +90,7 @@ export function initialViewerState(): StoreState {
       regionGroupBy: "leaf",
       regionWorkerZoom: [],
       regionOffworkerZoom: [],
+      regionInspectFocus: null,
       spanNavIndex: -1,
     },
     transient: {

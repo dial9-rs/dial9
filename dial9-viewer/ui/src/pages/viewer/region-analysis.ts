@@ -114,6 +114,7 @@ export function createRegionAnalysis(
         store.update("view", {
           regionWorkerZoom: path.worker,
           regionOffworkerZoom: path.offworker,
+          regionInspectFocus: fg.instance()?.getInspectFocus() ?? null,
         });
       }
       onZoomChange();
@@ -328,6 +329,14 @@ export function createRegionAnalysis(
           ...(view.regionOffworkerZoom.length > 0
             ? { offworkerZoom: view.regionOffworkerZoom }
             : {}),
+          ...(view.regionInspectFocus !== null
+            ? {
+                inspect: {
+                  name: view.regionInspectFocus,
+                  fullName: view.regionInspectFocus,
+                },
+              }
+            : {}),
         },
         { silent: true },
       );
@@ -337,11 +346,13 @@ export function createRegionAnalysis(
     const actual = instance.getZoomPath();
     if (
       actual.worker.join("\t") !== view.regionWorkerZoom.join("\t") ||
-      actual.offworker.join("\t") !== view.regionOffworkerZoom.join("\t")
+      actual.offworker.join("\t") !== view.regionOffworkerZoom.join("\t") ||
+      instance.getInspectFocus() !== view.regionInspectFocus
     ) {
       store.update("view", {
         regionWorkerZoom: actual.worker,
         regionOffworkerZoom: actual.offworker,
+        regionInspectFocus: instance.getInspectFocus(),
       });
     }
   }
@@ -609,6 +620,7 @@ export function createRegionAnalysis(
       regionMode: m,
       regionWorkerZoom: [],
       regionOffworkerZoom: [],
+      regionInspectFocus: null,
     });
     sync();
   }
@@ -620,6 +632,7 @@ export function createRegionAnalysis(
       regionHeapMode: m,
       regionWorkerZoom: [],
       regionOffworkerZoom: [],
+      regionInspectFocus: null,
     });
     sync();
   }
@@ -690,6 +703,7 @@ export function createRegionAnalysis(
       regionMode: kind,
       regionWorkerZoom: [],
       regionOffworkerZoom: [],
+      regionInspectFocus: null,
     });
     store.update("selection", {
       sidebarRange: { startNs: vp.minTs, endNs: vp.maxTs },

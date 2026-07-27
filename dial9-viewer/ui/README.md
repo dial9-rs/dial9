@@ -252,6 +252,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `span` | span id | Lane-highlighted span (ancestor chain is re-derived). |
 | `span-focus` | span id | Span-panel subtree root. |
 | `poll` | `<startNs>:<taskId>` | Poll-detail anchor. |
+| `task-dump` | `<taskId>:<timestamp>[,<timestamp>...]` | Selected task-dump captures. |
 | `event` | monotonic ns | Pinned custom-event cluster timestamp. |
 | `region` | `<startNs>-<endNs>` | Retained analysis region. |
 | `spawned` | `<startNs>-<endNs>` | Queue-track spawned-task range. |
@@ -283,6 +284,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `blocking-group` | `leaf` \| `full` | Blocking-list grouping. |
 | `analysis-worker-zoom` | TAB-joined frame path | Region worker-tree flamegraph zoom. |
 | `analysis-offworker-zoom` | same | Region off-worker-tree flamegraph zoom. |
+| `analysis-inspect` | full frame key | Region flamegraph butterfly/inspect focus. |
 | `span-index` | non-negative integer | Current filtered-span navigation cursor. |
 | `data-start` | monotonic ns | Parse-time Set Range lower bound. |
 | `data-end` | monotonic ns | Parse-time Set Range upper bound. |
