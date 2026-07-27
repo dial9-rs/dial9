@@ -173,6 +173,7 @@ const initialState: StoreState = {
     focusedSpanId: null,
     pinnedEvent: null,
     pollDetail: null,
+    taskDump: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
     spawnedTasksRange: null,
@@ -232,6 +233,10 @@ function populatedState(): StoreState {
         detailEvent: null,
       },
       pollDetail: poll,
+      taskDump: {
+        taskId: 42,
+        timestamps: [2_500],
+      },
       sidebarRange: range,
       hoveredWakerTaskId: 7,
       spawnedTasksRange: range,

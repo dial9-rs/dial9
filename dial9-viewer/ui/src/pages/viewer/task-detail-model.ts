@@ -383,6 +383,8 @@ export interface WakeRegion {
  * the shared LABEL_W DOM gutter, so no LABEL_W is added to the coordinates.
  */
 export interface TaskDetailRenderModel {
+  /** Task identity captured with this geometry; null for the empty model. */
+  taskId: number | null;
   wakeBands: readonly WakeBand[];
   /** Per-poll bars (empty when the coverage histogram is used instead). */
   pollBars: readonly PollBar[];
@@ -400,6 +402,7 @@ export interface TaskDetailRenderModel {
 
 /** Empty model (no drawW / degenerate view). */
 const EMPTY_RENDER_MODEL: TaskDetailRenderModel = {
+  taskId: null,
   wakeBands: [],
   pollBars: [],
   coverage: null,
@@ -622,6 +625,7 @@ export function buildTaskDetailRenderModel(
   }
 
   return {
+    taskId: data.taskId,
     wakeBands,
     pollBars,
     coverage,

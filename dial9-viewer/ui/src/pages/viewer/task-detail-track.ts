@@ -121,8 +121,8 @@ export interface TaskDetailTrackController {
    * is testable without a canvas/DOM.
    */
   hoverWaker(model: TaskDetailRenderModel, mx: number, my: number): void;
-  /** Clicking a waker label selects that waker task (via the store). */
-  clickWaker(model: TaskDetailRenderModel, mx: number, my: number): void;
+  /** Dispatch a task-detail canvas click to its waker or task-dump target. */
+  clickAt(model: TaskDetailRenderModel, mx: number, my: number): void;
   /** Clear the waker highlight (pointer left the canvas). */
   clearHover(): void;
   /** Tear down (no external resources today; symmetry with other tracks). */
@@ -266,7 +266,44 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
       store.update("selection", {
         selectedTaskId: waker.wakerTaskId,
         hoveredWakerTaskId: null,
+        taskDump: null,
       });
+    }
+  }
+
+  function clickTaskDump(
+    model: TaskDetailRenderModel,
+    mx: number,
+    my: number,
+  ): void {
+    const hit = hitRegionAt(model, mx, my);
+    const dumps = hit?.dumps ?? null;
+    const selectedTaskId = state().selection.selectedTaskId;
+    if (
+      model.taskId === null ||
+      selectedTaskId !== model.taskId ||
+      dumps === null ||
+      dumps.length === 0
+    ) {
+      return;
+    }
+    store.update("selection", {
+      taskDump: {
+        taskId: model.taskId,
+        timestamps: dumps.map((dump) => dump.timestamp),
+      },
+      pinnedEvent: null,
+      pollDetail: null,
+      sidebarRange: null,
+      spawnedTasksRange: null,
+    });
+  }
+
+  function clickAt(model: TaskDetailRenderModel, mx: number, my: number): void {
+    if (wakeRegionAt(model, mx, my) !== null) {
+      clickWaker(model, mx, my);
+    } else {
+      clickTaskDump(model, mx, my);
     }
   }
 
@@ -310,7 +347,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     const model = lastModel;
     if (model === null) return;
     const { mx, my } = pointerAt(canvas, ev);
-    clickWaker(model, mx, my);
+    clickAt(model, mx, my);
   }
 
   function taskDetail(): TaskDetailData {
@@ -324,7 +361,15 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     sizerCanvas = null;
   }
 
-  return { rowTemplate, paint, taskDetail, hoverWaker, clickWaker, clearHover, dispose };
+  return {
+    rowTemplate,
+    paint,
+    taskDetail,
+    hoverWaker,
+    clickAt,
+    clearHover,
+    dispose,
+  };
 }
 
 // ── Canvas draw (extracted so the render input is unit-testable) ───────────
