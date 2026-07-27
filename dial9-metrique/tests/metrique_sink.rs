@@ -111,6 +111,37 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
     events
 }
 
+/// Decode all `metrique:*` events from `dir` into `T` via the trace
+/// format's serde support: fields deserialize by name (post-rename), with
+/// `timestamp_ns` carrying the frame timestamp and pooled strings resolving
+/// to plain strings. Prefer this over [`decode_metrique_events`] when a test
+/// only asserts on values; the raw form remains for schema-shape assertions
+/// (units, field order, pooling).
+fn decode_metrique_events_as<T: serde::de::DeserializeOwned>(dir: &std::path::Path) -> Vec<T> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.to_string_lossy().contains(".bin"))
+        .collect();
+    files.sort();
+
+    let mut events = Vec::new();
+    for path in files {
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        let Some(mut decoder) = dial9_trace_format::decoder::Decoder::new(&data) else {
+            continue;
+        };
+        let _ = decoder.for_each_event(|ev| {
+            if ev.name.starts_with("metrique:") {
+                events.push(ev.deserialize().expect("metrique event must deserialize"));
+            }
+        });
+    }
+    events
+}
+
 /// Run `feed` against a fresh `Dial9Stream`, seal the trace, and decode the
 /// metrique events back.
 fn run_sink_test(feed: impl FnOnce(&mut Dial9Stream)) -> Vec<DecodedEvent> {
@@ -183,49 +214,83 @@ fn sample_request(retries: Option<u64>) -> RequestMetrics {
 
 #[test]
 fn full_entry_round_trips() {
-    let events = run_sink_test(|stream| {
-        feed_entry!(stream, sample_request(Some(2)));
-        feed_entry!(stream, sample_request(None));
-    });
+    /// `RequestMetrics` as decoded from the trace: fields deserialize by
+    /// post-rename name, the dial9 header by its wire names.
+    #[derive(Debug, serde::Deserialize)]
+    struct Decoded {
+        timestamp_ns: u64,
+        #[serde(rename = "dial9.thread_id")]
+        thread_id: Option<u64>,
+        #[serde(rename = "dial9.task_id")]
+        task_id: Option<u64>,
+        #[serde(rename = "dial9.duration_ns")]
+        duration_ns: Option<u64>,
+        #[serde(rename = "Route")]
+        route: String,
+        #[serde(rename = "Operation")]
+        operation: String,
+        #[serde(rename = "LatencyUs")]
+        latency_us: u64,
+        #[serde(rename = "Retries")]
+        retries: Option<u64>,
+        #[serde(rename = "Tags")]
+        tags: Vec<String>,
+        #[serde(rename = "Success")]
+        success: bool,
+        #[serde(rename = "Load")]
+        load: f64,
+        // Duration writes fractional milliseconds.
+        #[serde(rename = "Elapsed")]
+        elapsed_ms: f64,
+    }
 
-    assert_eq!(events.len(), 2, "expected two events, got {events:#?}");
-    let ev = &events[0];
-    assert_eq!(ev.schema_name, "metrique:RequestMetrics");
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    recorder.enable();
+    let mut stream = Dial9Stream::new(recorder.handle());
+    feed_entry!(stream, sample_request(Some(2)));
+    feed_entry!(stream, sample_request(None));
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
-    // Payload fields, post-rename.
-    assert_eq!(ev.fields["Route"], "/pets");
-    assert_eq!(ev.fields["Operation"], "GetPet");
-    assert_eq!(ev.fields["LatencyUs"], "1500");
-    assert_eq!(ev.fields["Retries"], "2");
-    assert_eq!(ev.fields["Tags"], "[a,b]"); // typed list encoding
-    assert_eq!(ev.fields["Success"], "true");
-    assert_eq!(ev.fields["Load"], "0.5");
-    // Duration writes fractional milliseconds.
-    assert_eq!(ev.fields["Elapsed"], "250");
-    assert!(
-        !ev.fields.contains_key("DebugBlob"),
-        "Skip field leaked into the payload: {ev:#?}"
-    );
+    let typed: Vec<Decoded> = decode_metrique_events_as(dir.path());
+    assert_eq!(typed.len(), 2, "expected two events, got {typed:#?}");
+    let ev = &typed[0];
 
-    assert_eq!(ev.units["LatencyUs"], "us");
-    assert_eq!(ev.units["Elapsed"], "ms");
-
-    assert!(ev.pooled_fields.contains(&"Route".to_owned()));
-    assert!(!ev.pooled_fields.contains(&"Operation".to_owned()));
+    // Payload values, post-rename.
+    assert_eq!(ev.route, "/pets");
+    assert_eq!(ev.operation, "GetPet");
+    assert_eq!(ev.latency_us, 1500);
+    assert_eq!(ev.retries, Some(2));
+    assert_eq!(ev.tags, vec!["a", "b"]); // typed list encoding
+    assert!(ev.success);
+    assert_eq!(ev.load, 0.5);
+    assert_eq!(ev.elapsed_ms, 250.0);
 
     // Off-runtime capture records the calling thread's tid and timestamps;
-    // the task id is absent.
-    assert_eq!(
-        ev.fields["dial9.thread_id"],
-        u64::from(current_tid()).to_string()
-    );
-    assert_eq!(ev.fields["dial9.task_id"], "<none>");
+    // the task id is absent. Close-time duration is present (arbitrarily
+    // small: the entry closes right after capture).
+    assert_eq!(ev.thread_id, Some(u64::from(current_tid())));
+    assert_eq!(ev.task_id, None);
     assert!(ev.timestamp_ns > 0, "start timestamp missing");
-    // Close-time duration: present and numeric (may be arbitrarily small,
-    // since the entry closes right after capture).
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert!(ev.duration_ns.is_some(), "duration missing: {ev:#?}");
 
-    assert_eq!(events[1].fields["Retries"], "<none>");
+    assert_eq!(typed[1].retries, None);
+
+    // Schema-shape assertions the typed decode cannot express: the Skip
+    // field stays out, units annotate, and only Interned strings pool.
+    let events = decode_metrique_events(dir.path());
+    let raw = &events[0];
+    assert_eq!(raw.schema_name, "metrique:RequestMetrics");
+    assert!(
+        !raw.fields.contains_key("DebugBlob"),
+        "Skip field leaked into the payload: {raw:#?}"
+    );
+    assert_eq!(raw.units["LatencyUs"], "us");
+    assert_eq!(raw.units["Elapsed"], "ms");
+    assert!(raw.pooled_fields.contains(&"Route".to_owned()));
+    assert!(!raw.pooled_fields.contains(&"Operation".to_owned()));
 }
 
 #[test]
@@ -830,23 +895,39 @@ fn typed_lists_round_trip() {
         }
     }
 
-    let events = run_sink_test(|stream| {
-        feed_entry!(stream, entry(Some(vec![7])));
-        feed_entry!(stream, entry(None));
-    });
+    #[derive(Debug, serde::Deserialize)]
+    struct Decoded {
+        counts: Vec<u64>,
+        labels: Vec<String>,
+        empty: Vec<u64>,
+        maybe: Option<Vec<u64>>,
+    }
 
-    assert_eq!(events.len(), 2, "both entries must record: {events:#?}");
-    let ev = &events[0];
-    assert_eq!(ev.fields["counts"], "[1,2,3]");
-    assert_eq!(ev.fields["labels"], "[a,b]");
-    assert_eq!(ev.fields["empty"], "[]");
-    assert_eq!(ev.fields["maybe"], "[7]");
-    // Interned lists pool their string elements.
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    recorder.enable();
+    let mut stream = Dial9Stream::new(recorder.handle());
+    feed_entry!(stream, entry(Some(vec![7])));
+    feed_entry!(stream, entry(None));
+    recorder.graceful_shutdown(Duration::from_secs(5));
+
+    let typed: Vec<Decoded> = decode_metrique_events_as(dir.path());
+    assert_eq!(typed.len(), 2, "both entries must record: {typed:#?}");
+    assert_eq!(typed[0].counts, vec![1, 2, 3]);
+    assert_eq!(typed[0].labels, vec!["a", "b"]);
+    assert_eq!(typed[0].empty, Vec::<u64>::new());
+    assert_eq!(typed[0].maybe.as_deref(), Some(&[7][..]));
+    assert_eq!(typed[1].maybe, None);
+
+    // Interned lists pool their string elements (a schema property the
+    // typed decode intentionally hides).
+    let events = decode_metrique_events(dir.path());
     assert!(
-        ev.pooled_fields.contains(&"labels".to_owned()),
-        "interned list elements must be pooled: {ev:#?}"
+        events[0].pooled_fields.contains(&"labels".to_owned()),
+        "interned list elements must be pooled: {events:#?}"
     );
-    assert_eq!(events[1].fields["maybe"], "<none>");
 }
 
 /// Wraps a descriptor-carrying entry and distorts its write-time callback
