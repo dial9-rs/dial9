@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 10008,
+  "total_samples": 13961,
   "by_source": {
-    "0": 212,
-    "1": 9796
+    "0": 199,
+    "1": 13762
   },
   "on_off_all": {
-    "on_runtime": 10008,
+    "on_runtime": 13961,
     "off_runtime": 0
   },
   "on_off_by_source": {
     "0": {
-      "on": 212,
+      "on": 199,
       "off": 0
     },
     "1": {
-      "on": 9796,
+      "on": 13762,
       "off": 0
     }
   },
@@ -24,27 +24,17 @@
     1
   ],
   "cpu_profile": {
-    "count": 212,
-    "distinct_stacks": 146,
-    "stack_sig_digest": "a1de0bfefa43ac65",
-    "ts_count": 212,
-    "ts_span_ns": 4050003565,
-    "ts_delta_digest": "f1500118fd8d83ed",
+    "count": 199,
+    "distinct_stacks": 145,
+    "stack_sig_digest": "68191d4e5ce711c1",
+    "ts_count": 199,
+    "ts_span_ns": 4049993373,
+    "ts_delta_digest": "c5f3560d8300ced3",
     "top_stacks": [
       {
-        "count": 26,
-        "depth": 76,
-        "leaf": "__GI___writev"
-      },
-      {
-        "count": 8,
-        "depth": 79,
-        "leaf": "__libc_recv"
-      },
-      {
-        "count": 5,
-        "depth": 43,
-        "leaf": "__GI___pread64"
+        "count": 33,
+        "depth": 82,
+        "leaf": "writev"
       },
       {
         "count": 5,
@@ -52,24 +42,34 @@
         "leaf": "malloc_consolidate"
       },
       {
-        "count": 5,
-        "depth": 92,
-        "leaf": "__GI___writev"
-      },
-      {
         "count": 4,
         "depth": 1,
-        "leaf": "[unknown] 0x7fe5e32c827a"
+        "leaf": "__libc_free"
       },
       {
-        "count": 4,
-        "depth": 95,
-        "leaf": "syscall"
+        "count": 3,
+        "depth": 89,
+        "leaf": "__GI___getrandom"
       },
       {
-        "count": 4,
+        "count": 3,
         "depth": 1,
-        "leaf": "_int_malloc"
+        "leaf": "__memmove_avx512_unaligned_erms"
+      },
+      {
+        "count": 3,
+        "depth": 85,
+        "leaf": "recv"
+      },
+      {
+        "count": 3,
+        "depth": 1,
+        "leaf": "__lll_lock_wake_private"
+      },
+      {
+        "count": 2,
+        "depth": 1,
+        "leaf": "__libc_realloc"
       }
     ]
   }
