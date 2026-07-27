@@ -66,7 +66,10 @@ describe("Dial9Session", () => {
       origin: "https://dial9.example",
       href: "https://dial9.example/viewer.html",
     });
-    const calls: { input: RequestInfo | URL; init?: RequestInit }[] = [];
+    const calls: {
+      input: RequestInfo | URL;
+      init: RequestInit | undefined;
+    }[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
