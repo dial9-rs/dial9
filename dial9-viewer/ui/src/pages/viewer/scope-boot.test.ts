@@ -4,6 +4,7 @@ import {
   type ScopeBootCredentials,
   type ScopeLoadTarget,
 } from "./scope-boot.js";
+import type { ReparseRange } from "../../lib/trace/index.js";
 
 const REPORTED_SEARCH =
   "?svc=shale&host=ip-10-2-118-83.us-west-2.compute.internal" +
@@ -22,7 +23,7 @@ describe("scope boot", () => {
     const loads: Array<{
       urls: readonly string[];
       label: string;
-      dataRange?: { startNs?: number; endNs?: number };
+      dataRange: ReparseRange | undefined;
     }> = [];
     const errors: string[] = [];
     let region = "us-east-1";

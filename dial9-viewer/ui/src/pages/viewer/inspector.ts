@@ -691,7 +691,7 @@ export function mountInspector(
 
   function syncTaskDumpFlamegraph(s: StoreState): void {
     const selected = s.selection.taskDump;
-    if (activeTab !== "stack" || selected === null) {
+    if (s.view.inspectorTab !== "stack" || selected === null) {
       taskDumpFg.detach();
       return;
     }

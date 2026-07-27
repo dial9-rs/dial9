@@ -433,7 +433,12 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       });
     },
     loadUrls(urls, label, range): void {
-      begin(urls, { label, withHeaders: true, objectUrl: null, range });
+      begin(urls, {
+        label,
+        withHeaders: true,
+        objectUrl: null,
+        ...(range !== undefined ? { range } : {}),
+      });
     },
     showLoading(label): number {
       // Show the loading view WITHOUT starting a worker load, for the async
