@@ -54,6 +54,34 @@
 //! rest of the pipeline and record nothing into the trace. Teeing the sink
 //! into an existing pipeline therefore only records the entries you opt in.
 //!
+//! ## Opting in without touching the entry
+//!
+//! Adding a field is intrusive when the metrics struct is shared, owned by
+//! another team, or when dial9 should be switchable from one place.
+//! [`Dial9EntryExt`](crate::metrique_sink::Dial9EntryExt) attaches the same
+//! context from the outside, so the entry definition stays as it was:
+//!
+//! ```ignore
+//! use dial9_tokio_telemetry::metrique_sink::Dial9EntryExt;
+//!
+//! #[metrics(rename_all = "PascalCase")]
+//! struct RequestMetrics {
+//!     operation: &'static str,
+//!     latency_ms: u64,
+//! }
+//!
+//! // `append_on_drop_dial9` in place of `append_on_drop`:
+//! let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
+//!     .append_on_drop_dial9(ServiceMetrics::sink());
+//! m.latency_ms = 5; // field access reaches through the wrapper
+//! ```
+//!
+//! Both paths produce the same event, named after your entry either way. The
+//! wrapper is also the easier one to make conditional, since a `cfg` around
+//! one call is simpler than one around a struct field:
+//! [`with_dial9_context`](crate::metrique_sink::Dial9EntryExt::with_dial9_context)
+//! wraps an entry without attaching it to a sink.
+//!
 //! # Keeping dial9's fields out of your other sinks
 //!
 //! [`Dial9Context`](crate::metrique_sink::Dial9Context)'s fields are ordinary
@@ -122,12 +150,14 @@
 //! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 
 mod context;
+mod event;
 mod filter;
 mod plan;
 mod stream;
 mod writer;
 
 pub use context::Dial9Context;
+pub use event::{Dial9EntryExt, Dial9Event, Dial9EventClosed};
 pub use filter::WithoutDial9Fields;
 pub use stream::Dial9Stream;
 

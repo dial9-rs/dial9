@@ -513,7 +513,21 @@ let mut m = RequestMetrics {
 };
 ```
 
-Entries without a `Dial9Context` record nothing, so teeing the sink into an existing pipeline only picks up the entries you opt in. Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Hand-written `Entry` impls (no descriptor) and entries containing `Flex` dynamic-key fields cannot be recorded; histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
+Entries without a `Dial9Context` record nothing, so teeing the sink into an existing pipeline only picks up the entries you opt in.
+
+If adding a field to the entry is awkward (a shared struct, or dial9 support you want to switch from one place), attach the context from the outside instead and leave the struct alone:
+
+```rust,ignore
+use dial9::metrique_sink::Dial9EntryExt;
+
+// `append_on_drop_dial9` in place of `append_on_drop`; field access reaches
+// through the wrapper, so the rest of the call site is unchanged.
+let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
+    .append_on_drop_dial9(ServiceMetrics::sink());
+m.latency_ms = 5;
+```
+
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Hand-written `Entry` impls (no descriptor) and entries containing `Flex` dynamic-key fields cannot be recorded; histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

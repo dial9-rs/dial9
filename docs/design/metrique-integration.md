@@ -12,7 +12,8 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 
 - **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `Dial9Stream::tee(&handle, emf)`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
 - **`WithoutDial9Fields`**: `EntryIoStream` wrapper that hides `dial9.`-prefixed fields from the sink it wraps. `Dial9Stream::tee` puts it around the non-dial9 side so the trace gets the runtime context and the EMF/JSON output does not.
-- **`Dial9Context`**: metrique subfield users flatten into their entries to capture per-request runtime context (see its rustdoc).
+- **`Dial9Context`**: metrique subfield users include in their entries to capture per-request runtime context (see its rustdoc).
+- **`Dial9Event<E>`**: hand-written wrapper entry that contributes the same context fields around an existing entry, for callers who cannot or would rather not add a field. `Dial9EntryExt::append_on_drop_dial9` is the ergonomic entry point.
 - **`Skip`** / **`Interned`**: the user-facing field flags for excluding a field from the payload and for string pooling (see their rustdoc).
 - **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors, and their presence is what opts an entry in. Would be replaced by a typed source-extraction mechanism in metrique.
 - **Encode plan**: the cached per-entry-type routing table (`metrique_sink/plan.rs`). Built once per distinct descriptor-id sequence: wire schema with unit annotations, and an action (header / payload / skip) per field position.
@@ -21,6 +22,10 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 ## User-facing API
 
 See the `dial9_tokio_telemetry::metrique_sink` module docs for the opt-in model and worked example.
+
+There are two ways to include the context, both producing the same event: flatten a `Dial9Context` field into the entry, or wrap the entry with `Dial9Event` (via `append_on_drop_dial9`). The wrapper exists because adding a field is intrusive for shared or externally-owned metrics structs, and because a `#[cfg]` around one call site is easier to maintain than one around a struct field.
+
+`Dial9Event` is hand-written rather than a `#[metrics]` struct: a generic flattened field needs `<E as CloseValue>::Closed: InflectableEntry<NS>` on the generated `impl<NS>`, which the macro does not emit. Implementing `InflectableEntry` at the default style only is sufficient and expressible, because a wrapper is always a root entry and so never inflected by a parent. It writes the wrapped entry first and the context second, matching the descriptor order it reports, which also keeps the event named after the wrapped entry (the plan takes its name from the first descriptor segment).
 
 Convenience wiring (`ServiceMetrics::attach_to_stream_with_dial9`-style extension traits, a `metrique_sink(...)` builder) is deliberately **later scope**: it drags `metrique-service-metrics` into the public API surface. `Dial9Stream::tee(&handle, other)` is the supported path: it composes the two sinks and filters dial9's fields out of `other` in one call, without naming any service-metrics type.
 

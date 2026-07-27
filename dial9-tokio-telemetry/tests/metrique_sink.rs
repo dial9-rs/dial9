@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Interned, Skip};
+use dial9_tokio_telemetry::metrique_sink::{
+    Dial9Context, Dial9EntryExt, Dial9Stream, Interned, Skip,
+};
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, WorkerId, recorder};
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
@@ -1433,5 +1435,114 @@ fn mixed_segment_degrades_descriptors_rather_than_misreporting() {
     assert!(
         seen.described.is_none(),
         "a partially-filtered segment must report Unavailable: {seen:#?}"
+    );
+}
+
+#[test]
+fn wrapping_an_entry_records_the_same_context_as_flattening_one() {
+    // The entry type knows nothing about dial9.
+    #[metrics(rename_all = "PascalCase")]
+    struct Plain {
+        #[metrics(flags(Interned))]
+        route: String,
+        latency_us: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Plain {
+                route: "/pets".to_owned(),
+                latency_us: 12,
+            }
+            .with_dial9_context()
+        );
+    });
+
+    assert_eq!(events.len(), 1, "wrapped entry must record: {events:#?}");
+    let ev = &events[0];
+    // Schema name comes from the wrapped entry, not the wrapper.
+    assert_eq!(ev.schema_name, "metrique:Plain");
+    // Payload is intact, including flags on the inner fields.
+    assert_eq!(ev.fields["Route"], "/pets");
+    assert_eq!(ev.fields["LatencyUs"], "12");
+    assert!(ev.pooled_fields.contains(&"Route".to_owned()));
+    // ...and the context landed in the header exactly as a flattened
+    // Dial9Context would.
+    assert_eq!(
+        ev.fields["dial9.worker_id"],
+        WorkerId::UNKNOWN.as_u64().to_string()
+    );
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert!(ev.timestamp_ns > 0, "start timestamp missing");
+    // The wrapper contributes no payload field of its own.
+    assert!(
+        !ev.field_names.iter().any(|n| n == "dial9"),
+        "wrapper leaked a field: {:?}",
+        ev.field_names
+    );
+}
+
+#[test]
+fn append_on_drop_dial9_records_through_a_sink() {
+    use metrique_writer::sink::BackgroundQueue;
+
+    #[metrics(rename_all = "PascalCase")]
+    struct Plain {
+        latency_ms: u64,
+        success: bool,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    recorder.enable();
+
+    let (queue, join) = BackgroundQueue::new(Dial9Stream::new(recorder.handle()));
+    {
+        let mut m = Plain {
+            latency_ms: 0,
+            success: false,
+        }
+        .append_on_drop_dial9(queue.clone());
+        // Deref reaches the wrapped entry's fields, so call sites read the
+        // same as they did before dial9 was involved.
+        m.latency_ms = 7;
+        m.success = true;
+    }
+    join.shut_down();
+
+    recorder.graceful_shutdown(Duration::from_secs(5));
+    let events = decode_metrique_events(dir.path());
+    assert_eq!(events.len(), 1, "expected one recorded entry: {events:#?}");
+    let ev = &events[0];
+    assert_eq!(ev.fields["LatencyMs"], "7");
+    assert_eq!(ev.fields["Success"], "true");
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+}
+
+#[test]
+fn wrapped_context_is_hidden_from_the_other_sink_too() {
+    #[metrics(rename_all = "PascalCase")]
+    struct Plain {
+        count: u64,
+    }
+
+    let handle = dial9_tokio_telemetry::telemetry::Dial9Handle::disabled();
+    let (other, seen) = RecordingStream::shared();
+    let mut stream = Dial9Stream::tee(&handle, other);
+    feed_entry!(stream, Plain { count: 3 }.with_dial9_context());
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.written,
+        vec!["Count".to_owned()],
+        "wrapper context must not reach the other sink: {seen:#?}"
+    );
+    assert_eq!(
+        seen.described.as_deref(),
+        Some(&["Count".to_owned()][..]),
+        "descriptor must match the filtered values: {seen:#?}"
     );
 }
