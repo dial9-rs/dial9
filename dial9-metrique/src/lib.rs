@@ -114,7 +114,7 @@
 //!
 //! Measured by `benches/metrique_sink_bench.rs`: `Dial9Context::capture()`
 //! costs ~31 ns on the request path, plus ~30 ns for the end-timestamp
-//! clock read when the entry closes. Encoding costs ~430-580 ns per entry
+//! clock read when the entry closes. Encoding costs ~480-620 ns per entry
 //! on the flush thread, from an all-scalar payload up to one carrying an
 //! allocating (non-interned) string; boxed entries from a global sink add
 //! ~60 ns. A paused recorder or a disabled handle costs ~3.5 ns per entry.
