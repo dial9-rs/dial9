@@ -18,6 +18,7 @@ import {
   loadTraceOnMainThread,
   isLoadPerfEnabled,
   Dial9Creds,
+  Dial9Session,
 } from "../../lib/trace/index.js";
 import type { ReparseRange } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
@@ -137,8 +138,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     },
     credsMissing: () => !Dial9Creds.has(),
     headers: () => {
-      const h = Dial9Creds.headers();
-      return Object.keys(h).length > 0 ? h : undefined;
+      return Dial9Session.headers(Dial9Creds.headers());
     },
   };
   controller = createLoadController(deps);

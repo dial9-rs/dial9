@@ -3,7 +3,13 @@
 // pushes a fresh full snapshot as each source file folds and closes at the cap.
 // The server owns the refine/stop loop; the page just renders each snapshot.
 
-import { Dial9Creds, nextMaxFiles, openSse, tokioStatsUrl } from "../../lib/trace/index.js";
+import {
+  Dial9Creds,
+  Dial9Session,
+  nextMaxFiles,
+  openSse,
+  tokioStatsUrl,
+} from "../../lib/trace/index.js";
 import type { TokioStatsQuery, TokioStatsResponse } from "../../lib/trace/index.js";
 import { pageEls } from "./dom.js";
 import { formatDuration, datetimeToNs, thresholdNs } from "./format.js";
@@ -234,7 +240,7 @@ async function loadPeriod(period: Period): Promise<void> {
   // loadAll's catch paints the status line red.
   let streamErr: Error | null = null;
   await openSse(tokioStatsUrl(query), {
-    headers: Dial9Creds.headers(),
+    headers: Dial9Session.headers(Dial9Creds.headers()),
     onEvent: (obj) => {
       period.data = obj as TokioStatsResponse;
       renderFromCache();

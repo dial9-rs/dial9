@@ -7,6 +7,7 @@
 
 import {
   Dial9Creds,
+  Dial9Session,
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
@@ -394,7 +395,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     const token = ++streamToken;
     abortCtl = new AbortController();
     void openSse(buildApiUrl(queryState(), window.location.origin), {
-      headers: Dial9Creds.headers(),
+      headers: Dial9Session.headers(Dial9Creds.headers()),
       signal: abortCtl.signal,
       onEvent: (obj) => {
         if (token !== streamToken) return;

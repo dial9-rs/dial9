@@ -1,4 +1,5 @@
 import { Dial9Creds } from "../../lib/trace/creds.js";
+import { Dial9Session } from "../../lib/trace/session.js";
 import {
   hasScope,
   readScope,
@@ -124,7 +125,7 @@ async function fetchJsonWithCreds(
   url: string,
   creds: ScopeBootCredentials,
 ): Promise<unknown> {
-  const resp = await fetch(url, { headers: creds.headers() });
+  const resp = await Dial9Session.fetch(url, { headers: creds.headers() });
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
     throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);

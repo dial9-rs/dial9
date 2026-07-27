@@ -29,6 +29,16 @@
     roleArn: "x-dial9-aws-role-arn",
   };
 
+  // Add the tab-scoped request identifier when session.js is present. Keep the
+  // credential API's public headers() method credential-only; callers that
+  // inspect it do not need to know about observability plumbing.
+  function requestHeaders() {
+    const credentialHeaders = headers();
+    return typeof Dial9Session !== "undefined"
+      ? Dial9Session.headers(credentialHeaders)
+      : credentialHeaders;
+  }
+
   // Resolve a storage backend. In the browser this is sessionStorage (creds die
   // when the tab closes). Tests inject a fake via `Dial9Creds._setStorage(...)`.
   // If no storage exists (Node without injection), fall back to an in-memory map
@@ -319,7 +329,12 @@
     const url =
       "/api/credentials/check" +
       (bucket ? "?bucket=" + encodeURIComponent(bucket) : "");
-    const resp = await fetch(url, { method: "POST", headers: headers() });
+    const request =
+      typeof Dial9Session !== "undefined" ? Dial9Session.fetch : fetch;
+    const resp = await request(url, {
+      method: "POST",
+      headers: requestHeaders(),
+    });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       return {
@@ -339,7 +354,9 @@
    * @returns {Promise<Array<{name: string, region: string|null}>>}
    */
   async function listBuckets() {
-    const resp = await fetch("/api/buckets", { headers: headers() });
+    const request =
+      typeof Dial9Session !== "undefined" ? Dial9Session.fetch : fetch;
+    const resp = await request("/api/buckets", { headers: requestHeaders() });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);

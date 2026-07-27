@@ -1007,6 +1007,7 @@
 
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
+        <script src="session.js"></script>
         <script src="creds.js"></script>
         <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
@@ -1705,7 +1706,9 @@
             async function streamAndShowTrace(urls, name, opts = {}) {
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
-                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const credHeaders = Dial9Session.headers(
+                        window.Dial9Creds ? Dial9Creds.headers() : {}
+                    );
                     const stream = list.length === 1
                         ? await TraceParser.fetchTraceStream(list[0], {
                             signal: loadAbortController?.signal,
@@ -1895,7 +1898,9 @@
                     // Attach bring-your-own-credentials headers if present. A
                     // tab opened directly (not from the browser page) has no
                     // inherited credentials — see the catch below.
-                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const credHeaders = Dial9Session.headers(
+                        window.Dial9Creds ? Dial9Creds.headers() : {}
+                    );
                     const arrayBuffer = await TraceParser.fetchTraces(list, {
                         signal: loadAbortController?.signal,
                         headers: credHeaders,
@@ -1968,7 +1973,7 @@
             // user's creds (BYOC) or the task's ambient identity (no creds).
             async function fetchJsonWithCreds(url) {
                 const headers = window.Dial9Creds ? Dial9Creds.headers() : {};
-                const resp = await fetch(url, { headers });
+                const resp = await Dial9Session.fetch(url, { headers });
                 if (!resp.ok) {
                     const body = await resp.text().catch(() => '');
                     throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);

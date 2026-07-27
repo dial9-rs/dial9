@@ -17,6 +17,7 @@
 
 import {
   Dial9Creds,
+  Dial9Session,
   addAttrFilter,
   buildSpanCatalog,
   classifyExemplarSnapshot,
@@ -307,7 +308,7 @@ function startStreaming(mode: StreamMode): void {
     exemplarRequestMatches(requestUid, requestScopeKey, selectedUid, exemplarScopeKey(view()));
 
   void openSse(buildApiUrl(mode, scope, view(), window.location.origin), {
-    headers: Dial9Creds.headers(),
+    headers: Dial9Session.headers(Dial9Creds.headers()),
     signal: abortCtl.signal,
     onEvent: (obj) => {
       if (token !== streamToken || !stillCurrent()) return;
@@ -454,7 +455,9 @@ if (rawMode && scope.trace != null) {
   els.stats.textContent = "📂 Raw trace mode — loading…";
   void (async () => {
     try {
-      const { trace } = await loadTrace(scope.trace as string);
+      const { trace } = await loadTrace(scope.trace as string, {
+        headers: Dial9Session.headers(Dial9Creds.headers()),
+      });
       const { allSpans } = buildSpanData(trace.customEvents);
       spanTypes = buildSpanCatalog(allSpans, trace.customEvents) as SpanTypeStats[];
       els.loading.classList.add("hidden");
