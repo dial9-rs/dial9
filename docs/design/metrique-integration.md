@@ -25,15 +25,15 @@ See the `dial9_tokio_telemetry::metrique_sink` module docs for the opt-in model 
 
 There are two ways to include the context, both producing the same event: flatten a `Dial9Context` field into the entry, or wrap the entry with `Dial9Event` (via `append_on_drop_dial9`). The wrapper exists because adding a field is intrusive for shared or externally-owned metrics structs, and because a `#[cfg]` around one call site is easier to maintain than one around a struct field.
 
-`Dial9Event` is hand-written rather than a `#[metrics]` struct: a generic flattened field needs `<E as CloseValue>::Closed: InflectableEntry<NS>` on the generated `impl<NS>`, which the macro does not emit. Implementing `InflectableEntry` at the default style only is sufficient and expressible, because a wrapper is always a root entry and so never inflected by a parent. It writes the wrapped entry first and the context second, matching the descriptor order it reports, which also keeps the event named after the wrapped entry (the plan takes its name from the first descriptor segment).
+`Dial9Event` is hand-written because the macro does not emit the `where` clause a generic flattened field needs. It implements `InflectableEntry` at the default style only, which is enough for a root entry, and writes the wrapped entry before the context so the event is named after the entry rather than the context.
 
 Convenience wiring (`ServiceMetrics::attach_to_stream_with_dial9`-style extension traits, a `metrique_sink(...)` builder) is deliberately **later scope**: it drags `metrique-service-metrics` into the public API surface. `Dial9Stream::tee(&handle, other)` is the supported path: it composes the two sinks and filters dial9's fields out of `other` in one call, without naming any service-metrics type.
 
 ### Keeping dial9's fields out of the other formats
 
-`Dial9Context`'s fields are ordinary metrique fields, so they reach every sink in the pipeline. The monotonic timestamps are useless in EMF, and the worker/task ids are noise for a non-tokio consumer. Metrique has no per-format field exclusion, so `WithoutDial9Fields` wraps the other sink and drops `dial9.`-prefixed fields as they arrive: values are filtered in the `EntryWriter`, and whole descriptor segments that describe only dial9 fields are dropped so a descriptor-aware downstream sink still sees a descriptor that matches the values it received.
+`Dial9Context`'s fields are ordinary metrique fields, so they reach every sink in the pipeline. The monotonic timestamps are useless in EMF, and the worker/task ids are noise for a non-tokio consumer. Metrique has no per-format field exclusion, so `WithoutDial9Fields` wraps the other sink and drops `dial9.`-prefixed fields as they arrive: values are filtered in the `EntryWriter`, and the context's descriptor segment is dropped alongside them so a descriptor-aware downstream sink still sees a descriptor that matches the values it received. Dropping whole segments is enough because the context is always its own segment, whether flattened or wrapped. (A segment that mixes dial9-named and user fields, which takes a user field literally named `dial9.*`, cannot be subset out of `&'static` descriptor storage, so it degrades to `Descriptors::Unavailable` instead of reporting fields that no longer match the values.)
 
-A segment that *mixes* dial9-named and user fields cannot be filtered (descriptor field lists live in `&'static` storage and cannot be subset), so those degrade to `Descriptors::Unavailable` rather than reporting fields that no longer line up with the value stream. This only affects descriptor-aware downstream sinks; the write-driven formats are unaffected. A general `drop_fields` in metrique itself would be the better long-term home, per review discussion.
+A general `drop_fields` in metrique itself would be the better long-term home, per review discussion.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ Caller thread: `Dial9Context::capture()` reads the worker-id TLS, `tokio::task::
 Flush thread (whatever thread drives the metrique pipeline, e.g. `BackgroundQueue`'s): `Dial9Stream::next` per entry:
 
 1. Disabled handle: return immediately (the tee still delivers entries to the other formats).
-2. `entry.descriptors()`: `Unavailable` (hand-written entries, or entries containing `Flex` dynamic-key fields, whose descriptors are unavailable by construction) is skipped with a rate-limited warning.
+2. `entry.descriptors()`: `Unavailable` (hand-written entries that do not implement `descriptors()`, or entries containing `Flex` dynamic-key fields, whose descriptors are unavailable by construction) is skipped with a rate-limited warning.
 3. Plan lookup keyed on the descriptor-id sequence; first use walks the descriptor segments and builds the plan (schema registration, unit annotations, diagnostics).
 4. Walk `entry.write` with a capturing `EntryWriter` that routes each value callback per the plan, then assemble and encode the event.
 
@@ -52,7 +52,7 @@ Flush thread (whatever thread drives the metrique pipeline, e.g. `BackgroundQueu
 
 Metrique guarantees that walking `descriptors()` segments in sequence yields fields in exactly the order `Entry::write` emits `EntryWriter::value` callbacks, with each segment covering a contiguous slice of the write output (`docs/entry-descriptors.md`; for entries with interleaved flatten sites this means one descriptor segment per contiguous field run). The plan is therefore a flat action list in descriptor order, and the walk consumes it by callback index.
 
-A walk whose callback count differs from the plan in either direction means the entry violated that contract (an upstream metrique bug); the event is dropped with a rate-limited warning rather than recording mis-attributed values. Counting matters: a mid-walk omission shifts every later value one slot left, which type-compatible neighbors would otherwise absorb silently.
+Counting the callbacks is a cheap defensive guard, so the sink does it: if the count differs from the plan in either direction the event is dropped with a rate-limited warning rather than recording mis-attributed values.
 
 Field names still matter for the wire schema: two payload fields that emit the same post-rename name cannot share a schema, so the first occurrence keeps the name and later ones are skipped with a once-per-type diagnostic. Prefixing the flatten site (`#[metrics(flatten, prefix = "...")]`) is the documented remedy. Dial9's own header fields are outside this hazard entirely, being `dial9.`-prefixed.
 
@@ -66,7 +66,7 @@ Wire types come from the descriptor's `FieldShape`: unsigned widths map to `Vari
 
 ### Units
 
-The descriptor carries `Option<Unit>` per field, resolved by metrique from the `Value` trait or an explicit `#[metrics(unit = ..)]`. Dial9 emits units as schema-level annotations with key `"unit"`, normalized to the vocabulary the viewer formats (`us`/`ms`/`s`/`bytes`, plus plain `count`); units outside it keep their CloudWatch name and render unformatted. The original design proposed a `"metrique.unit"` key, dropped because the viewer's unit handling is keyed on `"unit"`.
+The descriptor carries `Option<Unit>` per field, resolved by metrique from the `Value` trait or an explicit `#[metrics(unit = ..)]`. Dial9 emits units as schema-level annotations with key `"unit"`, normalized to the vocabulary the viewer formats (`us`/`ms`/`s`/`bytes`, plus plain `count`); units outside it keep their CloudWatch name and render unformatted.
 
 ### Observability
 
@@ -80,7 +80,7 @@ First-use, per descriptor-id sequence (cached, so at most once per type):
 
 | Condition | Behaviour |
 | --- | --- |
-| `descriptors()` unavailable (hand-written entry, or `Flex` anywhere in the entry) | rate-limited warn; skipped on the dial9 side only |
+| `descriptors()` unavailable (hand-written entry without a `descriptors()` impl, or `Flex` anywhere in the entry) | rate-limited warn; skipped on the dial9 side only |
 | No `Context`-flagged fields (entry never opted in) | silently inert: the plan records nothing and `Entry::write` is not walked for entries of this type |
 | Payload field name collides with an earlier payload field | one `tracing::error!` per type; the later occurrence is skipped. Header fields cannot be collided with: they are `dial9.`-prefixed |
 | Two `Dial9Context`s flattened into one entry | warn per duplicated context field at plan build; the first flatten site keeps the header slots |
@@ -98,8 +98,6 @@ Per entry:
 | Panic inside `Value::write` | caught; event dropped, rate-limited warn; no event bytes are written until the walk completes, so at most orphaned string-pool entries remain (harmless) |
 | Encoder rejects the assembled event (validation failure) | event dropped; dial9-core logs the reason |
 
-The original design called for `debug_assert!` on the no-context and Opaque cases. The implementation logs instead: a `#[cfg]`-gated context field is a legitimate configuration, and uniform debug/release behavior keeps the failure paths testable.
-
 ## Performance
 
 Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. On dial9's side, steady state allocates only for payload string and list values: routing tables, key lookups, and value buffers are cached or reused across entries. Metrique's `descriptors()` itself may allocate per entry once a layout exceeds its inline segment capacity; the precomputed sequence id ([awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348)) removes that walk entirely.
@@ -112,9 +110,6 @@ Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numb
 - **Convenience wiring**: `attach_to_stream_with_dial9` / `metrique_sink(...)` builder, once we accept `metrique-service-metrics` in the public surface (later scope, see "User-facing API").
 - **`Flex` support**, blocked on metrique giving `Flex` entries a self-describing descriptor shape (today `Flex::descriptors()` is `Unavailable`, which makes any entry containing one unavailable).
 - **Numeric lists through `GlobalEntrySink`**, blocked on metrique's dyn bridge forwarding list elements without stringifying them ([awslabs/metrique#349](https://github.com/awslabs/metrique/issues/349)); until then only lists of strings work through a global sink, and entries with numeric list fields are dropped there.
-- **Hand-written `Entry` impls opting into descriptors** once metrique ships `DescribeEntry`.
 - **Precomputed descriptor-sequence ids** (upstream), replacing the per-entry `descriptors()` walk and id hashing with a single `u64` read; identification is most of the gap between this sink and plain EMF formatting. Proposed in [awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348).
-- **Typed source extraction for context**, replacing flag-based `Dial9Context` discovery. It would make `WithoutDial9Fields` unnecessary: the context would never be a field in the first place, so nothing would need filtering out of the other formats.
 - **A general `drop_fields` upstream in metrique**, replacing `WithoutDial9Fields` and letting a mixed segment be filtered properly instead of degrading to `Unavailable`.
 - **More schema annotations**: display hints, aggregation hints, privacy labels, `dial9.kpi` markers. Same mechanism as units.
-- **Per-sink compile-time wire plans**, once metrique can emit them, replacing the flush-thread `Entry::write` walk entirely.

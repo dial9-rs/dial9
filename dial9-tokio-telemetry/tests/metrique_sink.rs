@@ -1399,12 +1399,12 @@ fn tee_hides_dial9_fields_from_the_other_sink() {
 }
 
 #[test]
-fn mixed_segment_degrades_descriptors_rather_than_misreporting() {
-    // A user field that happens to be named like a dial9 field, declared in
-    // the same struct (so the same descriptor segment) as ordinary fields.
-    // The value is filtered, but the segment's field list cannot be, so the
-    // downstream descriptor must degrade instead of disagreeing with the
-    // values.
+fn user_field_squatting_the_dial9_namespace_degrades_descriptors() {
+    // The context is always its own descriptor segment, so the only way to
+    // get a segment that mixes dial9-named and user fields is a user field
+    // literally named `dial9.*`. Its value is filtered but the segment's
+    // field list cannot be, so the downstream descriptor degrades instead of
+    // disagreeing with the values.
     #[metrics]
     struct Mixed {
         #[metrics(flatten)]

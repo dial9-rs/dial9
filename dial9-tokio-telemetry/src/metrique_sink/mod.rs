@@ -126,10 +126,11 @@
 //!
 //! # Limitations
 //!
-//! - Hand-written `Entry` impls and entries containing
-//!   [`Flex`](metrique::flex::Flex) dynamic-key fields carry no descriptors
-//!   and cannot be recorded; they still reach the other side of the `tee`, so
-//!   EMF/JSON output is unaffected.
+//! - An entry the sink cannot describe is not recorded: hand-written `Entry`
+//!   impls that do not implement `descriptors()`, and entries containing
+//!   [`Flex`](metrique::flex::Flex) dynamic-key fields, whose descriptors are
+//!   unavailable by construction. They still reach the other side of the
+//!   `tee`, so EMF/JSON output is unaffected.
 //! - Distribution-shaped fields (histograms) and other fields whose closed
 //!   shape is `Opaque` cannot be encoded and are left out of the payload.
 //! - Only lists of strings work through a `GlobalEntrySink` (e.g.
@@ -142,10 +143,9 @@
 //!   are `dial9.`-prefixed, so they are never part of such a collision.
 //! - A sink wrapped in
 //!   [`WithoutDial9Fields`](crate::metrique_sink::WithoutDial9Fields) sees no
-//!   descriptors at all for an entry that mixes `dial9.`-named fields with
-//!   its own in one flatten site, because descriptor field lists cannot be
-//!   subset. Formats that work off `Entry::write` (EMF, JSON, the local
-//!   format) are unaffected.
+//!   descriptors for an entry that declares its own field literally named
+//!   `dial9.*` next to other fields, since that segment cannot be filtered.
+//!   Formats that work off `Entry::write` are unaffected.
 //!
 //! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 

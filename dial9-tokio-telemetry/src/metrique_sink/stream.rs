@@ -165,8 +165,8 @@ impl EntryIoStream for Dial9Stream {
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
                     "metrique entry without descriptors reached the dial9 sink and was \
-                     skipped; hand-written Entry impls and entries containing Flex \
-                     dynamic-key fields carry no descriptors"
+                     skipped; hand-written Entry impls that do not implement descriptors() \
+                     and entries containing Flex dynamic-key fields carry none"
                 );
             });
             return Ok(());

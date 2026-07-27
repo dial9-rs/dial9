@@ -57,9 +57,9 @@ pub(crate) enum WalkError<'p> {
     /// `Entry::write` emitted a different number of value callbacks than the
     /// descriptor declares (in either direction). That breaks metrique's
     /// descriptor/write-order contract, so positional routing cannot be
-    /// trusted. A mid-walk omission shifts every later value one slot left,
-    /// so counting is what turns silent misattribution into a detectable
-    /// mismatch.
+    /// trusted. Counting is cheap, and without it a mid-walk omission would
+    /// shift every later value one slot left with type-compatible neighbors
+    /// absorbing it silently.
     PlanMismatch,
     /// A non-optional payload field produced no value (a shape/value
     /// mismatch); the wire format has no absent encoding for required

@@ -527,7 +527,7 @@ let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
 m.latency_ms = 5;
 ```
 
-Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Hand-written `Entry` impls (no descriptor) and entries containing `Flex` dynamic-key fields cannot be recorded; histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Entries the sink cannot describe are not recorded (hand-written `Entry` impls without a `descriptors()` impl, and entries containing `Flex` dynamic-key fields); histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

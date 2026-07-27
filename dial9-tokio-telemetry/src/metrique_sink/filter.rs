@@ -72,11 +72,11 @@ impl<E: Entry> Entry for Filtered<'_, E> {
 /// descriptor-aware downstream sink sees a descriptor consistent with the
 /// filtered value stream.
 ///
-/// A segment covers one contiguous run of an entry's write output, and a
-/// flattened `Dial9Context` is exactly one such segment, so dropping whole
-/// segments is enough for the shapes this filter exists to serve. A segment
-/// that mixes dial9 and non-dial9 fields cannot be represented (descriptor
-/// field lists come from `&'static` storage and cannot be subset), so rather
+/// A segment covers one contiguous run of an entry's write output, and the
+/// context is always its own segment (a flatten site gets one; `Dial9Event`
+/// chains one), so dropping whole segments covers both supported shapes. A
+/// mixed segment only arises from a user field literally named `dial9.*`;
+/// those cannot be subset out of `&'static` descriptor storage, so rather
 /// than hand out a descriptor whose fields no longer line up with the values,
 /// the whole thing degrades to `Unavailable`.
 fn filter_descriptors(descs: Descriptors<'_>) -> Descriptors<'_> {
