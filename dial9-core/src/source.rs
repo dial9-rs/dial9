@@ -19,6 +19,17 @@ pub struct FlushContext<'a> {
     drain_epoch: &'a AtomicU64,
 }
 
+impl std::fmt::Debug for FlushContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlushContext")
+            .field(
+                "drain_epoch",
+                &self.drain_epoch.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> FlushContext<'a> {
     pub(crate) fn new(collector: &'a Arc<CentralCollector>, drain_epoch: &'a AtomicU64) -> Self {
         Self {

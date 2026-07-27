@@ -45,6 +45,15 @@ pub struct Recorder {
     worker: Option<WorkerHandle>,
 }
 
+impl std::fmt::Debug for Recorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recorder")
+            .field("enabled", &self.handle.is_enabled())
+            .field("recording", &self.flush_thread.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// A hook run once, with the live [`Dial9Handle`], when the recorder first
 /// enables recording.
 pub type RecordingStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
