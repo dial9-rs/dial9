@@ -319,7 +319,11 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            enc.write_event(&schemas.enter, &values);
+            if let Err(e) = enc.write_event(&schemas.enter, &values) {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                    tracing::error!(span = %span_name, "dropping span-enter event: {e}");
+                });
+            }
         });
     }
 
@@ -353,7 +357,11 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            enc.write_event(&schemas.exit, &values);
+            if let Err(e) = enc.write_event(&schemas.exit, &values) {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                    tracing::error!(span = %span_name, "dropping span-exit event: {e}");
+                });
+            }
         });
     }
 

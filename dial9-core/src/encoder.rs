@@ -85,25 +85,18 @@ impl ThreadLocalEncoder<'_> {
     /// ```
     // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
     #[doc(hidden)]
-    /// Returns `false` if the event was dropped for a validation failure
-    /// (logged rate-limited; never panics the calling thread).
+    /// Errors on validation failure; the event is dropped and the calling
+    /// thread is never panicked. The caller decides whether and how to
+    /// report (it knows the event's provenance; rate-limit in loops).
+    #[must_use = "a validation failure means the event was dropped"]
     pub fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
         values: &[dial9_trace_format::types::FieldValue],
-    ) -> bool {
-        match self.encoder.write_event(schema, values) {
-            Ok(()) => {
-                *self.events_written += 1;
-                true
-            }
-            Err(e) => {
-                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
-                    tracing::error!(schema = %schema.name(), "dropping event: {e}");
-                });
-                false
-            }
-        }
+    ) -> std::io::Result<()> {
+        self.encoder.write_event(schema, values)?;
+        *self.events_written += 1;
+        Ok(())
     }
 
     /// Intern a `&'static Location` (caching the `to_string()` result).

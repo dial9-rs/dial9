@@ -255,11 +255,17 @@ impl EntryIoStream for Dial9Stream {
                 }
                 return;
             }
-            if enc.write_event(&plan.schema, values) {
-                emitted = true;
-            } else {
-                // Encoder validation failure (already logged by dial9-core).
-                dropped = true;
+            match enc.write_event(&plan.schema, values) {
+                Ok(()) => emitted = true,
+                Err(e) => {
+                    dropped = true;
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::error!(
+                            entry = %plan.entry_name,
+                            "encoder rejected the assembled event; dropped: {e}"
+                        );
+                    });
+                }
             }
         });
 
