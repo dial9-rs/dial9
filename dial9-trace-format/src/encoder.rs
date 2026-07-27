@@ -168,12 +168,6 @@ pub struct Encoder<W: Write = Vec<u8>> {
     stack_pool: FxHashMap<Box<[u64]>, u32>,
     next_stack_pool_id: u32,
     schema_ids: FxHashMap<SchemaKey, WireTypeId>,
-    /// Identity fast path for dynamic [`Schema`] handles: wire ids keyed by
-    /// the address of the schema's shared `SchemaEntry` allocation. The
-    /// `Arc` is kept alive in the value so the address cannot be reused
-    /// while cached. Repeated `write_event` calls with the same handle skip
-    /// the name hash and deep schema comparison in `ensure_registered`.
-    dynamic_schema_cache: FxHashMap<usize, (Arc<SchemaEntry>, WireTypeId)>,
     /// Per-type dense cache keyed by `TraceEvent::type_slot()`.
     /// Stores `wire_id + 1` so that `0` means "unset".
     slot_cache: Vec<u32>,
@@ -201,7 +195,6 @@ impl Encoder<Vec<u8>> {
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
-            dynamic_schema_cache: FxHashMap::default(),
             slot_cache: Vec::new(),
             registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         }
@@ -226,7 +219,6 @@ impl<W: Write> Encoder<W> {
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
-            dynamic_schema_cache: FxHashMap::default(),
             slot_cache: Vec::new(),
             registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         })
@@ -276,7 +268,6 @@ impl<W: Write> Encoder<W> {
             stack_pool: new_stack_pool,
             next_stack_pool_id,
             schema_ids,
-            dynamic_schema_cache: FxHashMap::default(),
             slot_cache: Vec::new(),
             registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         }
@@ -307,7 +298,6 @@ impl<W: Write> Encoder<W> {
         self.next_stack_pool_id = 0;
         self.registry.clear();
         self.schema_ids.clear();
-        self.dynamic_schema_cache.clear();
         self.slot_cache.fill(0);
         self.registered_ids.fill(0);
         // creating a new EncodeState resets the timestamp delta
@@ -321,19 +311,6 @@ impl<W: Write> Encoder<W> {
     /// Idempotent if the schema matches. Errors if a different schema was
     /// already registered under the same name.
     fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
-        let identity = Arc::as_ptr(&schema.entry) as usize;
-        if let Some((_, wire_id)) = self.dynamic_schema_cache.get(&identity) {
-            return Ok(*wire_id);
-        }
-        let wire_id = self.ensure_registered_slow(schema)?;
-        self.dynamic_schema_cache
-            .insert(identity, (Arc::clone(&schema.entry), wire_id));
-        Ok(wire_id)
-    }
-
-    /// Name-keyed registration with collision validation; the slow path
-    /// behind the identity cache above.
-    fn ensure_registered_slow(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
         let key = SchemaKey::Name(Arc::clone(&schema.name_key));
         if let Some(&wire_id) = self.schema_ids.get(&key) {
             // TODO: unify registry and schema_ids to avoid this error case
