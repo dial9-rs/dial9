@@ -1546,3 +1546,57 @@ fn wrapped_context_is_hidden_from_the_other_sink_too() {
         "descriptor must match the filtered values: {seen:#?}"
     );
 }
+
+#[test]
+fn multi_observation_distribution_records_the_first() {
+    use metrique_writer::core::descriptor::{FieldShape, KnownShape};
+    use metrique_writer::{MetricFlags, Observation, Unit};
+
+    // A custom `Value` that emits several observations into a field whose
+    // declared shape is a scalar. The first observation is recorded; the
+    // rest are dropped (debug-logged) rather than losing the field or the
+    // event.
+    #[derive(Debug)]
+    struct Burst;
+    impl metrique_writer::Value for Burst {
+        const SHAPE: FieldShape<'static> = FieldShape::Known(KnownShape::U64);
+        fn write(&self, writer: impl metrique_writer::ValueWriter) {
+            writer.metric(
+                [
+                    Observation::Unsigned(11),
+                    Observation::Unsigned(22),
+                    Observation::Unsigned(33),
+                ],
+                Unit::None,
+                [],
+                MetricFlags::empty(),
+            );
+        }
+    }
+    impl metrique::CloseValue for Burst {
+        type Closed = Burst;
+        fn close(self) -> Burst {
+            self
+        }
+    }
+
+    #[metrics]
+    struct WithBurst {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        samples: Burst,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            WithBurst {
+                dial9: Dial9Context::capture(),
+                samples: Burst,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1, "entry must record: {events:#?}");
+    assert_eq!(events[0].fields["samples"], "11");
+}

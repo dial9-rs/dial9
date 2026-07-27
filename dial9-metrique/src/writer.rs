@@ -243,7 +243,7 @@ fn capture_u64(value: &(impl Value + ?Sized)) -> Option<u64> {
             _dimensions: impl IntoIterator<Item = (&'a str, &'a str)>,
             _flags: metrique_writer::MetricFlags<'_>,
         ) {
-            if let Some(Observation::Unsigned(v)) = single_observation(distribution) {
+            if let (Some(Observation::Unsigned(v)), _) = first_observation(distribution) {
                 *self.0 = Some(v);
             }
         }
@@ -256,12 +256,15 @@ fn capture_u64(value: &(impl Value + ?Sized)) -> Option<u64> {
     out
 }
 
-/// The distribution's only observation, or `None` when it is empty or
-/// carries more than one.
-fn single_observation(distribution: impl IntoIterator<Item = Observation>) -> Option<Observation> {
+/// The distribution's first observation, and whether more followed. Planned
+/// shapes are all single-observation scalars; when a custom `Value` emits
+/// more, recording the first is more useful than losing the field.
+fn first_observation(
+    distribution: impl IntoIterator<Item = Observation>,
+) -> (Option<Observation>, bool) {
     let mut iter = distribution.into_iter();
     let first = iter.next();
-    if iter.next().is_some() { None } else { first }
+    (first, iter.next().is_some())
 }
 
 /// Outcome of one capture.
@@ -435,10 +438,21 @@ impl ValueWriter for ScalarCapture<'_, '_> {
         _dimensions: impl IntoIterator<Item = (&'a str, &'a str)>,
         _flags: metrique_writer::MetricFlags<'_>,
     ) {
-        // Planned kinds are all single-observation scalars (distribution
-        // shapes are Opaque and never planned), so a multi-observation
-        // callback falls through to the mismatch warn below.
-        let captured = match (single_observation(distribution), self.kind) {
+        let (first, truncated) = first_observation(distribution);
+        if truncated {
+            // Distribution shapes are Opaque and never planned, so extra
+            // observations mean a custom `Value` emitting several into a
+            // scalar-planned field. Record the first rather than none.
+            rate_limited!(Duration::from_secs(60), {
+                tracing::debug!(
+                    entry = %self.entry_name,
+                    kind = ?self.kind,
+                    "multi-observation distribution on a scalar field; recording \
+                     the first observation"
+                );
+            });
+        }
+        let captured = match (first, self.kind) {
             (None, _) => None,
             (Some(Observation::Unsigned(v)), ScalarKind::Bool) => Some(FieldValue::Bool(v != 0)),
             (Some(Observation::Unsigned(v)), ScalarKind::Uint) => Some(FieldValue::Varint(v)),
