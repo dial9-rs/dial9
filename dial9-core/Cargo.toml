@@ -9,6 +9,7 @@ readme = "README.md"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+missing_debug_implementations = "warn"
 
 [dependencies]
 bon = "3"

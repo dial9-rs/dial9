@@ -20,6 +20,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(shuttle)",
     "cfg(iai_enabled)",
 ] }
+missing_debug_implementations = "warn"
 
 [dependencies]
 tokio = { version = "1.52.0", features = [

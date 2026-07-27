@@ -8,6 +8,7 @@ description = "S3 upload SegmentProcessor for dial9-core's pipeline"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }

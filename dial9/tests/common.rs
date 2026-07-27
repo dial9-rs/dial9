@@ -32,6 +32,7 @@ pub fn small_mem_writer() -> MemoryBuffer {
 /// Pair with a [`MemoryBuffer`] via `.with_custom_pipeline(|p| p.pipe(capture))`,
 /// then `graceful_shutdown(..)` to drain the worker before reading the captured
 /// segments.
+#[derive(Debug)]
 pub struct CapturingProcessor {
     segments: Arc<Mutex<Vec<Vec<u8>>>>,
 }
