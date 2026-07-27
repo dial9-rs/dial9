@@ -126,6 +126,9 @@ pub(crate) struct Plan {
 /// The event-header fields every metrique schema starts with, preceding the
 /// payload fields. The event timestamp is implicit and not part of the
 /// schema field list.
+///
+/// Names are `dial9.`-prefixed so they cannot collide with a user payload
+/// field: an entry is free to carry its own `worker_id`.
 //
 // `ALL` is the single source of truth for header order: the schema builder
 // here and the value assembly in `writer.rs` both iterate it, so the two
@@ -151,10 +154,10 @@ impl Header {
 
     fn name(self) -> &'static str {
         match self {
-            Header::WorkerId => "worker_id",
-            Header::TaskId => "task_id",
-            Header::Duration => "duration_ns",
-            Header::WallClock => "wall_clock_ns",
+            Header::WorkerId => "dial9.worker_id",
+            Header::TaskId => "dial9.task_id",
+            Header::Duration => "dial9.duration_ns",
+            Header::WallClock => "dial9.wall_clock_ns",
         }
     }
 
@@ -302,16 +305,16 @@ pub(crate) fn build_plan(
 
 /// Classify one `Context`-flagged field into a header role.
 //
-// Roles match on canonicalized base names (see `field_names` in
-// `context.rs`). Each role routes at most once; repeats (a second
-// `Dial9Context` in the same entry) and unrecognized names are skipped
-// with a warning.
+// Roles match exactly on the descriptor's base name (see `field_names` in
+// `context.rs`; those names are style-invariant). Each role routes at most
+// once; repeats (a second `Dial9Context` in the same entry) and unrecognized
+// names are skipped with a warning.
 fn context_action(
     field: &FieldView<'_>,
     entry_name: &str,
     roles_seen: &mut [bool; ContextRole::COUNT],
 ) -> FieldAction {
-    let role = match field_names::canonicalize(field.base_name()).as_str() {
+    let role = match field.base_name() {
         field_names::WORKER_ID => Some(ContextRole::WorkerId),
         field_names::TASK_ID => Some(ContextRole::TaskId),
         field_names::MONOTONIC_NS_START => Some(ContextRole::MonotonicStart),

@@ -70,11 +70,11 @@
 //!
 //! - the entry's canonical name (schema name `metrique:<EntryName>`,
 //!   suffixed `#<layout hash>` when distinct entry types share a name),
-//! - the start timestamp, request duration, worker id, and task id from
+//! - the start timestamp, plus `dial9.duration_ns`, `dial9.worker_id`, and
+//!   `dial9.task_id` from
 //!   [`Dial9Context`](crate::metrique_sink::Dial9Context) (worker
-//!   `WorkerId::UNKNOWN` and absent task id when
-//!   captured off-runtime),
-//! - the wall-clock timestamp when the entry declares
+//!   `WorkerId::UNKNOWN` and absent task id when captured off-runtime),
+//! - `dial9.wall_clock_ns` when the entry declares
 //!   `#[metrics(timestamp)]`,
 //! - every field not flagged [`Skip`](crate::metrique_sink::Skip), with units
 //!   carried as `unit` schema annotations (the same key the `TraceEvent`
@@ -95,7 +95,8 @@
 //!   elements. Typed sinks are unaffected.
 //! - Two fields that emit the same post-rename name cannot share a schema:
 //!   the first occurrence keeps the name and later ones are skipped with a
-//!   diagnostic. Prefix flatten sites to disambiguate.
+//!   diagnostic. Prefix flatten sites to disambiguate. Dial9's own fields
+//!   are `dial9.`-prefixed, so they are never part of such a collision.
 //!
 //! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 

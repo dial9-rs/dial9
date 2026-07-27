@@ -210,14 +210,14 @@ fn full_entry_round_trips() {
     // Off-runtime capture still records timestamps; worker is unknown and
     // the task id is absent.
     assert_eq!(
-        ev.fields["worker_id"],
+        ev.fields["dial9.worker_id"],
         WorkerId::UNKNOWN.as_u64().to_string()
     );
-    assert_eq!(ev.fields["task_id"], "<none>");
+    assert_eq!(ev.fields["dial9.task_id"], "<none>");
     assert!(ev.timestamp_ns > 0, "start timestamp missing");
     // Close-time duration: present and numeric (may be arbitrarily small,
     // since the entry closes right after capture).
-    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
 
     assert_eq!(events[1].fields["Retries"], "<none>");
 }
@@ -248,11 +248,11 @@ fn on_runtime_context_captures_worker_and_task() {
     assert_eq!(events.len(), 1);
     let ev = &events[0];
     assert_ne!(
-        ev.fields["worker_id"],
+        ev.fields["dial9.worker_id"],
         WorkerId::UNKNOWN.as_u64().to_string(),
         "expected a real worker id"
     );
-    assert_ne!(ev.fields["task_id"], "<none>", "expected a task id");
+    assert_ne!(ev.fields["dial9.task_id"], "<none>", "expected a task id");
 }
 
 #[test]
@@ -333,7 +333,7 @@ fn context_only_entry_emits_header_event() {
 
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_ne!(ev.fields["duration_ns"], "<none>");
+    assert_ne!(ev.fields["dial9.duration_ns"], "<none>");
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn timestamp_field_lands_in_wall_clock_header() {
     });
 
     assert_eq!(events.len(), 1);
-    let wall: u64 = events[0].fields["wall_clock_ns"].parse().unwrap();
+    let wall: u64 = events[0].fields["dial9.wall_clock_ns"].parse().unwrap();
     assert!(
         wall > 1_500_000_000_000_000_000,
         "implausible wall clock: {wall}"
@@ -519,42 +519,9 @@ fn timestamp_field_lands_in_wall_clock_header() {
 }
 
 #[test]
-fn payload_field_colliding_with_header_name_is_skipped() {
-    // snake_case keeps the user field named exactly like the header field.
-    #[metrics]
-    struct Colliding {
-        #[metrics(flatten)]
-        dial9: Dial9Context,
-        worker_id: u64,
-        count: u64,
-    }
-
-    let events = run_sink_test(|stream| {
-        feed_entry!(
-            stream,
-            Colliding {
-                dial9: Dial9Context::capture(),
-                worker_id: 42,
-                count: 3,
-            }
-        );
-    });
-
-    assert_eq!(events.len(), 1);
-    let ev = &events[0];
-    assert_eq!(ev.fields["count"], "3");
-    // The header slot wins; the colliding payload field is dropped rather
-    // than producing a duplicate schema name.
-    assert_ne!(ev.fields["worker_id"], "42");
-}
-
-#[test]
-fn payload_field_sharing_a_context_field_name_still_records() {
-    // The unprefixed context routes "worker_id" into the event header; the
-    // snake_case payload field emits the identical name. Routing is
-    // positional, so both land: the context in the header, and the payload
-    // field skipped only because it collides with the reserved header schema
-    // name.
+fn payload_field_named_like_a_header_field_coexists_with_it() {
+    // The `dial9.` prefix on header fields means a user field named
+    // `worker_id` is not a collision: both land, side by side.
     #[metrics]
     struct SameNames {
         #[metrics(flatten)]
@@ -577,9 +544,11 @@ fn payload_field_sharing_a_context_field_name_still_records() {
     assert_eq!(events.len(), 1, "entry must record: {events:#?}");
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "7");
-    // The header slot carries the context's worker id, not the payload 42.
-    assert_ne!(ev.fields["worker_id"], "42");
-    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
+    // The payload keeps its own value...
+    assert_eq!(ev.fields["worker_id"], "42");
+    // ...and the header carries the captured context, unaffected.
+    assert_ne!(ev.fields["dial9.worker_id"], "42");
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
 }
 
 #[test]
@@ -609,7 +578,7 @@ fn duplicate_contexts_first_wins() {
     assert_eq!(events.len(), 1, "entry must record: {events:#?}");
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "1");
-    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
 }
 
 #[test]
@@ -697,13 +666,12 @@ fn custom_signed_value_round_trips_negatives() {
 
 #[test]
 fn prefixed_context_still_routes() {
-    // The documented remedy for name collisions: prefix the flatten site.
+    // A prefix at the flatten site changes the emitted context field names
+    // but not their descriptor base names, so role routing is unaffected.
     #[metrics]
     struct Prefixed {
-        #[metrics(flatten, prefix = "dial9_")]
+        #[metrics(flatten, prefix = "req_")]
         dial9: Dial9Context,
-        // Would collide with the header name without the prefix above
-        // making the context fields distinct.
         worker_id: u64,
     }
 
@@ -719,11 +687,10 @@ fn prefixed_context_still_routes() {
 
     assert_eq!(events.len(), 1, "prefixed entry must record: {events:#?}");
     let ev = &events[0];
-    // Context still routes (roles match on base name, prefix-insensitive)...
-    let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
-    // ...but the payload field collides with the reserved header name and
-    // is skipped; the header slot carries the real worker id.
-    assert_ne!(ev.fields["worker_id"], "7");
+    // Context still routes (roles match on base name, prefix-insensitive).
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert_ne!(ev.fields["dial9.worker_id"], "7");
+    assert_eq!(ev.fields["worker_id"], "7");
 }
 
 #[test]
@@ -831,7 +798,7 @@ fn entry_enum_variants_get_distinct_schemas() {
     assert_eq!(events[2].fields["bytes"], "300");
     // Context routed for every variant.
     for ev in &events {
-        let _duration: u64 = ev.fields["duration_ns"].parse().unwrap();
+        let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
     }
 }
 
@@ -1178,12 +1145,48 @@ fn every_context_role_routes() {
     // WorkerId, TaskId, MonotonicEnd routed; MonotonicStart is the event
     // timestamp.
     assert_ne!(
-        ev.fields["worker_id"],
+        ev.fields["dial9.worker_id"],
         WorkerId::UNKNOWN.as_u64().to_string()
     );
-    assert_ne!(ev.fields["task_id"], "<none>");
-    assert_ne!(ev.fields["duration_ns"], "<none>");
+    assert_ne!(ev.fields["dial9.task_id"], "<none>");
+    assert_ne!(ev.fields["dial9.duration_ns"], "<none>");
     assert!(ev.timestamp_ns > 0);
+}
+
+#[test]
+fn parent_rename_all_does_not_restyle_context_names() {
+    // Context routing and the `dial9.` header names both rely on
+    // Dial9Context's literal field names being style-invariant. A parent
+    // asking for a different style must not reach them.
+    #[metrics(rename_all = "PascalCase")]
+    struct Styled {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        some_count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            Styled {
+                dial9: Dial9Context::capture(),
+                some_count: 4,
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1, "styled entry must record: {events:#?}");
+    let ev = &events[0];
+    // The payload field is restyled...
+    assert_eq!(ev.fields["SomeCount"], "4");
+    // ...while the header keeps its literal lowercase names, and the
+    // context still routed into it.
+    assert!(
+        ev.field_names.contains(&"dial9.worker_id".to_owned()),
+        "header names must not be restyled: {:?}",
+        ev.field_names
+    );
+    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
 }
 
 #[test]
@@ -1268,7 +1271,7 @@ fn boxed_entries_round_trip() {
         ev.pooled_fields.contains(&"labels".to_owned()),
         "interning must survive the box: {ev:#?}"
     );
-    let _duration: u64 = ev.fields["duration_ns"]
+    let _duration: u64 = ev.fields["dial9.duration_ns"]
         .parse()
         .expect("context must route through the box");
 }

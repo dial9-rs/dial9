@@ -42,10 +42,11 @@ impl CloseValue for &MonotonicAtClose {
 /// the same worker and task.
 ///
 /// The fields also flow to the other formats in the pipeline (EMF/JSON) as
-/// ordinary fields named `worker_id`, `task_id`, `monotonic_ns_start`, and
-/// `monotonic_ns_end` (restyled by a parent `rename_all`); use
-/// `#[metrics(flatten, prefix = "...")]` at the flatten site if those names
-/// collide with your own.
+/// ordinary fields. Their names are literal and `dial9.`-prefixed
+/// (`dial9.worker_id`, `dial9.task_id`, `dial9.monotonic_ns_start`,
+/// `dial9.monotonic_ns_end`), which keeps them out of the way of your own
+/// field names and makes them easy to filter out of a format that does not
+/// want them.
 //
 // Deliberately neither `Default` nor `Clone`: a defaulted context would
 // silently look like "valid context captured at monotonic time 0".
@@ -54,16 +55,16 @@ impl CloseValue for &MonotonicAtClose {
 pub struct Dial9Context {
     /// Global dial9 worker id of the capturing thread
     /// (`WorkerId::UNKNOWN` when off-runtime).
-    #[metrics(flags(Context))]
+    #[metrics(name = "dial9.worker_id", flags(Context))]
     worker_id: u64,
     /// Tokio task id of the capturing task, absent when not inside a task.
-    #[metrics(flags(Context))]
+    #[metrics(name = "dial9.task_id", flags(Context))]
     task_id: Option<u64>,
     /// Monotonic nanoseconds at capture (request start).
-    #[metrics(flags(Context))]
+    #[metrics(name = "dial9.monotonic_ns_start", flags(Context))]
     monotonic_ns_start: u64,
     /// Monotonic nanoseconds at entry close (request end).
-    #[metrics(flags(Context))]
+    #[metrics(name = "dial9.monotonic_ns_end", flags(Context))]
     monotonic_ns_end: MonotonicAtClose,
 }
 
@@ -84,26 +85,19 @@ impl Dial9Context {
     }
 }
 
-/// Base names of [`Dial9Context`]'s fields, used by the sink to assign
-/// context roles when walking descriptors. Kept next to the struct so the
-/// two cannot drift independently.
+/// Names of [`Dial9Context`]'s fields, used by the sink to assign context
+/// roles when walking descriptors. Kept next to the struct so the two cannot
+/// drift independently.
 ///
-/// A parent entry's `rename_all` style restyles flattened child names
-/// (e.g. `worker_id` → `WorkerId`), so these are canonical forms compared
-/// via [`canonicalize`]: lowercase with separators removed.
+/// These are literal `#[metrics(name = ...)]` names, so unlike ordinary
+/// fields they are identical under every [`NameStyle`](metrique::NameStyle):
+/// a parent's `rename_all` cannot restyle them, and matching is an exact
+/// comparison against the descriptor's base name. A `prefix` at the flatten
+/// site prepends to the emitted name but leaves the base name alone, so
+/// routing survives that too.
 pub(crate) mod field_names {
-    pub(crate) const WORKER_ID: &str = "workerid";
-    pub(crate) const TASK_ID: &str = "taskid";
-    pub(crate) const MONOTONIC_NS_START: &str = "monotonicnsstart";
-    pub(crate) const MONOTONIC_NS_END: &str = "monotonicnsend";
-
-    /// Canonicalize a possibly-restyled field name: strip `_`/`-` and
-    /// lowercase, so `worker_id`, `WorkerId`, `workerId`, and `worker-id`
-    /// all compare equal.
-    pub(crate) fn canonicalize(name: &str) -> String {
-        name.chars()
-            .filter(|c| *c != '_' && *c != '-')
-            .map(|c| c.to_ascii_lowercase())
-            .collect()
-    }
+    pub(crate) const WORKER_ID: &str = "dial9.worker_id";
+    pub(crate) const TASK_ID: &str = "dial9.task_id";
+    pub(crate) const MONOTONIC_NS_START: &str = "dial9.monotonic_ns_start";
+    pub(crate) const MONOTONIC_NS_END: &str = "dial9.monotonic_ns_end";
 }
