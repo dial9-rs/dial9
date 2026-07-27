@@ -11,7 +11,7 @@
 //! cargo run -p dial9 --features metrique-sink --example metrique_metrics
 //! ```
 
-use dial9::metrique_sink::{Dial9Context, Dial9Stream, Interned};
+use dial9::metrique_sink::{Dial9Context, Dial9Stream};
 use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
 use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
@@ -29,7 +29,7 @@ struct RequestMetrics {
     dial9: Dial9Context,
 
     /// Interned: repeated values hit dial9's string pool.
-    #[metrics(flags(Interned))]
+    #[metrics(flags(dial9::Interned))]
     operation: &'static str,
 
     #[metrics(unit = Millisecond)]

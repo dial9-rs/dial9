@@ -5,7 +5,7 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
-use dial9::metrique_sink::{Dial9Context, Interned};
+use dial9::metrique_sink::Dial9Context;
 use metrique::ServiceMetrics;
 use metrique::timers::Timer;
 use metrique::unit_of_work::metrics;
@@ -21,10 +21,10 @@ struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,
 
-    #[metrics(flags(Interned))]
+    #[metrics(flags(dial9::Interned))]
     operation: &'static str,
 
-    #[metrics(flags(Interned))]
+    #[metrics(flags(dial9::Interned))]
     metric_name: String,
 
     /// Stops at entry close; carries a Milliseconds unit annotation.

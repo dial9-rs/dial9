@@ -480,7 +480,7 @@ dial9 = { version = "0.5", features = ["metrique-sink", "tokio"] }
 
 **Opt an entry in and tee the stream:**
 ```rust,ignore
-use dial9::metrique_sink::{Dial9Context, Dial9Stream, Interned, Skip};
+use dial9::metrique_sink::{Dial9Context, Dial9Stream};
 use metrique::unit_of_work::metrics;
 
 #[metrics(rename_all = "PascalCase")]
@@ -489,14 +489,14 @@ struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,
 
-    #[metrics(flags(Interned))]
+    #[metrics(flags(dial9::Interned))]
     operation: &'static str,
 
     latency_ms: u64,
     success: bool,
 
     // Keep bulky or high-cardinality fields out of the trace.
-    #[metrics(flags(Skip))]
+    #[metrics(flags(dial9::Skip))]
     debug_blob: String,
 }
 
