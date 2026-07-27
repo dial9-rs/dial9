@@ -466,7 +466,7 @@ tracing_subscriber::registry()
     .init();
 ```
 
-Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs ~300ns total (~50-100ns is dial9 encoding overhead).
+Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs roughly 650-800ns total on a modern server core, most of which is dial9 encoding (the same span through a bare `tracing` registry costs ~100-200ns).
 
 ### Metrique metrics (opt-in)
 
