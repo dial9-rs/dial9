@@ -11,7 +11,7 @@
 //! cargo run -p dial9 --features metrique-sink --example metrique_metrics
 //! ```
 
-use dial9::metrique_sink::{Dial9Context, Dial9Stream};
+use dial9::metrique_sink::{Dial9Context, Dial9EntryExt, Dial9Stream};
 use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
 use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
@@ -60,6 +60,22 @@ async fn handle_request(id: u32) {
     // queues it for both sinks.
 }
 
+/// An entry with no dial9 field: `append_on_drop_dial9` attaches the
+/// context from the outside, for structs you cannot (or would rather not)
+/// change.
+#[metrics(rename_all = "PascalCase")]
+struct HealthCheckMetrics {
+    healthy: bool,
+}
+
+async fn health_check() {
+    let mut metrics =
+        HealthCheckMetrics { healthy: false }.append_on_drop_dial9(ServiceMetrics::sink());
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    // Field access reaches through the wrapper.
+    metrics.healthy = true;
+}
+
 fn main() {
     let writer = DiskBuffer::single_file("metrique_trace.bin").unwrap();
     let (recorder, rt) = recorder(writer)
@@ -84,6 +100,9 @@ fn main() {
 
     rt.block_on(async {
         let tasks: Vec<_> = (0..20).map(|i| tokio::spawn(handle_request(i))).collect();
+        tokio::spawn(health_check())
+            .await
+            .expect("health check panicked");
         for t in tasks {
             t.await.expect("request task panicked");
         }
