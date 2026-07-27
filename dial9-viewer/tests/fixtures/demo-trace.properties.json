@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 12770,
+  "total_samples": 10008,
   "by_source": {
-    "0": 208,
-    "1": 12562
+    "0": 212,
+    "1": 9796
   },
   "on_off_all": {
-    "on_runtime": 12770,
+    "on_runtime": 10008,
     "off_runtime": 0
   },
   "on_off_by_source": {
     "0": {
-      "on": 208,
+      "on": 212,
       "off": 0
     },
     "1": {
-      "on": 12562,
+      "on": 9796,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 208,
-    "distinct_stacks": 142,
-    "stack_sig_digest": "352b8e56cbfa7df1",
-    "ts_count": 208,
-    "ts_span_ns": 4079996817,
-    "ts_delta_digest": "605e191ee4bedcf5",
+    "count": 212,
+    "distinct_stacks": 146,
+    "stack_sig_digest": "a1de0bfefa43ac65",
+    "ts_count": 212,
+    "ts_span_ns": 4050003565,
+    "ts_delta_digest": "f1500118fd8d83ed",
     "top_stacks": [
       {
         "count": 26,
-        "depth": 80,
+        "depth": 76,
         "leaf": "__GI___writev"
       },
       {
         "count": 8,
-        "depth": 83,
+        "depth": 79,
         "leaf": "__libc_recv"
       },
       {
-        "count": 7,
-        "depth": 1,
-        "leaf": "_int_malloc"
+        "count": 5,
+        "depth": 43,
+        "leaf": "__GI___pread64"
       },
       {
-        "count": 6,
-        "depth": 1,
-        "leaf": "__GI___lll_lock_wake_private"
-      },
-      {
-        "count": 4,
-        "depth": 47,
-        "leaf": "epoll_wait"
-      },
-      {
-        "count": 4,
-        "depth": 1,
-        "leaf": "_int_free"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "[unknown] 0x7f4d88bea27a"
-      },
-      {
-        "count": 3,
+        "count": 5,
         "depth": 1,
         "leaf": "malloc_consolidate"
+      },
+      {
+        "count": 5,
+        "depth": 92,
+        "leaf": "__GI___writev"
+      },
+      {
+        "count": 4,
+        "depth": 1,
+        "leaf": "[unknown] 0x7fe5e32c827a"
+      },
+      {
+        "count": 4,
+        "depth": 95,
+        "leaf": "syscall"
+      },
+      {
+        "count": 4,
+        "depth": 1,
+        "leaf": "_int_malloc"
       }
     ]
   }
