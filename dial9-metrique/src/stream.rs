@@ -12,8 +12,8 @@ use metrique_writer::core::descriptor::DescriptorId;
 use metrique_writer::stream::{Tee, tee};
 use metrique_writer::{Entry, EntryIoStream, IoStreamError};
 
-use crate::rate_limit::rate_limited;
-use crate::telemetry::Dial9Handle;
+use dial9_core::handle::Dial9Handle;
+use dial9_core::rate_limited;
 
 use super::WithoutDial9Fields;
 use super::plan::{Plan, build_plan};
@@ -102,7 +102,13 @@ impl Dial9Stream {
     /// `dial9.`-prefixed fields do not reach it: the trace gets the runtime
     /// context, and your EMF/JSON output looks the way it did before.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// use dial9_metrique::Dial9Stream;
+    /// use metrique::ServiceMetrics;
+    /// use metrique::writer::AttachGlobalEntrySinkExt;
+    ///
+    /// # let handle = dial9_core::handle::Dial9Handle::disabled();
+    /// # let emf_stream = Dial9Stream::new(&handle); // stand-in for your pipeline
     /// let _join = ServiceMetrics::attach_to_stream(
     ///     Dial9Stream::tee(&handle, emf_stream),
     /// );

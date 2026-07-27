@@ -9,16 +9,20 @@
 //!   global-sink path.
 //! - `Dial9Stream::next()` with a paused recorder and with a disabled
 //!   handle: the wiring-left-in costs.
+//! - `WithoutDial9Fields`: the per-entry cost the filter adds to the other
+//!   side of a `Dial9Stream::tee`, against a do-nothing sink baseline.
 //!
 //! Usage:
-//!   cargo bench --bench metrique_sink_bench --features metrique-sink
+//!   cargo bench -p dial9-metrique --bench metrique_sink_bench
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Interned};
-use dial9_tokio_telemetry::telemetry::{Dial9Handle, MemoryBuffer, recorder};
+use dial9_core::buffer::MemoryBuffer;
+use dial9_core::handle::Dial9Handle;
+use dial9_core::recorder::recorder;
+use dial9_metrique::{Dial9Context, Dial9Stream, Interned, WithoutDial9Fields};
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
-use metrique_writer::EntryIoStream;
+use metrique_writer::{EntryIoStream, IoStreamError};
 use std::hint::black_box;
 
 #[metrics(rename_all = "PascalCase")]
@@ -169,5 +173,57 @@ fn bench_inactive(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_capture, bench_stream_next, bench_inactive);
+/// A do-nothing downstream sink: drives `Entry::write` with a discarding
+/// writer, so the filter's per-value overhead is the only difference
+/// between the bare and wrapped variants.
+struct NullSink;
+
+impl EntryIoStream for NullSink {
+    fn next(&mut self, entry: &impl metrique_writer::Entry) -> Result<(), IoStreamError> {
+        struct Discard;
+        impl<'a> metrique_writer::EntryWriter<'a> for Discard {
+            fn timestamp(&mut self, timestamp: std::time::SystemTime) {
+                black_box(timestamp);
+            }
+            fn value(
+                &mut self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+                value: &(impl metrique_writer::Value + ?Sized),
+            ) {
+                black_box(name.into());
+                black_box(value);
+            }
+            fn config(&mut self, _config: &'a dyn metrique_writer::EntryConfig) {}
+        }
+        entry.write(&mut Discard);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Cost `WithoutDial9Fields` adds per entry on the other side of the tee.
+fn bench_filter(c: &mut Criterion) {
+    let entry = closed_entry();
+
+    let mut bare = NullSink;
+    c.bench_function("other_sink_bare", |b| {
+        b.iter(|| bare.next(black_box(&entry)).unwrap());
+    });
+
+    let mut filtered = WithoutDial9Fields::new(NullSink);
+    c.bench_function("other_sink_filtered", |b| {
+        b.iter(|| filtered.next(black_box(&entry)).unwrap());
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_capture,
+    bench_stream_next,
+    bench_inactive,
+    bench_filter
+);
 criterion_main!(benches);

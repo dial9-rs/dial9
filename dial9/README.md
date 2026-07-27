@@ -470,12 +470,12 @@ Careful filtering of the data you send to dial9 strongly recommended. dial9 does
 
 ### Metrique metrics (opt-in)
 
-If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Each event is pinned to the worker and task that served the request, with start and end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
+If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Each event is pinned to the thread and task that served the request, with start and end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
 
-**Enable the `metrique-sink` feature:**
+**Enable the `metrique-sink` feature** (with `tokio` also on, events carry the task id; the sink itself does not need a tokio runtime):
 ```toml
 [dependencies]
-dial9 = { version = "0.5", features = ["metrique-sink"] }
+dial9 = { version = "0.5", features = ["metrique-sink", "tokio"] }
 ```
 
 **Opt an entry in and tee the stream:**

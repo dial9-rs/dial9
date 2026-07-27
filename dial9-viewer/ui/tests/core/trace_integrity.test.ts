@@ -401,8 +401,8 @@ describe("metrique events", () => {
   it("metrique events carry context and payload fields", () => {
     for (const ev of requestMetrics()) {
       const f = ev.fields;
-      expect(f["dial9.worker_id"], `dial9.worker_id missing on ${ev.name}`).toBeDefined();
-      expect(f["dial9.worker_id"], `dial9.worker_id null on ${ev.name}`).not.toBeNull();
+      expect(f["dial9.thread_id"], `dial9.thread_id missing on ${ev.name}`).toBeDefined();
+      expect(f["dial9.thread_id"], `dial9.thread_id null on ${ev.name}`).not.toBeNull();
       const duration = Number(f["dial9.duration_ns"]);
       expect(duration, `dial9.duration_ns missing on ${ev.name}`).not.toBeNaN();
       expect(duration, "duration must be non-negative").toBeGreaterThanOrEqual(0);

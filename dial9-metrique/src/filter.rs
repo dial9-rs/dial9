@@ -2,7 +2,7 @@
 //!
 //! [`Dial9Context`](super::Dial9Context)'s fields are ordinary metrique
 //! fields, so without filtering they also reach the EMF/JSON side of a
-//! `tee`. Worker and task ids are at least arguable there; the monotonic
+//! `tee`. Thread and task ids are at least arguable there; the monotonic
 //! timestamps are noise. Metrique has no per-format field exclusion, so this
 //! module wraps the other sink and drops the `dial9.`-prefixed fields on
 //! their way in.
@@ -23,7 +23,7 @@ const DIAL9_PREFIX: &str = "dial9.";
 /// it wraps.
 ///
 /// Built by [`Dial9Stream::tee`](super::Dial9Stream::tee); put it around the
-/// non-dial9 side of a `tee` so `dial9.worker_id` and friends stay out of
+/// non-dial9 side of a `tee` so `dial9.thread_id` and friends stay out of
 /// your EMF/JSON output while the dial9 sink still sees them.
 #[derive(Debug)]
 pub struct WithoutDial9Fields<S> {
@@ -107,7 +107,7 @@ fn filter_descriptors(descs: Descriptors<'_>) -> Descriptors<'_> {
 fn is_dial9_field<'n>(mut name_parts: impl Iterator<Item = &'n str>) -> bool {
     // The prefix lives entirely in the first part: flatten-site prefixes come
     // first, and a bare `Dial9Context` field's own name already starts with
-    // `dial9.`. A user prefix in front of it (`req_dial9.worker_id`) is the
+    // `dial9.`. A user prefix in front of it (`req_dial9.thread_id`) is the
     // user's own field namespace, and is deliberately left alone.
     name_parts
         .next()

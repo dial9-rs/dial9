@@ -55,7 +55,7 @@ pub(crate) enum FieldAction {
 /// Which event-header slot a context field feeds.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ContextRole {
-    WorkerId,
+    ThreadId,
     TaskId,
     MonotonicStart,
     MonotonicEnd,
@@ -68,7 +68,7 @@ impl ContextRole {
     /// silently exceed [`Self::COUNT`].
     fn index(self) -> usize {
         match self {
-            ContextRole::WorkerId => 0,
+            ContextRole::ThreadId => 0,
             ContextRole::TaskId => 1,
             ContextRole::MonotonicStart => 2,
             ContextRole::MonotonicEnd => 3,
@@ -128,7 +128,7 @@ pub(crate) struct Plan {
 /// schema field list.
 ///
 /// Names are `dial9.`-prefixed so they cannot collide with a user payload
-/// field: an entry is free to carry its own `worker_id`.
+/// field: an entry is free to carry its own `thread_id`.
 //
 // `ALL` is the single source of truth for header order: the schema builder
 // here and the value assembly in `writer.rs` both iterate it, so the two
@@ -136,7 +136,7 @@ pub(crate) struct Plan {
 // both sides (the header just doesn't ship), never misaligned.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Header {
-    WorkerId,
+    ThreadId,
     TaskId,
     /// Request duration, from the context's start and close-time captures
     /// (`end = event timestamp + duration`).
@@ -146,7 +146,7 @@ pub(crate) enum Header {
 
 impl Header {
     pub(crate) const ALL: [Header; 4] = [
-        Header::WorkerId,
+        Header::ThreadId,
         Header::TaskId,
         Header::Duration,
         Header::WallClock,
@@ -154,7 +154,7 @@ impl Header {
 
     fn name(self) -> &'static str {
         match self {
-            Header::WorkerId => "dial9.worker_id",
+            Header::ThreadId => "dial9.thread_id",
             Header::TaskId => "dial9.task_id",
             Header::Duration => "dial9.duration_ns",
             Header::WallClock => "dial9.wall_clock_ns",
@@ -163,8 +163,9 @@ impl Header {
 
     fn field_type(self) -> FieldType {
         match self {
-            Header::WorkerId => FieldType::Varint,
-            Header::TaskId | Header::Duration | Header::WallClock => FieldType::OptionalVarint,
+            Header::ThreadId | Header::TaskId | Header::Duration | Header::WallClock => {
+                FieldType::OptionalVarint
+            }
         }
     }
 }
@@ -315,7 +316,7 @@ fn context_action(
     roles_seen: &mut [bool; ContextRole::COUNT],
 ) -> FieldAction {
     let role = match field.base_name() {
-        field_names::WORKER_ID => Some(ContextRole::WorkerId),
+        field_names::THREAD_ID => Some(ContextRole::ThreadId),
         field_names::TASK_ID => Some(ContextRole::TaskId),
         field_names::MONOTONIC_NS_START => Some(ContextRole::MonotonicStart),
         field_names::MONOTONIC_NS_END => Some(ContextRole::MonotonicEnd),

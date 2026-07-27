@@ -1,15 +1,19 @@
 //! End-to-end tests for the metrique → dial9 sink: entries flow through
 //! `Dial9Stream`, land in a sealed trace file, and decode back with the
 //! expected schema, header context, payload values, and unit annotations.
-#![cfg(feature = "metrique-sink")]
+//!
+//! Runs with the `tokio` feature (the self dev-dependency turns it on), so
+//! task ids are captured when a test enters a runtime. Off-runtime capture
+//! is the default everywhere else.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use dial9_tokio_telemetry::metrique_sink::{
-    Dial9Context, Dial9EntryExt, Dial9Stream, Interned, Skip,
-};
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, WorkerId, recorder};
+use dial9_core::buffer::DiskBuffer;
+use dial9_core::recorder::recorder;
+use dial9_core::thread::current_tid;
+use dial9_metrique::{Dial9Context, Dial9EntryExt, Dial9Stream, Interned, Skip};
+use dial9_tokio_telemetry::telemetry::RecorderTokioExt;
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
@@ -209,11 +213,11 @@ fn full_entry_round_trips() {
     assert!(ev.pooled_fields.contains(&"Route".to_owned()));
     assert!(!ev.pooled_fields.contains(&"Operation".to_owned()));
 
-    // Off-runtime capture still records timestamps; worker is unknown and
+    // Off-runtime capture records the calling thread's tid and timestamps;
     // the task id is absent.
     assert_eq!(
-        ev.fields["dial9.worker_id"],
-        WorkerId::UNKNOWN.as_u64().to_string()
+        ev.fields["dial9.thread_id"],
+        u64::from(current_tid()).to_string()
     );
     assert_eq!(ev.fields["dial9.task_id"], "<none>");
     assert!(ev.timestamp_ns > 0, "start timestamp missing");
@@ -225,7 +229,7 @@ fn full_entry_round_trips() {
 }
 
 #[test]
-fn on_runtime_context_captures_worker_and_task() {
+fn on_runtime_context_captures_task_id() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
@@ -249,11 +253,10 @@ fn on_runtime_context_captures_worker_and_task() {
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_ne!(
-        ev.fields["dial9.worker_id"],
-        WorkerId::UNKNOWN.as_u64().to_string(),
-        "expected a real worker id"
-    );
+    // Captured inside a spawned task on a worker thread: a tid that is not
+    // the test thread's, and a task id.
+    let tid: u64 = ev.fields["dial9.thread_id"].parse().unwrap();
+    assert_ne!(tid, u64::from(current_tid()), "expected a worker tid");
     assert_ne!(ev.fields["dial9.task_id"], "<none>", "expected a task id");
 }
 
@@ -340,7 +343,7 @@ fn context_only_entry_emits_header_event() {
 
 #[test]
 fn disabled_handle_is_noop() {
-    let handle = dial9_tokio_telemetry::telemetry::Dial9Handle::disabled();
+    let handle = dial9_core::handle::Dial9Handle::disabled();
     let mut stream = Dial9Stream::new(&handle);
 
     #[metrics]
@@ -523,12 +526,12 @@ fn timestamp_field_lands_in_wall_clock_header() {
 #[test]
 fn payload_field_named_like_a_header_field_coexists_with_it() {
     // The `dial9.` prefix on header fields means a user field named
-    // `worker_id` is not a collision: both land, side by side.
+    // `thread_id` is not a collision: both land, side by side.
     #[metrics]
     struct SameNames {
         #[metrics(flatten)]
         dial9: Dial9Context,
-        worker_id: u64,
+        thread_id: u64,
         count: u64,
     }
 
@@ -537,7 +540,7 @@ fn payload_field_named_like_a_header_field_coexists_with_it() {
             stream,
             SameNames {
                 dial9: Dial9Context::capture(),
-                worker_id: 42,
+                thread_id: 42,
                 count: 7,
             }
         );
@@ -547,9 +550,9 @@ fn payload_field_named_like_a_header_field_coexists_with_it() {
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "7");
     // The payload keeps its own value...
-    assert_eq!(ev.fields["worker_id"], "42");
+    assert_eq!(ev.fields["thread_id"], "42");
     // ...and the header carries the captured context, unaffected.
-    assert_ne!(ev.fields["dial9.worker_id"], "42");
+    assert_ne!(ev.fields["dial9.thread_id"], "42");
     let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
 }
 
@@ -674,7 +677,7 @@ fn prefixed_context_still_routes() {
     struct Prefixed {
         #[metrics(flatten, prefix = "req_")]
         dial9: Dial9Context,
-        worker_id: u64,
+        thread_id: u64,
     }
 
     let events = run_sink_test(|stream| {
@@ -682,7 +685,7 @@ fn prefixed_context_still_routes() {
             stream,
             Prefixed {
                 dial9: Dial9Context::capture(),
-                worker_id: 7,
+                thread_id: 7,
             }
         );
     });
@@ -691,8 +694,8 @@ fn prefixed_context_still_routes() {
     let ev = &events[0];
     // Context still routes (roles match on base name, prefix-insensitive).
     let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
-    assert_ne!(ev.fields["dial9.worker_id"], "7");
-    assert_eq!(ev.fields["worker_id"], "7");
+    assert_ne!(ev.fields["dial9.thread_id"], "7");
+    assert_eq!(ev.fields["thread_id"], "7");
 }
 
 #[test]
@@ -1144,12 +1147,9 @@ fn every_context_role_routes() {
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    // WorkerId, TaskId, MonotonicEnd routed; MonotonicStart is the event
+    // ThreadId, TaskId, MonotonicEnd routed; MonotonicStart is the event
     // timestamp.
-    assert_ne!(
-        ev.fields["dial9.worker_id"],
-        WorkerId::UNKNOWN.as_u64().to_string()
-    );
+    let _tid: u64 = ev.fields["dial9.thread_id"].parse().unwrap();
     assert_ne!(ev.fields["dial9.task_id"], "<none>");
     assert_ne!(ev.fields["dial9.duration_ns"], "<none>");
     assert!(ev.timestamp_ns > 0);
@@ -1184,7 +1184,7 @@ fn parent_rename_all_does_not_restyle_context_names() {
     // ...while the header keeps its literal lowercase names, and the
     // context still routed into it.
     assert!(
-        ev.field_names.contains(&"dial9.worker_id".to_owned()),
+        ev.field_names.contains(&"dial9.thread_id".to_owned()),
         "header names must not be restyled: {:?}",
         ev.field_names
     );
@@ -1414,7 +1414,7 @@ fn user_field_squatting_the_dial9_namespace_degrades_descriptors() {
         count: u64,
     }
 
-    let handle = dial9_tokio_telemetry::telemetry::Dial9Handle::disabled();
+    let handle = dial9_core::handle::Dial9Handle::disabled();
     let (other, seen) = RecordingStream::shared();
     let mut stream = Dial9Stream::tee(&handle, other);
     feed_entry!(
@@ -1470,8 +1470,8 @@ fn wrapping_an_entry_records_the_same_context_as_flattening_one() {
     // ...and the context landed in the header exactly as a flattened
     // Dial9Context would.
     assert_eq!(
-        ev.fields["dial9.worker_id"],
-        WorkerId::UNKNOWN.as_u64().to_string()
+        ev.fields["dial9.thread_id"],
+        u64::from(current_tid()).to_string()
     );
     let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
     assert!(ev.timestamp_ns > 0, "start timestamp missing");
@@ -1529,7 +1529,7 @@ fn wrapped_context_is_hidden_from_the_other_sink_too() {
         count: u64,
     }
 
-    let handle = dial9_tokio_telemetry::telemetry::Dial9Handle::disabled();
+    let handle = dial9_core::handle::Dial9Handle::disabled();
     let (other, seen) = RecordingStream::shared();
     let mut stream = Dial9Stream::tee(&handle, other);
     feed_entry!(stream, Plain { count: 3 }.with_dial9_context());

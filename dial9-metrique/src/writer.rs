@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime};
 use dial9_trace_format::types::FieldValue;
 use metrique_writer::{EntryConfig, EntryWriter, Observation, Value, ValueWriter};
 
-use crate::rate_limit::rate_limited;
-use crate::telemetry::{ThreadLocalEncoder, WorkerId, clock_monotonic_ns};
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::encoder::ThreadLocalEncoder;
+use dial9_core::rate_limited;
 
 use super::plan::{ContextRole, FieldAction, HEADER_FIELDS, Header, Plan, ScalarKind, ValueKind};
 
@@ -16,7 +17,7 @@ use super::plan::{ContextRole, FieldAction, HEADER_FIELDS, Header, Plan, ScalarK
 /// and the `EntryWriter::timestamp` callback as the walk encounters them.
 #[derive(Debug, Default)]
 struct ContextValues {
-    worker_id: Option<u64>,
+    thread_id: Option<u64>,
     task_id: Option<u64>,
     monotonic_start: Option<u64>,
     monotonic_end: Option<u64>,
@@ -114,9 +115,11 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
             FieldValue::Varint(self.ctx.monotonic_start.unwrap_or_else(clock_monotonic_ns));
         for (i, header) in Header::ALL.into_iter().enumerate() {
             self.values[1 + i] = match header {
-                Header::WorkerId => {
-                    FieldValue::Varint(self.ctx.worker_id.unwrap_or(WorkerId::UNKNOWN.as_u64()))
-                }
+                Header::ThreadId => self
+                    .ctx
+                    .thread_id
+                    .map(FieldValue::Varint)
+                    .unwrap_or(FieldValue::None),
                 Header::TaskId => opt(self.ctx.task_id),
                 // Absent unless the context captured both timestamps; the
                 // flush-thread fallback timestamp would make a nonsense
@@ -186,7 +189,7 @@ impl<'a> EntryWriter<'a> for EntryWalk<'_, '_> {
                     });
                 }
                 match role {
-                    ContextRole::WorkerId => self.ctx.worker_id = captured,
+                    ContextRole::ThreadId => self.ctx.thread_id = captured,
                     ContextRole::TaskId => self.ctx.task_id = captured,
                     ContextRole::MonotonicStart => self.ctx.monotonic_start = captured,
                     ContextRole::MonotonicEnd => self.ctx.monotonic_end = captured,

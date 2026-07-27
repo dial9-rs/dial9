@@ -132,4 +132,4 @@ pub use dial9_tokio_telemetry::tracing_layer;
 
 // Metrique unit-of-work entry sink.
 #[cfg(feature = "metrique-sink")]
-pub use dial9_tokio_telemetry::metrique_sink;
+pub use dial9_metrique as metrique_sink;

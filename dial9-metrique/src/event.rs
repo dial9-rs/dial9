@@ -26,8 +26,18 @@ use super::Dial9Context;
 /// Derefs to the wrapped entry, so field access reads and writes straight
 /// through:
 ///
-/// ```ignore
-/// let mut m = RequestMetrics { /* no dial9 field */ }
+/// ```no_run
+/// use dial9_metrique::Dial9EntryExt;
+/// use metrique::ServiceMetrics;
+/// use metrique::unit_of_work::metrics;
+/// use metrique::writer::GlobalEntrySink;
+///
+/// #[metrics]
+/// struct RequestMetrics {
+///     latency_ms: u64, // no dial9 field
+/// }
+///
+/// let mut m = RequestMetrics { latency_ms: 0 }
 ///     .append_on_drop_dial9(ServiceMetrics::sink());
 /// m.latency_ms = 5; // reaches RequestMetrics through the wrapper
 /// ```
@@ -127,8 +137,17 @@ pub trait Dial9EntryExt: CloseValue + Sized {
     /// well: context is captured now, and the entry closes and appends to
     /// `sink` on drop.
     ///
-    /// ```ignore
-    /// let mut m = RequestMetrics { /* ... */ }
+    /// ```no_run
+    /// use dial9_metrique::Dial9EntryExt;
+    /// use metrique::ServiceMetrics;
+    /// use metrique::unit_of_work::metrics;
+    /// use metrique::writer::GlobalEntrySink;
+    ///
+    /// # #[metrics]
+    /// # struct RequestMetrics {
+    /// #     latency_ms: u64,
+    /// # }
+    /// let m = RequestMetrics { latency_ms: 5 }
     ///     .append_on_drop_dial9(ServiceMetrics::sink());
     /// ```
     fn append_on_drop_dial9<Q>(self, sink: Q) -> metrique::AppendAndCloseOnDrop<Dial9Event<Self>, Q>

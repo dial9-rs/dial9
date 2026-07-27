@@ -1,6 +1,6 @@
 # Metrique integration
 
-> **Status: implemented.** The sink lives in `dial9-tokio-telemetry/src/metrique_sink/` behind the `metrique-sink` feature and is re-exported as `dial9::metrique_sink`. This document records the design; for API details, see the module rustdoc (`dial9_tokio_telemetry::metrique_sink`), which is kept authoritative.
+> **Status: implemented.** The sink is the `dial9-metrique` crate, re-exported as `dial9::metrique_sink` behind the `metrique-sink` feature. The crate is tokio-free; its `tokio` feature adds task-id capture and is enabled by the facade when dial9's `tokio` feature is also on. This document records the design; for API details, see the crate rustdoc (`dial9_metrique`), which is kept authoritative.
 
 Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EMF/JSON metrique pipeline; every metrique entry that flows through the configured sink is also recorded into the dial9 trace, so application metrics and runtime telemetry share one file.
 
@@ -21,7 +21,7 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 
 ## User-facing API
 
-See the `dial9_tokio_telemetry::metrique_sink` module docs for the opt-in model and worked example.
+See the `dial9_metrique` crate docs for the opt-in model and worked example.
 
 There are two ways to include the context, both producing the same event: flatten a `Dial9Context` field into the entry, or wrap the entry with `Dial9Event` (via `append_on_drop_dial9`). The wrapper exists because adding a field is intrusive for shared or externally-owned metrics structs, and because a `#[cfg]` around one call site is easier to maintain than one around a struct field.
 
@@ -31,7 +31,7 @@ Convenience wiring (`ServiceMetrics::attach_to_stream_with_dial9`-style extensio
 
 ### Keeping dial9's fields out of the other formats
 
-`Dial9Context`'s fields are ordinary metrique fields, so they reach every sink in the pipeline. The monotonic timestamps are useless in EMF, and the worker/task ids are noise for a non-tokio consumer. Metrique has no per-format field exclusion, so `WithoutDial9Fields` wraps the other sink and drops `dial9.`-prefixed fields as they arrive: values are filtered in the `EntryWriter`, and the context's descriptor segment is dropped alongside them so a descriptor-aware downstream sink still sees a descriptor that matches the values it received. Dropping whole segments is enough because the context is always its own segment, whether flattened or wrapped. (A segment that mixes dial9-named and user fields, which takes a user field literally named `dial9.*`, cannot be subset out of `&'static` descriptor storage, so it degrades to `Descriptors::Unavailable` instead of reporting fields that no longer match the values.)
+`Dial9Context`'s fields are ordinary metrique fields, so they reach every sink in the pipeline. The monotonic timestamps are useless in EMF, and the thread/task ids are noise there too. Metrique has no per-format field exclusion, so `WithoutDial9Fields` wraps the other sink and drops `dial9.`-prefixed fields as they arrive: values are filtered in the `EntryWriter`, and the context's descriptor segment is dropped alongside them so a descriptor-aware downstream sink still sees a descriptor that matches the values it received. Dropping whole segments is enough because the context is always its own segment, whether flattened or wrapped. (A segment that mixes dial9-named and user fields, which takes a user field literally named `dial9.*`, cannot be subset out of `&'static` descriptor storage, so it degrades to `Descriptors::Unavailable` instead of reporting fields that no longer match the values.)
 
 A general `drop_fields` in metrique itself would be the better long-term home, per review discussion.
 
@@ -39,7 +39,7 @@ A general `drop_fields` in metrique itself would be the better long-term home, p
 
 Compile time: the metrique macro generates the entry descriptor (fields, flags, units, canonical name) alongside the existing `Entry` impl. Dial9 contributes only the three flag marker types and `Dial9Context`.
 
-Caller thread: `Dial9Context::capture()` reads the worker-id TLS, `tokio::task::try_id()`, and the monotonic clock. Entry close records the end timestamp. The entry is queued as usual; dial9 adds no other request-path work.
+Caller thread: `Dial9Context::capture()` reads the OS thread id, `tokio::task::try_id()` (with the `tokio` feature), and the monotonic clock. Entry close records the end timestamp. The entry is queued as usual; dial9 adds no other request-path work.
 
 Flush thread (whatever thread drives the metrique pipeline, e.g. `BackgroundQueue`'s): `Dial9Stream::next` per entry:
 
@@ -60,7 +60,7 @@ Field names still matter for the wire schema: two payload fields that emit the s
 
 ### Event layout
 
-One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `dial9.monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `dial9.worker_id`, `dial9.task_id`, `dial9.duration_ns` (absent unless the context captured both timestamps; durations varint-encode in a fraction of the bytes an absolute end timestamp takes), `dial9.wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported descriptor field that is not flagged `Skip`. Every dial9-owned name, on the wire and in the other formats, carries the `dial9.` prefix, so it cannot collide with a user field and is trivially filterable.
+One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `dial9.monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `dial9.thread_id` (OS thread id, the same id space worker and CPU-sample events record), `dial9.task_id` (with the `tokio` feature), `dial9.duration_ns` (absent unless the context captured both timestamps; durations varint-encode in a fraction of the bytes an absolute end timestamp takes), `dial9.wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported descriptor field that is not flagged `Skip`. Every dial9-owned name, on the wire and in the other formats, carries the `dial9.` prefix, so it cannot collide with a user field and is trivially filterable.
 
 Wire types come from the descriptor's `FieldShape`: unsigned widths map to `Varint` (dial9's `FieldValue` carrier for scalar integers; the fixed-width wire types would not match its encoding), signed to `I64`, floats to `F64`, `bool` to `Bool`, strings to `String` or `PooledString` per the `Interned` flag, with `Optional` variants for optional shapes. List shapes (`Vec<T>`, slices) map to the self-describing `DynamicList` type; elements are captured through the `values()` value callback and encode with their own scalar tags, so an `Interned` list of strings pools each element. Absent optional elements are omitted from the encoded list, the same way metrique's other formats leave them out of their arrays.
 
@@ -100,7 +100,7 @@ Per entry:
 
 ## Performance
 
-Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. On dial9's side, steady state allocates only for payload string and list values: routing tables, key lookups, and value buffers are cached or reused across entries. Metrique's `descriptors()` itself may allocate per entry once a layout exceeds its inline segment capacity; the precomputed sequence id ([awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348)) removes that walk entirely.
+Measured by `dial9-metrique/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. On dial9's side, steady state allocates only for payload string and list values: routing tables, key lookups, and value buffers are cached or reused across entries. Metrique's `descriptors()` itself may allocate per entry once a layout exceeds its inline segment capacity; the precomputed sequence id ([awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348)) removes that walk entirely.
 
 ## Future evolution
 

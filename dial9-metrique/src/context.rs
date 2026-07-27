@@ -1,9 +1,9 @@
 //! Caller-thread context capture for metrique entries.
 
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::thread::current_tid;
 use metrique::CloseValue;
 use metrique::unit_of_work::metrics;
-
-use crate::telemetry::{TaskId, clock_monotonic_ns, current_worker_id};
 
 use super::Context;
 
@@ -31,33 +31,37 @@ impl CloseValue for &MonotonicAtClose {
 }
 
 /// Metrique subfield that captures dial9 runtime context for an entry.
-/// Flatten one into any entry that should land in the dial9 trace (see the
-/// [module docs](super) for the full example).
+/// Include one in any entry that should land in the dial9 trace (see the
+/// [module docs](crate) for the full example).
 ///
-/// [`capture`](Dial9Context::capture) reads the caller thread's tokio worker
-/// id and task id (when on a dial9-traced runtime) plus the monotonic clock;
-/// the end timestamp is captured automatically when the entry closes. The
-/// sink routes these fields into the trace event header so the viewer can
-/// place the event on the timeline and correlate it with other events on
-/// the same worker and task.
+/// [`capture`](Dial9Context::capture) reads the calling thread's OS thread
+/// id and the monotonic clock; with the `tokio` feature it also reads the
+/// tokio task id when called inside a task. The end timestamp is captured
+/// automatically when the entry closes. The sink routes these fields into
+/// the trace event header so the viewer can place the event on the timeline
+/// and correlate it with other events on the same thread and task.
+///
+/// The thread id is a capture-time snapshot: a task may migrate to another
+/// worker thread before the entry closes.
 ///
 /// The fields also flow to the other formats in the pipeline (EMF/JSON) as
 /// ordinary fields. Their names are literal and `dial9.`-prefixed
-/// (`dial9.worker_id`, `dial9.task_id`, `dial9.monotonic_ns_start`,
+/// (`dial9.thread_id`, `dial9.task_id`, `dial9.monotonic_ns_start`,
 /// `dial9.monotonic_ns_end`), which keeps them out of the way of your own
 /// field names and makes them easy to filter out of a format that does not
-/// want them.
+/// want them (see [`WithoutDial9Fields`](crate::WithoutDial9Fields)).
 //
 // Deliberately neither `Default` nor `Clone`: a defaulted context would
 // silently look like "valid context captured at monotonic time 0".
 #[metrics(subfield)]
 #[derive(Debug)]
 pub struct Dial9Context {
-    /// Global dial9 worker id of the capturing thread
-    /// (`WorkerId::UNKNOWN` when off-runtime).
-    #[metrics(name = "dial9.worker_id", flags(Context))]
-    worker_id: u64,
-    /// Tokio task id of the capturing task, absent when not inside a task.
+    /// OS thread id of the capturing thread (`gettid` on Linux), the same
+    /// id space dial9's worker and CPU-sample events record.
+    #[metrics(name = "dial9.thread_id", flags(Context))]
+    thread_id: u64,
+    /// Tokio task id of the capturing task. Absent when not inside a task
+    /// or when the `tokio` feature is disabled.
     #[metrics(name = "dial9.task_id", flags(Context))]
     task_id: Option<u64>,
     /// Monotonic nanoseconds at capture (request start).
@@ -71,18 +75,52 @@ pub struct Dial9Context {
 impl Dial9Context {
     /// Capture the calling thread's runtime context. Infallible.
     ///
-    /// Always records a monotonic start timestamp. Worker and task ids are
-    /// captured when the calling thread is owned by a dial9-traced tokio
-    /// runtime; otherwise the worker id is `WorkerId::UNKNOWN` and the task
-    /// id is absent.
+    /// Always records the OS thread id and a monotonic start timestamp. The
+    /// task id is captured when the `tokio` feature is enabled and the
+    /// calling thread is inside a tokio task; otherwise it is absent.
     pub fn capture() -> Self {
         Self {
-            worker_id: current_worker_id().as_u64(),
-            task_id: tokio::task::try_id().map(|id| TaskId::from(id).to_u64()),
+            thread_id: u64::from(current_tid()),
+            task_id: current_task_id(),
             monotonic_ns_start: clock_monotonic_ns(),
             monotonic_ns_end: MonotonicAtClose,
         }
     }
+}
+
+/// The current tokio task id, converted to the same `u64` dial9's runtime
+/// hooks record for spawn and poll events.
+#[cfg(feature = "tokio")]
+fn current_task_id() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    /// Extracts the raw `u64` from tokio's opaque `task::Id` by capturing
+    /// the value it feeds its hasher. Mirrors `TaskId::from<tokio::task::Id>`
+    /// in dial9-tokio-telemetry so the ids agree across event sources.
+    struct U64Extractor(u64);
+
+    impl Hasher for U64Extractor {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+
+        fn write(&mut self, _bytes: &[u8]) {}
+
+        fn write_u64(&mut self, i: u64) {
+            self.0 = i;
+        }
+    }
+
+    tokio::task::try_id().map(|id| {
+        let mut extractor = U64Extractor(0);
+        id.hash(&mut extractor);
+        extractor.finish()
+    })
+}
+
+#[cfg(not(feature = "tokio"))]
+fn current_task_id() -> Option<u64> {
+    None
 }
 
 /// Names of [`Dial9Context`]'s fields, used by the sink to assign context
@@ -96,7 +134,7 @@ impl Dial9Context {
 /// site prepends to the emitted name but leaves the base name alone, so
 /// routing survives that too.
 pub(crate) mod field_names {
-    pub(crate) const WORKER_ID: &str = "dial9.worker_id";
+    pub(crate) const THREAD_ID: &str = "dial9.thread_id";
     pub(crate) const TASK_ID: &str = "dial9.task_id";
     pub(crate) const MONOTONIC_NS_START: &str = "dial9.monotonic_ns_start";
     pub(crate) const MONOTONIC_NS_END: &str = "dial9.monotonic_ns_end";
