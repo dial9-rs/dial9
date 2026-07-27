@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
+use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Interned, Skip};
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, WorkerId, recorder};
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
@@ -133,7 +133,7 @@ macro_rules! feed_entry {
     };
 }
 
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+#[metrics(rename_all = "PascalCase")]
 struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,
@@ -156,7 +156,7 @@ struct RequestMetrics {
 
     elapsed: Duration,
 
-    #[metrics(flags(skip(Emit)))]
+    #[metrics(flags(Skip))]
     debug_blob: String,
 }
 
@@ -198,7 +198,7 @@ fn full_entry_round_trips() {
     assert_eq!(ev.fields["Elapsed"], "250");
     assert!(
         !ev.fields.contains_key("DebugBlob"),
-        "skip(Emit) field leaked into the payload: {ev:#?}"
+        "Skip field leaked into the payload: {ev:#?}"
     );
 
     assert_eq!(ev.units["LatencyUs"], "us");
@@ -256,8 +256,11 @@ fn on_runtime_context_captures_worker_and_task() {
 }
 
 #[test]
-fn entry_without_context_falls_back() {
-    #[metrics(default_flags(Emit))]
+fn entry_without_context_is_inert() {
+    // No `Dial9Context` means the entry never opted in: it flows through to
+    // the rest of the pipeline and records nothing, even though its fields
+    // are perfectly encodable.
+    #[metrics]
     struct NoContext {
         count: u64,
     }
@@ -266,28 +269,57 @@ fn entry_without_context_falls_back() {
         feed_entry!(stream, NoContext { count: 7 });
     });
 
-    assert_eq!(events.len(), 1);
-    let ev = &events[0];
-    assert_eq!(ev.fields["count"], "7");
-    assert_eq!(
-        ev.fields["worker_id"],
-        WorkerId::UNKNOWN.as_u64().to_string()
-    );
-    assert_eq!(ev.fields["duration_ns"], "<none>");
     assert!(
-        ev.timestamp_ns > 0,
-        "flush-thread fallback timestamp missing"
+        events.is_empty(),
+        "entry without a Dial9Context recorded: {events:#?}"
     );
 }
 
 #[test]
+fn optional_context_gates_per_entry() {
+    // An `Option`-flattened context changes the descriptor sequence at
+    // runtime, so the same Rust type is inert when absent and records when
+    // present.
+    #[metrics]
+    struct MaybeContext {
+        #[metrics(flatten)]
+        dial9: Option<Dial9Context>,
+        count: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            MaybeContext {
+                dial9: None,
+                count: 1,
+            }
+        );
+        feed_entry!(
+            stream,
+            MaybeContext {
+                dial9: Some(Dial9Context::capture()),
+                count: 2,
+            }
+        );
+    });
+
+    assert_eq!(
+        events.len(),
+        1,
+        "expected only the opted-in entry: {events:#?}"
+    );
+    assert_eq!(events[0].fields["count"], "2");
+}
+
+#[test]
 fn context_only_entry_emits_header_event() {
+    // An entry whose only field is the context still records: the event
+    // carries the header with an empty payload.
     #[metrics]
     struct ContextOnly {
         #[metrics(flatten)]
         dial9: Dial9Context,
-        // Not flagged: EMF-only field.
-        count: u64,
     }
 
     let events = run_sink_test(|stream| {
@@ -295,34 +327,13 @@ fn context_only_entry_emits_header_event() {
             stream,
             ContextOnly {
                 dial9: Dial9Context::capture(),
-                count: 3,
             }
         );
     });
 
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert!(
-        !ev.fields.contains_key("count"),
-        "unflagged field leaked: {ev:#?}"
-    );
     assert_ne!(ev.fields["duration_ns"], "<none>");
-}
-
-#[test]
-fn unflagged_entry_is_inert() {
-    #[metrics]
-    struct Plain {
-        count: u64,
-    }
-
-    let events = run_sink_test(|stream| {
-        feed_entry!(stream, Plain { count: 1 });
-    });
-    assert!(
-        events.is_empty(),
-        "inert entry produced events: {events:#?}"
-    );
 }
 
 #[test]
@@ -330,7 +341,7 @@ fn disabled_handle_is_noop() {
     let handle = dial9_tokio_telemetry::telemetry::Dial9Handle::disabled();
     let mut stream = Dial9Stream::new(&handle);
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Simple {
         count: u64,
     }
@@ -357,8 +368,10 @@ fn hand_written_entry_is_skipped() {
 
 #[test]
 fn interned_flag_on_numeric_field_skips_only_that_field() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct BadInterned {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
         #[metrics(flags(Interned))]
         count: u64,
         name: String,
@@ -368,6 +381,7 @@ fn interned_flag_on_numeric_field_skips_only_that_field() {
         feed_entry!(
             stream,
             BadInterned {
+                dial9: Dial9Context::capture(),
                 count: 9,
                 name: "ok".to_owned(),
             }
@@ -402,7 +416,7 @@ fn panicking_value_drops_event_without_poisoning_the_stream() {
         }
     }
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Panicky {
         bad: PanicOnWrite,
     }
@@ -420,7 +434,7 @@ fn panicking_value_drops_event_without_poisoning_the_stream() {
 fn entries_containing_flex_are_skipped() {
     use metrique::flex::Flex;
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct WithFlex {
         count: u64,
         #[metrics(flatten)]
@@ -476,8 +490,10 @@ fn background_queue_end_to_end() {
 fn timestamp_field_lands_in_wall_clock_header() {
     use std::time::SystemTime;
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Timestamped {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
         #[metrics(timestamp)]
         at: SystemTime,
         count: u64,
@@ -487,6 +503,7 @@ fn timestamp_field_lands_in_wall_clock_header() {
         feed_entry!(
             stream,
             Timestamped {
+                dial9: Dial9Context::capture(),
                 at: SystemTime::now(),
                 count: 1,
             }
@@ -504,8 +521,10 @@ fn timestamp_field_lands_in_wall_clock_header() {
 #[test]
 fn payload_field_colliding_with_header_name_is_skipped() {
     // snake_case keeps the user field named exactly like the header field.
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Colliding {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
         worker_id: u64,
         count: u64,
     }
@@ -514,6 +533,7 @@ fn payload_field_colliding_with_header_name_is_skipped() {
         feed_entry!(
             stream,
             Colliding {
+                dial9: Dial9Context::capture(),
                 worker_id: 42,
                 count: 3,
             }
@@ -531,10 +551,11 @@ fn payload_field_colliding_with_header_name_is_skipped() {
 #[test]
 fn payload_field_sharing_a_context_field_name_still_records() {
     // The unprefixed context routes "worker_id" into the event header; the
-    // snake_case Emit field emits the identical name. Routing is positional,
-    // so both land: the context in the header, and the payload field skipped
-    // only because it collides with the reserved header schema name.
-    #[metrics(default_flags(Emit))]
+    // snake_case payload field emits the identical name. Routing is
+    // positional, so both land: the context in the header, and the payload
+    // field skipped only because it collides with the reserved header schema
+    // name.
+    #[metrics]
     struct SameNames {
         #[metrics(flatten)]
         dial9: Dial9Context,
@@ -563,7 +584,7 @@ fn payload_field_sharing_a_context_field_name_still_records() {
 
 #[test]
 fn duplicate_contexts_first_wins() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct DoubleContext {
         #[metrics(flatten)]
         a: Dial9Context,
@@ -593,17 +614,16 @@ fn duplicate_contexts_first_wins() {
 
 #[test]
 fn identically_named_skipped_fields_are_harmless() {
-    // Unflagged fields never enter the schema, so identical names among
-    // them cannot collide with anything; the entry must still record.
+    // `Skip` fields never enter the schema, so identical names among them
+    // cannot collide with anything; the entry must still record.
     #[metrics]
     struct SkippedTwins {
         #[metrics(flatten)]
         dial9: Dial9Context,
-        #[metrics(name = "twin")]
+        #[metrics(name = "twin", flags(Skip))]
         first: u64,
-        #[metrics(name = "twin")]
+        #[metrics(name = "twin", flags(Skip))]
         second: u64,
-        #[metrics(flags(Emit))]
         count: u64,
     }
 
@@ -654,13 +674,21 @@ fn custom_signed_value_round_trips_negatives() {
         }
     }
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct WithSigned {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
         delta: Signed,
     }
 
     let events = run_sink_test(|stream| {
-        feed_entry!(stream, WithSigned { delta: Signed(-42) });
+        feed_entry!(
+            stream,
+            WithSigned {
+                dial9: Dial9Context::capture(),
+                delta: Signed(-42),
+            }
+        );
     });
 
     assert_eq!(events.len(), 1, "signed entry must record: {events:#?}");
@@ -670,7 +698,7 @@ fn custom_signed_value_round_trips_negatives() {
 #[test]
 fn prefixed_context_still_routes() {
     // The documented remedy for name collisions: prefix the flatten site.
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Prefixed {
         #[metrics(flatten, prefix = "dial9_")]
         dial9: Dial9Context,
@@ -710,12 +738,12 @@ fn mid_entry_payload_flatten_routes_correctly() {
         y: &'static str,
     }
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Outer {
         #[metrics(flatten)]
         dial9: Dial9Context,
         a: u64,
-        #[metrics(flatten, default_flags(Emit))]
+        #[metrics(flatten)]
         inner: Inner,
         b: u64,
     }
@@ -748,7 +776,7 @@ fn mid_entry_payload_flatten_routes_correctly() {
 
 #[test]
 fn entry_enum_variants_get_distinct_schemas() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     enum Request {
         Read {
             #[metrics(flatten)]
@@ -809,7 +837,7 @@ fn entry_enum_variants_get_distinct_schemas() {
 
 #[test]
 fn typed_lists_round_trip() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct WithLists {
         #[metrics(flatten)]
         dial9: Dial9Context,
@@ -902,7 +930,7 @@ impl<E: metrique_writer::Entry> metrique_writer::Entry for SkewedWrites<E> {
 
 #[test]
 fn callback_count_mismatch_drops_the_event() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Counted {
         #[metrics(flatten)]
         dial9: Dial9Context,
@@ -966,7 +994,7 @@ fn required_field_producing_no_value_drops_the_event() {
         }
     }
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Lying {
         bad: LyingShape,
     }
@@ -1012,7 +1040,7 @@ fn scalar_callback_on_list_shaped_field_drops_the_event() {
         }
     }
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct NotAList {
         items: FakeList,
     }
@@ -1032,8 +1060,10 @@ fn scalar_callback_on_list_shaped_field_drops_the_event() {
 
 #[test]
 fn duplicate_payload_names_keep_the_first_occurrence() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Twins {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
         #[metrics(name = "twin")]
         first: u64,
         #[metrics(name = "twin")]
@@ -1045,6 +1075,7 @@ fn duplicate_payload_names_keep_the_first_occurrence() {
         feed_entry!(
             stream,
             Twins {
+                dial9: Dial9Context::capture(),
                 first: 1,
                 second: 2,
                 count: 9,
@@ -1068,22 +1099,38 @@ fn duplicate_payload_names_keep_the_first_occurrence() {
 fn same_named_entry_types_get_distinct_schemas() {
     mod first {
         use super::*;
-        #[metrics(default_flags(Emit))]
+        #[metrics]
         pub struct Dup {
+            #[metrics(flatten)]
+            pub dial9: Dial9Context,
             pub a: u64,
         }
     }
     mod second {
         use super::*;
-        #[metrics(default_flags(Emit))]
+        #[metrics]
         pub struct Dup {
+            #[metrics(flatten)]
+            pub dial9: Dial9Context,
             pub b: u64,
         }
     }
 
     let events = run_sink_test(|stream| {
-        feed_entry!(stream, first::Dup { a: 1 });
-        feed_entry!(stream, second::Dup { b: 2 });
+        feed_entry!(
+            stream,
+            first::Dup {
+                dial9: Dial9Context::capture(),
+                a: 1,
+            }
+        );
+        feed_entry!(
+            stream,
+            second::Dup {
+                dial9: Dial9Context::capture(),
+                b: 2,
+            }
+        );
     });
 
     assert_eq!(events.len(), 2, "both types must record: {events:#?}");
@@ -1141,8 +1188,10 @@ fn every_context_role_routes() {
 
 #[test]
 fn absent_optional_list_elements_are_omitted() {
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct Sparse {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
         values: Vec<Option<u64>>,
     }
 
@@ -1150,6 +1199,7 @@ fn absent_optional_list_elements_are_omitted() {
         feed_entry!(
             stream,
             Sparse {
+                dial9: Dial9Context::capture(),
                 values: vec![Some(1), None, Some(3)],
             }
         );
@@ -1168,7 +1218,7 @@ fn boxed_entries_round_trip() {
     // the element type. String lists survive; numeric lists cannot be
     // captured and drop the event rather than record a wrong (empty or
     // partial) list. See the module docs' limitations.
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct BoxedStrings {
         #[metrics(flatten)]
         dial9: Dial9Context,
@@ -1177,7 +1227,7 @@ fn boxed_entries_round_trip() {
         count: u64,
     }
 
-    #[metrics(default_flags(Emit))]
+    #[metrics]
     struct BoxedNumbers {
         counts: Vec<u64>,
     }

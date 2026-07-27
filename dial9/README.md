@@ -478,14 +478,15 @@ If your service publishes unit-of-work metrics with [metrique](https://docs.rs/m
 dial9 = { version = "0.5", features = ["metrique-sink"] }
 ```
 
-**Opt fields in and tee the stream:**
+**Opt an entry in and tee the stream:**
 ```rust,ignore
-use dial9::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
+use dial9::metrique_sink::{Dial9Context, Dial9Stream, Interned, Skip};
 use metrique::unit_of_work::metrics;
 use metrique::writer::stream::tee;
 
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+#[metrics(rename_all = "PascalCase")]
 struct RequestMetrics {
+    // Including a Dial9Context opts this entry into the trace.
     #[metrics(flatten)]
     dial9: Dial9Context,
 
@@ -494,6 +495,10 @@ struct RequestMetrics {
 
     latency_ms: u64,
     success: bool,
+
+    // Keep bulky or high-cardinality fields out of the trace.
+    #[metrics(flags(Skip))]
+    debug_blob: String,
 }
 
 // dial9 as a peer of the existing pipeline:
@@ -509,7 +514,7 @@ let mut m = RequestMetrics {
 };
 ```
 
-Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Hand-written `Entry` impls (no descriptor) and entries containing `Flex` dynamic-key fields are dropped from the dial9 side with a diagnostic; histogram fields are skipped individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
+Entries without a `Dial9Context` record nothing, so teeing the sink into an existing pipeline only picks up the entries you opt in. Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Hand-written `Entry` impls (no descriptor) and entries containing `Flex` dynamic-key fields cannot be recorded; histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)

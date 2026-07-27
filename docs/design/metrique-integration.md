@@ -12,8 +12,8 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 
 - **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `tee(emf, Dial9Stream::new(&handle))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
 - **`Dial9Context`**: metrique subfield users flatten into their entries to capture per-request runtime context (see its rustdoc).
-- **`Emit`** / **`Interned`**: the user-facing field flags for payload opt-in and string pooling (see their rustdoc).
-- **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors. Would be replaced by a typed source-extraction mechanism in metrique.
+- **`Skip`** / **`Interned`**: the user-facing field flags for excluding a field from the payload and for string pooling (see their rustdoc).
+- **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors, and their presence is what opts an entry in. Would be replaced by a typed source-extraction mechanism in metrique.
 - **Encode plan**: the cached per-entry-type routing table (`metrique_sink/plan.rs`). Built once per distinct descriptor-id sequence: wire schema with unit annotations, and an action (header / payload / skip) per field position.
 - **Trace format**: dial9's wire format (`dial9-trace-format/SPEC.md`). The integration uses the schema-annotations frame (`TAG_SCHEMA_ANNOTATIONS`) for units and the self-describing `DynamicList` field type for list-shaped fields.
 
@@ -46,7 +46,7 @@ Field names still matter for the wire schema: two payload fields that emit the s
 
 ### Event layout
 
-One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `worker_id`, `task_id`, `duration_ns` (absent unless the context captured both timestamps; durations varint-encode in a fraction of the bytes an absolute end timestamp takes), `wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported `Emit`-tagged descriptor field.
+One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `worker_id`, `task_id`, `duration_ns` (absent unless the context captured both timestamps; durations varint-encode in a fraction of the bytes an absolute end timestamp takes), `wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported descriptor field that is not flagged `Skip`.
 
 Wire types come from the descriptor's `FieldShape`: unsigned widths map to `Varint` (dial9's `FieldValue` carrier for scalar integers; the fixed-width wire types would not match its encoding), signed to `I64`, floats to `F64`, `bool` to `Bool`, strings to `String` or `PooledString` per the `Interned` flag, with `Optional` variants for optional shapes. List shapes (`Vec<T>`, slices) map to the self-describing `DynamicList` type; elements are captured through the `values()` value callback and encode with their own scalar tags, so an `Interned` list of strings pools each element. Absent optional elements are omitted from the encoded list, the same way metrique's other formats leave them out of their arrays.
 
@@ -67,12 +67,12 @@ First-use, per descriptor-id sequence (cached, so at most once per type):
 | Condition | Behaviour |
 | --- | --- |
 | `descriptors()` unavailable (hand-written entry, or `Flex` anywhere in the entry) | rate-limited warn; skipped on the dial9 side only |
-| `Emit` fields but no `Context`-flagged fields | one `tracing::warn!` per type; entries encode with `WorkerId::UNKNOWN` and flush-thread timestamp fallback |
+| No `Context`-flagged fields (entry never opted in) | silently inert: the plan records nothing and `Entry::write` is not walked for entries of this type |
 | Payload field name collides with a header field (`worker_id`, ...) or an earlier payload field | one `tracing::error!` per type; the later occurrence is skipped |
 | Two `Dial9Context`s flattened into one entry | warn per duplicated context field at plan build; the first flatten site keeps the header slots |
 | `Interned` on a shape with no string data | one `tracing::error!` per type; field skipped on the wire; rest of entry encodes |
-| `Opaque` shape (histograms, custom `Value` without `SHAPE`) tagged `Emit` | one `tracing::error!` per type; field skipped; rest encodes |
-| Unsupported list element shape (nested lists, bytes, `Flex`, `Opaque`) | one `tracing::error!` per type; field skipped; rest encodes |
+| `Opaque` shape (histograms, custom `Value` without `SHAPE`) | one `tracing::debug!` per type; field left out of the payload; rest encodes. Expected under implicit opt-in, so not an error |
+| Unsupported list element shape (nested lists, bytes, `Flex`, `Opaque`) | one `tracing::debug!` per type; field left out of the payload; rest encodes |
 
 Per entry:
 

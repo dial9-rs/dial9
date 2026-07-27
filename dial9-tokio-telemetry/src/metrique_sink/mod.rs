@@ -9,18 +9,19 @@
 //!
 //! # Usage
 //!
-//! Opt fields into the dial9 payload with the [`Emit`](crate::metrique_sink::Emit)
-//! field flag, and flatten a [`Dial9Context`](crate::metrique_sink::Dial9Context)
-//! into the entry so events carry caller-thread
-//! runtime context:
+//! An entry opts into the dial9 trace by including a
+//! [`Dial9Context`](crate::metrique_sink::Dial9Context). Every field of an
+//! opted-in entry is recorded; exclude individual fields with the
+//! [`Skip`](crate::metrique_sink::Skip) field flag:
 //!
 //! ```ignore
-//! use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
+//! use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Interned, Skip};
 //! use metrique::unit_of_work::metrics;
 //!
-//! #[metrics(rename_all = "PascalCase", default_flags(Emit))]
+//! #[metrics(rename_all = "PascalCase")]
 //! struct RequestMetrics {
-//!     // Captures worker id, task id, and start/end monotonic timestamps.
+//!     // Opts this entry in, and captures worker id, task id, and
+//!     // start/end monotonic timestamps.
 //!     #[metrics(flatten)]
 //!     dial9: Dial9Context,
 //!
@@ -30,8 +31,8 @@
 //!
 //!     operation: &'static str,
 //!
-//!     // Opt noisy fields out of the dial9 payload.
-//!     #[metrics(flags(skip(Emit)))]
+//!     // Keep bulky or high-cardinality fields out of the trace.
+//!     #[metrics(flags(Skip))]
 //!     debug_blob: String,
 //! }
 //!
@@ -46,6 +47,10 @@
 //! }
 //! .append_on_drop(ServiceMetrics::sink());
 //! ```
+//!
+//! Entries without a `Dial9Context` are left alone: they flow through to the
+//! rest of the pipeline and record nothing into the trace. Teeing the sink
+//! into an existing pipeline therefore only records the entries you opt in.
 //!
 //! All dial9 encoding happens on the thread that drives the metrique
 //! pipeline (the `BackgroundQueue` flush thread for the standard setup).
@@ -71,18 +76,19 @@
 //!   captured off-runtime),
 //! - the wall-clock timestamp when the entry declares
 //!   `#[metrics(timestamp)]`,
-//! - every `Emit`-tagged field, with units carried as `unit` schema
-//!   annotations (the same key the `TraceEvent` derive emits). List-shaped
-//!   fields (`Vec<T>`, slices) encode as typed lists.
+//! - every field not flagged [`Skip`](crate::metrique_sink::Skip), with units
+//!   carried as `unit` schema annotations (the same key the `TraceEvent`
+//!   derive emits). List-shaped fields (`Vec<T>`, slices) encode as typed
+//!   lists.
 //!
 //! # Limitations
 //!
 //! - Hand-written `Entry` impls and entries containing
 //!   [`Flex`](metrique::flex::Flex) dynamic-key fields carry no descriptors
-//!   and are skipped with a rate-limited warning; they still reach the other
-//!   side of the `tee`, so EMF/JSON output is unaffected.
+//!   and cannot be recorded; they still reach the other side of the `tee`, so
+//!   EMF/JSON output is unaffected.
 //! - Distribution-shaped fields (histograms) and other fields whose closed
-//!   shape is `Opaque` are skipped with a diagnostic when tagged `Emit`.
+//!   shape is `Opaque` cannot be encoded and are left out of the payload.
 //! - Only lists of strings work through a `GlobalEntrySink` (e.g.
 //!   `ServiceMetrics::sink()`); entries with numeric list fields are
 //!   dropped there (rate-limited warning), because boxing stringifies list
@@ -107,23 +113,25 @@ use metrique_writer::value::{FlagConstructor, MetricFlags, MetricOptions};
 // each has a zero-sized MetricOptions payload that only the dial9 sink
 // inspects; other formats carry it through untouched.
 
-/// Runtime payload for [`Emit`].
+/// Runtime payload for [`Skip`].
 #[derive(Debug)]
-struct EmitOptions;
-impl MetricOptions for EmitOptions {}
+struct SkipOptions;
+impl MetricOptions for SkipOptions {}
 
-/// Field flag that opts a field into the dial9 trace payload.
+/// Field flag that excludes a field from the dial9 trace payload.
 ///
-/// Apply at struct scope via `#[metrics(default_flags(Emit))]` or at field
-/// scope via `#[metrics(flags(Emit))]`; invert with
-/// `#[metrics(flags(skip(Emit)))]`. Fields without this flag do not appear
-/// in the dial9 event payload (they still reach EMF/JSON formats unchanged).
+/// An entry opts into the dial9 sink by including a
+/// [`Dial9Context`](crate::metrique_sink::Dial9Context); every field of an
+/// opted-in entry is then recorded by default. Apply this flag via
+/// `#[metrics(flags(Skip))]` to keep a field out of the trace (it still
+/// reaches EMF/JSON formats unchanged). Use it for high-cardinality or bulky
+/// fields that would bloat the trace without helping analysis.
 #[derive(Debug)]
-pub struct Emit;
+pub struct Skip;
 
-impl FlagConstructor for Emit {
+impl FlagConstructor for Skip {
     fn construct() -> MetricFlags<'static> {
-        MetricFlags::upcast(&EmitOptions)
+        MetricFlags::upcast(&SkipOptions)
     }
 }
 
@@ -138,8 +146,7 @@ impl MetricOptions for InternedOptions {}
 /// Use for low-cardinality strings that repeat across events (route names,
 /// operation names, status labels): each distinct value is written once per
 /// flush cycle and events carry a compact pool reference. On list-of-string
-/// fields, each element is interned individually. Orthogonal to
-/// [`Emit`]; a field needs both flags to appear interned in the payload.
+/// fields, each element is interned individually.
 ///
 /// Applying `Interned` to a field whose shape is not string-capable is
 /// reported as an error and the field is skipped on the wire.

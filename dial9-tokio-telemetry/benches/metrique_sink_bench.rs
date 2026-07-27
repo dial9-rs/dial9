@@ -14,14 +14,14 @@
 //!   cargo bench --bench metrique_sink_bench --features metrique-sink
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
+use dial9_tokio_telemetry::metrique_sink::{Dial9Context, Dial9Stream, Interned};
 use dial9_tokio_telemetry::telemetry::{Dial9Handle, MemoryBuffer, recorder};
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
 use metrique_writer::EntryIoStream;
 use std::hint::black_box;
 
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+#[metrics(rename_all = "PascalCase")]
 struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,
@@ -66,7 +66,7 @@ fn bench_capture(c: &mut Criterion) {
 }
 
 /// Scalars only: the machinery floor, no per-entry allocations.
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+#[metrics(rename_all = "PascalCase")]
 struct ScalarMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,
@@ -77,7 +77,7 @@ struct ScalarMetrics {
 }
 
 /// Low-cardinality labels routed through the string pool: no allocations.
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+#[metrics(rename_all = "PascalCase")]
 struct InternedMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,

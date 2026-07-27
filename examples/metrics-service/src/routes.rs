@@ -5,7 +5,7 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
-use dial9::metrique_sink::{Dial9Context, Emit, Interned};
+use dial9::metrique_sink::{Dial9Context, Interned};
 use metrique::ServiceMetrics;
 use metrique::timers::Timer;
 use metrique::unit_of_work::metrics;
@@ -16,7 +16,7 @@ use crate::AppState;
 
 /// Per-request metrics, recorded into the dial9 trace via the
 /// `Dial9Stream` attached in `main`.
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+#[metrics(rename_all = "PascalCase")]
 struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,

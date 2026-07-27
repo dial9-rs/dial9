@@ -11,7 +11,7 @@
 //! cargo run -p dial9 --features metrique-sink --example metrique_metrics
 //! ```
 
-use dial9::metrique_sink::{Dial9Context, Dial9Stream, Emit, Interned};
+use dial9::metrique_sink::{Dial9Context, Dial9Stream, Interned};
 use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
 use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
@@ -22,9 +22,9 @@ use metrique::writer::stream::tee;
 use metrique::writer::{AttachGlobalEntrySinkExt, GlobalEntrySink};
 use std::time::Duration;
 
-/// One entry per request. `default_flags(Emit)` opts every field into the
-/// dial9 payload.
-#[metrics(rename_all = "PascalCase", default_flags(Emit))]
+/// One entry per request. The flattened `Dial9Context` opts the entry into
+/// the dial9 trace; every field is recorded unless flagged `Skip`.
+#[metrics(rename_all = "PascalCase")]
 struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,

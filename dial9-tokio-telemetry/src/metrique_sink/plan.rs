@@ -9,7 +9,7 @@ use dial9_trace_format::types::FieldType;
 use metrique_writer::core::descriptor::{AvailableDescriptors, FieldShape, FieldView, KnownShape};
 
 use super::context::field_names;
-use super::{Context, Emit, Interned};
+use super::{Context, Interned, Skip};
 
 /// Annotation key carrying a field's unit. Matches the key the `TraceEvent`
 /// derive emits, so viewers surface both through the same path.
@@ -45,7 +45,7 @@ pub(crate) enum FieldAction {
     /// One of [`Dial9Context`](super::Dial9Context)'s fields: route into the
     /// event header slots.
     Context(ContextRole),
-    /// An `Emit`-tagged field: capture as `kind` and append to the event's
+    /// A recorded field: capture as `kind` and append to the event's
     /// payload values (walk order is the schema's payload order). `optional`
     /// mirrors the schema field's wire type: an optional payload may be
     /// absent, a required one missing drops the event.
@@ -195,7 +195,6 @@ pub(crate) fn build_plan(
     let mut fields = header_field_defs();
     let mut annotations = Vec::new();
     let mut has_context = false;
-    let mut has_emit = false;
     let mut roles_seen = [false; ContextRole::COUNT];
 
     for seg in descs.iter() {
@@ -207,11 +206,10 @@ pub(crate) fn build_plan(
                 continue;
             }
 
-            if !field.flags().any(|f| f.is::<Emit>()) {
+            if field.flags().any(|f| f.is::<Skip>()) {
                 actions.push(FieldAction::Skip);
                 continue;
             }
-            has_emit = true;
 
             let full_name: String = field.name_parts().collect();
 
@@ -254,31 +252,37 @@ pub(crate) fn build_plan(
                         kind,
                     });
                 }
-                Err(reason) => {
+                Err(err) => {
                     // Once per descriptor sequence (plans are cached), so no
-                    // rate limiting needed.
-                    tracing::error!(
-                        entry = %entry_name,
-                        field = %full_name,
-                        reason,
-                        "metrique field tagged for dial9 cannot be encoded; skipping field"
-                    );
+                    // rate limiting needed. An unsupported shape is expected
+                    // under implicit opt-in (an opted-in entry may carry
+                    // histogram or opaque fields); a flag the sink cannot
+                    // honor is a user error worth surfacing.
+                    match err {
+                        ShapeError::Unsupported(reason) => tracing::debug!(
+                            entry = %entry_name,
+                            field = %full_name,
+                            reason,
+                            "metrique field cannot be encoded into the dial9 trace; leaving \
+                             it out of the payload"
+                        ),
+                        ShapeError::Misuse(reason) => tracing::error!(
+                            entry = %entry_name,
+                            field = %full_name,
+                            reason,
+                            "metrique field flagged for dial9 cannot be encoded; skipping field"
+                        ),
+                    }
                     actions.push(FieldAction::Skip);
                 }
             }
         }
     }
 
-    if has_emit && !has_context {
-        tracing::warn!(
-            entry = %entry_name,
-            "metrique entry has dial9 Emit fields but no Dial9Context; events will carry \
-             an unknown worker and a flush-thread timestamp. Flatten a Dial9Context into \
-             the entry to fix this."
-        );
-    }
-
-    let inert = !has_emit && !has_context;
+    // A `Dial9Context` is the opt-in signal: without one there is nothing to
+    // place the event on the timeline, and the entry belongs to a pipeline
+    // that merely shares the tee.
+    let inert = !has_context;
 
     let schema_name = schema_name(&entry_name, inert, &fields, &annotations, used_names);
     let schema = Schema::from_entry(SchemaEntry::with_annotations(
@@ -389,10 +393,30 @@ fn schema_name(
 /// Resolve a descriptor field shape to its wire type and capture kind.
 ///
 /// `Err` reasons are user-facing diagnostic strings.
+/// Why a field cannot become a payload field.
+#[derive(Debug, Clone, Copy)]
+enum ShapeError {
+    /// The field's shape has no wire representation. Expected under implicit
+    /// opt-in: an opted-in entry may carry histogram or opaque fields the
+    /// user never asked dial9 to record.
+    Unsupported(&'static str),
+    /// The user asked for something that cannot be honored (an `Interned`
+    /// flag on a field carrying no string data).
+    Misuse(&'static str),
+}
+
+// The shape-resolution helpers only ever report structurally unencodable
+// shapes; `Misuse` is raised by `resolve_shape` itself.
+impl From<&'static str> for ShapeError {
+    fn from(reason: &'static str) -> Self {
+        ShapeError::Unsupported(reason)
+    }
+}
+
 fn resolve_shape(
     shape: FieldShape<'_>,
     interned: bool,
-) -> Result<(FieldType, ValueKind), &'static str> {
+) -> Result<(FieldType, ValueKind), ShapeError> {
     let (optional, inner) = match shape {
         FieldShape::Optional(inner) => (true, *inner.get()),
         other => (false, other),
@@ -407,26 +431,37 @@ fn resolve_shape(
             let elem = resolve_element(*elem.get(), interned)?;
             (FieldType::DynamicList, ValueKind::List { elem })
         }
-        FieldShape::Flex { .. } => return Err("dynamic-key (Flex) fields are not supported"),
-        FieldShape::Optional(_) => return Err("nested optional shapes are not supported"),
+        FieldShape::Flex { .. } => {
+            return Err(ShapeError::Unsupported(
+                "dynamic-key (Flex) fields are not supported",
+            ));
+        }
+        FieldShape::Optional(_) => {
+            return Err(ShapeError::Unsupported(
+                "nested optional shapes are not supported",
+            ));
+        }
         FieldShape::Opaque => {
-            return Err(
+            return Err(ShapeError::Unsupported(
                 "field shape is opaque (not statically known); use a #[metrics(value)] \
                  newtype over a known scalar, or a custom Value impl that overrides SHAPE",
-            );
+            ));
         }
-        _ => return Err("unrecognized field shape"),
+        _ => return Err(ShapeError::Unsupported("unrecognized field shape")),
     };
 
     if interned && !kind_has_string_data(kind) {
-        return Err("Interned flag on a field with no string data");
+        return Err(ShapeError::Misuse(
+            "Interned flag on a field with no string data",
+        ));
     }
 
     let field_type = if optional {
         // Every supported field type has an optional variant; this cannot
         // fail today, but the flush thread must not panic if that changes.
-        FieldType::from_tag(base_type as u8 | FieldType::OPTIONAL_BIT)
-            .ok_or("field type has no optional variant")?
+        FieldType::from_tag(base_type as u8 | FieldType::OPTIONAL_BIT).ok_or(
+            ShapeError::Unsupported("field type has no optional variant"),
+        )?
     } else {
         base_type
     };
