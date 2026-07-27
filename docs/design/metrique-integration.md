@@ -10,7 +10,8 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 
 ## Glossary
 
-- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `tee(emf, Dial9Stream::new(&handle))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
+- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `Dial9Stream::tee(&handle, emf)`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
+- **`WithoutDial9Fields`**: `EntryIoStream` wrapper that hides `dial9.`-prefixed fields from the sink it wraps. `Dial9Stream::tee` puts it around the non-dial9 side so the trace gets the runtime context and the EMF/JSON output does not.
 - **`Dial9Context`**: metrique subfield users flatten into their entries to capture per-request runtime context (see its rustdoc).
 - **`Skip`** / **`Interned`**: the user-facing field flags for excluding a field from the payload and for string pooling (see their rustdoc).
 - **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors, and their presence is what opts an entry in. Would be replaced by a typed source-extraction mechanism in metrique.
@@ -21,7 +22,13 @@ The metrique side is the entry descriptor and field flag system (`docs/entry-des
 
 See the `dial9_tokio_telemetry::metrique_sink` module docs for the opt-in model and worked example.
 
-Convenience wiring (`ServiceMetrics::attach_to_stream_with_dial9`-style extension traits, a `metrique_sink(...)` builder) is deliberately **later scope**: it drags `metrique-service-metrics` into the public API surface, and `tee` already composes with zero extra API. The `tee` primitive is the supported v1 path.
+Convenience wiring (`ServiceMetrics::attach_to_stream_with_dial9`-style extension traits, a `metrique_sink(...)` builder) is deliberately **later scope**: it drags `metrique-service-metrics` into the public API surface. `Dial9Stream::tee(&handle, other)` is the supported path: it composes the two sinks and filters dial9's fields out of `other` in one call, without naming any service-metrics type.
+
+### Keeping dial9's fields out of the other formats
+
+`Dial9Context`'s fields are ordinary metrique fields, so they reach every sink in the pipeline. The monotonic timestamps are useless in EMF, and the worker/task ids are noise for a non-tokio consumer. Metrique has no per-format field exclusion, so `WithoutDial9Fields` wraps the other sink and drops `dial9.`-prefixed fields as they arrive: values are filtered in the `EntryWriter`, and whole descriptor segments that describe only dial9 fields are dropped so a descriptor-aware downstream sink still sees a descriptor that matches the values it received.
+
+A segment that *mixes* dial9-named and user fields cannot be filtered (descriptor field lists live in `&'static` storage and cannot be subset), so those degrade to `Descriptors::Unavailable` rather than reporting fields that no longer line up with the value stream. This only affects descriptor-aware downstream sinks; the write-driven formats are unaffected. A general `drop_fields` in metrique itself would be the better long-term home, per review discussion.
 
 ## Architecture
 
@@ -102,6 +109,7 @@ Measured by `dial9-tokio-telemetry/benches/metrique_sink_bench.rs`; current numb
 - **Numeric lists through `GlobalEntrySink`**, blocked on metrique's dyn bridge forwarding list elements without stringifying them ([awslabs/metrique#349](https://github.com/awslabs/metrique/issues/349)); until then only lists of strings work through a global sink, and entries with numeric list fields are dropped there.
 - **Hand-written `Entry` impls opting into descriptors** once metrique ships `DescribeEntry`.
 - **Precomputed descriptor-sequence ids** (upstream), replacing the per-entry `descriptors()` walk and id hashing with a single `u64` read; identification is most of the gap between this sink and plain EMF formatting. Proposed in [awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348).
-- **Typed source extraction for context**, replacing flag-based `Dial9Context` discovery. This is also what would keep context fields out of the other formats: today `dial9.worker_id`/`dial9.task_id`/`dial9.monotonic_ns_start`/`dial9.monotonic_ns_end` travel as ordinary fields and appear in EMF/JSON output. The `dial9.` prefix at least makes them recognizable to a filtering stream.
+- **Typed source extraction for context**, replacing flag-based `Dial9Context` discovery. It would make `WithoutDial9Fields` unnecessary: the context would never be a field in the first place, so nothing would need filtering out of the other formats.
+- **A general `drop_fields` upstream in metrique**, replacing `WithoutDial9Fields` and letting a mixed segment be filtered properly instead of degrading to `Unavailable`.
 - **More schema annotations**: display hints, aggregation hints, privacy labels, `dial9.kpi` markers. Same mechanism as units.
 - **Per-sink compile-time wire plans**, once metrique can emit them, replacing the flush-thread `Entry::write` walk entirely.

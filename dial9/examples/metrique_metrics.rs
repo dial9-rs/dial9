@@ -18,7 +18,6 @@ use metrique::local::{LocalFormat, OutputStyle};
 use metrique::unit::Millisecond;
 use metrique::unit_of_work::metrics;
 use metrique::writer::format::FormatExt;
-use metrique::writer::stream::tee;
 use metrique::writer::{AttachGlobalEntrySinkExt, GlobalEntrySink};
 use std::time::Duration;
 
@@ -76,9 +75,11 @@ fn main() {
         .expect("build tokio runtime");
 
     // Wire the metrique pipeline: local format on stderr, teed with dial9.
-    let join = ServiceMetrics::attach_to_stream(tee(
+    // `Dial9Stream::tee` keeps dial9's own `dial9.` fields out of the local
+    // format's output.
+    let join = ServiceMetrics::attach_to_stream(Dial9Stream::tee(
+        recorder.handle(),
         LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
-        Dial9Stream::new(recorder.handle()),
     ));
 
     rt.block_on(async {

@@ -482,7 +482,6 @@ dial9 = { version = "0.5", features = ["metrique-sink"] }
 ```rust,ignore
 use dial9::metrique_sink::{Dial9Context, Dial9Stream, Interned, Skip};
 use metrique::unit_of_work::metrics;
-use metrique::writer::stream::tee;
 
 #[metrics(rename_all = "PascalCase")]
 struct RequestMetrics {
@@ -501,11 +500,11 @@ struct RequestMetrics {
     debug_blob: String,
 }
 
-// dial9 as a peer of the existing pipeline:
-let _join = ServiceMetrics::attach_to_stream(tee(
-    emf_stream,
-    Dial9Stream::new(&handle),
-));
+// dial9 as a peer of the existing pipeline. `tee` also keeps dial9's own
+// `dial9.` fields out of the EMF output:
+let _join = ServiceMetrics::attach_to_stream(
+    Dial9Stream::tee(&handle, emf_stream),
+);
 
 // Use normally.
 let mut m = RequestMetrics {

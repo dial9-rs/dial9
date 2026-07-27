@@ -9,11 +9,13 @@ use std::time::{Duration, Instant};
 use dial9_trace_format::encoder::FxHashMap;
 use dial9_trace_format::types::FieldValue;
 use metrique_writer::core::descriptor::DescriptorId;
+use metrique_writer::stream::{Tee, tee};
 use metrique_writer::{Entry, EntryIoStream, IoStreamError};
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::Dial9Handle;
 
+use super::WithoutDial9Fields;
 use super::plan::{Plan, build_plan};
 use super::writer::{EntryWalk, WalkError};
 
@@ -73,6 +75,10 @@ impl Dial9Stream {
     /// A disabled handle (e.g. [`Dial9Handle::disabled`]) yields an inert
     /// stream, so wiring can stay unconditional in applications where dial9
     /// is sometimes off.
+    ///
+    /// Composing this with an existing pipeline by hand leaves dial9's own
+    /// `dial9.`-prefixed fields visible to that pipeline;
+    /// [`Dial9Stream::tee`] wires both sides up so they are not.
     pub fn new(handle: &Dial9Handle) -> Self {
         Self {
             handle: handle.clone(),
@@ -87,6 +93,28 @@ impl Dial9Stream {
             last_report: Instant::now(),
             entries_until_report_check: 1,
         }
+    }
+
+    /// Compose a dial9 sink alongside `other`, the pipeline you already have.
+    ///
+    /// Equivalent to metrique's [`tee`](metrique_writer::stream::tee) with
+    /// dial9 on one side, except that `other` is wrapped so dial9's own
+    /// `dial9.`-prefixed fields do not reach it: the trace gets the runtime
+    /// context, and your EMF/JSON output looks the way it did before.
+    ///
+    /// ```ignore
+    /// let _join = ServiceMetrics::attach_to_stream(
+    ///     Dial9Stream::tee(&handle, emf_stream),
+    /// );
+    /// ```
+    ///
+    /// Use [`new`](Self::new) with metrique's `tee` directly to keep those
+    /// fields in the other sink, or to control the composition yourself.
+    pub fn tee<S: EntryIoStream>(
+        handle: &Dial9Handle,
+        other: S,
+    ) -> Tee<Self, WithoutDial9Fields<S>> {
+        tee(Self::new(handle), WithoutDial9Fields::new(other))
     }
 
     fn report(&mut self) {

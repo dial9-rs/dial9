@@ -11,7 +11,7 @@ use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, WorkerId, r
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
-use metrique_writer::EntryIoStream;
+use metrique_writer::{EntryIoStream, IoStreamError};
 
 /// A decoded metrique event: field name → rendered value.
 #[derive(Debug)]
@@ -1296,4 +1296,142 @@ fn paused_recorder_records_nothing_until_resumed() {
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 1, "only the post-enable entry records");
     assert_eq!(events[0].fields["Retries"], "1");
+}
+
+/// A downstream sink that records what an entry looked like when it arrived:
+/// the field names written, and the field names its descriptor declared
+/// (`None` when the descriptor came through as `Unavailable`).
+#[derive(Debug, Default, Clone)]
+struct Seen {
+    written: Vec<String>,
+    described: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default)]
+struct RecordingStream(std::sync::Arc<std::sync::Mutex<Seen>>);
+
+impl RecordingStream {
+    fn shared() -> (Self, std::sync::Arc<std::sync::Mutex<Seen>>) {
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        (Self(cell.clone()), cell)
+    }
+}
+
+impl EntryIoStream for RecordingStream {
+    fn next(&mut self, entry: &impl metrique_writer::Entry) -> Result<(), IoStreamError> {
+        struct NameCollector<'n>(&'n mut Vec<String>);
+        impl<'a> metrique_writer::EntryWriter<'a> for NameCollector<'_> {
+            fn timestamp(&mut self, _timestamp: std::time::SystemTime) {}
+            fn value(
+                &mut self,
+                name: impl Into<std::borrow::Cow<'a, str>>,
+                _value: &(impl metrique_writer::Value + ?Sized),
+            ) {
+                self.0.push(name.into().into_owned());
+            }
+            fn config(&mut self, _config: &'a dyn metrique_writer::EntryConfig) {}
+        }
+
+        let mut seen = self.0.lock().unwrap();
+        let mut written = Vec::new();
+        entry.write(&mut NameCollector(&mut written));
+        seen.written = written;
+        seen.described = entry.descriptors().into_available().map(|descs| {
+            descs
+                .iter()
+                .flat_map(|d| {
+                    d.fields()
+                        .map(|f| f.name_parts().collect::<String>())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        });
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn tee_hides_dial9_fields_from_the_other_sink() {
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    recorder.enable();
+
+    let (other, seen) = RecordingStream::shared();
+    let mut stream = Dial9Stream::tee(recorder.handle(), other);
+    feed_entry!(stream, sample_request(Some(1)));
+
+    recorder.graceful_shutdown(Duration::from_secs(5));
+
+    let seen = seen.lock().unwrap().clone();
+    // The other sink sees the user's own fields...
+    assert!(
+        seen.written.contains(&"Operation".to_owned()),
+        "payload field missing downstream: {seen:#?}"
+    );
+    // ...and none of dial9's.
+    assert!(
+        !seen.written.iter().any(|n| n.starts_with("dial9.")),
+        "dial9 fields leaked downstream: {seen:#?}"
+    );
+    // The descriptor it sees matches the values it received.
+    let described = seen.described.expect("descriptors must stay available");
+    assert!(
+        !described.iter().any(|n| n.starts_with("dial9.")),
+        "dial9 fields leaked into the descriptor: {described:?}"
+    );
+    assert_eq!(
+        described, seen.written,
+        "filtered descriptor must line up with the filtered write order"
+    );
+
+    // dial9's own side still recorded the context.
+    let events = decode_metrique_events(dir.path());
+    assert_eq!(events.len(), 1, "dial9 side must still record: {events:#?}");
+    let _duration: u64 = events[0].fields["dial9.duration_ns"].parse().unwrap();
+}
+
+#[test]
+fn mixed_segment_degrades_descriptors_rather_than_misreporting() {
+    // A user field that happens to be named like a dial9 field, declared in
+    // the same struct (so the same descriptor segment) as ordinary fields.
+    // The value is filtered, but the segment's field list cannot be, so the
+    // downstream descriptor must degrade instead of disagreeing with the
+    // values.
+    #[metrics]
+    struct Mixed {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(name = "dial9.mine")]
+        mine: u64,
+        count: u64,
+    }
+
+    let handle = dial9_tokio_telemetry::telemetry::Dial9Handle::disabled();
+    let (other, seen) = RecordingStream::shared();
+    let mut stream = Dial9Stream::tee(&handle, other);
+    feed_entry!(
+        stream,
+        Mixed {
+            dial9: Dial9Context::capture(),
+            mine: 1,
+            count: 2,
+        }
+    );
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.written,
+        vec!["count".to_owned()],
+        "only non-dial9 values may reach the other sink: {seen:#?}"
+    );
+    assert!(
+        seen.described.is_none(),
+        "a partially-filtered segment must report Unavailable: {seen:#?}"
+    );
 }

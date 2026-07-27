@@ -36,9 +36,11 @@
 //!     debug_blob: String,
 //! }
 //!
-//! // Wire dial9 in as a peer of the existing EMF stream:
-//! let stream = metrique::writer::stream::tee(emf_stream, Dial9Stream::new(&handle));
-//! let _handle = ServiceMetrics::attach_to_stream(stream);
+//! // Wire dial9 in as a peer of the existing EMF stream. `tee` also keeps
+//! // dial9's own `dial9.`-prefixed fields out of that stream.
+//! let _handle = ServiceMetrics::attach_to_stream(
+//!     Dial9Stream::tee(&handle, emf_stream),
+//! );
 //!
 //! // Use normally.
 //! let mut m = RequestMetrics {
@@ -51,6 +53,19 @@
 //! Entries without a `Dial9Context` are left alone: they flow through to the
 //! rest of the pipeline and record nothing into the trace. Teeing the sink
 //! into an existing pipeline therefore only records the entries you opt in.
+//!
+//! # Keeping dial9's fields out of your other sinks
+//!
+//! [`Dial9Context`](crate::metrique_sink::Dial9Context)'s fields are ordinary
+//! metrique fields, so they would otherwise also appear in EMF/JSON output,
+//! where the monotonic timestamps in particular are useless.
+//! [`Dial9Stream::tee`](crate::metrique_sink::Dial9Stream::tee) wraps the
+//! other side of the tee in
+//! [`WithoutDial9Fields`](crate::metrique_sink::WithoutDial9Fields), which
+//! drops every `dial9.`-prefixed field on the way in. Compose with metrique's
+//! [`tee`](metrique_writer::stream::tee) and
+//! [`Dial9Stream::new`](crate::metrique_sink::Dial9Stream::new) directly if
+//! you would rather keep them.
 //!
 //! All dial9 encoding happens on the thread that drives the metrique
 //! pipeline (the `BackgroundQueue` flush thread for the standard setup).
@@ -97,15 +112,23 @@
 //!   the first occurrence keeps the name and later ones are skipped with a
 //!   diagnostic. Prefix flatten sites to disambiguate. Dial9's own fields
 //!   are `dial9.`-prefixed, so they are never part of such a collision.
+//! - A sink wrapped in
+//!   [`WithoutDial9Fields`](crate::metrique_sink::WithoutDial9Fields) sees no
+//!   descriptors at all for an entry that mixes `dial9.`-named fields with
+//!   its own in one flatten site, because descriptor field lists cannot be
+//!   subset. Formats that work off `Entry::write` (EMF, JSON, the local
+//!   format) are unaffected.
 //!
 //! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 
 mod context;
+mod filter;
 mod plan;
 mod stream;
 mod writer;
 
 pub use context::Dial9Context;
+pub use filter::WithoutDial9Fields;
 pub use stream::Dial9Stream;
 
 use metrique_writer::value::{FlagConstructor, MetricFlags, MetricOptions};
