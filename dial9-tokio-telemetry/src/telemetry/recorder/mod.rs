@@ -19,7 +19,7 @@ pub use tokio_hooks::TokioHooks;
 #[cfg(feature = "worker-s3")]
 pub use recorder_tokio::RecorderS3ClientExt;
 pub use recorder_tokio::{
-    AttachedRuntime, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions,
+    AttachedRuntime, Dial9HandleTokioExt, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions,
 };
 
 // Re-exports for internal test access

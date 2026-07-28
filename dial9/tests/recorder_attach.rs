@@ -290,3 +290,92 @@ fn on_recording_start_fires_at_enable() {
     drop(runtime);
     recorder.graceful_shutdown(Duration::from_secs(1));
 }
+
+/// Thread-per-core: one recorder, one cloned `Dial9Handle` per thread, one
+/// `current_thread` runtime built on each. Exercises `Dial9HandleTokioExt`
+/// from several threads at once.
+#[test]
+fn shared_recorder_attaches_from_many_threads() {
+    use dial9::Dial9HandleTokioExt;
+
+    const CORES: usize = 4;
+
+    let dir = tempfile::tempdir().unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
+    let recorder = recorder(writer).build();
+
+    let mut threads = Vec::with_capacity(CORES);
+    for core in 0..CORES {
+        let handle = recorder.handle().clone();
+        threads.push(std::thread::spawn(move || {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+
+            let runtime = handle
+                .attach_tokio_runtime(
+                    builder,
+                    TokioAttachOptions::builder()
+                        .runtime_name(format!("core-{core}"))
+                        .build(),
+                )
+                .expect("build core runtime");
+
+            runtime.block_on(async {
+                dial9::spawn(async {
+                    for _ in 0..5 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+        }));
+    }
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    #[derive(serde::Deserialize)]
+    struct WorkerIdField {
+        worker_id: u64,
+    }
+    const UNKNOWN_WORKER_ID: u64 = 255;
+
+    let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
+    let mut decoder = Decoder::new(&bytes).expect("valid trace");
+    let mut poll_starts = 0u32;
+    let mut poll_ends = 0u32;
+    let mut worker_ids = std::collections::BTreeSet::new();
+    decoder
+        .for_each_event(|ev| match ev.name {
+            "PollStartEvent" => {
+                poll_starts += 1;
+                if let Ok(fields) = ev.deserialize::<WorkerIdField>()
+                    && fields.worker_id != UNKNOWN_WORKER_ID
+                {
+                    worker_ids.insert(fields.worker_id);
+                }
+            }
+            "PollEndEvent" => poll_ends += 1,
+            _ => {}
+        })
+        .expect("decode events");
+
+    // Each core runs one task doing 5 `yield_now().await` calls: an initial
+    // poll plus one re-poll per yield, so at least 6 polls per core.
+    assert!(
+        poll_starts >= CORES as u32 * 6,
+        "expected at least {} poll events from {CORES} core runtimes, got {poll_starts}",
+        CORES * 6
+    );
+    assert!(
+        worker_ids.len() >= CORES,
+        "expected poll events from {CORES} distinct worker IDs, got {worker_ids:?}"
+    );
+    assert_eq!(
+        poll_starts, poll_ends,
+        "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
+    );
+}

@@ -138,6 +138,7 @@ linux-socket = [
 dial9 = { path = ".", features = [
     "tokio",
     "analysis",
+    "cpu-profiling",
     "memory-profiling",
     "process-resource",
     "linux-socket",
