@@ -25,28 +25,22 @@ import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
-import { initViewportFromTrace } from "./viewport-init.js";
 import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
 import { bootScopeFromSearch } from "./scope-boot.js";
 import {
   bindViewStateToUrl,
-  resolveViewState,
   type ViewStateBinding,
 } from "../../lib/url/index.js";
 import {
   projectViewerState,
   mirrorViewerToQuery,
-  readViewerUrlState,
-  hydrateViewerStore,
   VIEWER_URL_SLICES,
 } from "./url-state.js";
-import { resolveFocusLink, resolveUrlSelection } from "./url-selection.js";
-import { focusWindow, readFocusLink } from "./focus-link.js";
 import { mountViewerSearch } from "./search-overlay.js";
 import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
-import { taskIndexFor } from "./tasks-model.js";
+import { createViewerReconstruction } from "./viewer-reconstruction.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
 // <head> auto-boot is a no-op on this off-root new-UI path.
@@ -78,16 +72,11 @@ function boot(): void {
   // order/collapse) apply now - OVER the localStorage hydrate above, so a
   // shared URL wins. The viewport window + task selection apply after the trace
   // loads (below), once minTs/maxTs and the task set exist.
-  const urlView = readViewerUrlState(window.location.search);
-  // Non-destructive exemplar deep link, read once alongside the view state.
-  // Unlike `start`/`end` this never filters the parse - it only pans/zooms and
-  // selects (see focus-link.ts).
-  const focusLink = readFocusLink(window.location.search);
-  const urlHash = resolveViewState({
+  const reconstruction = createViewerReconstruction(store, {
     search: window.location.search,
     hash: window.location.hash,
   });
-  hydrateViewerStore(store, urlView, urlHash);
+  const urlView = reconstruction.urlState;
 
   // The URL sync binding, assigned after mount; forward-referenced by the
   // status bar's copy-link flush so a copy always reflects the live state.
@@ -176,6 +165,7 @@ function boot(): void {
   // pop-out/no-trace errors can surface.
   regionPanel = createRegionAnalysis(store, {
     inspectorHost: shell.inspectorRegion,
+    isSourceShareable: () => loadChrome?.isSourceShareable() === true,
     notify,
     announcer,
   });
@@ -261,68 +251,6 @@ function boot(): void {
     },
   });
 
-  // Initialize the viewport from the trace the moment it loads. Registered
-  // BEFORE the lane interaction so its zoom-history baseline records the
-  // fitted view (both subscribe to `trace`; order = registration order).
-  initViewportFromTrace(store);
-
-  // Apply the URL's viewport window + task selection to the FIRST loaded trace.
-  // Registered AFTER initViewportFromTrace so it overrides the full-fit;
-  // one-shot, so a later Set-Range reparse refits to its own extent instead of
-  // snapping back to the shared window.
-  {
-    let applied = false;
-    const unsubUrlRestore = store.subscribe(["trace"], (state) => {
-      const trace = state.trace.trace;
-      if (applied || trace === null) return;
-      applied = true;
-      unsubUrlRestore();
-      if (urlView.viewStart !== undefined && urlView.viewEnd !== undefined) {
-        const minTs = trace.minTs;
-        const maxTs = trace.maxTs;
-        const viewStart = minTs != null ? Math.max(minTs, urlView.viewStart) : urlView.viewStart;
-        const viewEnd = maxTs != null ? Math.min(maxTs, urlView.viewEnd) : urlView.viewEnd;
-        if (viewEnd > viewStart) {
-          store.update("viewport", { viewStart, viewEnd });
-        }
-      }
-      // Re-resolve the canvas-selection anchors (span/poll/event/region/
-      // spawned) against the loaded trace, plus the task, into one patch.
-      // Unresolvable anchors are silently dropped.
-      const selPatch = resolveUrlSelection(trace, urlView);
-
-      // A `focus_*` deep link (Span Explorer / Tokio Stats exemplar). Prefer
-      // landing ON the span: a long span's window overlaps dozens of others, so
-      // a plain pan leaves the user hunting. Falls back to that plain pan when
-      // nothing matches.
-      if (focusLink !== null) {
-        const focused = resolveFocusLink(trace, focusLink);
-        if (focused !== null) {
-          Object.assign(selPatch, focused.patch);
-          store.update("viewport", focused.viewport);
-        } else {
-          const w = focusWindow(focusLink, trace.clockOffsetNs);
-          if (Number.isFinite(w.start)) {
-            const pad = Math.max((w.end - w.start) * 2, 1e6);
-            store.update("viewport", {
-              viewStart: Math.max(trace.minTs ?? w.start, w.start - pad),
-              viewEnd: Math.min(trace.maxTs ?? w.end, w.end + pad),
-            });
-          }
-        }
-      }
-      if (
-        urlView.selectedTaskId !== undefined &&
-        taskIndexFor(trace).rows.some((row) => row.taskId === urlView.selectedTaskId)
-      ) {
-        selPatch.selectedTaskId = urlView.selectedTaskId;
-      }
-      if (Object.keys(selPatch).length > 0) {
-        store.update("selection", selPatch);
-      }
-    });
-  }
-
   // Lane interaction: pointer pan/zoom/region gestures, wheel zoom,
   // click-select, the selection overlay, and the viewport controls. Its key
   // bindings (arrows/WASD/z + the kb-selection Escape/Enter) join the unified
@@ -378,6 +306,7 @@ function boot(): void {
       ? { initialUrls: source.urls, initialLabel: source.label }
       : {}),
     ...(urlView.dataRange !== undefined ? { initialRange: urlView.dataRange } : {}),
+    onTraceLoaded: reconstruction.applyLoadedTrace,
   });
   loadChrome = boot;
 

@@ -58,6 +58,7 @@ import {
   type PollDetailView,
 } from "./inspector-model.js";
 import { createFlamegraphHost } from "./flamegraph-host.js";
+import { pollFlamegraphCacheSignature } from "./analysis-cache-signature.js";
 
 /** Clamp bounds for the resize drag ([200px, 92vw]). */
 const MIN_WIDTH = 200;
@@ -156,11 +157,12 @@ export function mountInspector(
   }
 
   // ── Selection reconciliation + widget lifecycle ─────────────────────────
-  // Selection signatures and object references are implementation caches only;
-  // every user-visible choice itself lives in state.view.
+  // Selection signatures and semantic anchor keys are implementation caches
+  // only; every user-visible choice itself lives in state.view. Scalar keys
+  // avoid retaining a prior parsed trace after Set/Clear Range.
   let lastSelSig: string | null = null;
-  let lastPollRef: SelectionSlice["pollDetail"] = null;
-  let lastDetailEventRef: CustomTraceEvent | null = null;
+  let lastPollKey: string | null = null;
+  let lastDetailEventKey: string | null = null;
   let preserveInitialTab = deps.preserveInitialTab === true;
   let preserveInitialPollView = deps.preserveInitialPollView === true;
   let preserveInitialRelatedView = deps.preserveInitialRelatedView === true;
@@ -218,15 +220,23 @@ export function mountInspector(
   function selectionSignature(sel: SelectionSlice): string {
     return [
       sel.selectedTaskId ?? "-",
-      sel.pollDetail ? `${sel.pollDetail.start}-${sel.pollDetail.end}` : "-",
+      pollKey(sel.pollDetail) ?? "-",
       sel.taskDump
         ? `${sel.taskDump.taskId}:${sel.taskDump.timestamps.join(",")}`
         : "-",
       sel.pinnedEvent ? `${sel.pinnedEvent.timestamp}:${sel.pinnedEvent.events.length}` : "-",
-      sel.pinnedEvent?.detailEvent ? sel.pinnedEvent.detailEvent.timestamp : "-",
+      detailEventKey(sel.pinnedEvent?.detailEvent ?? null) ?? "-",
       sel.spawnedTasksRange ? `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}` : "-",
       sel.sidebarRange ? `${sel.sidebarRange.startNs}-${sel.sidebarRange.endNs}` : "-",
     ].join("|");
+  }
+
+  function pollKey(poll: SelectionSlice["pollDetail"]): string | null {
+    return poll === null ? null : `${poll.start}:${poll.taskId}`;
+  }
+
+  function detailEventKey(event: CustomTraceEvent | null): string | null {
+    return event === null ? null : `${event.timestamp}:${event.name}`;
   }
 
   /** React to a genuinely-new selection: reset per-selection UI, auto-activate. */
@@ -236,8 +246,9 @@ export function mountInspector(
     lastSelSig = sig;
 
     const patch: Partial<StoreState["view"]> = {};
-    if (sel.pollDetail !== lastPollRef) {
-      if (preserveInitialPollView && lastPollRef === null && sel.pollDetail !== null) {
+    const nextPollKey = pollKey(sel.pollDetail);
+    if (nextPollKey !== lastPollKey) {
+      if (preserveInitialPollView && lastPollKey === null && sel.pollDetail !== null) {
         preserveInitialPollView = false;
       } else {
         patch.expandedPollGroups = new Set<string>();
@@ -245,18 +256,19 @@ export function mountInspector(
         patch.pollWorkerZoom = [];
         patch.pollOffworkerZoom = [];
       }
-      lastPollRef = sel.pollDetail;
+      lastPollKey = nextPollKey;
     }
     const detailEvent = sel.pinnedEvent?.detailEvent ?? null;
-    if (detailEvent !== lastDetailEventRef) {
-      if (preserveInitialRelatedView && lastDetailEventRef === null && detailEvent !== null) {
+    const nextDetailEventKey = detailEventKey(detailEvent);
+    if (nextDetailEventKey !== lastDetailEventKey) {
+      if (preserveInitialRelatedView && lastDetailEventKey === null && detailEvent !== null) {
         preserveInitialRelatedView = false;
       } else {
         patch.relatedCollapsed = {};
         patch.relatedExpand = {};
         patch.relatedCorrelate = null;
       }
-      lastDetailEventRef = detailEvent;
+      lastDetailEventKey = nextDetailEventKey;
     }
 
     const pref = preferredTab(sel);
@@ -648,9 +660,12 @@ export function mountInspector(
       return;
     }
     const d = data();
-    // sig changes only when the tree would: this poll, which section, and the
-    // sample count (the poll identity + section fully determine the samples).
-    const sig = `${poll.start}-${poll.end}:${section}:${samples.length}`;
+    const sig = pollFlamegraphCacheSignature({
+      trace: s.trace.trace,
+      poll,
+      section,
+      sampleCount: samples.length,
+    });
     pollFg.sync({
       hostEl,
       sig,

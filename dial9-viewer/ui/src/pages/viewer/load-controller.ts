@@ -57,6 +57,8 @@ export interface LoadHandle {
 
 export interface StartLoadOptions {
   onProgress(progress: TraceWorkerProgress): void;
+  /** Whether this parse replaces the source or reparses the current source. */
+  kind: "source" | "reparse";
   /** Same-origin credential headers; omitted for local file loads. */
   headers?: Record<string, string>;
   /**
@@ -172,6 +174,8 @@ export function loadErrorMessage(
 
 export interface LoadController {
   getState(): LoadChromeState;
+  /** Whether another browser can reproduce the successfully loaded source. */
+  isSourceShareable(): boolean;
   /** The escapable-surface spec to register in the shell's esc cascade. */
   readonly escSurface: EscapableSurface;
   /** Toolbar "New File": confirm, then open the chooser. */
@@ -241,6 +245,9 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
   // load never writes state (its done/catch callbacks capture the token).
   let loadToken = 0;
   let currentHandle: LoadHandle | null = null;
+  // Source identity is committed only by a successful, current load. Pending,
+  // aborted, failed, and superseded attempts cannot change Copy Link behavior.
+  let sourceShareable = false;
   // The decompressed trace bytes from the last successful load, retained for
   // Set/Clear Range reparse. Null until the first load completes.
   let retainedBuffer: ArrayBuffer | null = null;
@@ -298,6 +305,10 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       objectUrl: string | null;
       /** Set-Range reparse window forwarded to the worker. */
       range?: ReparseRange | null;
+      /** Source replacement vs same-source Set/Clear Range reparse. */
+      kind: "source" | "reparse";
+      /** Commit on success; null preserves the current source (reparse). */
+      shareableAfterSuccess: boolean | null;
     },
   ): void {
     // Supersede any in-flight load (its callbacks are already token-guarded).
@@ -309,6 +320,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     startTimer();
 
     const startOpts: StartLoadOptions = {
+      kind: opts.kind,
       onProgress: (p) => {
         if (token !== loadToken) return;
         progress = progressLabel(p);
@@ -348,6 +360,9 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         if (settled?.timing !== undefined) deps.onTiming?.(settled.timing);
         cleanup();
         if (token !== loadToken) return;
+        if (opts.shareableAfterSuccess !== null) {
+          sourceShareable = opts.shareableAfterSuccess;
+        }
         // Success: the store's trace slice is now populated; commit the
         // toolbar label, then drop the load section so the tracks show through.
         deps.onLoaded?.();
@@ -413,6 +428,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         elapsedLabel: elapsedLabel(),
       };
     },
+    isSourceShareable: () => sourceShareable,
     escSurface,
     requestNewFile(): void {
       if (section !== "closed") return; // already open; reopening is New File
@@ -430,6 +446,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         label: `Loading ${name}...`,
         withHeaders: false,
         objectUrl,
+        kind: "source",
+        shareableAfterSuccess: false,
       });
     },
     loadUrls(urls, label, range): void {
@@ -437,6 +455,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         label,
         withHeaders: true,
         objectUrl: null,
+        kind: "source",
+        shareableAfterSuccess: true,
         ...(range !== undefined ? { range } : {}),
       });
     },
@@ -466,6 +486,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
           : "Restoring full trace...",
         withHeaders: false,
         objectUrl,
+        kind: "reparse",
+        shareableAfterSuccess: null,
         range,
       });
     },
@@ -474,6 +496,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         label: "Loading demo trace...",
         withHeaders: true,
         objectUrl: null,
+        kind: "source",
+        shareableAfterSuccess: false,
       });
     },
     cancel: cancelLoad,

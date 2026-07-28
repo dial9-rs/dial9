@@ -26,6 +26,11 @@ import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import type { ParsedTrace } from "../../types/trace.js";
 import type { TimeRange } from "../../types/trace.js";
+import { buildRegionFlamegraphPopoutUrl } from "./region-popout.js";
+import {
+  regionComputedCacheSignature,
+  regionWidgetCacheSignature,
+} from "./analysis-cache-signature.js";
 import {
   buildBlockingView,
   collectSchedSamplesInRange,
@@ -57,6 +62,8 @@ const MODE_LABELS: Record<RegionMode, string> = {
 export interface RegionAnalysisDeps {
   /** The inspector aside; the Stack tab's `[data-region-host]` lives here. */
   inspectorHost: HTMLElement;
+  /** Whether the current successful source can be reconstructed from the URL. */
+  isSourceShareable(): boolean;
   /** Surface an error (pop-out with no trace URL, etc.) as a toast. */
   notify?(message: string): void;
   /** ARIA/status announcer for the "show in timeline" navigation. */
@@ -136,12 +143,18 @@ export function createRegionAnalysis(
     return `${range.startNs}-${range.endNs}`;
   }
 
-  function viewSig(m: RegionMode | null, range: TimeRange): string {
-    const key = rangeKey(range);
-    if (m === "heap") return `heap:${key}:${heapMode}`;
-    if (m === "blocking") return `blocking:${key}:${groupBy}`;
-    if (m === "cpu") return `cpu:${key}`;
-    return `empty:${key}`;
+  function viewSig(
+    trace: ParsedTrace,
+    m: RegionMode | null,
+    range: TimeRange,
+  ): string {
+    return regionComputedCacheSignature({
+      trace,
+      mode: m,
+      range,
+      heapMode,
+      groupBy,
+    });
   }
 
   // ── flamegraph widget ───────────────────────────────────────────────────
@@ -262,7 +275,7 @@ export function createRegionAnalysis(
     present: { cpu: boolean; blocking: boolean; heap: boolean },
     coverage: RegionCoverage,
   ): void {
-    const sig = viewSig(mode, range);
+    const sig = viewSig(trace, mode, range);
     if (sig !== computedSig) {
       computedView = computeView(mode, range, trace, ld);
       computedSig = sig;
@@ -282,7 +295,11 @@ export function createRegionAnalysis(
       if (fgHost === null) return;
       // The flame pref is part of the signature so switching list<->flame for
       // blocking re-applies setData.
-      const fgSig = blockingFlame ? `${sig}:flame` : sig;
+      const fgSig = regionWidgetCacheSignature({
+        trace,
+        computed: sig,
+        blockingFlame,
+      });
       fg.sync({
         hostEl: fgHost,
         sig: fgSig,
@@ -670,19 +687,17 @@ export function createRegionAnalysis(
 
   /** Pop Out: open flamegraph.html preserving trace URL(s), range, zoom. */
   function popOut(range: TimeRange): void {
-    const params = new URLSearchParams(window.location.search);
-    const traceUrls = params.getAll("trace").filter((u) => u.length > 0);
-    if (traceUrls.length === 0) {
-      deps.notify?.("Pop-out requires a URL-loaded trace (open with ?trace=).");
+    const url = buildRegionFlamegraphPopoutUrl(
+      window.location.search,
+      range,
+      state().view,
+      deps.isSourceShareable(),
+    );
+    if (url === null) {
+      deps.notify?.(
+        "Pop-out requires the current trace to be loaded from a reproducible URL.",
+      );
       return;
-    }
-    const qs = traceUrls.map((u) => `trace=${encodeURIComponent(u)}`).join("&");
-    let url = `flamegraph.html?${qs}&start=${Math.round(range.startNs)}&end=${Math.round(range.endNs)}`;
-    const fgInstance = fg.instance();
-    if (fgInstance !== null) {
-      const z = fgInstance.getZoomPath();
-      if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
-      if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;
     }
     window.open(url, "_blank");
   }

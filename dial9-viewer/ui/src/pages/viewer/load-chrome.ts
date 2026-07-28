@@ -19,9 +19,14 @@ import {
   isLoadPerfEnabled,
   Dial9Creds,
 } from "../../lib/trace/index.js";
-import type { ReparseRange } from "../../lib/trace/index.js";
+import type {
+  ParsedTrace,
+  ReparseRange,
+  TraceSliceStore,
+} from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { EscCascade } from "./esc-cascade.js";
+import type { LoadedTraceKind } from "./viewer-reconstruction.js";
 import {
   createLoadController,
   initialUrlLabel,
@@ -43,6 +48,8 @@ export interface LoadChromeOptions {
   initialLabel?: string;
   /** Deep-linked parse filter applied to the first URL load. */
   initialRange?: ReparseRange;
+  /** Explicit production transition that commits each successfully parsed trace. */
+  onTraceLoaded?(trace: ParsedTrace, kind: LoadedTraceKind): void;
   /** Test seams. */
   document?: Document;
   startLoad?: LoadControllerDeps["startLoad"];
@@ -95,8 +102,6 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
   let controller: LoadController;
   let committedLabel = options.initialLabel ?? "";
   let pendingLabel = options.initialLabel ?? "";
-  let committedShareable = (options.initialUrls?.length ?? 0) > 0;
-  let pendingShareable = committedShareable;
 
   // The file input and the lit-html render target are persistent siblings:
   // lit-html owns the render target's children, so the input lives OUTSIDE it
@@ -111,7 +116,6 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     fileInput.value = "";
     if (file) {
       pendingLabel = file.name;
-      pendingShareable = false;
       controller.loadFile(file);
     }
   });
@@ -124,13 +128,23 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     hasTrace: () => store.getState().trace.trace !== null,
     startLoad:
       options.startLoad ??
-      ((urls, opts) => loadTraceOnMainThread(store, urls, opts)),
+      ((urls, opts) => {
+        const target: TraceSliceStore = {
+          update(_slice, patch): void {
+            if (options.onTraceLoaded !== undefined) {
+              options.onTraceLoaded(patch.trace, opts.kind);
+            } else {
+              store.update("trace", patch);
+            }
+          },
+        };
+        return loadTraceOnMainThread(target, urls, opts);
+      }),
     confirm: options.confirm ?? ((message) => window.confirm(message)),
     onError: options.onError,
     onChange: renderLayer,
     onLoaded: () => {
       committedLabel = pendingLabel;
-      committedShareable = pendingShareable;
     },
     onTiming: (timing) => {
       if (!isLoadPerfEnabled()) return;
@@ -176,7 +190,6 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     const file = e.dataTransfer?.files[0];
     if (file) {
       pendingLabel = file.name;
-      pendingShareable = false;
       controller.loadFile(file);
     }
   };
@@ -230,7 +243,6 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
             e.preventDefault();
             e.stopPropagation();
             pendingLabel = "demo-trace.bin";
-            pendingShareable = false;
             controller.loadDemo();
           }}
           >or load demo trace</a
@@ -305,10 +317,9 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
       pendingLabel = committedLabel;
       controller.requestNewFile();
     },
-    isSourceShareable: () => committedShareable,
+    isSourceShareable: () => controller.isSourceShareable(),
     currentLabel: () => committedLabel,
     reparseToRange: (range) => {
-      pendingShareable = committedShareable;
       controller.reparse(range);
     },
     scopeLoading: (label) => {
@@ -317,7 +328,6 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     },
     loadUrls: (urls, label, range) => {
       pendingLabel = label;
-      pendingShareable = true;
       controller.loadUrls(urls, label, range);
     },
     scopeFailed: () => controller.cancel(),

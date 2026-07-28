@@ -224,6 +224,75 @@ describe("URL / demo loads feed the worker and close on success", () => {
   });
 });
 
+describe("source shareability", () => {
+  it("commits URL, local, and demo shareability only when each load succeeds", async () => {
+    const h = makeHarness({
+      createObjectUrl: () => "blob:local",
+    });
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+
+    h.ctrl.loadUrls(["/trace.bin"], initialUrlLabel(1));
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+    h.setHasTrace(true);
+    h.loads[0]?.resolve();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+
+    h.ctrl.loadFile(fakeFile("local.bin"));
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+    h.loads[1]?.resolve();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+
+    h.ctrl.loadUrls(["/trace-2.bin"], initialUrlLabel(1));
+    h.loads[2]?.resolve();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+
+    h.ctrl.loadDemo();
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+    h.loads[3]?.resolve();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+  });
+
+  it("keeps the last successful source classification across aborts and failures", async () => {
+    const h = makeHarness({
+      createObjectUrl: () => "blob:local",
+    });
+    h.ctrl.loadUrls(["/trace.bin"], initialUrlLabel(1));
+    h.setHasTrace(true);
+    h.loads[0]?.resolve();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+
+    h.ctrl.loadFile(fakeFile("cancelled.bin"));
+    h.ctrl.cancel();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+
+    h.ctrl.loadFile(fakeFile("failed.bin"));
+    h.loads[2]?.reject(new Error("bad local trace"));
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(true);
+
+    h.ctrl.loadFile(fakeFile("local.bin"));
+    h.loads[3]?.resolve();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+
+    h.ctrl.loadUrls(["/failed.bin"], initialUrlLabel(1));
+    h.loads[4]?.reject(new Error("HTTP 500"));
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+
+    h.ctrl.loadUrls(["/cancelled.bin"], initialUrlLabel(1));
+    h.ctrl.cancel();
+    await flush();
+    expect(h.ctrl.isSourceShareable()).toBe(false);
+  });
+});
+
 // The boot `s_*` scope must show the loading view during the async /api/browse
 // re-list BEFORE any URLs exist (otherwise the viewer sits in the drop zone —
 // the bug this fixes). showLoading enters "loading" without a worker load; the
