@@ -1682,7 +1682,11 @@
       const tree = key === "worker" ? workerTree : offworkerTree;
       if (!tree || !names.length) return;
       const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
-      // Try walking child-by-child (works when names is a full path from root)
+      // The URL carries a structural path so duplicate terminal names resolve
+      // deterministically. The live breadcrumb stack, however, records user
+      // zoom targets, not every structural ancestor. Restoring one URL target
+      // must therefore produce the same single breadcrumb as one live click.
+      let target = null;
       let node = tree;
       for (let i = 0; i < names.length; i++) {
         let found = null;
@@ -1690,15 +1694,19 @@
           if (child.name === names[i]) { found = child; break; }
         }
         if (!found) {
-          // Path walk failed, fall back to DFS for the last name
+          // Legacy paths may contain only a terminal name.
           const path = findNodePath(tree, names[names.length - 1]);
-          if (path) stack.push.apply(stack, path);
+          if (path) target = path[path.length - 1];
           break;
         }
-        stack.push(found);
+        target = found;
         node = found;
       }
-      if (stack.length > 0) renderAll();
+      if (target) {
+        stack.length = 0;
+        stack.push(target);
+        renderAll();
+      }
     }
 
     // Deep-link support for the inspect (butterfly) focus. The focus is

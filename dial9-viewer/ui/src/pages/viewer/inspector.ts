@@ -58,6 +58,7 @@ import {
   type PollDetailView,
 } from "./inspector-model.js";
 import { createFlamegraphHost } from "./flamegraph-host.js";
+import { pollFlamegraphCacheSignature } from "./analysis-cache-signature.js";
 
 /** Clamp bounds for the resize drag ([200px, 92vw]). */
 const MIN_WIDTH = 200;
@@ -87,6 +88,14 @@ export interface InspectorDeps {
    * region panel owns what opens.
    */
   regionPanel: RegionAnalysisController;
+  /** True when the URL explicitly selected the initial inspector tab. */
+  preserveInitialTab?: boolean;
+  /** True when poll disclosure/section/zoom came explicitly from the URL. */
+  preserveInitialPollView?: boolean;
+  /** True when Related disclosure/correlation came explicitly from the URL. */
+  preserveInitialRelatedView?: boolean;
+  /** True when the URL explicitly owns the initial inspector width. */
+  preserveInitialWidth?: boolean;
 }
 
 export interface MountedInspector {
@@ -147,25 +156,29 @@ export function mountInspector(
     return fn;
   }
 
-  // ── Local UI state (not store state) ─────────────────────────────────────
-  let activeTab: InspectorTab = "task";
-  // Selection "activation signature": the fields that decide which tab to open
-  // on a fresh selection (NOT hoveredWakerTaskId - a waker hover must not
-  // re-activate the tab). Auto-activation runs only when this changes.
+  // ── Selection reconciliation + widget lifecycle ─────────────────────────
+  // Selection signatures and semantic anchor keys are implementation caches
+  // only; every user-visible choice itself lives in state.view. Scalar keys
+  // avoid retaining a prior parsed trace after Set/Clear Range.
   let lastSelSig: string | null = null;
-  // Poll Detail frame-group expansion, keyed "sched-<i>"/"cpu-<i>".
-  let expandedGroups = new Set<string>();
-  let lastPollRef: SelectionSlice["pollDetail"] = null;
-  // Which sample section the poll flamegraph shows when both cpu + sched exist.
-  // A within-poll view choice (not a cross-selection pref), so it resets when
-  // the clicked poll changes. The list/flame CHOICE itself is the persisted
-  // uiPrefs.stacksAsFlamegraph.
-  let pollFgSection: "cpu" | "sched" = "cpu";
-  // The poll tab's own flamegraph instance, hosted the same way the region
-  // panel hosts its own (a SECOND live instance on the page).
+  let lastPollKey: string | null = null;
+  let lastDetailEventKey: string | null = null;
+  let preserveInitialTab = deps.preserveInitialTab === true;
+  let preserveInitialPollView = deps.preserveInitialPollView === true;
+  let preserveInitialRelatedView = deps.preserveInitialRelatedView === true;
+  let applyingPollView = false;
   const pollFg = createFlamegraphHost({
     doc: host.ownerDocument,
     className: "d9-poll-fg",
+    onZoom: () => {
+      if (applyingPollView) return;
+      const path = pollFg.instance()?.getZoomPath();
+      if (path === undefined) return;
+      store.update("view", {
+        pollWorkerZoom: path.worker,
+        pollOffworkerZoom: path.offworker,
+      });
+    },
   });
   const taskDumpFg = createFlamegraphHost({
     doc: host.ownerDocument,
@@ -183,13 +196,14 @@ export function mountInspector(
   }
   // Related tab UI state; reset when the detail event changes.
   let relatedUi: RelatedUiState = { collapsed: {}, expand: {}, correlate: null };
-  let lastDetailEventRef: CustomTraceEvent | null = null;
-  // Resize / persistence state.
-  let userResized = false;
+  // Resize / persistence state. This is interaction bookkeeping, not visible
+  // view state; the committed width itself lives in uiPrefs.
+  let userResized = deps.preserveInitialWidth === true;
 
-  // Seed the persisted width: a hand-set width survives reload. When one is
-  // stored, treat it as a manual resize so auto-defaults yield to it.
-  const storedWidth = readStoredWidth();
+  // Seed persistence only when the URL did not explicitly own the width.
+  // An explicit deep link must render identically regardless of recipient
+  // localStorage and must not be auto-narrowed by its initial event anchor.
+  const storedWidth = userResized ? null : readStoredWidth();
   if (storedWidth !== null) {
     userResized = true;
     if (storedWidth !== store.getState().uiPrefs.sidebarWidth) {
@@ -206,15 +220,23 @@ export function mountInspector(
   function selectionSignature(sel: SelectionSlice): string {
     return [
       sel.selectedTaskId ?? "-",
-      sel.pollDetail ? `${sel.pollDetail.start}-${sel.pollDetail.end}` : "-",
+      pollKey(sel.pollDetail) ?? "-",
       sel.taskDump
         ? `${sel.taskDump.taskId}:${sel.taskDump.timestamps.join(",")}`
         : "-",
       sel.pinnedEvent ? `${sel.pinnedEvent.timestamp}:${sel.pinnedEvent.events.length}` : "-",
-      sel.pinnedEvent?.detailEvent ? sel.pinnedEvent.detailEvent.timestamp : "-",
+      detailEventKey(sel.pinnedEvent?.detailEvent ?? null) ?? "-",
       sel.spawnedTasksRange ? `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}` : "-",
       sel.sidebarRange ? `${sel.sidebarRange.startNs}-${sel.sidebarRange.endNs}` : "-",
     ].join("|");
+  }
+
+  function pollKey(poll: SelectionSlice["pollDetail"]): string | null {
+    return poll === null ? null : `${poll.start}:${poll.taskId}`;
+  }
+
+  function detailEventKey(event: CustomTraceEvent | null): string | null {
+    return event === null ? null : `${event.timestamp}:${event.name}`;
   }
 
   /** React to a genuinely-new selection: reset per-selection UI, auto-activate. */
@@ -223,32 +245,46 @@ export function mountInspector(
     if (sig === lastSelSig) return;
     lastSelSig = sig;
 
-    // Reset Poll Detail expansion + flamegraph section when the clicked poll
-    // changes.
-    if (sel.pollDetail !== lastPollRef) {
-      expandedGroups = new Set();
-      pollFgSection = "cpu";
-      lastPollRef = sel.pollDetail;
+    const patch: Partial<StoreState["view"]> = {};
+    const nextPollKey = pollKey(sel.pollDetail);
+    if (nextPollKey !== lastPollKey) {
+      if (preserveInitialPollView && lastPollKey === null && sel.pollDetail !== null) {
+        preserveInitialPollView = false;
+      } else {
+        patch.expandedPollGroups = new Set<string>();
+        patch.pollFlamegraphSection = "cpu";
+        patch.pollWorkerZoom = [];
+        patch.pollOffworkerZoom = [];
+      }
+      lastPollKey = nextPollKey;
     }
-    // Reset Related UI when the detail event changes (persistence is per
-    // selection: collapse state cleared on reset).
     const detailEvent = sel.pinnedEvent?.detailEvent ?? null;
-    if (detailEvent !== lastDetailEventRef) {
-      relatedUi = { collapsed: {}, expand: {}, correlate: null };
-      lastDetailEventRef = detailEvent;
+    const nextDetailEventKey = detailEventKey(detailEvent);
+    if (nextDetailEventKey !== lastDetailEventKey) {
+      if (preserveInitialRelatedView && lastDetailEventKey === null && detailEvent !== null) {
+        preserveInitialRelatedView = false;
+      } else {
+        patch.relatedCollapsed = {};
+        patch.relatedExpand = {};
+        patch.relatedCorrelate = null;
+      }
+      lastDetailEventKey = nextDetailEventKey;
     }
 
-    // Activate the tab the just-completed interaction implies, if it has
-    // content. A manual tab switch (no selection change) is preserved because
-    // this only runs on a signature change.
     const pref = preferredTab(sel);
     const avail = tabAvailability(sel);
-    if (pref !== null && avail[pref]) {
-      activeTab = pref;
-    } else if (!avail[activeTab] && pref === null) {
-      // Selection fully cleared: fall back to Task (resting readout otherwise).
-      activeTab = "task";
+    const current = state().view.inspectorTab;
+    if (preserveInitialTab) {
+      // The inspector mounts before trace-dependent URL anchors resolve. Keep
+      // the explicit tab through empty/trace-only renders and consume the
+      // preservation only when the first actual selection arrives.
+      if (pref !== null) preserveInitialTab = false;
+    } else if (pref !== null && avail[pref]) {
+      patch.inspectorTab = pref;
+    } else if (!avail[current] && pref === null) {
+      patch.inspectorTab = "task";
     }
+    if (Object.keys(patch).length > 0) store.update("view", patch);
 
     // Auto-narrow on a fresh single-event pin, unless the user set a width.
     if (!userResized && pref === "event") {
@@ -321,7 +357,7 @@ export function mountInspector(
         <div
           class="d9-inspector-body"
           role="tabpanel"
-          aria-label="${TAB_LABELS[activeTab]} detail"
+          aria-label="${TAB_LABELS[s.view.inspectorTab]} detail"
           tabindex="0"
         >
           ${bodyTemplate(s)}
@@ -331,7 +367,7 @@ export function mountInspector(
   }
 
   function tabButton(tab: InspectorTab, enabled: boolean): TemplateResult {
-    const on = tab === activeTab;
+    const on = tab === state().view.inspectorTab;
     return html`<button
       type="button"
       class=${classMap({ "d9-inspector-tab": true, on, disabled: !enabled })}
@@ -423,7 +459,7 @@ export function mountInspector(
   // ── Tab body ──────────────────────────────────────────────────────────────
 
   function bodyTemplate(s: StoreState): TemplateResult {
-    switch (activeTab) {
+    switch (s.view.inspectorTab) {
       case "task":
         return taskTemplate(taskDetail());
       case "poll":
@@ -588,15 +624,15 @@ export function mountInspector(
   /** The section actually rendered: the stored choice when its samples exist,
    *  else whichever kind the poll has (a poll can carry only one). */
   function activePollFgSection(view: PollDetailView): "cpu" | "sched" {
+    const pollFgSection = state().view.pollFlamegraphSection;
     if (pollFgSection === "cpu" && view.cpuSamplesRaw.length > 0) return "cpu";
     if (pollFgSection === "sched" && view.schedSamplesRaw.length > 0) return "sched";
     return view.cpuSamplesRaw.length > 0 ? "cpu" : "sched";
   }
 
   function setPollFgSection(section: "cpu" | "sched"): void {
-    if (pollFgSection === section) return;
-    pollFgSection = section;
-    renderFrame();
+    if (state().view.pollFlamegraphSection === section) return;
+    store.update("view", { pollFlamegraphSection: section });
   }
 
   /**
@@ -607,7 +643,7 @@ export function mountInspector(
    */
   function syncPollFlamegraph(s: StoreState): void {
     const poll = s.selection.pollDetail;
-    if (activeTab !== "poll" || poll === null || !s.uiPrefs.stacksAsFlamegraph) {
+    if (s.view.inspectorTab !== "poll" || poll === null || !s.uiPrefs.stacksAsFlamegraph) {
       pollFg.detach();
       return;
     }
@@ -624,23 +660,53 @@ export function mountInspector(
       return;
     }
     const d = data();
-    // sig changes only when the tree would: this poll, which section, and the
-    // sample count (the poll identity + section fully determine the samples).
-    const sig = `${poll.start}-${poll.end}:${section}:${samples.length}`;
+    const sig = pollFlamegraphCacheSignature({
+      trace: s.trace.trace,
+      poll,
+      section,
+      sampleCount: samples.length,
+    });
     pollFg.sync({
       hostEl,
       sig,
-      apply: (instance) =>
+      apply: (instance) => {
         instance.setData(samples, d.callframeSymbols, {
           exportTitle: `${section === "cpu" ? "CPU" : "Blocking"} - ${view.title}`,
           runtimeWorkers: d.runtimeWorkers,
-        }),
+        });
+        applyingPollView = true;
+        try {
+          instance.applyViewState(
+            {
+              ...(s.view.pollWorkerZoom.length > 0
+                ? { workerZoom: s.view.pollWorkerZoom }
+                : {}),
+              ...(s.view.pollOffworkerZoom.length > 0
+                ? { offworkerZoom: s.view.pollOffworkerZoom }
+                : {}),
+            },
+            { silent: true },
+          );
+        } finally {
+          applyingPollView = false;
+        }
+        const actual = instance.getZoomPath();
+        if (
+          actual.worker.join("\t") !== s.view.pollWorkerZoom.join("\t") ||
+          actual.offworker.join("\t") !== s.view.pollOffworkerZoom.join("\t")
+        ) {
+          store.update("view", {
+            pollWorkerZoom: actual.worker,
+            pollOffworkerZoom: actual.offworker,
+          });
+        }
+      },
     });
   }
 
   function syncTaskDumpFlamegraph(s: StoreState): void {
     const selected = s.selection.taskDump;
-    if (activeTab !== "stack" || selected === null) {
+    if (s.view.inspectorTab !== "stack" || selected === null) {
       taskDumpFg.detach();
       return;
     }
@@ -672,7 +738,7 @@ export function mountInspector(
 
   function sampleGroup(g: SampleGroupView, kind: "sched" | "cpu", idx: number): TemplateResult {
     const key = `${kind}-${idx}`;
-    const expanded = expandedGroups.has(key);
+    const expanded = state().view.expandedPollGroups.has(key);
     return html`
       <div class=${classMap({ "d9-sample-group": true, sched: kind === "sched", cpu: kind === "cpu" })}>
         <div class="d9-sample-head">
@@ -708,6 +774,15 @@ export function mountInspector(
   }
 
   // ── Event tab ─────────────────────────────────────────────────────────────
+
+  function relatedUiState(): RelatedUiState {
+    const view = state().view;
+    return {
+      collapsed: view.relatedCollapsed,
+      expand: view.relatedExpand,
+      correlate: view.relatedCorrelate,
+    };
+  }
 
   function eventTemplate(sel: SelectionSlice): TemplateResult {
     const pinned = sel.pinnedEvent;
@@ -773,7 +848,7 @@ export function mountInspector(
         fmtTs,
         fmtDelta,
       },
-      relatedUi,
+      relatedUiState(),
     );
     return html`<div class="d9-related">${view.sections.map(relatedSection)}</div>`;
   }
@@ -922,43 +997,42 @@ export function mountInspector(
     </p>`;
   }
 
-  // ── UI-state mutations (local; render directly, not via the store) ───────
+  // ── Durable UI-state mutations ───────────────────────────────────────────
 
   function selectTab(tab: InspectorTab): void {
-    if (tab === activeTab) return;
-    activeTab = tab;
-    renderFrame();
+    if (tab === state().view.inspectorTab) return;
+    store.update("view", { inspectorTab: tab });
   }
 
   function toggleGroup(key: string): void {
-    if (expandedGroups.has(key)) expandedGroups.delete(key);
-    else expandedGroups.add(key);
-    renderFrame();
+    const next = new Set(state().view.expandedPollGroups);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    store.update("view", { expandedPollGroups: next });
   }
 
   function toggleSection(title: string, collapsed: boolean): void {
-    relatedUi = {
-      ...relatedUi,
-      collapsed: { ...relatedUi.collapsed, [title]: collapsed },
-    };
-    renderFrame();
+    store.update("view", {
+      relatedCollapsed: { ...state().view.relatedCollapsed, [title]: collapsed },
+    });
   }
 
   function loadMore(title: string, dir: "before" | "after"): void {
-    const cur: RelatedExpandState = relatedUi.expand[title] ?? { before: 0, after: 0 };
+    const cur: RelatedExpandState = state().view.relatedExpand[title] ?? { before: 0, after: 0 };
     const next: RelatedExpandState =
       dir === "before"
         ? { before: cur.before + 25, after: cur.after }
         : { before: cur.before, after: cur.after + 25 };
-    relatedUi = { ...relatedUi, expand: { ...relatedUi.expand, [title]: next } };
-    renderFrame();
+    store.update("view", {
+      relatedExpand: { ...state().view.relatedExpand, [title]: next },
+    });
   }
 
   function correlate(key: string, val: string): void {
-    // Set the correlation field and switch to Related (single-event only).
-    relatedUi = { ...relatedUi, correlate: { key, val } };
-    activeTab = "related";
-    renderFrame();
+    store.update("view", {
+      relatedCorrelate: { key, val },
+      inspectorTab: "related",
+    });
   }
 
   function copyValue(e: MouseEvent, value: string): void {
@@ -1102,7 +1176,7 @@ export function mountInspector(
   // high-frequency transient channel (so a hover never re-runs the tab
   // derivations - the split above).
   const unsubFrame = store.subscribe(
-    ["trace", "selection", "uiPrefs"],
+    ["trace", "selection", "uiPrefs", "view"],
     () => renderFrame(),
   );
   const unsubReadout = store.subscribe(["transient"], () => renderReadout());

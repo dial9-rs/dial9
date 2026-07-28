@@ -196,6 +196,28 @@ describe("bindViewStateToUrl", () => {
     expect(timer.pendingCount()).toBe(0);
   });
 
+  it("flush() sees a same-turn multi-field widget update before the store frame", () => {
+    const { host, store, binding } = setup({
+      pathname: "/p",
+      search: "?trace=t.bin",
+      hash: "",
+    });
+    store.update("fgView", {
+      workerZoom: ["canonical", "poll"],
+      offworkerZoom: ["off", "wait"],
+    });
+
+    // Copy Link can run in the same browser turn as the widget callback. The
+    // store state is already canonical even though subscribers have not seen
+    // their requestAnimationFrame notification yet.
+    binding.flush();
+
+    expect(host.writes).toEqual([
+      "/p?trace=t.bin&worker-zoom=canonical%09poll&offworker-zoom=off%09wait" +
+        "#v=1&fg.w=canonical%09poll&fg.o=off%09wait",
+    ]);
+  });
+
   it("dispose() cancels the pending write and unsubscribes", () => {
     const { raf, timer, host, store, binding } = setup({
       pathname: "/p",

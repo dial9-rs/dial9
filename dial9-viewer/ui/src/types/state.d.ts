@@ -287,6 +287,8 @@ export interface UiPrefsSlice {
    * scrolls internally, so this only sizes the visible window.
    */
   lanesViewportHeight: number;
+  /** Current vertical scroll offset of the worker-lanes viewport (CSS px). */
+  lanesScrollTop: number;
   /**
    * Legend chip toggles: span / custom-event names currently selected for
    * display filtering. Empty set = no name filter.
@@ -327,6 +329,47 @@ export interface UiPrefsSlice {
    * toggle would reset with it, so the preference has to outlive the selection.
    */
   stacksAsFlamegraph: boolean;
+}
+
+// ── durable view slice ──────────────────────────────────────────────────
+
+/** Inspector surface currently visible. */
+export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
+/** Region analysis selected for a retained range. */
+export type RegionAnalysisMode = "cpu" | "blocking" | "heap";
+/** One Related-section expansion counter. */
+export interface RelatedExpansion {
+  before: number;
+  after: number;
+}
+
+/**
+ * Durable controls that change what analysis is visible. Unlike TransientSlice,
+ * every field here is part of the deep-link contract. Components must dispatch
+ * changes through this slice rather than keeping local UI truth, so agents can
+ * construct the same view without replaying pointer/keyboard actions.
+ */
+export interface ViewerViewSlice {
+  inspectorTab: InspectorTab;
+  /** Poll sample groups expanded in list mode (`cpu-N` / `sched-N`). */
+  expandedPollGroups: ReadonlySet<string>;
+  /** Which sample family the poll flamegraph displays when both are present. */
+  pollFlamegraphSection: "cpu" | "sched";
+  pollWorkerZoom: readonly string[];
+  pollOffworkerZoom: readonly string[];
+  relatedCollapsed: Readonly<Record<string, boolean>>;
+  relatedExpand: Readonly<Record<string, RelatedExpansion>>;
+  relatedCorrelate: { key: string; val: string } | null;
+  /** null means choose the data-present default for a newly selected region. */
+  regionMode: RegionAnalysisMode | null;
+  regionHeapMode: "bytes" | "count";
+  regionGroupBy: "leaf" | "full";
+  regionWorkerZoom: readonly string[];
+  regionOffworkerZoom: readonly string[];
+  /** Butterfly/inspect focus in the region flamegraph, by full frame key. */
+  regionInspectFocus: string | null;
+  /** Current next/previous cursor in the filtered span list. */
+  spanNavIndex: number;
 }
 
 // ── transient slice ─────────────────────────────────────────────────────
@@ -523,6 +566,7 @@ export interface StoreState {
   selection: SelectionSlice;
   poi: PoiSlice;
   uiPrefs: UiPrefsSlice;
+  view: ViewerViewSlice;
   transient: TransientSlice;
   segments: SegmentsSlice;
 }
