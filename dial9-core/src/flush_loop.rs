@@ -1,6 +1,6 @@
 use crate::buffer::{BufferMode, SegmentWriter};
 use crate::encoder;
-use crate::handle::{ControlCommand, SegmentRotation};
+use crate::handle::ControlCommand;
 use crate::metrics::{FlushMetrics, FlushStats, Operation, TlDrainMetrics};
 use crate::rate_limit::rate_limited;
 use crate::shared_state::SharedState;
@@ -41,17 +41,9 @@ fn flush_once<M: BufferMode>(
     events_written: &mut u64,
     shared: &SharedState,
     drain_self: bool,
-    force_sources: bool,
+    cpu_flush_duration: Duration,
 ) -> FlushOutcome {
     let events_before = *events_written;
-    let cpu_events_time = std::time::Instant::now();
-    // A checkpoint must drain data that sources captured before the recording
-    // gate closed. Otherwise that data remains buffered in the source and can
-    // leak into the next capture after recording is re-enabled.
-    if force_sources || shared.is_enabled() {
-        shared.flush_sources();
-    }
-    let cpu_flush_duration = cpu_events_time.elapsed();
 
     if drain_self {
         // Periodically flush the flush thread's own TL buffer (queue samples + CPU events).
@@ -129,12 +121,14 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
 
     loop {
         let mut ack_tx = None;
-        let mut rotate_tx = None;
+        #[cfg(feature = "pipeline")]
+        let mut checkpoint_dump = None;
         let mut exit = false;
         // Wait for control commands up to 5ms.
         match control_rx.recv_timeout(Duration::from_millis(5)) {
-            Ok(ControlCommand::RotateSegment(ack)) => {
-                rotate_tx = Some(ack);
+            #[cfg(feature = "pipeline")]
+            Ok(ControlCommand::CheckpointDump(checkpoint)) => {
+                checkpoint_dump = Some(checkpoint);
             }
             Ok(ControlCommand::FinalizeAndStop(ack)) => {
                 ack_tx = Some(ack);
@@ -150,9 +144,31 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         // When disabled, skip all recording work (queue sampling, metadata
         // merging, drain coordination, flush). The loop still wakes every
         // 5ms to check for control commands and the exit signal.
-        if !exit && rotate_tx.is_none() && !shared.is_enabled() {
+        #[cfg(feature = "pipeline")]
+        let has_checkpoint = checkpoint_dump.is_some();
+        #[cfg(not(feature = "pipeline"))]
+        let has_checkpoint = false;
+        if !exit && !has_checkpoint && !shared.is_enabled() {
             continue;
         }
+
+        // A capture-stop checkpoint takes one final source sample while the
+        // recording gate is still open, then closes the gate before draining
+        // thread-local buffers. A checkpoint received after a caller already
+        // disabled recording does not invoke sources: `Source::flush` may
+        // sample new state rather than merely draining pending data.
+        let cpu_events_time = std::time::Instant::now();
+        if shared.is_enabled() {
+            shared.flush_sources();
+        }
+        #[cfg(feature = "pipeline")]
+        if checkpoint_dump
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.stop_recording)
+        {
+            shared.disable();
+        }
+        let cpu_flush_duration = cpu_events_time.elapsed();
 
         // Collect per-source metadata (per-runtime worker mappings, memory
         // sample rate, etc.) only from sources that report a change since the
@@ -172,8 +188,7 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         }
 
         cycle_count += 1;
-        let drain_self =
-            exit || rotate_tx.is_some() || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
+        let drain_self = exit || has_checkpoint || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
         // --- Drain coordination state machine ---
         //
         // When the writer reports a drain is due, we can't act immediately
@@ -201,12 +216,12 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
 
         // On exit, bump + drain in the same tick since there is no next
         // tick for the grace period.
-        if exit || rotate_tx.is_some() {
+        if exit || has_checkpoint {
             shared.bump_drain_epoch();
         }
 
         // --- Execute intrusive drain when needed ---
-        if exit || rotate_tx.is_some() || do_drain {
+        if exit || has_checkpoint || do_drain {
             let mut tl_drain_timer = Timer::start_now();
             let stats = shared.drain_all_tl_buffers();
             tl_drain_timer.stop();
@@ -227,8 +242,10 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
             &mut events_written,
             shared,
             drain_self,
-            rotate_tx.is_some(),
+            cpu_flush_duration,
         );
+        #[cfg(not(feature = "pipeline"))]
+        let _ = &flush_error;
         flush_timer.stop();
 
         // Notify the writer that TL buffers have been drained and flushed.
@@ -236,7 +253,7 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         // Skip on exit — finalize() below will seal the final segment.
         if do_drain
             && !exit
-            && rotate_tx.is_none()
+            && !has_checkpoint
             && let Err(e) = writer.drained()
         {
             rate_limited!(Duration::from_secs(60), {
@@ -278,35 +295,29 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 }
             }
         }
-        if let Some(tx) = rotate_tx.take() {
+        #[cfg(feature = "pipeline")]
+        if let Some(checkpoint) = checkpoint_dump.take() {
             let result = match flush_error {
                 Some(error) => Err(error),
-                None => writer.write_current_segment_metadata().and_then(|()| {
-                    writer.rotate_segment().map(|rotated| {
-                        if rotated {
-                            SegmentRotation::Sealed
-                        } else {
-                            SegmentRotation::Empty
-                        }
-                    })
-                }),
+                None => writer
+                    .write_current_segment_metadata()
+                    .and_then(|()| writer.rotate_segment().map(|_| ())),
             };
-            if let Err(e) = &result {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!("failed to rotate trace segment on demand: {e}");
-                });
-                // A strict rotation can consume the active writer before
-                // failing to seal or replace it. Stop accepting events only
-                // when there is no writer left; a pre-rotation flush or
-                // metadata error leaves the writer available for a retry.
-                if writer.is_closed() {
-                    shared.disable();
+            match result {
+                Ok(()) => checkpoint.dispatch(),
+                Err(error) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!("failed to checkpoint current trace data: {error}");
+                    });
+                    // A strict rotation can consume the active writer before
+                    // failing to seal or replace it. Stop accepting events only
+                    // when there is no writer left; a pre-rotation flush or
+                    // metadata error leaves the writer available for a retry.
+                    if writer.is_closed() {
+                        shared.disable();
+                    }
+                    checkpoint.fail(error);
                 }
-            }
-            if tx.send(result).is_err() {
-                tracing::debug!(
-                    "trace segment rotation completed after the caller stopped waiting"
-                );
             }
         }
         drop(flush_guard);

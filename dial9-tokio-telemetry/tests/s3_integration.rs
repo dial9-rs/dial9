@@ -98,6 +98,9 @@ fn client_future_runs_once_when_pipeline_starts() {
             future_calls_inner.fetch_add(1, Ordering::SeqCst);
             client_for_future
         })
+        // Keep this dump deliberately empty: current-data dumps now flush and
+        // seal in-flight recorder data before dispatching the pipeline.
+        .paused()
         .with_dump_trigger(|_| {})
         .build();
     let rt = common::attach(&recorder, 1, TokioAttachOptions::default());

@@ -594,6 +594,7 @@ impl<M: BufferMode> SegmentWriter<M> {
     /// Automatic rotation remains best-effort for compatibility. Explicit
     /// checkpoints use this strict path because their acknowledgement must not
     /// claim a segment was sealed after data failed to reach the backend.
+    #[cfg(any(feature = "pipeline", test))]
     fn rotate_strict(&mut self) -> std::io::Result<()> {
         self.rotate_with_flush_policy(true)
     }
@@ -638,8 +639,10 @@ impl<M: BufferMode> SegmentWriter<M> {
         };
 
         // Seal the current segment. If `.active` was removed externally
-        // (disk only: operator, log rotation, container teardown) abandon the
-        // segment and start a fresh one.
+        // (disk only: operator, log rotation, container teardown), recover by
+        // starting a fresh one. Explicit checkpoints still return the
+        // `NotFound` after recovery so they never acknowledge missing data.
+        let mut abandoned_error = None;
         match self.fs.seal(handle, &self.active_path, current_index) {
             Ok(seg_ref) => {
                 if M::IS_DISK {
@@ -654,6 +657,9 @@ impl<M: BufferMode> SegmentWriter<M> {
                         self.active_path.display()
                     );
                 });
+                if strict_flush {
+                    abandoned_error = Some(e);
+                }
             }
             Err(e) => {
                 // state is already Finished from mem::replace above
@@ -685,7 +691,10 @@ impl<M: BufferMode> SegmentWriter<M> {
             "rotated to new trace segment"
         );
         self.evict_oldest()?;
-        Ok(())
+        match abandoned_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Total size across all closed + active segments (disk mode only).
@@ -774,6 +783,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
     }
 
+    #[cfg(any(feature = "pipeline", test))]
     pub(crate) fn is_closed(&self) -> bool {
         matches!(self.state, WriterState::Finished)
     }
@@ -798,6 +808,7 @@ impl<M: BufferMode> SegmentWriter<M> {
     /// Seal a non-empty current segment immediately and continue writing into
     /// a fresh segment. The flush loop performs the required thread-local
     /// drain before calling this.
+    #[cfg(any(feature = "pipeline", test))]
     pub(crate) fn rotate_segment(&mut self) -> std::io::Result<bool> {
         if matches!(self.state, WriterState::Finished) {
             return Err(std::io::Error::new(
@@ -1161,6 +1172,37 @@ mod tests {
             .rotate_segment()
             .expect_err("checkpoint rotation must propagate its final flush failure");
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn explicit_rotation_reports_missing_active_after_recovery() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        let missing = writer.current_active_path().to_owned();
+        std::fs::remove_file(&missing).unwrap();
+
+        let error = writer
+            .rotate_segment()
+            .expect_err("a checkpoint must not acknowledge a missing active segment");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            !writer.is_closed(),
+            "the writer should recover with a fresh active segment"
+        );
+        assert!(writer.current_active_path().exists());
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        assert!(
+            writer.rotate_segment().unwrap(),
+            "the recovered writer remains usable"
+        );
     }
 
     #[test]

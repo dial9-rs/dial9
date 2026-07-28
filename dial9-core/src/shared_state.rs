@@ -116,7 +116,7 @@ impl SharedState {
             let _ = self.state.compare_exchange(
                 State::Disabled as u8,
                 State::Enabled as u8,
-                Ordering::Relaxed,
+                Ordering::Release,
                 Ordering::Relaxed,
             );
         }
@@ -127,7 +127,7 @@ impl SharedState {
         let _ = self.state.compare_exchange(
             State::Enabled as u8,
             State::Disabled as u8,
-            Ordering::Relaxed,
+            Ordering::Release,
             Ordering::Relaxed,
         );
     }
@@ -135,7 +135,7 @@ impl SharedState {
     /// Stop for good: recording off, [`enable`](Self::enable) and new attaches
     /// refused. Called at shutdown once the flush thread is gone.
     pub(crate) fn mark_stopped(&self) {
-        self.state.store(State::Stopped as u8, Ordering::Relaxed);
+        self.state.store(State::Stopped as u8, Ordering::Release);
     }
 
     /// Whether the recorder has shut down for good.
@@ -173,6 +173,9 @@ impl SharedState {
     /// that provides `record_event` / `record_encodable_event`. Returns
     /// `None` when disabled (no work is done).
     pub(crate) fn if_enabled<R>(&self, f: impl FnOnce(&EventBuffer<'_>) -> R) -> Option<R> {
+        // Speculative hot-path check only. EventBuffer repeats the check with
+        // Acquire ordering while holding the TL-buffer lock; that second check
+        // establishes the precise capture-stop boundary.
         if !self.is_enabled() {
             return None;
         }
@@ -298,17 +301,23 @@ pub(crate) struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {
     pub(crate) fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
-        if let Some(handle) =
-            encoder::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
-        {
-            self.0.tl_buffers.lock().unwrap().push(handle);
-        }
+        encoder::record_encodable_event_if_enabled(
+            event,
+            || self.0.state.load(Ordering::Acquire) == State::Enabled as u8,
+            &self.0.collector,
+            &self.0.drain_epoch,
+            |handle| self.0.tl_buffers.lock().unwrap().push(handle),
+        );
     }
 
     pub(crate) fn with_encoder(&self, f: impl FnOnce(&mut encoder::ThreadLocalEncoder<'_>)) {
-        if let Some(handle) = encoder::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
-            self.0.tl_buffers.lock().unwrap().push(handle);
-        }
+        encoder::with_encoder_if_enabled(
+            f,
+            || self.0.state.load(Ordering::Acquire) == State::Enabled as u8,
+            &self.0.collector,
+            &self.0.drain_epoch,
+            |handle| self.0.tl_buffers.lock().unwrap().push(handle),
+        );
     }
 }
 
@@ -329,6 +338,29 @@ mod tests {
         let ss = SharedState::new(0);
         ss.enable();
         ss
+    }
+
+    #[test]
+    fn event_buffer_rechecks_gate_before_encoding() {
+        let ss = enabled_shared_state();
+        let mut encoded = false;
+
+        ss.if_enabled(|events| {
+            // Model capture-stop closing the gate after the caller's fast-path
+            // check but before it acquires its thread-local buffer lock.
+            ss.disable();
+            events.with_encoder(|_| encoded = true);
+        });
+
+        assert!(
+            !encoded,
+            "an event crossing the stop boundary must be dropped"
+        );
+        assert_eq!(
+            ss.tl_buffers.lock().unwrap().len(),
+            1,
+            "a first-use buffer must register before the under-lock gate check"
+        );
     }
 
     #[test]

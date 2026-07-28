@@ -6,7 +6,6 @@ use crate::thread::ThreadTrackingGuard;
 use arc_swap::ArcSwapOption;
 use std::any::Any;
 use std::cell::RefCell;
-use std::time::Duration;
 
 /// First registered source of type `T`, if any.
 fn find_source<T: Source>(sources: &mut [Box<dyn Source>]) -> Option<&mut T> {
@@ -35,30 +34,14 @@ fn global_handle() -> Option<Dial9Handle> {
 }
 
 /// Commands sent to the flush thread by [`Recorder`](crate::recording::Recorder).
+#[derive(Debug)]
 pub(crate) enum ControlCommand {
-    /// Drain all thread-local buffers, flush, and seal the current segment,
-    /// then continue recording into a fresh segment.
-    RotateSegment(crate::primitives::sync::mpsc::SyncSender<std::io::Result<SegmentRotation>>),
+    /// Establish a dump boundary on the flush thread, then dispatch the dump
+    /// request to the pipeline worker.
+    #[cfg(feature = "pipeline")]
+    CheckpointDump(crate::dump::CheckpointDump),
     /// Flush, finalize (seal segment), then exit the thread.
     FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
-}
-
-/// Result of an on-demand trace-segment rotation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SegmentRotation {
-    /// The current segment contained events and was sealed. A fresh active
-    /// segment is ready for subsequent events.
-    Sealed,
-    /// No events had reached the current segment, so there was nothing to
-    /// seal. The existing empty active segment remains open.
-    Empty,
-    /// This handle is not connected to a recorder.
-    ///
-    /// Returned by an inert [`Dial9Handle::disabled`] handle. This does not
-    /// describe a live recorder whose event-recording gate was closed with
-    /// [`Dial9Handle::disable`].
-    NoRecorder,
 }
 
 /// Cheap, cloneable handle for recording events and controlling telemetry.
@@ -92,7 +75,6 @@ impl std::fmt::Debug for Dial9Handle {
     }
 }
 
-#[bon::bon]
 impl Dial9Handle {
     /// Build an enabled handle wired to a flush thread's control sender.
     /// [`Recorder::start`](crate::recording::Recorder::start) mints the channel
@@ -196,93 +178,6 @@ impl Dial9Handle {
     pub fn disable(&self) {
         if let Some(inner) = &self.inner {
             inner.shared.disable();
-        }
-    }
-
-    /// Seal the current trace segment and continue with a fresh one.
-    ///
-    /// The flush thread first drains all registered thread-local buffers, then
-    /// flushes and atomically seals the current segment. This is a checkpoint,
-    /// not a lifecycle operation: it does not change whether recording is
-    /// enabled, and it does not stop the recorder or its processing pipeline.
-    /// Call [`disable`](Self::disable) first when the sealed segment must
-    /// contain everything recorded before a capture gate was closed.
-    ///
-    /// `timeout` bounds waiting for an accepted filesystem operation. If it
-    /// expires, this returns
-    /// [`std::io::ErrorKind::TimedOut`], but a command already accepted by the
-    /// flush thread is not cancellable and may finish sealing in the
-    /// background. Calling this method from an async task blocks that task's
-    /// worker thread; use the runtime's blocking-task facility when necessary.
-    ///
-    /// A busy control queue returns [`std::io::ErrorKind::WouldBlock`] instead
-    /// of waiting without a bound. A stopped recorder returns
-    /// [`std::io::ErrorKind::BrokenPipe`].
-    ///
-    /// A write failure is returned to the caller. If that failure leaves the
-    /// writer permanently closed, recording is also disabled so producers do
-    /// not continue submitting events that cannot be persisted. Calling
-    /// [`enable`](Self::enable) cannot repair a closed writer.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use dial9_core::buffer::MemoryBuffer;
-    /// use dial9_core::recorder::recorder;
-    /// use std::time::Duration;
-    ///
-    /// # fn main() -> std::io::Result<()> {
-    /// let recorder = recorder(MemoryBuffer::new(1 << 20)?).build();
-    /// let handle = recorder.handle().clone();
-    ///
-    /// handle.disable();
-    /// let _outcome = handle
-    ///     .rotate_segment()
-    ///     .timeout(Duration::from_secs(5))
-    ///     .call()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[builder]
-    pub fn rotate_segment(&self, timeout: Duration) -> std::io::Result<SegmentRotation> {
-        let Some(inner) = &self.inner else {
-            return Ok(SegmentRotation::NoRecorder);
-        };
-
-        let (ack_tx, ack_rx) = crate::primitives::sync::mpsc::sync_channel(1);
-        match inner
-            .control_tx
-            .try_send(ControlCommand::RotateSegment(ack_tx))
-        {
-            Ok(()) => {}
-            Err(crate::primitives::sync::mpsc::TrySendError::Full(_)) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "dial9 flush thread is handling another control operation",
-                ));
-            }
-            Err(crate::primitives::sync::mpsc::TrySendError::Disconnected(_)) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "dial9 flush thread has stopped",
-                ));
-            }
-        }
-
-        match ack_rx.recv_timeout(timeout) {
-            Ok(result) => result,
-            Err(crate::primitives::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "timed out waiting for dial9 trace segment rotation; the accepted rotation may still finish",
-                ))
-            }
-            Err(crate::primitives::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "dial9 flush thread stopped before acknowledging trace segment rotation",
-                ))
-            }
         }
     }
 
@@ -499,59 +394,4 @@ pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
 /// process-global one. Equivalent to [`Dial9Handle::current`].
 pub fn current_handle() -> Dial9Handle {
     Dial9Handle::current()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::primitives::sync::{Arc, mpsc};
-
-    fn handle_with_idle_control(capacity: usize) -> (Dial9Handle, mpsc::Receiver<ControlCommand>) {
-        let (control_tx, control_rx) = mpsc::sync_channel(capacity);
-        let shared = Arc::new(SharedState::new(0));
-        (Dial9Handle::enabled(shared, control_tx), control_rx)
-    }
-
-    #[test]
-    fn rotate_segment_times_out_when_an_accepted_command_is_not_processed() {
-        let (handle, _control_rx) = handle_with_idle_control(1);
-
-        let error = handle
-            .rotate_segment()
-            .timeout(Duration::ZERO)
-            .call()
-            .expect_err("an unprocessed command must time out");
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    }
-
-    #[test]
-    fn rotate_segment_returns_would_block_when_control_queue_is_full() {
-        let (handle, _control_rx) = handle_with_idle_control(1);
-        let first = handle
-            .rotate_segment()
-            .timeout(Duration::ZERO)
-            .call()
-            .expect_err("the queued command is not processed");
-        assert_eq!(first.kind(), std::io::ErrorKind::TimedOut);
-
-        let error = handle
-            .rotate_segment()
-            .timeout(Duration::ZERO)
-            .call()
-            .expect_err("the second command must see the full queue");
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-    }
-
-    #[test]
-    fn rotate_segment_returns_broken_pipe_when_control_thread_is_gone() {
-        let (handle, control_rx) = handle_with_idle_control(1);
-        drop(control_rx);
-
-        let error = handle
-            .rotate_segment()
-            .timeout(Duration::ZERO)
-            .call()
-            .expect_err("a disconnected control queue must fail");
-        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-    }
 }

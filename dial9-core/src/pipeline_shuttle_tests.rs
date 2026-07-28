@@ -4,9 +4,10 @@
 
 use crate::buffer::{DiskBuffer, MemoryBuffer};
 use crate::clock::clock_monotonic_ns;
+use crate::encoder::{Encodable, ThreadLocalEncoder};
 use crate::primitives::fs;
-use crate::primitives::sync::atomic::{AtomicU64, Ordering};
-use crate::primitives::sync::{Arc, Mutex};
+use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::primitives::sync::{Arc, Mutex, mpsc};
 use crate::recording::Recorder;
 use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
@@ -87,6 +88,22 @@ fn check_timestamps_roundtrip(expected: &[ValidationEvent], decoded: &[Validatio
             "timestamp mismatch for event id {}: expected {exp_ts}, got {}",
             ev.id, ev.timestamp_ns
         );
+    }
+}
+
+struct BoundaryEvent {
+    encoded: Arc<AtomicBool>,
+}
+
+impl Encodable for BoundaryEvent {
+    fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>) {
+        self.encoded.store(true, Ordering::Relaxed);
+        encoder.encode(&ValidationEvent {
+            timestamp_ns: clock_monotonic_ns(),
+            thread_id: 0,
+            seq: 0,
+            id: 1,
+        });
     }
 }
 
@@ -336,6 +353,96 @@ crate::shuttle_test! {
             "TL-buffer event must survive a sibling source's panic"
         );
     }
+}
+
+/// Race a producer against the exact capture-stop boundary. If the producer's
+/// under-lock gate check wins, the checkpoint drain must include its event; if
+/// the stop wins, encoding must not begin. An event attempted after the
+/// completed stop must always be rejected.
+fn checkpoint_stop_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
+    let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+    let recorder = Recorder::start(shared.clone(), writer, None, || || {});
+    recorder.enable();
+    let (mut trigger, mut dump_rx) = crate::dump::channel();
+    trigger.bind_checkpoint(
+        recorder
+            .handle()
+            .control_tx()
+            .expect("live recorder has a control channel")
+            .clone(),
+    );
+    let handle = recorder.handle().clone();
+    let encoded = Arc::new(AtomicBool::new(false));
+    let producer_encoded = encoded.clone();
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+
+    let producer = crate::primitives::thread::spawn(move || {
+        handle.record_event(BoundaryEvent {
+            encoded: producer_encoded,
+        });
+        // Keep this thread's TLS buffer alive until the checkpoint has drained
+        // it or rejected the event.
+        release_rx.recv().expect("release producer");
+    });
+
+    drop(trigger.stop_recording_and_dump_current_data());
+    let request = loop {
+        match dump_rx.rx.try_recv() {
+            Ok(request) => break request,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                shuttle::thread::yield_now();
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("checkpoint did not dispatch to the dump worker")
+            }
+        }
+    };
+    assert!(
+        !shared.is_enabled(),
+        "checkpoint dispatch happens only after the recording gate closes"
+    );
+    release_tx.send(()).expect("producer remains live");
+    producer.join().expect("producer exits");
+
+    let post_boundary_encoded = Arc::new(AtomicBool::new(false));
+    recorder.handle().record_event(BoundaryEvent {
+        encoded: post_boundary_encoded.clone(),
+    });
+    assert!(
+        !post_boundary_encoded.load(Ordering::Relaxed),
+        "events after the completed stop boundary are rejected"
+    );
+
+    let mut decoded = Vec::new();
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.to_string_lossy().ends_with(".bin") {
+            decoded.extend(decode_validation_events(&std::fs::read(path).unwrap()));
+        }
+    }
+    let ids: Vec<_> = decoded.iter().map(|event| event.id).collect();
+    if encoded.load(Ordering::Relaxed) {
+        assert_eq!(
+            ids,
+            vec![1],
+            "an event that crossed the under-lock gate is drained exactly once"
+        );
+    } else {
+        assert!(
+            ids.is_empty(),
+            "an event rejected at the stop boundary is absent"
+        );
+    }
+
+    drop(request);
+    recorder.graceful_shutdown(std::time::Duration::ZERO);
+}
+
+#[test]
+fn shuttle_checkpoint_stop_boundary() {
+    shuttle::check_pct(checkpoint_stop_boundary, 1_000, 2);
 }
 
 // ── Error injection ─────────────────────────────────────────────────

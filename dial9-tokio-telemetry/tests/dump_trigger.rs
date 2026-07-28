@@ -27,10 +27,10 @@ fn with_dump_trigger_compiles_in_all_pipeline_states() {
         .with_dump_trigger(|_| {});
 }
 
-/// A trigger without a configured pipeline never spawns the worker; the
-/// receiver is dropped and every dump resolves `WorkerStopped`.
+/// A current-data trigger without processing stages still checkpoints and
+/// resolves. Its internal retain stage leaves the raw segment on disk.
 #[test]
-fn trigger_without_pipeline_resolves_worker_stopped() {
+fn trigger_without_pipeline_retains_raw_segment() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
@@ -41,22 +41,20 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
-    let err = rt
+    let receipt = rt
         .block_on(async { trigger.dump_current_data().await })
-        .expect_err("no worker, dump must fail");
-    assert!(matches!(err, DumpError::WorkerStopped));
+        .expect("checkpoint-only dump should succeed");
+    assert!(receipt.manifest_key.is_none());
 
     drop(rt);
     drop(recorder);
 }
 
-/// Two `dump_current_data()` calls fired concurrently both succeed with
-/// distinct dump ids and at least one captures the ring. Per-dump fan-out (a
-/// segment captured by every overlapping window) is covered by the worker
-/// unit tests; this pins the end-to-end answer to "what happens if two dumps
-/// are triggered at once": they run independently, no coordination.
+/// Concurrent current-data dumps never build an unbounded checkpoint backlog.
+/// Depending on whether the flush thread consumes the first command before the
+/// second is submitted, both may succeed or one may report a busy checkpoint.
 #[test]
-fn concurrent_dumps_both_resolve_with_distinct_ids() {
+fn concurrent_current_data_dumps_are_bounded() {
     use std::time::Duration;
 
     let dir = tempfile::tempdir().unwrap();
@@ -84,16 +82,33 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
         )
     });
 
-    let first = first.expect("first dump resolves");
-    let second = second.expect("second dump resolves");
-    assert_ne!(
-        first.dump_id, second.dump_id,
-        "concurrent dumps get distinct ids"
-    );
+    let outcomes = [first, second];
+    let successful: Vec<_> = outcomes
+        .iter()
+        .filter_map(|outcome| outcome.as_ref().ok())
+        .collect();
     assert!(
-        first.segments_processed + second.segments_processed > 0,
-        "at least one concurrent dump captured the ring"
+        !successful.is_empty(),
+        "the single available control slot accepts at least one dump"
     );
+    if successful.len() == 2 {
+        assert_ne!(
+            successful[0].dump_id, successful[1].dump_id,
+            "accepted concurrent dumps get distinct ids"
+        );
+    }
+    for outcome in outcomes {
+        if let Err(error) = outcome {
+            assert!(
+                matches!(
+                    error,
+                    DumpError::Checkpoint(ref error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                ),
+                "a rejected concurrent dump reports bounded backpressure: {error}"
+            );
+        }
+    }
 
     drop(rt);
     drop(recorder);

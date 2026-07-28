@@ -8,6 +8,25 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
+/// Terminal no-op used by triggered disk recorders that have no processing
+/// stages. Successfully claiming the segment keeps the raw file in place while
+/// preventing later dumps from processing the same artifact again.
+#[derive(Debug, Default)]
+pub(crate) struct RetainProcessor;
+
+impl SegmentProcessor for RetainProcessor {
+    fn name(&self) -> &'static str {
+        "Retain"
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(std::future::ready(Ok(data)))
+    }
+}
+
 /// Gzips the segment payload in-memory. Sets the `content_encoding` and
 /// `write_back_extension` metadata keys so downstream stages know the
 /// payload is gzipped. Already-gzipped segments (detected by magic bytes)

@@ -16,30 +16,35 @@
 //! (`trigger.dump_current_data();`) the run drops at the end of the statement and
 //! dispatches right there; if you bind it to a variable, dispatch waits until that
 //! binding is awaited or goes out of scope. Awaiting is optional and only retrieves the
-//! [`DumpReceipt`](crate::dump::DumpReceipt).
-//! Dumps are strictly best-effort: a window wider than what the ring
-//! retained captures whatever survived, with no error and no effect on the
-//! live stream.
+//! [`DumpReceipt`](crate::dump::DumpReceipt). Window coverage is best-effort:
+//! a window wider than what the ring retained captures whatever survived.
+//! A current-data dump installed through the recorder also checkpoints the
+//! active fragment and may return
+//! [`DumpError::Checkpoint`](crate::dump::DumpError::Checkpoint) if it cannot
+//! be drained and sealed.
 //!
 //! # Concurrent dumps
 //!
-//! Dumps are independent: triggering two at once registers two dumps, each
-//! with its own [`DumpId`](crate::dump::DumpId) and (off S3) its own manifest. A segment whose
-//! span overlaps both windows is captured by both. There is no coordination
-//! by default - this is intentional, so unrelated subsystems can dump
-//! without stepping on each other.
+//! Dumps accepted by the worker are independent: each has its own
+//! [`DumpId`](crate::dump::DumpId), and a segment whose span overlaps two
+//! windows is captured by both. Recorder-installed current-data dumps first
+//! enter the flush thread's bounded, single-slot control queue to establish
+//! their boundary. If that queue is busy, the new request resolves with
+//! [`DumpError::Checkpoint`](crate::dump::DumpError::Checkpoint) wrapping
+//! [`std::io::ErrorKind::WouldBlock`] instead of accumulating an unbounded
+//! backlog.
 //!
 //! When a single source fires repeatedly (a watcher that re-trips every
 //! poll, a hot path that dumps on every slow request), configure
-//! [`DumpTriggerConfig::debounce`](crate::dump::DumpTriggerConfig::debounce) to coalesce a burst
-//! into one dump: triggers
-//! within the debounce window after a dump dispatched resolve
-//! [`DumpError::Coalesced`](crate::dump::DumpError::Coalesced), naming the dump they folded
-//! into instead of
-//! starting a new one. The gate lives on the trigger stored on the recorder,
-//! so every [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger)
-//! clone shares it. (A *cooldown* that rejects extra triggers outright,
-//! rather than folding them, is a possible future addition.)
+//! [`DumpTriggerConfig::debounce`](crate::dump::DumpTriggerConfig::debounce) to
+//! coalesce a burst into one dump: triggers within the debounce window after a
+//! dump dispatched resolve
+//! [`DumpError::Coalesced`](crate::dump::DumpError::Coalesced), naming the dump
+//! they folded into instead of starting a new one. The gate lives on the
+//! trigger stored on the recorder, so every
+//! [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger) clone shares it.
+//! (A *cooldown* that rejects extra triggers outright, rather than folding
+//! them, is a possible future addition.)
 
 use std::future::Future;
 use std::pin::Pin;
@@ -56,7 +61,14 @@ use crate::pipeline::ProcessErrorKind;
 /// [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
 pub fn channel() -> (DumpTrigger, DumpRx) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (DumpTrigger { tx, debounce: None }, DumpRx { rx })
+    (
+        DumpTrigger {
+            tx,
+            debounce: None,
+            checkpoint_tx: None,
+        },
+        DumpRx { rx },
+    )
 }
 
 /// On-demand dump configuration, passed to
@@ -182,9 +194,20 @@ pub struct DumpTrigger {
     /// [`DumpTriggerConfig::debounce`]; shared by reference so every clone honors one
     /// gate.
     debounce: Option<Arc<Debounce>>,
+    /// Flush-thread control sender installed by `RecorderBuilder`. Manually
+    /// constructed trigger/receiver pairs retain their historical behavior and
+    /// dispatch directly to the worker.
+    checkpoint_tx: Option<crate::primitives::sync::mpsc::SyncSender<crate::handle::ControlCommand>>,
 }
 
 impl DumpTrigger {
+    pub(crate) fn bind_checkpoint(
+        &mut self,
+        checkpoint_tx: crate::primitives::sync::mpsc::SyncSender<crate::handle::ControlCommand>,
+    ) {
+        self.checkpoint_tx = Some(checkpoint_tx);
+    }
+
     /// Coalesce duplicate triggers within `window` into a single dump.
     ///
     /// Applied once at build time from [`DumpTriggerConfig::debounce`]; every
@@ -204,9 +227,63 @@ impl DumpTrigger {
     }
 
     /// Capture everything the ring still holds, right now. No forward
-    /// window.
+    /// window. When this trigger was installed by
+    /// [`RecorderBuilder::with_dump_trigger`](crate::recorder::RecorderBuilder::with_dump_trigger),
+    /// the flush thread first drains pending events and seals the active
+    /// fragment, so callers do not need to coordinate trace segments.
+    ///
+    /// If recording was already disabled, registered
+    /// [`Source`](crate::source::Source)s are not flushed: a source flush may
+    /// sample new state, which would move post-boundary data into the capture.
+    /// Source-owned data buffered before [`Dial9Handle::disable`](crate::handle::Dial9Handle::disable)
+    /// may therefore remain buffered until recording is enabled again. To end
+    /// a bounded capture, prefer
+    /// [`stop_recording_and_dump_current_data`](Self::stop_recording_and_dump_current_data),
+    /// which takes the final source sample and closes the gate atomically on
+    /// the flush thread.
+    ///
+    /// The flush-thread control queue is bounded. If it is already handling
+    /// another control operation, this request resolves with
+    /// [`DumpError::Checkpoint`] wrapping [`std::io::ErrorKind::WouldBlock`].
     pub fn dump_current_data(&self) -> DumpRun<'_> {
-        self.request(Lookback::Unbounded, Duration::ZERO)
+        self.request(
+            Lookback::Unbounded,
+            Duration::ZERO,
+            Checkpoint::CurrentData {
+                stop_recording: false,
+            },
+            true,
+        )
+    }
+
+    /// Stop recording and capture everything accumulated through that boundary.
+    ///
+    /// This is the preferred operation for ending a bounded capture.
+    ///
+    /// The recording gate is closed on the flush thread after one final source
+    /// sample. In-flight event writers are synchronized with the subsequent
+    /// thread-local drain before the active fragment is sealed and dispatched
+    /// to the dump pipeline. The recorder remains alive and may be re-enabled
+    /// after this future completes.
+    ///
+    /// Unlike ordinary dump requests, capture-stop requests are never
+    /// debounced: closing the recording gate is a lifecycle operation, so it
+    /// is always attempted. The flush-thread control queue remains bounded; if
+    /// another control operation is already queued, this request resolves with
+    /// [`DumpError::Checkpoint`] wrapping [`std::io::ErrorKind::WouldBlock`].
+    ///
+    /// This operation requires a trigger installed through
+    /// `with_dump_trigger`; a standalone pair from [`channel`] has no recorder
+    /// to stop and resolves with [`DumpError::Checkpoint`].
+    pub fn stop_recording_and_dump_current_data(&self) -> DumpRun<'_> {
+        self.request(
+            Lookback::Unbounded,
+            Duration::ZERO,
+            Checkpoint::CurrentData {
+                stop_recording: true,
+            },
+            false,
+        )
     }
 
     /// Capture the window `[trigger - lookback, trigger + lookforward]`.
@@ -221,22 +298,37 @@ impl DumpTrigger {
     /// covered span is reported on [`DumpReceipt::time_range`]. This never
     /// errors and never resizes or pins the ring.
     pub fn dump_time_range(&self, lookback: Duration, lookforward: Duration) -> DumpRun<'_> {
-        self.request(Lookback::Window(lookback), lookforward)
+        self.request(
+            Lookback::Window(lookback),
+            lookforward,
+            Checkpoint::None,
+            true,
+        )
     }
 
-    fn request(&self, lookback: Lookback, lookforward: Duration) -> DumpRun<'_> {
+    fn request(
+        &self,
+        lookback: Lookback,
+        lookforward: Duration,
+        checkpoint: Checkpoint,
+        allow_debounce: bool,
+    ) -> DumpRun<'_> {
         let id = DumpId::new();
 
         // Leading-edge debounce: a trigger within `window` of the last
         // accepted request coalesces into it instead of starting a new one.
         // Armed here at request-build time so a folded trigger can return a
         // `Coalesced` run synchronously (see `Debounce`).
-        if let Some(debounce) = &self.debounce {
+        if allow_debounce && let Some(debounce) = &self.debounce {
             let now = Instant::now();
             let mut last = debounce.last.lock().expect("debounce mutex poisoned");
             match *last {
                 Some((at, into)) if now.duration_since(at) < debounce.window => {
-                    return DumpRun::preempted(&self.tx, DumpError::Coalesced { into });
+                    return DumpRun::preempted(
+                        &self.tx,
+                        self.checkpoint_tx.as_ref(),
+                        DumpError::Coalesced { into },
+                    );
                 }
                 _ => *last = Some((now, id)),
             }
@@ -253,6 +345,8 @@ impl DumpTrigger {
                 receipt_tx,
             }),
             tx: &self.tx,
+            checkpoint_tx: self.checkpoint_tx.as_ref(),
+            checkpoint,
             receipt_rx: Some(receipt_rx),
             preempt: None,
         }
@@ -263,6 +357,47 @@ impl DumpTrigger {
 #[derive(Debug)]
 pub struct DumpRx {
     pub(crate) rx: mpsc::UnboundedReceiver<DumpRequest>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Checkpoint {
+    None,
+    CurrentData { stop_recording: bool },
+}
+
+/// A current-data dump waiting for the flush thread to establish its boundary.
+#[derive(Debug)]
+pub(crate) struct CheckpointDump {
+    request: DumpRequest,
+    worker_tx: mpsc::UnboundedSender<DumpRequest>,
+    pub(crate) stop_recording: bool,
+}
+
+impl CheckpointDump {
+    fn new(
+        request: DumpRequest,
+        worker_tx: mpsc::UnboundedSender<DumpRequest>,
+        stop_recording: bool,
+    ) -> Self {
+        Self {
+            request,
+            worker_tx,
+            stop_recording,
+        }
+    }
+
+    pub(crate) fn dispatch(self) {
+        if let Err(error) = self.worker_tx.send(self.request) {
+            let _ = error.0.receipt_tx.send(Err(DumpError::WorkerStopped));
+        }
+    }
+
+    pub(crate) fn fail(self, error: std::io::Error) {
+        let _ = self
+            .request
+            .receipt_tx
+            .send(Err(DumpError::Checkpoint(error)));
+    }
 }
 
 /// In-flight dump request.
@@ -277,6 +412,9 @@ pub struct DumpRx {
 pub struct DumpRun<'a> {
     request: Option<DumpRequest>,
     tx: &'a mpsc::UnboundedSender<DumpRequest>,
+    checkpoint_tx:
+        Option<&'a crate::primitives::sync::mpsc::SyncSender<crate::handle::ControlCommand>>,
+    checkpoint: Checkpoint,
     receipt_rx: Option<oneshot::Receiver<Result<DumpReceipt, DumpError>>>,
     /// Set when the run never dispatches (debounced): awaiting resolves this
     /// error directly. `request` is `None` for a preempted run, so
@@ -286,10 +424,18 @@ pub struct DumpRun<'a> {
 
 impl<'a> DumpRun<'a> {
     /// A run that never dispatches; awaiting resolves `err`.
-    fn preempted(tx: &'a mpsc::UnboundedSender<DumpRequest>, err: DumpError) -> Self {
+    fn preempted(
+        tx: &'a mpsc::UnboundedSender<DumpRequest>,
+        checkpoint_tx: Option<
+            &'a crate::primitives::sync::mpsc::SyncSender<crate::handle::ControlCommand>,
+        >,
+        err: DumpError,
+    ) -> Self {
         DumpRun {
             request: None,
             tx,
+            checkpoint_tx,
+            checkpoint: Checkpoint::None,
             receipt_rx: None,
             preempt: Some(err),
         }
@@ -311,7 +457,51 @@ impl<'a> DumpRun<'a> {
     /// when the worker is gone (channel closed).
     fn dispatch(&mut self) -> bool {
         match self.request.take() {
-            Some(req) => self.tx.send(req).is_ok(),
+            Some(req) => {
+                let Checkpoint::CurrentData { stop_recording } = self.checkpoint else {
+                    return self.tx.send(req).is_ok();
+                };
+                let Some(checkpoint_tx) = self.checkpoint_tx else {
+                    if stop_recording {
+                        CheckpointDump::new(req, self.tx.clone(), true).fail(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "capture-stop requires a recorder-installed dump trigger",
+                        ));
+                        return true;
+                    }
+                    return self.tx.send(req).is_ok();
+                };
+                let command = crate::handle::ControlCommand::CheckpointDump(CheckpointDump::new(
+                    req,
+                    self.tx.clone(),
+                    stop_recording,
+                ));
+                match checkpoint_tx.try_send(command) {
+                    Ok(()) => true,
+                    Err(crate::primitives::sync::mpsc::TrySendError::Full(command)) => {
+                        let crate::handle::ControlCommand::CheckpointDump(checkpoint) = command
+                        else {
+                            unreachable!("submitted a checkpoint command");
+                        };
+                        checkpoint.fail(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "dial9 flush thread is handling another control operation",
+                        ));
+                        true
+                    }
+                    Err(crate::primitives::sync::mpsc::TrySendError::Disconnected(command)) => {
+                        let crate::handle::ControlCommand::CheckpointDump(checkpoint) = command
+                        else {
+                            unreachable!("submitted a checkpoint command");
+                        };
+                        checkpoint.fail(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "dial9 flush thread has stopped",
+                        ));
+                        true
+                    }
+                }
+            }
             // Already dispatched.
             None => true,
         }
@@ -445,6 +635,9 @@ pub struct DumpReceipt {
 pub enum DumpError {
     /// The worker is shutting down or already stopped.
     WorkerStopped,
+    /// The flush thread could not accept, drain, or seal the active trace
+    /// fragment before dispatching the dump.
+    Checkpoint(std::io::Error),
     /// Every captured segment failed in a pipeline stage.
     Pipeline(ProcessErrorKind),
     /// The trigger was coalesced into an in-flight dump by the debounce gate
@@ -460,6 +653,9 @@ impl std::fmt::Display for DumpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WorkerStopped => write!(f, "worker is shutting down or already stopped"),
+            Self::Checkpoint(error) => {
+                write!(f, "could not checkpoint current trace data: {error}")
+            }
             Self::Pipeline(kind) => write!(f, "pipeline stage failed: {kind}"),
             Self::Coalesced { into } => write!(f, "coalesced into dump {into}"),
         }
@@ -470,6 +666,7 @@ impl std::error::Error for DumpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::WorkerStopped => None,
+            Self::Checkpoint(error) => Some(error),
             Self::Pipeline(ProcessErrorKind::Io(e)) => Some(e),
             Self::Pipeline(ProcessErrorKind::Transfer { source, .. }) => Some(source.as_ref()),
             Self::Coalesced { .. } => None,
@@ -541,6 +738,20 @@ mod tests {
         drop(rx);
         let err = trigger.dump_current_data().await.unwrap_err();
         assert!(matches!(err, DumpError::WorkerStopped));
+    }
+
+    #[tokio::test]
+    async fn standalone_trigger_cannot_stop_a_recorder() {
+        let (trigger, _rx) = channel();
+        let error = trigger
+            .stop_recording_and_dump_current_data()
+            .await
+            .expect_err("standalone trigger has no recording gate");
+        assert!(matches!(
+            error,
+            DumpError::Checkpoint(ref error)
+                if error.kind() == std::io::ErrorKind::Unsupported
+        ));
     }
 
     #[tokio::test]

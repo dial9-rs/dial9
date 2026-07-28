@@ -370,6 +370,74 @@ pub(crate) fn with_encoder(
     })
 }
 
+/// Record through an enabled gate that can be closed concurrently by the
+/// flush thread.
+///
+/// The second gate check uses Acquire ordering while holding the thread-local
+/// buffer lock. Before that check, a first-use buffer is registered while also
+/// holding the registry mutex. The flush thread closes the gate with a Release
+/// store, then snapshots the registry and drains every registered buffer. If a
+/// producer registers first, the snapshot includes its buffer and waits for
+/// its event; if the snapshot wins, the registry mutex orders the Release
+/// before the producer's Acquire and the event is dropped. The same ordering
+/// applies to an already-registered buffer's lock. These mutex boundaries let
+/// the speculative outer check remain Relaxed.
+pub(crate) fn record_encodable_event_if_enabled(
+    event: &dyn Encodable,
+    is_enabled: impl FnOnce() -> bool,
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+    register: impl FnOnce(TlBufferHandle),
+) {
+    with_encoder_if_enabled(
+        |enc| event.encode(enc),
+        is_enabled,
+        collector,
+        drain_epoch,
+        register,
+    );
+}
+
+pub(crate) fn with_encoder_if_enabled(
+    f: impl FnOnce(&mut ThreadLocalEncoder<'_>),
+    is_enabled: impl FnOnce() -> bool,
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+    register: impl FnOnce(TlBufferHandle),
+) {
+    BUFFER.with(|arc| {
+        let mut buf = match arc.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                    tracing::error!(
+                        "dial9: thread-local buffer mutex poisoned in with_encoder_if_enabled; \
+                         dropping events for this thread"
+                    );
+                });
+                return;
+            }
+        };
+        let first_call = buf.set_collector(collector);
+        if first_call {
+            register(TlBufferHandle {
+                buffer: Arc::downgrade(arc),
+                flush_epoch: buf.flush_epoch.clone(),
+            });
+        }
+        if !is_enabled() {
+            return;
+        }
+        f(&mut buf.thread_local_encoder());
+        buf.event_count += 1;
+        let current_epoch = drain_epoch.load(Ordering::Relaxed);
+        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
+            collector.accept_flush(buf.flush());
+            buf.flush_epoch.store(current_epoch);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

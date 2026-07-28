@@ -277,13 +277,6 @@ impl<M: BufferMode> RecorderBuilder<M> {
 
         let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
 
-        // Install the on-demand dump trigger so `Dial9Handle::dump_trigger` can
-        // reach it (paired with the `trigger` receiver handed to the worker).
-        #[cfg(feature = "pipeline")]
-        if let Some(trigger) = self.pending_dump_trigger {
-            shared.set_dump_trigger(trigger);
-        }
-
         // Sync any `boot_id` metadata to the writer's per-process namespace, so a
         // trace's identity matches its on-disk `{boot_id}/` directory (and its
         // S3 keys).
@@ -305,7 +298,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         // Collect the stages the sources ask for before they move into the
         // shared state; only the default pipeline uses them.
         #[cfg(feature = "pipeline")]
-        let processors = match self.pipeline {
+        let mut processors = match self.pipeline {
             Some(processors) => processors,
             None => {
                 let source_stages = sources
@@ -315,6 +308,14 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 default_pipeline(source_stages, self.terminal_processor, M::IS_DISK)
             }
         };
+        // A current-data dump is also useful without processing stages: the
+        // flush-thread checkpoint makes the active fragment stable and the
+        // retain stage lets the worker acknowledge it without rewriting or
+        // removing it.
+        #[cfg(feature = "pipeline")]
+        if self.trigger.is_some() && processors.is_empty() {
+            processors.push(Box::new(crate::worker::processors::RetainProcessor));
+        }
 
         for source in sources {
             shared.push_source(source);
@@ -351,6 +352,19 @@ impl<M: BufferMode> RecorderBuilder<M> {
         #[allow(unused_mut)]
         let mut recorder = Recorder::start(shared, writer, self.metrics_sink, move || hook());
         recorder.hold_process(sole_recorder);
+
+        // Bind builder-created dump triggers to the recorder's flush-thread
+        // control channel. Manually paired trigger receivers continue to
+        // dispatch directly to the worker for backwards compatibility.
+        #[cfg(feature = "pipeline")]
+        if let Some(mut trigger) = self.pending_dump_trigger
+            && let Some(control_tx) = recorder.handle().control_tx().cloned()
+        {
+            trigger.bind_checkpoint(control_tx);
+            if let Some(shared) = recorder.shared() {
+                shared.set_dump_trigger(trigger);
+            }
+        }
 
         #[cfg(feature = "pipeline")]
         if let Some(worker) = worker {
@@ -493,7 +507,9 @@ impl<M: BufferMode> RecorderBuilder<M> {
     /// [`DumpTrigger`](crate::dump::DumpTrigger), reachable from any recording
     /// thread via [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
     /// Pass `|_| {}` for the default, or `|t| { t.debounce(window); }` to
-    /// coalesce bursts.
+    /// coalesce bursts. [`DumpTrigger::dump_current_data`](crate::dump::DumpTrigger::dump_current_data)
+    /// drains and seals the active fragment before the worker runs; when no
+    /// processing stages are configured, the raw sealed segment is retained.
     pub fn with_dump_trigger<F>(mut self, configure: F) -> Self
     where
         F: FnOnce(&mut crate::dump::DumpTriggerConfig),
@@ -570,6 +586,14 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    fn active_segment(dir: &Path) -> PathBuf {
+        std::fs::read_dir(dir)
+            .expect("trace dir readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.to_string_lossy().ends_with(".bin.active"))
+            .expect("an active .bin segment")
     }
 
     fn decoded_test_values(bytes: &[u8]) -> Vec<u64> {
@@ -649,10 +673,10 @@ mod tests {
         );
     }
 
-    /// An on-demand rotation seals everything recorded before a disabled
-    /// capture gate, then leaves the recorder ready for a later capture.
-    #[test]
-    fn rotate_segment_seals_and_continues_after_reenable() {
+    /// A current-data dump seals the pending fragment before dispatching it,
+    /// without closing the recording gate.
+    #[tokio::test]
+    async fn dump_current_data_seals_and_continues_recording() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::builder()
             .base_path(dir.path())
@@ -661,25 +685,26 @@ mod tests {
             .rotation_period(Duration::MAX)
             .build()
             .expect("writer");
-        let recorder = recorder(writer).build();
+        let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
         let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
 
         handle.record_event(TestEvent {
             timestamp_ns: clock::clock_monotonic_ns(),
             value: 41,
         });
-        handle.disable();
-        assert_eq!(
-            handle
-                .rotate_segment()
-                .timeout(Duration::from_secs(2))
-                .call()
-                .expect("first rotation"),
-            crate::handle::SegmentRotation::Sealed
+        let receipt = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("dump should complete")
+            .expect("checkpoint and pipeline should succeed");
+        assert_eq!(receipt.segments_processed, 1);
+        assert!(
+            handle.shared().is_some_and(|shared| shared.is_enabled()),
+            "an ordinary current-data dump must leave recording enabled"
         );
 
         let first = sealed_segments(dir.path());
-        assert_eq!(first.len(), 1, "rotation should seal one segment");
+        assert_eq!(first.len(), 1, "checkpoint should seal one segment");
         assert_eq!(
             decoded_test_values(&std::fs::read(&first[0]).expect("read first segment")),
             vec![41]
@@ -689,10 +714,9 @@ mod tests {
                 .expect("trace dir readable")
                 .filter_map(Result::ok)
                 .any(|e| e.path().to_string_lossy().ends_with(".bin.active")),
-            "rotation should leave a fresh active segment"
+            "checkpoint should leave a fresh active segment"
         );
 
-        handle.enable();
         handle.record_event(TestEvent {
             timestamp_ns: clock::clock_monotonic_ns(),
             value: 42,
@@ -707,20 +731,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rotate_segment_on_handle_without_recorder_is_a_noop() {
-        assert_eq!(
-            Dial9Handle::disabled()
-                .rotate_segment()
-                .timeout(Duration::ZERO)
-                .call()
-                .expect("disabled handle"),
-            crate::handle::SegmentRotation::NoRecorder
-        );
-    }
-
-    #[test]
-    fn rotate_segment_flushes_pending_source_after_disable() {
+    #[tokio::test]
+    async fn stop_recording_takes_final_source_sample_before_checkpoint() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::builder()
             .base_path(dir.path())
@@ -729,60 +741,54 @@ mod tests {
             .rotation_period(Duration::MAX)
             .build()
             .expect("writer");
-        // A paused recorder makes the boundary deterministic: the source owns
-        // data captured before the gate closed, but no ordinary enabled flush
-        // can consume it before the explicit checkpoint.
         let recorder = recorder(writer)
             .source(OnceSource {
                 emitted: false,
                 value: 72,
             })
             .paused()
+            .with_dump_trigger(|_| {})
             .build();
         let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
 
-        handle.disable();
-        assert_eq!(
-            handle
-                .rotate_segment()
-                .timeout(Duration::from_secs(2))
-                .call()
-                .expect("rotation"),
-            crate::handle::SegmentRotation::Sealed
+        handle.enable();
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(2),
+            trigger.stop_recording_and_dump_current_data(),
+        )
+        .await
+        .expect("dump should complete")
+        .expect("checkpoint and pipeline should succeed");
+        assert_eq!(receipt.segments_processed, 1);
+        assert!(
+            handle.shared().is_some_and(|shared| !shared.is_enabled()),
+            "capture-stop must close the recording gate"
         );
         let segments = sealed_segments(dir.path());
         assert_eq!(segments.len(), 1);
         assert_eq!(
             decoded_test_values(&std::fs::read(&segments[0]).expect("read segment")),
             vec![72],
-            "source data captured before disable must stay in the checkpointed segment"
+            "the final source sample must stay in the checkpointed segment"
         );
     }
 
-    #[test]
-    fn rotate_segment_drains_flush_thread_events_after_disable() {
-        struct BlockingSource {
+    #[tokio::test]
+    async fn stop_recording_waits_for_in_flight_event_and_rejects_later_event() {
+        struct BlockingEvent {
             ready: std::sync::mpsc::SyncSender<()>,
             release: std::sync::mpsc::Receiver<()>,
-            emitted: bool,
         }
 
-        impl Source for BlockingSource {
-            fn flush(&mut self, ctx: &FlushContext<'_>) {
-                if self.emitted {
-                    return;
-                }
-                ctx.record_event(&TestEvent {
+        impl crate::encoder::Encodable for BlockingEvent {
+            fn encode(&self, encoder: &mut crate::encoder::ThreadLocalEncoder<'_>) {
+                self.ready.send(()).expect("test receiver remains live");
+                self.release.recv().expect("test sender remains live");
+                encoder.encode(&TestEvent {
                     timestamp_ns: clock::clock_monotonic_ns(),
                     value: 73,
                 });
-                self.emitted = true;
-                self.ready.send(()).expect("test receiver remains live");
-                self.release.recv().expect("test sender remains live");
-            }
-
-            fn name(&self) -> &'static str {
-                "blocking-once"
             }
         }
 
@@ -794,43 +800,169 @@ mod tests {
             .rotation_period(Duration::MAX)
             .build()
             .expect("writer");
+        let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let recorder = recorder(writer)
-            .source(BlockingSource {
+        let producer_handle = handle.clone();
+        let producer = std::thread::spawn(move || {
+            producer_handle.record_event(BlockingEvent {
                 ready: ready_tx,
                 release: release_rx,
-                emitted: false,
-            })
-            .build();
-        let handle = recorder.handle().clone();
-
+            });
+        });
         ready_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("source should record on the flush thread");
-        handle.disable();
-        release_tx
-            .send(())
-            .expect("flush thread should still be waiting");
+            .expect("producer reached the encoder");
 
-        assert_eq!(
-            handle
-                .rotate_segment()
-                .timeout(Duration::from_secs(2))
-                .call()
-                .expect("rotation"),
-            crate::handle::SegmentRotation::Sealed
+        let dump =
+            tokio::spawn(async move { trigger.stop_recording_and_dump_current_data().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while handle.shared().is_some_and(|shared| shared.is_enabled()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("checkpoint should close the gate");
+        assert!(
+            !dump.is_finished(),
+            "the checkpoint must wait for the in-flight encoder"
         );
-        let segments = sealed_segments(dir.path());
-        assert_eq!(segments.len(), 1);
+
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 74,
+        });
+        release_tx.send(()).expect("producer remains live");
+        producer.join().expect("producer exits");
+
+        let receipt = tokio::time::timeout(Duration::from_secs(2), dump)
+            .await
+            .expect("dump should complete")
+            .expect("dump task should not panic")
+            .expect("checkpoint and pipeline should succeed");
+        assert_eq!(receipt.segments_processed, 1);
         assert_eq!(
-            decoded_test_values(&std::fs::read(&segments[0]).expect("read segment")),
-            vec![73]
+            decoded_test_values(&std::fs::read(sealed_segment(dir.path())).expect("read segment")),
+            vec![73],
+            "the in-flight event belongs before the boundary and the later event after it"
         );
     }
 
-    #[test]
-    fn rotate_segment_returns_flush_failure() {
+    #[tokio::test]
+    async fn stop_recording_does_not_sample_sources_when_already_disabled() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingSource(StdArc<AtomicUsize>);
+        impl Source for CountingSource {
+            fn flush(&mut self, _ctx: &FlushContext<'_>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn name(&self) -> &'static str {
+                "counting"
+            }
+        }
+
+        let flushes = StdArc::new(AtomicUsize::new(0));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        let recorder = recorder(writer)
+            .source(CountingSource(StdArc::clone(&flushes)))
+            .paused()
+            .with_dump_trigger(|_| {})
+            .build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
+
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(2),
+            trigger.stop_recording_and_dump_current_data(),
+        )
+        .await
+        .expect("dump should complete")
+        .expect("empty checkpoint should succeed");
+        assert_eq!(receipt.segments_processed, 0);
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            0,
+            "a source may sample new state, so an already-closed capture must not flush it"
+        );
+        assert!(sealed_segments(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_data_checkpoint_returns_would_block_when_control_queue_is_full() {
+        use std::future::IntoFuture;
+
+        struct BlockingSource {
+            ready: Option<std::sync::mpsc::SyncSender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl Source for BlockingSource {
+            fn flush(&mut self, _ctx: &FlushContext<'_>) {
+                let Some(ready) = self.ready.take() else {
+                    return;
+                };
+                ready.send(()).expect("test receiver remains live");
+                self.release.recv().expect("test sender remains live");
+            }
+
+            fn name(&self) -> &'static str {
+                "blocking"
+            }
+        }
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let recorder = recorder(writer)
+            .source(BlockingSource {
+                ready: Some(ready_tx),
+                release: release_rx,
+            })
+            .with_dump_trigger(|_| {})
+            .build();
+        let trigger = recorder
+            .handle()
+            .dump_trigger()
+            .expect("configured dump trigger");
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("flush thread is blocked in the source");
+        let first = trigger.dump_current_data().into_future();
+        let error = trigger
+            .stop_recording_and_dump_current_data()
+            .await
+            .expect_err("the occupied control slot must apply backpressure");
+        assert!(
+            matches!(
+                error,
+                crate::dump::DumpError::Checkpoint(ref error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "unexpected busy error: {error}"
+        );
+
+        release_tx.send(()).expect("flush thread remains live");
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("accepted checkpoint should complete")
+            .expect("accepted checkpoint should succeed");
+    }
+
+    #[tokio::test]
+    async fn dump_current_data_returns_checkpoint_flush_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut writer = DiskBuffer::builder()
             .base_path(dir.path())
@@ -842,18 +974,100 @@ mod tests {
         writer
             .fail_after_flushes_for_test(0)
             .expect("install failing writer");
-        let recorder = recorder(writer).build();
+        let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
         let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
 
-        let error = handle
-            .rotate_segment()
-            .timeout(Duration::from_secs(2))
-            .call()
+        let error = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("dump should complete")
             .expect_err("flush failure must reach the checkpoint caller");
-        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(
+            matches!(
+                error,
+                crate::dump::DumpError::Checkpoint(ref error)
+                    if error.kind() == std::io::ErrorKind::Other
+            ),
+            "unexpected dump error: {error}"
+        );
         assert!(
             handle.shared().is_some_and(|shared| shared.is_enabled()),
             "a pre-rotation flush failure leaves the active writer available and must not close the recording gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn dump_current_data_reports_missing_active_and_recovers_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
+
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 81,
+        });
+        std::fs::remove_file(active_segment(dir.path())).expect("remove active segment");
+        let error = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("dump should complete")
+            .expect_err("a missing active segment must not be acknowledged");
+        assert!(
+            matches!(
+                error,
+                crate::dump::DumpError::Checkpoint(ref error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+            ),
+            "unexpected dump error: {error}"
+        );
+        assert!(
+            handle.shared().is_some_and(|shared| shared.is_enabled()),
+            "recovering a fresh writer keeps recording available"
+        );
+        assert!(active_segment(dir.path()).exists());
+
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 82,
+        });
+        let receipt = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("retry should complete")
+            .expect("recovered writer should checkpoint");
+        assert_eq!(receipt.segments_processed, 1);
+        assert_eq!(
+            decoded_test_values(&std::fs::read(sealed_segment(dir.path())).expect("read segment")),
+            vec![82]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_recording_bypasses_dump_debounce() {
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let recorder = recorder(writer)
+            .with_dump_trigger(|trigger| trigger.debounce(Duration::from_secs(60)))
+            .build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
+
+        trigger
+            .dump_current_data()
+            .await
+            .expect("first dump arms debounce");
+        trigger
+            .stop_recording_and_dump_current_data()
+            .await
+            .expect("capture-stop must not coalesce");
+        assert!(
+            handle.shared().is_some_and(|shared| !shared.is_enabled()),
+            "non-debounced lifecycle request reaches the flush thread"
         );
     }
 
