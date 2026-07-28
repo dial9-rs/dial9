@@ -1,12 +1,17 @@
 //! In-memory `Fs` variant.
 //!
 //! `MemFs` keeps sealed segments in a byte-bounded ring. On each `seal`,
-//! the oldest segments are dropped until `queued_bytes <=
-//! max_total_size`. The worker pops one segment per `take_files` cycle.
+//! the oldest segments are dropped until `queued_bytes <= max_total_size`.
+//! While the sole current-data checkpoint is active, its snapshot plus the
+//! newly sealed checkpoint segment are retained; that one segment may
+//! temporarily exceed the ring budget until the worker takes it. The worker
+//! pops one segment per `take_files` cycle.
 //!
 //! The shutdown handoff rides `writer_done` (Acquire/Release) plus a
 //! `tokio::sync::Notify` for wakeups.
 
+#[cfg(feature = "pipeline")]
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::Path;
@@ -74,6 +79,14 @@ struct Queue {
     bytes: u64,
     /// Segments evicted since the last `take_files` swap.
     dropped: u64,
+    /// Segments belonging to a checkpoint that the worker has not taken yet.
+    /// The sole active checkpoint may temporarily keep its active segment
+    /// beyond the ring budget until the worker takes the protected snapshot.
+    /// Later, unprotected production segments evict themselves while every
+    /// retained entry is protected, so the overshoot is bounded to that one
+    /// checkpoint segment (though a batch may overshoot its size threshold).
+    #[cfg(feature = "pipeline")]
+    checkpoint_protected: HashSet<u32>,
 }
 
 struct MemChannel {
@@ -85,6 +98,10 @@ struct MemChannel {
     in_flight_segments: Arc<AtomicU64>,
     #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     in_flight_bytes_peak: Arc<AtomicU64>,
+    /// Serializes current-data checkpoint snapshots so protected memory can
+    /// exceed the ring budget by at most one checkpoint segment.
+    #[cfg(feature = "pipeline")]
+    checkpoint_active: AtomicBool,
     writer_done: AtomicBool,
     notify: Notify,
 }
@@ -117,10 +134,14 @@ impl MemFs {
                     segments: VecDeque::with_capacity(slots),
                     bytes: 0,
                     dropped: 0,
+                    #[cfg(feature = "pipeline")]
+                    checkpoint_protected: HashSet::new(),
                 }),
                 in_flight_bytes: Arc::new(AtomicU64::new(0)),
                 in_flight_segments: Arc::new(AtomicU64::new(0)),
                 in_flight_bytes_peak: Arc::new(AtomicU64::new(0)),
+                #[cfg(feature = "pipeline")]
+                checkpoint_active: AtomicBool::new(false),
                 writer_done: AtomicBool::new(false),
                 notify: Notify::new(),
             }),
@@ -150,20 +171,6 @@ impl MemFs {
 
         let (evicted, first_idx, last_idx) = {
             let mut q = ch.queue.lock().unwrap();
-            // Evict-first under the lock: keeps `q.bytes <= max_total_size`
-            // at every observable moment, no transient overshoot.
-            let mut evicted = 0u64;
-            let mut first: Option<u32> = None;
-            let mut last: Option<u32> = None;
-            while q.bytes + size > ch.max_total_size
-                && let Some(old) = q.segments.pop_front()
-            {
-                q.bytes -= old.bytes.len() as u64;
-                evicted += 1;
-                first.get_or_insert(old.index);
-                last = Some(old.index);
-            }
-            q.dropped += evicted;
             q.segments.push_back(MemSealedSegment {
                 index,
                 bytes,
@@ -172,6 +179,36 @@ impl MemFs {
                 seal_secs,
             });
             q.bytes += size;
+
+            // The sole active checkpoint may add its active segment beyond
+            // the ring budget until the worker takes it. Evict only
+            // unprotected entries; later production segments evict themselves
+            // if the retained snapshot alone fills the budget. Without a
+            // checkpoint this is the same oldest-first policy as before.
+            let mut evicted = 0u64;
+            let mut first: Option<u32> = None;
+            let mut last: Option<u32> = None;
+            while q.bytes > ch.max_total_size {
+                #[cfg(feature = "pipeline")]
+                let evict_pos = q
+                    .segments
+                    .iter()
+                    .position(|segment| !q.checkpoint_protected.contains(&segment.index));
+                #[cfg(not(feature = "pipeline"))]
+                let evict_pos = (!q.segments.is_empty()).then_some(0);
+                let Some(evict_pos) = evict_pos else {
+                    break;
+                };
+                let old = q
+                    .segments
+                    .remove(evict_pos)
+                    .expect("eviction position came from the queue");
+                q.bytes -= old.bytes.len() as u64;
+                evicted += 1;
+                first.get_or_insert(old.index);
+                last = Some(old.index);
+            }
+            q.dropped += evicted;
             (evicted, first, last)
         };
 
@@ -189,6 +226,69 @@ impl MemFs {
     }
 
     pub(super) fn remove_sealed(&self, _seg: &SegmentRef, _reason: RemoveReason) {}
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn protect_checkpoint_segments(&self, current_index: Option<u32>) -> Vec<u32> {
+        let mut q = self.channel.queue.lock().unwrap();
+        let mut indices: Vec<u32> = q.segments.iter().map(|segment| segment.index).collect();
+        if let Some(index) = current_index {
+            indices.push(index);
+        }
+        q.checkpoint_protected.extend(indices.iter().copied());
+        indices
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn try_reserve_checkpoint(&self) -> bool {
+        self.channel
+            .checkpoint_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn finish_checkpoint(&self) {
+        self.channel
+            .checkpoint_active
+            .store(false, Ordering::Release);
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn checkpoint_segment_is_protected(&self, index: u32) -> bool {
+        self.channel
+            .queue
+            .lock()
+            .unwrap()
+            .checkpoint_protected
+            .contains(&index)
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn release_checkpoint_segment(&self, index: u32) {
+        let ch = &self.channel;
+        let mut q = ch.queue.lock().unwrap();
+        if !q.checkpoint_protected.remove(&index) {
+            return;
+        }
+
+        // If the worker never took a protected entry (for example it stopped
+        // before registering the request), restore the ring budget now.
+        while q.bytes > ch.max_total_size {
+            let Some(pos) = q
+                .segments
+                .iter()
+                .position(|segment| !q.checkpoint_protected.contains(&segment.index))
+            else {
+                break;
+            };
+            let old = q
+                .segments
+                .remove(pos)
+                .expect("eviction position came from the queue");
+            q.bytes -= old.bytes.len() as u64;
+            q.dropped += 1;
+        }
+    }
 
     /// Re-enqueue `bytes` for re-dispense on the next `take_files` cycle.
     ///
@@ -262,6 +362,7 @@ impl MemFs {
             };
             if let Some(s) = &popped {
                 q.bytes -= s.bytes.len() as u64;
+                q.checkpoint_protected.remove(&s.index);
             }
             let segments_dropped = std::mem::take(&mut q.dropped);
             (popped, q.segments.len() as u64, q.bytes, segments_dropped)
@@ -489,6 +590,85 @@ mod tests {
         }
         let t = mem.take_files();
         check!(t.segments.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_snapshot_uses_in_flight_reserve_instead_of_evicting() {
+        let mem = MemFs::with_capacity(4, 4).unwrap();
+        check!(mem.try_reserve_checkpoint());
+        let first = mem.create_segment(Path::new("first")).unwrap();
+        let ActiveHandle::Mem(mut first) = first else {
+            unreachable!("memory backend yields a memory handle")
+        };
+        first.buf.resize(4, 1);
+        mem.seal(ActiveHandle::Mem(first), Path::new("first"), 0)
+            .unwrap();
+
+        let protected = mem.protect_checkpoint_segments(Some(1));
+        check!(protected == vec![0, 1]);
+
+        let checkpoint = mem.create_segment(Path::new("checkpoint")).unwrap();
+        let ActiveHandle::Mem(mut checkpoint) = checkpoint else {
+            unreachable!("memory backend yields a memory handle")
+        };
+        checkpoint.buf.resize(4, 2);
+        mem.seal(ActiveHandle::Mem(checkpoint), Path::new("checkpoint"), 1)
+            .unwrap();
+
+        let first_taken = mem.take_files();
+        check!(first_taken.segments.len() == 1);
+        check!(first_taken.segments[0].seg_ref.index() == 0);
+        check!(first_taken.segments_dropped == 0);
+
+        let checkpoint_taken = mem.take_files();
+        check!(checkpoint_taken.segments.len() == 1);
+        check!(checkpoint_taken.segments[0].seg_ref.index() == 1);
+        check!(checkpoint_taken.segments_dropped == 0);
+        mem.finish_checkpoint();
+    }
+
+    #[test]
+    fn active_checkpoint_bounds_memory_overshoot_and_rejects_another() {
+        let mem = MemFs::with_capacity(4, 4).unwrap();
+        check!(mem.try_reserve_checkpoint());
+        check!(!mem.try_reserve_checkpoint());
+
+        let first = mem.create_segment(Path::new("first")).unwrap();
+        let ActiveHandle::Mem(mut first) = first else {
+            unreachable!("memory backend yields a memory handle")
+        };
+        first.buf.resize(4, 1);
+        mem.seal(ActiveHandle::Mem(first), Path::new("first"), 0)
+            .unwrap();
+        let protected = mem.protect_checkpoint_segments(Some(1));
+
+        for index in 1..=32 {
+            let segment = mem.create_segment(Path::new("later")).unwrap();
+            let ActiveHandle::Mem(mut segment) = segment else {
+                unreachable!("memory backend yields a memory handle")
+            };
+            segment.buf.resize(4, 2);
+            mem.seal(ActiveHandle::Mem(segment), Path::new("later"), index)
+                .unwrap();
+        }
+
+        {
+            let q = mem.channel.queue.lock().unwrap();
+            check!(q.bytes == 8);
+            check!(q.segments.len() == 2);
+            check!(q.segments[0].index == 0);
+            check!(q.segments[1].index == 1);
+        }
+
+        for index in protected {
+            mem.release_checkpoint_segment(index);
+        }
+        mem.finish_checkpoint();
+        check!(mem.try_reserve_checkpoint());
+        mem.finish_checkpoint();
+
+        let q = mem.channel.queue.lock().unwrap();
+        check!(q.bytes <= mem.channel.max_total_size);
     }
 
     #[test]

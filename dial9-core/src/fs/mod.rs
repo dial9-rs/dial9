@@ -438,6 +438,77 @@ impl Fs {
         }
     }
 
+    /// Reserve the sole current-data checkpoint snapshot.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn try_reserve_checkpoint(&self) -> bool {
+        match self {
+            Fs::Disk(d) => d.try_reserve_checkpoint(),
+            Fs::Mem(m) => m.try_reserve_checkpoint(),
+        }
+    }
+
+    /// Release the current-data checkpoint reservation after its worker pass
+    /// resolves or checkpoint construction fails.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn finish_checkpoint(&self) {
+        match self {
+            Fs::Disk(d) => d.finish_checkpoint(),
+            Fs::Mem(m) => m.finish_checkpoint(),
+        }
+    }
+
+    /// Protect disk indices from the writer's ordered retention queue.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn protect_disk_checkpoint_segments(&self, indices: &[u32]) {
+        match self {
+            Fs::Disk(d) => d.protect_checkpoint_segments(indices),
+            Fs::Mem(_) => unreachable!("disk checkpoint protection used with memory backend"),
+        }
+    }
+
+    /// Snapshot and protect the memory queue under its seal/eviction lock.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn protect_memory_checkpoint_segments(
+        &self,
+        current_index: Option<u32>,
+    ) -> Vec<u32> {
+        match self {
+            Fs::Disk(_) => unreachable!("memory checkpoint protection used with disk backend"),
+            Fs::Mem(m) => m.protect_checkpoint_segments(current_index),
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn checkpoint_segment_is_protected(&self, index: u32) -> bool {
+        match self {
+            Fs::Disk(d) => d.checkpoint_segment_is_protected(index),
+            Fs::Mem(m) => m.checkpoint_segment_is_protected(index),
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn release_checkpoint_segment(&self, index: u32) {
+        match self {
+            Fs::Disk(d) => d.release_checkpoint_segment(index),
+            Fs::Mem(m) => m.release_checkpoint_segment(index),
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn release_checkpoint_segments(&self, indices: &[u32]) {
+        for &index in indices {
+            self.release_checkpoint_segment(index);
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn checkpoint_budget_dirty(&self) -> bool {
+        match self {
+            Fs::Disk(d) => d.checkpoint_budget_dirty(),
+            Fs::Mem(_) => false,
+        }
+    }
+
     /// Re-enqueue a memory segment after a retryable failure.
     ///
     /// Caller owns the [`MEMORY_RETRY_BUDGET`] check, this method always

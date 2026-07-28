@@ -735,6 +735,126 @@ mod tests {
     }
 
     #[cfg(feature = "pipeline")]
+    /// A checkpoint must survive the retention pass caused by opening its
+    /// replacement active segment. Before checkpoint protection, a budget
+    /// that fit exactly one sealed segment evicted that segment before the
+    /// dump request reached the worker and returned an empty receipt.
+    #[tokio::test]
+    async fn dump_current_data_survives_checkpoint_retention_pressure() {
+        struct DelayedPathCheck;
+
+        impl crate::pipeline::SegmentProcessor for DelayedPathCheck {
+            fn name(&self) -> &'static str {
+                "DelayedPathCheck"
+            }
+
+            fn process(
+                &mut self,
+                data: crate::pipeline::SegmentData,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::pipeline::SegmentData,
+                                crate::pipeline::ProcessError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if data
+                        .segment()
+                        .disk_path()
+                        .is_some_and(std::path::Path::exists)
+                    {
+                        Ok(data)
+                    } else {
+                        Err(crate::pipeline::ProcessError::io(
+                            data,
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "checkpoint segment was evicted during its pipeline pass",
+                            ),
+                        ))
+                    }
+                })
+            }
+        }
+
+        // Keep the probe on another thread so its thread-local encoder cannot
+        // affect the recorder under test.
+        let one_segment_budget = std::thread::spawn(|| {
+            let probe_dir = tempfile::tempdir().expect("probe tempdir");
+            let probe_writer = DiskBuffer::builder()
+                .base_path(probe_dir.path())
+                .max_file_size(u64::MAX)
+                .max_total_size(1024 * 1024)
+                .rotation_period(Duration::MAX)
+                .build()
+                .expect("probe writer");
+            let probe = recorder(probe_writer).build();
+            probe.handle().record_event(TestEvent {
+                timestamp_ns: clock::clock_monotonic_ns(),
+                value: 51,
+            });
+            probe.graceful_shutdown(Duration::ZERO);
+            std::fs::metadata(sealed_segment(probe_dir.path()))
+                .expect("probe segment metadata")
+                .len()
+        })
+        .join()
+        .expect("probe thread");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(one_segment_budget)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer");
+        let recorder = recorder(writer)
+            .pipe(DelayedPathCheck)
+            .with_dump_trigger(|_| {})
+            .build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 51,
+        });
+
+        let receipt = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("dump should complete")
+            .expect("checkpoint and pipeline should succeed");
+        assert_eq!(
+            receipt.segments_processed, 1,
+            "the checkpoint segment must remain available until the worker loads it"
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let retained_bytes: u64 = std::fs::read_dir(dir.path())
+                    .expect("trace dir readable")
+                    .map(|entry| entry.expect("trace directory entry"))
+                    .map(|entry| entry.metadata().expect("trace metadata").len())
+                    .sum();
+                if retained_bytes <= one_segment_budget {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("checkpoint protection must not permanently weaken the disk budget");
+
+        recorder.graceful_shutdown(Duration::ZERO);
+    }
+
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn stop_recording_takes_final_source_sample_before_checkpoint() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -6,7 +6,7 @@
 mod common;
 mod fake_s3;
 
-use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
+use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
@@ -259,11 +259,40 @@ fn lookforward_dump_resolves_after_deadline() {
 /// manifest (`manifest_key` is `None`).
 #[test]
 fn off_s3_pipeline_dumps_without_manifest() {
+    use dial9_core::source::{FlushContext, Source};
+    use dial9_trace_format::TraceEvent;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(TraceEvent)]
+    struct BoundaryEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
+
+    struct ArmedBoundarySource(Arc<AtomicBool>);
+
+    impl Source for ArmedBoundarySource {
+        fn flush(&mut self, ctx: &FlushContext<'_>) {
+            if self.0.load(Ordering::Acquire) {
+                ctx.record_event(&BoundaryEvent {
+                    timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
+                });
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "armed-boundary"
+        }
+    }
+
     let trace_dir = tempfile::tempdir().unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
 
     let writer = fast_sealing_writer(trace_dir.path());
 
     let recorder = recorder(writer)
+        .source(ArmedBoundarySource(Arc::clone(&armed)))
         .worker_poll_interval(Duration::from_millis(50))
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
@@ -271,13 +300,16 @@ fn off_s3_pipeline_dumps_without_manifest() {
     let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
-
-    wait_for_sealed_segment(&rt, trace_dir.path());
+    // Make the checkpoint's own source sample establish the test precondition:
+    // data exists at the requested boundary. Waiting for a previously sealed
+    // file would race ordinary ring retention before the request is made.
+    armed.store(true, Ordering::Release);
 
     let check_rt = assertion_runtime();
     let receipt = check_rt
         .block_on(async { trigger.dump_current_data().await })
         .unwrap();
+    armed.store(false, Ordering::Release);
     assert!(receipt.segments_processed >= 1);
     assert!(receipt.manifest_key.is_none(), "no manifest off S3");
 
@@ -311,7 +343,7 @@ fn shutdown_truncates_open_lookforward_dump() {
 
     let recorder = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
-        .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client))
+        .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client.clone()))
         .with_dump_trigger(|_| {})
         .build();
     let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
@@ -322,7 +354,11 @@ fn shutdown_truncates_open_lookforward_dump() {
     let fut = trigger
         .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
-    drive_workload(&rt);
+
+    // Establish the condition asserted below before initiating shutdown.
+    // Uploaded objects persist, unlike local files that the worker removes,
+    // so this does not race pipeline cleanup.
+    wait_for_uploaded_segment(&rt, &client, "test-bucket");
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(2));

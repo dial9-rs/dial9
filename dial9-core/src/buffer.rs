@@ -716,13 +716,26 @@ impl<M: BufferMode> SegmentWriter<M> {
             return Ok(());
         }
         // Always keep at least the current file.
-        while self.total_size() > self.max_total_size && !self.closed_files.is_empty() {
-            if let Some((seg_ref, _size)) = self.closed_files.pop_front() {
+        while self.total_size() > self.max_total_size {
+            #[cfg(feature = "pipeline")]
+            let evict_pos = self
+                .closed_files
+                .iter()
+                .position(|(segment, _)| !self.fs.checkpoint_segment_is_protected(segment.index()));
+            #[cfg(not(feature = "pipeline"))]
+            let evict_pos = (!self.closed_files.is_empty()).then_some(0);
+            let Some(evict_pos) = evict_pos else {
+                break;
+            };
+            if let Some((seg_ref, _size)) = self.closed_files.remove(evict_pos) {
                 self.fs.remove_sealed(&seg_ref, RemoveReason::Eviction);
             }
         }
         // If even the current file alone exceeds total budget, stop writing.
-        if self.total_size() > self.max_total_size {
+        // Protected checkpoint segments may temporarily occupy the pipeline's
+        // in-flight reserve; they become evictable as soon as the worker loads
+        // them and must not make the active writer look irrecoverably full.
+        if self.total_size() > self.max_total_size && self.closed_files.is_empty() {
             self.state = WriterState::Finished;
         }
         Ok(())
@@ -808,7 +821,7 @@ impl<M: BufferMode> SegmentWriter<M> {
     /// Seal a non-empty current segment immediately and continue writing into
     /// a fresh segment. The flush loop performs the required thread-local
     /// drain before calling this.
-    #[cfg(any(feature = "pipeline", test))]
+    #[cfg(test)]
     pub(crate) fn rotate_segment(&mut self) -> std::io::Result<bool> {
         if matches!(self.state, WriterState::Finished) {
             return Err(std::io::Error::new(
@@ -821,6 +834,82 @@ impl<M: BufferMode> SegmentWriter<M> {
         }
         self.rotate_strict()?;
         Ok(true)
+    }
+
+    /// Reserve the sole current-data checkpoint snapshot.
+    ///
+    /// Reservation happens before source sampling or a capture-stop closes the
+    /// recording gate, so a busy capture-stop request has no lifecycle side
+    /// effects.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn reserve_checkpoint(&self) -> std::io::Result<()> {
+        if self.fs.try_reserve_checkpoint() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "another current-data checkpoint is still active",
+            ))
+        }
+    }
+
+    /// Protect the current ring snapshot, then seal a non-empty active
+    /// fragment. The caller must hold the checkpoint reservation. Protection
+    /// lasts until the triggered worker takes each memory segment or finishes
+    /// the disk segment's pipeline pass; this prevents the checkpoint's own
+    /// rotation from evicting data it is about to dispatch.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn checkpoint_segments(&mut self) -> std::io::Result<Vec<u32>> {
+        if matches!(self.state, WriterState::Finished) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "dial9 trace writer is closed",
+            ));
+        }
+
+        let current_index = self.has_real_events.then_some(self.next_index - 1);
+        let protected = if M::IS_DISK {
+            let mut indices: Vec<u32> = self
+                .closed_files
+                .iter()
+                .map(|(segment, _)| segment.index())
+                .collect();
+            if let Some(index) = current_index {
+                indices.push(index);
+            }
+            self.fs.protect_disk_checkpoint_segments(&indices);
+            indices
+        } else {
+            self.fs.protect_memory_checkpoint_segments(current_index)
+        };
+
+        if self.has_real_events
+            && let Err(error) = self.rotate_strict()
+        {
+            self.fs.release_checkpoint_segments(&protected);
+            return Err(error);
+        }
+        Ok(protected)
+    }
+
+    /// Re-apply the disk budget after the worker finishes checkpoint segments
+    /// and releases their short-lived eviction protection.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn enforce_checkpoint_budget(&mut self) -> std::io::Result<()> {
+        if self.fs.checkpoint_budget_dirty() {
+            self.evict_oldest()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn release_checkpoint_segments(&self, indices: &[u32]) {
+        self.fs.release_checkpoint_segments(indices);
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn finish_checkpoint(&self) {
+        self.fs.finish_checkpoint();
     }
 
     #[cfg(test)]

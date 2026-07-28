@@ -223,11 +223,29 @@ struct ActiveDump {
     /// registered until this elapses.
     deadline: Option<tokio::time::Instant>,
     metadata: Vec<(String, String)>,
+    /// Snapshot protected by a flush-thread checkpoint. Entries are released
+    /// as the worker finishes them; leftovers are released when the dump
+    /// resolves. `Some`, including an empty snapshot, owns the sole active
+    /// checkpoint reservation.
+    checkpoint_segments: Option<Vec<u32>>,
     receipt_tx: Option<tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>>,
     segments_processed: usize,
     first_epoch: Option<u64>,
     last_epoch: Option<u64>,
     first_error: Option<ProcessErrorKind>,
+}
+
+/// Releases checkpoint eviction protection on every segment exit path:
+/// success, terminal failure, retry, panic, or load failure.
+struct CheckpointProtection {
+    fs: Arc<Fs>,
+    index: u32,
+}
+
+impl Drop for CheckpointProtection {
+    fn drop(&mut self) {
+        self.fs.release_checkpoint_segment(self.index);
+    }
 }
 
 impl ActiveDump {
@@ -257,6 +275,7 @@ impl ActiveDump {
             window,
             deadline,
             metadata: req.metadata,
+            checkpoint_segments: req.checkpoint_segments,
             receipt_tx: Some(req.receipt_tx),
             segments_processed: 0,
             first_epoch: None,
@@ -474,6 +493,10 @@ impl WorkerLoop {
                 // Requests that never registered fail explicitly.
                 rx.rx.close();
                 while let Ok(req) = rx.rx.try_recv() {
+                    if let Some(indices) = &req.checkpoint_segments {
+                        self.fs.release_checkpoint_segments(indices);
+                        self.fs.finish_checkpoint();
+                    }
                     let _ = req.receipt_tx.send(Err(DumpError::WorkerStopped));
                 }
                 tracing::debug!(target: "dial9_worker", "Exiting triggered run loop");
@@ -577,6 +600,10 @@ impl WorkerLoop {
                 }
             }
         }
+        if let Some(indices) = &dump.checkpoint_segments {
+            self.fs.release_checkpoint_segments(indices);
+            self.fs.finish_checkpoint();
+        }
         let (tx, result) = dump.into_result(manifest_key);
         // The caller may have dropped the handle; that does not cancel.
         let _ = tx.send(result);
@@ -629,6 +656,10 @@ impl WorkerLoop {
         }
 
         'next_segment: for (seg_idx, taken) in segments.into_iter().enumerate() {
+            let _checkpoint_protection = CheckpointProtection {
+                fs: Arc::clone(&self.fs),
+                index: taken.seg_ref.index(),
+            };
             // Cached-epoch fast path (triggered mode, disk): a segment
             // already inspected and found out-of-window is released without
             // re-reading its file.

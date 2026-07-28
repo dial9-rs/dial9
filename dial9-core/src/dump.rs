@@ -32,7 +32,8 @@
 //! their boundary. If that queue is busy, the new request resolves with
 //! [`DumpError::Checkpoint`](crate::dump::DumpError::Checkpoint) wrapping
 //! [`std::io::ErrorKind::WouldBlock`] instead of accumulating an unbounded
-//! backlog.
+//! backlog. Only one eviction-protected current-data checkpoint may remain
+//! active in the worker; a second resolves with the same busy error.
 //!
 //! When a single source fires repeatedly (a watcher that re-trips every
 //! poll, a hot path that dumps on every slow request), configure
@@ -159,6 +160,11 @@ pub(crate) struct DumpRequest {
     pub(crate) lookback: Lookback,
     pub(crate) lookforward: Duration,
     pub(crate) metadata: Vec<(String, String)>,
+    /// Ring snapshot protected by the flush-thread checkpoint until the
+    /// worker takes it through the pipeline. `None` for ordinary time-range
+    /// requests; `Some` also owns the sole checkpoint reservation when the
+    /// snapshot contains no segments.
+    pub(crate) checkpoint_segments: Option<Vec<u32>>,
     pub(crate) receipt_tx: oneshot::Sender<Result<DumpReceipt, DumpError>>,
 }
 
@@ -242,8 +248,9 @@ impl DumpTrigger {
     /// which takes the final source sample and closes the gate atomically on
     /// the flush thread.
     ///
-    /// The flush-thread control queue is bounded. If it is already handling
-    /// another control operation, this request resolves with
+    /// The flush-thread control queue and active checkpoint are bounded. If
+    /// another control operation is queued or a protected checkpoint is still
+    /// running, this request resolves with
     /// [`DumpError::Checkpoint`] wrapping [`std::io::ErrorKind::WouldBlock`].
     pub fn dump_current_data(&self) -> DumpRun<'_> {
         self.request(
@@ -269,8 +276,9 @@ impl DumpTrigger {
     /// Unlike ordinary dump requests, capture-stop requests are never
     /// debounced: closing the recording gate is a lifecycle operation, so it
     /// is always attempted. The flush-thread control queue remains bounded; if
-    /// another control operation is already queued, this request resolves with
-    /// [`DumpError::Checkpoint`] wrapping [`std::io::ErrorKind::WouldBlock`].
+    /// another control operation is already queued or a protected checkpoint
+    /// is still running, this request resolves with [`DumpError::Checkpoint`]
+    /// wrapping [`std::io::ErrorKind::WouldBlock`].
     ///
     /// This operation requires a trigger installed through
     /// `with_dump_trigger`; a standalone pair from [`channel`] has no recorder
@@ -296,7 +304,9 @@ impl DumpTrigger {
     /// attaching segments as they seal; it is bounded only by the process
     /// lifetime and is best-effort under upload pressure. The actual
     /// covered span is reported on [`DumpReceipt::time_range`]. This never
-    /// errors and never resizes or pins the ring.
+    /// errors and never resizes or pins the ring, so matching data may also be
+    /// evicted after the request is made while the worker claims or processes
+    /// it.
     pub fn dump_time_range(&self, lookback: Duration, lookforward: Duration) -> DumpRun<'_> {
         self.request(
             Lookback::Window(lookback),
@@ -342,6 +352,7 @@ impl DumpTrigger {
                 lookback,
                 lookforward,
                 metadata: Vec::new(),
+                checkpoint_segments: None,
                 receipt_tx,
             }),
             tx: &self.tx,
@@ -386,10 +397,18 @@ impl CheckpointDump {
         }
     }
 
-    pub(crate) fn dispatch(self) {
+    pub(crate) fn dispatch(mut self, checkpoint_segments: Vec<u32>) -> Result<(), Vec<u32>> {
+        self.request.checkpoint_segments = Some(checkpoint_segments);
         if let Err(error) = self.worker_tx.send(self.request) {
+            let checkpoint_segments = error
+                .0
+                .checkpoint_segments
+                .clone()
+                .expect("checkpoint dispatch marks its reservation");
             let _ = error.0.receipt_tx.send(Err(DumpError::WorkerStopped));
+            return Err(checkpoint_segments);
         }
+        Ok(())
     }
 
     pub(crate) fn fail(self, error: std::io::Error) {

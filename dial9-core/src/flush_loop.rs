@@ -141,6 +141,26 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
             Err(crate::primitives::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
 
+        #[cfg(feature = "pipeline")]
+        if let Err(error) = writer.enforce_checkpoint_budget() {
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("failed to restore trace budget after checkpoint: {error}");
+            });
+        }
+
+        // Claim the sole protected snapshot before source sampling or closing
+        // the recording gate. A busy capture-stop request must not disable
+        // recording when it cannot establish its boundary.
+        #[cfg(feature = "pipeline")]
+        if checkpoint_dump.is_some()
+            && let Err(error) = writer.reserve_checkpoint()
+        {
+            checkpoint_dump
+                .take()
+                .expect("checkpoint presence checked")
+                .fail(error);
+        }
+
         // When disabled, skip all recording work (queue sampling, metadata
         // merging, drain coordination, flush). The loop still wakes every
         // 5ms to check for control commands and the exit signal.
@@ -301,10 +321,15 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 Some(error) => Err(error),
                 None => writer
                     .write_current_segment_metadata()
-                    .and_then(|()| writer.rotate_segment().map(|_| ())),
+                    .and_then(|()| writer.checkpoint_segments()),
             };
             match result {
-                Ok(()) => checkpoint.dispatch(),
+                Ok(protected) => {
+                    if let Err(protected) = checkpoint.dispatch(protected) {
+                        writer.release_checkpoint_segments(&protected);
+                        writer.finish_checkpoint();
+                    }
+                }
                 Err(error) => {
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to checkpoint current trace data: {error}");
@@ -317,6 +342,7 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                         shared.disable();
                     }
                     checkpoint.fail(error);
+                    writer.finish_checkpoint();
                 }
             }
         }

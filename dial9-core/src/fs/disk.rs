@@ -30,6 +30,22 @@ pub(crate) struct DiskFs {
     /// Claimed segment index -> uncompressed size in bytes. Dedup so each
     /// sealed file is dispensed at most once per `DiskFs` instance.
     claimed: Mutex<HashMap<u32, u64>>,
+    /// Segments belonging to a flush-thread checkpoint whose worker pipeline
+    /// pass has not finished yet. Writer-side eviction skips these entries so
+    /// sealing the checkpoint cannot invalidate its own dump or a stage that
+    /// still needs the original path.
+    #[cfg(feature = "pipeline")]
+    checkpoint_protected: Mutex<HashSet<u32>>,
+    /// Set when the worker releases checkpoint protection. The flush thread
+    /// consumes this flag and re-applies the disk budget from its writer-owned
+    /// `closed_files` queue.
+    #[cfg(feature = "pipeline")]
+    checkpoint_budget_dirty: AtomicBool,
+    /// At most one current-data checkpoint may own an eviction-protected
+    /// snapshot. This bounds the retention overshoot while its worker pass is
+    /// active and makes overlapping protection sets unambiguous.
+    #[cfg(feature = "pipeline")]
+    checkpoint_active: AtomicBool,
     dropped: AtomicU64,
     writer_done: AtomicBool,
 }
@@ -40,6 +56,12 @@ impl DiskFs {
             dir: dir.into(),
             stem: stem.into(),
             claimed: Mutex::new(HashMap::new()),
+            #[cfg(feature = "pipeline")]
+            checkpoint_protected: Mutex::new(HashSet::new()),
+            #[cfg(feature = "pipeline")]
+            checkpoint_budget_dirty: AtomicBool::new(false),
+            #[cfg(feature = "pipeline")]
+            checkpoint_active: AtomicBool::new(false),
             dropped: AtomicU64::new(0),
             writer_done: AtomicBool::new(false),
         }
@@ -85,6 +107,11 @@ impl DiskFs {
             remove_segment_family(path);
         }
         self.claimed.lock().unwrap().remove(&seg.index());
+        #[cfg(feature = "pipeline")]
+        self.checkpoint_protected
+            .lock()
+            .unwrap()
+            .remove(&seg.index());
         if matches!(reason, RemoveReason::Eviction) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -115,6 +142,43 @@ impl DiskFs {
     #[cfg(feature = "pipeline")]
     pub(super) fn release_claim(&self, index: u32) {
         self.claimed.lock().unwrap().remove(&index);
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn protect_checkpoint_segments(&self, indices: &[u32]) {
+        self.checkpoint_protected
+            .lock()
+            .unwrap()
+            .extend(indices.iter().copied());
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn try_reserve_checkpoint(&self) -> bool {
+        self.checkpoint_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn finish_checkpoint(&self) {
+        self.checkpoint_active.store(false, Ordering::Release);
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn checkpoint_segment_is_protected(&self, index: u32) -> bool {
+        self.checkpoint_protected.lock().unwrap().contains(&index)
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn release_checkpoint_segment(&self, index: u32) {
+        if self.checkpoint_protected.lock().unwrap().remove(&index) {
+            self.checkpoint_budget_dirty.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn checkpoint_budget_dirty(&self) -> bool {
+        self.checkpoint_budget_dirty.swap(false, Ordering::AcqRel)
     }
 
     #[cfg(feature = "pipeline")]
