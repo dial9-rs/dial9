@@ -15,7 +15,7 @@ This skill guides you through analyzing dial9 trace data stored in S3. The workf
 ## Prerequisites
 
 - AWS CLI configured with read access to the target bucket
-- `dial9` CLI installed (`cargo install dial9` or `cargo binstall dial9`)
+- `dial9` CLI installed (`cargo install dial9 --features cli` or `cargo binstall dial9`)
 - Node.js 14+ for running the analysis toolkit
 
 ## Phase 1: Discovery
@@ -158,6 +158,6 @@ dial9 agents skill dial9-red-flags
 
 - **"Access Denied" or "NoSuchBucket"**: Verify credentials with `aws sts get-caller-identity` and check bucket region
 - **Empty bucket listings**: Verify date format is YYYY-MM-DD, region is correct, and prefix matches
-- **`dial9` not found**: `cargo install dial9` or `cargo binstall dial9`
+- **`dial9` not found**: `cargo install dial9 --features cli` or `cargo binstall dial9`
 - **Analysis errors on .gz files**: Decompress first — `analyze.js` requires raw `.bin` input
-- **"Unknown frame tag" errors**: Toolkit version is older than the trace format — update dial9 with `cargo install dial9`
+- **"Unknown frame tag" errors**: Toolkit version is older than the trace format — update dial9 with `cargo install dial9 --features cli`

@@ -1,0 +1,94 @@
+// Tests for the issues-rail controller. The lit-html rail markup is exercised
+// in the browser (no DOM env here); this suite pins the `n`/`p` stepping wiring
+// that dispatches into the store - the store-side of the keyboard nav.
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
+import { beforeAll, describe, expect, it } from "vitest";
+import { parseTraceBuffer } from "../../lib/trace/index.js";
+import type { ParsedTrace } from "../../types/trace.js";
+import type { KeyEventLike, KeyBinding } from "../../lib/interact/keyboard.js";
+import { createViewerStore } from "./store.js";
+import type { ViewerStore } from "../../store/store.js";
+import { createIssuesRail } from "./issues-rail.js";
+
+let trace: ParsedTrace;
+
+beforeAll(async () => {
+  const fileBytes = readFileSync(
+    fileURLToPath(new URL("../../../public/demo-trace.bin", import.meta.url)),
+  );
+  const raw =
+    fileBytes[0] === 0x1f && fileBytes[1] === 0x8b
+      ? new Uint8Array(gunzipSync(fileBytes))
+      : new Uint8Array(fileBytes);
+  trace = await parseTraceBuffer(raw);
+});
+
+/** A store with the demo trace resident and the viewport fitted. */
+function loadedStore(): ViewerStore {
+  const store = createViewerStore({ scheduler: () => {} });
+  store.update("trace", { trace });
+  const minTs = trace.minTs ?? 0;
+  const maxTs = trace.maxTs ?? 0;
+  store.update("viewport", { minTs, maxTs, viewStart: minTs, viewEnd: maxTs });
+  return store;
+}
+
+const FAKE_KEY: KeyEventLike = {
+  key: "",
+  ctrlKey: false,
+  metaKey: false,
+  altKey: false,
+  shiftKey: false,
+  target: null,
+  defaultPrevented: false,
+  preventDefault: () => {},
+};
+
+function binding(bindings: readonly KeyBinding[], key: string): KeyBinding {
+  const b = bindings.find((x) => x.key === key);
+  if (b === undefined) throw new Error(`no binding for ${key}`);
+  return b;
+}
+
+describe("issues-rail n/p stepping", () => {
+  it("`n` from nothing-selected lands on the first POI and moves the view", () => {
+    const store = loadedStore();
+    const rail = createIssuesRail(store);
+    const before = store.getState().viewport;
+
+    const consumed = binding(rail.keyBindings, "n").onKey(FAKE_KEY);
+
+    const st = store.getState();
+    expect(consumed).toBe(true); // there are sched POIs, so the key is consumed
+    expect(st.poi.index).toBe(0);
+    // Centering on a POI narrows/moves the view off the full extent.
+    const moved =
+      st.viewport.viewStart !== before.viewStart ||
+      st.viewport.viewEnd !== before.viewEnd;
+    expect(moved).toBe(true);
+  });
+
+  it("`n` advances and `p` retreats through the list", () => {
+    const store = loadedStore();
+    const rail = createIssuesRail(store);
+    const n = binding(rail.keyBindings, "n");
+    const p = binding(rail.keyBindings, "p");
+
+    n.onKey(FAKE_KEY);
+    expect(store.getState().poi.index).toBe(0);
+    n.onKey(FAKE_KEY);
+    expect(store.getState().poi.index).toBe(1);
+    p.onKey(FAKE_KEY);
+    expect(store.getState().poi.index).toBe(0);
+  });
+
+  it("declines (returns false) when no trace is loaded - the key falls through", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    const rail = createIssuesRail(store);
+    expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(false);
+    expect(binding(rail.keyBindings, "p").onKey(FAKE_KEY)).toBe(false);
+  });
+});

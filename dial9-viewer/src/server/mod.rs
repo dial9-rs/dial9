@@ -16,8 +16,11 @@ mod config;
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
+pub(crate) mod fold_stream;
 pub(crate) mod metrics;
 mod prefixes;
+mod services;
+pub(crate) mod span_stats;
 pub(crate) mod tokio_stats;
 mod trace;
 mod upload;
@@ -46,8 +49,13 @@ pub(crate) async fn region_from_head_bucket(
     }
 }
 
+// Embed ONLY the built artifact set (`npm run build` output), never sources,
+// tests, or node_modules. A cargo-only checkout still compiles: the committed
+// `ui/dist/.gitkeep` keeps the folder present (empty UI until built). Release
+// CI runs the JS build before packaging, so published crates/binaries carry a
+// populated dist. See docs/adr/0004-viewer-ui-migration.md section 3.
 #[derive(Embed)]
-#[folder = "ui/"]
+#[folder = "ui/dist/"]
 struct UiAssets;
 
 /// Default output key prefix for aggregate part-files.
@@ -176,6 +184,11 @@ pub struct AppState {
     pub agg_output: AggOutput,
     /// Segment duration (seconds) for BYOC aggregation scope padding.
     pub agg_segment_secs: i64,
+    /// Bucket-name substring the UI's bucket picker filters on, advertised via
+    /// `/api/config` as `bucket_filter` (the filtering itself is client-side).
+    /// Defaults to "dial9"; empty disables filtering. See
+    /// [`Self::with_bucket_filter`].
+    pub bucket_filter: String,
     /// Process-global concurrency limits for the demand-driven fold pipeline,
     /// shared across all in-flight `/api/flamegraph` requests so total fold work
     /// is bounded application-wide (see [`FoldLimits`]).
@@ -200,6 +213,7 @@ impl AppState {
             role_assumer: None,
             agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
+            bucket_filter: "dial9".to_string(),
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
     }
@@ -290,6 +304,17 @@ impl AppState {
         self
     }
 
+    /// Set the bucket-name substring the UI's bucket picker uses to surface
+    /// trace buckets, advertised to clients via `/api/config` as
+    /// `bucket_filter` (T15; the match is case-insensitive and happens
+    /// client-side). Defaults to "dial9"; pass an empty string to disable the
+    /// filtering. A page can still override the advertised value per load with
+    /// a `bucket_filter=` query param on its own URL.
+    pub fn with_bucket_filter(mut self, filter: impl Into<String>) -> Self {
+        self.bucket_filter = filter.into();
+        self
+    }
+
     /// Build a per-request [`AggContext`] for the bring-your-own-credentials
     /// path (`?bucket=…`), or reuse the server-configured one.
     ///
@@ -311,11 +336,12 @@ impl AppState {
         &self,
         bucket: Option<&str>,
         prefix: Option<&str>,
+        aws_region: Option<&str>,
         creds: MaybeCreds,
     ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
         use crate::ingest::aggregate::AggContext;
         if let Some(bucket) = bucket {
-            let backend = self.resolve(creds).await?;
+            let backend = self.resolve_with_region(creds, aws_region).await?;
             let source_prefix = prefix
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
@@ -376,6 +402,17 @@ impl AppState {
         &self,
         creds: MaybeCreds,
     ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
+        self.resolve_with_region(creds, None).await
+    }
+
+    /// Resolve a backend for aggregate reads, honoring a deep-linked region even
+    /// when the request uses the server's ambient credentials. Explicit BYO or
+    /// assumed-role credentials already carry their own validated region.
+    async fn resolve_with_region(
+        &self,
+        creds: MaybeCreds,
+        ambient_region: Option<&str>,
+    ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
         let parsed = match creds.0 {
             Ok(parsed) => parsed,
             Err(
@@ -402,10 +439,11 @@ impl AppState {
             // BYO disabled (local-dir) — credentials are meaningless here.
             CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
             CredSource::Default => {
-                // No credential headers reached the backend. On a BYO-capable
-                // server this means we fall back to the server's ambient identity
-                // — the usual cause of a "wrong account" error.
                 if self.allow_byo_creds {
+                    if let Some(region) = ambient_region {
+                        tracing::debug!(%region, "using ambient credentials in request region");
+                        return Ok(Arc::new(S3Backend::from_env_in_region(region).await));
+                    }
                     tracing::debug!(
                         "no x-dial9-aws-* credentials on request; using server's default identity"
                     );
@@ -529,6 +567,7 @@ fn api_router(state: AppState) -> Router {
             axum::routing::post(check::check_credentials),
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
+        .route("/services", axum::routing::get(services::list_services))
         .route("/browse", axum::routing::get(browse::browse))
         .route("/object", axum::routing::get(trace::get_object))
         .route(
@@ -538,6 +577,10 @@ fn api_router(state: AppState) -> Router {
         .route(
             "/tokio-stats",
             axum::routing::get(tokio_stats::get_tokio_stats),
+        )
+        .route(
+            "/span-stats",
+            axum::routing::get(span_stats::get_span_stats),
         )
         .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
         .merge(upload_route)

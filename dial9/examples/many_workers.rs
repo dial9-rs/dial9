@@ -6,31 +6,34 @@
 //! Then open the trace in the viewer:
 //!   cargo run -p dial9-viewer -- serve --local-dir .
 
+use std::io;
 use std::time::Duration;
 
-use dial9::Dial9TokioHandle;
-use dial9::{DiskBuffer, TracedRuntimeBuilder};
+use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
 
-fn my_config() -> TracedRuntimeBuilder {
+fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
         .base_path("many_workers_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
-    dial9::recorder_or_disabled(writer, |t| {
-        t.worker_threads(48);
-    })
-    .with_task_tracking(true)
+    let recorder = dial9::recorder_or_disabled(writer).build();
+    recorder.attach_tokio_runtime_with(
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+        |t| {
+            t.worker_threads(48);
+        },
+    )
 }
 
 #[dial9::main(config = my_config)]
 async fn main() {
     println!("Running workload with 48 workers...");
-
-    let handle = Dial9TokioHandle::current();
     let tasks: Vec<_> = (0..500)
         .map(|i| {
-            handle.spawn(async move {
+            dial9::spawn(async move {
                 for _ in 0..5 {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                     // Small CPU work to generate poll events

@@ -1,0 +1,247 @@
+//! Metrique → dial9 sink.
+//!
+//! Records [metrique](https://docs.rs/metrique) unit-of-work entries into the
+//! dial9 trace alongside the user's existing EMF/JSON pipeline, so a single
+//! trace file carries both tokio runtime telemetry and per-request
+//! application metrics.
+//!
+//! Available through the `dial9` facade as `dial9::metrique_sink`
+//! (feature `metrique-sink`), or directly as a standalone crate. The `tokio`
+//! feature adds task-id capture; nothing else in this crate needs a tokio
+//! runtime.
+//!
+//! # Usage
+//!
+//! An entry opts into the dial9 trace by including a
+//! [`Dial9Context`](crate::Dial9Context). Every field of an
+//! opted-in entry is recorded; exclude individual fields with the
+//! [`Skip`](crate::Skip) field flag:
+//!
+//! ```no_run
+//! use dial9_metrique::{Dial9Context, Dial9Stream, Interned, Skip};
+//! use metrique::ServiceMetrics;
+//! use metrique::unit_of_work::metrics;
+//! use metrique::writer::{AttachGlobalEntrySinkExt, GlobalEntrySink};
+//!
+//! #[metrics(rename_all = "PascalCase")]
+//! struct RequestMetrics {
+//!     // Opts this entry in, and captures thread id, task id, and
+//!     // start/end monotonic timestamps.
+//!     #[metrics(flatten)]
+//!     dial9: Dial9Context,
+//!
+//!     // Route repeated strings through dial9's string pool.
+//!     #[metrics(flags(Interned))]
+//!     route: String,
+//!
+//!     operation: &'static str,
+//!
+//!     // Keep bulky or high-cardinality fields out of the trace.
+//!     #[metrics(flags(Skip))]
+//!     debug_blob: String,
+//! }
+//!
+//! # let handle = dial9_core::handle::Dial9Handle::disabled();
+//! # let emf_stream = Dial9Stream::new(&handle); // stand-in for your pipeline
+//! // Wire dial9 in as a peer of the existing EMF stream. `tee` also keeps
+//! // dial9's own `dial9.`-prefixed fields out of that stream.
+//! let _join = ServiceMetrics::attach_to_stream(
+//!     Dial9Stream::tee(&handle, emf_stream),
+//! );
+//!
+//! // Use normally.
+//! let mut m = RequestMetrics {
+//!     dial9: Dial9Context::capture(),
+//!     route: "/pets".to_owned(),
+//!     operation: "GetPet",
+//!     debug_blob: String::new(),
+//! }
+//! .append_on_drop(ServiceMetrics::sink());
+//! ```
+//!
+//! Entries without a `Dial9Context` are left alone: they flow through to the
+//! rest of the pipeline and record nothing into the trace. Teeing the sink
+//! into an existing pipeline therefore only records the entries you opt in.
+//!
+//! ## Opting in without touching the entry
+//!
+//! Adding a field is intrusive when the metrics struct is shared, owned by
+//! another team, or when dial9 should be switchable from one place.
+//! [`Dial9EntryExt`](crate::Dial9EntryExt) attaches the same
+//! context from the outside, so the entry definition stays as it was:
+//!
+//! ```no_run
+//! use dial9_metrique::Dial9EntryExt;
+//! use metrique::ServiceMetrics;
+//! use metrique::unit_of_work::metrics;
+//! use metrique::writer::GlobalEntrySink;
+//!
+//! #[metrics(rename_all = "PascalCase")]
+//! struct RequestMetrics {
+//!     operation: &'static str,
+//!     latency_ms: u64,
+//! }
+//!
+//! // `append_on_drop_dial9` in place of `append_on_drop`:
+//! let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
+//!     .append_on_drop_dial9(ServiceMetrics::sink());
+//! m.latency_ms = 5; // field access reaches through the wrapper
+//! ```
+//!
+//! Both paths produce the same event, named after your entry either way. The
+//! wrapper is also the easier one to make conditional, since a `cfg` around
+//! one call is simpler than one around a struct field:
+//! [`with_dial9_context`](crate::Dial9EntryExt::with_dial9_context)
+//! wraps an entry without attaching it to a sink.
+//!
+//! # Keeping dial9's fields out of your other sinks
+//!
+//! [`Dial9Context`](crate::Dial9Context)'s fields are ordinary
+//! metrique fields, so they would otherwise also appear in EMF/JSON output,
+//! where the monotonic timestamps in particular are useless.
+//! [`Dial9Stream::tee`](crate::Dial9Stream::tee) wraps the
+//! other side of the tee in
+//! [`WithoutDial9Fields`](crate::WithoutDial9Fields), which
+//! drops every `dial9.`-prefixed field on the way in. Compose with metrique's
+//! [`tee`](metrique_writer::stream::tee) and
+//! [`Dial9Stream::new`](crate::Dial9Stream::new) directly if
+//! you would rather keep them.
+//!
+//! All dial9 encoding happens on the thread that drives the metrique
+//! pipeline (the `BackgroundQueue` flush thread for the standard setup).
+//!
+//! # Overhead
+//!
+//! Measured by `benches/metrique_sink_bench.rs`: `Dial9Context::capture()`
+//! costs ~31 ns on the request path, plus ~30 ns for the end-timestamp
+//! clock read when the entry closes. Encoding costs ~420-535 ns per entry
+//! on the flush thread, from an all-scalar payload up to one carrying an
+//! allocating (non-interned) string; boxed entries from a global sink add
+//! ~35 ns. A paused recorder or a disabled handle costs ~3.5 ns per entry.
+//! [`Dial9Stream::tee`]'s field filtering adds well under a nanosecond per
+//! entry to the other sink.
+//!
+//! # What lands in the trace
+//!
+//! One event per entry, carrying:
+//!
+//! - the entry's canonical name (schema name `metrique:<EntryName>`,
+//!   suffixed `#<layout hash>` when distinct entry types share a name),
+//! - the start timestamp, plus `dial9.duration_ns`, `dial9.thread_id`, and
+//!   `dial9.task_id` from [`Dial9Context`](crate::Dial9Context) (the task id
+//!   needs the `tokio` feature and is absent when captured outside a task),
+//! - `dial9.wall_clock_ns` when the entry declares
+//!   `#[metrics(timestamp)]`,
+//! - every field not flagged [`Skip`](crate::Skip), with units
+//!   carried as `unit` schema annotations (the same key the `TraceEvent`
+//!   derive emits). List-shaped fields (`Vec<T>`, slices) encode as typed
+//!   lists.
+//!
+//! # Limitations
+//!
+//! - An entry the sink cannot describe is not recorded: hand-written `Entry`
+//!   impls that do not implement `descriptors()`, and entries containing
+//!   [`Flex`](metrique::flex::Flex) dynamic-key fields, whose descriptors are
+//!   unavailable by construction. They still reach the other side of the
+//!   `tee`, so EMF/JSON output is unaffected.
+//! - Distribution-shaped fields (histograms) and other fields whose closed
+//!   shape is `Opaque` cannot be encoded and are left out of the payload.
+//! - Only lists of strings work through a `GlobalEntrySink` (e.g.
+//!   `ServiceMetrics::sink()`); entries with numeric list fields are
+//!   dropped there (rate-limited warning), because boxing stringifies list
+//!   elements. Typed sinks are unaffected.
+//! - Two fields that emit the same post-rename name cannot share a schema:
+//!   the first occurrence keeps the name and later ones are skipped with a
+//!   diagnostic. Prefix flatten sites to disambiguate. Dial9's own fields
+//!   are `dial9.`-prefixed, so they are never part of such a collision.
+//! - A sink wrapped in
+//!   [`WithoutDial9Fields`](crate::WithoutDial9Fields) sees no
+//!   descriptors for an entry that declares its own field literally named
+//!   `dial9.*` next to other fields, since that segment cannot be filtered.
+//!   Formats that work off `Entry::write` are unaffected.
+//!
+//! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
+
+mod context;
+mod event;
+mod filter;
+mod plan;
+mod stream;
+mod writer;
+
+pub use context::Dial9Context;
+pub use event::{Dial9EntryExt, Dial9Event, Dial9EventClosed};
+pub use filter::WithoutDial9Fields;
+pub use stream::Dial9Stream;
+
+use metrique_writer::value::{FlagConstructor, MetricFlags, MetricOptions};
+
+// The three flag markers below follow metrique's FlagConstructor pattern:
+// each has a zero-sized MetricOptions payload that only the dial9 sink
+// inspects; other formats carry it through untouched.
+
+/// Runtime payload for [`Skip`].
+#[derive(Debug)]
+struct SkipOptions;
+impl MetricOptions for SkipOptions {}
+
+/// Field flag that excludes a field from the dial9 trace payload.
+///
+/// An entry opts into the dial9 sink by including a
+/// [`Dial9Context`](crate::Dial9Context); every field of an
+/// opted-in entry is then recorded by default. Apply this flag via
+/// `#[metrics(flags(Skip))]` to keep a field out of the trace (it still
+/// reaches EMF/JSON formats unchanged). Use it for high-cardinality or bulky
+/// fields that would bloat the trace without helping analysis.
+#[derive(Debug)]
+pub struct Skip;
+
+impl FlagConstructor for Skip {
+    fn construct() -> MetricFlags<'static> {
+        MetricFlags::upcast(&SkipOptions)
+    }
+}
+
+/// Runtime payload for [`Interned`].
+#[derive(Debug)]
+struct InternedOptions;
+impl MetricOptions for InternedOptions {}
+
+/// Field flag that routes string data in this field through dial9's string
+/// pool.
+///
+/// Use for low-cardinality strings that repeat across events (route names,
+/// operation names, status labels): each distinct value is written once per
+/// flush cycle and events carry a compact pool reference. On list-of-string
+/// fields, each element is interned individually.
+///
+/// Applying `Interned` to a field whose shape is not string-capable is
+/// reported as an error and the field is skipped on the wire.
+#[derive(Debug)]
+pub struct Interned;
+
+impl FlagConstructor for Interned {
+    fn construct() -> MetricFlags<'static> {
+        MetricFlags::upcast(&InternedOptions)
+    }
+}
+
+/// Runtime payload for [`Context`].
+#[derive(Debug)]
+struct ContextOptions;
+impl MetricOptions for ContextOptions {}
+
+/// Dial9-internal field flag carried by [`Dial9Context`]'s own fields.
+///
+/// Users never name this type; they flatten [`Dial9Context`] into their
+/// entry and the sink discovers the context fields by walking the descriptor
+/// at first use. A future typed source-extraction mechanism in metrique
+/// would replace this tag-based discovery.
+#[derive(Debug)]
+pub(crate) struct Context;
+
+impl FlagConstructor for Context {
+    fn construct() -> MetricFlags<'static> {
+        MetricFlags::upcast(&ContextOptions)
+    }
+}

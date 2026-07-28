@@ -8,6 +8,12 @@
 //! endpoint.
 
 pub mod aggregate;
-pub mod decode;
+pub(crate) mod decode;
 pub(crate) mod parquet_writer;
 pub(crate) mod refine;
+
+/// Narrow harness for the external Criterion benchmark target.
+#[doc(hidden)]
+pub fn benchmark_decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<()> {
+    decode::decode_samples(data, source_key).map(drop)
+}

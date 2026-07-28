@@ -99,8 +99,8 @@ background during agent-driven testing.
 - Behavior changes should include focused tests that fail without the change; if tests are not practical, state why.
 - For Rust behavior changes, run `cargo nextest run`.
 - For final verification of Rust changes, run `cargo nextest run --stress-duration 20s`. The package is expected to have no flaky tests; report any apparent flake instead of ignoring it.
-- **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the relevant JS tests under `dial9-viewer/ui/test_*.js` with `node <test>` and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
-- **Adding a new `dial9-viewer/ui/test_*.js` file:** CI does NOT auto-discover JS tests. You MUST register the new file in `scripts/e2e-trace-tests.sh` (the `trace-integrity` CI job runs that script), or it will never run in CI. See `dial9-viewer/ui/README.md`.
+- **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the Vitest suites (`npm run test` in `dial9-viewer/ui/`, or a filtered `npx vitest run tests/core/<suite>.test.ts`) and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
+- **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.ts` for suites over the frozen core, `src/**/*.test.ts` for new TS modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.
 - Shuttle tests are NOT included in `cargo nextest run`. They require a separate invocation: `./scripts/test-shuttle.sh`. Always run this when modifying code under `#[cfg(all(test, shuttle))]` or the flush/source paths.
 
 ## Scope
@@ -114,7 +114,7 @@ background during agent-driven testing.
 
 ## Demo Trace
 
-If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace:
+If you modify the trace format (event structure, encoding, parser, etc.), the metrique sink's emitted event shape, or the demo app's `RequestMetrics` entry, you MUST regenerate the demo trace; `trace_integrity.test.ts` asserts on its contents. Regenerate on a host with `perf_event_paranoid <= 1` so sched events survive, with `DIAL9_SCHED_WAIT_SAMPLE_RATE=1` and CPU load so sched-wait samples are captured (the script validates this). Afterwards refresh the demo-pinned anchors in `flamegraph_search.test.ts` if they fail.
 
 ```bash
 ./scripts/regenerate_demo_trace.sh
@@ -129,10 +129,10 @@ Or via Docker (no host Rust/AWS/Java needed — DDB Local runs as a sidecar):
 Or manually:
 
 ```bash
-rm -rf dial9-viewer/ui/demo-trace.bin sched-traces
+rm -rf dial9-viewer/ui/public/demo-trace.bin sched-traces
 cargo build --release -p metrics-service
 AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-traces --demo
-cp sched-traces/trace.*.bin dial9-viewer/ui/demo-trace.bin
+cp sched-traces/trace.*.bin dial9-viewer/ui/public/demo-trace.bin
 ```
 
 The demo trace is used for:

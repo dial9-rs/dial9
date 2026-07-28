@@ -139,7 +139,7 @@ mod pipeline_helpers {
         fs.mark_writer_done();
         let stop = CancellationToken::new();
         let mut worker =
-            WorkerLoop::new(fs, poll_interval, processors, stop, dev_null_sink(), None);
+            WorkerLoop::new(fs, poll_interval, processors, stop, dev_null_sink(), None).await?;
         worker.run().await;
         Ok(())
     }
@@ -153,6 +153,12 @@ mod pipeline_helpers {
         fs: Arc<Fs>,
         stop: CancellationToken,
         join: JoinHandle<()>,
+    }
+
+    impl std::fmt::Debug for TriggeredPipeline {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TriggeredPipeline").finish_non_exhaustive()
+        }
     }
 
     impl TriggeredPipeline {
@@ -178,15 +184,21 @@ mod pipeline_helpers {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let (trigger, rx) = crate::dump::channel();
         let stop = CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            Arc::clone(&fs),
-            Duration::from_millis(10),
-            processors,
-            stop.clone(),
-            dev_null_sink(),
-            Some(rx),
-        );
-        let join = tokio::spawn(async move { worker.run().await });
+        let worker_fs = Arc::clone(&fs);
+        let worker_stop = stop.clone();
+        let join = tokio::spawn(async move {
+            let mut worker = WorkerLoop::new(
+                worker_fs,
+                Duration::from_millis(10),
+                processors,
+                worker_stop,
+                dev_null_sink(),
+                Some(rx),
+            )
+            .await
+            .expect("initialize worker");
+            worker.run().await;
+        });
         TriggeredPipeline {
             trigger,
             fs,

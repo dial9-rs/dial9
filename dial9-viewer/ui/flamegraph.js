@@ -136,6 +136,30 @@
     return { functions: fns.size, covered: covered, rootTotal: rootTotal };
   }
 
+  // Retained #593 regression helper. The search-stats line now uses
+  // `searchAggregate`; this is exported only for the highlighted-area unit
+  // suite (tests/core/flamegraph_search.test.ts). `matchedCount` is the union
+  // of INCLUSIVE sample counts of the topmost matching frames: a match nested
+  // under another match lies inside its ancestor's highlighted extent and adds
+  // no new area, so it equals the share of the canvas lit at full alpha (the
+  // search highlight renders each matching frame's full `count`-wide bar). Same
+  // semantic as the exported SVG's embedded search ("Matched: X%",
+  // flamegraph_export.js) and flamegraph.pl.
+  function countSearchMatches(root, queryLower) {
+    let matchedCount = 0;
+    let frameCount = 0;
+    function walk(node, underMatch) {
+      const isMatch = node.name.toLowerCase().includes(queryLower) || (node.fullName && node.fullName.toLowerCase().includes(queryLower));
+      if (isMatch) {
+        frameCount++;
+        if (!underMatch) matchedCount += node.count;
+      }
+      for (const child of node.children.values()) walk(child, underMatch || isMatch);
+    }
+    walk(root, false);
+    return { matchedCount, frameCount };
+  }
+
   // ── Inspect / butterfly (issue #652) ────────────────────────────────────
   // Two frames are "the same function" when their identity key matches. The
   // exact-trace tree keys children by symbol (fullName); aggregated/API trees
@@ -1606,10 +1630,10 @@
     function getZoomPath() {
       function fullPath(tree, stack) {
         if (!tree || stack.length === 0) return [];
-        // If stack already has the full path (from zoomToPath restore), use it directly.
-        // Otherwise find the path from root to the zoom target.
+        // Resolve the exact target object back to its ancestor chain. Name-based
+        // DFS is ambiguous when different branches end in the same frame name.
         const target = stack[stack.length - 1];
-        const path = findNodePath(tree, target.name);
+        const path = findAncestorPath(tree, target);
         return path ? path.map((n) => n.name) : stack.map((n) => n.name);
       }
       return {
@@ -1896,6 +1920,8 @@
     buildInspect: buildInspect,
     collectSearchResults: collectSearchResults,
     searchAggregate: searchAggregate,
+    // #593 highlighted-area regression helper (tests/core/flamegraph_search.test.ts).
+    countSearchMatches: countSearchMatches,
   };
   if (typeof module !== "undefined" && module.exports) {
     module.exports = fgExports;

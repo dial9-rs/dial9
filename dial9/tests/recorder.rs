@@ -50,7 +50,7 @@ fn facade_recorder_records_a_source() {
 
     let recorder = recorder(writer)
         .source(OnceSource { emitted: false })
-        .build_and_start();
+        .build();
     // The recorder exposes its sources through the public `shared()` API.
     let source_names: Vec<String> = recorder
         .shared()
@@ -61,9 +61,7 @@ fn facade_recorder_records_a_source() {
         source_names.iter().any(|name| name == "once"),
         "the registered source should be visible on the recorder"
     );
-    recorder
-        .graceful_shutdown(Duration::ZERO)
-        .expect("graceful shutdown");
+    recorder.graceful_shutdown(Duration::ZERO);
 
     let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
     let mut decoder = Decoder::new(&bytes).expect("valid trace header");

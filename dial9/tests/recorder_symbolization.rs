@@ -39,7 +39,7 @@ fn recorder_symbolizes_cpu_samples() {
         .source(profiler)
         .pipe(SymbolizeProcessor::new())
         .pipe(WriteBackProcessor::to_dir(output.clone()))
-        .build_and_start();
+        .build();
 
     // Burn CPU on several process threads; the process-wide profiler samples
     // them via perf `inherit`, no per-thread registration needed.
@@ -48,9 +48,7 @@ fn recorder_symbolizes_cpu_samples() {
         h.join().expect("burn thread");
     }
 
-    traced
-        .graceful_shutdown(Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown(Duration::from_secs(10));
 
     let mut symbol_table_entries = 0usize;
     for entry in std::fs::read_dir(&output).expect("read output dir") {

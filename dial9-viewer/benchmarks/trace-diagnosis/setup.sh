@@ -18,7 +18,7 @@ git add -A
 git commit -q -m "init"
 
 # Copy demo trace
-cp "$REPO_ROOT/ui/demo-trace.bin" "$TARGET/trace.bin"
+cp "$REPO_ROOT/ui/public/demo-trace.bin" "$TARGET/trace.bin"
 
 # Install skills
 echo "Installing dial9 skills..."

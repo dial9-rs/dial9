@@ -8,14 +8,14 @@
 //! ```no_run
 //! use dial9_core::buffer::DiskBuffer;
 //! let recorder = dial9_core::recorder::recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
-//!     .build_and_start();
+//!     .build();
 //! // record events through `recorder.handle()`.
 //! # Ok::<(), std::io::Error>(())
 //! ```
 //!
-//! This is the assembler layered above the low-level `Recorder::start`,
-//! which requires a pre-built [`SharedState`](crate::shared_state::SharedState) with sources
-//! already registered. The Tokio integration builds on the same builder internally.
+//! This wraps low-level `Recorder::start`, which expects a pre-built
+//! [`SharedState`](crate::shared_state::SharedState) with sources already
+//! registered. The Tokio integration reuses the same builder.
 
 use crate::buffer::{BufferMode, Disk, SegmentWriter};
 use crate::clock;
@@ -49,9 +49,35 @@ pub(crate) fn merge_segment_metadata(
 /// Begin building a recorder backed by `writer`.
 ///
 /// Register data sources with [`RecorderBuilder::source`], then
-/// [`build`](RecorderBuilder::build) (recording starts disabled) or
-/// [`build_and_start`](RecorderBuilder::build_and_start).
+/// [`build`](RecorderBuilder::build), which starts recording.
 pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
+    builder_with(Some(writer))
+}
+
+/// Begin building a recorder backed by `writer`, or a writer-free disabled one
+/// when the writer could not be created.
+///
+/// Configure it exactly like [`recorder`]: register sources, set a pipeline,
+/// then [`build`](RecorderBuilder::build). When the writer failed, every one of
+/// those is retained but inert, and `build` yields the same recorder
+/// [`recorder_disabled`] does. A bad trace path therefore costs telemetry, not
+/// the process.
+pub fn recorder_or_disabled<M: BufferMode>(
+    writer: std::io::Result<SegmentWriter<M>>,
+) -> RecorderBuilder<M> {
+    match writer {
+        Ok(writer) => builder_with(Some(writer)),
+        Err(e) => {
+            tracing::error!(
+                target: "dial9_telemetry",
+                "dial9: trace writer setup failed; running without telemetry: {e}"
+            );
+            builder_with(None)
+        }
+    }
+}
+
+fn builder_with<M: BufferMode>(writer: Option<SegmentWriter<M>>) -> RecorderBuilder<M> {
     RecorderBuilder {
         writer,
         sources: Vec::new(),
@@ -60,29 +86,87 @@ pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
         metrics_sink: None,
         thread_init: noop_thread_hook(),
         #[cfg(feature = "pipeline")]
-        processors: Vec::new(),
+        pipeline: None,
+        #[cfg(feature = "pipeline")]
+        terminal_processor: None,
         #[cfg(feature = "pipeline")]
         worker_poll_interval: None,
         #[cfg(feature = "pipeline")]
         trigger: None,
+        #[cfg(feature = "pipeline")]
+        pending_dump_trigger: None,
+        enabled: true,
     }
 }
 
+/// A recorder with recording permanently disabled: no flush thread, no sources,
+/// and [`handle`](crate::recording::Recorder::handle) returns a disabled handle.
+///
+/// Attaching Tokio to it is a no-op and `enable`/`graceful_shutdown` do nothing,
+/// so it is the "telemetry off" fallback for `#[dial9::main]` and
+/// `recorder_or_disabled`: application code runs unchanged, recording nothing.
+pub fn recorder_disabled() -> crate::recording::Recorder {
+    crate::recording::Recorder::new(crate::handle::Dial9Handle::disabled(), None)
+}
+
+/// Assemble dial9's default pipeline: source-requested stages
+/// (for example symbolization), then compression, then a terminal stage —
+/// uploader if configured, otherwise disk write-back.
+///
+/// Returns empty when there is no source stage and no uploader; in that case
+/// no worker is spawned.
+#[cfg(feature = "pipeline")]
+fn default_pipeline(
+    source_stages: Vec<Box<dyn crate::pipeline::SegmentProcessor>>,
+    terminal: Option<Box<dyn crate::pipeline::SegmentProcessor>>,
+    is_disk: bool,
+) -> Vec<Box<dyn crate::pipeline::SegmentProcessor>> {
+    if source_stages.is_empty() && terminal.is_none() {
+        return Vec::new();
+    }
+    let mut processors = source_stages;
+    processors.push(Box::new(crate::worker::processors::GzipCompressor));
+    match terminal {
+        Some(terminal) => processors.push(terminal),
+        None if is_disk => processors.push(Box::new(
+            crate::worker::processors::WriteBackProcessor::default(),
+        )),
+        None => {}
+    }
+    processors
+}
+
 /// Builder for a runtime-agnostic [`Recorder`]. See [`recorder`].
-#[must_use = "call `.build()` (or `.build_and_start()`) to start recording"]
+#[must_use = "call `.build()` to start recording"]
 pub struct RecorderBuilder<M: BufferMode = Disk> {
-    writer: SegmentWriter<M>,
+    /// `None` when the writer could not be created (see
+    /// [`recorder_or_disabled`]); `build` then yields a disabled recorder.
+    writer: Option<SegmentWriter<M>>,
     sources: Vec<Box<dyn Source>>,
     recording_start_hooks: Vec<RecordingStartHook>,
     segment_metadata: Vec<(String, String)>,
     metrics_sink: Option<metrique::writer::BoxEntrySink>,
     thread_init: RecordingThreadHook,
+    /// The segment-processing pipeline. `Some` runs exactly these processors,
+    /// `None` assembles dial9's default from the registered sources at build.
     #[cfg(feature = "pipeline")]
-    processors: Vec<Box<dyn crate::pipeline::SegmentProcessor>>,
+    pipeline: Option<Vec<Box<dyn crate::pipeline::SegmentProcessor>>>,
+    /// Final stage of the default pipeline, replacing write-back (the S3
+    /// uploader sets it). Applied at build, so it does not depend on the order
+    /// the builder was called in.
+    #[cfg(feature = "pipeline")]
+    terminal_processor: Option<Box<dyn crate::pipeline::SegmentProcessor>>,
     #[cfg(feature = "pipeline")]
     worker_poll_interval: Option<std::time::Duration>,
     #[cfg(feature = "pipeline")]
     trigger: Option<crate::dump::DumpRx>,
+    /// Dump-trigger sender, installed on the shared state at build so
+    /// `Dial9Handle::dump_trigger` can reach it.
+    #[cfg(feature = "pipeline")]
+    pending_dump_trigger: Option<crate::dump::DumpTrigger>,
+    /// Whether [`build`](RecorderBuilder::build) starts recording. See
+    /// [`paused`](RecorderBuilder::paused).
+    enabled: bool,
 }
 
 impl<M: BufferMode> std::fmt::Debug for RecorderBuilder<M> {
@@ -108,7 +192,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
     /// The writer's per-process namespace boot id, or `None` before
     /// [`set_namespace`](SegmentWriter::set_namespace) has run.
     pub fn writer_boot_id(&self) -> Option<&str> {
-        self.writer.boot_id()
+        self.writer.as_ref()?.boot_id()
     }
 
     /// Static metadata written into every rotated segment header. Merged across
@@ -137,25 +221,69 @@ impl<M: BufferMode> RecorderBuilder<M> {
         self
     }
 
-    /// Start the recorder. Recording begins **disabled**; call
-    /// [`Recorder::enable`] (or use [`build_and_start`](Self::build_and_start)).
+    /// Start the recorder and begin recording.
+    ///
+    /// Chain [`paused`](Self::paused) beforehand to build without recording, then
+    /// start it later with [`Recorder::enable`].
+    ///
+    /// Yields a disabled recorder when the writer could not be created (see
+    /// [`recorder_or_disabled`]); the sources and pipeline configured on the way
+    /// here are simply never started.
     pub fn build(self) -> Recorder {
+        #[allow(unused_mut)]
+        let Some(mut writer) = self.writer else {
+            return recorder_disabled();
+        };
+
         let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
 
-        #[allow(unused_mut)]
-        let mut writer = self.writer;
-        if !self.segment_metadata.is_empty() {
-            writer.update_segment_metadata(self.segment_metadata);
+        // Install the on-demand dump trigger so `Dial9Handle::dump_trigger` can
+        // reach it (paired with the `trigger` receiver handed to the worker).
+        #[cfg(feature = "pipeline")]
+        if let Some(trigger) = self.pending_dump_trigger {
+            shared.set_dump_trigger(trigger);
         }
 
-        for source in self.sources {
+        // Sync any `boot_id` metadata to the writer's per-process namespace, so a
+        // trace's identity matches its on-disk `{boot_id}/` directory (and its
+        // S3 keys).
+        let mut segment_metadata = self.segment_metadata;
+        if let Some(boot_id) = writer.boot_id().map(str::to_owned) {
+            for (key, value) in &mut segment_metadata {
+                if key == "boot_id" {
+                    *value = boot_id.clone();
+                }
+            }
+        }
+        if !segment_metadata.is_empty() {
+            writer.update_segment_metadata(segment_metadata);
+        }
+
+        #[allow(unused_mut)]
+        let mut sources = self.sources;
+
+        // Collect the stages the sources ask for before they move into the
+        // shared state; only the default pipeline uses them.
+        #[cfg(feature = "pipeline")]
+        let processors = match self.pipeline {
+            Some(processors) => processors,
+            None => {
+                let source_stages = sources
+                    .iter_mut()
+                    .filter_map(|source| source.segment_processor())
+                    .collect();
+                default_pipeline(source_stages, self.terminal_processor, M::IS_DISK)
+            }
+        };
+
+        for source in sources {
             shared.push_source(source);
         }
 
         // The worker borrows `&writer`, so it must be spawned before the writer
         // moves into `Recorder::start`.
         #[cfg(feature = "pipeline")]
-        let worker = if self.processors.is_empty() {
+        let worker = if processors.is_empty() {
             None
         } else {
             let poll = self
@@ -169,7 +297,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 .maybe_trace_dir(M::IS_DISK.then(|| writer.trace_dir().to_path_buf()))
                 .maybe_trace_stem(M::IS_DISK.then(|| writer.trace_stem().to_string()))
                 .poll_interval(poll)
-                .processors(self.processors)
+                .processors(processors)
                 .metrics_sink(metrics)
                 .maybe_trigger(self.trigger)
                 .build();
@@ -190,24 +318,30 @@ impl<M: BufferMode> RecorderBuilder<M> {
 
         recorder.set_recording_start_hooks(self.recording_start_hooks);
 
+        if self.enabled {
+            recorder.enable();
+        }
         recorder
     }
 
-    /// Start the recorder and immediately begin recording.
-    pub fn build_and_start(self) -> Recorder {
-        let recorder = self.build();
-        recorder.enable();
-        recorder
+    /// Build without recording. [`Recorder::enable`] starts it later.
+    ///
+    /// Use for a recorder that should exist but stay quiet until something turns
+    /// it on; for permanently-off telemetry prefer [`recorder_disabled`], which
+    /// allocates no writer at all.
+    pub fn paused(mut self) -> Self {
+        self.enabled = false;
+        self
     }
 }
 
-// TODO(tokio-as-source): fold away once tokio is just a Source with its own ext
-// trait, source registration can then be inherent on RecorderBuilder.
+// TODO(tokio-as-source): now that tokio attaches to a built `Recorder`, this
+// trait has a single implementor. Fold it into inherent `RecorderBuilder`
+// methods once the `RecorderPerfExt` blanket impl can be reworked.
 /// A builder that can register [`Source`]s.
 ///
-/// Implemented by [`RecorderBuilder`] and by runtime wrappers that own a core
-/// builder (e.g. the tokio layer's `TracedRuntimeBuilder`), so source-registration
-/// sugar works the same on either.
+/// Implemented by [`RecorderBuilder`]; the `.with_*()` perf-source sugar is
+/// built on top of it.
 pub trait RecorderSourceExt: Sized {
     /// Register a [`Source`] with the underlying recording recorder.
     fn source(self, source: impl Source + 'static) -> Self;
@@ -248,22 +382,38 @@ impl<M: BufferMode> RecorderSourceExt for RecorderBuilder<M> {
 
 #[cfg(feature = "pipeline")]
 impl<M: BufferMode> RecorderBuilder<M> {
-    /// Append a segment processor (compress, symbolize, upload, write-back).
-    /// The background worker is spawned only when at least one processor is set
-    /// and the writer is filesystem-backed.
+    /// Append a segment processor (compress, symbolize, upload, write-back),
+    /// replacing dial9's default pipeline with your own stages.
     pub fn pipe(mut self, processor: impl crate::pipeline::SegmentProcessor + 'static) -> Self {
-        self.processors.push(Box::new(processor));
+        self.pipeline
+            .get_or_insert_default()
+            .push(Box::new(processor));
         self
     }
 
-    /// Set the full processor pipeline at once, replacing any added with
-    /// [`pipe`](Self::pipe). Use this when you already have a built list,
-    /// or `pipe` to append incrementally.
+    /// Set the full processor pipeline at once, replacing dial9's default and
+    /// anything added with [`pipe`](Self::pipe). Use this when you already have
+    /// a built list, or `pipe` to append incrementally.
     pub fn processors(
         mut self,
         processors: Vec<Box<dyn crate::pipeline::SegmentProcessor>>,
     ) -> Self {
-        self.processors = processors;
+        self.pipeline = Some(processors);
+        self
+    }
+
+    /// Replace write-back as the last stage of the default pipeline, so sealed
+    /// segments are shipped elsewhere instead of written back to disk. This
+    /// also makes processing meaningful even with no other stage, so the worker
+    /// still runs.
+    ///
+    /// Ignored when a custom pipeline is set. The S3 uploader is wired up this
+    /// way.
+    pub fn terminal_processor(
+        mut self,
+        processor: impl crate::pipeline::SegmentProcessor + 'static,
+    ) -> Self {
+        self.terminal_processor = Some(Box::new(processor));
         self
     }
 
@@ -277,6 +427,27 @@ impl<M: BufferMode> RecorderBuilder<M> {
     /// [`crate::dump`]. `None` keeps continuous mode.
     pub fn trigger(mut self, trigger: crate::dump::DumpRx) -> Self {
         self.trigger = Some(trigger);
+        self
+    }
+
+    /// Enable on-demand dump mode: the background worker runs the pipeline only
+    /// when a dump is requested through the
+    /// [`DumpTrigger`](crate::dump::DumpTrigger), reachable from any recording
+    /// thread via [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
+    /// Pass `|_| {}` for the default, or `|t| { t.debounce(window); }` to
+    /// coalesce bursts.
+    pub fn with_dump_trigger<F>(mut self, configure: F) -> Self
+    where
+        F: FnOnce(&mut crate::dump::DumpTriggerConfig),
+    {
+        let mut config = crate::dump::DumpTriggerConfig::new();
+        configure(&mut config);
+        let (mut trigger, rx) = crate::dump::channel();
+        if let Some(window) = config.debounce_window() {
+            trigger = trigger.with_debounce(window);
+        }
+        self.trigger = Some(rx);
+        self.pending_dump_trigger = Some(trigger);
         self
     }
 }
@@ -344,8 +515,8 @@ mod tests {
         values
     }
 
-    /// Stories 1 + 7: a registered `Source` records to a real trace file with
-    /// no async runtime. The final flush on `graceful_shutdown` runs the source.
+    /// A registered `Source` records to a real trace file without an async
+    /// runtime. The final flush on `graceful_shutdown` runs the source.
     #[test]
     fn records_source_events_to_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -357,10 +528,8 @@ mod tests {
                 emitted: false,
                 value: 7,
             })
-            .build_and_start();
-        recorder
-            .graceful_shutdown(Duration::ZERO)
-            .expect("graceful shutdown");
+            .build();
+        recorder.graceful_shutdown(Duration::ZERO);
 
         let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
         assert!(
@@ -369,47 +538,79 @@ mod tests {
         );
     }
 
-    /// The recorder is born with recording off; `build()` (without `_and_start`)
-    /// leaves it disabled until `enable()`.
+    /// `build()` starts recording.
     #[test]
-    fn build_starts_disabled() {
+    fn build_starts_recording() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let recorder = recorder(writer).build();
         assert!(
+            recorder.shared().expect("live recorder").is_enabled(),
+            "build() must start recording"
+        );
+    }
+
+    /// `paused()` builds a live recorder that is not yet recording.
+    #[test]
+    fn paused_build_waits_for_enable() {
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let recorder = recorder(writer).paused().build();
+        assert!(
             !recorder.shared().expect("live recorder").is_enabled(),
-            "recording must be off before enable()"
+            "paused() must leave recording off"
+        );
+        // The handle tells the truth: connected but paused reports disabled.
+        assert!(
+            !recorder.handle().is_enabled(),
+            "a paused handle must report disabled"
+        );
+        assert!(
+            recorder.handle().shared().is_some(),
+            "a paused handle is still connected"
         );
         recorder.enable();
         assert!(
             recorder.shared().expect("live recorder").is_enabled(),
             "recording on after enable()"
         );
+        assert!(
+            recorder.handle().is_enabled(),
+            "handle enabled after enable()"
+        );
     }
 
-    /// `on_recording_start` hooks run once, with the handle on `enable()`.
+    /// `on_recording_start` hooks run once, with the handle, when recording
+    /// starts — at `build()`, or at `enable()` when the build was paused.
     #[test]
-    fn on_recording_start_runs_at_enable() {
+    fn on_recording_start_runs_once_when_recording_starts() {
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let runs = StdArc::new(AtomicUsize::new(0));
         let runs_hook = StdArc::clone(&runs);
-        let recorder = recorder(writer)
+        let live = recorder(MemoryBuffer::new(1 << 20).expect("writer"))
             .on_recording_start(move |_handle| {
                 runs_hook.fetch_add(1, Ordering::SeqCst);
             })
             .build();
-
-        assert_eq!(
-            runs.load(Ordering::SeqCst),
-            0,
-            "hook must not run before enable"
-        );
-        recorder.enable();
-        assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs on enable");
-        recorder.enable();
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at build");
+        live.enable();
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at most once");
+
+        let paused_runs = StdArc::new(AtomicUsize::new(0));
+        let paused_hook = StdArc::clone(&paused_runs);
+        let paused = recorder(MemoryBuffer::new(1 << 20).expect("writer"))
+            .on_recording_start(move |_handle| {
+                paused_hook.fetch_add(1, Ordering::SeqCst);
+            })
+            .paused()
+            .build();
+        assert_eq!(
+            paused_runs.load(Ordering::SeqCst),
+            0,
+            "paused build must not run the hook yet"
+        );
+        paused.enable();
+        assert_eq!(paused_runs.load(Ordering::SeqCst), 1, "hook runs on enable");
     }
 
     /// Pipeline: `.pipe()` spawns the background worker for a runtime-agnostic
@@ -449,10 +650,8 @@ mod tests {
                 value: 11,
             })
             .pipe(CountingProcessor(StdArc::clone(&processed)))
-            .build_and_start();
-        recorder
-            .graceful_shutdown(Duration::from_secs(5))
-            .expect("graceful shutdown drains the worker");
+            .build();
+        recorder.graceful_shutdown(Duration::from_secs(5));
 
         assert!(
             processed.load(Ordering::SeqCst) >= 1,
@@ -481,5 +680,144 @@ mod tests {
             !md.iter().any(|(k, v)| k == "region" && v == "us-east-1"),
             "the colliding key's old value must be gone"
         );
+    }
+    /// Default pipeline behavior: source-requested stages run automatically,
+    /// then compression and write-back.
+    #[cfg(feature = "pipeline")]
+    #[test]
+    fn source_stage_joins_the_default_pipeline() {
+        use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct MarkerStage(StdArc<AtomicUsize>);
+        impl SegmentProcessor for MarkerStage {
+            fn name(&self) -> &'static str {
+                "Marker"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        /// A source that contributes a pipeline stage, as the CPU profiler does.
+        struct StagedSource(StdArc<AtomicUsize>);
+        impl Source for StagedSource {
+            fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+            fn name(&self) -> &'static str {
+                "staged"
+            }
+            fn segment_processor(&mut self) -> Option<Box<dyn SegmentProcessor>> {
+                Some(Box::new(MarkerStage(StdArc::clone(&self.0))))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+        let ran = StdArc::new(AtomicUsize::new(0));
+
+        let recorder = recorder(writer)
+            .source(StagedSource(StdArc::clone(&ran)))
+            .source(OnceSource {
+                emitted: false,
+                value: 3,
+            })
+            .build();
+        recorder.graceful_shutdown(Duration::from_secs(5));
+
+        assert!(
+            ran.load(Ordering::SeqCst) >= 1,
+            "the source's stage should run in the default pipeline"
+        );
+        let gzipped = std::fs::read_dir(dir.path())
+            .expect("trace dir readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .any(|p| p.to_string_lossy().ends_with(".bin.gz"));
+        assert!(gzipped, "the default pipeline compresses and writes back");
+    }
+
+    /// With no stages and no uploader, the worker does not spawn.
+    #[cfg(feature = "pipeline")]
+    #[test]
+    fn default_pipeline_is_empty_without_stages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+
+        let recorder = recorder(writer)
+            .source(OnceSource {
+                emitted: false,
+                value: 5,
+            })
+            .build();
+        recorder.graceful_shutdown(Duration::from_secs(5));
+
+        let compressed = std::fs::read_dir(dir.path())
+            .expect("trace dir readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .any(|p| p.to_string_lossy().ends_with(".gz"));
+        assert!(
+            !compressed,
+            "no stages means no worker, so nothing is gzipped"
+        );
+        // The trace itself is still readable, straight off the writer.
+        let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
+        assert_eq!(decoded_test_values(&bytes), vec![5]);
+    }
+
+    /// A terminal stage ships segments elsewhere, so the worker should run even
+    /// when no source contributes a stage. It replaces write-back.
+    #[cfg(feature = "pipeline")]
+    #[test]
+    fn terminal_processor_replaces_write_back() {
+        use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Uploader(StdArc<AtomicUsize>);
+        impl SegmentProcessor for Uploader {
+            fn name(&self) -> &'static str {
+                "Uploader"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+        let uploaded = StdArc::new(AtomicUsize::new(0));
+
+        let recorder = recorder(writer)
+            .source(OnceSource {
+                emitted: false,
+                value: 9,
+            })
+            .terminal_processor(Uploader(StdArc::clone(&uploaded)))
+            .build();
+        recorder.graceful_shutdown(Duration::from_secs(5));
+
+        assert!(
+            uploaded.load(Ordering::SeqCst) >= 1,
+            "the terminal stage runs on its own"
+        );
+        let written_back = std::fs::read_dir(dir.path())
+            .expect("trace dir readable")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .any(|p| p.to_string_lossy().ends_with(".bin.gz"));
+        assert!(!written_back, "the terminal stage takes write-back's place");
     }
 }

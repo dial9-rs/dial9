@@ -4,6 +4,7 @@
 /sched-traces/
 # except the demo trace
 !dial9-viewer/ui/demo-trace.bin
+!dial9-viewer/ui/public/demo-trace.bin
 !dial9-viewer/ui/test-traces/*.bin
 target/
 .agents/skills/

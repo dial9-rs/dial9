@@ -211,6 +211,12 @@ const SCOPE_KEYS_SINGLE = [
   // A = fast polls, B = slow polls (the "why are the slow ones slow" view).
   "min_poll_ns",
   "max_poll_ns",
+  // Span-type filter (span-explorer deep links): scope the flamegraph to
+  // samples enclosed by a span of this type, plus an optional duration band.
+  // Carried per-side so a diff/copy link reproduces the span-scoped view.
+  "span_type_uid",
+  "min_span_ns",
+  "max_span_ns",
   "max_files",
 ];
 

@@ -116,13 +116,14 @@ _Avoid_: completion target (we deliberately never reach 100%).
 A query's selection: a time range (minute precision), a service, and a
 **host set** (the heatmap box can span many hosts → `host=` is repeatable;
 empty = all hosts, each entry an exact match). Translated to the
-[[matched-set]] in two stages: (1) a coarse S3 prefix prune over the
+[[matched-set]] in two stages: (1) an S3 prefix prune over the
 `{date}/{HHMM}/` rotation buckets the window spans, widened by one bucket
-each side; (2) an in-memory interval-overlap filter on each file's filename
-`epoch` (padded by the known raw-trace segment duration), plus the
-service/host-set filter. Time/`HHMM` is high in the key so it prunes by
-prefix; service/host is below it so it is an in-memory filter. The S3
-browser's 🔥 button builds a scope from the heatmap selection's hosts +
+each side; when a service is selected, its exact path segment is appended
+(`{date}/{HHMM}/{service}/`) so sibling services are excluded by S3; (2) an
+in-memory interval-overlap filter on each file's filename `epoch` (padded by
+the known raw-trace segment duration), plus exact service/host-set checks.
+Host remains an in-memory filter because a scope may contain a host set. The
+S3 browser's 🔥 button builds a scope from the heatmap selection's hosts +
 `[t0,t1]` and drives the [[refinement-loop]] when the server advertises
 `aggregation_enabled` via `/api/config`.
 _Avoid_: query (use "scope" for the selection, "query" for the request).

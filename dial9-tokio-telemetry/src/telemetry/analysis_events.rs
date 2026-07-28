@@ -155,6 +155,9 @@ pub struct QueueSampleEvent {
     pub timestamp_ns: u64,
     /// Global queue depth.
     pub global_queue: u8,
+    /// Number of active (alive) tasks at sample time.
+    #[serde(default)]
+    pub active_tasks: Option<u64>,
 }
 
 /// A new task was spawned.
@@ -492,6 +495,7 @@ mod tests {
         enc.write(&format::QueueSampleEvent {
             timestamp_ns: 4_000_000,
             global_queue: 7,
+            active_tasks: 0,
         })
         .unwrap();
 

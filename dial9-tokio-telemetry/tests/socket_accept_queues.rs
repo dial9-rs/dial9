@@ -5,7 +5,8 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
-    MemoryBuffer, RecorderBuilderTokioExt, RecorderPerfExt, SocketAcceptQueuesConfig, recorder,
+    MemoryBuffer, RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt, SocketAcceptQueuesConfig,
+    recorder,
 };
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -17,20 +18,23 @@ fn traced_runtime_records_socket_accept_queue_snapshot() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_socket_accept_queues(
             SocketAcceptQueuesConfig::builder()
                 .sample_interval(Duration::ZERO)
                 .build(),
         )
-        .with_tokio(|t| {
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
     drop(client);
     drop(listener);
 
@@ -66,15 +70,18 @@ fn traced_runtime_does_not_record_socket_accept_queues_by_default() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .with_tokio(|t| {
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
             t.worker_threads(1);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
     drop(client);
     drop(listener);
 

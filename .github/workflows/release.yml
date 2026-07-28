@@ -60,6 +60,17 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dial9-viewer/ui/package-lock.json
+      # Build the viewer UI BEFORE release-plz publishes: the dial9-viewer
+      # crate archive must carry ui/dist (embedded via rust-embed at compile
+      # time), so cargo-install users never need Node.
+      - name: Build viewer UI
+        working-directory: dial9-viewer/ui
+        run: npm ci && npm run build
       - name: Authenticate to crates.io
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
         id: auth
@@ -72,73 +83,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-  build-viewer-binaries:
-    name: Build dial9-viewer ${{ matrix.target }}
+  # Extract the dial9-viewer tag from release-plz's output, then hand off to the
+  # binary-build workflow.
+  resolve-release:
+    name: Resolve release tag
     needs: release-plz-release
     if: >-
       needs.release-plz-release.outputs.releases_created == 'true' &&
       contains(needs.release-plz-release.outputs.releases, '"package_name":"dial9-viewer"')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ inputs.release_branch }}
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
-
-      - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer -p dial9
-        env:
-          RUSTFLAGS: "--cfg tokio_unstable"
-
-      - name: Determine tag and version
+      - name: Determine tag
         id: version
         shell: bash
+        env:
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
         run: |
-          TAG=$(echo '${{ needs.release-plz-release.outputs.releases }}' | jq -r '.[] | select(.package_name == "dial9-viewer") | .tag')
-          VERSION=$(echo '${{ needs.release-plz-release.outputs.releases }}' | jq -r '.[] | select(.package_name == "dial9-viewer") | .version')
+          TAG=$(jq -r '.[] | select(.package_name == "dial9-viewer") | .tag' <<<"$RELEASES")
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Package (Unix)
-        if: ${{ matrix.archive == 'tar.gz' }}
-        shell: bash
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar -czvf ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.tar.gz dial9-viewer dial9
-
-      - name: Package (Windows)
-        if: ${{ matrix.archive == 'zip' }}
-        shell: pwsh
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path dial9-viewer.exe,dial9.exe -DestinationPath ../../../dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.zip
-
-      - name: Upload release asset
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          files: dial9-viewer-${{ matrix.target }}-${{ steps.version.outputs.version }}.${{ matrix.archive }}
+  build-viewer-binaries:
+    needs: resolve-release
+    uses: ./.github/workflows/build-viewer-binaries.yml
+    with:
+      tag: ${{ needs.resolve-release.outputs.tag }}

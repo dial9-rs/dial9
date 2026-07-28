@@ -61,6 +61,7 @@ where
 
 /// A traced Axum 0.7 server.
 #[must_use = "servers must be given an executor and awaited"]
+#[derive(Debug)]
 pub struct Serve<M, S, E = ()> {
     listener: TcpListener,
     make_service: M,
@@ -145,6 +146,7 @@ where
 
 /// A traced Axum 0.7 server with graceful shutdown.
 #[must_use = "servers must be given an executor and awaited"]
+#[derive(Debug)]
 pub struct WithGracefulShutdown<M, S, F, E = ()> {
     listener: TcpListener,
     make_service: M,

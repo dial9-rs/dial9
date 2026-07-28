@@ -377,4 +377,32 @@ test("repeated applyViewState converges (streamed-snapshot retry safety)", () =>
   }
 });
 
+test("captured full view state survives replacement with duplicate terminal names", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("./flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    fg.setTreeDirect(sampleTree(), 15);
+    fg.zoomToPath("worker", ["a", "mid", "leaf"]);
+    const preserved = fg.getViewState();
+
+    // Put branch b first. setTreeDirect's best-effort terminal-name retention
+    // may choose b/…/leaf, but flamegraph.html reapplies this captured full path.
+    const reordered = sampleTree();
+    fg.setTreeDirect(
+      tree("", 15, 0, [reordered.children.get("b"), reordered.children.get("a")]),
+      15,
+    );
+    fg.applyViewState(preserved);
+
+    assert.deepStrictEqual(
+      fg.getZoomPath().worker,
+      ["a", "mid", "leaf"],
+      "full path returns to branch a rather than the first duplicate leaf",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
 summarize();

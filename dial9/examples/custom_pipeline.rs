@@ -31,7 +31,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use dial9::Dial9TokioHandle;
 use dial9::DiskBuffer;
 use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
 
@@ -182,6 +181,7 @@ async fn worker_task(id: usize) {
 }
 
 #[dial9::main(config = || {
+    use dial9::{RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions};
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let writer = DiskBuffer::builder()
         .base_path(TRACE_DIR)
@@ -193,8 +193,9 @@ async fn worker_task(id: usize) {
         .max_total_size(16 * 1024 * 1024)
         .rotation_period(Duration::from_secs(2))
         .build();
-    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); })
-        .with_task_tracking(true)
+    // A writer that fails to open downgrades to a disabled recorder, the
+    // pipeline below is still configured, just never started.
+    let recorder = dial9::recorder_or_disabled(writer)
         .with_custom_pipeline(|p| p
             .pipe(MetadataTagger::new([
                 ("service", "custom-pipeline-demo"),
@@ -204,20 +205,25 @@ async fn worker_task(id: usize) {
             .pipe(SizeReporter::every(1))
             .gzip()
             .write_back())
+        .build();
+    recorder.attach_tokio_runtime_with(
+        TokioAttachOptions::builder().task_tracking_enabled(true).build(),
+        |t| {
+            t.worker_threads(4);
+        },
+    )
 })]
 async fn main() {
     println!("Running workload, traces under {TRACE_DIR}/");
-
-    let handle = Dial9TokioHandle::current();
-    let tasks: Vec<_> = (0..32).map(|i| handle.spawn(worker_task(i))).collect();
+    let tasks: Vec<_> = (0..32).map(|i| dial9::spawn(worker_task(i))).collect();
     for task in tasks {
         let _ = task.await;
     }
 
     // Give the worker a beat to seal + process the final segment before
-    // the runtime shuts down. Not required in production - `TracedRuntime`
-    // honors the configured drain timeout on drop - but it makes the demo
-    // output more satisfying.
+    // the runtime shuts down. Not required in production, dropping the runtime
+    // and calling `Recorder::graceful_shutdown` drains it, but it makes the
+    // demo output more satisfying.
     tokio::time::sleep(Duration::from_secs(3)).await;
     println!("Done. Sealed segments are gzipped under {TRACE_DIR}/*.bin.gz");
 }

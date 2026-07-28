@@ -3,6 +3,7 @@ pub mod ingest;
 pub mod report_serve;
 pub mod server;
 pub mod storage;
+mod trace_shape;
 
 pub use report_serve::report_serve_router;
 
@@ -204,16 +205,31 @@ pub async fn build_app(
     };
 
     let dev_ui_dir = if dev {
-        let candidates = [PathBuf::from("ui"), PathBuf::from("dial9-viewer/ui")];
+        // Serve the BUILT UI (ui/dist), not the ui/ sources: the servable set
+        // is the vite build output (root assets such as demo-trace.bin and
+        // flamegraph.css live in ui/public/ and only appear at the served
+        // root via a build). Keep it fresh with `npm run dev:embedded`
+        // (vite build --watch) for the edit-refresh loop.
+        let candidates = [
+            PathBuf::from("ui/dist"),
+            PathBuf::from("dial9-viewer/ui/dist"),
+        ];
         let dir = candidates.into_iter().find(|p| p.exists());
         match dir {
             Some(d) => {
+                if !d.join("index.html").exists() {
+                    tracing::warn!(
+                        path = %d.display(),
+                        "ui/dist has no built UI - run `npm run build` or `npm run dev:embedded` \
+                         in dial9-viewer/ui first (UI work requires Node, see ui/README.md)"
+                    );
+                }
                 tracing::info!(path = %d.display(), "dev mode: serving UI from disk");
                 Some(d)
             }
             None => {
                 anyhow::bail!(
-                    "--dev: could not find ui/ directory. Run from the dial9-viewer/ or repo root directory."
+                    "--dev: could not find ui/dist/ directory. Run from the dial9-viewer/ or repo root directory."
                 );
             }
         }

@@ -4,6 +4,7 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>dial9 Trace Viewer</title>
+        <script src="ui-switch.js"></script>
         <link rel="stylesheet" href="flamegraph.css" />
         <style>
             /* Stacking layers (low -> high). Only the tiers that must agree on
@@ -1640,7 +1641,10 @@
                 if (pendingFocus) {
                     const focus = pendingFocus;
                     pendingFocus = null;
-                    focusOnWindow(focus);
+                    // Prefer selecting the actual span (exemplar deep links): if we
+                    // can resolve a span matching the focus window, focus it in the
+                    // span panel. Otherwise fall back to a plain timeline pan/zoom.
+                    if (!focusOnSpanFromDeepLink(focus)) focusOnWindow(focus);
                 }
                 // Record the TOTAL load time including the analysis+render phase
                 // that just ran in showViewer. The live `loadStartTime` timer was
@@ -2030,6 +2034,10 @@
                         endNs: urlParams.get('focus_end'),
                         worker: urlParams.get('focus_worker'),
                         taskId: urlParams.get('focus_task'),
+                        // When set, select+focus the matching tracing span (not just
+                        // pan the timeline). `focus_span_name` disambiguates when
+                        // many spans overlap the window (e.g. a slow-exemplar link).
+                        spanName: urlParams.get('focus_span_name'),
                     };
                 }
             }
@@ -2576,6 +2584,60 @@
                 if (taskId != null) selectedTaskId = Number(taskId);
                 if (worker != null) scrollToWorkerLane(Number(worker));
                 renderAll();
+            }
+
+            // Deep-link span focus: resolve the tracing span matching a focus
+            // window and select+focus it exactly as clicking its bar would, so a
+            // slow-exemplar link lands ON the span (not just near it in time — a
+            // long span's window overlaps dozens of others). Returns true when a
+            // span was focused, false to fall back to focusOnWindow (plain pan).
+            //
+            // The deep link's focus_start/end are WALL-CLOCK ns; client spans are
+            // MONOTONIC (built from customEvents), so convert with the same
+            // clock offset focusOnWindow uses. Matching: among spans overlapping
+            // the window (and matching focus_span_name when provided), pick the
+            // one whose [start,end] is closest to the requested window — the
+            // exemplar's own span is the tightest, boundary-aligned match.
+            function focusOnSpanFromDeepLink({ startNs, endNs, spanName }) {
+                if (startNs == null || !allSpans || allSpans.length === 0) return false;
+                const offset = (trace && trace.clockOffsetNs != null) ? trace.clockOffsetNs : 0;
+                const ws = Number(startNs) - offset;
+                const we = (endNs != null ? Number(endNs) : Number(startNs)) - offset;
+                if (!Number.isFinite(ws)) return false;
+
+                let best = null;
+                let bestScore = Infinity;
+                for (const s of allSpans) {
+                    if (spanName && s.spanName !== spanName) continue;
+                    // Require temporal overlap with the requested window.
+                    if (s.end < ws || s.start > we) continue;
+                    // Score by how far the span's edges sit from the requested
+                    // window edges (0 == exact match). Lower is better.
+                    const score = Math.abs(s.start - ws) + Math.abs(s.end - we);
+                    if (score < bestScore) { bestScore = score; best = s; }
+                }
+                if (!best) return false;
+
+                // Drive the same selection the span-panel click handler does.
+                clearSpanTaskSelection();
+                focusedSpanId = best.spanId;
+                selectedSpanId = best.spanId;
+                selectedSpanIds = new Set([best.spanId]);
+                let parentId = best.parentSpanId;
+                while (parentId != null && !selectedSpanIds.has(parentId)) {
+                    selectedSpanIds.add(parentId);
+                    parentId = spanMeta.get(parentId)?.parentSpanId ?? null;
+                }
+                if (best.taskId != null) selectedTaskId = best.taskId;
+
+                // Frame the view on the span (like navigateToSpan/jumpToPoi): show
+                // ~5x its duration so it sits in context, clamped to the trace.
+                const dur = Math.max(best.end - best.start, 0);
+                const viewDur = Math.max(dur * 5, 1e6);
+                viewStart = Math.max(minTs, best.start - viewDur * 0.3);
+                viewEnd = Math.min(maxTs, viewStart + viewDur);
+                renderAll();
+                return true;
             }
 
             // ── Lane DOM ──
@@ -3912,6 +3974,9 @@
                 const my = e.clientY - rect.top;
 
                 const bucket = findBucketAtXY(mx, my);
+                // Spans are clickable (focus the span / select its task), so show
+                // the pointer cursor on hover — matching the CE/CPU panels.
+                c.style.cursor = bucket ? "pointer" : "default";
                 if (bucket) {
                     const spans = bucket.spans;
                     const rep = bucket.representative;
@@ -3957,6 +4022,7 @@
             });
             document.getElementById("span-panel-canvas").addEventListener("mouseleave", () => {
                 tooltip.style.display = "none";
+                document.getElementById("span-panel-canvas").style.cursor = "default";
             });
 
             // Copy button handler for span field values

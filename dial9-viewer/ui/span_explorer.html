@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<!-- Span Explorer: a Vite entry served at the canonical /span_explorer.html.
+     Unlike the other pages this one has no legacy twin - it was born after the
+     migration - so it is NOT registered in ui-switch.js NEW_UI_ENTRIES and does
+     not load ui-switch.js: there is nothing to switch to, and a switch to
+     nowhere must not render.
+
+     Static skeleton + styles only; ALL behavior lives in the module entry
+     (src/pages/span-explorer/main.ts), which reaches the frozen core through
+     the lib/trace barrel rather than <script src> globals. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Span Explorer</title>
+<!-- Resolve relative navigation targets (the flamegraph.html / viewer.html deep
+     links the page builds) against the server root. -->
+<base href="/" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header { padding: 10px 20px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 1.1em; color: #6c63ff; }
+  header .stats { font-size: 0.8em; color: #888; }
+  .toolbar { padding: 8px 16px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 0.8em; }
+  .toolbar label { color: #e0e0e0; }
+  .toolbar input, .toolbar select { background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; padding: 3px 8px; border-radius: 3px; }
+  .toolbar button { cursor: pointer; font-weight: 600; border: none; padding: 4px 14px; border-radius: 3px; }
+  .toolbar .primary { background: #6c63ff; color: #fff; }
+  .toolbar .secondary { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444; }
+
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Catalog table */
+  .catalog-wrap { flex: 0 0 auto; max-height: 35vh; overflow-y: auto; border-bottom: 1px solid #333; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  th { background: #161b22; color: #8b949e; font-weight: 600; position: sticky; top: 0; z-index: 1; cursor: pointer; user-select: none; }
+  th:hover { color: #e0e0e0; }
+  tr.selected { background: #1c3a5e; }
+  tr:hover:not(.selected) { background: #1c2128; }
+  td.name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  .kind-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.75em; font-weight: 600; margin-right: 4px; }
+  .kind-tracing { background: #264f78; color: #9ec1ff; }
+  .kind-tokio_poll { background: #3d2b1f; color: #ffa657; }
+
+  /* Detail panel (histogram + composition + flamegraph links) */
+  .detail-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0 16px; }
+  .detail-panel.empty { align-items: center; justify-content: center; color: #666; font-size: 0.9em; }
+  .detail-header { padding: 10px 0 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
+  .detail-header h2 { font-size: 1em; color: #e0e0e0; }
+  .detail-header .meta { font-size: 0.8em; color: #888; }
+
+  /* Histogram */
+  .histogram-wrap { flex-shrink: 0; padding: 6px 0; }
+  .histogram-wrap svg { display: block; cursor: crosshair; }
+  .histogram-axis { position: relative; height: 1.2em; margin-top: 2px; font-size: 0.68em; color: #8a8aa0; }
+  .histogram-hint { font-size: 0.66em; color: #6a6a80; margin-top: 2px; }
+  /* Percentile guide lines (P50/P90/P99/P99.9) over the duration histogram. */
+  .histogram-wrap svg .pctile-line { stroke: #f0f6fc; stroke-opacity: 0.55; stroke-width: 1;
+    stroke-dasharray: 2 2; pointer-events: none; }
+  .histogram-wrap svg .pctile-label { fill: #c9d1d9; font-size: 8px; font-weight: 600;
+    paint-order: stroke; stroke: #0d1117; stroke-width: 2px; pointer-events: none; }
+
+  /* Time composition bar */
+  .composition-wrap { flex-shrink: 0; padding: 8px 0; }
+  .composition-bar { display: flex; height: 20px; border-radius: 3px; overflow: hidden; background: #21262d; }
+  .composition-bar .seg { height: 100%; transition: width 0.2s; }
+  .composition-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; font-size: 0.75em; }
+  .composition-legend .item { display: flex; align-items: center; gap: 4px; }
+  .composition-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .composition-legend .legend-pct { font-weight: 600; color: #e6edf3; }
+  .composition-legend .legend-ns { color: #8b949e; }
+
+  /* Band selection display */
+  .band-info { padding: 6px 0; font-size: 0.8em; color: #aaa; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .band-info .count { color: #e0e0e0; font-weight: 600; }
+
+  /* Flamegraph links */
+  .fg-links { display: flex; gap: 10px; padding: 8px 0; flex-shrink: 0; flex-wrap: wrap; }
+  .fg-links a { display: inline-block; padding: 6px 16px; border-radius: 4px; font-size: 0.82em; font-weight: 600; text-decoration: none; }
+  .fg-links .on-cpu { background: #ff6b35; color: #fff; }
+  .fg-links .blocking { background: #e63946; color: #fff; }
+  .fg-links a:hover { opacity: 0.85; }
+
+  /* Exemplars: a table of representative instances. A per-row Jump button
+     deep-links to the viewer focused on that span (like the Tokio-stats
+     exemplar tables); the row itself is not clickable. */
+  .exemplars { padding: 8px 0; font-size: 0.8em; color: #aaa; flex-shrink: 0; overflow-x: auto; }
+  .exemplars .label { font-weight: 600; margin-bottom: 4px; }
+  /* Column show/hide menu. */
+  .exemplars .col-menu { position: relative; display: inline-block; margin-bottom: 6px; }
+  .exemplars .col-menu-btn { background: #21262d; color: #adbac7; border: 1px solid #30363d;
+    border-radius: 3px; padding: 2px 8px; font-size: 1em; cursor: pointer; }
+  .exemplars .col-menu-btn:hover { border-color: #388bfd; }
+  .exemplars .col-menu-list { position: absolute; z-index: 20; top: 100%; left: 0; margin-top: 2px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); min-width: 160px; max-height: 260px; overflow-y: auto; }
+  .exemplars .col-menu-item { display: flex; align-items: center; gap: 6px; padding: 3px 6px;
+    color: #c9d1d9; cursor: pointer; border-radius: 3px; white-space: nowrap; }
+  .exemplars .col-menu-item:hover { background: #21262d; }
+  .exemplars .col-menu-item input { cursor: pointer; }
+  .exemplars .col-menu-auto { color: #6e7681; font-style: italic; }
+  .exemplars .col-menu-reset { display: block; width: 100%; margin-top: 4px; padding: 3px 6px;
+    background: transparent; border: none; border-top: 1px solid #21262d; color: #79c0ff;
+    cursor: pointer; text-align: left; font-size: 1em; }
+  .exemplars .col-menu-reset:hover { color: #adbac7; }
+  .exemplars table.exemplar-table { width: auto; min-width: 320px; border-collapse: collapse; font-size: 0.95em; }
+  .exemplars table.exemplar-table th { position: static; background: transparent; cursor: default; padding: 3px 12px 3px 0; color: #8b949e; font-weight: 600; text-align: left; }
+  .exemplars table.exemplar-table td { padding: 3px 12px 3px 0; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  .exemplars table.exemplar-table td.dur { color: #e6edf3; font-weight: 600; }
+  .exemplars table.exemplar-table td.pctile { color: #8b949e; font-variant-numeric: tabular-nums; }
+  .exemplars table.exemplar-table td.host { color: #8b949e; }
+  .exemplars table.exemplar-table td.muted, .exemplars .muted { color: #6e7681; }
+  .exemplars table.exemplar-table code { color: #79c0ff; }
+  /* Jump-to-source button (replaces whole-row click). */
+  .exemplars td.jump-cell { padding-right: 8px; }
+  .exemplars .jump-btn { background: #21262d; color: #79c0ff; border: 1px solid #30363d;
+    border-radius: 3px; padding: 1px 7px; font-size: 0.9em; cursor: pointer; white-space: nowrap; }
+  .exemplars .jump-btn:hover:not(:disabled) { border-color: #388bfd; background: #1c2a3a; }
+  .exemplars .jump-btn:disabled { opacity: 0.4; cursor: default; }
+  /* Per-row time-composition mini-bar: same categories/colors as the aggregate
+     composition legend, scoped to a single exemplar instance. Wide enough to
+     print the time inside sufficiently large segments. */
+  .exemplars .ex-comp-bar { display: inline-flex; width: 200px; height: 16px; border-radius: 2px;
+    overflow: hidden; background: #21262d; vertical-align: middle; }
+  .exemplars .ex-comp-bar .seg { height: 100%; display: flex; align-items: center;
+    justify-content: center; overflow: hidden; min-width: 0; }
+  /* Inline time label shown only inside sufficiently wide mini-bar segments. */
+  .exemplars .ex-comp-bar .seg-label { font-size: 9px; font-weight: 600; color: #fff; white-space: nowrap;
+    padding: 0 2px; text-shadow: 0 0 2px rgba(0,0,0,0.75), 0 0 1px rgba(0,0,0,0.9); pointer-events: none; }
+  /* Attribute columns: one per attribute key. The value toggles a filter on
+     click; a small copy button copies the raw value. */
+  .exemplars td.attr-cell { color: #adbac7; }
+  .exemplars .attr-val { cursor: pointer; border-bottom: 1px dotted #30363d; }
+  .exemplars .attr-val:hover { color: #79c0ff; border-bottom-color: #388bfd; }
+  .exemplars .attr-val.active { color: #79c0ff; font-weight: 600; border-bottom: 1px solid #388bfd; }
+  .exemplars .attr-val.inert { cursor: default; border-bottom: none; }
+  .exemplars .attr-val.inert:hover { color: #adbac7; }
+  .exemplars .attr-copy { margin-left: 5px; background: transparent; border: none; color: #6e7681;
+    cursor: pointer; font-size: 1em; padding: 0 2px; vertical-align: baseline; }
+  .exemplars .attr-copy:hover { color: #79c0ff; }
+  .exemplars .attr-copy.copied { color: #3fb950; }
+
+  /* Active attribute-filter bar. */
+  .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    padding: 6px 16px; background: #0d1117; border-bottom: 1px solid #21262d; font-size: 0.8em; }
+  .filter-bar .fb-label { color: #8b949e; font-weight: 600; }
+  .filter-bar .fb-chip { display: inline-flex; align-items: center; gap: 6px;
+    background: #163050; border: 1px solid #388bfd; border-radius: 3px; padding: 2px 6px; color: #adbac7; }
+  .filter-bar .fb-chip b { color: #79c0ff; font-weight: 600; }
+  .filter-bar .fb-chip .fb-x { cursor: pointer; color: #8b949e; font-weight: 700; }
+  .filter-bar .fb-chip .fb-x:hover { color: #f85149; }
+  .filter-bar .fb-clear { cursor: pointer; color: #8b949e; text-decoration: underline; }
+  .filter-bar .fb-clear:hover { color: #adbac7; }
+  /* Clickable max value in the detail header */
+  .detail-header .meta a.max-jump { color: #79c0ff; text-decoration: none; font-weight: 600; }
+  .detail-header .meta a.max-jump:hover { text-decoration: underline; }
+
+  /* Coverage badge */
+  .coverage { padding: 6px 0; font-size: 0.75em; color: #8b949e; flex-shrink: 0; }
+
+  /* States */
+  .loading { display: flex; align-items: center; justify-content: center; flex: 1; color: #888; gap: 0.6em; }
+  .loading.hidden { display: none; }
+  .spinner { width: 1.2em; height: 1.2em; border: 2px solid #444; border-top-color: #aaa; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { display: none; align-items: center; justify-content: center; flex: 1; color: #ff6b6b; padding: 24px; text-align: center; }
+
+  /* Confidence / partial indicator */
+  .partial-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7em; background: #3a2a1a; color: #ffa657; margin-left: 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🔍 Span Explorer</h1>
+  <span class="stats" id="stats"></span>
+</header>
+
+<div class="toolbar" id="toolbar">
+  <label>From: <input id="f-start" type="datetime-local" step="1"></label>
+  <label>To: <input id="f-end" type="datetime-local" step="1"></label>
+  <button class="primary" id="btn-apply">Apply</button>
+  <button class="secondary" id="btn-more" disabled>Refine more</button>
+  <button class="secondary" id="btn-stop" disabled>Stop</button>
+  <span style="flex:1"></span>
+  <button class="secondary" id="btn-copylink">Copy link</button>
+</div>
+
+<!-- Active attribute filters (populated by the module); hidden when none. -->
+<div class="filter-bar" id="filter-bar" style="display:none"></div>
+
+<div class="main" id="main">
+  <div class="loading" id="loading"><div class="spinner"></div>Loading span statistics…</div>
+  <div class="error" id="error"></div>
+
+  <div class="catalog-wrap" id="catalog-wrap" style="display:none">
+    <table id="catalog">
+      <thead>
+        <tr>
+          <th data-sort="name">Span</th>
+          <th data-sort="kind">Kind</th>
+          <th data-sort="count">Instances</th>
+          <th data-sort="p50_ns">p50</th>
+          <th data-sort="p95_ns">p95</th>
+          <th data-sort="p99_ns">p99</th>
+          <th data-sort="max_ns">max</th>
+          <th data-sort="quality" title="Fraction of instances with full time-composition data">Quality</th>
+        </tr>
+      </thead>
+      <tbody id="catalog-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Left empty: the module renders the placeholder hint and the panel body
+       through lit-html, which appends after any static content rather than
+       replacing it. -->
+  <div class="detail-panel empty" id="detail-panel"></div>
+</div>
+
+<script type="module" src="/src/pages/span-explorer/main.ts"></script>
+</body>
+</html>

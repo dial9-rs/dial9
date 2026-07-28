@@ -49,12 +49,15 @@
 //!
 //! # Overhead
 //!
-//! Each span enter+exit pair costs roughly **300ns** total (tracing dispatch
-//! plus dial9 encoding), of which **~50-100ns** is the dial9 encoding overhead.
-//! Measured with an in-memory writer on a `current_thread` runtime to
-//! isolate encoding from I/O. This scales linearly with nesting depth and is
-//! comparable to the cost of a single poll event, so the layer is suitable
-//! for production use with appropriate span filtering.
+//! Each span enter+exit pair costs roughly **650-800ns** total (tracing
+//! dispatch plus dial9 encoding), of which dial9 encoding is the majority:
+//! the same span through a bare `tracing_subscriber::registry()` costs
+//! ~100-200ns. Measured with an in-memory writer on a `current_thread`
+//! runtime pinned to one core of an AMD EPYC 9R14 (see the `single_thread`
+//! group in `benches/tracing_layer_bench.rs`); absolute numbers scale with
+//! hardware. Cost grows with the number of span fields and scales linearly
+//! with nesting depth, so the layer is suitable for production use with
+//! appropriate span filtering.
 
 use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::TraceEvent;
@@ -319,7 +322,11 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            enc.write_event(&schemas.enter, &values);
+            if let Err(e) = enc.write_event(&schemas.enter, &values) {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                    tracing::error!(span = %span_name, "dropping span-enter event: {e}");
+                });
+            }
         });
     }
 
@@ -353,7 +360,11 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            enc.write_event(&schemas.exit, &values);
+            if let Err(e) = enc.write_event(&schemas.exit, &values) {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                    tracing::error!(span = %span_name, "dropping span-exit event: {e}");
+                });
+            }
         });
     }
 

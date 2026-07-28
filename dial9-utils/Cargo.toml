@@ -8,6 +8,7 @@ description = "Pipeline and runtime integration utilities for dial9"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }

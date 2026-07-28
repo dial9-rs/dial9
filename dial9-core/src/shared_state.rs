@@ -32,6 +32,15 @@ pub struct SharedState {
     dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
 }
 
+impl std::fmt::Debug for SharedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedState")
+            .field("enabled", &self.enabled)
+            .field("start_time_ns", &self.start_time_ns)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SharedState {
     crate::test_util_pub! {
         fn new(start_time_ns: u64) -> Self {
@@ -59,6 +68,28 @@ impl SharedState {
     pub fn with_sources_mut<R>(
         &self,
         f: impl FnOnce(&mut [Box<dyn crate::source::Source>]) -> R,
+    ) -> Option<R> {
+        self.sources.lock().ok().map(|mut sources| f(&mut sources))
+    }
+
+    /// Drop every registered source.
+    ///
+    /// Sources own OS resources (perf fds, mmap rings) and may hold a
+    /// [`Dial9Handle`](crate::handle::Dial9Handle) back to this state, which
+    /// would otherwise keep the `Arc` alive forever. Releasing them here bounds
+    /// both to the recorder's lifetime.
+    pub(crate) fn clear_sources(&self) {
+        match self.sources.lock() {
+            Ok(mut sources) => sources.clear(),
+            Err(_) => tracing::warn!("sources lock poisoned, sources left registered"),
+        }
+    }
+
+    /// Like [`with_sources_mut`](Self::with_sources_mut), but `f` receives the
+    /// list itself so it can register sources too.
+    pub fn with_sources_vec<R>(
+        &self,
+        f: impl FnOnce(&mut Vec<Box<dyn crate::source::Source>>) -> R,
     ) -> Option<R> {
         self.sources.lock().ok().map(|mut sources| f(&mut sources))
     }
@@ -230,6 +261,7 @@ impl SharedState {
 /// active. All event-recording calls should go through this type so that
 /// callers cannot accidentally emit events without an enabled check.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {

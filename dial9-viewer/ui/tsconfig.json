@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // T16: the worker body (src/lib/trace/worker/body.ts) is executed under
+    // plain Node's type stripping (node-worker-entry.mjs), which resolves
+    // specifiers on disk - its runtime imports of sibling TS use explicit
+    // .ts extensions. Vite/vitest resolve those natively; this flag only
+    // lets tsc accept them (legal because noEmit is set). Everything else
+    // keeps the .js-specifier convention.
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    // T07 audit finding 2: without this, update(slice, { field: undefined })
+    // typechecks and Object.assign stamps the explicit undefined into a
+    // non-optional field. Exact optional types reject explicit undefined
+    // wherever the property type does not include it.
+    "exactOptionalPropertyTypes": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "noEmit": true,
+    "skipLibCheck": true,
+    "useDefineForClassFields": true
+  },
+  "include": ["src", "tests", "vite.config.ts"]
+}

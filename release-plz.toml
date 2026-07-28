@@ -26,18 +26,7 @@ Changes:
 
 [[package]]
 name = "dial9-tokio-telemetry"
-changelog_update = true
-changelog_path = "CHANGELOG.md"
-changelog_include = [
-    "dial9-core",
-    "dial9-utils",
-    "dial9-macro",
-    "dial9-perf-self-profile",
-    "dial9-trace-format",
-    "dial9-trace-format-derive",
-    "dial9-viewer",
-    "dial9",
-]
+changelog_update = false
 
 [[package]]
 name = "dial9-core"
@@ -68,7 +57,21 @@ version_group = "trace-format"
 [[package]]
 name = "dial9-viewer"
 changelog_update = false
+# ui/dist is gitignored but force-included in the package, so the
+# CI-built dist trips cargo publish's dirty check. Allow it for this crate only.
+publish_allow_dirty = true
 
 [[package]]
 name = "dial9"
-changelog_update = false
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+    "dial9-core",
+    "dial9-utils",
+    "dial9-macro",
+    "dial9-perf-self-profile",
+    "dial9-trace-format",
+    "dial9-trace-format-derive",
+    "dial9-viewer",
+    "dial9-tokio-telemetry",
+]

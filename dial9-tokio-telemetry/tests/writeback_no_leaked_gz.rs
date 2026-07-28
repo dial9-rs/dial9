@@ -7,9 +7,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, RecorderTokioExt, recorder};
 use std::time::Duration;
 
 /// Produce enough trace data to trigger multiple rotations and evictions,
@@ -38,18 +36,20 @@ fn eviction_cleans_up_processed_gz_segments() {
         .build()
         .unwrap();
 
-    let traced = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .worker_poll_interval(Duration::from_millis(50))
-        .with_tokio(|t| {
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
             t.worker_threads(2);
         })
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
     // Generate enough work to produce many sealed segments, exceeding the
     // total budget so eviction must kick in.
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         for _ in 0..30 {
             let mut handles = Vec::new();
             for _ in 0..20 {
@@ -67,7 +67,8 @@ fn eviction_cleans_up_processed_gz_segments() {
         }
     });
 
-    traced.graceful_shutdown(Duration::from_secs(10));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(10));
 
     // Collect all trace-related files in the directory.
     let mut bin_files = Vec::new();

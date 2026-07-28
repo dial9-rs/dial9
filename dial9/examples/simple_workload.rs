@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use dial9::Dial9TokioHandle;
+use dial9::RecorderTokioExt;
 
 async fn cpu_work(iterations: u64) -> u64 {
     let mut result = 0u64;
@@ -44,14 +44,14 @@ async fn mixed_task(id: usize) {
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
-    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); })
-        .with_task_tracking(true)
+    dial9::recorder_or_disabled(writer).build().attach_tokio_runtime_with(
+        dial9::TokioAttachOptions::builder().task_tracking_enabled(true).build(),
+        |t| { t.worker_threads(4); },
+    )
 })]
 async fn main() {
     println!("Running workload...");
-
-    let handle = Dial9TokioHandle::current();
-    let tasks: Vec<_> = (0..200).map(|i| handle.spawn(mixed_task(i))).collect();
+    let tasks: Vec<_> = (0..200).map(|i| dial9::spawn(mixed_task(i))).collect();
 
     for task in tasks {
         let _ = task.await;

@@ -13,7 +13,9 @@ use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Ev
 fn sched_event_timestamps_align_with_wall_clock() {
     use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
-    use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, RecorderPerfExt, recorder};
+    use dial9_tokio_telemetry::telemetry::{
+        RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt, recorder,
+    };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -21,22 +23,24 @@ fn sched_event_timestamps_align_with_wall_clock() {
 
     let num_workers = 2u64;
 
-    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default())
-        .with_tokio(move |t| {
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let (recorder, rt) = recorder
+        .attach_tokio_runtime(|t| {
+            t.enable_all();
             t.worker_threads(num_workers as usize);
         })
-        .with_custom_pipeline(|p| p.pipe(capture))
-        .build()
-        .unwrap();
+        .expect("build tokio runtime");
 
-    let _trace_start = traced.start_time();
+    let _trace_start = recorder.start_time();
     let sleep_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sleep_duration = Duration::from_millis(1);
     let num_sleeps = 4u64;
 
-    traced.runtime().block_on(async {
+    rt.block_on(async {
         // Warmup
         for _ in 0..num_workers {
             tokio::spawn(async {
@@ -62,7 +66,8 @@ fn sched_event_timestamps_align_with_wall_clock() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    traced.graceful_shutdown(Duration::from_secs(1));
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

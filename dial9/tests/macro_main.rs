@@ -8,29 +8,36 @@ fn tmp_base_path() -> PathBuf {
 }
 
 // ===========================================================================
-// Recorder builder API — `recorder(DiskBuffer::builder()...).with_tokio(..)`
+// Recorder builder API — `recorder(DiskBuffer::builder()...)` + `attach_tokio_runtime`
 // ===========================================================================
 mod fluent_builder {
+    use std::io;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use dial9::{DiskBuffer, RecorderBuilderTokioExt, TracedRuntimeBuilder};
+    use dial9::{AttachedRuntime, DiskBuffer, Recorder, RecorderTokioExt};
 
     use super::tmp_base_path;
 
-    fn test_config() -> TracedRuntimeBuilder {
+    /// Attach a default multi-thread runtime to `recorder` and hand both to the
+    /// macro.
+    fn with_runtime(recorder: Recorder, worker_threads: usize) -> io::Result<AttachedRuntime> {
+        recorder.attach_tokio_runtime(|t| {
+            t.worker_threads(worker_threads);
+        })
+    }
+
+    fn test_config() -> io::Result<AttachedRuntime> {
         let writer = DiskBuffer::builder()
             .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
             .expect("writer build failed");
-        dial9::recorder(writer).with_tokio(|_| {})
+        with_runtime(dial9::recorder(writer).build(), 2)
     }
 
-    fn disabled_config() -> TracedRuntimeBuilder {
-        TracedRuntimeBuilder::disabled().with_tokio(|t| {
-            t.worker_threads(2);
-        })
+    fn disabled_config() -> io::Result<AttachedRuntime> {
+        with_runtime(dial9::recorder_disabled(), 2)
     }
 
     #[dial9::main(config = test_config)]
@@ -50,7 +57,7 @@ mod fluent_builder {
             .max_total_size(4 * 1024 * 1024)
             .build()
             .expect("writer build failed");
-        dial9::recorder(writer).with_tokio(|_| {})
+        with_runtime(dial9::recorder(writer).build(), 2)
     })]
     async fn runs_with_inline_closure() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -68,7 +75,7 @@ mod fluent_builder {
             .max_total_size(4 * 1024 * 1024)
             .build()
             .expect("writer build failed");
-        dial9::recorder(writer).with_tokio(|_| {})
+        with_runtime(dial9::recorder(writer).build(), 2)
     })]
     async fn runs_with_move_closure() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -170,8 +177,10 @@ mod fluent_builder {
 
     // --- Disabled telemetry ---
 
-    fn disabled_config_default() -> TracedRuntimeBuilder {
-        TracedRuntimeBuilder::disabled()
+    fn disabled_config_default() -> io::Result<AttachedRuntime> {
+        dial9::recorder_disabled().attach_tokio_runtime(|t| {
+            t.enable_all();
+        })
     }
 
     #[dial9::main(config = disabled_config)]
@@ -242,12 +251,13 @@ mod fluent_builder {
 // In-memory writer via `recorder(MemoryBuffer::builder()...)`.
 mod in_memory {
     use std::future::Future;
+    use std::io;
     use std::pin::Pin;
 
     use dial9::Dial9Handle;
     use dial9::Dial9TokioHandle;
     use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
-    use dial9::{MemoryBuffer, RecorderBuilderTokioExt, TracedRuntimeBuilder};
+    use dial9::{AttachedRuntime, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -266,14 +276,17 @@ mod in_memory {
         }
     }
 
-    fn memory_config() -> TracedRuntimeBuilder<dial9::Memory> {
+    fn memory_config() -> io::Result<AttachedRuntime> {
         let writer = MemoryBuffer::builder()
             .max_total_size(16 * 1024 * 1024)
             .build()
             .expect("in-memory writer build failed");
         dial9::recorder(writer)
-            .with_tokio(|_| {})
             .with_custom_pipeline(|p| p.pipe(NoopProcessor))
+            .build()
+            .attach_tokio_runtime(|t| {
+                t.enable_all();
+            })
     }
 
     #[dial9::main(config = memory_config)]
@@ -293,30 +306,35 @@ mod in_memory {
 }
 
 // ===========================================================================
-// Lenient downgrade path: on a writer-I/O failure the config function falls
-// back to `TracedRuntimeBuilder::disabled()` (a plain tokio runtime with no
-// telemetry). Exercises the macro through that downgrade.
+// Lenient downgrade path: on a writer-I/O failure `recorder_or_disabled` falls
+// back to a disabled recorder (a plain tokio runtime with no telemetry).
+// Exercises the macro through that downgrade.
 // ===========================================================================
 mod fluent_builder_fallback {
+    use std::io;
     use std::path::PathBuf;
 
     use dial9::Dial9Handle;
-    use dial9::{DiskBuffer, TracedRuntimeBuilder};
+    use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt};
 
     use super::tmp_base_path;
 
     /// Build a disk-backed recorder, or fall back to a disabled recorder (a
     /// plain tokio runtime) when the writer cannot be created.
-    fn disk_recorder_or_disabled(base_path: PathBuf) -> TracedRuntimeBuilder {
+    fn disk_recorder_or_disabled(base_path: PathBuf) -> io::Result<AttachedRuntime> {
         let writer = DiskBuffer::builder()
             .base_path(base_path)
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build();
-        dial9::recorder_or_disabled(writer, |_| {})
+        dial9::recorder_or_disabled(writer)
+            .build()
+            .attach_tokio_runtime(|t| {
+                t.enable_all();
+            })
     }
 
-    fn fallback_config() -> TracedRuntimeBuilder {
+    fn fallback_config() -> io::Result<AttachedRuntime> {
         disk_recorder_or_disabled(tmp_base_path())
     }
 
@@ -324,7 +342,7 @@ mod fluent_builder_fallback {
         PathBuf::from("/this/dir/does/not/exist/dial9_macro_fallback_trace.bin")
     }
 
-    fn cascading_fallback_config() -> TracedRuntimeBuilder {
+    fn cascading_fallback_config() -> io::Result<AttachedRuntime> {
         disk_recorder_or_disabled(unwritable_base_path())
     }
 
@@ -357,5 +375,52 @@ mod fluent_builder_fallback {
             telemetry_disabled,
             "unwritable base_path must downgrade to a plain tokio runtime with no telemetry"
         );
+    }
+}
+
+/// `Recorder::attach_tokio_runtime` builds an instrumented runtime and hands back both.
+mod attach_tokio_runtime {
+    use dial9::{MemoryBuffer, RecorderTokioExt, TokioAttachOptions};
+
+    #[test]
+    fn builds_an_instrumented_runtime() {
+        let (recorder, runtime) = dial9::recorder(MemoryBuffer::new(4 * 1024 * 1024).unwrap())
+            .build()
+            .attach_tokio_runtime_with(
+                TokioAttachOptions::builder().runtime_name("main").build(),
+                |t| {
+                    t.worker_threads(2);
+                },
+            )
+            .expect("build tokio runtime");
+
+        let enabled = runtime.block_on(async { dial9::Dial9Handle::current().is_enabled() });
+        assert!(enabled, "the runtime should be instrumented");
+
+        drop(runtime);
+        recorder.graceful_shutdown(std::time::Duration::from_secs(1));
+    }
+
+    /// A disabled recorder still yields a usable runtime, just an untraced one.
+    #[test]
+    fn disabled_recorder_gives_a_plain_runtime() {
+        let (recorder, runtime) = dial9::recorder_disabled()
+            .attach_tokio_runtime(|_| {})
+            .expect("build tokio runtime");
+
+        assert_eq!(runtime.block_on(async { 42 }), 42);
+        assert!(!recorder.handle().is_enabled());
+    }
+
+    /// `attach_tokio_runtime`'s return value is exactly what `config` must produce, so
+    /// it goes straight into `#[dial9::main]` — nothing to unwrap or assemble.
+    #[dial9::main(config = || dial9::recorder_disabled().attach_tokio_runtime(|t| { t.worker_threads(2); }))]
+    async fn runs_from_an_attach_runtime_config() -> u32 {
+        dial9::spawn(async { 21 + 21 }).await.unwrap()
+    }
+
+    #[test]
+    fn attach_runtime_result_feeds_the_macro() {
+        assert_eq!(runs_from_an_attach_runtime_config(), 42);
     }
 }

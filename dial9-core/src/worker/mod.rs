@@ -114,18 +114,36 @@ pub(crate) fn run_background_task(
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");
     rt.block_on(async {
         let stop = tokio_util::sync::CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            fs,
-            config.poll_interval(),
-            processors,
-            stop.clone(),
-            metrics_sink,
-            trigger,
-        );
-        let mut run_fut = std::pin::pin!(worker.run());
+        let worker_stop = stop.clone();
+        let worker = async move {
+            let mut worker = WorkerLoop::new(
+                fs,
+                config.poll_interval(),
+                processors,
+                worker_stop,
+                metrics_sink,
+                trigger,
+            )
+            .await?;
+            worker.run().await;
+            io::Result::Ok(())
+        };
+        let mut run_fut =
+            std::pin::pin!(std::panic::AssertUnwindSafe(worker).catch_unwind());
         // Poll the worker until we receive a shutdown signal with a drain timeout.
         let drain_timeout = tokio::select! {
-            () = &mut run_fut => return,
+            result = &mut run_fut => {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
+                    }
+                    Err(_) => {
+                        tracing::error!(target: "dial9_worker", "worker panicked");
+                    }
+                }
+                return;
+            }
             msg = shutdown => msg.unwrap_or(Duration::ZERO),
         };
         tracing::info!(target: "dial9_worker", ?drain_timeout, "stop signal received, draining");
@@ -133,7 +151,11 @@ pub(crate) fn run_background_task(
         stop.cancel();
         // Give it `drain_timeout` to finish; after that, drop the future.
         match tokio::time::timeout(drain_timeout, run_fut).await {
-            Ok(()) => tracing::info!(target: "dial9_worker", "drain complete"),
+            Ok(Ok(Ok(()))) => tracing::info!(target: "dial9_worker", "drain complete"),
+            Ok(Ok(Err(error))) => {
+                tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
+            }
+            Ok(Err(_)) => tracing::error!(target: "dial9_worker", "worker panicked"),
             Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
         }
     });
@@ -341,15 +363,30 @@ fn record_dump_error(dumps: &mut [ActiveDump], matched: &[usize], kind: ProcessE
 }
 
 impl WorkerLoop {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         fs: Arc<Fs>,
         poll_interval: Duration,
-        processors: Vec<Box<dyn SegmentProcessor>>,
+        mut processors: Vec<Box<dyn SegmentProcessor>>,
         stop: tokio_util::sync::CancellationToken,
         metrics_sink: BoxEntrySink,
         trigger: Option<crate::dump::DumpRx>,
-    ) -> Self {
-        Self {
+    ) -> io::Result<Self> {
+        for processor in &mut processors {
+            let processor_name = processor.name();
+            tracing::debug!(
+                target: "dial9_worker",
+                processor = processor_name,
+                "initializing processor"
+            );
+            processor.initialize().await.map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("processor {processor_name} initialization failed: {error}"),
+                )
+            })?;
+        }
+
+        Ok(Self {
             fs,
             poll_interval,
             processors,
@@ -357,7 +394,7 @@ impl WorkerLoop {
             stop,
             trigger,
             epoch_cache: HashMap::new(),
-        }
+        })
     }
 
     pub(crate) async fn run(&mut self) {

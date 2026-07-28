@@ -223,7 +223,7 @@ impl TraceCapture {
         let writer =
             dial9_core::buffer::DiskBuffer::single_file(directory.path().join("trace.bin"))
                 .expect("create trace writer");
-        let recorder = dial9_core::recorder::recorder(writer).build_and_start();
+        let recorder = dial9_core::recorder::recorder(writer).build();
         dial9_core::handle::set_tl_handle(recorder.handle().clone());
         Self {
             directory,
@@ -236,8 +236,7 @@ impl TraceCapture {
         self.recorder
             .take()
             .expect("trace recorder is present")
-            .graceful_shutdown(std::time::Duration::ZERO)
-            .expect("shut down trace recorder");
+            .graceful_shutdown(std::time::Duration::ZERO);
 
         let bytes =
             std::fs::read(self.directory.path().join("trace.0.bin")).expect("read sealed trace");
