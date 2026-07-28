@@ -49,13 +49,20 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     // Downgrades to a disabled recorder if the writer can't be created; use
     // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
-    dial9::recorder_or_disabled(writer).build().attach_tokio_runtime_with(
-        TokioAttachOptions::builder()
-            .runtime_name("main")
-            .task_tracking_enabled(true)
-            .build(),
-        |t| { t.worker_threads(4); },
-    )
+    dial9::recorder_or_disabled(writer)
+        .segment_metadata([("service".to_string(), "checkout".to_string())])
+        .segment_metadata([(
+            "application.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        )])
+        .build()
+        .attach_tokio_runtime_with(
+            TokioAttachOptions::builder()
+                .runtime_name("main")
+                .task_tracking_enabled(true)
+                .build(),
+            |t| { t.worker_threads(4); },
+        )
 }
 
 #[dial9::main(config = my_config)] // inline config function is also supported
@@ -67,6 +74,12 @@ async fn main() {
         .unwrap();
 }
 ```
+
+Use [`RecorderBuilder::segment_metadata`](https://docs.rs/dial9/latest/dial9/struct.RecorderBuilder.html#method.segment_metadata)
+for static context that should be available when any rotated segment is loaded
+independently, such as the service, host, deployment, or compiled application
+version. Calls are merged, including calls made by integration layers; when a
+key is repeated, the later value wins.
 
 For zero-code configuration in production, use `dial9::recorder_from_env`:
 
