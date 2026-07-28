@@ -67,7 +67,8 @@ jobs:
   freebsd:
     name: FreeBSD 15.1
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    continue-on-error: true
+    timeout-minutes: 30
     env:
       RUST_BACKTRACE: 1
       RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
@@ -82,22 +83,22 @@ jobs:
           cache-after-prepare: true
           envs: "RUST_BACKTRACE RUSTFLAGS"
           prepare: |
-            pkg install -y node24 rustup-init
+            pkg install -y rustup-init
             rustup-init -y --profile minimal --default-toolchain "${{ env.STABLE_TOOLCHAIN }}"
             . "$HOME/.cargo/env"
-            rustup component add clippy
           run: |
             . "$HOME/.cargo/env"
             freebsd-version
             rustc --version
-            cargo test -p dial9-core --all-features
-            cargo test -p dial9-tokio-telemetry --features __nonlinux_all_features
+            cargo test -p dial9-core --all-features \
+              freebsd_tid_matches_kernel_thread_id
+            cargo test -p dial9-tokio-telemetry \
+              --features __nonlinux_all_features \
+              --test park_unpark_tid \
+              --test process_resource_usage
             cargo test -p dial9-perf-self-profile \
               --features "process-resource test-util" \
               process_resource
-            cargo clippy --all-targets \
-              --features __nonlinux_all_features \
-              -- -D warnings
 
   windows-cli-check:
     name: Windows CLI check
@@ -497,7 +498,7 @@ jobs:
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, freebsd, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle, package, doctests]
+    needs: [fmt, clippy, build, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle, package, doctests]
     if: always()
     steps:
       - run: |

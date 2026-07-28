@@ -275,15 +275,37 @@ mod unix {
             events
         }
 
+        fn read_after_rss_accounting_tick() -> ProcessResourceUsageSnapshot {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut working_set = vec![0_u8; 1024 * 1024];
+            loop {
+                // FreeBSD updates ru_maxrss from its statclock path while the
+                // process is running. Sleeping alone may never trigger that
+                // accounting, so touch resident pages through at least one
+                // likely clock tick before retrying getrusage.
+                let work_until = Instant::now() + Duration::from_millis(10);
+                while Instant::now() < work_until {
+                    for page in working_set.chunks_mut(4096) {
+                        page[0] = page[0].wrapping_add(1);
+                    }
+                    std::hint::black_box(&working_set);
+                }
+
+                let snapshot = read_process_resource_usage()
+                    .expect("getrusage should succeed for the current process");
+                if snapshot.max_rss_bytes > 0 {
+                    return snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "ru_maxrss remained zero after waiting for a resource-accounting tick"
+                );
+            }
+        }
+
         #[test]
         fn read_process_resource_usage_returns_metrics() {
-            let snapshot = read_process_resource_usage()
-                .expect("getrusage should succeed for the current process");
-            // FreeBSD may report ru_maxrss == 0 until its first accounting
-            // tick, so validate a resource counter populated at startup.
-            #[cfg(target_os = "freebsd")]
-            assert!(snapshot.minor_faults > 0);
-            #[cfg(not(target_os = "freebsd"))]
+            let snapshot = read_after_rss_accounting_tick();
             assert!(snapshot.max_rss_bytes > 0);
         }
 
@@ -298,6 +320,11 @@ mod unix {
 
         #[test]
         fn source_emits_process_resource_usage_event() {
+            // FreeBSD can report ru_maxrss == 0 before its first accounting
+            // tick. Once it becomes non-zero it is a process maximum, so the
+            // source sample below must retain the real RSS assertion.
+            read_after_rss_accounting_tick();
+
             let shared = SharedState::new(0);
             let ctx = shared.flush_context();
             let mut source = ProcessResourceUsageSource::new(ProcessResourceUsageConfig::default());
@@ -311,9 +338,6 @@ mod unix {
             assert_eq!(events.len(), 1);
             let event = &events[0];
             assert!(event.timestamp_ns > 0);
-            #[cfg(target_os = "freebsd")]
-            assert!(event.minor_faults > 0);
-            #[cfg(not(target_os = "freebsd"))]
             assert!(event.max_rss_bytes > 0);
         }
 
