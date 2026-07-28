@@ -8,7 +8,6 @@
     "check:types": "tsc -p tsconfig.types.json --noEmit",
     "dev": "vite",
     "dev:embedded": "vite build --watch",
-    "prototype:state-authority": "node src/store/prototype-unified-state/cli.mts",
     "pretest": "npm run check:boundary",
     "test": "vitest run",
     "posttest": "npm run test:node-legacy",

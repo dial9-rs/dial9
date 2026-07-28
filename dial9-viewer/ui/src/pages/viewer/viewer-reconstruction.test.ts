@@ -3,7 +3,11 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
-import { parseTraceBuffer, type ParsedTrace } from "../../lib/trace/index.js";
+import {
+  parseTraceBuffer,
+  type ParsedTrace,
+  type PollSpan,
+} from "../../lib/trace/index.js";
 import { encodeViewState } from "../../lib/url/index.js";
 import { createViewerStore } from "./store.js";
 import {
@@ -43,6 +47,15 @@ function atFraction(trace: ParsedTrace, fraction: number): number {
   return Math.round(trace.minTs! + (trace.maxTs! - trace.minTs!) * fraction);
 }
 
+function lanePolls(lane: ReturnType<typeof deriveLaneData>): PollSpan[] {
+  const polls: PollSpan[] = [];
+  for (const workerId of lane.workerIds) {
+    const workerPolls = lane.workerSpans[workerId]?.polls;
+    if (workerPolls !== undefined) polls.push(...workerPolls);
+  }
+  return polls;
+}
+
 function normalizedProjection(
   state: Parameters<typeof projectViewerState>[0],
 ): { query: [string, string][]; hash: string } {
@@ -64,8 +77,7 @@ describe("viewer deep-link reconstruction", () => {
     );
 
     const lane = deriveLaneData(settledTrace);
-    const poll = lane.workerIds
-      .flatMap((workerId) => lane.workerSpans[workerId]?.polls ?? [])
+    const poll = lanePolls(lane)
       .find((candidate) => candidate.taskId > 0)!;
     const spanId =
       lane.allSpans[0]?.spanId ??
@@ -159,7 +171,7 @@ describe("viewer deep-link reconstruction", () => {
       .flatMap((slice) => Object.values(slice))
       .flatMap((field) => field.kind === "url" ? [...field.params] : []);
     const emittedParams = [
-      ...query.keys().filter((key) => key !== "trace"),
+      ...[...query.keys()].filter((key) => key !== "trace"),
       ...[...new URLSearchParams(hash).keys()]
         .filter((key) => key !== "v")
         .map((key) => `#${key}`),
@@ -189,8 +201,7 @@ describe("viewer deep-link reconstruction", () => {
     reconstruction.applyLoadedTrace(settledTrace, "source");
 
     const oldLane = deriveLaneData(settledTrace);
-    const oldPoll = oldLane.workerIds
-      .flatMap((workerId) => oldLane.workerSpans[workerId]?.polls ?? [])
+    const oldPoll = lanePolls(oldLane)
       .find((candidate) => candidate.taskId > 0)!;
     const oldEvent = settledTrace.customEvents.find(
       (candidate) => !candidate.name.startsWith("Span"),
@@ -216,11 +227,7 @@ describe("viewer deep-link reconstruction", () => {
     reconstruction.applyLoadedTrace(reconstructedTrace, "reparse");
 
     const selection = store.getState().selection;
-    const replacementPolls = deriveLaneData(reconstructedTrace).workerIds
-      .flatMap(
-        (workerId) =>
-          deriveLaneData(reconstructedTrace).workerSpans[workerId]?.polls ?? [],
-      );
+    const replacementPolls = lanePolls(deriveLaneData(reconstructedTrace));
     expect(selection.pollDetail).not.toBe(oldPoll);
     expect(replacementPolls).toContain(selection.pollDetail);
     expect(selection.pinnedEvent?.events).not.toContain(oldEvent);
@@ -248,8 +255,7 @@ describe("viewer deep-link reconstruction", () => {
     reconstruction.applyLoadedTrace(settledTrace, "source");
 
     const lane = deriveLaneData(settledTrace);
-    const poll = lane.workerIds
-      .flatMap((workerId) => lane.workerSpans[workerId]?.polls ?? [])
+    const poll = lanePolls(lane)
       .find((candidate) => candidate.taskId > 0)!;
     const event = settledTrace.customEvents.find(
       (candidate) => !candidate.name.startsWith("Span"),
