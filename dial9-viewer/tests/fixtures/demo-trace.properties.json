@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 8993,
+  "total_samples": 14489,
   "by_source": {
-    "0": 147,
-    "1": 8846
+    "0": 163,
+    "1": 14326
   },
   "on_off_all": {
-    "on_runtime": 8993,
-    "off_runtime": 0
+    "on_runtime": 14487,
+    "off_runtime": 2
   },
   "on_off_by_source": {
     "0": {
-      "on": 147,
-      "off": 0
+      "on": 161,
+      "off": 2
     },
     "1": {
-      "on": 8846,
+      "on": 14326,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 147,
-    "distinct_stacks": 116,
-    "stack_sig_digest": "a9a7f7ccc3890e67",
-    "ts_count": 147,
-    "ts_span_ns": 3637993460,
-    "ts_delta_digest": "f23bfcd1eaa71887",
+    "count": 163,
+    "distinct_stacks": 134,
+    "stack_sig_digest": "d2d39f4f7efb544d",
+    "ts_count": 163,
+    "ts_span_ns": 3761408783,
+    "ts_delta_digest": "c0826680ddf38f70",
     "top_stacks": [
       {
-        "count": 8,
-        "depth": 129,
-        "leaf": "_Unwind_Find_FDE"
-      },
-      {
         "count": 6,
-        "depth": 129,
-        "leaf": "0xffff9ba4de60"
+        "depth": 1,
+        "leaf": "__pthread_mutex_unlock_usercnt"
       },
       {
         "count": 4,
-        "depth": 122,
-        "leaf": "0xffff9ba4c97c"
+        "depth": 1,
+        "leaf": "__GI___pthread_mutex_lock"
       },
       {
         "count": 4,
-        "depth": 129,
-        "leaf": "0xffff9b87d200"
+        "depth": 1,
+        "leaf": "_int_malloc"
+      },
+      {
+        "count": 4,
+        "depth": 1,
+        "leaf": "__lll_unlock_wake"
       },
       {
         "count": 3,
-        "depth": 129,
-        "leaf": "0xffff9ba4de8c"
+        "depth": 1,
+        "leaf": "__GI___strlen_sse2"
       },
       {
         "count": 3,
-        "depth": 59,
-        "leaf": "0xffff9babd2f8"
-      },
-      {
-        "count": 3,
-        "depth": 122,
-        "leaf": "_Unwind_Find_FDE"
+        "depth": 1,
+        "leaf": "_int_free"
       },
       {
         "count": 2,
-        "depth": 122,
-        "leaf": "0xffff9ba4de54"
+        "depth": 2,
+        "leaf": "[unknown] 0x7f0acd2f194d"
+      },
+      {
+        "count": 2,
+        "depth": 1,
+        "leaf": "__dl_iterate_phdr"
       }
     ]
   }

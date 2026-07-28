@@ -38,7 +38,7 @@
 //! `dial9-utils` to a particular async runtime integration. Connection lifecycle
 //! events use the `dial9-core` version linked by `dial9-utils`.
 
-use std::{future::Future, pin::Pin};
+use std::{fmt::Debug, future::Future, net::SocketAddr, pin::Pin};
 
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_trace_format::{InternedString, TraceEvent};
@@ -82,9 +82,35 @@ where
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectionMetadata {
+    remote_addr: String,
+    remote_port: Option<u16>,
+}
+
+fn connection_metadata<A>(remote_addr: &A) -> ConnectionMetadata
+where
+    A: Debug,
+{
+    // Axum 0.8 supports arbitrary listener address types. Keep those generic
+    // while structuring standard TCP addresses for effective IP interning.
+    let remote_addr = format!("{remote_addr:?}");
+    if let Ok(remote_addr) = remote_addr.parse::<SocketAddr>() {
+        ConnectionMetadata {
+            remote_addr: remote_addr.ip().to_string(),
+            remote_port: Some(remote_addr.port()),
+        }
+    } else {
+        ConnectionMetadata {
+            remote_addr,
+            remote_port: None,
+        }
+    }
+}
+
 struct ConnectionAccepted {
     timestamp_ns: u64,
-    remote_addr: String,
+    remote: ConnectionMetadata,
 }
 
 #[derive(TraceEvent)]
@@ -92,21 +118,23 @@ struct ConnectionAcceptedWire {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     remote_addr: InternedString,
+    remote_port: Option<u16>,
 }
 
 impl Encodable for ConnectionAccepted {
     fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
-        let remote_addr = enc.intern_string(&self.remote_addr);
+        let remote_addr = enc.intern_string(&self.remote.remote_addr);
         enc.encode(&ConnectionAcceptedWire {
             timestamp_ns: self.timestamp_ns,
             remote_addr,
+            remote_port: self.remote.remote_port,
         });
     }
 }
 
 struct ConnectionClosed {
     timestamp_ns: u64,
-    remote_addr: String,
+    remote: ConnectionMetadata,
     duration_us: u64,
 }
 
@@ -115,6 +143,7 @@ struct ConnectionClosedWire {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     remote_addr: InternedString,
+    remote_port: Option<u16>,
     /// Rendered as a human-friendly duration in the viewer via the unit
     /// annotation.
     #[traceevent(unit = "us")]
@@ -123,10 +152,11 @@ struct ConnectionClosedWire {
 
 impl Encodable for ConnectionClosed {
     fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
-        let remote_addr = enc.intern_string(&self.remote_addr);
+        let remote_addr = enc.intern_string(&self.remote.remote_addr);
         enc.encode(&ConnectionClosedWire {
             timestamp_ns: self.timestamp_ns,
             remote_addr,
+            remote_port: self.remote.remote_port,
             duration_us: self.duration_us,
         });
     }
@@ -171,4 +201,113 @@ async fn send_request(address: std::net::SocketAddr) -> String {
         .await
         .expect("read response");
     response
+}
+
+#[cfg(test)]
+struct TraceCapture {
+    directory: tempfile::TempDir,
+    recorder: Option<dial9_core::recording::Recorder>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct RecordedConnectionEvents {
+    accepted: Vec<ConnectionMetadata>,
+    closed: Vec<ConnectionMetadata>,
+}
+
+#[cfg(test)]
+impl TraceCapture {
+    fn start() -> Self {
+        let directory = tempfile::tempdir().expect("create trace directory");
+        let writer =
+            dial9_core::buffer::DiskBuffer::single_file(directory.path().join("trace.bin"))
+                .expect("create trace writer");
+        let recorder = dial9_core::recorder::recorder(writer).build_and_start();
+        dial9_core::handle::set_tl_handle(recorder.handle().clone());
+        Self {
+            directory,
+            recorder: Some(recorder),
+        }
+    }
+
+    fn finish(mut self) -> RecordedConnectionEvents {
+        dial9_core::handle::clear_tl_handle();
+        self.recorder
+            .take()
+            .expect("trace recorder is present")
+            .graceful_shutdown(std::time::Duration::ZERO)
+            .expect("shut down trace recorder");
+
+        let bytes =
+            std::fs::read(self.directory.path().join("trace.0.bin")).expect("read sealed trace");
+        let mut decoder =
+            dial9_trace_format::decoder::Decoder::new(&bytes).expect("decode trace header");
+        let mut events = RecordedConnectionEvents::default();
+        decoder
+            .for_each_event(|event| {
+                let destination = match event.name {
+                    "ConnectionAcceptedWire" => &mut events.accepted,
+                    "ConnectionClosedWire" => &mut events.closed,
+                    _ => return,
+                };
+
+                let mut remote_addr = None;
+                let mut remote_port = None;
+                for (field, value) in event.schema.fields().iter().zip(event.fields) {
+                    match (field.name(), value) {
+                        (
+                            "remote_addr",
+                            dial9_trace_format::types::FieldValueRef::PooledString(id),
+                        ) => {
+                            remote_addr = Some(
+                                event
+                                    .string_pool
+                                    .get(*id)
+                                    .expect("remote address is in the string pool")
+                                    .to_owned(),
+                            );
+                        }
+                        ("remote_port", dial9_trace_format::types::FieldValueRef::Varint(port)) => {
+                            remote_port =
+                                Some(u16::try_from(*port).expect("remote port fits in u16"));
+                        }
+                        ("remote_port", dial9_trace_format::types::FieldValueRef::None) => {}
+                        _ => {}
+                    }
+                }
+
+                destination.push(ConnectionMetadata {
+                    remote_addr: remote_addr.expect("connection event has a remote address"),
+                    remote_port,
+                });
+            })
+            .expect("decode trace events");
+        events
+    }
+}
+
+#[cfg(test)]
+impl Drop for TraceCapture {
+    fn drop(&mut self) {
+        dial9_core::handle::clear_tl_handle();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionMetadata, connection_metadata};
+
+    #[test]
+    fn socket_connection_metadata_splits_ip_and_port() {
+        let remote_addr: std::net::SocketAddr = "127.0.0.1:43210".parse().unwrap();
+
+        assert_eq!(
+            connection_metadata(&remote_addr),
+            ConnectionMetadata {
+                remote_addr: "127.0.0.1".to_owned(),
+                remote_port: Some(43210),
+            }
+        );
+    }
 }
