@@ -197,6 +197,24 @@ impl<M: BufferMode> RecorderBuilder<M> {
 
     /// Static metadata written into every rotated segment header. Merged across
     /// calls (and across the tokio layer); on a key collision the later value wins.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use dial9_core::buffer::MemoryBuffer;
+    /// use dial9_core::recorder::recorder;
+    ///
+    /// let recorder = recorder(MemoryBuffer::new(1024 * 1024)?)
+    ///     .segment_metadata([("service".into(), "checkout".into())])
+    ///     .segment_metadata([("environment".into(), "production".into())])
+    ///     .segment_metadata([("service".into(), "payments".into())])
+    ///     .build();
+    ///
+    /// // Metadata is merged across calls. The third call overrides `service`
+    /// // from the first, so its value is `payments`.
+    /// # recorder.graceful_shutdown(std::time::Duration::ZERO);
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     pub fn segment_metadata(mut self, entries: impl IntoIterator<Item = (String, String)>) -> Self {
         merge_segment_metadata(&mut self.segment_metadata, entries);
         self
