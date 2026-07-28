@@ -103,6 +103,29 @@ pub(crate) struct PollEnd {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct TaskSpawn {
+    pub(crate) timestamp_ns: u64,
+    pub(crate) task_id: u64,
+    /// Whether the task was spawned through dial9's traced waker. `None` when
+    /// the source trace predates the `instrumented` field.
+    #[serde(default)]
+    pub(crate) instrumented: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct TaskTerminate {
+    pub(crate) timestamp_ns: u64,
+    pub(crate) task_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WakeEvent {
+    pub(crate) timestamp_ns: u64,
+    pub(crate) waker_task_id: u64,
+    pub(crate) woken_task_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct ClockSync {
     pub(crate) timestamp_ns: u64,
     pub(crate) realtime_ns: u64,
@@ -294,6 +317,9 @@ pub(crate) enum TraceEvent {
     WorkerUnpark(WorkerUnpark),
     PollStart(PollStart),
     PollEnd(PollEnd),
+    TaskSpawn(TaskSpawn),
+    TaskTerminate(TaskTerminate),
+    Wake(WakeEvent),
 }
 
 impl TraceEvent {
@@ -304,6 +330,9 @@ impl TraceEvent {
             Self::WorkerUnpark(e) => e.timestamp_ns,
             Self::PollStart(e) => e.timestamp_ns,
             Self::PollEnd(e) => e.timestamp_ns,
+            Self::TaskSpawn(e) => e.timestamp_ns,
+            Self::TaskTerminate(e) => e.timestamp_ns,
+            Self::Wake(e) => e.timestamp_ns,
         }
     }
 }
@@ -402,6 +431,21 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
             "PollEndEvent" => {
                 if let Ok(p) = ev.deserialize::<PollEnd>() {
                     events.push(TraceEvent::PollEnd(p));
+                }
+            }
+            "TaskSpawnEvent" => {
+                if let Ok(event) = ev.deserialize::<TaskSpawn>() {
+                    events.push(TraceEvent::TaskSpawn(event));
+                }
+            }
+            "TaskTerminateEvent" => {
+                if let Ok(event) = ev.deserialize::<TaskTerminate>() {
+                    events.push(TraceEvent::TaskTerminate(event));
+                }
+            }
+            "WakeEventEvent" => {
+                if let Ok(event) = ev.deserialize::<WakeEvent>() {
+                    events.push(TraceEvent::Wake(event));
                 }
             }
             "SymbolTableEntry" => {

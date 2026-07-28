@@ -92,6 +92,16 @@ function latencyHeat(ns) {
   return "#3fb950"; // green — sub-millisecond
 }
 
+// Human-readable provenance for a runnable-to-poll scheduling measurement.
+function schedulingDelayEvidenceLabel(kind) {
+  switch (kind) {
+    case "spawn": return "spawn -> first poll";
+    case "wake": return "wake -> poll";
+    case "wake_during_poll": return "poll end -> next poll";
+    default: return "unknown evidence";
+  }
+}
+
 // Map a worker's busyness percentage to a severity color. Busyness = time spent
 // in poll() / wall-clock time. ≥80% is red (near-saturated), ≥50% amber
 // (moderately loaded), else green. Thresholds are intentionally higher than
@@ -160,6 +170,7 @@ if (typeof module !== "undefined" && module.exports) {
     exemplarViewerUrl,
     formatTokioCoverage,
     latencyHeat,
+    schedulingDelayEvidenceLabel,
     busynessHeat,
     hostBusyPct,
     hostWorkerCounts,
