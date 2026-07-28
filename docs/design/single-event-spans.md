@@ -114,7 +114,9 @@ Fields carrying the `span.start`/`span.duration` or execution-context roles
 are not copied into the span's attributes. The `span.name` field is the
 exception: it stays a normal attribute (with its original name, value, and
 unit) in addition to supplying the display name. All other event fields remain
-attributes with their original names, values, and units.
+attributes with their original names, values, and units. Decoders may project
+the field shapes supported by their existing span-attribute model; decoders
+that expose typed attributes also preserve their unit annotations.
 
 ## Validation
 
@@ -195,5 +197,5 @@ recognized as spans.
 
 PR 1 defines this specification and updates the metrique producer. PR 2
 replaces the metrique-specific viewer implementation with the generalized
-single-event span decoder. The PRs are not stacked; PR 2 is rebased onto
-`main` after PR 1 merges.
+single-event span decoder. PR 2 may be temporarily stacked on PR 1 for review;
+it will be rebased onto `main` after PR 1 merges.

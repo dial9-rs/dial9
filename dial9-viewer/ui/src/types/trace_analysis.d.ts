@@ -348,6 +348,10 @@ declare module "*/trace_analysis.js" {
     spanName: string;
     /** User-defined span fields (base worker/span fields excluded). */
     fields: Record<string, DecodedFieldValue>;
+    /** Producer/instrumentation family for annotated single-event spans. */
+    spanType?: string | undefined;
+    /** Units for projected single-event span attributes. */
+    units?: Record<string, string> | null | undefined;
     /** Only set for explicit parents; null for most #[instrument] spans. */
     parentSpanId: string | null;
     segments: SpanSegment[];
@@ -383,6 +387,8 @@ declare module "*/trace_analysis.js" {
       {
         spanName: string;
         fields: Record<string, DecodedFieldValue>;
+        spanType?: string | undefined;
+        units?: Record<string, string> | null | undefined;
         parentSpanId: string | null;
       }
     >;
@@ -394,7 +400,11 @@ declare module "*/trace_analysis.js" {
 
   export function buildSpanData(
     customEvents: readonly CustomTraceEvent[],
-    workerSpans?: Record<number, WorkerLane>
+    workerSpans?: Record<number, WorkerLane>,
+    tidBindings?: ReadonlyMap<
+      number,
+      readonly import("*/trace_parser.js").TidWorkerBinding[]
+    >
   ): SpanData;
 
   /** Seeds plus all their descendants; cycle-safe. */

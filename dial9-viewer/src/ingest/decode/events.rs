@@ -4,13 +4,16 @@
 //! consumes. Raw timestamp fields are converted to clock-domain newtypes as
 //! soon as orchestration leaves the wire edge.
 
+use dial9_trace_format::codec::WireTypeId;
 use dial9_trace_format::decoder::{Decoder, RawEvent};
-use dial9_trace_format::types::FieldValueRef;
+use dial9_trace_format::schema::SchemaEntry;
+use dial9_trace_format::types::{FieldType, FieldValueRef};
 use lasso::{Rodeo, Spur};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
-use super::clock::ClockOffset;
+use super::clock::{ClockOffset, MonoNs};
+use dial9_core::schema_extensions::{self, roles};
 
 /// Span enter/exit fields that describe the span's identity or lifecycle rather
 /// than user-attached metadata. These are consumed structurally elsewhere and
@@ -27,14 +30,17 @@ const BASE_SPAN_FIELDS: &[&str] = &[
     "span_name",
 ];
 
-/// Extract user-attached span attributes (non-base fields) from a raw span
-/// enter/exit event, resolving pooled strings and rendering scalar values to
-/// strings. Absent (`None`) fields and non-scalar values (stacks, maps, lists,
-/// bytes) are skipped — attributes are meant to be short scalar labels.
-fn extract_span_attributes(ev: &RawEvent<'_, '_>) -> Vec<(String, String)> {
+/// Extract user-attached attributes (non-base fields) from a raw event,
+/// resolving pooled strings and rendering scalar values to strings. Absent
+/// (`None`) fields and non-scalar values (stacks, maps, lists, bytes) are
+/// skipped — attributes are meant to be short scalar labels.
+fn extract_attributes(
+    ev: &RawEvent<'_, '_>,
+    include_field: impl Fn(usize, &str) -> bool,
+) -> Vec<(String, String)> {
     let mut attrs = Vec::new();
-    for (name, value) in ev.field_names().zip(ev.fields.iter()) {
-        if BASE_SPAN_FIELDS.contains(&name) {
+    for (index, (name, value)) in ev.field_names().zip(ev.fields.iter()).enumerate() {
+        if !include_field(index, name) {
             continue;
         }
         let rendered = match value {
@@ -61,6 +67,10 @@ fn extract_span_attributes(ev: &RawEvent<'_, '_>) -> Vec<(String, String)> {
         }
     }
     attrs
+}
+
+fn extract_span_attributes(ev: &RawEvent<'_, '_>) -> Vec<(String, String)> {
+    extract_attributes(ev, |_, name| !BASE_SPAN_FIELDS.contains(&name))
 }
 
 // ─── Lightweight serde structs (select only needed fields) ───────────────────
@@ -175,6 +185,310 @@ pub(crate) struct LegacySpanCloseEvent {
     /// deterministically against them when timestamps tie.
     #[serde(skip)]
     pub(crate) decode_sequence: u64,
+}
+
+/// A completed span projected from one annotated event.
+#[derive(Debug)]
+pub(crate) struct SingleEventSpanEvent {
+    pub(crate) schema_name: String,
+    pub(crate) span_type: String,
+    pub(crate) name: String,
+    pub(crate) start_ns: u64,
+    pub(crate) end_ns: u64,
+    pub(crate) thread_id: Option<u64>,
+    pub(crate) task_id: Option<u64>,
+    pub(crate) worker_id: Option<u64>,
+    /// Per-single-event-span wire ordinal for deterministic synthetic identity.
+    pub(crate) decode_sequence: u64,
+    pub(crate) attributes: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuralRole {
+    SpanStart,
+    SpanName,
+    ThreadId,
+    TokioTaskId,
+    TokioWorkerId,
+}
+
+impl StructuralRole {
+    fn from_annotation(value: &str) -> Option<Self> {
+        match value {
+            roles::SPAN_START => Some(Self::SpanStart),
+            roles::SPAN_NAME => Some(Self::SpanName),
+            roles::THREAD_ID => Some(Self::ThreadId),
+            roles::TOKIO_TASK_ID => Some(Self::TokioTaskId),
+            roles::TOKIO_WORKER_ID => Some(Self::TokioWorkerId),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SingleEventSpanLayout {
+    schema_name: String,
+    span_type: String,
+    start_index: usize,
+    start_multiplier: u64,
+    name_index: Option<usize>,
+    thread_id_index: Option<usize>,
+    task_id_index: Option<usize>,
+    worker_id_index: Option<usize>,
+    attribute_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum CompiledSingleEventSpan {
+    NotSpan,
+    Invalid(String),
+    Layout(SingleEventSpanLayout),
+}
+
+fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
+    let mut field_roles = vec![None; schema.fields().len()];
+    let mut start_index = None;
+    let mut name_index = None;
+    let mut thread_id_index = None;
+    let mut task_id_index = None;
+    let mut worker_id_index = None;
+    let mut validation_error = None;
+
+    for annotation in schema
+        .annotations()
+        .iter()
+        .filter(|annotation| annotation.key() == schema_extensions::ROLE_KEY)
+    {
+        let Some(role) = StructuralRole::from_annotation(annotation.value()) else {
+            continue;
+        };
+        let index = usize::from(annotation.field_index());
+        if index >= schema.fields().len() {
+            validation_error.get_or_insert_with(|| {
+                format!(
+                    "{} references missing field {}",
+                    schema_extensions::ROLE_KEY,
+                    annotation.field_index()
+                )
+            });
+            continue;
+        }
+        match field_roles[index] {
+            Some(existing) if existing == role => continue,
+            Some(_) => {
+                validation_error.get_or_insert_with(|| {
+                    format!("field {} has conflicting structural roles", index)
+                });
+                continue;
+            }
+            None => field_roles[index] = Some(role),
+        }
+
+        let slot = match role {
+            StructuralRole::SpanStart => &mut start_index,
+            StructuralRole::SpanName => &mut name_index,
+            StructuralRole::ThreadId => &mut thread_id_index,
+            StructuralRole::TokioTaskId => &mut task_id_index,
+            StructuralRole::TokioWorkerId => &mut worker_id_index,
+        };
+        if slot.replace(index).is_some() {
+            validation_error
+                .get_or_insert_with(|| format!("duplicate {} role", annotation.value()));
+        }
+    }
+
+    let Some(start_index) = start_index else {
+        return CompiledSingleEventSpan::NotSpan;
+    };
+    if let Some(error) = validation_error {
+        return CompiledSingleEventSpan::Invalid(error);
+    }
+    if !schema.has_timestamp() {
+        return CompiledSingleEventSpan::Invalid(
+            "single-event span schema has no packed end timestamp".to_string(),
+        );
+    }
+    if !is_integer_field(schema.fields()[start_index].field_type()) {
+        return CompiledSingleEventSpan::Invalid(
+            "span.start field must have an integer wire type".to_string(),
+        );
+    }
+    if let Some(index) = name_index
+        && !is_string_field(schema.fields()[index].field_type())
+    {
+        return CompiledSingleEventSpan::Invalid(
+            "span.name field must have a string wire type".to_string(),
+        );
+    }
+    for (role, index) in [
+        (roles::THREAD_ID, thread_id_index),
+        (roles::TOKIO_TASK_ID, task_id_index),
+        (roles::TOKIO_WORKER_ID, worker_id_index),
+    ] {
+        if let Some(index) = index
+            && !is_integer_field(schema.fields()[index].field_type())
+        {
+            return CompiledSingleEventSpan::Invalid(format!(
+                "{role} field must have an integer wire type"
+            ));
+        }
+    }
+
+    let start_multiplier = match unique_annotation(schema, start_index, "unit") {
+        Ok(Some("ns")) => 1,
+        Ok(Some("us")) => 1_000,
+        Ok(Some("ms")) => 1_000_000,
+        Ok(Some("s")) => 1_000_000_000,
+        Ok(Some(unit)) => {
+            return CompiledSingleEventSpan::Invalid(format!(
+                "unsupported span.start unit {unit:?}"
+            ));
+        }
+        Ok(None) => {
+            return CompiledSingleEventSpan::Invalid(
+                "span.start field is missing its unit annotation".to_string(),
+            );
+        }
+        Err(error) => return CompiledSingleEventSpan::Invalid(error),
+    };
+    let span_type = match unique_annotation(schema, start_index, schema_extensions::SPAN_TYPE_KEY) {
+        Ok(Some(value)) if !value.is_empty() => value.to_string(),
+        Ok(_) => schema_extensions::DEFAULT_SPAN_TYPE.to_string(),
+        Err(error) => return CompiledSingleEventSpan::Invalid(error),
+    };
+    let attribute_indices = field_roles
+        .iter()
+        .enumerate()
+        .filter_map(|(index, role)| role.is_none().then_some(index))
+        .collect();
+
+    CompiledSingleEventSpan::Layout(SingleEventSpanLayout {
+        schema_name: schema.name().to_string(),
+        span_type,
+        start_index,
+        start_multiplier,
+        name_index,
+        thread_id_index,
+        task_id_index,
+        worker_id_index,
+        attribute_indices,
+    })
+}
+
+fn unique_annotation<'a>(
+    schema: &'a SchemaEntry,
+    field_index: usize,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
+    let mut value = None;
+    for annotation in schema.annotations().iter().filter(|annotation| {
+        usize::from(annotation.field_index()) == field_index && annotation.key() == key
+    }) {
+        match value {
+            Some(existing) if existing != annotation.value() => {
+                return Err(format!(
+                    "field {field_index} has conflicting {key} annotations"
+                ));
+            }
+            Some(_) => {}
+            None => value = Some(annotation.value()),
+        }
+    }
+    Ok(value)
+}
+
+fn is_integer_field(field_type: FieldType) -> bool {
+    matches!(
+        field_type.inner(),
+        FieldType::I64 | FieldType::Varint | FieldType::U8 | FieldType::U16 | FieldType::U32
+    )
+}
+
+fn is_string_field(field_type: FieldType) -> bool {
+    matches!(
+        field_type.inner(),
+        FieldType::String | FieldType::PooledString
+    )
+}
+
+fn unsigned_value(value: &FieldValueRef<'_>) -> Result<Option<u64>, &'static str> {
+    match value {
+        FieldValueRef::Varint(value) => Ok(Some(*value)),
+        FieldValueRef::I64(value) => u64::try_from(*value)
+            .map(Some)
+            .map_err(|_| "integer structural field is negative"),
+        FieldValueRef::None => Ok(None),
+        _ => Err("integer structural field has an incompatible value"),
+    }
+}
+
+fn string_value<'a>(
+    ev: &'a RawEvent<'_, '_>,
+    index: usize,
+) -> Result<Option<&'a str>, &'static str> {
+    match &ev.fields[index] {
+        FieldValueRef::String(value) => Ok(Some(value)),
+        FieldValueRef::PooledString(id) => ev
+            .string_pool
+            .get(*id)
+            .map(Some)
+            .ok_or("span.name references an unresolved pooled string"),
+        FieldValueRef::None => Ok(None),
+        _ => Err("span.name field has an incompatible value"),
+    }
+}
+
+impl SingleEventSpanLayout {
+    fn decode(
+        &self,
+        ev: &RawEvent<'_, '_>,
+        decode_sequence: u64,
+    ) -> Result<SingleEventSpanEvent, &'static str> {
+        let end_ns = ev
+            .timestamp_ns
+            .ok_or("single-event span has no packed end timestamp")?;
+        let raw_start = unsigned_value(&ev.fields[self.start_index])?
+            .ok_or("single-event span is missing its start timestamp")?;
+        let start_ns = raw_start
+            .checked_mul(self.start_multiplier)
+            .ok_or("single-event span start timestamp overflows nanoseconds")?;
+        if start_ns > end_ns {
+            return Err("single-event span start follows its end");
+        }
+
+        let name = match self.name_index {
+            Some(index) => string_value(ev, index)?
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&self.schema_name)
+                .to_string(),
+            None => self.schema_name.clone(),
+        };
+        let context_value = |index: Option<usize>| -> Result<Option<u64>, &'static str> {
+            index
+                .map(|index| unsigned_value(&ev.fields[index]))
+                .transpose()
+                .map(Option::flatten)
+        };
+        let thread_id = context_value(self.thread_id_index)?;
+        let task_id = context_value(self.task_id_index)?.filter(|id| *id > 0);
+        let worker_id = context_value(self.worker_id_index)?;
+        let attributes = extract_attributes(ev, |index, _| {
+            self.attribute_indices.binary_search(&index).is_ok()
+        });
+
+        Ok(SingleEventSpanEvent {
+            schema_name: self.schema_name.clone(),
+            span_type: self.span_type.clone(),
+            name,
+            start_ns,
+            end_ns,
+            thread_id,
+            task_id,
+            worker_id,
+            decode_sequence,
+            attributes,
+        })
+    }
 }
 
 /// Metadata parsed from the SpanEnter schema name for old-format events.
@@ -314,10 +628,12 @@ pub(crate) struct DecodedTrace {
     pub(crate) addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>>,
     pub(crate) events: Vec<TraceEvent>,
     pub(crate) clock_offset: Option<ClockOffset>,
+    pub(crate) first_clock_sync_mono: Option<MonoNs>,
     pub(crate) segment_metadata_boot_id: Option<String>,
     pub(crate) legacy_enters: Vec<(String, LegacySpanEnterEvent)>,
     pub(crate) legacy_exits: Vec<(String, LegacySpanExitEvent)>,
     pub(crate) legacy_closes: Vec<LegacySpanCloseEvent>,
+    pub(crate) single_event_spans: Vec<SingleEventSpanEvent>,
 }
 
 /// Decode relevant wire events without imposing downstream ordering or attribution.
@@ -328,6 +644,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
     let mut addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>> = FxHashMap::default();
     let mut events: Vec<TraceEvent> = Vec::new();
     let mut clock_offset: Option<ClockOffset> = None;
+    let mut first_clock_sync_mono: Option<MonoNs> = None;
     // Authoritative boot_id decoded from SegmentMetadata entries. When the
     // namespace isolation layer is active, the writer stamps a
     // `boot_id` key in segment metadata. This is the stable cross-segment
@@ -347,129 +664,177 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
     let mut legacy_enter_decode_errors: u64 = 0;
     let mut legacy_exit_decode_errors: u64 = 0;
     let mut legacy_close_decode_errors: u64 = 0;
+    let mut single_event_spans: Vec<SingleEventSpanEvent> = Vec::new();
+    let mut single_event_decode_sequence: u64 = 0;
+    let mut single_event_schema_errors: u64 = 0;
+    let mut single_event_decode_errors: u64 = 0;
+    let mut single_event_layouts: FxHashMap<WireTypeId, (SchemaEntry, CompiledSingleEventSpan)> =
+        FxHashMap::default();
     decoder
-        .for_each_event(|ev| match ev.name {
-            "ClockSyncEvent" => {
-                if let Ok(cs) = ev.deserialize::<ClockSync>()
-                    && cs.realtime_ns > 0
-                    && cs.timestamp_ns > 0
-                    && clock_offset.is_none()
+        .for_each_event(|ev| {
+            let needs_compile = single_event_layouts
+                .get(&ev.type_id)
+                .is_none_or(|(schema, _)| schema != ev.schema);
+            if needs_compile {
+                let compiled = compile_single_event_span(ev.schema);
+                if let CompiledSingleEventSpan::Invalid(error) = &compiled {
+                    single_event_schema_errors += 1;
+                    tracing::debug!(
+                        source_key,
+                        schema = ev.name,
+                        error,
+                        "ignoring invalid single-event span schema"
+                    );
+                }
+                single_event_layouts.insert(ev.type_id, (ev.schema.clone(), compiled));
+            }
+            let is_single_event_span = matches!(
+                single_event_layouts.get(&ev.type_id),
+                Some((_, CompiledSingleEventSpan::Layout(_)))
+            );
+            if let Some((_, CompiledSingleEventSpan::Layout(layout))) =
+                single_event_layouts.get(&ev.type_id)
+            {
+                let decode_sequence = single_event_decode_sequence;
+                single_event_decode_sequence += 1;
+                match layout.decode(&ev, decode_sequence) {
+                    Ok(event) => single_event_spans.push(event),
+                    Err(_) => single_event_decode_errors += 1,
+                }
+            }
+
+            match ev.name {
+                "ClockSyncEvent" => {
+                    if let Ok(cs) = ev.deserialize::<ClockSync>()
+                        && cs.realtime_ns > 0
+                        && cs.timestamp_ns > 0
+                        && clock_offset.is_none()
+                    {
+                        clock_offset = Some(ClockOffset::from_clock_sync(
+                            cs.realtime_ns,
+                            cs.timestamp_ns,
+                        ));
+                        first_clock_sync_mono = Some(MonoNs(cs.timestamp_ns));
+                    }
+                }
+                "SegmentMetadataEvent" => {
+                    // Decode segment metadata to extract the authoritative boot_id.
+                    // SegmentMetadataEvent has entries: HashMap<String, String>.
+                    #[derive(serde::Deserialize)]
+                    struct SegmentMeta {
+                        #[serde(default)]
+                        entries: std::collections::HashMap<String, String>,
+                    }
+                    if let Ok(meta) = ev.deserialize::<SegmentMeta>()
+                        && segment_metadata_boot_id.is_none()
+                        && let Some(bid) = meta.entries.get("boot_id")
+                        && !bid.is_empty()
+                    {
+                        segment_metadata_boot_id = Some(bid.clone());
+                    }
+                }
+                "CpuSampleEvent" | "CpuSample" => {
+                    if let Ok(s) = ev.deserialize::<CpuSample>()
+                        && !s.callchain.is_empty()
+                    {
+                        events.push(TraceEvent::CpuSample(s));
+                    }
+                }
+                "WorkerParkEvent" => {
+                    if let Ok(p) = ev.deserialize::<WorkerPark>() {
+                        events.push(TraceEvent::WorkerPark(p));
+                    }
+                }
+                "WorkerUnparkEvent" => {
+                    if let Ok(u) = ev.deserialize::<WorkerUnpark>() {
+                        events.push(TraceEvent::WorkerUnpark(u));
+                    }
+                }
+                "PollStartEvent" => {
+                    if let Ok(p) = ev.deserialize::<PollStart>() {
+                        events.push(TraceEvent::PollStart(p));
+                    }
+                }
+                "PollEndEvent" => {
+                    if let Ok(p) = ev.deserialize::<PollEnd>() {
+                        events.push(TraceEvent::PollEnd(p));
+                    }
+                }
+                "SymbolTableEntry" => {
+                    if let Ok(sym) = ev.deserialize::<SymbolEntry>() {
+                        let key = interner.get_or_intern(&sym.symbol_name);
+                        addr_to_keys
+                            .entry(sym.addr)
+                            .or_default()
+                            .push((sym.inline_depth, key));
+                    }
+                }
+                // Span close: the old producer's `SpanCloseEvent` carries only
+                // `span_id`. Also accept the struct-derived `SpanClose__{Type}`
+                // convention (a Rust identifier cannot contain `:`).
+                name if !is_single_event_span
+                    && (name == "SpanCloseEvent" || name.starts_with("SpanClose__")) =>
                 {
-                    clock_offset = Some(ClockOffset::from_clock_sync(
-                        cs.realtime_ns,
-                        cs.timestamp_ns,
-                    ));
+                    match ev.deserialize::<LegacySpanCloseEvent>() {
+                        Ok(mut lc) if lc.span_id > 0 => {
+                            lc.decode_sequence = span_decode_sequence;
+                            span_decode_sequence += 1;
+                            legacy_closes.push(lc);
+                        }
+                        _ => {
+                            legacy_close_decode_errors += 1;
+                        }
+                    }
                 }
-            }
-            "SegmentMetadataEvent" => {
-                // Decode segment metadata to extract the authoritative boot_id.
-                // SegmentMetadataEvent has entries: HashMap<String, String>.
-                #[derive(serde::Deserialize)]
-                struct SegmentMeta {
-                    #[serde(default)]
-                    entries: std::collections::HashMap<String, String>,
-                }
-                if let Ok(meta) = ev.deserialize::<SegmentMeta>()
-                    && segment_metadata_boot_id.is_none()
-                    && let Some(bid) = meta.entries.get("boot_id")
-                    && !bid.is_empty()
+                // Span enter/exit events for local interval tracking.
+                //
+                // Two on-wire naming conventions carry the same events:
+                //   - `SpanEnter:{target}::{name}:{file}:{line}` — the dynamic schema
+                //     name emitted by the tracing layer (colon-separated).
+                //   - `SpanEnter__{Type}` — a struct-derived event (e.g.
+                //     `SpanEnter__ShaleOperation`). A Rust identifier cannot contain
+                //     `:`, so struct-named events use the `__` separator instead.
+                // We accept both, mirroring the viewer's `buildSpanData`.
+                name if !is_single_event_span
+                    && (name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__")) =>
                 {
-                    segment_metadata_boot_id = Some(bid.clone());
+                    match ev.deserialize::<LegacySpanEnterEvent>() {
+                        Ok(mut le) if le.span_id > 0 => {
+                            le.decode_sequence = span_decode_sequence;
+                            span_decode_sequence += 1;
+                            le.attributes = extract_span_attributes(&ev);
+                            legacy_enters.push((name.to_string(), le));
+                        }
+                        _ => {
+                            legacy_enter_decode_errors += 1;
+                        }
+                    }
                 }
-            }
-            "CpuSampleEvent" | "CpuSample" => {
-                if let Ok(s) = ev.deserialize::<CpuSample>()
-                    && !s.callchain.is_empty()
+                name if !is_single_event_span
+                    && (name.starts_with("SpanExit:") || name.starts_with("SpanExit__")) =>
                 {
-                    events.push(TraceEvent::CpuSample(s));
-                }
-            }
-            "WorkerParkEvent" => {
-                if let Ok(p) = ev.deserialize::<WorkerPark>() {
-                    events.push(TraceEvent::WorkerPark(p));
-                }
-            }
-            "WorkerUnparkEvent" => {
-                if let Ok(u) = ev.deserialize::<WorkerUnpark>() {
-                    events.push(TraceEvent::WorkerUnpark(u));
-                }
-            }
-            "PollStartEvent" => {
-                if let Ok(p) = ev.deserialize::<PollStart>() {
-                    events.push(TraceEvent::PollStart(p));
-                }
-            }
-            "PollEndEvent" => {
-                if let Ok(p) = ev.deserialize::<PollEnd>() {
-                    events.push(TraceEvent::PollEnd(p));
-                }
-            }
-            "SymbolTableEntry" => {
-                if let Ok(sym) = ev.deserialize::<SymbolEntry>() {
-                    let key = interner.get_or_intern(&sym.symbol_name);
-                    addr_to_keys
-                        .entry(sym.addr)
-                        .or_default()
-                        .push((sym.inline_depth, key));
-                }
-            }
-            // Span close: the old producer's `SpanCloseEvent` carries only
-            // `span_id`. Also accept the struct-derived `SpanClose__{Type}`
-            // convention (a Rust identifier cannot contain `:`).
-            name if name == "SpanCloseEvent" || name.starts_with("SpanClose__") => {
-                match ev.deserialize::<LegacySpanCloseEvent>() {
-                    Ok(mut lc) if lc.span_id > 0 => {
-                        lc.decode_sequence = span_decode_sequence;
-                        span_decode_sequence += 1;
-                        legacy_closes.push(lc);
-                    }
-                    _ => {
-                        legacy_close_decode_errors += 1;
+                    match ev.deserialize::<LegacySpanExitEvent>() {
+                        Ok(mut le) if le.span_id > 0 => {
+                            le.decode_sequence = span_decode_sequence;
+                            span_decode_sequence += 1;
+                            le.attributes = extract_span_attributes(&ev);
+                            legacy_exits.push((name.to_string(), le));
+                        }
+                        _ => {
+                            legacy_exit_decode_errors += 1;
+                        }
                     }
                 }
+                _ => {}
             }
-            // Span enter/exit events for local interval tracking.
-            //
-            // Two on-wire naming conventions carry the same events:
-            //   - `SpanEnter:{target}::{name}:{file}:{line}` — the dynamic schema
-            //     name emitted by the tracing layer (colon-separated).
-            //   - `SpanEnter__{Type}` — a struct-derived event (e.g.
-            //     `SpanEnter__ShaleOperation`). A Rust identifier cannot contain
-            //     `:`, so struct-named events use the `__` separator instead.
-            // We accept both, mirroring the viewer's `buildSpanData`.
-            name if name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__") => {
-                match ev.deserialize::<LegacySpanEnterEvent>() {
-                    Ok(mut le) if le.span_id > 0 => {
-                        le.decode_sequence = span_decode_sequence;
-                        span_decode_sequence += 1;
-                        le.attributes = extract_span_attributes(&ev);
-                        legacy_enters.push((name.to_string(), le));
-                    }
-                    _ => {
-                        legacy_enter_decode_errors += 1;
-                    }
-                }
-            }
-            name if name.starts_with("SpanExit:") || name.starts_with("SpanExit__") => {
-                match ev.deserialize::<LegacySpanExitEvent>() {
-                    Ok(mut le) if le.span_id > 0 => {
-                        le.decode_sequence = span_decode_sequence;
-                        span_decode_sequence += 1;
-                        le.attributes = extract_span_attributes(&ev);
-                        legacy_exits.push((name.to_string(), le));
-                    }
-                    _ => {
-                        legacy_exit_decode_errors += 1;
-                    }
-                }
-            }
-            _ => {}
         })
         .map_err(|e| anyhow::anyhow!("decode error: {e}"))?;
 
     if legacy_close_decode_errors > 0
         || legacy_enter_decode_errors > 0
         || legacy_exit_decode_errors > 0
+        || single_event_schema_errors > 0
+        || single_event_decode_errors > 0
     {
         use dial9_core::rate_limited;
         rate_limited!(std::time::Duration::from_secs(60), {
@@ -478,6 +843,8 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                 legacy_enter_errors = legacy_enter_decode_errors,
                 legacy_exit_errors = legacy_exit_decode_errors,
                 legacy_close_errors = legacy_close_decode_errors,
+                single_event_schema_errors,
+                single_event_decode_errors,
                 "skipped malformed span event(s) during decode"
             );
         });
@@ -488,9 +855,151 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
         addr_to_keys,
         events,
         clock_offset,
+        first_clock_sync_mono,
         segment_metadata_boot_id,
         legacy_enters,
         legacy_exits,
         legacy_closes,
+        single_event_spans,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dial9_trace_format::encoder::{Encoder, Schema};
+    use dial9_trace_format::schema::{FieldAnnotation, FieldDef};
+    use dial9_trace_format::types::FieldValue;
+
+    fn schema(
+        name: &str,
+        fields: impl IntoIterator<Item = (&'static str, FieldType)>,
+        annotations: impl IntoIterator<Item = FieldAnnotation>,
+    ) -> SchemaEntry {
+        SchemaEntry::with_annotations(
+            name,
+            true,
+            fields
+                .into_iter()
+                .map(|(name, field_type)| FieldDef::new(name, field_type)),
+            annotations,
+        )
+    }
+
+    #[test]
+    fn schema_name_does_not_classify_single_event_spans() {
+        let schema = schema(
+            "metrique:Unannotated",
+            [("duration", FieldType::Varint)],
+            [],
+        );
+        assert!(matches!(
+            compile_single_event_span(&schema),
+            CompiledSingleEventSpan::NotSpan
+        ));
+    }
+
+    #[test]
+    fn compiles_roles_units_type_and_attribute_indices() {
+        let schema = schema(
+            "producer:Work",
+            [
+                ("began", FieldType::Varint),
+                ("display", FieldType::PooledString),
+                ("payload", FieldType::String),
+                ("future_role", FieldType::Varint),
+            ],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ms"),
+                FieldAnnotation::new(0, schema_extensions::SPAN_TYPE_KEY, "test-producer"),
+                FieldAnnotation::new(1, schema_extensions::ROLE_KEY, roles::SPAN_NAME),
+                FieldAnnotation::new(3, schema_extensions::ROLE_KEY, "future.role"),
+            ],
+        );
+
+        let CompiledSingleEventSpan::Layout(layout) = compile_single_event_span(&schema) else {
+            panic!("expected a valid single-event span layout");
+        };
+        assert_eq!(layout.start_index, 0);
+        assert_eq!(layout.start_multiplier, 1_000_000);
+        assert_eq!(layout.name_index, Some(1));
+        assert_eq!(layout.span_type, "test-producer");
+        assert_eq!(layout.attribute_indices, vec![2, 3]);
+    }
+
+    #[test]
+    fn rejects_duplicate_roles_and_conflicting_units() {
+        let duplicate_start = schema(
+            "producer:DuplicateStart",
+            [("first", FieldType::Varint), ("second", FieldType::Varint)],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+                FieldAnnotation::new(1, schema_extensions::ROLE_KEY, roles::SPAN_START),
+            ],
+        );
+        assert!(matches!(
+            compile_single_event_span(&duplicate_start),
+            CompiledSingleEventSpan::Invalid(_)
+        ));
+
+        let conflicting_unit = schema(
+            "producer:ConflictingUnit",
+            [("start", FieldType::Varint)],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+                FieldAnnotation::new(0, "unit", "ms"),
+            ],
+        );
+        assert!(matches!(
+            compile_single_event_span(&conflicting_unit),
+            CompiledSingleEventSpan::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn defaults_span_type_when_annotation_is_absent() {
+        let schema = schema(
+            "producer:DefaultType",
+            [("start", FieldType::Varint)],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+            ],
+        );
+        let CompiledSingleEventSpan::Layout(layout) = compile_single_event_span(&schema) else {
+            panic!("expected a valid single-event span layout");
+        };
+        assert_eq!(layout.span_type, schema_extensions::DEFAULT_SPAN_TYPE);
+    }
+
+    #[test]
+    fn annotated_schema_does_not_also_use_legacy_name_decoder() {
+        let schema = Schema::from_entry(schema(
+            "SpanClose__Collision",
+            [("start", FieldType::Varint), ("span_id", FieldType::Varint)],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+            ],
+        ));
+        let mut encoder = Encoder::new();
+        encoder
+            .write_event(
+                &schema,
+                &[
+                    FieldValue::Varint(200),
+                    FieldValue::Varint(100),
+                    FieldValue::Varint(42),
+                ],
+            )
+            .unwrap();
+
+        let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
+        assert_eq!(decoded.single_event_spans.len(), 1);
+        assert!(decoded.legacy_closes.is_empty());
+    }
 }

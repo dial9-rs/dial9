@@ -556,7 +556,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
           ? html`<div>
               <span class="tt-k">Fields:</span>
               ${fields
-                .map(([k, v]) => `${k}=${formatFieldValue(v)}`)
+                .map(([k, v]) => `${k}=${formatFieldValue(v, rep.units?.[k])}`)
                 .join(", ")}
             </div>`
           : nothing}

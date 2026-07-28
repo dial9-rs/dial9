@@ -228,8 +228,8 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
     const spanEvents = trace.spanEvents;
     r = measureSpan("spanData", () =>
       store && spanEvents
-        ? buildSpanDataColumnar(spanEvents, store)
-        : buildSpanData(trace.customEvents, fatLanes(workerSpans)),
+        ? buildSpanDataColumnar(spanEvents, store, trace.tidBindings)
+        : buildSpanData(trace.customEvents, fatLanes(workerSpans), trace.tidBindings),
     );
     spanDataCache.set(trace, r);
   }

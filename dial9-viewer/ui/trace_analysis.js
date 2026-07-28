@@ -1199,10 +1199,43 @@
     return out.length > 0 ? out : rawSegments;
   }
 
+  function singleEventActiveSegments(start, end, taskPolls) {
+    if (!taskPolls || taskPolls.length === 0) return [];
+    const out = [];
+    let lo = 0, hi = taskPolls.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (taskPolls[mid].end <= start) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo; i < taskPolls.length; i++) {
+      const poll = taskPolls[i];
+      if (poll.start >= end) break;
+      const overlapStart = Math.max(poll.start, start);
+      const overlapEnd = Math.min(poll.end, end);
+      if (overlapEnd > overlapStart) {
+        out.push({ start: overlapStart, end: overlapEnd, workerId: poll.workerId });
+      }
+    }
+    return out;
+  }
+
+  function workerForTidAt(bindings, timestamp) {
+    if (!bindings || bindings.length === 0) return undefined;
+    let lo = 0, hi = bindings.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (bindings[mid].timestamp <= timestamp) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo === 0 ? undefined : bindings[lo - 1].workerId;
+  }
+
   /**
    * Build span data structures from custom events.
    * Groups SpanEnter/SpanExit pairs into spans with segments (one per poll).
-   * SpanCloseEvent finalizes a span and enables span ID recycling.
+   * SpanCloseEvent finalizes a span and enables span ID recycling. Annotated
+   * single-event spans already carry both lifecycle endpoints.
    *
    * When `workerSpans` is supplied, each span's active segments are
    * reconstructed from its owning task's poll timeline instead of trusting the
@@ -1210,6 +1243,8 @@
    * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
    * @param {Object} [workerSpans] per-worker `{polls}` from {@link buildWorkerSpans};
    *   when present, enables poll-based active/idle reconstruction.
+   * @param {Map<number,Array<{timestamp:number,workerId:number}>>} [tidBindings]
+   *   historical OS thread id → worker bindings used at the span start.
    * @returns {{
    *   allSpans: Array<{start: number, end: number, spanId: string, spanName: string, fields: Object, parentSpanId: string|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, taskId: number|null, depth: number}>,
    *   spanMeta: Map<string, {spanName: string, fields: Object, parentSpanId: string|null}>,
@@ -1218,7 +1253,7 @@
    *   childrenByParent: Map<string|null, string[]>,
    * }}
    */
-  function buildSpanData(customEvents, workerSpans) {
+  function buildSpanData(customEvents, workerSpans, tidBindings) {
     // Events are only ordered within a single worker's stream. Cross-worker
     // interleaving can produce globally out-of-order timestamps, so we must
     // sort before processing to ensure close events are seen after all
@@ -1233,6 +1268,7 @@
 
     const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
     const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "span_name"]);
+    let singleEventOrdinal = 0;
 
     function finalizeSpan(spanId) {
       const rec = spanMap.get(spanId);
@@ -1243,6 +1279,44 @@
     }
 
     for (const ev of customEvents) {
+      if (ev.singleEventSpan != null) {
+        // Completed single-event spans need neither pairing nor a close record.
+        // The ordinal is local to projections in packed-timestamp order, making
+        // the synthetic id deterministic and identical in both storage paths.
+        const spanId = `single-event:${singleEventOrdinal++}`;
+        const projected = ev.singleEventSpan;
+        const start = projected.start;
+        const end = projected.end;
+        const taskId = projected.taskId;
+        const mappedWorker = projected.workerId ??
+          (projected.threadId != null
+            ? workerForTidAt(tidBindings?.get(projected.threadId), start)
+            : undefined);
+        // 255 is dial9's UNKNOWN worker. It keeps an event with no runtime
+        // attribution out of real worker lanes without inventing worker 0.
+        const workerId = mappedWorker ?? 255;
+        const rec = {
+          spanName: projected.name,
+          spanType: projected.spanType,
+          fields: projected.fields,
+          units: projected.units,
+          parentSpanId: null,
+          segments: [{ start, end, workerId }],
+          taskId,
+          singleEventStart: start,
+          singleEventEnd: end,
+        };
+        closedSpans.push({ spanId, ...rec });
+        spanMeta.set(spanId, {
+          spanName: projected.name,
+          spanType: projected.spanType,
+          fields: projected.fields,
+          units: projected.units,
+          parentSpanId: null,
+        });
+        continue;
+      }
+
       // Span events are recognized by name. The built-in tracing layer emits
       // dynamic schema names "SpanEnter:{target}::{name}:{file}:{line}". A
       // hand-written `#[derive(TraceEvent)]` struct's wire name is its Rust
@@ -1321,22 +1395,27 @@
     const allSpans = [];
     for (const rec of closedSpans) {
       rec.segments.sort((a, b) => a.start - b.start);
-      const start = rec.segments[0].start;
-      const end = rec.segments[rec.segments.length - 1].end;
+      const start = rec.singleEventStart ?? rec.segments[0].start;
+      const end = rec.singleEventEnd ?? rec.segments[rec.segments.length - 1].end;
       // Resolve the owning task from the ENTER of the first segment: the poll
       // covering (segment.workerId, segment.start). This is the same lookup the
       // viewer uses to jump to a task on span-click.
-      const taskId = pollsByTask
-        ? resolveSpanTask(rec.segments[0], workerSpans)
-        : null;
+      const taskId = rec.taskId != null
+        ? rec.taskId
+        : pollsByTask
+          ? resolveSpanTask(rec.segments[0], workerSpans)
+          : null;
       // When we know the owning task, reconstruct active segments by
       // intersecting each on-wire segment with that task's polls. This turns a
       // coarse "entered across .await" span (one segment covering the whole
       // request) into the actual on-CPU polls, so idle gaps render and
       // activeNs reflects on-CPU time rather than span-open time. When we can't
       // resolve a task (no covering poll), keep the raw on-wire segments.
-      const segments =
-        taskId != null
+      const segments = rec.singleEventStart != null
+        ? taskId != null && pollsByTask
+          ? singleEventActiveSegments(start, end, pollsByTask.get(taskId))
+          : []
+        : taskId != null && pollsByTask
           ? reconstructSpanSegments(rec.segments, pollsByTask.get(taskId))
           : rec.segments;
       const activeNs = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
@@ -1344,7 +1423,9 @@
         start, end,
         spanId: rec.spanId,
         spanName: rec.spanName,
+        spanType: rec.spanType,
         fields: rec.fields,
+        units: rec.units,
         parentSpanId: rec.parentSpanId,
         segments,
         activeNs,

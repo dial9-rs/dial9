@@ -22,6 +22,7 @@ pub(crate) struct PollRecord {
 
 pub(crate) struct PollTimeline {
     tid_to_worker: FxHashMap<u32, u64>,
+    tid_bindings: FxHashMap<u32, Vec<(MonoNs, u64)>>,
     records: Vec<PollRecord>,
     by_worker: FxHashMap<u64, Vec<usize>>,
     sample_counts: Vec<(u32, u32)>,
@@ -29,8 +30,8 @@ pub(crate) struct PollTimeline {
 
 impl PollTimeline {
     pub(crate) fn reconstruct(events: &[TraceEvent]) -> Self {
-        // Build tid → worker_id mapping from ALL park/unpark events. A tid is
-        // bound to the same worker for the entire segment lifetime.
+        // Build both the existing last-seen tid → worker map and a historical
+        // binding timeline from all park/unpark events.
         //
         // TODO(block-in-place): when a worker hands its tid off via
         // block_in_place, samples inside the handoff interval are not confidently
@@ -40,15 +41,28 @@ impl PollTimeline {
         // worker. Closing this requires detecting tid changes between consecutive
         // park/unpark events per worker.
         let mut tid_to_worker = FxHashMap::default();
+        let mut tid_bindings: FxHashMap<u32, Vec<(MonoNs, u64)>> = FxHashMap::default();
         for event in events {
-            match event {
+            let binding = match event {
                 TraceEvent::WorkerPark(event) => {
-                    tid_to_worker.insert(event.tid, event.worker_id);
+                    Some((MonoNs(event.timestamp_ns), event.tid, event.worker_id))
                 }
                 TraceEvent::WorkerUnpark(event) => {
-                    tid_to_worker.insert(event.tid, event.worker_id);
+                    Some((MonoNs(event.timestamp_ns), event.tid, event.worker_id))
                 }
-                _ => {}
+                _ => None,
+            };
+            let Some((timestamp, tid, worker_id)) = binding else {
+                continue;
+            };
+
+            tid_to_worker.insert(tid, worker_id);
+            let bindings = tid_bindings.entry(tid).or_default();
+            if bindings
+                .last()
+                .is_none_or(|(_, previous)| *previous != worker_id)
+            {
+                bindings.push((timestamp, worker_id));
             }
         }
 
@@ -110,6 +124,7 @@ impl PollTimeline {
         let sample_counts = vec![(0, 0); records.len()];
         Self {
             tid_to_worker,
+            tid_bindings,
             records,
             by_worker,
             sample_counts,
@@ -159,6 +174,16 @@ impl PollTimeline {
         &self.records
     }
 
+    /// Resolve the worker bound to `tid` at a historical monotonic timestamp.
+    ///
+    /// The last-seen map remains separate for existing sample attribution
+    /// behavior.
+    pub(crate) fn worker_for_tid_at(&self, tid: u32, timestamp: MonoNs) -> Option<u64> {
+        let bindings = self.tid_bindings.get(&tid)?;
+        let index = bindings.partition_point(|(bound_at, _)| *bound_at <= timestamp);
+        index.checked_sub(1).map(|index| bindings[index].1)
+    }
+
     pub(crate) fn resolved(
         &self,
         clock_offset: Option<ClockOffset>,
@@ -188,5 +213,44 @@ impl PollTimeline {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ingest::decode::events::{WorkerPark, WorkerUnpark};
+
+    #[test]
+    fn historical_tid_mapping_resolves_remapped_tids_at_event_time() {
+        let events = vec![
+            TraceEvent::WorkerUnpark(WorkerUnpark {
+                timestamp_ns: 10,
+                worker_id: 1,
+                tid: 100,
+            }),
+            TraceEvent::WorkerPark(WorkerPark {
+                timestamp_ns: 20,
+                worker_id: 1,
+                tid: 100,
+            }),
+            TraceEvent::WorkerUnpark(WorkerUnpark {
+                timestamp_ns: 30,
+                worker_id: 2,
+                tid: 200,
+            }),
+            TraceEvent::WorkerPark(WorkerPark {
+                timestamp_ns: 40,
+                worker_id: 3,
+                tid: 200,
+            }),
+        ];
+
+        let timeline = PollTimeline::reconstruct(&events);
+        assert_eq!(timeline.worker_for_tid_at(100, MonoNs(15)), Some(1));
+        assert_eq!(timeline.worker_for_tid_at(200, MonoNs(35)), Some(2));
+        assert_eq!(timeline.worker_for_tid_at(200, MonoNs(45)), Some(3));
+        assert_eq!(timeline.worker_for_tid_at(200, MonoNs(25)), None);
+        assert_eq!(timeline.tid_to_worker.get(&200), Some(&3));
     }
 }

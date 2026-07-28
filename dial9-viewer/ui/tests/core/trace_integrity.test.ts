@@ -45,6 +45,17 @@ interface CustomEvent {
   timestamp: number;
   fields: Record<string, unknown>;
   units: Record<string, string> | null;
+  singleEventSpan?: {
+    start: number;
+    end: number;
+    name: string;
+    spanType: string;
+    threadId: number | null;
+    taskId: number | null;
+    workerId: number | null;
+    fields: Record<string, unknown>;
+    units: Record<string, string> | null;
+  } | null;
 }
 
 interface ParsedTrace {
@@ -415,6 +426,16 @@ describe("metrique events", () => {
       ).toBe("ns");
       expect(f["Operation"], `Operation missing on ${ev.name}`).toBeTruthy();
       expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
+      const span = ev.singleEventSpan;
+      expect(span, `single-event projection missing on ${ev.name}`).not.toBeNull();
+      expect(span?.start).toBe(start);
+      expect(span?.end).toBe(ev.timestamp);
+      expect(span?.name).toBe(f["Operation"]);
+      expect(span?.spanType).toBe("metrique");
+      expect(span?.fields["span.start_ns"]).toBeUndefined();
+      expect(span?.fields["thread_id"]).toBeUndefined();
+      expect(span?.fields["Operation"]).toBeUndefined();
+      expect(span?.fields["MetricName"]).toBe(f["MetricName"]);
     }
   });
 

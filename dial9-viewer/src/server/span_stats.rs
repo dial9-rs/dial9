@@ -1294,7 +1294,7 @@ mod tests {
                         uid[15] = name.as_bytes().first().copied().unwrap_or(0);
                         uid
                     },
-                    kind: "tracing",
+                    kind: "tracing".to_string(),
                     name: name.to_string(),
                     target: "test".to_string(),
                     callsite_file: Some("src/main.rs".to_string()),
@@ -1375,7 +1375,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test".to_string(),
             target: "test".to_string(),
             callsite_file: None,
@@ -1493,7 +1493,7 @@ mod tests {
                         uid
                     },
                     span_type_uid: type_uid,
-                    kind: "tracing",
+                    kind: "tracing".to_string(),
                     name: format!("span_{i}"),
                     target: "test".to_string(),
                     callsite_file: None,
@@ -1568,7 +1568,7 @@ mod tests {
                         uid
                     },
                     span_type_uid: type_uid,
-                    kind: "tracing",
+                    kind: "tracing".to_string(),
                     name: format!("span_{i}"),
                     target: "test".to_string(),
                     callsite_file: None,
@@ -1655,7 +1655,7 @@ mod tests {
         let mk = |elapsed: u64, on_cpu: u64, wait: u64| ResolvedSpan {
             span_uid: [0u8; 16],
             span_type_uid: [7u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "op".to_string(),
             target: "t".to_string(),
             callsite_file: None,
@@ -1778,7 +1778,7 @@ mod tests {
                     uid
                 },
                 span_type_uid: type_uid,
-                kind: "tracing",
+                kind: "tracing".to_string(),
                 name: "same_type".to_string(),
                 target: "test".to_string(),
                 callsite_file: Some("src/main.rs".to_string()),
@@ -2359,7 +2359,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test_span".to_string(),
             target: "my_crate".to_string(),
             callsite_file: Some("src/main.rs".to_string()),
@@ -2584,7 +2584,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test".to_string(),
             target: "test".to_string(),
             callsite_file: None,

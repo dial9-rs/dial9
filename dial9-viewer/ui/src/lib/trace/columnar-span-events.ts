@@ -1,10 +1,10 @@
-// Columnar store for tracing SPAN events (SpanEnter / SpanExit / SpanClose),
-// which dominate a heavily-instrumented trace's customEvents (millions of fat
-// objects at ~240 B each). They are the ONLY custom events buildSpanData
-// consumes, and it reads them read-only (name -> kind, timestamp, and a few
-// base fields) without retaining the event object - so unlike the non-span
-// custom events (which are used as WeakMap keys / pinned refs and must stay
-// fat), span events can live as typed-array columns.
+// Columnar store for span-producing custom events (SpanEnter / SpanExit /
+// SpanClose and annotated single-event spans), which dominate a heavily-instrumented
+// trace's customEvents (millions of fat objects at ~240 B each). They are the
+// ONLY custom events buildSpanData consumes, and it reads them read-only (name
+// -> kind, timestamp, and a few base fields) without retaining the event object
+// - so unlike the non-span custom events (which are used as WeakMap keys /
+// pinned refs and must stay fat), span events can live as typed-array columns.
 //
 // The parser routes span events here via the `spanEventSink` parse option
 // (mirroring buildSpanData's field extraction, so old traces round-trip
@@ -14,7 +14,7 @@
 import type { DecodedFieldValue } from "../../../decode.js";
 
 /** Span-event kind, replacing the frozen buildSpanData name classification. */
-export const SPAN_KIND = { Enter: 0, Exit: 1, Close: 2 } as const;
+export const SPAN_KIND = { Enter: 0, Exit: 1, Close: 2, Complete: 3 } as const;
 
 /** Classify a custom-event name as a span event kind, or null if not one.
  * Mirrors buildSpanData's name matching (trace_analysis.js) EXACTLY. */
@@ -66,6 +66,17 @@ function isBaseExitField(k: string): boolean {
     k === "tid"
   );
 }
+interface SingleEventSpanProjection {
+  start: number;
+  end: number;
+  name: string;
+  spanType: string;
+  threadId: number | null;
+  taskId: number | null;
+  workerId: number | null;
+  fields: Record<string, DecodedFieldValue>;
+  units: Record<string, string> | null;
+}
 
 const INITIAL_CAP = 1 << 16;
 
@@ -81,6 +92,16 @@ export class ColumnarSpanEvents {
   parentIdx: Int32Array;
   /** index into `spanNames` (interned span_name); -1 = absent (-> "unknown"). */
   spanNameIdx: Int32Array;
+  /** Dense event -> complete-event slot. -1 for tracing events. */
+  completeIdx: Int32Array;
+  /** Single-event-only lifecycle/context columns, allocated sparsely. */
+  private completeStart: Float64Array;
+  private completeThreadId: Float64Array;
+  private completeTaskId: Float64Array;
+  private completeWorkerId: Float64Array;
+  private completeTypeIdx: Int32Array;
+  private completeLen = 0;
+  private completeCap = 1024;
 
   /** Interned span_id / parent_span_id strings (span_ids are ~unique so this is
    * roughly one string per span, exact-value, no f64 u64 precision loss). */
@@ -88,6 +109,8 @@ export class ColumnarSpanEvents {
   private strIntern = new Map<string, number>();
   spanNames: string[] = [];
   private nameIntern = new Map<string, number>();
+  spanTypes: string[] = [];
+  private typeIntern = new Map<string, number>();
 
   /** Non-base span fields (e.g. request_id, metric_name) as an INTERNED CSR:
    * event i owns extraKeyId/extraValId[extraOff[i], extraOff[i+1]). On a heavily
@@ -98,12 +121,15 @@ export class ColumnarSpanEvents {
   extraOff: Int32Array;
   extraKeyId: Int32Array;
   extraValId: Int32Array;
+  extraUnitId: Int32Array;
   extraKeys: string[] = [];
   private extraKeyIntern = new Map<string, number>();
   /** valId 0 = null; else extraVals[valId-1]. Primitives interned by value;
    * non-primitive values (arrays/objects) are boxed (no dedup, rare). */
   extraVals: DecodedFieldValue[] = [];
   private extraValIntern = new Map<unknown, number>();
+  extraUnits: string[] = [];
+  private extraUnitIntern = new Map<string, number>();
   private extraLen = 0;
   private _extraCap: number;
 
@@ -124,10 +150,19 @@ export class ColumnarSpanEvents {
     this.spanIdIdx = new Int32Array(cap);
     this.parentIdx = new Int32Array(cap);
     this.spanNameIdx = new Int32Array(cap);
+    this.completeIdx = new Int32Array(cap);
+    this.completeIdx.fill(-1);
+    this.completeStart = new Float64Array(this.completeCap);
+    this.completeThreadId = new Float64Array(this.completeCap);
+    this.completeTaskId = new Float64Array(this.completeCap);
+    this.completeWorkerId = new Float64Array(this.completeCap);
+    this.completeTypeIdx = new Int32Array(this.completeCap);
     this.extraOff = new Int32Array(cap + 1);
     this._extraCap = cap;
     this.extraKeyId = new Int32Array(cap);
     this.extraValId = new Int32Array(cap);
+    this.extraUnitId = new Int32Array(cap);
+    this.extraUnitId.fill(-1);
   }
 
   private internKey(k: string): number {
@@ -158,7 +193,28 @@ export class ColumnarSpanEvents {
     const n = this._extraCap * 2;
     const gk = new Int32Array(n); gk.set(this.extraKeyId); this.extraKeyId = gk;
     const gv = new Int32Array(n); gv.set(this.extraValId); this.extraValId = gv;
+    const gu = new Int32Array(n); gu.fill(-1); gu.set(this.extraUnitId); this.extraUnitId = gu;
     this._extraCap = n;
+  }
+
+  private growComplete(): void {
+    const n = this.completeCap * 2;
+    const start = new Float64Array(n);
+    start.set(this.completeStart);
+    this.completeStart = start;
+    const threadId = new Float64Array(n);
+    threadId.set(this.completeThreadId);
+    this.completeThreadId = threadId;
+    const taskId = new Float64Array(n);
+    taskId.set(this.completeTaskId);
+    this.completeTaskId = taskId;
+    const workerId = new Float64Array(n);
+    workerId.set(this.completeWorkerId);
+    this.completeWorkerId = workerId;
+    const typeIdx = new Int32Array(n);
+    typeIdx.set(this.completeTypeIdx);
+    this.completeTypeIdx = typeIdx;
+    this.completeCap = n;
   }
 
   get length(): number {
@@ -187,7 +243,16 @@ export class ColumnarSpanEvents {
    * classification here (mirrors buildSpanData), so the frozen parser only
    * delegates.
    */
-  pushIfSpan(name: string, timestamp: number, v: Record<string, DecodedFieldValue>): boolean {
+  pushIfSpan(
+    name: string,
+    timestamp: number,
+    v: Record<string, DecodedFieldValue>,
+    singleEventSpan: SingleEventSpanProjection | null,
+  ): boolean {
+    if (singleEventSpan != null) {
+      this.push(SPAN_KIND.Complete, timestamp, v, singleEventSpan);
+      return true;
+    }
     const kind = spanKindOf(name);
     if (kind === null) return false;
     this.push(kind, timestamp, v);
@@ -212,6 +277,24 @@ export class ColumnarSpanEvents {
     }
     return i;
   }
+  private internType(s: string): number {
+    let i = this.typeIntern.get(s);
+    if (i === undefined) {
+      i = this.spanTypes.length;
+      this.spanTypes.push(s);
+      this.typeIntern.set(s, i);
+    }
+    return i;
+  }
+  private internUnit(s: string): number {
+    let i = this.extraUnitIntern.get(s);
+    if (i === undefined) {
+      i = this.extraUnits.length;
+      this.extraUnits.push(s);
+      this.extraUnitIntern.set(s, i);
+    }
+    return i;
+  }
 
   private grow(): void {
     const n = this._cap * 2;
@@ -229,6 +312,10 @@ export class ColumnarSpanEvents {
     this.spanIdIdx = g(this.spanIdIdx, Int32Array);
     this.parentIdx = g(this.parentIdx, Int32Array);
     this.spanNameIdx = g(this.spanNameIdx, Int32Array);
+    const completeIdx = new Int32Array(n);
+    completeIdx.fill(-1);
+    completeIdx.set(this.completeIdx);
+    this.completeIdx = completeIdx;
     const eo = new Int32Array(n + 1);
     eo.set(this.extraOff);
     this.extraOff = eo;
@@ -241,7 +328,12 @@ export class ColumnarSpanEvents {
    * base fields become columns; any non-base fields are kept in `extras` so a
    * hand-written span struct with custom fields still round-trips.
    */
-  push(kind: number, timestamp: number, v: Record<string, DecodedFieldValue>): void {
+  push(
+    kind: number,
+    timestamp: number,
+    v: Record<string, DecodedFieldValue>,
+    singleEventSpan: SingleEventSpanProjection | null = null,
+  ): void {
     if (this._len === this._cap) this.grow();
     const i = this._len++;
     this.kind[i] = kind;
@@ -258,17 +350,40 @@ export class ColumnarSpanEvents {
     const pid = v.parent_span_id;
     this.parentIdx[i] =
       pid == null ? -1 : this.internStr(typeof pid === "string" ? pid : String(pid));
-    const sn = v.span_name;
+    const sn = kind === SPAN_KIND.Complete
+      ? singleEventSpan?.name
+      : v.span_name;
     this.spanNameIdx[i] = typeof sn === "string" && sn ? this.internName(sn) : -1;
+    if (kind === SPAN_KIND.Complete) {
+      if (singleEventSpan == null) {
+        throw new Error("complete span event is missing its normalized projection");
+      }
+      if (this.completeLen === this.completeCap) this.growComplete();
+      const completeIdx = this.completeLen++;
+      this.completeIdx[i] = completeIdx;
+      this.completeStart[completeIdx] = singleEventSpan.start;
+      this.completeThreadId[completeIdx] = singleEventSpan.threadId ?? NaN;
+      this.completeTaskId[completeIdx] = singleEventSpan.taskId ?? NaN;
+      this.completeWorkerId[completeIdx] = singleEventSpan.workerId ?? NaN;
+      this.completeTypeIdx[completeIdx] = this.internType(singleEventSpan.spanType);
+    }
 
     // Non-base fields: interned into the CSR (matches buildSpanData's per-span
     // `fields`, which excludes the base keys). extraOff[i+1] closes event i.
-    const isBase = kind === SPAN_KIND.Exit ? isBaseExitField : isBaseEnterField;
-    for (const k in v) {
+    const isBase = kind === SPAN_KIND.Complete
+      ? () => false
+      : kind === SPAN_KIND.Exit
+        ? isBaseExitField
+        : isBaseEnterField;
+    const extras = kind === SPAN_KIND.Complete ? singleEventSpan!.fields : v;
+    for (const k in extras) {
       if (!isBase(k)) {
         if (this.extraLen === this._extraCap) this.growExtra();
         this.extraKeyId[this.extraLen] = this.internKey(k);
-        this.extraValId[this.extraLen] = this.internVal(v[k]!);
+        this.extraValId[this.extraLen] = this.internVal(extras[k]!);
+        const unit = singleEventSpan?.units?.[k];
+        this.extraUnitId[this.extraLen] =
+          unit == null ? -1 : this.internUnit(unit);
         this.extraLen++;
       }
     }
@@ -292,6 +407,31 @@ export class ColumnarSpanEvents {
     const idx = this.spanNameIdx[i]!;
     return idx < 0 ? "unknown" : this.spanNames[idx]!;
   }
+  /** Single-event start timestamp, or NaN for tracing events. */
+  startAt(i: number): number {
+    const idx = this.completeIdx[i]!;
+    return idx < 0 ? NaN : this.completeStart[idx]!;
+  }
+  /** Complete-event OS thread id, or NaN for tracing events / absent data. */
+  threadIdAt(i: number): number {
+    const idx = this.completeIdx[i]!;
+    return idx < 0 ? NaN : this.completeThreadId[idx]!;
+  }
+  /** Complete-event Tokio task id, or NaN for tracing events / absent data. */
+  taskIdAt(i: number): number {
+    const idx = this.completeIdx[i]!;
+    return idx < 0 ? NaN : this.completeTaskId[idx]!;
+  }
+  /** Complete-event runtime worker id, or NaN when absent. */
+  completeWorkerIdAt(i: number): number {
+    const idx = this.completeIdx[i]!;
+    return idx < 0 ? NaN : this.completeWorkerId[idx]!;
+  }
+  /** Producer/instrumentation family for a complete single-event span. */
+  spanTypeAt(i: number): string {
+    const idx = this.completeIdx[i]!;
+    return idx < 0 ? "tracing" : this.spanTypes[this.completeTypeIdx[idx]!]!;
+  }
   /** Non-base fields for this event ({} when none), rebuilt from the interned
    * CSR - matches the fat buildSpanData per-span `fields`. */
   extraFieldsAt(i: number): Record<string, DecodedFieldValue> {
@@ -303,5 +443,17 @@ export class ColumnarSpanEvents {
       out[this.extraKeys[this.extraKeyId[j]!]!] = id === 0 ? null : this.extraVals[id - 1]!;
     }
     return out;
+  }
+  /** Attribute units for this event, or null when none are declared. */
+  extraUnitsAt(i: number): Record<string, string> | null {
+    const lo = this.extraOff[i]!, hi = this.extraOff[i + 1]!;
+    const out: Record<string, string> = {};
+    for (let j = lo; j < hi; j++) {
+      const unitId = this.extraUnitId[j]!;
+      if (unitId >= 0) {
+        out[this.extraKeys[this.extraKeyId[j]!]!] = this.extraUnits[unitId]!;
+      }
+    }
+    return Object.keys(out).length > 0 ? out : null;
   }
 }

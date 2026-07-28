@@ -1,12 +1,12 @@
 //! Sample-to-span membership attribution (stage 3).
 //!
-//! After span resolution (modern + legacy), this module builds a flat sorted
+//! After span resolution, this module builds a flat sorted
 //! interval index and performs a sweep-line attribution of CPU/sched samples
 //! to their enclosing spans.
 //!
-//! CRITICAL: We attach samples ONLY to balanced, locally observed entered
-//! intervals — never to lifecycle envelopes. An async span that is exited
-//! (waiting) must NOT claim samples that fire during its idle gap.
+//! CRITICAL: We attach samples only to locally observed active intervals, never
+//! to lifecycle envelopes when finer interval evidence is available. An async
+//! span must not claim samples that fire during its idle gap.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -27,13 +27,13 @@ struct SpanInterval {
 /// Mutates `samples` (populates `enclosing_spans`) and `resolved_spans`
 /// (increments `cpu_sample_count` / `sched_sample_count`).
 ///
-/// `legacy_intervals` maps synthetic span instance_id → list of monotonic
+/// `instance_intervals` maps synthetic span instance_id → list of monotonic
 /// (enter, exit) intervals. `boot_id` is needed to compute span_uid for each
 /// instance_id.
 pub(crate) fn attribute_samples_to_spans(
     samples: &mut [ResolvedSample],
     resolved_spans: &mut [ResolvedSpan],
-    legacy_intervals: &FxHashMap<u64, Vec<MonoInterval>>,
+    instance_intervals: &FxHashMap<u64, Vec<MonoInterval>>,
     boot_id: &str,
     clock_offset: Option<ClockOffset>,
 ) {
@@ -42,8 +42,8 @@ pub(crate) fn attribute_samples_to_spans(
     let to_wall = |mono: super::clock::MonoNs| mono.to_wall_or_raw(clock_offset);
 
     // Index resolved spans by uid once so the per-interval lookup below is O(1).
-    // Previously this was `resolved_spans.iter().position(...)` per legacy
-    // interval — an O(spans × intervals) scan that dominated attribution time on
+    // Previously this was `resolved_spans.iter().position(...)` per interval —
+    // an O(spans × intervals) scan that dominated attribution time on
     // span-heavy files (seconds on a 325k-span-event segment).
     let span_idx_by_uid: FxHashMap<[u8; 16], usize> = resolved_spans
         .iter()
@@ -51,8 +51,8 @@ pub(crate) fn attribute_samples_to_spans(
         .map(|(idx, span)| (span.span_uid, idx))
         .collect();
 
-    // Legacy intervals are computed with synthetic instance_ids.
-    for (synthetic_instance_id, intervals) in legacy_intervals {
+    // Reconstructed intervals are keyed by synthetic instance ids.
+    for (synthetic_instance_id, intervals) in instance_intervals {
         let target_uid = compute_span_uid(boot_id, *synthetic_instance_id);
         if let Some(&span_idx) = span_idx_by_uid.get(&target_uid) {
             for &(enter_ts, exit_ts) in intervals {

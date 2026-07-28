@@ -43,6 +43,8 @@ import type { SelectionSlice } from "../../types/state.js";
 export interface SpanNameMeta {
   spanName: string;
   fields: Record<string, unknown>;
+  spanType?: string;
+  units?: Record<string, string> | null;
   parentSpanId: string | null;
 }
 
@@ -564,20 +566,23 @@ export function spanLabelModel(
   if (focusedSpanId == null) return null;
   const cs = data.columnarSpans;
   let fields: Record<string, DecodedFieldValue>;
+  let units: Record<string, string> | null | undefined;
   let name: string;
   if (cs) {
     const r = cs.spanIdToRow.get(focusedSpanId);
     fields = r === undefined ? {} : cs.fieldsAt(r);
+    units = r === undefined ? null : cs.unitsAt(r);
     name = r === undefined ? "Span" : cs.spanNameAt(r);
   } else {
     const meta = data.spanMeta.get(focusedSpanId);
     const span = data.allSpans.find((s) => s.spanId === focusedSpanId);
     fields = span?.fields ?? meta?.fields ?? {};
+    units = span?.units ?? meta?.units;
     name = meta?.spanName ?? span?.spanName ?? "Span";
   }
   const rows: SpanFieldRow[] = Object.entries(fields).map(([key, value]) => ({
     key,
-    display: formatFieldValue(value),
+    display: formatFieldValue(value, units?.[key]),
     copy: String(value),
   }));
   return { name, rows };

@@ -73,8 +73,10 @@ export type {
   ParseProgress,
   ParsedTrace,
   SampleGroup,
+  SingleEventSpan,
   SymbolFrame,
   TaskDump,
+  TidWorkerBinding,
   TraceEvent,
 } from "../../../trace_parser.js";
 export type { DecodedFieldValue } from "../../../decode.js";
@@ -515,9 +517,10 @@ export function loadTraceOnMainThread(
   // Columnar event store: the parser writes events into typed-array columns
   // instead of ~13M fat objects, so peak memory drops ~7x and the parse no
   // longer GC-thrashes. A fresh store per load (incl. Set/Clear-Range reparse).
-  // Columnar span-event store: SpanEnter/Exit/Close custom events (the ~2.3 GB
-  // of fat span objects that stall a 13M-event parse) route into typed columns;
-  // non-span custom events stay fat. buildSpanDataColumnar reads the columns.
+  // Columnar span-event store: SpanEnter/Exit/Close and annotated single-event
+  // spans (the ~2.3 GB of fat span objects that stall a 13M-event parse) route
+  // into typed columns; other custom events stay fat.
+  // buildSpanDataColumnar reads the columns.
   const spanEventSink = new ColumnarSpanEvents();
   const parseOpts: ParseOptions = {
     onParseProgress,

@@ -2180,7 +2180,11 @@
                     // Pass workerSpans (built above) so span active/idle segments
                     // are reconstructed from each span's owning task's polls,
                     // rather than the coarse on-wire SpanEnter/SpanExit segments.
-                    const spanResult2 = buildSpanData(trace.customEvents, workerSpans);
+                    const spanResult2 = buildSpanData(
+                        trace.customEvents,
+                        workerSpans,
+                        trace.tidBindings,
+                    );
                     allSpans = spanResult2.allSpans;
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
@@ -2213,6 +2217,7 @@
                         const spanPrefixes = ["SpanEnter:", "SpanExit:", "SpanEnter__", "SpanExit__", "SpanClose__"];
                         const spanExact = new Set(["SpanEnterEvent", "SpanExitEvent", "SpanCloseEvent"]);
                         for (const ev of trace.customEvents) {
+                            if (ev.singleEventSpan) continue;
                             if (spanExact.has(ev.name)) continue;
                             if (spanPrefixes.some(p => ev.name.startsWith(p))) continue;
                             genericCustomEvents.push(ev);

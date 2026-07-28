@@ -11,7 +11,7 @@ import { parseTraceBuffer } from "./load.js";
 import { buildSpanData, buildWorkerSpans } from "./analysis.js";
 import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
-import { ColumnarSpanEvents } from "./columnar-span-events.js";
+import { ColumnarSpanEvents, SPAN_KIND } from "./columnar-span-events.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
 
 let raw: Uint8Array;
@@ -68,5 +68,81 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     }
 
     expect([...col.childrenByParent.entries()].sort()).toEqual([...fat.childrenByParent.entries()].sort());
+  });
+
+  it("keeps single-event lifecycle timing without inventing active segments", () => {
+    const spanEvents = new ColumnarSpanEvents(1);
+    spanEvents.push(
+      SPAN_KIND.Complete,
+      150,
+      {},
+      {
+        start: 100,
+        end: 150,
+        name: "Request",
+        spanType: "test-producer",
+        threadId: null,
+        taskId: 42,
+        workerId: null,
+        fields: { Attempts: 1 },
+        units: { Attempts: "count" },
+      },
+    );
+    const store = ColumnarWorkerSpans.fromWorkerSpans({});
+    const result = buildSpanDataColumnar(spanEvents, store);
+    const span = result.columnarSpans!.at(0);
+
+    expect(span.start).toBe(100);
+    expect(span.end).toBe(150);
+    expect(span.taskId).toBe(42);
+    expect(span.activeNs).toBe(0);
+    expect(span.segments).toEqual([]);
+    expect(span.spanType).toBe("test-producer");
+    expect(span.units).toEqual({ Attempts: "count" });
+  });
+
+  it("resolves remapped thread context at the span start", () => {
+    const spanEvents = new ColumnarSpanEvents(1);
+    spanEvents.push(
+      SPAN_KIND.Complete,
+      390,
+      {},
+      {
+        start: 310,
+        end: 390,
+        name: "Request",
+        spanType: "test-producer",
+        threadId: 77,
+        taskId: null,
+        workerId: null,
+        fields: {},
+        units: null,
+      },
+    );
+    const store = ColumnarWorkerSpans.fromWorkerSpans({
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1, spawnLocId: null, spawnLoc: null }],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+      1: {
+        polls: [{ start: 300, end: 400, taskId: 2, spawnLocId: null, spawnLoc: null }],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    });
+    const bindings = new Map([[
+      77,
+      [
+        { timestamp: 50, workerId: 0 },
+        { timestamp: 250, workerId: 1 },
+      ],
+    ]]);
+
+    const span = buildSpanDataColumnar(spanEvents, store, bindings)
+      .columnarSpans!.at(0);
+    expect(span.taskId).toBe(2);
   });
 });

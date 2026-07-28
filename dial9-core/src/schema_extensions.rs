@@ -9,6 +9,10 @@ pub const ROLE_KEY: &str = "dial9.role";
 /// Annotation key carrying the producer or instrumentation family for a span.
 pub const SPAN_TYPE_KEY: &str = "dial9.span.type";
 
+/// Span type used when a single-event span schema does not declare a producer
+/// or instrumentation family.
+pub const DEFAULT_SPAN_TYPE: &str = "single-event";
+
 /// Values emitted under [`SPAN_TYPE_KEY`].
 pub mod span_types {
     /// The metrique adapter's single-event spans.
