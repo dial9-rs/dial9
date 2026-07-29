@@ -8,16 +8,18 @@ pub use dial9_core::recorder::{
 };
 pub use dial9_core::recording::Recorder;
 
-/// Define custom events with `#[derive(TraceEvent)]` and record them with
-/// [`record_event`].
-pub use dial9_trace_format::{TraceEvent, TraceField};
+/// The trace format: define events with `#[derive(TraceEvent)]`, encode your own
+/// types with [`TraceField`](format::TraceField), read a trace back with
+/// [`Decoder`](format::Decoder).
+pub mod format {
+    pub use dial9_trace_format::decoder::{self, Decoder};
+    pub use dial9_trace_format::types::{self, EventEncoder, FieldType, InternedString};
+    pub use dial9_trace_format::{TraceEvent, TraceField};
 
-/// Read a trace file's events: [`Decoder::for_each_event`] hands each one to a
-/// callback as a [`RawEvent`](decoder::RawEvent), which deserializes into your
-/// own type.
-#[cfg(feature = "deserialize")]
-pub use dial9_trace_format::DeserError;
-pub use dial9_trace_format::decoder::{self, Decoder};
+    /// Error from [`RawEvent::deserialize`](decoder::RawEvent::deserialize).
+    #[cfg(feature = "deserialize")]
+    pub use dial9_trace_format::DeserError;
+}
 
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
 /// write custom encoders, author custom segment processors, reach the raw
@@ -31,9 +33,6 @@ pub mod core {
     pub use dial9_core::recorder;
     pub use dial9_core::source::{self, FlushContext, Source};
     pub use dial9_core::thread::{ThreadTrackingGuard, current_tid};
-
-    /// Building blocks for a hand-written [`TraceField`](crate::TraceField) impl.
-    pub use dial9_trace_format::types::{self, EventEncoder, FieldType, InternedString};
 
     // Background pipeline (segment worker, on-demand dumps).
     #[cfg(feature = "pipeline")]

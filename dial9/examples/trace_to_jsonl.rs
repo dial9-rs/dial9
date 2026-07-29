@@ -5,7 +5,7 @@
 //!
 //! If output is omitted, writes to stdout.
 
-use dial9::Decoder;
+use dial9::format::Decoder;
 use std::io::{BufWriter, Write};
 
 fn main() -> std::io::Result<()> {

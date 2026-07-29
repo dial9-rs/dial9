@@ -9,8 +9,9 @@
 //! cargo run --example custom_events --features analysis
 //! ```
 
-use dial9::core::{Encodable, InternedString, ThreadLocalEncoder, clock_monotonic_ns};
-use dial9::{DiskBuffer, RecorderTokioExt, TraceEvent, recorder};
+use dial9::core::{Encodable, ThreadLocalEncoder, clock_monotonic_ns};
+use dial9::format::{InternedString, TraceEvent};
+use dial9::{DiskBuffer, RecorderTokioExt, recorder};
 use std::time::Duration;
 
 // ── Simple: derive-only, no interning ───────────────────────────────────────
@@ -110,7 +111,7 @@ fn main() -> std::io::Result<()> {
     let sealed = dir.path().join("trace.0.bin");
     let data = std::fs::read(&sealed)?;
     let mut decoder =
-        dial9::Decoder::new(&data).ok_or_else(|| std::io::Error::other("invalid trace"))?;
+        dial9::format::Decoder::new(&data).ok_or_else(|| std::io::Error::other("invalid trace"))?;
 
     let mut request_completed = 0u32;
     let mut http_request = 0u32;
