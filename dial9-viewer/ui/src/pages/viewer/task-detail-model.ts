@@ -345,7 +345,7 @@ export interface IdleBand {
   showLabel: boolean;
 }
 
-/** The task lifespan bar, spawn -> terminate. */
+/** The observed task lifespan, from spawn through terminate or the visible edge. */
 export interface LifespanBar {
   x1: number;
   x2: number;
@@ -512,15 +512,15 @@ export function buildTaskDetailRenderModel(
   }
 
   // ── Task lifespan bar ────────────────────────────────────────────────
-  if (data.hasTerminate && data.spawnTs != null && data.terminateTs != null) {
+  if (data.spawnTs != null) {
     const lifeStart = data.spawnTs;
-    const lifeEnd = data.terminateTs;
+    const lifeEnd = data.terminateTs ?? viewEnd;
     if (lifeStart < viewEnd && lifeEnd > viewStart) {
       lifespan = {
         x1: Math.max(0, nsToX(lifeStart)),
         x2: Math.min(drawW, nsToX(lifeEnd)),
         showSpawn: lifeStart >= viewStart,
-        showDone: lifeEnd <= viewEnd,
+        showDone: data.terminateTs != null && lifeEnd <= viewEnd,
       };
     }
   }

@@ -324,6 +324,12 @@ describe("buildTaskDetailRenderModel: idle gaps + lifespan", () => {
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
     expect(m.lifespan).toEqual({ x1: 50, x2: 800, showSpawn: true, showDone: true });
   });
+
+  it("shows the spawn edge when termination was not observed", () => {
+    const data = detailData({ polls: [poll(100, 200, 1)], spawnTs: 50 });
+    const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
+    expect(m.lifespan).toEqual({ x1: 50, x2: 1000, showSpawn: true, showDone: false });
+  });
 });
 
 // ── Hit-region ordering + status/waker lookups ────────────────────────────
