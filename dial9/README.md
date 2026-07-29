@@ -585,8 +585,8 @@ You can emit your own application-level events into the trace alongside the buil
 ```rust,no_run
 # fn main() {
 use dial9::Dial9Handle;
-use dial9::TraceEvent;
 use dial9::core::clock_monotonic_ns;
+use dial9::format::TraceEvent;
 
 #[derive(TraceEvent)]
 struct RequestCompleted {
@@ -616,7 +616,8 @@ periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,no_run
 use dial9::core::CustomEventsConfig;
-use dial9::{RecorderSourceExt, TraceEvent, recorder};
+use dial9::format::TraceEvent;
+use dial9::{RecorderSourceExt, recorder};
 
 #[derive(TraceEvent)]
 struct CacheEvent {
