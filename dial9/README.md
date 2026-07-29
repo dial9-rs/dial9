@@ -213,6 +213,11 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 recorder too, so calling it again attaches another runtime to the same trace. Its return type,
 `std::io::Result<dial9::AttachedRuntime>`, is what a `#[dial9::main]` config must produce.
 
+Driving that runtime yourself, reach for [`dial9::block_on`](https://docs.rs/dial9/latest/dial9/fn.block_on.html) rather than
+`Runtime::block_on`. Poll and wake events come from Tokio's per-task hooks, and `Runtime::block_on` would
+polls its future outside any task, so that future and everything awaited inline under it would be absent
+from the trace. `dial9::block_on` spawns it first. `#[dial9::main]` already does this for you.
+
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # mod inner {
