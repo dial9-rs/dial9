@@ -3,18 +3,18 @@
 //! Test that a second install() returns AlreadyInstalled.
 
 use dial9::memory::{InstallError, MemoryProfiler};
-use dial9::{RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, TokioAttachOptions, recorder};
 
 mod common;
 
 #[test]
 fn second_install_returns_already_installed() {
     let recorder = recorder(common::small_mem_writer()).build();
-    let (recorder, _rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let _rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
 
     let handle = recorder.handle().clone();

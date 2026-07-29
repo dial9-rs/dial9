@@ -95,15 +95,18 @@ fn bench_mixed_sizes(c: &mut Criterion) {
 
 fn install_profiler() {
     use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
-    use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderTokioExt, recorder};
+    use dial9_tokio_telemetry::telemetry::{
+        Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, recorder,
+    };
 
     // We leak the runtime and recorder so they live for the process lifetime.
     // This is intentional — the profiler is process-permanent anyway.
     let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
     let handle = recorder.handle().clone();
 

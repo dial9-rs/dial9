@@ -1,6 +1,9 @@
 #![allow(dead_code)]
+use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, MemoryBuffer};
+use dial9_tokio_telemetry::telemetry::{
+    Dial9HandleTokioExt, DiskBuffer, MemoryBuffer, TokioAttachOptions,
+};
 use dial9_trace_format::decoder::Decoder;
 use serde::de::DeserializeOwned;
 use std::future::Future;
@@ -19,6 +22,33 @@ pub const SEAL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SEAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Trivial tasks spawned per workload burst; enough to seal a 64-byte segment.
 pub const WORKLOAD_BURST: usize = 200;
+
+/// Attach a multi-thread runtime with `workers` workers to `recorder`.
+pub fn attach(
+    recorder: &Recorder,
+    workers: usize,
+    options: TokioAttachOptions,
+) -> tokio::runtime::Runtime {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(workers);
+    recorder
+        .handle()
+        .attach_tokio_runtime(builder, options)
+        .expect("build tokio runtime")
+}
+
+/// [`attach`] with a current-thread runtime.
+pub fn attach_current_thread(
+    recorder: &Recorder,
+    options: TokioAttachOptions,
+) -> tokio::runtime::Runtime {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    recorder
+        .handle()
+        .attach_tokio_runtime(builder, options)
+        .expect("build tokio runtime")
+}
 
 /// A [`DiskBuffer`] tuned to seal a segment within a few hundred ms under a tiny
 /// workload: the small size threshold seals by bytes almost immediately, and the

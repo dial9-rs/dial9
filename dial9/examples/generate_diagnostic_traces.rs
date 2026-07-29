@@ -12,8 +12,8 @@
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
 use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -47,17 +47,21 @@ fn generate_no_wake_events(dir: &PathBuf) {
         .max_total_size(50 * 1024 * 1024)
         .build()
         .unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(Duration::from_millis(50))
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .expect("build tokio runtime");
 
@@ -84,18 +88,22 @@ fn generate_good_trace(dir: &PathBuf) {
         .max_total_size(50 * 1024 * 1024)
         .build()
         .unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
         .worker_poll_interval(Duration::from_millis(50))
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .expect("build tokio runtime");
 
@@ -121,18 +129,22 @@ fn generate_no_sched_events(dir: &PathBuf) {
         .max_total_size(50 * 1024 * 1024)
         .build()
         .unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()
         .worker_poll_interval(Duration::from_millis(50))
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .expect("build tokio runtime");
 

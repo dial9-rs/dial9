@@ -3,8 +3,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
 use dial9_core::recorder::RecorderSourceExt;
 use dial9_tokio_telemetry::telemetry::{
-    CustomEventsConfig, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions,
-    recorder,
+    CustomEventsConfig, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
@@ -51,11 +50,7 @@ fn traced_runtime_records_custom_events_callback_events() {
         })
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(1));
@@ -87,22 +82,13 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
         })
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-            t.enable_all();
-            t.enable_all();
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach_current_thread(&recorder, TokioAttachOptions::default());
 
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().runtime_name("main").build(),
-            |t| {
-                t.worker_threads(1);
-            },
-        )
-        .unwrap();
+    let runtime = common::attach(
+        &recorder,
+        1,
+        TokioAttachOptions::builder().runtime_name("main").build(),
+    );
 
     drop(runtime);
     drop(rt);

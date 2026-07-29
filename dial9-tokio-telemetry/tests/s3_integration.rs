@@ -9,8 +9,7 @@ use aws_sdk_s3::Client;
 use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderPipelineExt, RecorderS3ClientExt, RecorderTokioExt, TokioAttachOptions,
-    recorder, spawn,
+    DiskBuffer, RecorderPipelineExt, RecorderS3ClientExt, TokioAttachOptions, recorder, spawn,
 };
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
@@ -52,11 +51,7 @@ fn worker_thread_starts_and_stops_cleanly() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     rt.block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -105,11 +100,7 @@ fn client_future_runs_once_when_pipeline_starts() {
         })
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     rt.block_on(async {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -162,11 +153,7 @@ fn graceful_shutdown_seals_segments() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(5));
@@ -215,16 +202,13 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .runtime_name("test-runtime")
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .runtime_name("test-runtime")
+            .build(),
+    );
 
     // Run a workload that generates enough events to trigger rotation.
     rt.block_on(async {
@@ -397,11 +381,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     rt.block_on(async {
         for _ in 0..50 {
@@ -517,16 +497,13 @@ fn stress_test_all_segments_uploaded_and_valid() {
         .metrics_sink(metrics_sink)
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(4);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        4,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     // Generate load for 1 second — enough to produce several segments at 64KB each.
     rt.block_on(async {
@@ -729,11 +706,7 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     // Generate trace data on the runtime, then let the worker pick it up.
     rt.block_on(async {
@@ -798,16 +771,13 @@ fn stress_test_with_s3_failures() {
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(4);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        4,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -889,11 +859,7 @@ fn permanently_broken_s3_produces_failure_metrics() {
         .metrics_sink(metrics_sink)
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     let has_pipeline_metric = || {
         inspector
@@ -968,11 +934,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 

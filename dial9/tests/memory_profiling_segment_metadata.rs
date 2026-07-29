@@ -8,7 +8,7 @@ mod common;
 use common::decode_file;
 use dial9::analysis::analysis_events::Dial9Event;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 #[global_allocator]
@@ -22,11 +22,11 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
 
     let handle = recorder.handle().clone();

@@ -12,7 +12,7 @@
 
 use clap::Parser;
 use dial9::core::pipeline::s3::S3Config;
-use dial9::{DiskBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -141,18 +141,21 @@ fn main() -> std::io::Result<()> {
         LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
     );
 
-    let worker_threads = args.worker_threads;
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .metrics_sink(metrics_sink)
         .with_s3_uploader(s3_config)
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(args.worker_threads);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(worker_threads);
-            },
         )
         .expect("build tokio runtime");
 

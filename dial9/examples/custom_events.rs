@@ -10,7 +10,7 @@
 //! ```
 
 use dial9::core::{Encodable, ThreadLocalEncoder, clock_monotonic_ns};
-use dial9::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::time::Duration;
 
@@ -66,11 +66,14 @@ fn main() -> std::io::Result<()> {
     let trace_path = dir.path().join("trace.bin");
 
     let writer = DiskBuffer::single_file(&trace_path)?;
-    let (recorder, rt) = recorder(writer)
-        .build()
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
+    let recorder = recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("build tokio runtime");
 
     let handle = recorder.handle();

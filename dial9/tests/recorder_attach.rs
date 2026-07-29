@@ -3,19 +3,21 @@
 #![cfg(feature = "tokio")]
 
 use dial9::{
-    AttachedRuntime, DiskBuffer, Recorder, RecorderSourceExt, RecorderTokioExt, TokioAttachOptions,
-    recorder,
+    AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, Recorder, RecorderSourceExt,
+    TokioAttachOptions, recorder,
 };
 use dial9_trace_format::decoder::Decoder;
 use std::{collections::BTreeMap, time::Duration};
 
 /// Attach a multi-thread runtime with `workers` threads and the given options.
 fn attach(recorder: Recorder, workers: usize, options: TokioAttachOptions) -> AttachedRuntime {
-    recorder
-        .attach_tokio_runtime_with(options, |t| {
-            t.worker_threads(workers);
-        })
-        .expect("build tokio runtime")
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(workers);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, options)
+        .expect("build tokio runtime");
+    (recorder, runtime)
 }
 
 #[test]

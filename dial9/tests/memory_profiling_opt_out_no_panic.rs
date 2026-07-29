@@ -8,7 +8,7 @@
 //! would panic. With OPT_OUT, they bail out cleanly.
 
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, recorder};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -57,11 +57,11 @@ fn opt_out_prevents_tls_teardown_panic() {
     PANICS.store(0, Ordering::Relaxed);
 
     let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
 
     let handle = recorder.handle().clone();

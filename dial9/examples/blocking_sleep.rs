@@ -1,5 +1,5 @@
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {
@@ -13,17 +13,21 @@ async fn blocking_task(id: usize) {
 
 fn main() {
     let writer = DiskBuffer::single_file("blocking_sleep_trace.bin").unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(Default::default())
         .with_sched_events(Default::default())
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(2);
-            },
         )
         .expect("build tokio runtime");
 

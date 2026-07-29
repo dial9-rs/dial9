@@ -12,7 +12,7 @@ use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Ev
 fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::{
-        RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt, recorder,
+        RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
     };
     use std::time::Duration;
 
@@ -24,12 +24,11 @@ fn sched_events_capture_context_switches() {
         .with_sched_events(SchedEventConfig::default())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(num_workers as usize);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        num_workers as usize,
+        TokioAttachOptions::default(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();
@@ -85,7 +84,7 @@ fn sched_events_capture_context_switches() {
 fn sched_events_sampling_reduces_count() {
     use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::{
-        RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt, recorder,
+        RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
     };
     use std::collections::HashSet;
     use std::time::Duration;
@@ -99,12 +98,11 @@ fn sched_events_sampling_reduces_count() {
         .with_sched_events(SchedEventConfig::default().sampling_interval(PERIOD))
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(num_workers as usize);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        num_workers as usize,
+        TokioAttachOptions::default(),
+    );
 
     // Baseline switch counts for all current threads (workers already spawned).
     let before = common::snapshot_task_switches();

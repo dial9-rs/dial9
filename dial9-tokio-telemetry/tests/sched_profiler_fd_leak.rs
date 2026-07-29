@@ -10,7 +10,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::SchedEventConfig;
-use dial9_tokio_telemetry::telemetry::{RecorderPerfExt, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{RecorderPerfExt, TokioAttachOptions, recorder};
 
 mod common;
 use std::sync::Mutex;
@@ -47,12 +47,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
     let recorder = recorder(common::small_mem_writer())
         .with_sched_events(SchedEventConfig::default())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(num_workers);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, num_workers, TokioAttachOptions::default());
 
     // Let workers start and resolve their identity.
     rt.block_on(async {
@@ -108,12 +103,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
         let recorder = recorder(common::small_mem_writer())
             .with_sched_events(SchedEventConfig::default())
             .build();
-        let (recorder, rt) = recorder
-            .attach_tokio_runtime(|t| {
-                t.enable_all();
-                t.worker_threads(num_workers);
-            })
-            .expect("build tokio runtime");
+        let rt = common::attach(&recorder, num_workers, TokioAttachOptions::default());
 
         // Do some work so workers resolve their identity.
         rt.block_on(async {

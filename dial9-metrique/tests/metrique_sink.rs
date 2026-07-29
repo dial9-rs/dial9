@@ -13,7 +13,7 @@ use dial9_core::buffer::DiskBuffer;
 use dial9_core::recorder::recorder;
 use dial9_core::thread::current_tid;
 use dial9_metrique::{Dial9Context, Dial9EntryExt, Dial9Stream, Interned, Skip};
-use dial9_tokio_telemetry::telemetry::RecorderTokioExt;
+use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
@@ -299,10 +299,11 @@ fn on_runtime_context_captures_task_id() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
 
     let mut stream = Dial9Stream::new(recorder.handle());
@@ -1212,10 +1213,11 @@ fn every_context_role_routes() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
 
     let mut stream = Dial9Stream::new(recorder.handle());

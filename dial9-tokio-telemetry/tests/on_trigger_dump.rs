@@ -9,7 +9,7 @@ mod fake_s3;
 use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderPipelineExt, RecorderTokioExt, recorder,
+    DiskBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 use fake_s3::{fake_s3_client, wait_for_uploaded_segment};
 use std::future::IntoFuture;
@@ -49,12 +49,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
         .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client.clone()))
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
@@ -172,12 +167,7 @@ fn lookforward_dump_captures_post_trigger_segments() {
         .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client.clone()))
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
@@ -243,12 +233,7 @@ fn lookforward_dump_resolves_after_deadline() {
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
@@ -283,12 +268,7 @@ fn off_s3_pipeline_dumps_without_manifest() {
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
@@ -334,12 +314,7 @@ fn shutdown_truncates_open_lookforward_dump() {
         .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client))
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 

@@ -167,8 +167,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9::{
-    AttachedRuntime, Disk, DiskBuffer, Recorder, RecorderBuilder, RecorderPipelineExt,
-    RecorderTokioExt, TokioAttachOptions,
+    AttachedRuntime, Dial9HandleTokioExt, Disk, DiskBuffer, Recorder, RecorderBuilder,
+    RecorderPipelineExt, TokioAttachOptions,
 };
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
@@ -345,12 +345,17 @@ fn my_config() -> io::Result<AttachedRuntime> {
         }
     );
     let recorder = configure_dial9(&opts);
-    recorder.attach_tokio_runtime_with(
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .build(),
-        |_| {},
-    )
+    )?;
+    Ok((recorder, runtime))
 }
 
 async fn workload_task(id: usize) {

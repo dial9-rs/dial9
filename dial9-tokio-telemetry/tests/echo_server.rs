@@ -2,9 +2,7 @@ mod common;
 
 use common::decode_file;
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -62,16 +60,13 @@ fn overhead_bench_validates() {
     let num_workers = 4;
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(num_workers);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        num_workers,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let running = Arc::new(AtomicBool::new(true));
 

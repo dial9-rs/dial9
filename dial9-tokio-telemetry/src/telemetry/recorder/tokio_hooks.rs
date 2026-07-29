@@ -63,7 +63,7 @@ impl TokioHook<TaskMetaCb> {
 ///
 /// ```rust,no_run
 /// use dial9_tokio_telemetry::telemetry::{
-///     MemoryBuffer, RecorderTokioExt, TokioAttachOptions, TokioHooks, recorder,
+///     Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, TokioHooks, recorder,
 /// };
 ///
 /// let mut hooks = TokioHooks::default();
@@ -71,10 +71,14 @@ impl TokioHook<TaskMetaCb> {
 /// hooks.on_thread_stop(|| println!("stopping"));
 ///
 /// let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
-/// let (rec, runtime) = rec
-///     .attach_tokio_runtime_with(
+///
+/// let mut builder = tokio::runtime::Builder::new_multi_thread();
+/// builder.enable_all().worker_threads(4);
+/// let runtime = rec
+///     .handle()
+///     .attach_tokio_runtime(
+///         builder,
 ///         TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-///         |t| { t.worker_threads(4); },
 ///     )
 ///     .unwrap();
 /// ```

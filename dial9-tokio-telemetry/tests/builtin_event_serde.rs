@@ -6,7 +6,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
-    MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder,
+    MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 use std::time::Duration;
 
@@ -17,16 +17,13 @@ fn decode_builtin_events_via_serde() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();

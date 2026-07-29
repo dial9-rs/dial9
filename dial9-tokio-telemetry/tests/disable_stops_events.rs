@@ -1,7 +1,7 @@
+mod common;
+
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::path::Path;
 use std::time::Duration;
@@ -43,16 +43,13 @@ fn disable_stops_all_event_production() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let handle = recorder.handle().clone();
 
@@ -133,16 +130,13 @@ fn disable_stops_cpu_sample_production() {
     let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let handle = recorder.handle().clone();
 
@@ -230,11 +224,7 @@ fn disable_stops_segment_rotation() {
         .unwrap();
 
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     let handle = recorder.handle().clone();
 
@@ -300,16 +290,13 @@ fn enable_after_disable_resumes_events() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let handle = recorder.handle().clone();
 

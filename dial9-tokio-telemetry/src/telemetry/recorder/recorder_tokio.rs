@@ -1,30 +1,36 @@
 //! Build Tokio runtimes instrumented against a [`Recorder`].
 //!
-//! [`RecorderTokioExt::attach_tokio_runtime`] registers dial9 hooks on a
-//! `tokio::runtime::Builder`, builds the runtime, and returns both. Call it once
-//! per runtime, all attached runtimes feed the same recorder/trace.
+//! [`Dial9HandleTokioExt::attach_tokio_runtime`] registers dial9 hooks on a
+//! `tokio::runtime::Builder`, builds the runtime, and returns it. Call it once
+//! per runtime, all runtimes attached to the same recorder feed one trace.
 //! `#[dial9::main]` builds on this.
 //!
-//! dial9 builds the runtime because Tokio's hook configuration freezes at
-//! `.build()`. Your closure configures the builder and may swap runtime flavor.
+//! Attach goes through [`Dial9Handle`], so configure the builder, then hand it
+//! over. dial9 builds it for you because Tokio's hook configuration freezes at
+//! `.build()`. A handle is cheap to clone and `Send`, so it can be used in services
+//! where multiple threads build their own runtimes.
 //!
 //! ```no_run
 //! use std::time::Duration;
 //! use dial9_core::buffer::DiskBuffer;
 //! use dial9_core::recorder::recorder;
-//! use dial9_tokio_telemetry::telemetry::{spawn, RecorderTokioExt, TokioAttachOptions};
+//! use dial9_tokio_telemetry::telemetry::{spawn, Dial9HandleTokioExt, TokioAttachOptions};
 //!
 //! # fn main() -> std::io::Result<()> {
 //! let rec = recorder(DiskBuffer::single_file("/tmp/trace.bin")?).build();
 //!
-//! let (rec, main_rt) = rec.attach_tokio_runtime_with(
+//! let mut main_builder = tokio::runtime::Builder::new_multi_thread();
+//! main_builder.enable_all().worker_threads(4);
+//! let main_rt = rec.handle().attach_tokio_runtime(
+//!     main_builder,
 //!     TokioAttachOptions::builder().runtime_name("main").build(),
-//!     |t| { t.worker_threads(4); },
 //! )?;
 //!
-//! let (rec, io_rt) = rec.attach_tokio_runtime_with(
+//! let mut io_builder = tokio::runtime::Builder::new_multi_thread();
+//! io_builder.enable_all().worker_threads(2);
+//! let io_rt = rec.handle().attach_tokio_runtime(
+//!     io_builder,
 //!     TokioAttachOptions::builder().runtime_name("io").build(),
-//!     |t| { t.worker_threads(2); },
 //! )?;
 //!
 //! main_rt.block_on(async { spawn(async { /* work */ }).await.unwrap() });
@@ -40,10 +46,6 @@
 //!
 //! Lost shutdown telemetry is acceptable in this model; `#[dial9::main]` handles
 //! runtime-drop-before-shutdown ordering for you.
-//!
-//! [`Dial9HandleTokioExt::attach_tokio_runtime`] is the same operation for
-//! callers that don't want to thread a [`Recorder`] through their code,
-//! clone a [`Dial9Handle`] once and attach from as many threads as you like.
 
 use super::register_runtime_context;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
@@ -234,8 +236,7 @@ impl std::fmt::Debug for TokioAttachOptions {
     }
 }
 
-/// A recorder and a Tokio runtime instrumented against it, as returned by
-/// [`RecorderTokioExt::attach_tokio_runtime`].
+/// The recorder and runtime pair a `#[dial9::main]` config returns.
 ///
 /// Name it in a `#[dial9::main]` config function's signature:
 ///
@@ -244,105 +245,52 @@ impl std::fmt::Debug for TokioAttachOptions {
 /// ```
 pub type AttachedRuntime = (Recorder, tokio::runtime::Runtime);
 
-/// Tokio instrumentation for [`Recorder`].
-pub trait RecorderTokioExt {
-    /// Attach a Tokio runtime to this recorder and return both as an
-    /// [`AttachedRuntime`].
-    ///
-    /// `configure` receives a `tokio::runtime::Builder` pre-seeded with
-    /// `enable_all()`. Use it to set `worker_threads`, `thread_name`, etc., or
-    /// replace `*t` to switch flavor (for example
-    /// `*t = Builder::new_current_thread()`).
-    ///
-    /// Each call attaches another runtime (it does not replace earlier ones),
-    /// handing the recorder back so it can be threaded into the next one:
-    ///
-    /// ```no_run
-    /// # use dial9_core::buffer::MemoryBuffer;
-    /// # use dial9_core::recorder::recorder;
-    /// # use dial9_tokio_telemetry::telemetry::RecorderTokioExt;
-    /// # fn main() -> std::io::Result<()> {
-    /// # let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
-    /// let (rec, api) = rec.attach_tokio_runtime(|t| { t.worker_threads(4); })?;
-    /// let (rec, io)  = rec.attach_tokio_runtime(|t| { t.worker_threads(2); })?;
-    /// # let _ = (rec, api, io);
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// On a disabled recorder this still returns a working, untraced runtime.
-    ///
-    /// Do not set builder thread/task callbacks directly (`t.on_thread_start`)
-    /// because dial9 must install its own hooks. Use
-    /// [`TokioHooks`](super::TokioHooks) via
-    /// [`attach_tokio_runtime_with`](Self::attach_tokio_runtime_with) to compose yours.
-    ///
-    /// Drop the runtime before
-    /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
-    /// so its workers flush.
-    ///
-    /// ```no_run
-    /// use dial9_core::buffer::MemoryBuffer;
-    /// use dial9_core::recorder::recorder;
-    /// use dial9_tokio_telemetry::telemetry::RecorderTokioExt;
-    ///
-    /// # fn main() -> std::io::Result<()> {
-    /// let (recorder, runtime) = recorder(MemoryBuffer::new(1 << 20)?)
-    ///     .build()
-    ///     .attach_tokio_runtime(|t| { t.worker_threads(4); })?;
-    /// # let _ = (recorder, runtime);
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn attach_tokio_runtime(
-        self,
-        configure: impl FnOnce(&mut tokio::runtime::Builder),
-    ) -> io::Result<AttachedRuntime>
-    where
-        Self: Sized,
-    {
-        self.attach_tokio_runtime_with(TokioAttachOptions::default(), configure)
-    }
-
-    /// [`attach_tokio_runtime`](Self::attach_tokio_runtime) with dial9 per-runtime options.
-    ///
-    /// - `options`: dial9 tracing behavior (runtime name, task tracking,
-    ///   task-dump config, composed hooks).
-    /// - `configure`: Tokio runtime construction (worker count, thread names,
-    ///   flavor).
-    ///
-    /// `tokio_instrumentation_enabled(false)` skips instrumentation for this
-    /// runtime only; other recorder-attached runtimes are unaffected.
-    fn attach_tokio_runtime_with(
-        self,
-        options: TokioAttachOptions,
-        configure: impl FnOnce(&mut tokio::runtime::Builder),
-    ) -> io::Result<AttachedRuntime>
-    where
-        Self: Sized;
-}
-
-impl RecorderTokioExt for Recorder {
-    fn attach_tokio_runtime_with(
-        self,
-        options: TokioAttachOptions,
-        configure: impl FnOnce(&mut tokio::runtime::Builder),
-    ) -> io::Result<AttachedRuntime> {
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.enable_all();
-        configure(&mut builder);
-        let runtime = self.handle().attach_tokio_runtime(builder, options)?;
-        Ok((self, runtime))
-    }
-}
-
 /// Tokio instrumentation for [`Dial9Handle`].
 pub trait Dial9HandleTokioExt {
     /// Instrument a builder you configured, build it, and return the runtime.
     ///
-    /// Every runtime built from a handle must be dropped before
+    /// Get a handle from [`Recorder::handle`](dial9_core::recording::Recorder::handle),
+    /// or clone one per thread. Each call attaches another runtime (it does not
+    /// replace earlier ones) and every runtime attached to the same recorder
+    /// records into the same trace.
+    ///
+    /// - `builder`: yours to configure. dial9 does not seed it, so call
+    ///   `enable_all` (or the drivers you need) yourself, and pick the flavor.
+    /// - `options`: dial9 tracing behavior for this runtime (runtime name, task
+    ///   tracking, task-dump config, composed hooks).
+    ///
+    /// On a disabled recorder this still returns a working, untraced runtime, as
+    /// does `tokio_instrumentation_enabled(false)`, which skips instrumentation
+    /// for this runtime only.
+    ///
+    /// Do not set builder thread/task callbacks directly (`on_thread_start` and
+    /// friends) because dial9 installs its own and would overwrite yours. Pass
+    /// [`TokioHooks`](super::TokioHooks) in the options to compose them instead.
+    ///
+    /// Drop the runtime before calling
     /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
-    /// consumes the recorder that handle came from.
+    /// on the recorder this handle came from, so the runtime's workers flush.
+    ///
+    /// ```no_run
+    /// use dial9_core::buffer::MemoryBuffer;
+    /// use dial9_core::recorder::recorder;
+    /// use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+    ///
+    /// # fn main() -> std::io::Result<()> {
+    /// let recorder = recorder(MemoryBuffer::new(1 << 20)?).build();
+    ///
+    /// let mut builder = tokio::runtime::Builder::new_multi_thread();
+    /// builder.enable_all().worker_threads(4);
+    /// let runtime = recorder
+    ///     .handle()
+    ///     .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+    /// # let _ = (recorder, runtime);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// The handle is cheap to clone, so several threads can each attach their
+    /// own runtime off the same recorder:
     ///
     /// ```no_run
     /// use dial9_core::buffer::MemoryBuffer;
@@ -353,24 +301,20 @@ pub trait Dial9HandleTokioExt {
     /// let recorder = recorder(MemoryBuffer::new(1 << 20)?).build();
     /// let handle = recorder.handle().clone();
     ///
-    /// let mut threads = Vec::new();
-    /// for core in 0..4 {
-    ///     let handle = handle.clone();
-    ///     threads.push(std::thread::spawn(move || {
-    ///         let mut builder = tokio::runtime::Builder::new_current_thread();
-    ///         builder.enable_all();
-    ///
-    ///         let runtime = handle
-    ///             .attach_tokio_runtime(
-    ///                 builder,
-    ///                 TokioAttachOptions::builder()
-    ///                     .runtime_name(format!("core-{core}"))
-    ///                     .build(),
-    ///             )
-    ///             .expect("build core runtime");
-    ///         runtime.block_on(async { /* ... */ });
-    ///     }));
-    /// }
+    /// let threads: Vec<_> = (0..2)
+    ///     .map(|_| {
+    ///         let handle = handle.clone();
+    ///         std::thread::spawn(move || {
+    ///             let mut builder = tokio::runtime::Builder::new_current_thread();
+    ///             builder.enable_all();
+    ///             let runtime = handle
+    ///                 .attach_tokio_runtime(builder, TokioAttachOptions::default())
+    ///                 .expect("build runtime");
+    ///             runtime.block_on(async { /* ... */ });
+    ///         })
+    ///     })
+    ///     .collect();
+    /// # for t in threads { t.join().unwrap(); }
     /// # Ok(())
     /// # }
     /// ```

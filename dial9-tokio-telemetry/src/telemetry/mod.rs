@@ -49,7 +49,7 @@ pub use format::{
 pub use recorder::RecorderS3ClientExt;
 pub use recorder::{
     AttachedRuntime, Dial9Handle, Dial9HandleTokioExt, Dial9TokioHandle, RecorderPipelineExt,
-    RecorderTokioExt, TokioAttachOptions, TokioHooks, block_on, current_worker_id, spawn, spawn_in,
+    TokioAttachOptions, TokioHooks, block_on, current_worker_id, spawn, spawn_in,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
