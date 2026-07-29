@@ -39,9 +39,19 @@ export interface ApiConfig {
   default_prefix?: string | undefined;
   aggregation_enabled?: boolean | undefined;
   supports_byo_credentials?: boolean | undefined;
+  /** Source-key layout; absent on servers predating simulator support. */
+  source_layout?: "flat" | "time-partitioned" | undefined;
   /** Bucket-picker filter substring; may be absent on servers predating
    * the field - the client falls back to "dial9". */
   bucket_filter?: string | undefined;
+}
+
+/** Whether selected traces must open directly by key instead of by scope. */
+export function usesFlatSourceLayout(config: ApiConfig): boolean {
+  if (config.source_layout === "flat") return true;
+  if (config.source_layout === "time-partitioned") return false;
+  // Compatibility with servers that predate the explicit layout capability.
+  return !config.supports_byo_credentials;
 }
 
 /** GET /api/browse response fields the page reads. */

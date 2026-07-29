@@ -11,6 +11,38 @@ cargo install --locked dial9
 
 See the [`dial9` README](https://crates.io/crates/dial9) for usage documentation.
 
+## Simulator mode
+
+Run the complete S3-browser and on-demand aggregation workflow without an S3
+bucket or AWS credentials:
+
+```bash
+# Sanitized synthetic traces
+dial9 serve --simulator --local
+
+# Rebase and replay the bundled demo trace in every virtual segment
+dial9 serve --simulator demo --local
+
+# Configure fleet size, segment spacing, data volume, and feature groups
+dial9 serve --simulator synthetic \
+  --simulator-hosts 8 \
+  --simulator-segment-secs 60 \
+  --simulator-repetitions 2 \
+  --simulator-symbols realistic \
+  --simulator-features cpu,scheduling,tasks,spans \
+  --local
+```
+
+Simulator objects use the production date/service/host key layout and the
+normal viewer storage API. The catalog is virtual: every requested time range
+has deterministic segments, and trace bytes are rendered only when fetched.
+Flamegraph, span, and Tokio-stat rollups are written to a process-local
+temporary directory and removed when the server exits. Run `dial9 serve
+--help` for all simulator size, duration, and symbol options. Synthetic symbol
+names remain anonymous placeholders by default; `--simulator-symbols
+realistic` emits deterministic Rust-like names for more representative
+flamegraphs.
+
 ## `trace-shape` — Trace Structural Fingerprints
 
 The `trace-shape` subcommand extracts and generates sanitized structural

@@ -72,7 +72,7 @@ pub async fn list_services(
         .filter(|s| !s.is_empty());
     let base = resolve_base(state.default_prefix.as_deref(), key_prefix);
 
-    if !state.allow_byo_creds {
+    if !state.time_partitioned_source {
         let page = backend
             .list_objects(&bucket, &base, LOCAL_OBJECT_CAP)
             .await
