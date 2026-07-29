@@ -1220,7 +1220,18 @@
     return out;
   }
 
-  function workerForTidAt(bindings, timestamp) {
+  function timestampIsInHandoffGap(timestamp, handoffGaps) {
+    if (handoffGaps) {
+      for (const gap of handoffGaps) {
+        if (gap.startNs > timestamp) break;
+        if (timestamp < gap.endNs) return true;
+      }
+    }
+    return false;
+  }
+
+  function workerForTidAt(bindings, timestamp, handoffGaps) {
+    if (timestampIsInHandoffGap(timestamp, handoffGaps)) return undefined;
     if (!bindings || bindings.length === 0) return undefined;
     let lo = 0, hi = bindings.length;
     while (lo < hi) {
@@ -1245,6 +1256,8 @@
    *   when present, enables poll-based active/idle reconstruction.
    * @param {Map<number,Array<{timestamp:number,workerId:number}>>} [tidBindings]
    *   historical OS thread id → worker bindings used at the span start.
+   * @param {Array<{fromTid:number,toTid:number,startNs:number,endNs:number}>} [blockInPlaceGaps]
+   *   handoff intervals where thread-derived worker attribution is unknown.
    * @returns {{
    *   allSpans: Array<{start: number, end: number, spanId: string, spanName: string, fields: Object, parentSpanId: string|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, taskId: number|null, depth: number}>,
    *   spanMeta: Map<string, {spanName: string, fields: Object, parentSpanId: string|null}>,
@@ -1253,7 +1266,7 @@
    *   childrenByParent: Map<string|null, string[]>,
    * }}
    */
-  function buildSpanData(customEvents, workerSpans, tidBindings) {
+  function buildSpanData(customEvents, workerSpans, tidBindings, blockInPlaceGaps) {
     // Events are only ordered within a single worker's stream. Cross-worker
     // interleaving can produce globally out-of-order timestamps, so we must
     // sort before processing to ensure close events are seen after all
@@ -1269,6 +1282,17 @@
     const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
     const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "span_name"]);
     let singleEventOrdinal = 0;
+    const handoffGapsByTid = new Map();
+    for (const gap of blockInPlaceGaps || []) {
+      for (const tid of [gap.fromTid, gap.toTid]) {
+        let gaps = handoffGapsByTid.get(tid);
+        if (!gaps) {
+          gaps = [];
+          handoffGapsByTid.set(tid, gaps);
+        }
+        gaps.push(gap);
+      }
+    }
 
     function finalizeSpan(spanId) {
       const rec = spanMap.get(spanId);
@@ -1288,10 +1312,19 @@
         const start = projected.start;
         const end = projected.end;
         const taskId = projected.taskId;
-        const mappedWorker = projected.workerId ??
-          (projected.threadId != null
-            ? workerForTidAt(tidBindings?.get(projected.threadId), start)
-            : undefined);
+        const handoffGaps = projected.threadId != null
+          ? handoffGapsByTid.get(projected.threadId)
+          : undefined;
+        const mappedWorker = timestampIsInHandoffGap(start, handoffGaps)
+          ? undefined
+          : projected.workerId ??
+            (projected.threadId != null
+              ? workerForTidAt(
+                  tidBindings?.get(projected.threadId),
+                  start,
+                  handoffGaps,
+                )
+              : undefined);
         // 255 is dial9's UNKNOWN worker. It keeps an event with no runtime
         // attribution out of real worker lanes without inventing worker 0.
         const workerId = mappedWorker ?? 255;

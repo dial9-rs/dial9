@@ -145,4 +145,73 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
       .columnarSpans!.at(0);
     expect(span.taskId).toBe(2);
   });
+
+  it("does not derive a task from a thread inside a block-in-place handoff gap", () => {
+    const spanEvents = new ColumnarSpanEvents(1);
+    spanEvents.push(
+      SPAN_KIND.Complete,
+      170,
+      {},
+      {
+        start: 110,
+        end: 170,
+        name: "work",
+        spanType: "producer",
+        threadId: 77,
+        taskId: null,
+        workerId: null,
+        fields: {},
+        units: null,
+      },
+    );
+    const store = ColumnarWorkerSpans.fromWorkerSpans({
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1, spawnLocId: null, spawnLoc: null }],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    });
+    const bindings = new Map([[77, [{ timestamp: 50, workerId: 0 }]]]);
+    const gaps = [{
+      workerId: 0,
+      fromTid: 77,
+      toTid: 88,
+      startNs: 50,
+      endNs: 200,
+    }];
+
+    const span = buildSpanDataColumnar(spanEvents, store, bindings, gaps)
+      .columnarSpans!.at(0);
+    expect(span.taskId).toBeNull();
+    expect(span.segments).toEqual([]);
+    expect(span.activeNs).toBe(0);
+
+    const directlyAnnotatedEvents = new ColumnarSpanEvents(1);
+    directlyAnnotatedEvents.push(
+      SPAN_KIND.Complete,
+      170,
+      {},
+      {
+        start: 110,
+        end: 170,
+        name: "work",
+        spanType: "producer",
+        threadId: 77,
+        taskId: null,
+        workerId: 0,
+        fields: {},
+        units: null,
+      },
+    );
+    const directlyAnnotated = buildSpanDataColumnar(
+      directlyAnnotatedEvents,
+      store,
+      bindings,
+      gaps,
+    )
+      .columnarSpans!.at(0);
+    expect(directlyAnnotated.taskId).toBeNull();
+    expect(directlyAnnotated.segments).toEqual([]);
+  });
 });

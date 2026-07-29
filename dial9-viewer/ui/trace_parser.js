@@ -715,6 +715,7 @@
             recordMaxTs: -Infinity,
             singleEventMinTs: Infinity,
             singleEventMaxTs: -Infinity,
+            singleEventDecodeErrors: 0,
         };
     }
 
@@ -734,12 +735,9 @@
             bindings = [];
             state.tidBindings.set(tid, bindings);
         }
-        if (
-            bindings.length === 0 ||
-            bindings[bindings.length - 1].workerId !== workerId
-        ) {
-            bindings.push({ timestamp, workerId });
-        }
+        // Cross-worker frames are not globally timestamp ordered. Retain every
+        // binding here; finalizeParse sorts and coalesces them chronologically.
+        bindings.push({ timestamp, workerId });
         const previousWorker = state.stableTidToWorker.get(tid);
         if (!state.ambiguousTids.has(tid) && previousWorker === undefined) {
             state.stableTidToWorker.set(tid, workerId);
@@ -774,12 +772,14 @@
         const roleByField = new Array(schema.fields.length).fill(null);
         const roleIndices = new Map();
         let error = null;
+        let sawSpanStart = false;
         for (const annotation of annotations) {
             if (annotation.key !== DIAL9_ROLE_KEY) continue;
             const role = Object.values(SINGLE_EVENT_ROLES).includes(annotation.value)
                 ? annotation.value
                 : null;
             if (role == null) continue;
+            if (role === SINGLE_EVENT_ROLES.start) sawSpanStart = true;
             const index = annotation.fieldIndex;
             if (index < 0 || index >= schema.fields.length) {
                 error ||= `${DIAL9_ROLE_KEY} references missing field ${index}`;
@@ -802,7 +802,14 @@
         const startIndex = roleIndices.get(SINGLE_EVENT_ROLES.start);
         let result;
         if (startIndex == null) {
-            result = { kind: "not-span" };
+            result = sawSpanStart
+                ? {
+                      kind: "invalid",
+                      error:
+                          error ||
+                          "single-event span schema has no valid span.start field",
+                  }
+                : { kind: "not-span" };
         } else if (error != null) {
             result = { kind: "invalid", error };
         } else if (!schema.hasTimestamp) {
@@ -936,10 +943,7 @@
         return result;
     }
 
-    function decodeSingleEventSpan(schema, values, end) {
-        const layout = compileSingleEventSpanSchema(schema);
-        if (layout.kind !== "layout") return null;
-
+    function decodeSingleEventSpan(layout, schema, values, end) {
         const rawStart = values[layout.startField];
         const start =
             rawStart == null ? NaN : Number(rawStart) * layout.startMultiplier;
@@ -974,6 +978,9 @@
         const fields = {};
         const units = {};
         for (const field of layout.attributeFields) {
+            // Optional wire fields decode as null. They are absent values, not
+            // span attributes; match the Rust decoder's FieldValueRef::None path.
+            if (values[field] == null) continue;
             fields[field] = values[field];
             if (schema.units?.[field] != null) {
                 units[field] = schema.units[field];
@@ -1022,10 +1029,18 @@
         if (capped && !UNCAPPED_FRAMES.has(frame.name)) return;
 
         const schema = dec.schemas.get(frame.typeId);
-        const singleEventSpan =
+        const singleEventLayout =
             schema && schema.annotations && schema.annotations.length > 0
-                ? decodeSingleEventSpan(schema, v, ts)
+                ? compileSingleEventSpanSchema(schema)
+                : { kind: "not-span" };
+        const isSingleEventSchema = singleEventLayout.kind !== "not-span";
+        const singleEventSpan =
+            singleEventLayout.kind === "layout"
+                ? decodeSingleEventSpan(singleEventLayout, schema, v, ts)
                 : null;
+        if (singleEventLayout.kind === "layout" && singleEventSpan == null) {
+            state.singleEventDecodeErrors++;
+        }
 
         // Time range filtering: skip events outside the requested range
         // (uncapped frames like symbols/metadata are always processed)
@@ -1034,16 +1049,19 @@
         const spanInTimeRange =
             singleEventSpan != null &&
             singleEventSpan.start <= endTime &&
-            singleEventSpan.end >= startTime;
+            singleEventSpan.end > startTime;
+        const recordInTimeRange =
+            singleEventSpan != null ? spanInTimeRange : inTimeRange;
+        const uncappedRuntimeFrame =
+            !isSingleEventSchema && UNCAPPED_FRAMES.has(frame.name);
         if (
-            !inTimeRange &&
-            !spanInTimeRange &&
-            !UNCAPPED_FRAMES.has(frame.name)
+            !recordInTimeRange &&
+            !uncappedRuntimeFrame
         ) {
             return;
         }
         if (
-            (inTimeRange || spanInTimeRange) &&
+            recordInTimeRange &&
             !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)
         ) {
             const boundStart = spanInTimeRange
@@ -1086,16 +1104,16 @@
         const customEvents = state.customEvents;
         const spanEventSink = state.spanEventSink;
         const clockSyncAnchors = state.clockSyncAnchors;
-        let singleEventSpanHandled = false;
         if (singleEventSpan != null) {
-            if (spanEventSink) {
+            const storedInSink =
+                spanEventSink &&
                 spanEventSink.pushIfSpan(
                     frame.name,
                     ts,
                     v,
                     singleEventSpan,
                 );
-            } else {
+            if (!storedInSink) {
                 customEvents.push({
                     name: frame.name,
                     timestamp: ts,
@@ -1104,7 +1122,20 @@
                     singleEventSpan,
                 });
             }
-            singleEventSpanHandled = true;
+        } else if (isSingleEventSchema && ts != null) {
+            // Invalid schemas and per-event projection failures remain visible
+            // as ordinary custom events, but must not mutate runtime state based
+            // only on a colliding schema name.
+            customEvents.push({
+                name: frame.name,
+                timestamp: ts,
+                fields: v,
+                units: schema?.units || null,
+                singleEventSpan: null,
+            });
+        }
+        if (isSingleEventSchema) {
+            return;
         }
         if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) return;
 
@@ -1390,7 +1421,7 @@
                 // Unrecognized event type: capture as a custom event. Events
                 // that produce spans route to the columnar spanEventSink when
                 // present; everything else stays fat.
-                if (ts != null && !singleEventSpanHandled) {
+                if (ts != null) {
                     if (
                         !(
                             spanEventSink &&
@@ -1481,6 +1512,24 @@
         // Sort task dumps by timestamp for efficient lookup during rendering
         for (const arr of taskDumps.values()) {
             arr.sort((a, b) => a.timestamp - b.timestamp);
+        }
+        for (const [tid, bindings] of tidBindings) {
+            bindings.sort((a, b) => a.timestamp - b.timestamp);
+            const coalesced = [];
+            for (const binding of bindings) {
+                if (
+                    coalesced.length === 0 ||
+                    coalesced[coalesced.length - 1].workerId !== binding.workerId
+                ) {
+                    coalesced.push(binding);
+                }
+            }
+            tidBindings.set(tid, coalesced);
+        }
+        if (state.singleEventDecodeErrors > 0) {
+            console.warn(
+                `Ignored ${state.singleEventDecodeErrors} invalid single-event span event(s)`,
+            );
         }
 
         let clockOffsetNs = null;

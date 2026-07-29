@@ -253,6 +253,7 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
     let mut task_id_index = None;
     let mut worker_id_index = None;
     let mut validation_error = None;
+    let mut saw_span_start = false;
 
     for annotation in schema
         .annotations()
@@ -262,6 +263,7 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
         let Some(role) = StructuralRole::from_annotation(annotation.value()) else {
             continue;
         };
+        saw_span_start |= role == StructuralRole::SpanStart;
         let index = usize::from(annotation.field_index());
         if index >= schema.fields().len() {
             validation_error.get_or_insert_with(|| {
@@ -298,6 +300,11 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
     }
 
     let Some(start_index) = start_index else {
+        if saw_span_start {
+            return CompiledSingleEventSpan::Invalid(validation_error.unwrap_or_else(|| {
+                "single-event span schema has no valid span.start field".to_string()
+            }));
+        }
         return CompiledSingleEventSpan::NotSpan;
     };
     if let Some(error) = validation_error {
@@ -688,19 +695,20 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                 }
                 single_event_layouts.insert(ev.type_id, (ev.schema.clone(), compiled));
             }
-            let is_single_event_span = matches!(
-                single_event_layouts.get(&ev.type_id),
-                Some((_, CompiledSingleEventSpan::Layout(_)))
-            );
-            if let Some((_, CompiledSingleEventSpan::Layout(layout))) =
-                single_event_layouts.get(&ev.type_id)
-            {
+            let compiled = &single_event_layouts
+                .get(&ev.type_id)
+                .expect("schema was compiled above")
+                .1;
+            if let CompiledSingleEventSpan::Layout(layout) = compiled {
                 let decode_sequence = single_event_decode_sequence;
                 single_event_decode_sequence += 1;
                 match layout.decode(&ev, decode_sequence) {
                     Ok(event) => single_event_spans.push(event),
                     Err(_) => single_event_decode_errors += 1,
                 }
+            }
+            if !matches!(compiled, CompiledSingleEventSpan::NotSpan) {
+                return;
             }
 
             match ev.name {
@@ -772,9 +780,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                 // Span close: the old producer's `SpanCloseEvent` carries only
                 // `span_id`. Also accept the struct-derived `SpanClose__{Type}`
                 // convention (a Rust identifier cannot contain `:`).
-                name if !is_single_event_span
-                    && (name == "SpanCloseEvent" || name.starts_with("SpanClose__")) =>
-                {
+                name if name == "SpanCloseEvent" || name.starts_with("SpanClose__") => {
                     match ev.deserialize::<LegacySpanCloseEvent>() {
                         Ok(mut lc) if lc.span_id > 0 => {
                             lc.decode_sequence = span_decode_sequence;
@@ -795,9 +801,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                 //     `SpanEnter__ShaleOperation`). A Rust identifier cannot contain
                 //     `:`, so struct-named events use the `__` separator instead.
                 // We accept both, mirroring the viewer's `buildSpanData`.
-                name if !is_single_event_span
-                    && (name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__")) =>
-                {
+                name if name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__") => {
                     match ev.deserialize::<LegacySpanEnterEvent>() {
                         Ok(mut le) if le.span_id > 0 => {
                             le.decode_sequence = span_decode_sequence;
@@ -810,9 +814,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                         }
                     }
                 }
-                name if !is_single_event_span
-                    && (name.starts_with("SpanExit:") || name.starts_with("SpanExit__")) =>
-                {
+                name if name.starts_with("SpanExit:") || name.starts_with("SpanExit__") => {
                     match ev.deserialize::<LegacySpanExitEvent>() {
                         Ok(mut le) if le.span_id > 0 => {
                             le.decode_sequence = span_decode_sequence;
@@ -961,6 +963,23 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_span_start_annotation_is_invalid() {
+        let schema = schema(
+            "producer:MissingStartField",
+            [("payload", FieldType::String)],
+            [FieldAnnotation::new(
+                7,
+                schema_extensions::ROLE_KEY,
+                roles::SPAN_START,
+            )],
+        );
+        assert!(matches!(
+            compile_single_event_span(&schema),
+            CompiledSingleEventSpan::Invalid(_)
+        ));
+    }
+
+    #[test]
     fn defaults_span_type_when_annotation_is_absent() {
         let schema = schema(
             "producer:DefaultType",
@@ -1001,5 +1020,48 @@ mod tests {
         let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
         assert_eq!(decoded.single_event_spans.len(), 1);
         assert!(decoded.legacy_closes.is_empty());
+    }
+
+    #[test]
+    fn annotated_schema_does_not_also_use_runtime_name_decoder() {
+        for annotations in [
+            vec![
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+            ],
+            vec![FieldAnnotation::new(
+                0,
+                schema_extensions::ROLE_KEY,
+                roles::SPAN_START,
+            )],
+        ] {
+            let schema = Schema::from_entry(schema(
+                "ClockSyncEvent",
+                [
+                    ("start", FieldType::Varint),
+                    ("realtime_ns", FieldType::Varint),
+                    ("timestamp_ns", FieldType::Varint),
+                ],
+                annotations,
+            ));
+            let mut encoder = Encoder::new();
+            encoder
+                .write_event(
+                    &schema,
+                    &[
+                        FieldValue::Varint(200),
+                        FieldValue::Varint(100),
+                        FieldValue::Varint(1_000),
+                        FieldValue::Varint(200),
+                    ],
+                )
+                .unwrap();
+
+            let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
+            assert!(
+                decoded.clock_offset.is_none(),
+                "annotated schemas must not mutate runtime decode state"
+            );
+        }
     }
 }

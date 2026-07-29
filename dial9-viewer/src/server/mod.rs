@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 
 mod browse;
@@ -580,6 +581,14 @@ fn api_router(state: AppState) -> Router {
     let upload_route = Router::new()
         .route("/upload", axum::routing::post(upload::upload_trace))
         .layer(DefaultBodyLimit::max(upload_body_limit));
+    let raw_span_stats_post = axum::routing::post(span_stats::post_raw_span_stats)
+        .route_layer(DefaultBodyLimit::max(span_stats::RAW_SPAN_STATS_BODY_LIMIT))
+        // Acquire capacity before Bytes extraction buffers the request body.
+        .route_layer(raw_span_stats_concurrency_limit());
+    let span_stats_route = Router::new().route(
+        "/span-stats",
+        axum::routing::get(span_stats::get_span_stats).merge(raw_span_stats_post),
+    );
 
     Router::new()
         .route("/config", axum::routing::get(config::get_config))
@@ -600,12 +609,9 @@ fn api_router(state: AppState) -> Router {
             "/tokio-stats",
             axum::routing::get(tokio_stats::get_tokio_stats),
         )
-        .route(
-            "/span-stats",
-            axum::routing::get(span_stats::get_span_stats),
-        )
         .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
         .merge(upload_route)
+        .merge(span_stats_route)
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())
@@ -616,9 +622,17 @@ fn api_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+fn raw_span_stats_concurrency_limit() -> ConcurrencyLimitLayer {
+    ConcurrencyLimitLayer::new(span_stats::MAX_CONCURRENT_RAW_SPAN_STATS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Semaphore;
+    use tower::{Layer, ServiceExt, service_fn};
 
     /// The temporary output uses the request's source bucket as the (ignored)
     /// bucket argument, while an S3 output always writes to its own bucket
@@ -632,6 +646,58 @@ mod tests {
         let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
         let s3 = AggOutput::s3("operator-owned", backend);
         assert_eq!(s3.output_bucket_for("caller-source"), "operator-owned");
+    }
+
+    #[tokio::test]
+    async fn raw_span_stats_concurrency_is_bounded() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let service = raw_span_stats_concurrency_limit().layer(service_fn({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |()| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    release.acquire().await.unwrap().forget();
+                    Ok::<_, Infallible>(())
+                }
+            }
+        }));
+
+        let mut requests = Vec::new();
+        for _ in 0..span_stats::MAX_CONCURRENT_RAW_SPAN_STATS {
+            requests.push(tokio::spawn(service.clone().oneshot(())));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) < span_stats::MAX_CONCURRENT_RAW_SPAN_STATS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("configured number of requests should start");
+
+        requests.push(tokio::spawn(service.clone().oneshot(())));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            span_stats::MAX_CONCURRENT_RAW_SPAN_STATS,
+            "an additional request must wait for decode capacity"
+        );
+
+        release.add_permits(span_stats::MAX_CONCURRENT_RAW_SPAN_STATS);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) <= span_stats::MAX_CONCURRENT_RAW_SPAN_STATS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiting request should start after capacity is released");
+        release.add_permits(1);
+        for request in requests {
+            request.await.unwrap().unwrap();
+        }
     }
 
     /// The default output prefix is applied and overridable, and the default

@@ -404,7 +404,8 @@ declare module "*/trace_analysis.js" {
     tidBindings?: ReadonlyMap<
       number,
       readonly import("*/trace_parser.js").TidWorkerBinding[]
-    >
+    >,
+    blockInPlaceGaps?: readonly BlockInPlaceGap[]
   ): SpanData;
 
   /** Seeds plus all their descendants; cycle-safe. */

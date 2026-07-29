@@ -59,13 +59,16 @@ pub(crate) fn resolve_single_event_spans(
     for event in events {
         let start = MonoNs(event.start_ns);
         let end = MonoNs(event.end_ns);
-        let duration_ns = event.end_ns - event.start_ns;
         // Prefer a directly captured task. Otherwise use a captured worker, or
         // resolve a stable worker from the OS thread, then find the poll that
         // covers the span start.
         let task_id = event.task_id.or_else(|| {
+            let tid = event.thread_id.and_then(|tid| u32::try_from(tid).ok());
+            if tid.is_some_and(|tid| poll_timeline.tid_is_in_handoff_gap(tid, start)) {
+                return None;
+            }
             let worker = event.worker_id.or_else(|| {
-                let tid = u32::try_from(event.thread_id?).ok()?;
+                let tid = tid?;
                 poll_timeline.worker_for_tid_at(tid, start)
             })?;
             resolve_span_task(polls_by_worker.get(&worker)?, start)
@@ -76,12 +79,16 @@ pub(crate) fn resolve_single_event_spans(
         let mut async_wait_ns = None;
         let mut attribution_flags = 0b1111;
         if let Some(task_polls) = task_id.and_then(|id| polls_by_task.get(&id)) {
-            let intersections = intersect_lifecycle_with_polls(start, end, task_polls);
+            let observable_start = first_clock_sync_mono
+                .map(|boundary| start.max(boundary))
+                .unwrap_or(start)
+                .min(end);
+            let intersections = intersect_lifecycle_with_polls(observable_start, end, task_polls);
             if !intersections.is_empty() {
                 let on_cpu = interval_pairing::union_interval_duration(&intersections).raw();
                 intervals = intersections;
                 on_cpu_ns_est = Some(on_cpu);
-                async_wait_ns = Some(duration_ns - on_cpu);
+                async_wait_ns = Some(end.saturating_sub(observable_start).raw() - on_cpu);
                 // The task and its polls provide unambiguous runtime placement.
                 attribution_flags &= !0b0100;
             }
@@ -342,5 +349,107 @@ mod tests {
             &vec![(MonoNs(310), MonoNs(390))]
         );
         assert_eq!(resolution.spans[0].on_cpu_ns_est, Some(80));
+    }
+
+    #[test]
+    fn context_does_not_resolve_task_inside_block_in_place_handoff_gap() {
+        let timeline = PollTimeline::reconstruct(&[
+            TraceEvent::WorkerUnpark(WorkerUnpark {
+                timestamp_ns: 50,
+                worker_id: 0,
+                tid: 77,
+            }),
+            TraceEvent::PollStart(PollStart {
+                timestamp_ns: 100,
+                worker_id: 0,
+                task_id: 1,
+                spawn_loc: None,
+            }),
+            TraceEvent::PollEnd(PollEnd {
+                timestamp_ns: 180,
+                worker_id: 0,
+            }),
+            TraceEvent::WorkerPark(crate::ingest::decode::events::WorkerPark {
+                timestamp_ns: 200,
+                worker_id: 0,
+                tid: 88,
+            }),
+        ]);
+        for worker_id in [None, Some(0)] {
+            let event = SingleEventSpanEvent {
+                schema_name: "work:Request".to_string(),
+                span_type: "test-producer".to_string(),
+                name: "request".to_string(),
+                start_ns: 110,
+                end_ns: 170,
+                thread_id: Some(77),
+                task_id: None,
+                worker_id,
+                decode_sequence: 0,
+                attributes: Vec::new(),
+            };
+
+            let resolution = resolve_single_event_spans(
+                &[event],
+                &timeline,
+                "source",
+                "boot",
+                None,
+                Some(MonoNs(0)),
+                "path",
+                "host",
+                "service",
+                "date",
+            );
+
+            assert!(resolution.instance_intervals.is_empty());
+            assert_eq!(resolution.spans[0].on_cpu_ns_est, None);
+            assert_eq!(resolution.spans[0].active_ns, None);
+        }
+    }
+
+    #[test]
+    fn time_before_file_boundary_remains_unknown() {
+        let timeline = PollTimeline::reconstruct(&[
+            TraceEvent::PollStart(PollStart {
+                timestamp_ns: 120,
+                worker_id: 0,
+                task_id: 1,
+                spawn_loc: None,
+            }),
+            TraceEvent::PollEnd(PollEnd {
+                timestamp_ns: 140,
+                worker_id: 0,
+            }),
+        ]);
+        let event = SingleEventSpanEvent {
+            schema_name: "work:Request".to_string(),
+            span_type: "test-producer".to_string(),
+            name: "request".to_string(),
+            start_ns: 50,
+            end_ns: 200,
+            thread_id: None,
+            task_id: Some(1),
+            worker_id: None,
+            decode_sequence: 0,
+            attributes: Vec::new(),
+        };
+
+        let resolution = resolve_single_event_spans(
+            &[event],
+            &timeline,
+            "source",
+            "boot",
+            None,
+            Some(MonoNs(100)),
+            "path",
+            "host",
+            "service",
+            "date",
+        );
+        let span = &resolution.spans[0];
+        assert_eq!(span.on_cpu_ns_est, Some(20));
+        assert_eq!(span.async_wait_ns, Some(80));
+        assert_eq!(span.unknown_ns, 50);
     }
 }

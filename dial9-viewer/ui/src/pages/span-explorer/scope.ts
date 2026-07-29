@@ -2,8 +2,8 @@
 // /api/span-stats request URL per stream mode, and the address-bar sync.
 //
 // Two modes share this page:
-//   - RAW (`?trace=<url>`): the trace is fetched and parsed in the browser and
-//     the catalog is built client-side. No backend, so no exemplars/flamegraphs.
+//   - RAW (`?trace=<url>`): the browser fetches the bytes and the server decodes
+//     them through POST /api/span-stats.
 //   - AGGREGATE (`?api=1` / `?bucket=` / `?data_dir=`): /api/span-stats streams
 //     server-computed statistics over SSE.
 

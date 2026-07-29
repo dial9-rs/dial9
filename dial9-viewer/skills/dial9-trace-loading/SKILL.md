@@ -19,7 +19,7 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   recordMinTs: number|null,      // earliest sliceable timestamped record (ns), null if none
   recordMaxTs: number|null,      // latest sliceable timestamped record (ns), null if none
   cpuSamples: CpuSample[],      // Periodic stack traces from perf/eBPF
-  customEvents: CustomEvent[],   // Custom events plus legacy tracing span events on the fat/worker path
+  customEvents: CustomEvent[],   // Custom events; also spans when no spanEventSink is configured
   spawnLocations: Map<string, string>,    // spawn location ID → source location
   taskSpawnLocs: Map<number, string|null>,// task ID → spawn location (null if unknown)
   taskSpawnTimes: Map<number, number>,    // task ID → spawn timestamp (ns)
@@ -49,11 +49,14 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
 }
 ```
 
-An annotated completed span remains a custom event and carries a normalized
-`singleEventSpan` projection. It contains `start`, `end`, `name`, `spanType`,
-`threadId`, `taskId`, `workerId`, `fields`, and `units`; structural-role fields
-are excluded from `fields`. Consumers should use this projection rather than
-matching schema or physical field names.
+Without a `spanEventSink`, an annotated completed span remains a custom event
+and carries a normalized `singleEventSpan` projection. The primary viewer
+configures a sink, so legacy and single-event spans are instead stored in the
+optional `spanEvents` columns and are absent from `customEvents`. The normalized
+projection contains `start`, `end`, `name`, `spanType`, `threadId`, `taskId`,
+`workerId`, `fields`, and `units`; structural-role fields are excluded from
+`fields`. Consumers should read both storage paths through the shared span-data
+builder rather than matching schema or physical field names.
 
 The packed event timestamp is `end`; `start` is decoded from the field carrying
 `dial9.role=span.start` and its `unit` annotation. See

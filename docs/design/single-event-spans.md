@@ -197,5 +197,4 @@ recognized as spans.
 
 PR 1 defines this specification and updates the metrique producer. PR 2
 replaces the metrique-specific viewer implementation with the generalized
-single-event span decoder. PR 2 may be temporarily stacked on PR 1 for review;
-it will be rebased onto `main` after PR 1 merges.
+single-event span decoder. PR 2 is rebased onto `main` after PR 1 merges.

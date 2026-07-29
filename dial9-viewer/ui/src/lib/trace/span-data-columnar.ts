@@ -15,6 +15,7 @@ import { SPAN_KIND, type ColumnarSpanEvents } from "./columnar-span-events.js";
 import type { ColumnarWorkerSpans, PollsByTaskCSR } from "./columnar-worker-spans.js";
 import { ColumnarSpansBuilder } from "./columnar-spans.js";
 import type {
+  BlockInPlaceGap,
   DecodedFieldValue,
   SpanData,
   TidWorkerBinding,
@@ -81,10 +82,25 @@ function singleEventActiveSegments(startNs: number, endNs: number, csr: PollsByT
   return out;
 }
 
+function timestampIsInHandoffGap(
+  timestamp: number,
+  handoffGaps: readonly BlockInPlaceGap[] | undefined,
+): boolean {
+  if (handoffGaps != null) {
+    for (const gap of handoffGaps) {
+      if (gap.startNs > timestamp) break;
+      if (timestamp < gap.endNs) return true;
+    }
+  }
+  return false;
+}
+
 function workerForTidAt(
   bindings: readonly TidWorkerBinding[] | undefined,
   timestamp: number,
+  handoffGaps: readonly BlockInPlaceGap[] | undefined,
 ): number | undefined {
+  if (timestampIsInHandoffGap(timestamp, handoffGaps)) return undefined;
   if (bindings == null || bindings.length === 0) return undefined;
   let lo = 0, hi = bindings.length;
   while (lo < hi) {
@@ -103,7 +119,8 @@ function workerForTidAt(
 export function buildSpanDataColumnar(
   spanEvents: ColumnarSpanEvents,
   store: ColumnarWorkerSpans,
-  tidBindings?: ReadonlyMap<number, readonly TidWorkerBinding[]>
+  tidBindings?: ReadonlyMap<number, readonly TidWorkerBinding[]>,
+  blockInPlaceGaps?: readonly BlockInPlaceGap[],
 ): SpanData {
   // spanId -> {timestamp, workerId} of the currently-open enter.
   const openEnters = new Map<string, { timestamp: number; workerId: number }>();
@@ -120,6 +137,17 @@ export function buildSpanDataColumnar(
   const csr = store.pollsByTaskCSR();
   const builder = new ColumnarSpansBuilder();
   let singleEventOrdinal = 0;
+  const handoffGapsByTid = new Map<number, BlockInPlaceGap[]>();
+  for (const gap of blockInPlaceGaps ?? []) {
+    for (const tid of [gap.fromTid, gap.toTid]) {
+      let gaps = handoffGapsByTid.get(tid);
+      if (gaps == null) {
+        gaps = [];
+        handoffGapsByTid.set(tid, gaps);
+      }
+      gaps.push(gap);
+    }
+  }
 
   const finalizeSpan = (spanId: string): void => {
     const rec = spanMap.get(spanId);
@@ -153,11 +181,16 @@ export function buildSpanDataColumnar(
       const directTask = spanEvents.taskIdAt(i);
       const threadId = spanEvents.threadIdAt(i);
       const directWorker = spanEvents.completeWorkerIdAt(i);
-      const workerId = Number.isFinite(directWorker)
-        ? directWorker
-        : Number.isFinite(threadId)
-          ? (workerForTidAt(tidBindings?.get(threadId), start) ?? 255)
-          : 255;
+      const handoffGaps = Number.isFinite(threadId)
+        ? handoffGapsByTid.get(threadId)
+        : undefined;
+      const workerId = timestampIsInHandoffGap(start, handoffGaps)
+        ? 255
+        : Number.isFinite(directWorker)
+          ? directWorker
+          : Number.isFinite(threadId)
+            ? (workerForTidAt(tidBindings?.get(threadId), start, handoffGaps) ?? 255)
+            : 255;
       let taskId = Number.isFinite(directTask) && directTask > 0 ? directTask : null;
       if (taskId == null && workerId !== 255) {
         taskId = store.resolveSpanTaskAt(workerId, start);

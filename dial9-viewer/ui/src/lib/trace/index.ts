@@ -42,6 +42,7 @@ export {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
+  fetchTraceBytes,
   formatFrame,
   loadTrace,
   loadTraceBuffered,
@@ -328,14 +329,11 @@ export type {
 
 // span_explorer.ts - the frozen Span Explorer helpers: catalog sorting, the
 // log-duration histogram geometry + percentile estimation, the five-way time
-// composition, attribute filters, and the flamegraph/viewer deep links. Shared
-// with the raw-trace path so a client-built catalog matches the aggregated one.
+// composition, attribute filters, and the flamegraph/viewer deep links.
 export {
   TIME_CATEGORIES,
   addAttrFilter,
   bandComposition,
-  buildLogHistogram,
-  buildSpanCatalog,
   classifyExemplarSnapshot,
   collectExemplarAttributeKeys,
   columnIsDegenerate,
@@ -357,7 +355,6 @@ export {
   mergeSelectedExemplarSnapshot,
   normalizeSpanHistogram,
   parseAttrFilterParams,
-  parseSpanEventName,
   percentileForDuration,
   removeAttrFilter,
   sameSpanCatalogStatistics,
@@ -379,7 +376,6 @@ export type {
   DurationBand,
   ExemplarLinkScope,
   HistogramBarLike,
-  ParsedSpanEventName,
   SpanExplorerState,
   SpanHistogramBar,
   SpanHistogramColumn,

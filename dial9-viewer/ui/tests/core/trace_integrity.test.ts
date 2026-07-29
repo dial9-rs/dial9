@@ -68,10 +68,14 @@ interface ParsedTrace {
   clockSyncAnchors: ClockSyncAnchor[];
   clockOffsetNs: number | null;
   customEvents: CustomEvent[];
+  tidBindings: Map<number, Array<{ timestamp: number; workerId: number }>>;
 }
 
 const { parseTrace, EVENT_TYPES } = require("../../trace_parser.js") as {
-  parseTrace: (buf: Buffer) => Promise<ParsedTrace>;
+  parseTrace: (
+    buf: Buffer,
+    opts?: { spanEventSink?: { pushIfSpan: (...args: unknown[]) => boolean } },
+  ) => Promise<ParsedTrace>;
   EVENT_TYPES: Record<string, number>;
 };
 
@@ -121,6 +125,17 @@ describe("basic", () => {
 
   it("not truncated", () => {
     expect(trace.truncated, "Trace was truncated at event cap").toBe(false);
+  });
+
+  it("keeps historical TID bindings sorted and coalesced", () => {
+    for (const bindings of trace.tidBindings.values()) {
+      for (let i = 1; i < bindings.length; i++) {
+        expect(bindings[i]!.timestamp).toBeGreaterThanOrEqual(
+          bindings[i - 1]!.timestamp,
+        );
+        expect(bindings[i]!.workerId).not.toBe(bindings[i - 1]!.workerId);
+      }
+    }
   });
 });
 
@@ -409,6 +424,17 @@ describe("metrique events", () => {
     expect(requestMetrics().length, "No metrique:RequestMetrics events found").toBeGreaterThan(0);
   });
 
+  it("keeps spans as custom events when a columnar sink declines them", async () => {
+    const declined = await parseTrace(readFileSync(tracePath), {
+      spanEventSink: { pushIfSpan: () => false },
+    });
+    expect(
+      declined.customEvents.filter((event) => event.singleEventSpan != null).length,
+    ).toBe(
+      trace.customEvents.filter((event) => event.singleEventSpan != null).length,
+    );
+  });
+
   it("metrique events carry context and payload fields", () => {
     for (const ev of requestMetrics()) {
       const f = ev.fields;
@@ -435,6 +461,7 @@ describe("metrique events", () => {
       expect(span?.fields["span.start_ns"]).toBeUndefined();
       expect(span?.fields["thread_id"]).toBeUndefined();
       expect(span?.fields["Operation"]).toBeUndefined();
+      expect(span?.fields["dial9.wall_clock_ns"]).toBeUndefined();
       expect(span?.fields["MetricName"]).toBe(f["MetricName"]);
     }
   });

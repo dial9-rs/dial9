@@ -100,6 +100,15 @@ export interface LoadedTrace {
   mode: "stream" | "buffered";
 }
 
+/** Fetch and gunzip one logical trace without running the JavaScript decoder. */
+export function fetchTraceBytes(
+  urls: string | readonly string[],
+  opts: FetchOptions = {},
+): Promise<ArrayBuffer> {
+  const list = Array.isArray(urls) ? [...urls] : [urls as string];
+  return fetchTraces(list, opts);
+}
+
 function splitOptions(opts: LoadTraceOptions): {
   fetchOpts: FetchOptions;
   parseOpts: ParseOptions;
