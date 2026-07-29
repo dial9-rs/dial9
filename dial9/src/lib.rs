@@ -8,6 +8,19 @@ pub use dial9_core::recorder::{
 };
 pub use dial9_core::recording::Recorder;
 
+/// The trace format: define events with `#[derive(TraceEvent)]`, encode your own
+/// types with [`TraceField`](format::TraceField), read a trace back with
+/// [`Decoder`](format::Decoder).
+pub mod format {
+    pub use dial9_trace_format::decoder::{self, Decoder};
+    pub use dial9_trace_format::types::{self, EventEncoder, FieldType, InternedString};
+    pub use dial9_trace_format::{TraceEvent, TraceField};
+
+    /// Error from [`RawEvent::deserialize`](decoder::RawEvent::deserialize).
+    #[cfg(feature = "deserialize")]
+    pub use dial9_trace_format::DeserError;
+}
+
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
 /// write custom encoders, author custom segment processors, reach the raw
 /// recording modules.
