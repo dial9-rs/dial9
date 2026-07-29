@@ -11,7 +11,7 @@
 //      `derived(["trace","selection"], ...)` - a selection change invalidates, a
 //      pan does not.
 //   2. buildTaskDetailRenderModel(...) - viewport-dependent: the visible poll
-//      window, wake->poll delay bands, poll bars / coverage histogram, idle
+//      window, scheduling-delay bands, poll bars / coverage histogram, idle
 //      gaps, the lifespan bar, and the hit/wake regions the interaction layer
 //      reads. Memoized on its primitive inputs so a hover-only redraw never
 //      re-walks the collection.
@@ -304,24 +304,35 @@ export function formatTaskDetailSummary(data: TaskDetailData): string {
 export const BAND_TOP = 50;
 export const BAND_H = 30;
 
-/** Delay severity: green / orange / red. */
-export type WakeSeverity = "low" | "mid" | "high";
+/** Scheduling-delay severity: green / orange / red. */
+export type SchedulingSeverity = "low" | "mid" | "high";
 
-/** A wake->poll scheduling-delay band + its waker label. */
-export interface WakeBand {
-  /** Draw-area-relative x of the effective-wake edge (px). */
+interface SchedulingBandBase {
+  /** Draw-area-relative x of the delay's starting edge (px). */
   x1: number;
   /** Draw-area-relative x of the poll-start edge (px). */
   x2: number;
   delayNs: number;
-  severity: WakeSeverity;
-  wakerTaskId: number;
-  wakerLabel: string;
+  severity: SchedulingSeverity;
   /** Duration label shown only when the band is wider than 25px. */
   showDelayLabel: boolean;
+}
+
+/** The delay between task spawn and its first poll. */
+export interface SpawnSchedulingBand extends SchedulingBandBase {
+  kind: "spawn";
+}
+
+/** A wake->poll scheduling delay and its optional visible waker label. */
+export interface WakeSchedulingBand extends SchedulingBandBase {
+  kind: "wake";
+  wakerTaskId: number;
+  wakerLabel: string;
   /** Waker label shown (and clickable) only when wider than 40px. */
   showWakerLabel: boolean;
 }
+
+export type SchedulingBand = SpawnSchedulingBand | WakeSchedulingBand;
 
 /** A cyan poll bar (per-poll regime). */
 export interface PollBar {
@@ -385,7 +396,7 @@ export interface WakeRegion {
 export interface TaskDetailRenderModel {
   /** Task identity captured with this geometry; null for the empty model. */
   taskId: number | null;
-  wakeBands: readonly WakeBand[];
+  schedulingBands: readonly SchedulingBand[];
   /** Per-poll bars (empty when the coverage histogram is used instead). */
   pollBars: readonly PollBar[];
   /** Per-pixel coverage (opacity 0..1 per column); null in per-poll mode. */
@@ -403,7 +414,7 @@ export interface TaskDetailRenderModel {
 /** Empty model (no drawW / degenerate view). */
 const EMPTY_RENDER_MODEL: TaskDetailRenderModel = {
   taskId: null,
-  wakeBands: [],
+  schedulingBands: [],
   pollBars: [],
   coverage: null,
   visiblePolls: 0,
@@ -440,7 +451,7 @@ export function firstVisibleByEnd(
   return lo;
 }
 
-function severityOf(delayNs: number): WakeSeverity {
+function severityOf(delayNs: number): SchedulingSeverity {
   const delayUs = delayNs / 1000;
   if (delayUs > 1000) return "high";
   if (delayUs > 100) return "mid";
@@ -448,8 +459,9 @@ function severityOf(delayNs: number): WakeSeverity {
 }
 
 /**
- * Build the per-frame render model: wake->poll delay bands, the lifespan bar,
- * poll bars OR the coverage histogram, and idle gaps with their dump lookup.
+ * Build the per-frame render model: spawn/wake->poll scheduling-delay bands,
+ * the lifespan bar, poll bars OR the coverage histogram, and idle gaps with
+ * their dump lookup.
  * Draw-area-relative coordinates. Hit regions are emitted in scheduled ->
  * polling -> idle order so the first-match-wins status lookup matches.
  */
@@ -464,12 +476,43 @@ export function buildTaskDetailRenderModel(
   const span = viewEnd - viewStart;
   const nsToX = (ns: number): number => ((ns - viewStart) / span) * drawW;
 
-  const wakeBands: WakeBand[] = [];
+  const schedulingBands: SchedulingBand[] = [];
   const pollBars: PollBar[] = [];
   const idleBands: IdleBand[] = [];
   const hitRegions: HitRegion[] = [];
   const wakeRegions: WakeRegion[] = [];
   let lifespan: LifespanBar | null = null;
+
+  // ── Spawn->first-poll delay ──────────────────────────────────────────
+  const firstPoll = polls[0]!;
+  if (
+    data.spawnTs != null &&
+    data.spawnTs < firstPoll.start &&
+    firstPoll.start >= viewStart &&
+    data.spawnTs <= viewEnd
+  ) {
+    const delay = firstPoll.start - data.spawnTs;
+    const x1 = Math.max(0, nsToX(data.spawnTs));
+    const x2 = Math.min(drawW, nsToX(firstPoll.start));
+    const w = x2 - x1;
+    if (w >= 1) {
+      schedulingBands.push({
+        kind: "spawn",
+        x1,
+        x2,
+        delayNs: delay,
+        severity: severityOf(delay),
+        showDelayLabel: w > 25,
+      });
+      hitRegions.push({
+        x1,
+        x2,
+        type: "scheduled",
+        detail: `Scheduled — waiting ${formatHumanDuration(delay)} for first poll after task spawn`,
+        dumps: null,
+      });
+    }
+  }
 
   // ── Wake->poll delay bands + waker labels ────────────────────────────
   for (let i = 0; i < polls.length; i++) {
@@ -483,7 +526,8 @@ export function buildTaskDetailRenderModel(
     const w = x2 - x1;
     if (w < 1) continue;
     const showWakerLabel = w > 40;
-    wakeBands.push({
+    schedulingBands.push({
+      kind: "wake",
       x1,
       x2,
       delayNs: delay,
@@ -626,7 +670,7 @@ export function buildTaskDetailRenderModel(
 
   return {
     taskId: data.taskId,
-    wakeBands,
+    schedulingBands,
     pollBars,
     coverage,
     visiblePolls,
