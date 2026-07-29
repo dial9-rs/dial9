@@ -38,7 +38,7 @@
     service: "s_svc",
     host: "s_host", // repeatable
     from: "s_from", // epoch seconds (inclusive)
-    to: "s_to", // epoch seconds (inclusive)
+    to: "s_to", // epoch seconds (exclusive)
   };
 
   // Parse an S3 trace key into its {service, host, bootId, epoch, segIndex}.
@@ -146,7 +146,10 @@
     // /api/browse params (400) — a silently broken deep link.
     if ((t0 == null || t1 == null) && !epochs.length) return null;
     const from = t0 != null ? Math.floor(t0) : Math.min(...epochs);
-    const to = t1 != null ? Math.ceil(t1) : Math.max(...epochs);
+    // Explicit heatmap windows already carry the end of the final segment.
+    // Raw selections only carry segment start epochs, so extend the latest by
+    // one second to keep it inside the half-open [from, to) scope.
+    const to = t1 != null ? Math.ceil(t1) : Math.max(...epochs) + 1;
     return {
       bucket: bucket || "",
       region: region || "",
@@ -279,7 +282,7 @@
       const end = obj.last_modified
         ? new Date(obj.last_modified).getTime() / 1000
         : start;
-      if (start > scope.to || end < scope.from) continue;
+      if (start >= scope.to || end <= scope.from) continue;
       if (scope.service && p.service && p.service !== scope.service) continue;
       if (hostSet.size && !hostSet.has(p.host)) continue;
       matched.push({ key: obj.key, epoch: start });

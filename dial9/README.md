@@ -830,9 +830,49 @@ dial9 serve --local-dir /tmp/my_traces
 
 # Serve traces from S3
 AWS_PROFILE=my-profile dial9 serve --bucket my-trace-bucket
+
+# Explore the complete browser and aggregation flow without S3
+dial9 serve --simulator --local
 ```
 
 Open `http://localhost:3000` to browse traces. Enter a search prefix (e.g. `2026-04-09/1910/checkout-api`), select one or more segments, and click "View Selected" to open them in the viewer.
+
+#### Simulator mode
+
+Simulator mode exposes lazily generated traces through the same S3-shaped keys
+and storage interface as a real trace bucket. Browser discovery, object
+downloads, spans, flamegraphs, and Tokio stats therefore use their production
+paths, while aggregate rollups stay in a process-local temporary directory.
+No bucket or AWS credentials are required.
+
+```bash
+# Sanitized synthetic traces with every feature group enabled
+dial9 serve --simulator --local
+
+# Replay the bundled demo trace in each virtual segment
+dial9 serve --simulator demo --local
+
+# Model a larger fleet with five-minute segments
+dial9 serve --simulator --simulator-hosts 12 --simulator-segment-secs 300 --local
+
+# Keep selected synthetic features and repeat the template for more data
+dial9 serve --simulator synthetic \
+  --simulator-features cpu,scheduling,tasks,spans \
+  --simulator-repetitions 3 \
+  --simulator-symbols realistic --local
+```
+
+The default fleet has 3 hosts and one-minute virtual segments across any
+requested time range. The catalog is deterministic and independent of server
+uptime; payload bytes are generated only when an object is fetched. Use
+`--simulator-hosts`, `--simulator-segment-secs`, and
+`--simulator-repetitions` to change its shape and data volume. Synthetic
+feature groups are `cpu`, `scheduling`, `tasks`, `spans`, `memory`,
+`resources`, and `custom-events`; omit `--simulator-features` to enable all of
+them, or pass `none` for clock and segment metadata only. Use
+`--simulator-symbols realistic` for deterministic Rust-like stack-frame names;
+anonymous placeholders remain the default. Demo replay preserves the bundled
+trace's event data while rebasing one copy into every virtual segment.
 
 ### `agents`
 

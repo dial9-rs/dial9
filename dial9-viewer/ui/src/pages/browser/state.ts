@@ -90,9 +90,8 @@ export interface UiSlice {
 export interface ConfigSlice {
   /** Server runs demand-driven aggregation. */
   aggregationEnabled: boolean;
-  /** Server is a local directory (no bring-your-own credentials): traces
-   * open directly by key rather than via a scope, since buffer-style local
-   * key names carry no service/host/date to build a scope from (#627). */
+  /** Server uses flat source keys: traces open directly by key rather than via
+   * a scope, since buffer-style keys carry no service/host/date (#627). */
   localMode: boolean;
   /** Server declared a default prefix; Search waits for one. */
   serverHasPrefix: boolean;

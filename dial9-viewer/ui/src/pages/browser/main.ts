@@ -6,7 +6,7 @@
 
 import "../../styles/browser.css";
 import { createActions } from "./actions.js";
-import type { ApiConfig } from "./api.js";
+import { usesFlatSourceLayout, type ApiConfig } from "./api.js";
 import { mountActionsBar } from "./actions-bar.js";
 import { resolveBucketFilter } from "./bucket-filter.js";
 import { mountBrowseView } from "./browse-view.js";
@@ -180,9 +180,10 @@ function boot(): void {
       // button drives the sampled server-side loop instead of decoding raw
       // traces; Tokio Stats enables on selection.
       store.update("config", { aggregationEnabled: !!config.aggregation_enabled });
-      // Local-dir servers have no BYO credentials; their buffer-style keys
-      // carry no scope, so selections open directly by key (#627).
-      store.update("config", { localMode: !config.supports_byo_credentials });
+      // Flat-layout sources carry no scope in buffer-style keys, so selections
+      // open directly by key (#627). Simulator keys are time-partitioned even
+      // though the simulator intentionally has no credential support.
+      store.update("config", { localMode: usesFlatSourceLayout(config) });
       // The server's bucket-picker filter applies unless the page URL
       // pinned an override at load (which wins). Servers predating the
       // field leave the "dial9" default in place.

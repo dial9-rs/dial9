@@ -2,6 +2,7 @@ pub mod cli;
 pub mod ingest;
 pub mod report_serve;
 pub mod server;
+pub mod simulator;
 pub mod storage;
 mod trace_shape;
 
@@ -13,6 +14,37 @@ pub use report_serve::report_serve_router;
 pub use server::metrics::attach_request_metrics;
 
 use std::path::PathBuf;
+
+pub(crate) fn resolve_dev_ui_dir(dev: bool) -> anyhow::Result<Option<PathBuf>> {
+    if !dev {
+        return Ok(None);
+    }
+
+    // Serve the BUILT UI (ui/dist), not the ui/ sources: the servable set
+    // is the vite build output (root assets such as demo-trace.bin and
+    // flamegraph.css live in ui/public/ and only appear at the served
+    // root via a build). Keep it fresh with `npm run dev:embedded`
+    // (vite build --watch) for the edit-refresh loop.
+    let candidates = [
+        PathBuf::from("ui/dist"),
+        PathBuf::from("dial9-viewer/ui/dist"),
+    ];
+    let Some(dir) = candidates.into_iter().find(|p| p.exists()) else {
+        anyhow::bail!(
+            "--dev: could not find ui/dist/ directory. Run from the dial9-viewer/ or repo root directory."
+        );
+    };
+
+    if !dir.join("index.html").exists() {
+        tracing::warn!(
+            path = %dir.display(),
+            "ui/dist has no built UI - run `npm run build` or `npm run dev:embedded` \
+             in dial9-viewer/ui first (UI work requires Node, see ui/README.md)"
+        );
+    }
+    tracing::info!(path = %dir.display(), "dev mode: serving UI from disk");
+    Ok(Some(dir))
+}
 
 async fn detect_bucket_region(bucket: &str) -> Option<String> {
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -204,38 +236,7 @@ pub async fn build_app(
         None
     };
 
-    let dev_ui_dir = if dev {
-        // Serve the BUILT UI (ui/dist), not the ui/ sources: the servable set
-        // is the vite build output (root assets such as demo-trace.bin and
-        // flamegraph.css live in ui/public/ and only appear at the served
-        // root via a build). Keep it fresh with `npm run dev:embedded`
-        // (vite build --watch) for the edit-refresh loop.
-        let candidates = [
-            PathBuf::from("ui/dist"),
-            PathBuf::from("dial9-viewer/ui/dist"),
-        ];
-        let dir = candidates.into_iter().find(|p| p.exists());
-        match dir {
-            Some(d) => {
-                if !d.join("index.html").exists() {
-                    tracing::warn!(
-                        path = %d.display(),
-                        "ui/dist has no built UI - run `npm run build` or `npm run dev:embedded` \
-                         in dial9-viewer/ui first (UI work requires Node, see ui/README.md)"
-                    );
-                }
-                tracing::info!(path = %d.display(), "dev mode: serving UI from disk");
-                Some(d)
-            }
-            None => {
-                anyhow::bail!(
-                    "--dev: could not find ui/dist/ directory. Run from the dial9-viewer/ or repo root directory."
-                );
-            }
-        }
-    } else {
-        None
-    };
+    let dev_ui_dir = resolve_dev_ui_dir(dev)?;
 
     // Build the base state per backend. `source_is_s3` is true for every S3
     // backend; it is false only in local-dir mode (and local-source

@@ -58,6 +58,10 @@ pub(crate) async fn region_from_head_bucket(
 #[folder = "ui/dist/"]
 struct UiAssets;
 
+pub(crate) fn embedded_ui_asset(path: &str) -> Option<Vec<u8>> {
+    UiAssets::get(path).map(|file| file.data.into_owned())
+}
+
 /// Default output key prefix for aggregate part-files.
 const DEFAULT_AGG_OUTPUT_PREFIX: &str = "flamegraph-data";
 
@@ -167,6 +171,12 @@ pub struct AppState {
     /// aggregation: any S3 bucket can run the `/api/flamegraph` refinement loop,
     /// but a local-directory source cannot.
     pub allow_byo_creds: bool,
+    /// Whether source keys use the production date-partitioned S3 layout.
+    ///
+    /// This controls time-scoped browse and service-discovery listings. It is
+    /// independent of credentials because non-S3 backends such as the simulator
+    /// can expose the same layout.
+    time_partitioned_source: bool,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
@@ -209,6 +219,7 @@ impl AppState {
             agg: None,
             uploads: None,
             allow_byo_creds: false,
+            time_partitioned_source: false,
             ephemeral_s3: None,
             role_assumer: None,
             agg_output: AggOutput::temporary(),
@@ -267,11 +278,22 @@ impl AppState {
         self
     }
 
-    /// Enable the bring-your-own-credentials path (S3 backends only). This also
-    /// enables on-demand aggregation; leave unset (the default) for local-dir
-    /// sources, where credentials are meaningless and aggregation is local.
+    /// Enable the bring-your-own-credentials path (S3 backends only).
+    ///
+    /// Enabling it also selects the production time-partitioned source layout
+    /// for backwards compatibility with existing S3 embedders.
     pub fn with_byo_creds(mut self, allow: bool) -> Self {
         self.allow_byo_creds = allow;
+        if allow {
+            self.time_partitioned_source = true;
+        }
+        self
+    }
+
+    /// Use production date/time-partitioned trace keys for browse and service
+    /// discovery without enabling AWS credential handling.
+    pub fn with_time_partitioned_source(mut self) -> Self {
+        self.time_partitioned_source = true;
         self
     }
 
