@@ -7,7 +7,7 @@ use dial9::{
     recorder,
 };
 use dial9_trace_format::decoder::Decoder;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 /// Attach a multi-thread runtime with `workers` threads and the given options.
 fn attach(recorder: Recorder, workers: usize, options: TokioAttachOptions) -> AttachedRuntime {
@@ -341,39 +341,86 @@ fn shared_recorder_attaches_from_many_threads() {
     struct WorkerIdField {
         worker_id: u64,
     }
+    #[derive(serde::Deserialize)]
+    struct SegmentMetadata {
+        entries: Vec<(String, String)>,
+    }
     const UNKNOWN_WORKER_ID: u64 = 255;
 
     let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
     let mut decoder = Decoder::new(&bytes).expect("valid trace");
-    let mut poll_starts = 0u32;
+    let mut poll_starts_per_worker: BTreeMap<u64, u32> = Default::default();
     let mut poll_ends = 0u32;
-    let mut worker_ids = std::collections::BTreeSet::new();
+    let mut runtime_workers: BTreeMap<String, Vec<u64>> = Default::default();
     decoder
         .for_each_event(|ev| match ev.name {
             "PollStartEvent" => {
-                poll_starts += 1;
                 if let Ok(fields) = ev.deserialize::<WorkerIdField>()
                     && fields.worker_id != UNKNOWN_WORKER_ID
                 {
-                    worker_ids.insert(fields.worker_id);
+                    *poll_starts_per_worker.entry(fields.worker_id).or_default() += 1;
                 }
             }
             "PollEndEvent" => poll_ends += 1,
+            "SegmentMetadataEvent" => {
+                if let Ok(meta) = ev.deserialize::<SegmentMetadata>() {
+                    for (key, val) in meta.entries {
+                        if let Some(name) = key.strip_prefix("runtime.") {
+                            let ids = val.split(',').filter_map(|s| s.parse().ok()).collect();
+                            runtime_workers.insert(name.to_string(), ids);
+                        }
+                    }
+                }
+            }
             _ => {}
         })
         .expect("decode events");
 
+    // Segment metadata should name exactly the CORES runtimes we attached.
+    let expected_runtimes: std::collections::BTreeSet<String> =
+        (0..CORES).map(|core| format!("core-{core}")).collect();
+    let seen_runtimes: std::collections::BTreeSet<String> =
+        runtime_workers.keys().cloned().collect();
+    assert_eq!(
+        seen_runtimes, expected_runtimes,
+        "segment metadata should report exactly one entry per core runtime"
+    );
+
+    // Each `current_thread` runtime has exactly one worker; metadata must
+    // attribute exactly one worker ID to each core runtime.
+    for (name, ids) in &runtime_workers {
+        assert_eq!(
+            ids.len(),
+            1,
+            "runtime {name} should map to exactly one worker ID, got {ids:?}"
+        );
+    }
+
+    // The worker IDs segment metadata attributes to those runtimes must be
+    // exactly the worker IDs poll events actually came from.
+    let metadata_worker_ids: std::collections::BTreeSet<u64> =
+        runtime_workers.values().flatten().copied().collect();
+    let polled_worker_ids: std::collections::BTreeSet<u64> =
+        poll_starts_per_worker.keys().copied().collect();
+    assert_eq!(
+        metadata_worker_ids, polled_worker_ids,
+        "worker IDs in segment metadata must match worker IDs seen in poll events"
+    );
+    assert_eq!(
+        polled_worker_ids.len(),
+        CORES,
+        "expected poll events from exactly {CORES} distinct worker IDs, got {polled_worker_ids:?}"
+    );
+
     // Each core runs one task doing 5 `yield_now().await` calls: an initial
-    // poll plus one re-poll per yield, so at least 6 polls per core.
-    assert!(
-        poll_starts >= CORES as u32 * 6,
-        "expected at least {} poll events from {CORES} core runtimes, got {poll_starts}",
-        CORES * 6
-    );
-    assert!(
-        worker_ids.len() >= CORES,
-        "expected poll events from {CORES} distinct worker IDs, got {worker_ids:?}"
-    );
+    // poll plus one re-poll per yield, so exactly 6 polls per worker.
+    for (worker_id, count) in &poll_starts_per_worker {
+        assert_eq!(
+            *count, 6,
+            "worker {worker_id} expected exactly 6 poll events, got {count}"
+        );
+    }
+    let poll_starts: u32 = poll_starts_per_worker.values().sum();
     assert_eq!(
         poll_starts, poll_ends,
         "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
