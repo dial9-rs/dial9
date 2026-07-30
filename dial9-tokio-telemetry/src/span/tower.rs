@@ -3,7 +3,7 @@
 //!
 //! Requires the `tower` feature.
 
-use super::{Dial9Span, Instrument as _, Instrumented, Span};
+use super::{Instrument as _, Instrumented, Span};
 use std::fmt;
 use std::task::{Context, Poll};
 use tower_layer::Layer;
@@ -12,28 +12,17 @@ use tower_service::Service;
 /// A [`tower::Layer`](tower_layer::Layer) that wraps a service so each request's
 /// response future is recorded as a span.
 ///
-/// The span for each request is produced by a `make_span` closure, letting you
-/// give every request the same name or vary it per call. For a fixed name, use
-/// [`Dial9SpanLayer::named`].
-///
-/// ```no_run
-/// use dial9_tokio_telemetry::span::Dial9SpanLayer;
-/// # use tower_layer::Layer;
-/// # fn demo<S>(service: S) {
-/// // Every request becomes a span named "http_request":
-/// let layer = Dial9SpanLayer::named("http_request");
-/// let instrumented = layer.layer(service);
-/// # let _ = instrumented;
-/// # }
-/// ```
-///
-/// To attach fields, return a [`dial9_span!`](crate::dial9_span) span from
-/// [`new`](Dial9SpanLayer::new):
+/// The span for each request is produced by the `make_span` closure passed to
+/// [`new`](Dial9SpanLayer::new). It receives the request, so it can attach
+/// request-derived fields — or ignore it for a fixed name.
 ///
 /// ```no_run
 /// # use dial9_tokio_telemetry::span::Dial9SpanLayer;
 /// # use dial9_tokio_telemetry::dial9_span;
-/// let layer = Dial9SpanLayer::new(|| dial9_span!("rpc", service = "auth"));
+/// // Per-request fields:
+/// let layer = Dial9SpanLayer::new(|req: &u64| dial9_span!("rpc", id = *req));
+/// // Or a fixed name, ignoring the request:
+/// let fixed = Dial9SpanLayer::new(|_req: &u64| dial9_span!("http_request"));
 /// ```
 #[derive(Clone)]
 pub struct Dial9SpanLayer<F> {
@@ -46,22 +35,18 @@ impl<F> fmt::Debug for Dial9SpanLayer<F> {
     }
 }
 
-impl Dial9SpanLayer<()> {
-    /// Build a layer that names every request span `name`.
-    pub fn named(name: impl Into<String>) -> Dial9SpanLayer<impl Fn() -> Dial9Span + Clone> {
-        let name = name.into();
-        Dial9SpanLayer {
-            make_span: move || Dial9Span::new(name.clone()),
-        }
-    }
-}
-
-impl<F, S> Dial9SpanLayer<F>
-where
-    F: Fn() -> S + Clone,
-    S: Span,
-{
-    /// Build a layer that produces a fresh span per request via `make_span`.
+impl<F> Dial9SpanLayer<F> {
+    /// Build a layer that produces a fresh span per request via `make_span`,
+    /// which receives the request so it can attach request-derived fields:
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::span::Dial9SpanLayer;
+    /// # use dial9_tokio_telemetry::dial9_span;
+    /// # struct Request; impl Request { fn path(&self) -> &str { "/" } }
+    /// let layer = Dial9SpanLayer::new(|req: &Request| {
+    ///     dial9_span!("http_request", route = %req.path())
+    /// });
+    /// ```
     pub fn new(make_span: F) -> Self {
         Self { make_span }
     }
@@ -103,7 +88,7 @@ where
 impl<Svc, F, S, Req> Service<Req> for Dial9SpanService<Svc, F>
 where
     Svc: Service<Req>,
-    F: Fn() -> S,
+    F: Fn(&Req) -> S,
     S: Span,
 {
     type Response = Svc::Response;
@@ -115,7 +100,7 @@ where
     }
 
     fn call(&mut self, req: Req) -> Self::Future {
-        let span = (self.make_span)();
+        let span = (self.make_span)(&req);
         self.inner.call(req).instrument(span)
     }
 }

@@ -173,8 +173,8 @@ identity, one close.
 Tower layer (feature `tower`):
 
 ```rust
-Dial9SpanLayer::named("http_request")                       // fixed name
-Dial9SpanLayer::new(|| dial9_span!("rpc", service = "auth")) // per-request span
+Dial9SpanLayer::new(|req: &Req| dial9_span!("rpc", route = %req.path())) // per-request
+Dial9SpanLayer::new(|_req: &Req| dial9_span!("http_request"))            // fixed name
 ```
 
 ### Design decisions
@@ -242,15 +242,17 @@ needed. 2^63 ids does not wrap in practice (at 1B spans/sec: ~292 years).
 
 ## Tower layer semantics (v1)
 
-- One span per `call`, created by the `make_span` closure (`named` for a fixed
-  name, `new` for a per-request span). The span is attached to the inner
-  service's response future via `instrument`, so the layer is generic over the
-  span type the closure returns.
-- The response future is entered/exited per poll and closed when it resolves or
-  is dropped (e.g. on cancellation). **Streaming bodies are not covered by the
-  span** in v1: the span closes when the response future resolves (the response
-  head for HTTP). Holding the span open until end-of-stream is a documented
-  follow-up (requires an `http-body` dep and per-frame policy decisions).
+- One span per `call`, from a single `make_span` closure (`Fn(&Req) -> impl Span`)
+  passed to `new`. It receives the request, so it can attach request-derived
+  fields (route, method, …), or ignore it (`|_req|`) for a fixed name. The span
+  is attached to the inner service's response future via `instrument`, so the
+  layer is generic over the span type the closure returns.
+- The response future emits one enter + one completion exit (with the
+  active/idle/poll aggregate) and closes when it resolves or is dropped (e.g. on
+  cancellation). **Streaming bodies are not covered by the span** in v1: the span
+  closes when the response future resolves (the response head for HTTP). Holding
+  the span open until end-of-stream is a documented follow-up (requires an
+  `http-body` dep and per-frame policy decisions).
 - The layer is fully generic over the request/response types; nothing in it
   depends on `http`. The example program shows it on an axum stack because that
   is the motivating case.
@@ -269,12 +271,7 @@ needed. 2^63 ids does not wrap in practice (at 1B spans/sec: ~292 years).
 
 ## Open questions for review
 
-1. Tower `make_span` takes no arguments today (`Fn() -> impl Span`), so fields
-   are constants or captured from the environment, not read off the request. A
-   `Fn(&Req) -> impl Span` form would let callers pull request fields in, at the
-   cost of tying the closure to the request type. Deferred until there is a
-   concrete need.
-2. Module name: `span` (shipped) vs `spans` vs re-exports at crate root.
-3. Does the tower layer belong in this crate behind a feature (shipped), or in a
+1. Module name: `span` (shipped) vs `spans` vs re-exports at crate root.
+2. Does the tower layer belong in this crate behind a feature (shipped), or in a
    separate `dial9-tower` crate? Feature keeps versioning simple; a separate
    crate keeps the core dep-free even at compile time.

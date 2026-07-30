@@ -109,8 +109,9 @@ async fn tower_demo() {
         }
     }
 
-    // `make_span` runs per request, so it can name the span and attach fields.
-    let layer = Dial9SpanLayer::new(|| dial9_span!("http_request", route = "/checkout"));
+    // `make_span` receives the request, so it can attach request-derived fields
+    // (here the order id) rather than hardcoding them.
+    let layer = Dial9SpanLayer::new(|order_id: &u64| dial9_span!("checkout", order_id = *order_id));
 
     let mut svc = layer.layer(Checkout);
     for order_id in 0..3u64 {

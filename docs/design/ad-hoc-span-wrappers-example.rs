@@ -46,11 +46,13 @@ async fn serve() {
     tokio::spawn(settlement_worker());
 
     // ── UX 1: the tower layer ────────────────────────────────────────────
-    // One span per request. The `make_span` closure runs per call, so it can
-    // name the span and attach fields captured from the request. The response
-    // future is entered/exited around each poll and closed when it resolves.
-    let span_layer =
-        Dial9SpanLayer::new(|| dial9_span!("http_request", service = "checkout"));
+    // One span per request. The `make_span` closure receives the request, so it
+    // names the span and attaches request-derived fields (method, path). The
+    // response future emits one enter + one completion event carrying the
+    // active/idle/poll aggregate, and closes when it resolves.
+    let span_layer = Dial9SpanLayer::new(|req: &axum::extract::Request| {
+        dial9_span!("http_request", method = %req.method(), path = %req.uri().path())
+    });
 
     let app = Router::new()
         .route("/orders/{id}/checkout", post(checkout))

@@ -451,7 +451,8 @@ fn tower_layer_wraps_request() {
 
     let events = run_traced(1, || async {
         use tower_layer::Layer;
-        let layer = Dial9SpanLayer::new(|| dial9_span!("request", service = "checkout"));
+        // `make_span` receives the request, so the span can carry request fields.
+        let layer = Dial9SpanLayer::new(|n: &u32| dial9_span!("request", n = *n));
         let mut svc = layer.layer(Doubler);
         let out = svc.call(21).await.unwrap();
         assert_eq!(out, 42);
@@ -470,12 +471,13 @@ fn tower_layer_wraps_request() {
         "poll_count should reflect the yield: {:?}",
         events.exit_fields
     );
+    // The field was read from the request (`n = 21`), proving `make_span(&Req)`.
     assert!(
         events
             .enter_fields
             .iter()
-            .any(|(k, v)| k == "service" && v == "checkout"),
-        "request field on enter: {:?}",
+            .any(|(k, v)| k == "n" && v == "21"),
+        "request-derived field on enter: {:?}",
         events.enter_fields
     );
 }
