@@ -79,7 +79,7 @@ export function mountFieldChartDialog(
   const create = doc.createElement("button");
   create.type = "submit";
   create.className = "primary";
-  create.textContent = "Create chart";
+  create.textContent = "Create";
   actions.append(cancel, create);
 
   form.append(title, source, selectorLabel, selector, help, actions);
