@@ -345,7 +345,9 @@ export type FieldChartKind = "gauge" | "counter" | "updown-counter";
  */
 export interface FieldChartSpec {
   readonly id: string;
+  /** Non-empty custom-event name; commas are not supported by the URL tuple. */
   readonly eventName: string;
+  /** Non-empty numeric field name; commas are not supported by the URL tuple. */
   readonly fieldName: string;
   readonly kind: FieldChartKind;
 }

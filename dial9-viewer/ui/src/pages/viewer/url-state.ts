@@ -24,7 +24,11 @@ import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
 import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
 import { POI_FILTERS } from "./poi.js";
-import { FIELD_CHART_KINDS } from "./field-chart-model.js";
+import {
+  FIELD_CHART_KINDS,
+  FIELD_CHART_URL_SEPARATOR,
+  isFieldChartNameSupported,
+} from "./field-chart-model.js";
 import {
   FIELD_CHART_TRACK_ID_PREFIX,
   isFieldChartTrackId,
@@ -742,26 +746,28 @@ export function readViewerUrlState(search: string): ViewerUrlState {
 function encodeFieldChart(chart: FieldChartSpec): string | null {
   if (
     !isValidFieldChartTrackId(chart.id) ||
-    chart.eventName.length === 0 ||
-    chart.fieldName.length === 0 ||
+    !isFieldChartNameSupported(chart.eventName) ||
+    !isFieldChartNameSupported(chart.fieldName) ||
     !(FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
   ) {
     return null;
   }
-  return encodeList([
+  return [
     chart.id,
     chart.eventName,
     chart.fieldName,
     chart.kind,
-  ]);
+  ].join(FIELD_CHART_URL_SEPARATOR);
 }
 
 function decodeFieldChart(value: string): FieldChartSpec | null {
-  const parts = decodeList(value);
-  if (parts === null || parts.length !== 4) return null;
+  const parts = value.split(FIELD_CHART_URL_SEPARATOR);
+  if (parts.length !== 4 || parts.some((part) => part.length === 0)) return null;
   const [id, eventName, fieldName, kind] = parts;
   if (
     !isValidFieldChartTrackId(id) ||
+    !isFieldChartNameSupported(eventName) ||
+    !isFieldChartNameSupported(fieldName) ||
     !(FIELD_CHART_KINDS as readonly string[]).includes(kind)
   ) {
     return null;

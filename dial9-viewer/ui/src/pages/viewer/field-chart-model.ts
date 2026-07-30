@@ -25,6 +25,7 @@ import {
 } from "../../lib/canvas/track-layout.js";
 
 export const FIELD_CHART_TRACK_HEIGHT = 112;
+export const FIELD_CHART_URL_SEPARATOR = ",";
 
 export type FieldChartNumeric = number | bigint;
 export type FieldChartGap = "missing" | "reset";
@@ -74,6 +75,11 @@ function numericValue(value: DecodedFieldValue): FieldChartNumeric | null {
 /** True when a decoded field can be graphed as a finite decimal number. */
 export function isChartableNumericValue(value: DecodedFieldValue): boolean {
   return numericValue(value) !== null;
+}
+
+/** Field-chart URL tuples require non-empty, comma-free event and field names. */
+export function isFieldChartNameSupported(name: string): boolean {
+  return name.length > 0 && !name.includes(FIELD_CHART_URL_SEPARATOR);
 }
 
 function lessThan(a: FieldChartNumeric, b: FieldChartNumeric): boolean {
@@ -289,6 +295,14 @@ export function addFieldChart(
   fieldName: string,
   kind: FieldChartKind,
 ): FieldChartSpec {
+  if (
+    !isFieldChartNameSupported(eventName) ||
+    !isFieldChartNameSupported(fieldName)
+  ) {
+    throw new Error(
+      "Field chart event and field names must be non-empty and cannot contain commas",
+    );
+  }
   const state = store.getState();
   const used = new Set([
     ...state.view.fieldCharts.map((chart) => chart.id),

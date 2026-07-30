@@ -12,7 +12,10 @@ import {
   formatFieldValue,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
-import { isChartableNumericValue } from "./field-chart-model.js";
+import {
+  isChartableNumericValue,
+  isFieldChartNameSupported,
+} from "./field-chart-model.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type {
@@ -192,7 +195,7 @@ export interface KvRow {
    *  nowhere (cluster rows, the `@`/`Task` rows, or a value unique to one
    *  event). */
   corrVal: string | null;
-  /** True only for decoded finite numeric fields. */
+  /** True when the value is numeric and its event/field names fit the URL tuple. */
   chartable: boolean;
 }
 
@@ -261,7 +264,10 @@ export function buildEventDetail(
         key: k,
         value: display,
         corrVal: shared ? corrVal : null,
-        chartable: isChartableNumericValue(v),
+        chartable:
+          isChartableNumericValue(v) &&
+          isFieldChartNameSupported(ev.name) &&
+          isFieldChartNameSupported(k),
       });
     }
     rows.push({

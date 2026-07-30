@@ -206,6 +206,26 @@ describe("buildEventDetail", () => {
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100 – t300");
     expect(v.rows.every((r) => r.corrVal === null)).toBe(true);
   });
+
+  it("does not offer charts for comma-delimited event or field names", () => {
+    const commaEvent = ev("Req,Finished", 100, { value: 42 });
+    const commaField = ev("Req", 200, { "value,total": 42 });
+
+    expect(
+      buildEventDetail(
+        pinnedSingle(commaEvent, null),
+        [commaEvent],
+        fmtTs,
+      ).rows.find((row) => row.key === "value")?.chartable,
+    ).toBe(false);
+    expect(
+      buildEventDetail(
+        pinnedSingle(commaField, null),
+        [commaField],
+        fmtTs,
+      ).rows.find((row) => row.key === "value,total")?.chartable,
+    ).toBe(false);
+  });
 });
 
 // ── Related ──────────────────────────────────────────────────────────────────

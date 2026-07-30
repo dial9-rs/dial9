@@ -218,6 +218,18 @@ describe("field-chart lifecycle", () => {
     expect(charts.at(-1)?.id).toBe("fc-a");
   });
 
+  it("rejects event and field names containing the URL separator", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+
+    expect(() =>
+      addFieldChart(store, "Metric,Other", "value", "gauge"),
+    ).toThrow("cannot contain commas");
+    expect(() =>
+      addFieldChart(store, "Metric", "value,total", "gauge"),
+    ).toThrow("cannot contain commas");
+    expect(store.getState().view.fieldCharts).toEqual([]);
+  });
+
   it("drops the materialized list as soon as its panel is reconciled away", () => {
     const cache = createFieldChartSeriesCache();
     const trace = {
