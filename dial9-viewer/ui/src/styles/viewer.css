@@ -474,6 +474,7 @@ body {
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
+.d9-field-chart-canvas { cursor: crosshair; }
 
 /* ── Worker-lanes box: fixed-height rows in a resizeable inner-scroll box ── */
 /* The lanes track stacks its label + scroll box in a row, then a resize gutter

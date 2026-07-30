@@ -348,7 +348,9 @@ function defaultTrackRow(t: TrackSpec): TemplateResult {
       </div>
       <div class="d9-track-canvas-wrap">
         <canvas
-          class="d9-track-canvas"
+          class="d9-track-canvas ${isFieldChartTrackId(t.id)
+            ? "d9-field-chart-canvas"
+            : ""}"
           data-track-canvas=${t.id}
           aria-labelledby="d9-track-label-${t.id}"
           role="img"

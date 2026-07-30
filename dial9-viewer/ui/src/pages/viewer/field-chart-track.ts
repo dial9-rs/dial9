@@ -15,7 +15,21 @@ import type {
   FieldChartSpec,
 } from "../../types/state.js";
 import type { ViewerStore } from "../../store/store.js";
-import { formatFieldValue } from "../../lib/trace/index.js";
+import {
+  formatFieldValue,
+  formatHumanDuration,
+} from "../../lib/trace/index.js";
+import {
+  createTooltip,
+  tooltipRowsTemplate,
+  type TooltipHandle,
+  type TooltipRow,
+} from "../../components/overlay/tooltip.js";
+import {
+  deriveAxisInputs,
+  fmtAxisTick,
+  isDateQualified,
+} from "./axis.js";
 import {
   createFieldChartSeriesCache,
   type FieldChartNumeric,
@@ -161,6 +175,111 @@ function upperBound(
     else hi = mid;
   }
   return lo;
+}
+
+export interface FieldChartHover {
+  value: FieldChartNumeric;
+  timestamp: number;
+  endTimestamp: number | null;
+}
+
+/**
+ * Resolve the value under a timestamp without scanning the series. Gauge only
+ * considers the two adjacent entries, so it never skips over a run of explicit
+ * gaps. Counters resolve the exact half-open interval.
+ */
+export function fieldChartHoverAt(
+  series: FieldChartSeries,
+  kind: FieldChartKind,
+  timestamp: number,
+): FieldChartHover | null {
+  const { samples } = series;
+  if (kind !== "gauge") {
+    const sample = samples[upperBound(samples, timestamp) - 1];
+    return sample !== undefined &&
+      sample.value !== null &&
+      sample.endTimestamp !== null &&
+      timestamp < sample.endTimestamp
+      ? {
+          value: sample.value,
+          timestamp: sample.timestamp,
+          endTimestamp: sample.endTimestamp,
+        }
+      : null;
+  }
+
+  const index = lowerBound(samples, timestamp);
+  const before = samples[index - 1];
+  const after = samples[index];
+  if (
+    after !== undefined &&
+    after.timestamp === timestamp &&
+    after.value === null
+  ) {
+    return null;
+  }
+  const beforeNumeric =
+    before !== undefined &&
+    before.value !== null &&
+    before.endTimestamp === null
+      ? before
+      : null;
+  const afterNumeric =
+    after !== undefined &&
+    after.value !== null &&
+    after.endTimestamp === null
+      ? after
+      : null;
+  const sample =
+    beforeNumeric === null
+      ? afterNumeric
+      : afterNumeric === null ||
+          timestamp - beforeNumeric.timestamp <=
+            afterNumeric.timestamp - timestamp
+        ? beforeNumeric
+        : afterNumeric;
+  return sample === null
+    ? null
+    : {
+        value: sample.value!,
+        timestamp: sample.timestamp,
+        endTimestamp: null,
+      };
+}
+
+/** Structured content for the shared viewer tooltip. */
+export function fieldChartTooltipRows(
+  hover: FieldChartHover,
+  spec: FieldChartSpec,
+  unit: string | null,
+  formatTimestamp: (timestamp: number) => string,
+): TooltipRow[] {
+  const rows: TooltipRow[] = [
+    [{ label: "Series:", value: `${spec.eventName}.${spec.fieldName}` }],
+    [
+      {
+        label: spec.kind === "gauge" ? "Value:" : "Delta:",
+        value: compactFieldChartValue(hover.value, unit),
+      },
+    ],
+  ];
+  if (hover.endTimestamp === null) {
+    rows.push([{ label: "Time:", value: formatTimestamp(hover.timestamp) }]);
+  } else {
+    rows.push([
+      {
+        label: "Interval:",
+        value:
+          `${formatTimestamp(hover.timestamp)} \u2192 ` +
+          formatTimestamp(hover.endTimestamp),
+      },
+      {
+        label: "Duration:",
+        value: formatHumanDuration(hover.endTimestamp - hover.timestamp),
+      },
+    ]);
+  }
+  return rows;
 }
 
 function xAt(
@@ -627,6 +746,21 @@ export interface FieldChartTrackController {
   dispose(): void;
 }
 
+interface FieldChartPaintState {
+  series: FieldChartSeries;
+  spec: FieldChartSpec;
+  viewStart: number;
+  viewEnd: number;
+  drawW: number;
+}
+
+interface FieldChartCanvasBinding {
+  canvas: HTMLCanvasElement;
+  state: FieldChartPaintState;
+  onMouseMove: (event: MouseEvent) => void;
+  onMouseLeave: () => void;
+}
+
 /** Create the one controller/cache shared by all dynamic tracks in this view. */
 export function createFieldChartTrack(
   store: ViewerStore,
@@ -636,14 +770,97 @@ export function createFieldChartTrack(
     HTMLCanvasElement,
     CanvasSizer<CanvasRenderingContext2D>
   >();
+  const bindings = new Map<string, FieldChartCanvasBinding>();
+  let tooltip: TooltipHandle | null = null;
+
+  function removeBinding(id: string): void {
+    const binding = bindings.get(id);
+    if (binding === undefined) return;
+    binding.canvas.removeEventListener("mousemove", binding.onMouseMove);
+    binding.canvas.removeEventListener("mouseleave", binding.onMouseLeave);
+    bindings.delete(id);
+    tooltip?.hide();
+  }
+
+  function bindCanvas(
+    canvas: HTMLCanvasElement,
+    state: FieldChartPaintState,
+  ): void {
+    const existing = bindings.get(state.spec.id);
+    if (existing?.canvas === canvas) {
+      existing.state = state;
+      return;
+    }
+    if (existing !== undefined) removeBinding(state.spec.id);
+
+    const id = state.spec.id;
+    const onMouseMove = (event: MouseEvent): void => {
+      const binding = bindings.get(id);
+      if (binding === undefined || binding.canvas !== canvas) return;
+      const current = binding.state;
+      const x = Math.min(Math.max(0, event.offsetX), current.drawW);
+      const timestamp =
+        current.viewStart +
+        (x / (current.drawW || 1)) *
+          (current.viewEnd - current.viewStart);
+      const hover = fieldChartHoverAt(
+        current.series,
+        current.spec.kind,
+        timestamp,
+      );
+      if (hover === null) {
+        tooltip?.hide();
+        return;
+      }
+
+      const axis = deriveAxisInputs(store.getState());
+      const withDate = isDateQualified(
+        axis,
+        current.viewStart,
+        current.viewEnd,
+      );
+      tooltip ??= createTooltip(canvas.ownerDocument);
+      tooltip.show(
+        tooltipRowsTemplate(
+          fieldChartTooltipRows(
+            hover,
+            current.spec,
+            current.series.unit,
+            (ns) => fmtAxisTick(axis, ns, withDate),
+          ),
+        ),
+        event,
+      );
+    };
+    const onMouseLeave = (): void => tooltip?.hide();
+    canvas.addEventListener("mousemove", onMouseMove);
+    canvas.addEventListener("mouseleave", onMouseLeave);
+    bindings.set(id, {
+      canvas,
+      state,
+      onMouseMove,
+      onMouseLeave,
+    });
+  }
 
   return {
     reconcile(specs) {
       cache.reconcile(specs);
+      const live = new Set(specs.map((spec) => spec.id));
+      for (const id of bindings.keys()) {
+        if (!live.has(id)) removeBinding(id);
+      }
+      if (bindings.size === 0 && tooltip !== null) {
+        tooltip.dispose();
+        tooltip = null;
+      }
     },
     paint(canvas, geometry, spec, viewStart, viewEnd) {
       const trace = store.getState().trace.trace;
-      if (trace === null) return;
+      if (trace === null) {
+        removeBinding(spec.id);
+        return;
+      }
       let sizer = sizers.get(canvas);
       if (sizer === undefined) {
         sizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
@@ -654,16 +871,27 @@ export function createFieldChartTrack(
         geometry.height,
         geometry.dpr,
       );
+      const series = cache.get(trace, spec);
+      bindCanvas(canvas, {
+        series,
+        spec,
+        viewStart,
+        viewEnd,
+        drawW: geometry.time.drawW,
+      });
       renderFieldChart(
         ctx,
         geometry,
-        cache.get(trace, spec),
+        series,
         spec,
         viewStart,
         viewEnd,
       );
     },
     dispose() {
+      for (const id of [...bindings.keys()]) removeBinding(id);
+      tooltip?.dispose();
+      tooltip = null;
       cache.clear();
     },
   };

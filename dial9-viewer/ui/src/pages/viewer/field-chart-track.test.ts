@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { FieldChartSample, FieldChartSeries } from "./field-chart-model.js";
 import {
   buildFieldChartPlot,
+  fieldChartHoverAt,
   fieldChartReadoutText,
+  fieldChartTooltipRows,
 } from "./field-chart-track.js";
 
 function series(samples: readonly FieldChartSample[]): FieldChartSeries {
@@ -195,5 +197,68 @@ describe("buildFieldChartPlot", () => {
         "updown-counter",
       ),
     ).toBe("avg 0.5 · min -2 · max 3");
+  });
+});
+
+describe("field-chart hover", () => {
+  it("selects the nearest gauge observation and stops on an explicit gap", () => {
+    const gauge = series([point(0, 1n), point(10, 3n)]);
+    expect(fieldChartHoverAt(gauge, "gauge", 6)).toEqual({
+      value: 3n,
+      timestamp: 10,
+      endTimestamp: null,
+    });
+
+    const withGap = series([
+      point(0, 1n),
+      point(5, null, "missing"),
+      point(10, 3n),
+    ]);
+    expect(fieldChartHoverAt(withGap, "gauge", 5)).toBeNull();
+  });
+
+  it("resolves the exact counter interval and leaves gaps empty", () => {
+    const counter = series([
+      interval(0, 5, 2n),
+      point(5, null, "reset"),
+      interval(5, 10, 3n),
+    ]);
+
+    expect(fieldChartHoverAt(counter, "counter", 4.9)).toEqual({
+      value: 2n,
+      timestamp: 0,
+      endTimestamp: 5,
+    });
+    expect(fieldChartHoverAt(counter, "counter", 5)).toEqual({
+      value: 3n,
+      timestamp: 5,
+      endTimestamp: 10,
+    });
+    expect(fieldChartHoverAt(counter, "counter", 10)).toBeNull();
+  });
+
+  it("describes a counter delta with its interval and duration", () => {
+    const spec = {
+      id: "field-chart-1",
+      eventName: "Metric",
+      fieldName: "value",
+      kind: "counter",
+    } as const;
+
+    expect(
+      fieldChartTooltipRows(
+        { value: 3n, timestamp: 1_000, endTimestamp: 6_000 },
+        spec,
+        "widgets",
+        (timestamp) => `t${timestamp}`,
+      ),
+    ).toEqual([
+      [{ label: "Series:", value: "Metric.value" }],
+      [{ label: "Delta:", value: "3 widgets" }],
+      [
+        { label: "Interval:", value: "t1000 → t6000" },
+        { label: "Duration:", value: "5.0µs" },
+      ],
+    ]);
   });
 });
