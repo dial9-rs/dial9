@@ -227,6 +227,59 @@ export interface LongPoll extends PollExemplar {
   spawn_loc?: string;
 }
 
+/**
+ * How a poll's ready time was established (server `SchedulingDelayKind`,
+ * serialized snake_case). `"spawn"` = spawn -> first poll; `"wake"` = an idle
+ * wake -> the next poll; `"wake_during_poll"` = a wake mid-poll, made effective
+ * at the poll's explicit end.
+ */
+export type SchedulingDelayKind = "spawn" | "wake" | "wake_during_poll";
+
+/**
+ * One measured runnable-to-poll delay for the "Scheduling delay" rollup (server
+ * `SchedulingDelay`). Worker/task are always present (the server only emits a
+ * row when it can attribute the poll). Unlike LongPoll this does NOT extend
+ * PollExemplar — the wire carries `ready_at_ns`/`poll_end_ns`, which the client
+ * maps into the exemplar focus window (ready -> poll end) to deep-link.
+ */
+export interface SchedulingDelay {
+  /** Runnable-to-poll delay (ns): poll_start_ns - ready_at_ns. */
+  delay_ns: number;
+  ready_at_ns: number;
+  poll_start_ns: number;
+  poll_end_ns: number;
+  worker_id: number;
+  task_id: number;
+  /** How the ready time was established. */
+  kind: SchedulingDelayKind;
+  /** Where the future was spawned; absent when the trace didn't record it. */
+  spawn_loc?: string;
+  /** The task that woke this one, when the evidence is a wake. */
+  waker_task_id?: number;
+  host: string;
+  /** Source trace file key for constructing the viewer deep link. */
+  source_key: string;
+}
+
+/**
+ * Measurement coverage for the scheduling-delay rollup (server
+ * `SchedulingDelayCoverage`): how many polls carried usable readiness evidence
+ * versus not, and why the unmeasured ones could not be inferred. Lets the UI
+ * qualify the top-N with an honest denominator rather than implying every poll
+ * was measured. All fields default to 0 on a server predating the rollup.
+ */
+export interface SchedulingDelayCoverage {
+  observed_polls: number;
+  unmeasured_polls: number;
+  over_1ms_polls: number;
+  spawn_inferred_polls: number;
+  wake_observed_polls: number;
+  wake_during_poll_polls: number;
+  uninstrumented_unmeasured_polls: number;
+  instrumentation_unknown_unmeasured_polls: number;
+  missing_readiness_unmeasured_polls: number;
+}
+
 export interface TokioStatsResponse {
   /** Time span covered by the data (ns), for per-minute rates. Min 1. */
   time_span_ns: number;
@@ -241,6 +294,18 @@ export interface TokioStatsResponse {
    * response that omits it (a server predating the rollup); read it as `[]`.
    */
   top_long_polls?: LongPoll[];
+  /**
+   * Longest runnable-to-poll scheduling delays, ranked descending by delay
+   * (server top_scheduling_delays, bounded to the top 100). Optional so
+   * consumers tolerate a response that omits it (a server predating the
+   * rollup); read it as `[]`.
+   */
+  top_scheduling_delays?: SchedulingDelay[];
+  /**
+   * Coverage tallies for the scheduling-delay rollup. Optional; absent on a
+   * server predating the rollup, in which case the section is hidden.
+   */
+  scheduling_delay_coverage?: SchedulingDelayCoverage;
   /**
    * See FlamegraphResponse.coverage. Quirk: tokio-stats reports files
    * READ this request as `samples_folded` (its folded unit is files).

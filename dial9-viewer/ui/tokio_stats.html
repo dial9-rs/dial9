@@ -401,87 +401,25 @@
     const rows = Object.entries(s.byLoc)
       .filter(([, v]) => v.long > 0)
       .sort(([, a], [, b]) => b.rate - a.rate);
-    let html = "";
-    if (!rows.length) {
-      html = "<p style='margin-top:10px'>No polls exceed the threshold.</p>";
-    } else {
-      html = `<table><thead><tr>
-        <th>Spawn Location</th><th>Long</th><th>/min</th>
-        <th>Off-CPU 🔴</th><th>On-CPU 🟡</th>
-        <th>P50</th><th>P99</th><th>Max</th>
-      </tr></thead><tbody>`;
-      for (const [loc, v] of rows) {
-        html += `<tr>
-          <td><code>${escapeHtml(loc)}</code></td>
-          <td>${v.long}</td><td>${v.rate.toFixed(1)}</td>
-          <td>${linkedStat(v.offCpu, v.exemplars && v.exemplars[0], data, "off-cpu")}</td>
-          <td>${linkedStat(v.onCpu, v.exemplars && v.exemplars[1], data, "on-cpu")}</td>
-          <td>${formatDuration(v.p50)}</td><td>${formatDuration(v.p99)}</td><td>${formatDuration(v.max)}</td>
-        </tr>`;
-      }
-      html += "</tbody></table>";
+    if (!rows.length) { tableEl.innerHTML = "<p style='margin-top:10px'>No polls exceed the threshold.</p>"; return; }
+    let html = `<table><thead><tr>
+      <th>Spawn Location</th><th>Long</th><th>/min</th>
+      <th>Off-CPU 🔴</th><th>On-CPU 🟡</th>
+      <th>P50</th><th>P99</th><th>Max</th>
+    </tr></thead><tbody>`;
+    for (const [loc, v] of rows) {
+      html += `<tr>
+        <td><code>${escapeHtml(loc)}</code></td>
+        <td>${v.long}</td><td>${v.rate.toFixed(1)}</td>
+        <td>${linkedStat(v.offCpu, v.exemplars && v.exemplars[0], data, "off-cpu")}</td>
+        <td>${linkedStat(v.onCpu, v.exemplars && v.exemplars[1], data, "on-cpu")}</td>
+        <td>${formatDuration(v.p50)}</td><td>${formatDuration(v.p99)}</td><td>${formatDuration(v.max)}</td>
+      </tr>`;
     }
+    html += "</tbody></table>";
     html += renderWorkerActivity(data, threshNs);
-    html += renderSchedulingDelays(data);
     html += renderLongPolls(data, threshNs);
     tableEl.innerHTML = html;
-  }
-
-  // "Longest observed scheduling delays": runnable-to-poll latency backed by
-  // same-segment spawn/wake evidence. Inter-poll gaps are deliberately never
-  // treated as delays because they can contain legitimate I/O or timer waits.
-  function renderSchedulingDelays(data) {
-    const coverage = data && data.scheduling_delay_coverage;
-    if (!coverage) return "";
-
-    const observed = Number(coverage.observed_polls) || 0;
-    const unmeasured = Number(coverage.unmeasured_polls) || 0;
-    const total = observed + unmeasured;
-    const spawn = Number(coverage.spawn_inferred_polls) || 0;
-    const wake = Number(coverage.wake_observed_polls) || 0;
-    const wakeDuringPoll = Number(coverage.wake_during_poll_polls) || 0;
-    const high = Number(coverage.over_1ms_polls) || 0;
-    const rows = ((data && data.top_scheduling_delays) || []).slice(0, 50);
-    const pct = total > 0 ? (observed / total * 100).toFixed(1) : "0.0";
-
-    let html = `<h3 style="margin:20px 0 8px">Longest observed scheduling delays</h3>
-      <p style="font-size:0.8em;color:#8b949e;margin-bottom:4px">Time a runnable task waited before its next poll. First polls can be inferred from task spawn; later polls require a wake in the same trace segment.</p>
-      <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">${observed.toLocaleString()} / ${total.toLocaleString()} polls observed (${pct}%) &middot; ${spawn.toLocaleString()} spawn-inferred &middot; ${wake.toLocaleString()} idle wakes &middot; ${wakeDuringPoll.toLocaleString()} in-poll wakes &middot; ${high.toLocaleString()} over 1ms</p>`;
-
-    if (unmeasured > 0) {
-      const uninstrumented = Number(coverage.uninstrumented_unmeasured_polls) || 0;
-      const unknownInstrumentation = Number(coverage.instrumentation_unknown_unmeasured_polls) || 0;
-      const missingReadiness = Number(coverage.missing_readiness_unmeasured_polls) || 0;
-      html += `<p style="font-size:0.8em;color:#d29922;margin-bottom:6px">${unmeasured.toLocaleString()} polls unmeasured: ${uninstrumented.toLocaleString()} uninstrumented, ${unknownInstrumentation.toLocaleString()} instrumentation unknown, ${missingReadiness.toLocaleString()} missing same-segment readiness evidence. These are unknown, not zero-delay.</p>`;
-    }
-    if (!rows.length) {
-      return html + `<p style="font-size:0.85em;margin-top:8px">No scheduling delay could be safely measured in the folded files.</p>`;
-    }
-
-    const multiHost = new Set(rows.map(row => row.host || "")).size > 1;
-    html += `<table><thead><tr>
-      <th>Delay</th><th>Evidence</th><th>Worker</th><th>Task</th><th>Spawn Location</th>${multiHost ? "<th>Host</th>" : ""}
-    </tr></thead><tbody>`;
-    for (const row of rows) {
-      const evidence = schedulingDelayEvidenceLabel(row.kind);
-      const url = exemplarLink({
-        start_ns: row.ready_at_ns,
-        end_ns: row.poll_end_ns,
-        worker_id: row.worker_id,
-        task_id: row.task_id,
-        host: row.host,
-        source_key: row.source_key,
-      }, data);
-      const cells = `<td><span style="color:${latencyHeat(row.delay_ns)};font-weight:600">${formatDuration(row.delay_ns)}</span></td>
-        <td>${escapeHtml(evidence)}</td>
-        <td>w${row.worker_id}</td>
-        <td><code>${row.task_id}</code></td>
-        <td><code>${escapeHtml(row.spawn_loc || "(unknown)")}</code></td>${multiHost ? `<td>${escapeHtml(row.host || "")}</td>` : ""}`;
-      html += url
-        ? `<tr style="cursor:pointer" onclick="openExemplar(this)" data-url="${url.replace(/"/g, "&quot;")}">${cells}</tr>`
-        : `<tr>${cells}</tr>`;
-    }
-    return html + "</tbody></table>";
   }
 
   // "Worker activity": per-host busyness summary with expandable per-worker

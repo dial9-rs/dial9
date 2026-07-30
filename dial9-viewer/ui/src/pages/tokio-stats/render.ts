@@ -7,8 +7,9 @@
 // text, not markup - see render.test.ts).
 
 import { html, nothing, render, type TemplateResult } from "lit-html";
-import type { TokioStatsResponse } from "../../lib/trace/index.js";
-import { formatDuration, nsToDatetime } from "./format.js";
+import { live } from "lit-html/directives/live.js";
+import type { SchedulingDelay, TokioStatsResponse } from "../../lib/trace/index.js";
+import { formatDuration, nsToDatetime, schedulingDelayEvidenceLabel } from "./format.js";
 import { latencyHeat } from "../../lib/trace/tokio_stats_api.js";
 import { exemplarLink } from "./exemplar.js";
 import {
@@ -21,6 +22,30 @@ import {
 
 /** Period-tag palette, cycling blue/purple/green/orange. */
 export const COLORS = ["#58a6ff", "#d2a8ff", "#7ee787", "#ffa657"];
+
+/** Row-count choices offered by every per-table "Rows" selector. */
+export const ROW_LIMIT_OPTIONS = [10, 25, 50, 100] as const;
+
+/**
+ * A per-table "Rows: [n]" selector. `live()` keeps the shown option pinned to
+ * the caller's current limit across re-renders (lit-html otherwise leaves a
+ * user-edited <select> untouched). onChange receives the parsed count.
+ */
+function rowLimitSelect(
+  current: number,
+  onChange: (limit: number) => void,
+): TemplateResult {
+  return html`<label style="font-size:0.8em;font-weight:400;color:#8b949e">
+    Rows:
+    <select
+      .value=${live(String(current))}
+      @change=${(e: Event) => onChange(Number((e.target as HTMLSelectElement).value))}
+      style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 4px;border-radius:3px"
+    >
+      ${ROW_LIMIT_OPTIONS.map((n) => html`<option value=${n}>${n}</option>`)}
+    </select>
+  </label>`;
+}
 
 /** Minimal period shape the row template needs. */
 export interface PeriodRow {
@@ -246,14 +271,21 @@ export function longPollsTemplate(
   threshNs: number,
   bucketParam: string | null,
   onOpen: (url: string) => void,
+  limit: number,
+  onLimitChange: (limit: number) => void,
 ): TemplateResult | typeof nothing {
-  const rows = (data.top_long_polls ?? []).filter((p) => p.duration_ns >= threshNs).slice(0, 50);
-  if (!rows.length) return nothing;
+  const matching = (data.top_long_polls ?? []).filter(
+    (p) => p.duration_ns >= threshNs,
+  );
+  if (!matching.length) return nothing;
+  const rows = matching.slice(0, limit);
   // The host column only earns its space when the scope spans multiple hosts.
   const multiHost = new Set(rows.map((p) => p.host || "")).size > 1;
   const bucketFromData = data.bucket;
   return html`
-    <h3 style="margin:20px 0 8px">Longest polls</h3>
+    <h3 style="margin:20px 0 8px;display:flex;align-items:center;gap:12px">
+      Longest polls ${rowLimitSelect(limit, onLimitChange)}
+    </h3>
     <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">
       Single polls that held a worker thread longest; long polls starve other
       tasks on that worker. Click a row to open its trace segment.
@@ -293,6 +325,130 @@ export function longPollsTemplate(
   `;
 }
 
+/**
+ * "Scheduling delay": how long a runnable task waited before its next poll,
+ * backed by same-segment spawn/wake evidence (an inter-poll gap is deliberately
+ * never treated as a delay — it can contain legitimate I/O or timer waits). The
+ * server ranks the top delays and reports coverage (measured vs why-unmeasured)
+ * so the top-N reads against an honest denominator. Each row deep-links its
+ * trace segment via the ready -> poll-end focus window. lit-html escapes every
+ * interpolated value, so the attacker-influenceable spawn_loc/host render inert.
+ */
+export function schedulingDelaysTemplate(
+  data: TokioStatsResponse,
+  bucketParam: string | null,
+  onOpen: (url: string) => void,
+  limit: number,
+  onLimitChange: (limit: number) => void,
+): TemplateResult | typeof nothing {
+  const cov = data.scheduling_delay_coverage;
+  if (!cov) return nothing;
+
+  const observed = cov.observed_polls;
+  const unmeasured = cov.unmeasured_polls;
+  const total = observed + unmeasured;
+  const pct = total > 0 ? ((observed / total) * 100).toFixed(1) : "0.0";
+  const rows = (data.top_scheduling_delays ?? []).slice(0, limit);
+  const bucketFromData = data.bucket;
+  // The host column only earns its space when the scope spans multiple hosts.
+  const multiHost = new Set(rows.map((d) => d.host || "")).size > 1;
+
+  const coverageLine = html`<p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">
+    ${observed.toLocaleString()} / ${total.toLocaleString()} polls observed (${pct}%) ·
+    ${cov.spawn_inferred_polls.toLocaleString()} spawn-inferred ·
+    ${cov.wake_observed_polls.toLocaleString()} idle wakes ·
+    ${cov.wake_during_poll_polls.toLocaleString()} in-poll wakes ·
+    ${cov.over_1ms_polls.toLocaleString()} over 1ms
+  </p>`;
+  const unmeasuredLine =
+    unmeasured > 0
+      ? html`<p style="font-size:0.8em;color:#d29922;margin-bottom:6px">
+          ${unmeasured.toLocaleString()} polls unmeasured:
+          ${cov.uninstrumented_unmeasured_polls.toLocaleString()} uninstrumented,
+          ${cov.instrumentation_unknown_unmeasured_polls.toLocaleString()} instrumentation
+          unknown, ${cov.missing_readiness_unmeasured_polls.toLocaleString()} missing
+          same-segment readiness evidence. These are unknown, not zero-delay.
+        </p>`
+      : nothing;
+
+  const header = html`
+    <h3 style="margin:20px 0 8px;display:flex;align-items:center;gap:12px">
+      Longest observed scheduling delays ${rowLimitSelect(limit, onLimitChange)}
+    </h3>
+    <p style="font-size:0.8em;color:#8b949e;margin-bottom:4px">
+      Time a runnable task waited before its next poll. First polls can be
+      inferred from task spawn; later polls require a wake in the same trace
+      segment. Click a row to open its trace segment.
+    </p>
+    ${coverageLine}${unmeasuredLine}
+  `;
+
+  if (!rows.length) {
+    return html`${header}<p style="font-size:0.85em;margin-top:8px">
+        No scheduling delay could be safely measured in the folded files.
+      </p>`;
+  }
+
+  return html`
+    ${header}
+    <table>
+      <thead>
+        <tr>
+          <th>Delay</th>
+          <th>Evidence</th>
+          <th>Worker</th>
+          <th>Task</th>
+          <th>Spawn Location</th>
+          ${multiHost ? html`<th>Host</th>` : nothing}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((d: SchedulingDelay) => {
+          // The exemplar focus window frames the wait: ready -> poll end.
+          const url = exemplarLink(
+            {
+              start_ns: d.ready_at_ns,
+              end_ns: d.poll_end_ns,
+              duration_ns: d.delay_ns,
+              host: d.host,
+              source_key: d.source_key,
+              worker_id: d.worker_id,
+              task_id: d.task_id,
+            },
+            bucketFromData,
+            bucketParam,
+          );
+          const cells = html`
+            <td>
+              <span style="color:${latencyHeat(d.delay_ns)};font-weight:600"
+                >${formatDuration(d.delay_ns)}</span
+              >
+            </td>
+            <td>${schedulingDelayEvidenceLabel(d.kind)}</td>
+            <td>w${d.worker_id}</td>
+            <td><code>${d.task_id}</code></td>
+            <td><code>${d.spawn_loc || "(unknown)"}</code></td>
+            ${multiHost ? html`<td>${d.host || ""}</td>` : nothing}
+          `;
+          return url
+            ? html`<tr style="cursor:pointer" data-url=${url} @click=${() => onOpen(url)}>
+                ${cells}
+              </tr>`
+            : html`<tr>${cells}</tr>`;
+        })}
+      </tbody>
+    </table>
+  `;
+}
+
+/** Per-table row limits and their change handlers for the single-period view. */
+export interface RowLimits {
+  longPolls: number;
+  onLongPollsChange: (limit: number) => void;
+  schedulingDelays: number;
+  onSchedulingDelaysChange: (limit: number) => void;
+}
+
 /** Render one period through the single-period view. */
 export function renderSinglePeriod(
   sumEl: HTMLElement,
@@ -302,6 +458,7 @@ export function renderSinglePeriod(
   threshNs: number,
   bucketParam: string | null,
   onOpen: (url: string) => void,
+  limits: RowLimits,
 ): void {
   render(summaryCardsTemplate(s, threshNs), sumEl);
   render(
@@ -310,6 +467,14 @@ export function renderSinglePeriod(
       threshNs,
       bucketParam,
       onOpen,
+      limits.longPolls,
+      limits.onLongPollsChange,
+    )}${schedulingDelaysTemplate(
+      data,
+      bucketParam,
+      onOpen,
+      limits.schedulingDelays,
+      limits.onSchedulingDelaysChange,
     )}`,
     tableEl,
   );

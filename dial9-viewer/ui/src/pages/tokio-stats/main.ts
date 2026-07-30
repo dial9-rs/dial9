@@ -14,6 +14,7 @@ import {
   renderSinglePeriod,
   renderNotLoaded,
   renderDiff,
+  type RowLimits,
   type Tab,
 } from "./render.js";
 import {
@@ -161,8 +162,30 @@ function setTab(tab: string): void {
   renderFromCache();
 }
 
+// Each rollup table owns its own row cap, changed via a selector in the table
+// header. Re-rendering after a change keeps the two independent.
+let longPollsLimit = 10;
+let schedulingDelaysLimit = 10;
+
+/** The per-table limits + change handlers handed to renderSinglePeriod. */
+function rowLimits(): RowLimits {
+  return {
+    longPolls: longPollsLimit,
+    onLongPollsChange: (n: number) => {
+      longPollsLimit = n;
+      renderFromCache();
+    },
+    schedulingDelays: schedulingDelaysLimit,
+    onSchedulingDelaysChange: (n: number) => {
+      schedulingDelaysLimit = n;
+      renderFromCache();
+    },
+  };
+}
+
 function renderFromCache(): void {
   const threshNs = thresholdNs(els.slider.value);
+  const limits = rowLimits();
   const stats = periods.map((p) => computeStats(p.data, threshNs));
   if (stats.every((s) => !s)) return;
 
@@ -188,6 +211,7 @@ function renderFromCache(): void {
       threshNs,
       scope.bucket,
       openExemplar,
+      limits,
     );
     return;
   }
@@ -204,6 +228,7 @@ function renderFromCache(): void {
       threshNs,
       scope.bucket,
       openExemplar,
+      limits,
     );
     return;
   }

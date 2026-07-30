@@ -10,7 +10,6 @@ const {
   exemplarViewerUrl,
   formatTokioCoverage,
   latencyHeat,
-  schedulingDelayEvidenceLabel,
   busynessHeat,
   hostBusyPct,
   hostWorkerCounts,
@@ -181,28 +180,6 @@ assertEq(latencyHeat(1_000_000), "#d29922", "1ms poll is amber");
 assertEq(latencyHeat(2_500_000), "#d29922", "1–3ms poll is amber");
 assertEq(latencyHeat(3_000_000), "#f85149", "3ms poll is red");
 assertEq(latencyHeat(50_000_000), "#f85149", "50ms poll is red");
-
-// ── schedulingDelayEvidenceLabel ──
-assertEq(
-  schedulingDelayEvidenceLabel("spawn"),
-  "spawn -> first poll",
-  "spawn inference is labeled explicitly",
-);
-assertEq(
-  schedulingDelayEvidenceLabel("wake"),
-  "wake -> poll",
-  "idle wake evidence is labeled explicitly",
-);
-assertEq(
-  schedulingDelayEvidenceLabel("wake_during_poll"),
-  "poll end -> next poll",
-  "in-poll wake uses poll end as the ready time",
-);
-assertEq(
-  schedulingDelayEvidenceLabel(undefined),
-  "unknown evidence",
-  "unknown provenance is not presented as a measured wake",
-);
 
 // ── busynessHeat ──
 // Busyness = poll time / wall-clock. ≥80% red (saturated), ≥50% amber, else green.

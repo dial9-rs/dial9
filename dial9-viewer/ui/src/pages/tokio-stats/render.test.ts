@@ -18,7 +18,12 @@ import { describe, it, expect } from "vitest";
 import type { TokioStatsResponse } from "../../lib/trace/index.js";
 import type { PeriodStats } from "./stats.js";
 import { nothing } from "lit-html";
-import { diffTableTemplate, locTableTemplate, longPollsTemplate } from "./render.js";
+import {
+  diffTableTemplate,
+  locTableTemplate,
+  longPollsTemplate,
+  schedulingDelaysTemplate,
+} from "./render.js";
 
 // Two classic breakout payloads: an element-context inject and an
 // attribute-breakout inject.
@@ -140,17 +145,41 @@ describe("longPollsTemplate (Longest polls card)", () => {
   };
 
   it("filters rows below the threshold, keeps those above", () => {
-    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}));
+    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
     expect(t.leaves).toContain(42); // the 5ms poll's task id survives
     expect(t.leaves).not.toContain(7); // the 0.2ms poll is filtered out
   });
 
   it("returns nothing when no poll exceeds the threshold", () => {
-    expect(longPollsTemplate(data, 10_000_000, null, () => {})).toBe(nothing);
+    expect(longPollsTemplate(data, 10_000_000, null, () => {}, 10, () => {})).toBe(nothing);
+  });
+
+  it("caps the rendered rows at the requested limit", () => {
+    const many: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 10,
+      bucket: "b",
+      by_spawn_loc: [],
+      top_long_polls: Array.from({ length: 20 }, (_, i) => ({
+        duration_ns: 5_000_000,
+        worker_id: 0,
+        task_id: 1000 + i,
+        spawn_loc: "app::f:f.rs:1",
+        host: "h1",
+        source_key: "k",
+        start_ns: 1,
+        end_ns: 2,
+      })),
+    };
+    const t = split(longPollsTemplate(many, 0, null, () => {}, 3, () => {}));
+    // Only the first 3 task ids should appear.
+    expect(t.leaves).toContain(1000);
+    expect(t.leaves).toContain(1002);
+    expect(t.leaves).not.toContain(1003);
   });
 
   it("each row deep-links its poll via a non-destructive focus link", () => {
-    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}));
+    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
     const url = t.leaves.find(
       (v): v is string => typeof v === "string" && v.startsWith("viewer.html?"),
     );
@@ -169,9 +198,121 @@ describe("longPollsTemplate (Longest polls card)", () => {
         { duration_ns: 5_000_000, worker_id: 0, task_id: 1, spawn_loc: HOSTILE_TAG, host: "h1", source_key: "k", start_ns: 1, end_ns: 2 },
       ],
     };
-    const t = split(longPollsTemplate(hostile, 0, null, () => {}));
+    const t = split(longPollsTemplate(hostile, 0, null, () => {}, 10, () => {}));
     expect(t.leaves).toContain(HOSTILE_TAG);
     for (const chunk of t.strings) expect(chunk).not.toContain(HOSTILE_TAG);
+  });
+});
+
+describe("schedulingDelaysTemplate (Scheduling delay card)", () => {
+  const coverage = {
+    observed_polls: 80,
+    unmeasured_polls: 20,
+    over_1ms_polls: 5,
+    spawn_inferred_polls: 30,
+    wake_observed_polls: 40,
+    wake_during_poll_polls: 10,
+    uninstrumented_unmeasured_polls: 12,
+    instrumentation_unknown_unmeasured_polls: 3,
+    missing_readiness_unmeasured_polls: 5,
+  };
+  const data: TokioStatsResponse = {
+    time_span_ns: 60e9,
+    total_polls: 100,
+    bucket: "b",
+    by_spawn_loc: [],
+    scheduling_delay_coverage: coverage,
+    top_scheduling_delays: [
+      { delay_ns: 5_000_000, ready_at_ns: 1000, poll_start_ns: 6000, poll_end_ns: 7000, worker_id: 3, task_id: 42, kind: "spawn", spawn_loc: "app::f:f.rs:1", host: "h1", source_key: "traces/a.bin.gz" },
+      { delay_ns: 200_000, ready_at_ns: 2000, poll_start_ns: 2200, poll_end_ns: 2400, worker_id: 1, task_id: 7, kind: "wake", spawn_loc: "app::g:g.rs:2", host: "h1", source_key: "traces/b.bin.gz" },
+    ],
+  };
+
+  it("returns nothing when the server sent no coverage (predates the rollup)", () => {
+    const bare: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 10,
+      bucket: "b",
+      by_spawn_loc: [],
+    };
+    expect(schedulingDelaysTemplate(bare, null, () => {}, 10, () => {})).toBe(nothing);
+  });
+
+  it("renders the delays and their evidence labels", () => {
+    const t = split(schedulingDelaysTemplate(data, null, () => {}, 10, () => {}));
+    expect(t.leaves).toContain(42);
+    expect(t.leaves).toContain(7);
+    expect(t.leaves).toContain("spawn → first poll");
+    expect(t.leaves).toContain("wake → poll");
+  });
+
+  it("caps the rendered rows at the requested limit", () => {
+    const many: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 100,
+      bucket: "b",
+      by_spawn_loc: [],
+      scheduling_delay_coverage: coverage,
+      top_scheduling_delays: Array.from({ length: 20 }, (_, i) => ({
+        delay_ns: 5_000_000,
+        ready_at_ns: 1000,
+        poll_start_ns: 6000,
+        poll_end_ns: 7000,
+        worker_id: 0,
+        task_id: 2000 + i,
+        kind: "spawn" as const,
+        spawn_loc: "app::f:f.rs:1",
+        host: "h1",
+        source_key: "k",
+      })),
+    };
+    const t = split(schedulingDelaysTemplate(many, null, () => {}, 3, () => {}));
+    expect(t.leaves).toContain(2000);
+    expect(t.leaves).toContain(2002);
+    expect(t.leaves).not.toContain(2003);
+  });
+
+  it("each row deep-links via the ready -> poll-end focus window", () => {
+    const t = split(schedulingDelaysTemplate(data, null, () => {}, 10, () => {}));
+    const url = t.leaves.find(
+      (v): v is string => typeof v === "string" && v.startsWith("viewer.html?"),
+    );
+    expect(url).toBeDefined();
+    expect(url).toContain("focus_start=1000"); // ready_at_ns
+    expect(url).not.toContain("/api/trace");
+  });
+
+  it("still renders the coverage header when no delay could be measured", () => {
+    const empty: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 100,
+      bucket: "b",
+      by_spawn_loc: [],
+      scheduling_delay_coverage: coverage,
+      top_scheduling_delays: [],
+    };
+    const t = split(schedulingDelaysTemplate(empty, null, () => {}, 10, () => {}));
+    const joined = t.strings.join("");
+    expect(joined).toContain("No scheduling delay could be safely measured");
+  });
+
+  it("hostile spawn_loc renders as an interpolated VALUE (XSS-safe)", () => {
+    const hostile: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 1,
+      bucket: "b",
+      by_spawn_loc: [],
+      scheduling_delay_coverage: coverage,
+      top_scheduling_delays: [
+        { delay_ns: 5_000_000, ready_at_ns: 1, poll_start_ns: 2, poll_end_ns: 3, worker_id: 0, task_id: 1, kind: "spawn", spawn_loc: HOSTILE_TAG, host: HOSTILE_ATTR, source_key: "k" },
+      ],
+    };
+    const t = split(schedulingDelaysTemplate(hostile, null, () => {}, 10, () => {}));
+    expect(t.leaves).toContain(HOSTILE_TAG);
+    for (const chunk of t.strings) {
+      expect(chunk).not.toContain(HOSTILE_TAG);
+      expect(chunk).not.toContain("onerror");
+    }
   });
 });
 
