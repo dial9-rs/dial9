@@ -363,7 +363,13 @@ fn shared_recorder_attaches_from_many_threads() {
                     *poll_starts_per_worker.entry(fields.worker_id).or_default() += 1;
                 }
             }
-            "PollEndEvent" => poll_ends += 1,
+            "PollEndEvent" => {
+                if let Ok(fields) = ev.deserialize::<WorkerIdField>()
+                    && fields.worker_id != UNKNOWN_WORKER_ID
+                {
+                    poll_ends += 1;
+                }
+            }
             "SegmentMetadataEvent" => {
                 if let Ok(meta) = ev.deserialize::<SegmentMetadata>() {
                     for (key, val) in meta.entries {
@@ -427,4 +433,28 @@ fn shared_recorder_attaches_from_many_threads() {
         poll_starts, poll_ends,
         "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
     );
+}
+
+#[test]
+fn attach_after_shutdown_errors() {
+    let recorder = recorder(dial9::MemoryBuffer::new(1 << 20).unwrap()).build();
+    let handle = recorder.handle().clone();
+    recorder.graceful_shutdown(Duration::from_secs(5));
+
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let result = handle.attach_tokio_runtime(builder, TokioAttachOptions::default());
+    assert!(result.is_err(), "attach on a shut-down recorder must fail");
+}
+
+#[test]
+fn handle_is_inert_after_shutdown() {
+    let recorder = recorder(dial9::MemoryBuffer::new(1 << 20).unwrap()).build();
+    let handle = recorder.handle().clone();
+    assert!(handle.is_enabled());
+    recorder.graceful_shutdown(Duration::from_secs(5));
+
+    assert!(!handle.is_enabled());
+    handle.enable();
+    assert!(!handle.is_enabled(), "enable after shutdown must stay off");
 }

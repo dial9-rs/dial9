@@ -247,7 +247,7 @@ impl std::fmt::Debug for TokioAttachOptions {
 pub type AttachedRuntime = (Recorder, tokio::runtime::Runtime);
 
 /// Tokio instrumentation for [`Dial9Handle`].
-pub trait Dial9HandleTokioExt {
+pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
     /// Instrument a builder you configured, build it, and return the runtime.
     ///
     /// Get a handle from [`Recorder::handle`](dial9_core::recording::Recorder::handle),
@@ -271,6 +271,11 @@ pub trait Dial9HandleTokioExt {
     /// Drop the runtime before calling
     /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
     /// on the recorder this handle came from, so the runtime's workers flush.
+    ///
+    /// # Errors
+    ///
+    /// Fails if Tokio cannot build the runtime, or if the recorder has
+    /// already shut down.
     ///
     /// Drive the root future with [`block_on`](crate::block_on), not
     /// [`Runtime::block_on`](tokio::runtime::Runtime::block_on): to ensure polls and wakes
@@ -330,12 +335,26 @@ pub trait Dial9HandleTokioExt {
     ) -> io::Result<tokio::runtime::Runtime>;
 }
 
+mod dial9_handle_tokio_ext_sealed {
+    use dial9_core::handle::Dial9Handle;
+
+    pub trait Sealed {}
+    impl Sealed for Dial9Handle {}
+}
+
 impl Dial9HandleTokioExt for Dial9Handle {
     fn attach_tokio_runtime(
         &self,
         mut builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime> {
+        if let Some(shared) = self.shared()
+            && shared.is_stopped()
+        {
+            return Err(io::Error::other(
+                "recorder has shut down; attach runtimes before graceful_shutdown",
+            ));
+        }
         let instrumented = options.tokio_instrumentation_enabled;
         install_tokio_hooks(self, &mut builder, options);
         let runtime = builder.build()?;
@@ -370,7 +389,7 @@ pub(crate) fn install_tokio_hooks(
         rate_limited!(Duration::from_secs(60), {
             tracing::error!(
                 target: "dial9_telemetry",
-                "source registry unavailable; Tokio runtime not attached"
+                "source registry unavailable (poisoned or recorder stopped); Tokio runtime not attached"
             );
         });
         return;
@@ -401,18 +420,24 @@ pub(crate) fn install_tokio_hooks(
 
 /// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that
 /// owns it on first use. Find-or-insert under one lock, so racing attaches share
-/// one source. `None` only if the source lock is poisoned.
+/// one source. `None` if the source lock is poisoned or the recorder has shut
+/// down.
 pub(crate) fn runtime_registry(shared: &Arc<SharedState>) -> Option<RuntimeContextRegistry> {
-    shared.with_sources_vec(|sources| {
-        let existing = sources.iter_mut().find_map(|source| {
-            let any: &mut dyn std::any::Any = &mut **source;
-            any.downcast_mut::<TokioRuntimesSource>()
-        });
-        if let Some(source) = existing {
-            return source.registry().clone();
-        }
-        let registry: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
-        sources.push(Box::new(TokioRuntimesSource::new(registry.clone())));
-        registry
-    })
+    shared
+        .with_sources_vec(|sources| {
+            if shared.is_stopped() {
+                return None;
+            }
+            let existing = sources.iter_mut().find_map(|source| {
+                let any: &mut dyn std::any::Any = &mut **source;
+                any.downcast_mut::<TokioRuntimesSource>()
+            });
+            if let Some(source) = existing {
+                return Some(source.registry().clone());
+            }
+            let registry: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+            sources.push(Box::new(TokioRuntimesSource::new(registry.clone())));
+            Some(registry)
+        })
+        .flatten()
 }
