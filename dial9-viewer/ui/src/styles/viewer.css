@@ -1134,9 +1134,10 @@ body {
     color: var(--d9-fg);
     border-color: var(--d9-accent);
 }
-.d9-kv-chart {
-    color: #55d6be;
-    border-color: rgba(85, 214, 190, 0.45);
+.d9-kv-chart svg {
+    display: block;
+    width: 1em;
+    height: 1em;
 }
 
 /* ── Numeric-field chart kind dialog ──────────────────────────────────── */

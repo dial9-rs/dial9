@@ -830,7 +830,19 @@ export function mountInspector(
             aria-label="Chart ${key}"
             @click=${() => deps.openFieldChart(eventName, key)}
           >
-            Chart
+            <svg
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M2.5 2.5v11h11"></path>
+              <path d="m4 10 2.5-3 2.2 1.8L12.5 4"></path>
+            </svg>
           </button>`
         : nothing}
       <button
