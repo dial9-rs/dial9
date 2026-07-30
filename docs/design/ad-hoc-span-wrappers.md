@@ -2,14 +2,15 @@
 
 Issue: [dial9-rs/dial9#498](https://github.com/dial9-rs/dial9/issues/498)
 
-Status: **implemented.** The core lives in `dial9-tokio-telemetry/src/span.rs`
-(+ `span/future.rs`, `span/wire.rs`) and the tower layer in
-`dial9-tokio-telemetry/src/span/tower.rs` (feature `tower`), re-exported from
-the `dial9` umbrella crate. Tests are in
-`dial9-tokio-telemetry/tests/span_wrappers.rs`, a runnable example is
+Status: **implemented.** The code lives in its own lightweight **`dial9-util`**
+crate — `dial9-util/src/span/{mod,future,wire}.rs` and the tower layer in
+`span/tower.rs` (feature `tower`) — re-exported from the `dial9` umbrella crate.
+`dial9-util` depends only on `dial9-core` + `dial9-trace-format` (plus an
+*optional* `tokio` for the worker index), so **spans work with or without
+Tokio**. Tests are in `dial9-util/tests/span_wrappers.rs`, a runnable example is
 `dial9/examples/adhoc_spans.rs`, and a head-to-head benchmark is
-`dial9-tokio-telemetry/benches/span_encode_bench.rs`. This document is the design
-rationale; the code is the source of truth for the exact signatures.
+`dial9-util/benches/span_encode_bench.rs`. This document is the design rationale;
+the code is the source of truth for the exact signatures.
 
 Companion UX artifact: [`ad-hoc-span-wrappers-example.rs`](./ad-hoc-span-wrappers-example.rs).
 A complete program written against the API, showing it in context on an axum
@@ -131,11 +132,11 @@ work for the generated types:
 
 ## API surface
 
-Module `dial9_tokio_telemetry::span`, re-exported as `dial9::span`; the
-`dial9_span!` macro is exported at the crate root. The core (macro + guard +
-future combinator) has zero new dependencies and is always compiled. The tower
-layer sits behind a new `tower` feature (adds the small `tower-service` /
-`tower-layer` trait crates, not `tower` itself).
+Module `dial9_util::span`, re-exported as `dial9::span`; the `dial9_span!` macro
+is exported at the `dial9-util` crate root (and re-exported as `dial9::dial9_span`).
+The core (macro + guard + future combinator) depends only on `dial9-core` +
+`dial9-trace-format`. The tower layer sits behind a `tower` feature (adds the
+small `tower-service` / `tower-layer` trait crates, not `tower` itself).
 
 ```rust
 // Build a span, capturing the callsite and typed fields. tracing-style syntax:
@@ -257,13 +258,39 @@ needed. 2^63 ids does not wrap in practice (at 1B spans/sec: ~292 years).
   depends on `http`. The example program shows it on an axum stack because that
   is the motivating case.
 
+## Crate placement & Tokio-independence
+
+The span code is its own crate, **`dial9-util`**, not part of `dial9-tokio-telemetry`,
+because spans should work even in programs that don't use Tokio. The emit path
+needs only `dial9-core` (the `Dial9Handle`/encoder/clock) and `dial9-trace-format`
+— nothing Tokio-specific — so a plain-threads program that installs the core
+recorder can emit spans too.
+
+The one Tokio touch-point is the `worker_id` wire field. `dial9-util` reads it
+from `tokio::runtime::worker_index()` behind an **optional `tokio` feature**;
+off a runtime, or with the feature off, `worker_id` is a sentinel (unknown).
+That keeps the crate Tokio-free by default while still stamping the worker index
+when Tokio is in use. (`worker_index()` is a `tokio_unstable` API; the workspace
+builds with `--cfg tokio_unstable`.) This is a deliberately simpler source than
+the tracing layer's global worker id — `worker_id` is nice-to-have metadata, and
+per-poll worker attribution is recoverable from the task's poll events anyway.
+
+`dial9-util` depends on `dial9-core`, **not** on `dial9-tokio-telemetry`, so there
+is no cycle with `dial9-tokio-telemetry`'s (optional) dependency on `dial9-utils`.
+The span tests need a traced Tokio runtime, so they pull `dial9-tokio-telemetry`
+as a **dev-dependency** only — allowed, since it never forms a normal-dependency
+cycle. `SpanCloseEvent` is a tiny `wire_slot` event; the tracing layer and
+`dial9-util` each keep a private copy (identical schema, distinct producers).
+
 ## Feature flags & semver
 
-- Core `span` module (macro, guard, future combinator): unconditional, no new
-  deps. All new API, purely additive.
+- `dial9-util` core (macro, guard, future combinator): depends only on
+  `dial9-core` + `dial9-trace-format`. All new API, purely additive.
+- `tokio` feature (`dial9-util`): opts into reading the Tokio worker index for
+  `worker_id`; without it spans still work (worker unknown). Enabled by the
+  `dial9` umbrella's `tokio` feature.
 - `tower` feature: gates `Dial9SpanLayer`/`Dial9SpanService` (+ `tower-layer` /
-  `tower-service` deps). Mirrored as a passthrough `tower` feature on the `dial9`
-  umbrella crate.
+  `tower-service` deps). Mirrored as a passthrough `tower` feature on `dial9`.
 - Derive / trace-format changes (`name = <expr>`, generics propagation,
   `TraceField for &str`) are additive and have no effect on existing events.
 - No trace-format *wire* changes: only new instances of the existing

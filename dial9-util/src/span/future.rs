@@ -1,7 +1,8 @@
 //! Future combinator for attaching a [`Span`] to a future.
 
 use super::Span;
-use crate::telemetry::{Dial9Handle, clock_monotonic_ns};
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::handle::Dial9Handle;
 use pin_project_lite::pin_project;
 use std::fmt;
 use std::future::Future;
@@ -96,8 +97,8 @@ impl<F: Future, S: Span> Future for Instrumented<F, S> {
 /// Extension trait that attaches a [`Span`] to a future.
 ///
 /// ```no_run
-/// use dial9_tokio_telemetry::dial9_span;
-/// use dial9_tokio_telemetry::span::Instrument as _;
+/// use dial9_util::dial9_span;
+/// use dial9_util::span::Instrument as _;
 ///
 /// # async fn demo() {
 /// async {

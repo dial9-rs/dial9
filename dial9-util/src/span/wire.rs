@@ -6,7 +6,7 @@
 //! Each call site registers two schemas, named `SpanEnter:<id>` and
 //! `SpanExit:<id>`, where `<id>` is unique per call site (the viewer keys on the
 //! `SpanEnter:` / `SpanExit:` prefix and groups by it). This matches the format
-//! emitted by the [`tracing` layer](crate::tracing_layer), so the viewer renders
+//! emitted by the `tracing` layer (`dial9_tokio_telemetry::tracing_layer`), so the viewer renders
 //! ad-hoc spans and `tracing` spans on the same timeline.
 
 use dial9_trace_format::TraceEvent;
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Emitted once when a span is finalized (dropped). Tells the viewer the span
 /// will receive no further enter/exit segments.
 ///
-/// Shared with the [`tracing` layer](crate::tracing_layer) so both producers
+/// Shared with the `tracing` layer (`dial9_tokio_telemetry::tracing_layer`) so both producers
 /// emit the identical `SpanCloseEvent` schema.
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]

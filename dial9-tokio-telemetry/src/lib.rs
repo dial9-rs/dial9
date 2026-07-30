@@ -20,9 +20,6 @@ pub mod memory_profiling {
 #[cfg(feature = "taskdump")]
 pub(crate) use dial9_core::sampling;
 pub(crate) use dial9_core::{primitives, rate_limit};
-/// Ad-hoc span wrappers (guard, future wrapper, tower layer) that emit span
-/// events directly into a dial9 trace with no `tracing` subscriber.
-pub mod span;
 #[cfg(feature = "taskdump")]
 pub(crate) mod task_dumped;
 /// Core telemetry types, recording, and trace I/O.

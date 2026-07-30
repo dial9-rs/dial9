@@ -52,8 +52,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
     "registry",
 ] }
-tower-service = { version = "0.3", optional = true }
-tower-layer = { version = "0.3", optional = true }
 hostname = "0.4"
 bon = "3"
 aws-sdk-s3 = { version = "1", default-features = false, optional = true, features = [
@@ -102,9 +100,6 @@ _shuttle = [
 ## is a hard compile error from tokio.
 taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
-## Ad-hoc span tower middleware (`span::Dial9SpanLayer`). The core span
-## wrappers are always compiled; this only adds the tower integration.
-tower = ["dep:tower-service", "dep:tower-layer"]
 ## Sampled memory allocation profiling via ring buffers.
 memory-profiling = [
     "dep:dial9-perf-self-profile",
@@ -127,7 +122,6 @@ __nonlinux_all_features = [
     "process-resource",
     "linux-socket",
     "tracing-layer",
-    "tower",
     "worker-s3",
 ]
 
@@ -138,7 +132,6 @@ dial9-tokio-telemetry = { path = ".", features = [
     "process-resource",
     "linux-socket",
     "tracing-layer",
-    "tower",
     "unstable-events",
     "worker-s3",
 ] }
@@ -180,7 +173,6 @@ dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
     "taskdump",
     "tracing-layer",
-    "tower",
     "linux-socket",
 ] }
 nix = { version = "0.29", features = ["process"] }
@@ -225,6 +217,3 @@ harness = false
 name = "writer_write_encoded_iai"
 harness = false
 
-[[bench]]
-name = "span_encode_bench"
-harness = false

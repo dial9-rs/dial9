@@ -1,4 +1,4 @@
-//! Head-to-head: the [`dial9_span!`](dial9_tokio_telemetry::dial9_span) macro
+//! Head-to-head: the [`dial9_span!`](dial9_util::dial9_span) macro
 //! vs. hand-written `#[derive(TraceEvent)]` span events.
 //!
 //! Both paths allocate a span id and emit enter → exit → close through the same
@@ -11,12 +11,12 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use dial9_core::buffer::MemoryBuffer;
+use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::recorder;
-use dial9_tokio_telemetry::dial9_span;
-use dial9_tokio_telemetry::span::Span as _;
-use dial9_tokio_telemetry::telemetry::{clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::{InternedString, TraceEvent};
+use dial9_util::dial9_span;
+use dial9_util::span::Span as _;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -73,7 +73,7 @@ fn hand_span(x: u64, y: u64) {
         let span_name = enc.intern_string("handbench");
         enc.encode(&HandEnter {
             timestamp_ns: clock_monotonic_ns(),
-            worker_id: current_worker_id().as_u64(),
+            worker_id: u64::MAX, // WORKER_ID_UNKNOWN (bench runs off a tokio runtime)
             span_id,
             parent_span_id: None,
             span_name,
@@ -87,7 +87,7 @@ fn hand_span(x: u64, y: u64) {
         let span_name = enc.intern_string("handbench");
         enc.encode(&HandExit {
             timestamp_ns: clock_monotonic_ns(),
-            worker_id: current_worker_id().as_u64(),
+            worker_id: u64::MAX, // WORKER_ID_UNKNOWN (bench runs off a tokio runtime)
             span_id,
             span_name,
             active_ns,

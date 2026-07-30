@@ -1,0 +1,44 @@
+[package]
+name = "dial9-util"
+version = "0.5.0-rc0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ad-hoc span instrumentation for dial9 traces — no tracing subscriber, tokio-optional"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)", "cfg(docsrs)"] }
+
+[dependencies]
+dial9-core = { workspace = true }
+dial9-trace-format = { workspace = true }
+pin-project-lite = "0.2"
+# Optional: only used to read the current worker index for the span `worker_id`
+# field. Spans work without it (the field falls back to "unknown").
+tokio = { version = "1.52.0", optional = true, default-features = false, features = [
+    "rt",
+] }
+tower-service = { version = "0.3", optional = true }
+tower-layer = { version = "0.3", optional = true }
+
+[features]
+## Read the current Tokio worker index for the span `worker_id` field. Without
+## it, spans still work; `worker_id` is just reported as unknown.
+tokio = ["dep:tokio"]
+## Tower middleware (`span::Dial9SpanLayer`).
+tower = ["dep:tower-service", "dep:tower-layer"]
+
+[dev-dependencies]
+# The span tests need a traced Tokio runtime to capture events; that machinery
+# lives in dial9-tokio-telemetry. It's a dev-dependency only, so no dependency
+# cycle (nothing in this crate's normal deps touches tokio-telemetry).
+dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry" }
+dial9-core = { workspace = true }
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+tokio = { version = "1.52.0", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "span_encode_bench"
+harness = false

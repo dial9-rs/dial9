@@ -1,6 +1,6 @@
 //! Ad-hoc span instrumentation that does not require a `tracing` subscriber.
 //!
-//! The [`tracing` layer](crate::tracing_layer) is the right tool when your code
+//! The `tracing` layer (`dial9_tokio_telemetry::tracing_layer`) is the right tool when your code
 //! is already instrumented with `tracing` and you have a subscriber wired up.
 //! This module is for everything else: emitting span-like timing information
 //! into a dial9 trace directly, with nothing but a dial9 runtime installed.
@@ -23,8 +23,8 @@
 //! # Instrumenting a future
 //!
 //! ```no_run
-//! use dial9_tokio_telemetry::dial9_span;
-//! use dial9_tokio_telemetry::span::Instrument as _;
+//! use dial9_util::dial9_span;
+//! use dial9_util::span::Instrument as _;
 //!
 //! # async fn handle(req: u32) {
 //! async {
@@ -43,7 +43,7 @@
 //! producing a `String`):
 //!
 //! ```no_run
-//! # use dial9_tokio_telemetry::dial9_span;
+//! # use dial9_util::dial9_span;
 //! # let retries = 1u32; let path = "/x";
 //! # #[derive(Debug)] struct Cfg; let cfg = Cfg;
 //! let span = dial9_span!("load", retries = retries, path = %path, config = ?cfg);
@@ -52,8 +52,8 @@
 //! # Instrumenting a synchronous scope
 //!
 //! ```no_run
-//! use dial9_tokio_telemetry::dial9_span;
-//! use dial9_tokio_telemetry::span::Span as _;
+//! use dial9_util::dial9_span;
+//! use dial9_util::span::Span as _;
 //!
 //! let span = dial9_span!("expensive_computation");
 //! let _entered = span.enter();
@@ -79,7 +79,8 @@ pub use future::{Instrument, Instrumented};
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
 pub use tower::{Dial9SpanLayer, Dial9SpanService};
 
-use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::handle::Dial9Handle;
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::fmt;
 use std::marker::PhantomData;
@@ -90,7 +91,8 @@ use std::marker::PhantomData;
 pub mod __rt {
     pub use super::wire::next_span_id;
     pub use super::{Span, current_worker_id_u64, emit_close};
-    pub use crate::telemetry::{Dial9Handle, clock_monotonic_ns};
+    pub use dial9_core::clock::clock_monotonic_ns;
+    pub use dial9_core::handle::Dial9Handle;
     pub use dial9_trace_format::{InternedString, TraceEvent, TraceField};
 }
 
@@ -207,11 +209,28 @@ impl<S: Span> Drop for Entered<'_, S> {
 
 // ── Shared emit helpers (used by macro-generated spans and `Dial9Span`) ───────
 
-/// The current thread's global worker id as a raw `u64`, for the `worker_id`
-/// wire field. Used by the [`dial9_span!`](crate::dial9_span) expansion.
+/// Sentinel `worker_id` for a thread that isn't a known Tokio worker (or when
+/// the `tokio` feature is off). Matches the tracing layer's "unknown" id.
+const WORKER_ID_UNKNOWN: u64 = u64::MAX;
+
+/// The current Tokio worker index as a raw `u64`, for the `worker_id` wire
+/// field. Used by the [`dial9_span!`](crate::dial9_span) expansion.
+///
+/// With the `tokio` feature this reads [`tokio::runtime::worker_index`]; off a
+/// runtime — or without the feature — it is [`WORKER_ID_UNKNOWN`], so spans work
+/// regardless of whether Tokio is in use.
 #[doc(hidden)]
 pub fn current_worker_id_u64() -> u64 {
-    current_worker_id().as_u64()
+    #[cfg(feature = "tokio")]
+    {
+        tokio::runtime::worker_index()
+            .map(|i| i as u64)
+            .unwrap_or(WORKER_ID_UNKNOWN)
+    }
+    #[cfg(not(feature = "tokio"))]
+    {
+        WORKER_ID_UNKNOWN
+    }
 }
 
 /// Record a span's `SpanCloseEvent`. No-op off a dial9 runtime. Used by the
@@ -355,7 +374,7 @@ impl Drop for Dial9Span {
 /// Field syntax mirrors `tracing`:
 ///
 /// ```
-/// use dial9_tokio_telemetry::dial9_span;
+/// use dial9_util::dial9_span;
 ///
 /// // Just a name:
 /// let span = dial9_span!("load_config");

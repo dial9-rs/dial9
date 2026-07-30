@@ -56,7 +56,18 @@
 //! comparable to the cost of a single poll event, so the layer is suitable
 //! for production use with appropriate span filtering.
 
-use crate::span::wire::SpanCloseEvent;
+use dial9_trace_format::TraceEvent;
+
+/// Emitted once when a span closes, so the viewer can recycle its id. Mirrors
+/// the `SpanCloseEvent` the ad-hoc span wrappers emit (same schema, distinct
+/// producer).
+#[derive(TraceEvent)]
+#[traceevent(wire_slot)]
+struct SpanCloseEvent {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    span_id: u64,
+}
 use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;

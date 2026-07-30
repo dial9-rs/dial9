@@ -1735,6 +1735,7 @@ dependencies = [
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
+ "dial9-util",
  "dial9-viewer",
  "flate2",
  "hostname",
@@ -1851,8 +1852,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
- "tower-layer",
- "tower-service",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1879,6 +1878,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dial9-util"
+version = "0.5.0-rc0"
+dependencies = [
+ "criterion",
+ "dial9-core",
+ "dial9-tokio-telemetry",
+ "dial9-trace-format",
+ "pin-project-lite",
+ "tempfile",
+ "tokio",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
