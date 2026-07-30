@@ -63,6 +63,7 @@ function mkState(over: {
       ...over.poi,
     },
     view: {
+      fieldCharts: [],
       inspectorTab: "task",
       expandedPollGroups: new Set<string>(),
       pollFlamegraphSection: "cpu",
@@ -157,6 +158,51 @@ describe("viewer URL state: focused span", () => {
     const { params, out } = roundTrip(mkState({ selection: { focusedSpanId: "0xabc" } }));
     expect(params.get("span-focus")).toBe("0xabc");
     expect(out.focusedSpanId).toBe("0xabc");
+  });
+});
+
+describe("viewer URL state: dynamic field charts", () => {
+  it("round-trips repeatable definitions without delimiter ambiguity from commas", () => {
+    const charts: StoreState["view"]["fieldCharts"] = [
+      {
+        id: "field-chart-1",
+        eventName: "request,finished",
+        fieldName: "bytes,total",
+        kind: "counter",
+      },
+      {
+        id: "field-chart-2",
+        eventName: "queue.depth",
+        fieldName: "active",
+        kind: "updown-counter",
+      },
+    ];
+    const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
+
+    expect(params.getAll("field-chart")).toEqual([
+      "v1:field-chart-1\trequest,finished\tbytes,total\tcounter",
+      "v1:field-chart-2\tqueue.depth\tactive\tupdown-counter",
+    ]);
+    expect(out.fieldCharts).toEqual(charts);
+  });
+
+  it("drops malformed definitions and duplicate ids", () => {
+    const valid = "v1:field-chart-a\tMetric\tvalue\tgauge";
+    const params = new URLSearchParams();
+    params.append("field-chart", "legacy,shape");
+    params.append("field-chart", "v1:bad-id\tMetric\tvalue\tgauge");
+    params.append("field-chart", "v1:field-chart-b\tMetric\tvalue\thistogram");
+    params.append("field-chart", valid);
+    params.append("field-chart", valid);
+
+    expect(readViewerUrlState(`?${params.toString()}`).fieldCharts).toEqual([
+      {
+        id: "field-chart-a",
+        eventName: "Metric",
+        fieldName: "value",
+        kind: "gauge",
+      },
+    ]);
   });
 });
 
@@ -336,7 +382,8 @@ describe("viewer URL state: store hydration", () => {
     const decoded = readViewerUrlState(
       "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
         "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
-        "&stack-view=flame&inspector-width=444",
+        "&stack-view=flame&inspector-width=444" +
+        "&field-chart=v1%3Afield-chart-1%09Metric%09value%09counter",
     );
 
     hydrateViewerStore(store, decoded, {
@@ -356,6 +403,14 @@ describe("viewer URL state: store hydration", () => {
       sidebarWidth: 444,
     });
     expect(store.getState().view).toMatchObject({
+      fieldCharts: [
+        {
+          id: "field-chart-1",
+          eventName: "Metric",
+          fieldName: "value",
+          kind: "counter",
+        },
+      ],
       inspectorTab: "stack",
       regionMode: "cpu",
       regionInspectFocus: "tokio::poll",

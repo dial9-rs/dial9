@@ -337,6 +337,18 @@ export interface UiPrefsSlice {
 export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
 /** Region analysis selected for a retained range. */
 export type RegionAnalysisMode = "cpu" | "blocking" | "heap";
+/** Rendering semantics for a custom-event numeric field chart. */
+export type FieldChartKind = "gauge" | "counter" | "updown-counter";
+/**
+ * One URL-defined custom-event field chart. The id also keys track order and
+ * collapse state; event + field names resolve against the loaded trace.
+ */
+export interface FieldChartSpec {
+  id: string;
+  eventName: string;
+  fieldName: string;
+  kind: FieldChartKind;
+}
 /** One Related-section expansion counter. */
 export interface RelatedExpansion {
   before: number;
@@ -350,6 +362,8 @@ export interface RelatedExpansion {
  * construct the same view without replaying pointer/keyboard actions.
  */
 export interface ViewerViewSlice {
+  /** Dynamic numeric-field tracks. Their existence is defined only by URL. */
+  fieldCharts: readonly FieldChartSpec[];
   inspectorTab: InspectorTab;
   /** Poll sample groups expanded in list mode (`cpu-N` / `sched-N`). */
   expandedPollGroups: ReadonlySet<string>;

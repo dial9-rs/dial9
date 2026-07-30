@@ -199,6 +199,14 @@ const initialState: StoreState = {
     stacksAsFlamegraph: false,
   },
   view: {
+    fieldCharts: [
+      {
+        id: "field-chart-1",
+        eventName: "MyEvent",
+        fieldName: "latency",
+        kind: "gauge",
+      },
+    ],
     inspectorTab: "related",
     expandedPollGroups: new Set(["cpu-0"]),
     pollFlamegraphSection: "sched",

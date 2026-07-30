@@ -329,6 +329,36 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(uiPrefs(s2).lanesViewportHeight).toBe(312);
   });
 
+  it("never writes dynamic chart order or collapse state to localStorage", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    saveTrackPrefs({
+      trackOrder: ["events", "field-chart-1", "cpu"],
+      collapsed: { events: true, "field-chart-1": true },
+    });
+
+    expect(loadTrackPrefs()).toEqual({
+      trackOrder: ["events", "cpu"],
+      collapsed: { events: true },
+    });
+  });
+
+  it("filters dynamic chart references from an older stored blob on hydrate", () => {
+    const ls = fakeLocalStorage();
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({
+        trackOrder: ["field-chart-old", "queue"],
+        collapsed: { "field-chart-old": true, queue: true },
+      }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    const store = createViewerStore({ scheduler: () => {} });
+    hydrateTrackPrefs(store);
+
+    expect(uiPrefs(store).trackOrder).toEqual(["queue"]);
+    expect(uiPrefs(store).collapsed).toEqual({ queue: true });
+  });
+
   it("keeps the store default when no lanes height was stored", () => {
     const ls = fakeLocalStorage();
     // A pref blob from before lanesHeight existed: order/collapse only.

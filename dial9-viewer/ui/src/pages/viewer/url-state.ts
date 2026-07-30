@@ -17,11 +17,15 @@ import type {
   TaskSortKey,
   InspectorTab,
   RegionAnalysisMode,
+  FieldChartKind,
+  FieldChartSpec,
 } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
 import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
 import { POI_FILTERS } from "./poi.js";
+import { FIELD_CHART_KINDS } from "./field-chart-model.js";
+import { isFieldChartTrackId } from "../../lib/canvas/track-layout.js";
 
 const P_START = "start";
 const P_END = "end";
@@ -29,6 +33,7 @@ const P_TASK = "task";
 const P_SPAN_FILTER = "span-filter";
 const P_TRACK_ORDER = "track-order";
 const P_COLLAPSED = "collapsed";
+const P_FIELD_CHART = "field-chart";
 const P_SPAN = "span";
 const P_SPAN_FOCUS = "span-focus";
 const P_POLL = "poll";
@@ -146,6 +151,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     stacksAsFlamegraph: url(P_STACK_VIEW),
   },
   view: {
+    fieldCharts: url(P_FIELD_CHART),
     inspectorTab: url(P_INSPECTOR_TAB),
     expandedPollGroups: url(P_POLL_EXPANDED),
     pollFlamegraphSection: url(P_POLL_SECTION),
@@ -238,6 +244,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
     (id) => state.uiPrefs.collapsed[id] === true,
   ).sort();
   if (collapsed.length > 0) vs.collapsed = collapsed;
+  if (state.view.fieldCharts.length > 0) {
+    vs.fieldCharts = state.view.fieldCharts;
+  }
   if (sel.focusedSpanId !== null) vs.focusedSpanId = sel.focusedSpanId;
   // Issues rail: only the deltas from the resting defaults (filter "sched",
   // sort duration/desc, no current POI) so a pristine rail keeps the URL clean.
@@ -337,6 +346,11 @@ export function mirrorViewerToQuery(
   set(params, P_SPAN_FILTER, vs.spanFilter && vs.spanFilter.length > 0 ? vs.spanFilter : null);
   set(params, P_TRACK_ORDER, vs.trackOrder && vs.trackOrder.length > 0 ? vs.trackOrder.join(",") : null);
   set(params, P_COLLAPSED, vs.collapsed && vs.collapsed.length > 0 ? vs.collapsed.join(",") : null);
+  params.delete(P_FIELD_CHART);
+  for (const chart of vs.fieldCharts ?? []) {
+    const encoded = encodeFieldChart(chart);
+    if (encoded !== null) params.append(P_FIELD_CHART, encoded);
+  }
   set(params, P_SPAN, vs.selectedSpanId ?? null);
   set(params, P_SPAN_FOCUS, vs.focusedSpanId ?? null);
   set(params, P_POLL, vs.pollAnchor ?? null);
@@ -415,6 +429,7 @@ export interface ViewerUrlState {
   spanFilter?: string;
   trackOrder?: string[];
   collapsed?: string[];
+  fieldCharts?: FieldChartSpec[];
   /** Canvas-selection anchors, re-resolved against the loaded trace on load. */
   selectedSpanId?: string;
   focusedSpanId?: string;
@@ -503,6 +518,9 @@ export function hydrateViewerStore(
   if (Object.keys(uiPrefs).length > 0) store.update("uiPrefs", uiPrefs);
 
   const view: Partial<StoreState["view"]> = {};
+  if (urlView.fieldCharts !== undefined) {
+    view.fieldCharts = urlView.fieldCharts;
+  }
   if (urlView.inspectorTab !== undefined) view.inspectorTab = urlView.inspectorTab;
   if (urlView.pollSection !== undefined) {
     view.pollFlamegraphSection = urlView.pollSection;
@@ -586,6 +604,16 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (col != null && col.length > 0) {
     out.collapsed = col.split(",").filter((s) => s.length > 0);
   }
+  const fieldCharts: FieldChartSpec[] = [];
+  const fieldChartIds = new Set<string>();
+  for (const value of p.getAll(P_FIELD_CHART)) {
+    const chart = decodeFieldChart(value);
+    if (chart !== null && !fieldChartIds.has(chart.id)) {
+      fieldCharts.push(chart);
+      fieldChartIds.add(chart.id);
+    }
+  }
+  if (fieldCharts.length > 0) out.fieldCharts = fieldCharts;
   const span = p.get(P_SPAN);
   if (span != null && span.length > 0) out.selectedSpanId = span;
   const spanFocus = p.get(P_SPAN_FOCUS);
@@ -706,6 +734,45 @@ export function readViewerUrlState(search: string): ViewerUrlState {
     }
   }
   return out;
+}
+
+function encodeFieldChart(chart: FieldChartSpec): string | null {
+  if (
+    !isFieldChartTrackId(chart.id) ||
+    chart.eventName.length === 0 ||
+    chart.fieldName.length === 0 ||
+    chart.eventName.includes("\t") ||
+    chart.fieldName.includes("\t") ||
+    !(FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
+  ) {
+    return null;
+  }
+  return `v1:${chart.id}\t${chart.eventName}\t${chart.fieldName}\t${chart.kind}`;
+}
+
+function decodeFieldChart(value: string): FieldChartSpec | null {
+  if (!value.startsWith("v1:")) return null;
+  const parts = value.slice(3).split("\t");
+  if (parts.length !== 4) return null;
+  const [id, eventName, fieldName, kind] = parts;
+  if (
+    id === undefined ||
+    eventName === undefined ||
+    fieldName === undefined ||
+    kind === undefined ||
+    !isFieldChartTrackId(id) ||
+    eventName.length === 0 ||
+    fieldName.length === 0 ||
+    !(FIELD_CHART_KINDS as readonly string[]).includes(kind)
+  ) {
+    return null;
+  }
+  return {
+    id,
+    eventName,
+    fieldName,
+    kind: kind as FieldChartKind,
+  };
 }
 
 /** Decode the modern marked list, falling back to the previously emitted
