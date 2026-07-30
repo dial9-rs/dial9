@@ -24,7 +24,7 @@ import {
 export const COLORS = ["#58a6ff", "#d2a8ff", "#7ee787", "#ffa657"];
 
 /** Row-count choices offered by every per-table "Rows" selector. */
-export const ROW_LIMIT_OPTIONS = [10, 25, 50, 100] as const;
+const ROW_LIMIT_OPTIONS = [10, 25, 50, 100] as const;
 
 /**
  * A per-table "Rows: [n]" selector. `live()` keeps the shown option pinned to
