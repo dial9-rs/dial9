@@ -241,7 +241,7 @@ export function fieldChartHoverAt(
   return sample === null
     ? null
     : {
-        value: sample.value!,
+        value: sample.value,
         timestamp: sample.timestamp,
         endTimestamp: null,
       };
@@ -385,11 +385,17 @@ export function buildFieldChartPlot(
     if (compare(zero, min) < 0) min = zero;
     if (compare(zero, max) > 0) max = zero;
   }
+  const scaleMin = min;
+  const scaleMax = max;
+  const flatZeroCounter =
+    kind === "counter" && compare(scaleMin, scaleMax) === 0;
   const chartH = Math.max(1, chartBottom - chartTop);
   const yAt = (value: FieldChartNumeric): number =>
-    chartBottom - ratio(value, min!, max!) * chartH;
+    flatZeroCounter
+      ? chartBottom
+      : chartBottom - ratio(value, scaleMin, scaleMax) * chartH;
   const baselineY =
-    kind === "gauge" ? chartBottom : yAt(zeroFor(min));
+    kind === "gauge" ? chartBottom : yAt(zeroFor(scaleMin));
 
   const segments: FieldChartVertex[][] = [];
   const resetXs = new Set<number>();

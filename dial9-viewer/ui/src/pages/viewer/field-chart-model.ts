@@ -152,10 +152,7 @@ export function materializeFieldChartSeries(
       continue;
     }
 
-    if (
-      spec.kind === "counter" &&
-      lessThan(value, previous.value)
-    ) {
+    if (spec.kind === "counter" && lessThan(value, previous.value)) {
       samples.push({
         timestamp: event.timestamp,
         endTimestamp: null,

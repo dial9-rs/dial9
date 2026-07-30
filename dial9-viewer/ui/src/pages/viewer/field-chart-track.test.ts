@@ -103,6 +103,21 @@ describe("buildFieldChartPlot", () => {
     expect(plot.baselineY).toBeLessThan(100);
   });
 
+  it("draws an all-zero counter on its zero baseline", () => {
+    const plot = buildFieldChartPlot(
+      series([interval(0, 5, 0n), interval(5, 10, 0n)]),
+      "counter",
+      0,
+      10,
+      100,
+      0,
+      100,
+    );
+
+    expect(plot.baselineY).toBe(100);
+    expect(plot.segments.flat().every(({ y }) => y === 100)).toBe(true);
+  });
+
   it("does not apply a counter sample that occurs after the viewport", () => {
     const plot = buildFieldChartPlot(
       series([interval(0, 5, 5n), interval(15, 20, 10n)]),
