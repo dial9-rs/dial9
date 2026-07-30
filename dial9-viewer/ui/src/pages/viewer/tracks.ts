@@ -16,7 +16,12 @@ import { repeat } from "lit-html/directives/repeat.js";
 import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, lanesScrollbarWidth, trackGeometry } from "../../lib/canvas/track-layout.js";
-import type { TrackId, TrackSpec } from "../../lib/canvas/track-layout.js";
+import {
+  isFieldChartTrackId,
+  type TrackId,
+  type TrackSpec,
+} from "../../lib/canvas/track-layout.js";
+import type { FieldChartSpec } from "../../types/state.js";
 import {
   COLLAPSED_TRACK_H,
   isCollapsed,
@@ -31,6 +36,8 @@ import type { SpansTrackController } from "./spans-track.js";
 import type { QueueTrackController } from "./queue-track.js";
 import type { TaskDetailTrackController } from "./task-detail-track.js";
 import type { EventsTrackController } from "./events-track.js";
+import { fieldChartTrackSpecs } from "./field-chart-model.js";
+import type { FieldChartTrackController } from "./field-chart-track.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -49,6 +56,8 @@ export interface TracksViewModel {
    * it from the store via `deriveCpuInputs`; other tracks ignore it.
    */
   cpu: CpuInputs;
+  /** URL-defined numeric-field charts appended to the manageable catalogue. */
+  fieldCharts: readonly FieldChartSpec[];
   /**
    * Track management, lifted from uiPrefs by the shell. `trackOrder` reorders the
    * manageable analysis tracks; `collapsed` overrides a track's height to
@@ -81,7 +90,10 @@ export interface TracksViewModel {
  * (label-only) - collapse is a height override, not a hide.
  */
 export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
-  return orderedTracks(vm.trackOrder).filter((t) => {
+  return orderedTracks(
+    vm.trackOrder,
+    fieldChartTrackSpecs(vm.fieldCharts),
+  ).filter((t) => {
     if (t.selectionOnly && !vm.taskSelected) return false;
     if (vm.hasTrace && vm.emptyTracks.has(t.id)) return false;
     return true;
@@ -279,7 +291,8 @@ function manageWrapper(
   const collapsed = isCollapsed(vm.collapsed, t.id);
   return html`
     <div
-      class="d9-track-manage ${collapsed ? "is-collapsed" : ""}"
+      class="d9-track-manage ${collapsed ? "is-collapsed" : ""}
+        ${isFieldChartTrackId(t.id) ? "is-dynamic" : ""}"
       data-track-manage=${t.id}
       @dragover=${(e: DragEvent) => onRowDragOver(e, t.id)}
       @drop=${(e: DragEvent) => onRowDrop(e, t.id, actions)}
@@ -306,6 +319,19 @@ function manageWrapper(
           @dragstart=${(e: DragEvent) => onGripDragStart(e, t.id)}
           @dragend=${onGripDragEnd}
         ></span>
+        ${isFieldChartTrackId(t.id)
+          ? html`
+              <button
+                type="button"
+                class="d9-track-close"
+                aria-label=${`Close ${t.label} track`}
+                title="Close chart"
+                @click=${() => actions.close(t.id)}
+              >
+                &times;
+              </button>
+            `
+          : null}
       </div>
       ${inner}
     </div>
@@ -358,6 +384,7 @@ export function sizeTracks(
   taskDetailTrack?: TaskDetailTrackController,
   eventsTrack?: EventsTrackController,
   queueTrack?: QueueTrackController,
+  fieldChartTrack?: FieldChartTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
   // Full column width and the LANES-BOX scrollbar gutter, so every track's draw
@@ -438,6 +465,21 @@ export function sizeTracks(
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;
+    }
+    if (isFieldChartTrackId(track.id) && fieldChartTrack !== undefined) {
+      const spec = vm.fieldCharts.find((chart) => chart.id === track.id);
+      if (spec !== undefined) {
+        fieldChartTrack.paint(
+          canvas,
+          geometry,
+          spec,
+          vm.viewStart,
+          vm.viewEnd,
+        );
+        canvas.dataset["drawW"] = String(Math.round(drawW));
+        out.push({ id: track.id, drawW, height: track.height });
+        continue;
+      }
     }
     let sizer = sizers.get(canvas);
     if (!sizer) {

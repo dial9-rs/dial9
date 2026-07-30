@@ -736,30 +736,40 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   return out;
 }
 
+/** Encode one repeatable, versioned JSON tuple so arbitrary schema names
+ * round-trip without reserving a delimiter inside those names. */
 function encodeFieldChart(chart: FieldChartSpec): string | null {
   if (
     !isFieldChartTrackId(chart.id) ||
     chart.eventName.length === 0 ||
     chart.fieldName.length === 0 ||
-    chart.eventName.includes("\t") ||
-    chart.fieldName.includes("\t") ||
     !(FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
   ) {
     return null;
   }
-  return `v1:${chart.id}\t${chart.eventName}\t${chart.fieldName}\t${chart.kind}`;
+  return `v1:${JSON.stringify([
+    chart.id,
+    chart.eventName,
+    chart.fieldName,
+    chart.kind,
+  ])}`;
 }
 
 function decodeFieldChart(value: string): FieldChartSpec | null {
   if (!value.startsWith("v1:")) return null;
-  const parts = value.slice(3).split("\t");
-  if (parts.length !== 4) return null;
+  let parts: unknown;
+  try {
+    parts = JSON.parse(value.slice(3));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parts) || parts.length !== 4) return null;
   const [id, eventName, fieldName, kind] = parts;
   if (
-    id === undefined ||
-    eventName === undefined ||
-    fieldName === undefined ||
-    kind === undefined ||
+    typeof id !== "string" ||
+    typeof eventName !== "string" ||
+    typeof fieldName !== "string" ||
+    typeof kind !== "string" ||
     !isFieldChartTrackId(id) ||
     eventName.length === 0 ||
     fieldName.length === 0 ||

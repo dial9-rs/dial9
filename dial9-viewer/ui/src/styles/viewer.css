@@ -553,9 +553,12 @@ body {
     line-height: 1.15;
     color: var(--d9-fg);
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .d9-track-caret,
-.d9-track-grip {
+.d9-track-grip,
+.d9-track-close {
     pointer-events: auto;
     width: 18px;
     height: 20px;
@@ -574,7 +577,8 @@ body {
    right = collapsed. Keeps the glyph out of the TS source. */
 .d9-track-caret::before { content: "\25BE"; }
 .d9-track-manage.is-collapsed .d9-track-caret::before { content: "\25B8"; }
-.d9-track-caret:focus-visible {
+.d9-track-caret:focus-visible,
+.d9-track-close:focus-visible {
     outline: 2px solid var(--d9-accent);
     outline-offset: 1px;
     border-radius: 3px;
@@ -585,6 +589,20 @@ body {
 }
 .d9-track-grip::before { content: "\2261"; } /* triple bar = drag handle */
 .d9-track-grip:active { cursor: grabbing; }
+.d9-track-close {
+    color: var(--d9-fg-muted);
+    font-size: 17px;
+}
+.d9-track-close:hover { color: #ff6b81; }
+.d9-track-manage.is-dynamic .d9-track-manage-strip {
+    gap: 2px;
+    padding-inline: 4px;
+}
+.d9-track-manage.is-dynamic .d9-track-caret,
+.d9-track-manage.is-dynamic .d9-track-grip,
+.d9-track-manage.is-dynamic .d9-track-close {
+    width: 16px;
+}
 /* Collapsed (label-only, legacy 24px): hide the drawing body. Covers both
    body variants (spans/events) and the canvas-wrap variants (cpu/queue). */
 .d9-track-manage.is-collapsed .d9-track-body,
@@ -1105,7 +1123,7 @@ body {
 
 /* Event tab. */
 .d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
-.d9-kv-corr, .d9-kv-copy {
+.d9-kv-corr, .d9-kv-copy, .d9-kv-chart {
     flex-shrink: 0;
     font-size: 0.85em;
     color: var(--d9-fg-muted);
@@ -1115,7 +1133,95 @@ body {
     padding: 0 5px;
     cursor: pointer;
 }
-.d9-kv-corr:hover, .d9-kv-copy:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
+.d9-kv-corr:hover, .d9-kv-copy:hover, .d9-kv-chart:hover {
+    color: var(--d9-fg);
+    border-color: var(--d9-accent);
+}
+.d9-kv-chart {
+    color: #55d6be;
+    border-color: rgba(85, 214, 190, 0.45);
+}
+
+/* ── Numeric-field chart kind dialog ──────────────────────────────────── */
+.d9-field-chart-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1060;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.58);
+}
+.d9-field-chart-backdrop.open { display: flex; }
+.d9-field-chart-dialog {
+    width: min(380px, calc(100vw - 40px));
+    padding: 18px;
+    color: var(--d9-fg);
+    background: #151530;
+    border: 1px solid var(--d9-accent);
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65);
+}
+.d9-field-chart-dialog h2 {
+    margin: 0 0 8px;
+    font-size: 1rem;
+}
+.d9-field-chart-source {
+    margin-bottom: 16px;
+    color: var(--d9-fg-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+.d9-field-chart-kind-label {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--d9-fg-muted);
+    font-size: 0.75rem;
+}
+.d9-field-chart-kind {
+    width: 100%;
+    padding: 9px 12px;
+    text-align: left;
+    color: var(--d9-fg);
+    background: #0f1629;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+    cursor: pointer;
+}
+.d9-field-chart-kind:hover,
+.d9-field-chart-kind:focus-visible {
+    border-color: var(--d9-accent);
+    outline: none;
+}
+.d9-field-chart-help {
+    min-height: 2.4em;
+    margin: 7px 0 16px;
+    color: var(--d9-fg-muted);
+    font-size: 0.75rem;
+    line-height: 1.4;
+}
+.d9-field-chart-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+.d9-field-chart-actions button {
+    padding: 6px 10px;
+    color: var(--d9-fg);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    cursor: pointer;
+}
+.d9-field-chart-actions button:hover { border-color: var(--d9-accent); }
+.d9-field-chart-actions button.primary {
+    color: #0d1728;
+    background: #55d6be;
+    border-color: #55d6be;
+    font-weight: 600;
+}
 
 /* Related tab. */
 .d9-related-section { margin-bottom: 4px; }

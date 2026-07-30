@@ -22,6 +22,7 @@ import {
   type TaskDetailTrackController,
 } from "./task-detail-track.js";
 import { createEventsTrack, type EventsTrackController } from "./events-track.js";
+import { createFieldChartTrack } from "./field-chart-track.js";
 import { createToolbar, type ToolbarController, type ToolbarDeps } from "./toolbar.js";
 import { createIssuesRail, type IssuesRailController } from "./issues-rail.js";
 import {
@@ -82,6 +83,7 @@ function viewModel(state: StoreState): TracksViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu,
+    fieldCharts: state.view.fieldCharts,
     emptyTracks,
     // Track management: the order + collapse map the track column reads.
     trackOrder: state.uiPrefs.trackOrder,
@@ -284,6 +286,7 @@ export function mountShell(
   // rendered while a task is selected.
   const taskDetailTrack = createTaskDetailTrack(store);
   const eventsTrack = createEventsTrack(store);
+  const fieldChartTrack = createFieldChartTrack(store);
   // Toolbar (file info / analysis / time) and the issues rail: store-wired
   // controllers filling the toolbar slots + the body's left column.
   const toolbar = createToolbar(store, deps);
@@ -296,6 +299,7 @@ export function mountShell(
   function renderPass(): void {
     const state = store.getState();
     const vm = viewModel(state);
+    fieldChartTrack.reconcile(vm.fieldCharts);
     render(
       shellTemplate(
         vm,
@@ -313,7 +317,15 @@ export function mountShell(
     );
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm, spansTrack, taskDetailTrack, eventsTrack, queueTrack);
+      sizeTracks(
+        column,
+        vm,
+        spansTrack,
+        taskDetailTrack,
+        eventsTrack,
+        queueTrack,
+        fieldChartTrack,
+      );
     }
   }
 
@@ -321,7 +333,7 @@ export function mountShell(
   // chrome, so it renders declaratively from state; track/inspector content
   // components add their own slice subscriptions against this store.
   const unsubscribe = store.subscribe(
-    ["trace", "viewport", "selection", "poi", "uiPrefs"],
+    ["trace", "viewport", "selection", "poi", "uiPrefs", "view"],
     () => renderPass(),
   );
 
@@ -362,6 +374,7 @@ export function mountShell(
       queueTrack.dispose();
       taskDetailTrack.dispose();
       eventsTrack.dispose();
+      fieldChartTrack.dispose();
       toolbar.dispose();
       rail.dispose();
     },

@@ -181,7 +181,10 @@ describe("buildEventDetail", () => {
     const id = v.rows.find((r) => r.key === "id")!;
     expect(path.corrVal).toBe("/a"); // shared -> correlation offered
     expect(id.corrVal).toBeNull(); // unique -> no correlation
+    expect(path.chartable).toBe(false);
+    expect(id.chartable).toBe(true);
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100");
+    expect(v.rows.find((r) => r.key === "@")!.chartable).toBe(false);
     expect(v.rows.find((r) => r.key === "Task")!.value).toBe("0x2a (selected)");
   });
 

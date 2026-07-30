@@ -180,18 +180,41 @@ describe("viewer URL state: dynamic field charts", () => {
     const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
 
     expect(params.getAll("field-chart")).toEqual([
-      "v1:field-chart-1\trequest,finished\tbytes,total\tcounter",
-      "v1:field-chart-2\tqueue.depth\tactive\tupdown-counter",
+      'v1:["field-chart-1","request,finished","bytes,total","counter"]',
+      'v1:["field-chart-2","queue.depth","active","updown-counter"]',
     ]);
     expect(out.fieldCharts).toEqual(charts);
   });
 
+  it("round-trips tabs and literal percent escapes in event and field names", () => {
+    const charts: StoreState["view"]["fieldCharts"] = [
+      {
+        id: "field-chart-tabs",
+        eventName: "request\t50%",
+        fieldName: "bytes\t%09",
+        kind: "gauge",
+      },
+    ];
+
+    const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
+    expect(params.get("field-chart")).toBe(
+      'v1:["field-chart-tabs","request\\t50%","bytes\\t%09","gauge"]',
+    );
+    expect(out.fieldCharts).toEqual(charts);
+  });
+
   it("drops malformed definitions and duplicate ids", () => {
-    const valid = "v1:field-chart-a\tMetric\tvalue\tgauge";
+    const valid = 'v1:["field-chart-a","Metric","value","gauge"]';
     const params = new URLSearchParams();
     params.append("field-chart", "legacy,shape");
-    params.append("field-chart", "v1:bad-id\tMetric\tvalue\tgauge");
-    params.append("field-chart", "v1:field-chart-b\tMetric\tvalue\thistogram");
+    params.append(
+      "field-chart",
+      'v1:["bad-id","Metric","value","gauge"]',
+    );
+    params.append(
+      "field-chart",
+      'v1:["field-chart-b","Metric","value","histogram"]',
+    );
     params.append("field-chart", valid);
     params.append("field-chart", valid);
 
@@ -383,7 +406,8 @@ describe("viewer URL state: store hydration", () => {
       "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
         "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
         "&stack-view=flame&inspector-width=444" +
-        "&field-chart=v1%3Afield-chart-1%09Metric%09value%09counter",
+        "&field-chart=v1%3A%5B%22field-chart-1%22%2C%22Metric%22%2C" +
+        "%22value%22%2C%22counter%22%5D",
     );
 
     hydrateViewerStore(store, decoded, {

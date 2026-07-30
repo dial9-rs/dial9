@@ -41,6 +41,7 @@ import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
+import { mountFieldChartDialog } from "./field-chart-dialog.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
 // <head> auto-boot is a no-op on this off-root new-UI path.
@@ -99,6 +100,7 @@ function boot(): void {
     getIndex: () => searchIndex(),
     onPick: (r) => navigateToSearchResult(r),
   });
+  const fieldChartDialog = mountFieldChartDialog(document, store, esc);
   function navigateToSearchResult(r: SearchResult): void {
     const vp = store.getState().viewport;
     if (r.nav.kind === "poi") {
@@ -200,6 +202,7 @@ function boot(): void {
   const inspector = mountInspector(shell.inspectorRegion, store, {
     esc,
     regionPanel,
+    openFieldChart: fieldChartDialog.open,
     preserveInitialTab: urlView.inspectorTab !== undefined,
     preserveInitialPollView:
       urlView.poll !== undefined &&
@@ -335,6 +338,7 @@ function boot(): void {
   window.addEventListener("beforeunload", () => {
     urlBinding?.dispose();
     search.dispose();
+    fieldChartDialog.dispose();
     disposeTrackPrefs();
     loadChrome?.dispose();
     statusBar.dispose();

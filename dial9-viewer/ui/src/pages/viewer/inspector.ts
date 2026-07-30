@@ -88,6 +88,8 @@ export interface InspectorDeps {
    * region panel owns what opens.
    */
   regionPanel: RegionAnalysisController;
+  /** Open the chart-kind modal for one numeric custom-event field. */
+  openFieldChart(eventName: string, fieldName: string): void;
   /** True when the URL explicitly selected the initial inspector tab. */
   preserveInitialTab?: boolean;
   /** True when poll disclosure/section/zoom came explicitly from the URL. */
@@ -793,15 +795,20 @@ export function mountInspector(
     }
     const { fmtTs } = formatters();
     const view = buildEventDetail(pinned, data().customEvents, fmtTs);
+    const eventName = pinned.detailEvent?.name ?? pinned.name;
     return html`
       <div class="d9-event-detail">
         <div class="d9-event-title">${view.title}</div>
-        ${view.rows.map((r) => eventRow(r.key, r.value, r.corrVal))}
+        ${view.rows.map((row) => eventRow(row, eventName))}
       </div>
     `;
   }
 
-  function eventRow(key: string, value: string, corrVal: string | null): TemplateResult {
+  function eventRow(
+    row: ReturnType<typeof buildEventDetail>["rows"][number],
+    eventName: string,
+  ): TemplateResult {
+    const { key, value, corrVal, chartable } = row;
     return html`<div class="d9-kv-row">
       <span class="k">${key}</span><span class="v">${value}</span>
       ${corrVal !== null
@@ -813,6 +820,17 @@ export function mountInspector(
             @click=${() => correlate(key, corrVal)}
           >
             ↔
+          </button>`
+        : nothing}
+      ${chartable
+        ? html`<button
+            type="button"
+            class="d9-kv-chart"
+            title="Chart numeric field"
+            aria-label="Chart ${key}"
+            @click=${() => deps.openFieldChart(eventName, key)}
+          >
+            Chart
           </button>`
         : nothing}
       <button

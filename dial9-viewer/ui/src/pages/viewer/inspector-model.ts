@@ -12,6 +12,7 @@ import {
   formatFieldValue,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
+import { isChartableNumericValue } from "./field-chart-model.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type {
@@ -182,7 +183,7 @@ export function buildPollDetail(
 
 // ── Event detail ──────────────────────────────────────────────────────────
 
-/** One key/value detail row; `corrVal` non-null offers correlation. */
+/** One key/value detail row; correlation/chart actions are opt-in per field. */
 export interface KvRow {
   key: string;
   /** Display value (unit-formatted for a single event). */
@@ -191,6 +192,8 @@ export interface KvRow {
    *  nowhere (cluster rows, the `@`/`Task` rows, or a value unique to one
    *  event). */
   corrVal: string | null;
+  /** True only for decoded finite numeric fields. */
+  chartable: boolean;
 }
 
 /** The Event tab view: kv rows + the resolved task (single or cluster). */
@@ -254,25 +257,50 @@ export function buildEventDetail(
       const corrVal = String(v);
       const display = formatFieldValue(v, ev.units?.[k]);
       const shared = countWithField(allEvents, k, corrVal) > 1;
-      rows.push({ key: k, value: display, corrVal: shared ? corrVal : null });
+      rows.push({
+        key: k,
+        value: display,
+        corrVal: shared ? corrVal : null,
+        chartable: isChartableNumericValue(v),
+      });
     }
-    rows.push({ key: "@", value: fmtTs(ev.timestamp), corrVal: null });
+    rows.push({
+      key: "@",
+      value: fmtTs(ev.timestamp),
+      corrVal: null,
+      chartable: false,
+    });
   } else {
     const first = events[0]!;
     const last = events[events.length - 1]!;
     title = `Cluster · ${events.length} events`;
-    rows.push({ key: "Cluster", value: `${events.length} events`, corrVal: null });
-    rows.push({ key: "Types", value: topEventNames(events), corrVal: null });
+    rows.push({
+      key: "Cluster",
+      value: `${events.length} events`,
+      corrVal: null,
+      chartable: false,
+    });
+    rows.push({
+      key: "Types",
+      value: topEventNames(events),
+      corrVal: null,
+      chartable: false,
+    });
     const range =
       last.timestamp !== first.timestamp
         ? `${fmtTs(first.timestamp)} – ${fmtTs(last.timestamp)}`
         : fmtTs(first.timestamp);
-    rows.push({ key: "@", value: range, corrVal: null });
+    rows.push({ key: "@", value: range, corrVal: null, chartable: false });
   }
 
   if (pinned.taskId != null) {
     const hex = "0x" + pinned.taskId.toString(16);
-    rows.push({ key: "Task", value: `${hex} (selected)`, corrVal: null });
+    rows.push({
+      key: "Task",
+      value: `${hex} (selected)`,
+      corrVal: null,
+      chartable: false,
+    });
   }
   return { title, rows, taskId: pinned.taskId, isSingle };
 }
