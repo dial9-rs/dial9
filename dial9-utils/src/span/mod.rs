@@ -23,8 +23,8 @@
 //! # Instrumenting a future
 //!
 //! ```no_run
-//! use dial9_util::dial9_span;
-//! use dial9_util::span::Instrument as _;
+//! use dial9_utils::dial9_span;
+//! use dial9_utils::span::Instrument as _;
 //!
 //! # async fn handle(req: u32) {
 //! async {
@@ -43,7 +43,7 @@
 //! producing a `String`):
 //!
 //! ```no_run
-//! # use dial9_util::dial9_span;
+//! # use dial9_utils::dial9_span;
 //! # let retries = 1u32; let path = "/x";
 //! # #[derive(Debug)] struct Cfg; let cfg = Cfg;
 //! let span = dial9_span!("load", retries = retries, path = %path, config = ?cfg);
@@ -52,8 +52,8 @@
 //! # Instrumenting a synchronous scope
 //!
 //! ```no_run
-//! use dial9_util::dial9_span;
-//! use dial9_util::span::Span as _;
+//! use dial9_utils::dial9_span;
+//! use dial9_utils::span::Span as _;
 //!
 //! let span = dial9_span!("expensive_computation");
 //! let _entered = span.enter();
@@ -216,21 +216,14 @@ const WORKER_ID_UNKNOWN: u64 = u64::MAX;
 /// The current Tokio worker index as a raw `u64`, for the `worker_id` wire
 /// field. Used by the [`dial9_span!`](crate::dial9_span) expansion.
 ///
-/// With the `tokio` feature this reads [`tokio::runtime::worker_index`]; off a
-/// runtime — or without the feature — it is [`WORKER_ID_UNKNOWN`], so spans work
+/// Reads [`tokio::runtime::worker_index`]; off a runtime (e.g. a plain thread,
+/// or code not running under Tokio) it is [`WORKER_ID_UNKNOWN`], so spans work
 /// regardless of whether Tokio is in use.
 #[doc(hidden)]
 pub fn current_worker_id_u64() -> u64 {
-    #[cfg(feature = "tokio")]
-    {
-        tokio::runtime::worker_index()
-            .map(|i| i as u64)
-            .unwrap_or(WORKER_ID_UNKNOWN)
-    }
-    #[cfg(not(feature = "tokio"))]
-    {
-        WORKER_ID_UNKNOWN
-    }
+    tokio::runtime::worker_index()
+        .map(|i| i as u64)
+        .unwrap_or(WORKER_ID_UNKNOWN)
 }
 
 /// Record a span's `SpanCloseEvent`. No-op off a dial9 runtime. Used by the
@@ -374,7 +367,7 @@ impl Drop for Dial9Span {
 /// Field syntax mirrors `tracing`:
 ///
 /// ```
-/// use dial9_util::dial9_span;
+/// use dial9_utils::dial9_span;
 ///
 /// // Just a name:
 /// let span = dial9_span!("load_config");

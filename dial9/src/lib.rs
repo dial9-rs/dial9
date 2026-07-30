@@ -143,14 +143,6 @@ pub mod socket {
 #[cfg(feature = "tracing-layer")]
 pub use dial9_tokio_telemetry::tracing_layer;
 
-// Ad-hoc span instrumentation — works with or without Tokio, so re-exported
-// unconditionally. Construct spans with the [`dial9_span!`] macro.
-pub use dial9_util::dial9_span;
-/// Ad-hoc span instrumentation (sync guard, future combinator, tower layer)
-/// that emits span events directly into a dial9 trace with no `tracing`
-/// subscriber. Construct spans with the [`dial9_span!`] macro.
-pub use dial9_util::span;
-
 // Metrique unit-of-work entry sink.
 #[cfg(feature = "metrique-sink")]
 pub use dial9_metrique as metrique_sink;

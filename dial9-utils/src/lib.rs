@@ -1,7 +1,7 @@
 //! Utilities for dial9 recording and runtime integrations.
 //!
 //! Provides [`S3PipelineUploader`](s3::S3PipelineUploader), a pipeline stage
-//! that uploads sealed trace segments to S3.
+//! that uploads sealed trace segments to S3, and ad-hoc [`span`] instrumentation.
 
 #![warn(unreachable_pub)]
 
@@ -11,3 +11,8 @@ mod connection;
 pub mod dial9_axum;
 mod instance_metadata;
 pub mod s3;
+
+/// Ad-hoc span instrumentation (sync guard, future combinator, tower layer)
+/// that emits span events directly into a dial9 trace with no `tracing`
+/// subscriber. Construct spans with the [`dial9_span!`] macro.
+pub mod span;

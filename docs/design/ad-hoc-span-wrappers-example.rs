@@ -20,12 +20,14 @@
 use std::time::Duration;
 
 use axum::{Router, extract::Path, routing::post};
-use dial9::{DiskBuffer, RecorderTokioExt, recorder};
+// Runtime setup (buffer/recorder/attach) comes from the tokio telemetry crate;
+// the spans themselves live in `dial9-utils`.
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
 
-// The entire new surface. The macro + core wrappers are dep-free and
-// unconditional; `Dial9SpanLayer` is behind the `tower` cargo feature.
-use dial9::dial9_span;
-use dial9::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
+// The entire span surface. The macro + core wrappers are unconditional;
+// `Dial9SpanLayer` is behind the `tower` cargo feature.
+use dial9_utils::dial9_span;
+use dial9_utils::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
 
 // Note what is absent here: no tracing_subscriber::registry(), no
 // Dial9TracingLayer, no `tracing` dependency at all.

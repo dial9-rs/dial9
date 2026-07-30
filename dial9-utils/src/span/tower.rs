@@ -17,8 +17,8 @@ use tower_service::Service;
 /// request-derived fields — or ignore it for a fixed name.
 ///
 /// ```no_run
-/// # use dial9_util::span::Dial9SpanLayer;
-/// # use dial9_util::dial9_span;
+/// # use dial9_utils::span::Dial9SpanLayer;
+/// # use dial9_utils::dial9_span;
 /// // Per-request fields:
 /// let layer = Dial9SpanLayer::new(|req: &u64| dial9_span!("rpc", id = *req));
 /// // Or a fixed name, ignoring the request:
@@ -40,8 +40,8 @@ impl<F> Dial9SpanLayer<F> {
     /// which receives the request so it can attach request-derived fields:
     ///
     /// ```no_run
-    /// # use dial9_util::span::Dial9SpanLayer;
-    /// # use dial9_util::dial9_span;
+    /// # use dial9_utils::span::Dial9SpanLayer;
+    /// # use dial9_utils::dial9_span;
     /// # struct Request; impl Request { fn path(&self) -> &str { "/" } }
     /// let layer = Dial9SpanLayer::new(|req: &Request| {
     ///     dial9_span!("http_request", route = %req.path())

@@ -1,4 +1,4 @@
-//! Head-to-head: the [`dial9_span!`](dial9_util::dial9_span) macro
+//! Head-to-head: the [`dial9_span!`](dial9_utils::dial9_span) macro
 //! vs. hand-written `#[derive(TraceEvent)]` span events.
 //!
 //! Both paths allocate a span id and emit enter → exit → close through the same
@@ -15,8 +15,8 @@ use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::recorder;
 use dial9_trace_format::{InternedString, TraceEvent};
-use dial9_util::dial9_span;
-use dial9_util::span::Span as _;
+use dial9_utils::dial9_span;
+use dial9_utils::span::Span as _;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -10,7 +10,6 @@ members = [
     "dial9-viewer",
     "dial9",
     "dial9-utils",
-    "dial9-util",
     "perf-self-profile",
     "examples/metrics-service",
     "examples/simple-local",

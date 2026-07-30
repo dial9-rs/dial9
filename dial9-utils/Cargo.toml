@@ -12,9 +12,11 @@ missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
-dial9-trace-format = { workspace = true, optional = true }
+dial9-trace-format = { workspace = true }
+pin-project-lite = "0.2"
 bon = "3"
-tokio = { version = "1", features = ["fs"], default-features = false }
+# `rt` is needed for `tokio::runtime::worker_index()` (the span `worker_id`).
+tokio = { version = "1", features = ["fs", "rt"], default-features = false }
 tracing = "0.1.44"
 axum-0-7 = { package = "axum", version = "0.7", optional = true }
 axum-core-0-4 = { package = "axum-core", version = "0.4", optional = true }
@@ -28,6 +30,7 @@ hyper-util = { version = "0.1", features = [
 ], optional = true }
 tower = { version = "0.5", optional = true }
 tower-service = { version = "0.3", optional = true }
+tower-layer = { version = "0.3", optional = true }
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "behavior-version-latest",
     "sigv4a",
@@ -45,7 +48,6 @@ serde_json = "1"
 axum-07 = [
     "dep:axum-0-7",
     "dep:axum-core-0-4",
-    "dep:dial9-trace-format",
     "dep:futures-util",
     "dep:hyper",
     "dep:hyper-util",
@@ -58,7 +60,6 @@ axum-07 = [
 axum-08 = [
     "dep:axum-0-8",
     "dep:axum-core-0-5",
-    "dep:dial9-trace-format",
     "dep:futures-util",
     "dep:hyper",
     "dep:hyper-util",
@@ -67,11 +68,18 @@ axum-08 = [
     "dep:tower",
     "dep:tower-service",
 ]
+## Tower middleware for ad-hoc spans (`span::Dial9SpanLayer`).
+tower = ["dep:tower-service", "dep:tower-layer"]
 
 [dev-dependencies]
 dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
+# The span tests need a traced Tokio runtime; that lives in dial9-tokio-telemetry.
+# Dev-dependency only, so no dependency cycle.
+dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry" }
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 assert2 = { workspace = true }
 async-trait = "0.1.89"
+criterion = "0.5"
 flate2 = "1"
 tempfile = "3"
 tokio = { version = "1.52.0", features = [
@@ -87,3 +95,7 @@ tokio = { version = "1.52.0", features = [
 s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
+
+[[bench]]
+name = "span_encode_bench"
+harness = false

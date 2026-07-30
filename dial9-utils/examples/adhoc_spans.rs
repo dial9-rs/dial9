@@ -7,10 +7,11 @@
 //! Run with the `tower` feature to include the middleware section:
 //!
 //! ```sh
-//! cargo run -p dial9 --example adhoc_spans --features tokio,tower
+//! cargo run -p dial9-utils --example adhoc_spans --features tower
 //! ```
-use dial9::span::{Instrument as _, Span as _};
-use dial9::{DiskBuffer, RecorderTokioExt, dial9_span, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9_utils::dial9_span;
+use dial9_utils::span::{Instrument as _, Span as _};
 use std::time::Duration;
 
 struct Order {
@@ -82,7 +83,7 @@ async fn settlement_worker() {
 
 #[cfg(feature = "tower")]
 async fn tower_demo() {
-    use dial9::span::Dial9SpanLayer;
+    use dial9_utils::span::Dial9SpanLayer;
     use std::convert::Infallible;
     use tower_layer::Layer;
     use tower_service::Service;

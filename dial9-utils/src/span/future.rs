@@ -97,8 +97,8 @@ impl<F: Future, S: Span> Future for Instrumented<F, S> {
 /// Extension trait that attaches a [`Span`] to a future.
 ///
 /// ```no_run
-/// use dial9_util::dial9_span;
-/// use dial9_util::span::Instrument as _;
+/// use dial9_utils::dial9_span;
+/// use dial9_utils::span::Instrument as _;
 ///
 /// # async fn demo() {
 /// async {

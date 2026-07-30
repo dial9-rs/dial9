@@ -1,4 +1,4 @@
-//! Tests for the ad-hoc span wrappers (`dial9_util::span`).
+//! Tests for the ad-hoc span wrappers (`dial9_utils::span`).
 //!
 //! These decode the sealed trace and assert on the emitted `SpanEnter:*` /
 //! `SpanExit:*` / `SpanCloseEvent` wire events, the same format the tracing
@@ -6,8 +6,8 @@
 
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
 use dial9_trace_format::types::FieldValueRef;
-use dial9_util::dial9_span;
-use dial9_util::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
+use dial9_utils::dial9_span;
+use dial9_utils::span::{Dial9Span, Instrument as _, Span as _};
 use std::collections::HashSet;
 use std::task::Poll;
 use std::time::Duration;
@@ -422,8 +422,10 @@ fn typed_and_display_fields_roundtrip() {
 
 /// The tower layer creates one span per request; a `make_span` closure names
 /// it, and the response future emits one enter + one completion exit + close.
+#[cfg(feature = "tower")]
 #[test]
 fn tower_layer_wraps_request() {
+    use dial9_utils::span::Dial9SpanLayer;
     use std::convert::Infallible;
     use std::pin::Pin;
     use tower_service::Service;
