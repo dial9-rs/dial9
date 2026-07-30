@@ -87,9 +87,7 @@ describe("materializeFieldChartSeries", () => {
       9_007_199_254_740_994n,
       9_007_199_254_740_995n,
     ]);
-    expect(series.numericKind).toBe("integer");
     expect(series.unit).toBe("bytes");
-    expect(series.matchingEventCount).toBe(3);
   });
 
   it("uses explicit null gaps for absent/non-numeric values", () => {
@@ -129,7 +127,6 @@ describe("materializeFieldChartSeries", () => {
       { timestamp: 3, value: 4n, gap: null },
       { timestamp: 4, value: 9n, gap: null },
     ]);
-    expect(series.resetCount).toBe(1);
   });
 
   it("keeps decreases continuous for an up/down counter", () => {
@@ -141,16 +138,14 @@ describe("materializeFieldChartSeries", () => {
       { timestamp: 1, value: 10n, gap: null },
       { timestamp: 2, value: 3n, gap: null },
     ]);
-    expect(series.resetCount).toBe(0);
   });
 
-  it("promotes a mixed integer/decimal series to finite numbers", () => {
+  it("keeps exact integers in a mixed integer/decimal series", () => {
     const series = materializeFieldChartSeries(
       [event("Metric", 1, "10"), event("Metric", 2, "10.5")],
       spec(),
     );
-    expect(series.numericKind).toBe("float");
-    expect(series.samples.map((sample) => sample.value)).toEqual([10, 10.5]);
+    expect(series.samples.map((sample) => sample.value)).toEqual([10n, 10.5]);
   });
 });
 

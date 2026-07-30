@@ -145,6 +145,14 @@ describe("viewer deep-link reconstruction", () => {
       stacksAsFlamegraph: true,
     });
     source.update("view", {
+      fieldCharts: [
+        {
+          id: "field-chart-1",
+          eventName: event.name,
+          fieldName: "value",
+          kind: "counter",
+        },
+      ],
       inspectorTab: "related",
       expandedPollGroups: new Set(["cpu-0", "sched-1"]),
       pollFlamegraphSection: "sched",
@@ -335,6 +343,7 @@ describe("viewer deep-link reconstruction", () => {
       stacksAsFlamegraph: true,
     });
     expect(state.view).toEqual({
+      fieldCharts: [],
       inspectorTab: "task",
       expandedPollGroups: new Set(),
       pollFlamegraphSection: "cpu",

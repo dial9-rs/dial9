@@ -37,6 +37,7 @@ const RESET_STROKE = "rgba(255, 184, 77, 0.72)";
 const CHART_TOP = 20;
 const CHART_BOTTOM_PAD = 8;
 const BIGINT_RATIO_SCALE = 1_000_000_000_000n;
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 export interface FieldChartVertex {
   x: number;
@@ -49,7 +50,6 @@ export interface FieldChartPlot {
   min: FieldChartNumeric | null;
   max: FieldChartNumeric | null;
   baselineY: number;
-  visibleSamples: number;
 }
 
 interface RawPoint {
@@ -136,19 +136,25 @@ function xAt(
   viewEnd: number,
   drawW: number,
 ): number {
-  const x = ((timestamp - viewStart) / (viewEnd - viewStart || 1)) * drawW;
-  return Math.max(0, Math.min(drawW, x));
+  return ((timestamp - viewStart) / (viewEnd - viewStart || 1)) * drawW;
 }
 
-function candidateIndexes(bucket: Bucket): number[] {
+function pixelColumn(x: number, drawW: number): number {
+  return Math.min(
+    Math.max(0, Math.floor(x)),
+    Math.max(0, Math.ceil(drawW) - 1),
+  );
+}
+
+function bucketPoints(bucket: Bucket): RawPoint[] {
   return [
-    bucket.first.index,
-    bucket.min.index,
-    bucket.max.index,
-    bucket.last.index,
+    bucket.first,
+    bucket.min,
+    bucket.max,
+    bucket.last,
   ]
-    .sort((a, b) => a - b)
-    .filter((index, i, all) => i === 0 || index !== all[i - 1]);
+    .sort((a, b) => a.index - b.index)
+    .filter((point, i, all) => i === 0 || point.index !== all[i - 1]!.index);
 }
 
 function stepAfter(vertices: readonly FieldChartVertex[]): FieldChartVertex[] {
@@ -185,21 +191,19 @@ export function buildFieldChartPlot(
       min: null,
       max: null,
       baselineY: chartBottom,
-      visibleSamples: 0,
     };
   }
 
   const from = Math.max(0, lowerBound(samples, viewStart) - 1);
-  const to = Math.min(samples.length, upperBound(samples, viewEnd) + 1);
+  const to = Math.min(
+    samples.length,
+    upperBound(samples, viewEnd) + (kind === "gauge" ? 1 : 0),
+  );
   let min: FieldChartNumeric | null = null;
   let max: FieldChartNumeric | null = null;
-  let visibleSamples = 0;
   for (let i = from; i < to; i++) {
     const sample = samples[i]!;
     if (sample.value === null) continue;
-    if (sample.timestamp >= viewStart && sample.timestamp <= viewEnd) {
-      visibleSamples++;
-    }
     if (min === null || compare(sample.value, min) < 0) min = sample.value;
     if (max === null || compare(sample.value, max) > 0) max = sample.value;
   }
@@ -210,7 +214,6 @@ export function buildFieldChartPlot(
       min: null,
       max: null,
       baselineY: chartBottom,
-      visibleSamples,
     };
   }
 
@@ -226,21 +229,13 @@ export function buildFieldChartPlot(
     kind === "updown-counter" ? yAt(zeroFor(min)) : chartBottom;
 
   const segments: FieldChartVertex[][] = [];
-  const resetXs: number[] = [];
+  const resetXs = new Set<number>();
   let rawSegment: RawPoint[] = [];
   let bucket: Bucket | null = null;
 
   const flushBucket = (): void => {
     if (bucket === null) return;
-    const byIndex = new Map<number, RawPoint>([
-      [bucket.first.index, bucket.first],
-      [bucket.min.index, bucket.min],
-      [bucket.max.index, bucket.max],
-      [bucket.last.index, bucket.last],
-    ]);
-    for (const index of candidateIndexes(bucket)) {
-      rawSegment.push(byIndex.get(index)!);
-    }
+    rawSegment.push(...bucketPoints(bucket));
     bucket = null;
   };
 
@@ -267,8 +262,17 @@ export function buildFieldChartPlot(
     const sample = samples[i]!;
     if (sample.value === null) {
       flushSegment(sample.timestamp);
-      if (sample.gap === "reset") {
-        resetXs.push(xAt(sample.timestamp, viewStart, viewEnd, drawW));
+      if (
+        sample.gap === "reset" &&
+        sample.timestamp >= viewStart &&
+        sample.timestamp <= viewEnd
+      ) {
+        resetXs.add(
+          pixelColumn(
+            xAt(sample.timestamp, viewStart, viewEnd, drawW),
+            drawW,
+          ),
+        );
       }
       continue;
     }
@@ -278,10 +282,7 @@ export function buildFieldChartPlot(
       value: sample.value,
     };
     const x = xAt(sample.timestamp, viewStart, viewEnd, drawW);
-    const column = Math.min(
-      Math.max(0, Math.floor(x)),
-      Math.max(0, Math.ceil(drawW) - 1),
-    );
+    const column = pixelColumn(x, drawW);
     if (bucket === null || bucket.column !== column) {
       flushBucket();
       bucket = {
@@ -301,11 +302,10 @@ export function buildFieldChartPlot(
 
   return {
     segments,
-    resetXs: [...new Set(resetXs.map((x) => Math.floor(x)))],
+    resetXs: [...resetXs],
     min,
     max,
     baselineY,
-    visibleSamples,
   };
 }
 
@@ -359,9 +359,36 @@ function strokeSegments(
   ctx.stroke();
 }
 
+function compactBigInt(value: bigint): string {
+  const text = String(value);
+  const sign = text.startsWith("-") ? "-" : "";
+  const digits = sign === "" ? text : text.slice(1);
+  return digits.length <= 18
+    ? text
+    : `${sign}${digits[0]}.${digits.slice(1, 4)}e${digits.length - 1}`;
+}
+
 function compactValue(value: FieldChartNumeric, unit: string | null): string {
-  if (unit !== null) return formatFieldValue(value, unit);
-  if (typeof value === "bigint") return String(value);
+  const raw = typeof value === "bigint" ? compactBigInt(value) : String(value);
+  if (unit !== null) {
+    if (!["ns", "us", "ms", "s", "bytes"].includes(unit)) return raw;
+    const safeBigInt =
+      typeof value !== "bigint" ||
+      (value >= -MAX_SAFE_BIGINT && value <= MAX_SAFE_BIGINT);
+    const n = Number(value);
+    const multiplier =
+      unit === "us"
+        ? 1e3
+        : unit === "ms"
+          ? 1e6
+          : unit === "s"
+            ? 1e9
+            : 1;
+    return safeBigInt && n >= 0 && Number.isFinite(n * multiplier)
+      ? formatFieldValue(value, unit)
+      : `${raw} ${unit}`;
+  }
+  if (typeof value === "bigint") return raw;
   if (value === 0) return "0";
   const abs = Math.abs(value);
   if (abs >= 1e9 || abs < 0.001) return value.toExponential(3);

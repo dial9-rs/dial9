@@ -262,7 +262,7 @@ export interface MountedShell {
 
 /**
  * Mount the shell into `root`, wired to `store`. Subscribes to the slice set
- * that changes the chrome (trace/viewport/selection/uiPrefs) and renders +
+ * that changes the chrome (trace/viewport/selection/uiPrefs/view) and renders +
  * sizes track canvases each frame INSIDE the store's notification tick (the
  * scheduler is the only place renders run and layout reads are batched).
  * Returns handles the entry needs (toast region, teardown).

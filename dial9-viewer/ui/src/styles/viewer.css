@@ -453,7 +453,7 @@ body {
     border-right: 1px solid var(--d9-border);
 }
 .d9-track-name { font-size: 0.8em; color: var(--d9-fg); }
-/* On a manageable track the visible name lives in the strip's 3-column header;
+/* On a manageable track the visible name lives in the management strip;
    keep the inner name for aria-labelledby, but hide it visually (sr-only). */
 .d9-track-manage .d9-track-label .d9-track-name {
     position: absolute;
@@ -524,15 +524,12 @@ body {
    BEHAVIOR survives, one-line-fold presentation retired). The affordances
    overlay a reserved strip at the LEFT edge of the
    label gutter so the frozen per-track labels are not modified; the strip is
-   pointer-events:none except the two controls, so the rest of the label (e.g.
+   pointer-events:none except its controls, so the rest of the label (e.g.
    the spans copy buttons) stays interactive. ── */
 .d9-track-manage { position: relative; }
 /* Reserve room for the strip so it never covers the label text / copy buttons. */
-/* The manageable-track header: a top-fixed 3-column row spanning the label
-   gutter - [collapse caret] [label] [drag grip]. Anchored to the top with
-   padding, so the three columns never move when the track collapses or
-   resizes. Overlays the (aria-only) inner label; the caret/grip are the only
-   interactive parts. */
+/* The manageable-track header is a top-fixed row spanning the label gutter:
+   collapse, label, drag, and (for dynamic charts) close. */
 .d9-track-manage-strip {
     position: absolute;
     left: 0;

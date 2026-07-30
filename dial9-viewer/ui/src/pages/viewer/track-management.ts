@@ -1,18 +1,18 @@
 // Per-track collapse + drag-reorder for the unified track column. This module
 // owns:
 //
-//   - which tracks are user-manageable (collapse + reorder): the four foldable
-//     analysis surfaces (cpu/queue/spans/events). The two structural tracks
-//     (timeline/lanes) and the selection-only task-detail track are fixed.
+//   - which tracks are user-manageable (collapse + reorder): the four built-in
+//     analysis surfaces plus dynamic field charts. The two structural tracks
+//     and the selection-only task-detail track are fixed.
 //   - the ordering resolution (uiPrefs.trackOrder -> the ordered TrackSpec
 //     list), robust to unknown/missing ids so a stored order predating a new
 //     track still resolves.
 //   - the reorder swap (drop = swap position).
 //   - the collapse predicate + label-only height.
-//   - the store actions (toggle collapse / reorder) the shell's caret + grip
-//     handlers dispatch.
+//   - the store actions (toggle collapse / reorder / close) the shell's track
+//     controls dispatch.
 //   - localStorage persistence (hydrate on boot + persist on change):
-//     trackOrder/collapsed survive reload.
+//     built-in order/collapse survives reload; dynamic ids remain URL-only.
 //
 // Track pinning is out of scope. This operates on the track list/order +
 // per-track height only; it does not touch the per-track render delegation.
@@ -143,7 +143,7 @@ export function computeReorder(
 
 // ── Store actions ────────────────────────────────────────────────────────
 
-/** The collapse/reorder dispatchers the shell's caret + grip handlers call. */
+/** The management dispatchers used by the shell's per-track controls. */
 export interface TrackManageActions {
   /** Toggle a track's collapsed state (caret click / Enter / Space). */
   toggleCollapse(id: TrackId): void;

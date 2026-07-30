@@ -38,23 +38,8 @@ export interface FieldChartSeries {
   samples: readonly FieldChartSample[];
   /** Unit annotation recovered from the matching event schema, if present. */
   unit: string | null;
-  matchingEventCount: number;
   numericSampleCount: number;
-  resetCount: number;
-  numericKind: "integer" | "float" | null;
 }
-
-interface IntegerCandidate {
-  kind: "integer";
-  value: bigint;
-}
-
-interface FloatCandidate {
-  kind: "float";
-  value: number;
-}
-
-type NumericCandidate = IntegerCandidate | FloatCandidate;
 
 // Strict decimal syntax: no hexadecimal, Infinity, NaN, separators, or
 // partially numeric strings. Varints decoded as decimal strings take the exact
@@ -62,31 +47,29 @@ type NumericCandidate = IntegerCandidate | FloatCandidate;
 const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const INTEGER = /^[+-]?\d+$/;
 
-function numericCandidate(value: DecodedFieldValue): NumericCandidate | null {
-  if (typeof value === "bigint") return { kind: "integer", value };
+function numericValue(value: DecodedFieldValue): FieldChartNumeric | null {
+  if (typeof value === "bigint") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return null;
-    return Number.isSafeInteger(value)
-      ? { kind: "integer", value: BigInt(value) }
-      : { kind: "float", value };
+    return Number.isSafeInteger(value) ? BigInt(value) : value;
   }
   if (typeof value !== "string") return null;
   const text = value.trim();
   if (text === "" || !DECIMAL.test(text)) return null;
   if (INTEGER.test(text)) {
     try {
-      return { kind: "integer", value: BigInt(text) };
+      return BigInt(text);
     } catch {
       return null;
     }
   }
   const parsed = Number(text);
-  return Number.isFinite(parsed) ? { kind: "float", value: parsed } : null;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /** True when a decoded field can be graphed as a finite decimal number. */
 export function isChartableNumericValue(value: DecodedFieldValue): boolean {
-  return numericCandidate(value) !== null;
+  return numericValue(value) !== null;
 }
 
 function lessThan(a: FieldChartNumeric, b: FieldChartNumeric): boolean {
@@ -121,38 +104,15 @@ export function materializeFieldChartSeries(
   );
 
   let unit: string | null = null;
-  const candidates = ordered.map(({ event }) => {
-    unit ??= event.units?.[spec.fieldName] ?? null;
-    return {
-      timestamp: event.timestamp,
-      value: numericCandidate(event.fields?.[spec.fieldName] ?? null),
-    };
-  });
-
-  const numericKind = candidates.some((sample) => sample.value?.kind === "float")
-    ? "float"
-    : candidates.some((sample) => sample.value?.kind === "integer")
-      ? "integer"
-      : null;
-
   let numericSampleCount = 0;
-  let resetCount = 0;
   let previous: FieldChartNumeric | null = null;
   const samples: FieldChartSample[] = [];
-  for (const candidate of candidates) {
-    let value: FieldChartNumeric | null = null;
-    if (candidate.value !== null) {
-      if (numericKind === "float") {
-        const n = Number(candidate.value.value);
-        if (Number.isFinite(n)) value = n;
-      } else {
-        value = candidate.value.value;
-      }
-    }
-
+  for (const { event } of ordered) {
+    unit ??= event.units?.[spec.fieldName] ?? null;
+    const value = numericValue(event.fields?.[spec.fieldName] ?? null);
     if (value === null) {
       samples.push({
-        timestamp: candidate.timestamp,
+        timestamp: event.timestamp,
         value: null,
         gap: "missing",
       });
@@ -166,13 +126,12 @@ export function materializeFieldChartSeries(
       lessThan(value, previous)
     ) {
       samples.push({
-        timestamp: candidate.timestamp,
+        timestamp: event.timestamp,
         value: null,
         gap: "reset",
       });
-      resetCount++;
     }
-    samples.push({ timestamp: candidate.timestamp, value, gap: null });
+    samples.push({ timestamp: event.timestamp, value, gap: null });
     numericSampleCount++;
     previous = value;
   }
@@ -180,10 +139,7 @@ export function materializeFieldChartSeries(
   return {
     samples,
     unit,
-    matchingEventCount: ordered.length,
     numericSampleCount,
-    resetCount,
-    numericKind,
   };
 }
 

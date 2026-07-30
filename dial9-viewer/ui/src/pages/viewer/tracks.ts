@@ -231,13 +231,14 @@ function lanesTrackRow(t: TrackSpec, viewportHeight: number): TemplateResult {
   `;
 }
 
-// ── Track management overlay: collapse caret + reorder grip ────────────────
+// ── Track management overlay: collapse, reorder, dynamic close ─────────────
 //
 // The affordances are shell-owned and sit in a reserved strip over the LEFT
 // edge of the label gutter (CSS `.d9-track-manage-strip`), so the per-track
 // labels (the spans/queue/events controllers render their own) are never
-// modified. The strip is pointer-events:none except the two controls, so the
-// rest of the label (e.g. the spans copy buttons) stays interactive.
+// modified. The strip itself is pointer-events:none, while its controls accept
+// pointer input, so the rest of the label (e.g. spans copy buttons) stays
+// interactive.
 
 // Id of the track whose grip is being dragged; module-level so `drop` can
 // read it without relying on DataTransfer (jsdom/older browsers vary). Set on

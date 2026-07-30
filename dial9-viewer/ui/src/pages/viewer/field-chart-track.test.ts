@@ -7,12 +7,7 @@ function series(samples: readonly FieldChartSample[]): FieldChartSeries {
   return {
     samples,
     unit: null,
-    matchingEventCount: samples.length,
     numericSampleCount: numeric.length,
-    resetCount: samples.filter((sample) => sample.gap === "reset").length,
-    numericKind: numeric.some((sample) => typeof sample.value === "number")
-      ? "float"
-      : "integer",
   };
 }
 
@@ -40,6 +35,20 @@ describe("buildFieldChartPlot", () => {
         { x: 50, y: 0 },
       ],
     ]);
+  });
+
+  it("keeps gauge neighbors outside the viewport for true edge interpolation", () => {
+    const plot = buildFieldChartPlot(
+      series([sample(0, 0n), sample(10, 10n)]),
+      "gauge",
+      2,
+      8,
+      60,
+      0,
+      100,
+    );
+
+    expect(plot.segments[0]?.map(({ x }) => x)).toEqual([-20, 80]);
   });
 
   it("draws counters step-after and breaks the path at resets", () => {
@@ -88,6 +97,24 @@ describe("buildFieldChartPlot", () => {
     expect(plot.baselineY).toBeLessThan(100);
   });
 
+  it("does not apply a counter sample that occurs after the viewport", () => {
+    const plot = buildFieldChartPlot(
+      series([sample(0, 0n), sample(5, 5n), sample(15, 10n)]),
+      "counter",
+      0,
+      10,
+      100,
+      0,
+      100,
+    );
+
+    expect(plot.max).toBe(5n);
+    expect(plot.segments[0]?.map(({ x }) => x)).toEqual([0, 50, 50, 100]);
+    expect(plot.segments[0]?.at(-1)?.y).toBe(
+      plot.segments[0]?.at(-2)?.y,
+    );
+  });
+
   it("keeps adjacent large bigint values visually distinct", () => {
     const plot = buildFieldChartPlot(
       series([
@@ -130,6 +157,5 @@ describe("buildFieldChartPlot", () => {
     expect(vertices).toBeLessThanOrEqual(20 * 8 + 1);
     expect(plot.min).toBe(0);
     expect(plot.max).toBe(96);
-    expect(plot.visibleSamples).toBe(10_000);
   });
 });
