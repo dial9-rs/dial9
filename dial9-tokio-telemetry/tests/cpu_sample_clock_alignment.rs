@@ -30,7 +30,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
     use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
     use dial9_tokio_telemetry::telemetry::{
-        Dial9HandleTokioExt, RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
+        RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
