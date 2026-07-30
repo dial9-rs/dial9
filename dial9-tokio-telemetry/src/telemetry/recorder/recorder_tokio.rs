@@ -12,6 +12,7 @@
 //! use std::time::Duration;
 //! use dial9_core::buffer::DiskBuffer;
 //! use dial9_core::recorder::recorder;
+//! use dial9_tokio_telemetry::block_on;
 //! use dial9_tokio_telemetry::telemetry::{spawn, RecorderTokioExt, TokioAttachOptions};
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -27,7 +28,7 @@
 //!     |t| { t.worker_threads(2); },
 //! )?;
 //!
-//! main_rt.block_on(async { spawn(async { /* work */ }).await.unwrap() });
+//! block_on(&main_rt, async { spawn(async { /* work */ }).await.unwrap() });
 //!
 //! // graceful_shutdown is synchronous; drop the runtimes first so their workers
 //! // flush, then drain.
@@ -103,7 +104,7 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
 
     #[cfg(feature = "worker-s3")]
     fn with_s3_uploader(self, config: crate::background_task::s3::S3Config) -> Self {
-        apply_s3_uploader(self, config, None)
+        apply_s3_uploader(self, config, |uploader| uploader)
     }
 
     #[cfg(feature = "worker-s3")]
@@ -112,7 +113,54 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
         config: crate::background_task::s3::S3Config,
         client: aws_sdk_s3::Client,
     ) -> Self {
-        apply_s3_uploader(self, config, Some(client))
+        apply_s3_uploader(self, config, |mut uploader| {
+            uploader.set_client(client);
+            uploader
+        })
+    }
+}
+
+/// Asynchronous S3 client construction on the recorder's pipeline worker.
+///
+/// This is separate from [`RecorderPipelineExt`] to keep that existing public
+/// trait unchanged.
+#[cfg(feature = "worker-s3")]
+pub trait RecorderS3ClientExt<M: BufferMode>:
+    recorder_s3_client_ext_sealed::Sealed + Sized
+{
+    /// Like [`RecorderPipelineExt::with_s3_uploader`], but constructs the S3
+    /// client asynchronously on the pipeline worker's Tokio runtime.
+    fn with_s3_uploader_client_future<F>(
+        self,
+        config: crate::background_task::s3::S3Config,
+        client_future: F,
+    ) -> Self
+    where
+        F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static;
+}
+
+#[cfg(feature = "worker-s3")]
+mod recorder_s3_client_ext_sealed {
+    use dial9_core::buffer::BufferMode;
+    use dial9_core::recorder::RecorderBuilder;
+
+    pub trait Sealed {}
+    impl<M: BufferMode> Sealed for RecorderBuilder<M> {}
+}
+
+#[cfg(feature = "worker-s3")]
+impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
+    fn with_s3_uploader_client_future<F>(
+        self,
+        config: crate::background_task::s3::S3Config,
+        client_future: F,
+    ) -> Self
+    where
+        F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
+    {
+        apply_s3_uploader(self, config, |uploader| {
+            uploader.with_client_future(client_future)
+        })
     }
 }
 
@@ -123,14 +171,17 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
 fn apply_s3_uploader<M: BufferMode>(
     builder: RecorderBuilder<M>,
     config: crate::background_task::s3::S3Config,
-    client: Option<aws_sdk_s3::Client>,
+    configure: impl FnOnce(
+        crate::background_task::S3PipelineUploader,
+    ) -> crate::background_task::S3PipelineUploader,
 ) -> RecorderBuilder<M> {
     let metadata: Vec<(String, String)> = config
         .as_metadata()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let boot_id = builder.writer_boot_id().map(str::to_owned);
-    let mut uploader = crate::background_task::S3PipelineUploader::new(config, client);
+    let uploader = crate::background_task::S3PipelineUploader::new(config, None);
+    let mut uploader = configure(uploader);
     if let Some(boot_id) = boot_id {
         uploader.set_boot_id(boot_id);
     }
@@ -218,6 +269,10 @@ pub trait RecorderTokioExt {
     /// Drop the runtime before
     /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
     /// so its workers flush.
+    ///
+    /// Drive the root future with [`block_on`](crate::block_on), not
+    /// [`Runtime::block_on`](tokio::runtime::Runtime::block_on): to ensure polls and wakes
+    /// are captured.
     ///
     /// ```no_run
     /// use dial9_core::buffer::MemoryBuffer;

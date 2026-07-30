@@ -108,6 +108,21 @@
         .tab-bar button:hover { color: #ccc; background: transparent; }
         .tab-bar button.active { color: #6c63ff; border-bottom-color: #6c63ff; background: transparent; }
 
+        .service-tabs {
+            display: flex; gap: 4px; padding: 8px 20px 0;
+            background: #1a1a2e; border-bottom: 1px solid #333; flex-wrap: wrap;
+        }
+        .service-tabs button {
+            border-radius: 4px 4px 0 0; border-bottom-color: transparent;
+            padding: 6px 12px; display: inline-flex; align-items: baseline; gap: 7px;
+        }
+        .service-tab-meta { color: #85859d; font-size: 0.78em; font-weight: 400; }
+        .service-tabs button.active {
+            background: #222244; border-color: #6c63ff;
+            border-bottom-color: #222244; color: #fff;
+        }
+        .service-tabs button.active .service-tab-meta { color: #aaaac0; }
+
         /* Host picker */
         .host-grid {
             display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -282,6 +297,7 @@
         <label>Prefix:</label>
         <input type="text" id="prefix-input" placeholder="detecting…" style="width:120px" />
         <span id="prefix-suggestions" style="display:inline-flex;gap:4px"></span>
+        <input type="hidden" id="service-input" />
         <span style="color:#444">|</span>
         <div class="quick-btns">
             <button onclick="setQuickRange(1)">Last 1hr</button>
@@ -292,20 +308,21 @@
         <input type="datetime-local" id="range-from" step="60" />
         <label>To:</label>
         <input type="datetime-local" id="range-to" step="60" />
-        <button class="primary" id="search-btn" onclick="doTimeRangeSearch()" disabled>Search</button>
+        <button class="primary" id="search-btn" onclick="discoverServices()" disabled>Search</button>
     </div>
 
     <div class="tab-bar">
         <button class="active" onclick="switchTab('browse')" id="tab-browse">Browse</button>
         <button onclick="switchTab('raw')" id="tab-raw">Raw Search</button>
     </div>
+    <div class="service-tabs" id="service-tabs" role="tablist" aria-label="Services" style="display:none"></div>
 
     <div class="main-area" id="main-area">
         <!-- Browse mode: status / density heatmap timeline -->
         <div id="browse-view">
             <div class="warning-banner" id="browse-warning" style="display:none"></div>
             <div class="status" id="browse-status">
-                Select a time range and click Search to find traces.
+                Select a bucket to find services.
             </div>
             <div id="heatmap-view" style="display:none">
                 <div id="heatmap-hint">
@@ -481,7 +498,7 @@
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
-    let localMode = false;             // true when server is local-dir (no BYO creds)
+    let localMode = false;             // true when source keys use a flat layout
     let currentQuickRange = null;   // hours, when a "Last Nhr" quick range is active
                                     // (null once the user edits the range manually)
 
@@ -660,7 +677,7 @@
                 Dial9Creds.setRegion(bucket.region);
                 syncUrl();
                 setStatus(`Using ${name} · region ${bucket.region}`, 'ok');
-                discoverPrefixes().then(() => reRunCurrentSearch());
+                discoverPrefixes().then(discoverServices);
                 return;
             }
             setStatus(`Detecting region for ${name}…`, null);
@@ -676,7 +693,7 @@
                     syncUrl();
                 }
                 setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ''}`, 'ok');
-                discoverPrefixes().then(() => reRunCurrentSearch());
+                discoverPrefixes().then(discoverServices);
             } else {
                 setStatus(`Cannot use ${name}: ${result.error || 'unknown error'}`, 'error');
             }
@@ -736,14 +753,16 @@
         });
 
         // React to programmatic changes (e.g. an injected userscript calling
-        // Dial9Creds.set) as well as the panel's own actions: refresh the UI and
-        // re-run the current search so results reflect the new credentials.
+        // Dial9Creds.set). Reload an active service; with an already-picked
+        // bucket, otherwise run only lightweight service discovery.
         window.addEventListener('dial9:credentials-changed', () => {
             refresh();
-            // Only re-run when credentials are now present. This event also fires
-            // on Clear, where re-running would query the last-selected bucket with
-            // no credentials (the server's ambient identity) and fail.
-            if (autoSearched && Dial9Creds.has()) reRunCurrentSearch();
+            if (!Dial9Creds.has()) return;
+            if (canReRunCurrentSearch()) {
+                reRunCurrentSearch();
+            } else if (bucketInput.value.trim()) {
+                discoverPrefixes().then(discoverServices);
+            }
         });
 
         refresh();
@@ -758,11 +777,19 @@
         }
     }
 
+    function canReRunCurrentSearch() {
+        if (currentTab === 'raw') {
+            return !!document.getElementById('raw-search-input').value.trim();
+        }
+        return !!serviceInput.value.trim() && !!bucketInput.value.trim();
+    }
+
     // Re-run whichever search the user last triggered (browse or raw).
     function reRunCurrentSearch() {
+        if (!canReRunCurrentSearch()) return;
         if (currentTab === 'raw') {
-            if (document.getElementById('raw-search-input').value.trim()) doRawSearch();
-        } else if (bucketInput.value.trim()) {
+            doRawSearch();
+        } else {
             doTimeRangeSearch();
         }
     }
@@ -770,9 +797,10 @@
     // ── Init: restore state from the URL ──
     //
     // Every state-changing action mirrors the page state into the query string
-    // via syncUrl(), so a link reproduces the same bucket, prefix, tab, time
-    // window, timezone, and raw query. Restore that saved state here on load.
+    // via syncUrl(), so a link reproduces the same bucket, prefix, service,
+    // tab, time window, timezone, and raw query. Restore that state here.
     const prefixInput = document.getElementById('prefix-input');
+    const serviceInput = document.getElementById('service-input');
     const rawSearchInput = document.getElementById('raw-search-input');
     let serverHasPrefix = false;
 
@@ -794,7 +822,7 @@
     // stored relative (`last=N`) so the link keeps meaning "the last N hours
     // from now"; a manually-edited range is stored as precise epoch-second
     // `from`/`to` so it reproduces exactly regardless of the viewer's TZ toggle.
-    function syncUrl() {
+    function syncUrl(historyMode = 'replace') {
         if (restoring) return;
         // The bucket's region rides in the URL (as aws_region) so a cross-region
         // bucket is reproducible from a shared link. The credentials store is the
@@ -809,6 +837,7 @@
             // store is the source of truth — echo whatever it holds.
             roleArn: (storedCreds && storedCreds.roleArn) || '',
             prefix: prefixInput.value.trim(),
+            service: serviceInput.value.trim(),
             tab: currentTab,
             tz: useLocalTz ? 'local' : 'utc',
             q: rawSearchInput.value.trim(),
@@ -822,7 +851,9 @@
             if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
         }
         const qs = Dial9UrlState.serialize(state);
-        history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
+        history[historyMode === 'push' ? 'pushState' : 'replaceState'](
+            null, '', qs ? '?' + qs : window.location.pathname
+        );
     }
 
     // Restore saved state. Timezone first: the range pickers format in the
@@ -835,6 +866,7 @@
     }
     if (urlState.bucket) bucketInput.value = urlState.bucket;
     if (urlState.prefix) prefixInput.value = urlState.prefix;
+    if (urlState.service) serviceInput.value = urlState.service;
     if (urlState.q) rawSearchInput.value = urlState.q;
     if (urlState.tab === 'raw') switchTab('raw');
 
@@ -909,7 +941,7 @@
         // When the server runs demand-driven aggregation, the flamegraph button
         // drives the sampled server-side loop instead of decoding raw traces.
         aggregationEnabled = !!config.aggregation_enabled;
-        localMode = !config.supports_byo_credentials;
+        localMode = usesFlatSourceLayout(config);
         if (config.supports_byo_credentials) initCredsUi();
         // Server defaults (bucket/prefix) were filled programmatically above;
         // reflect them in the URL so the link is complete.
@@ -920,22 +952,38 @@
         // the right regional endpoint. A pinned region makes this a fast no-op.
         detectRegionForBucket(bucketInput.value.trim())
             .then(() => discoverPrefixes())
-            .then(autoSearch);
-    }).catch(() => { discoverPrefixes().then(autoSearch); });
+            .then(discoverServices);
+    }).catch(() => { discoverPrefixes().then(discoverServices); });
+
+    function usesFlatSourceLayout(config) {
+        if (config.source_layout === 'flat') return true;
+        if (config.source_layout === 'time-partitioned') return false;
+        // Compatibility with servers that predate the explicit layout field.
+        return !config.supports_byo_credentials;
+    }
+
+    window.addEventListener('popstate', () => {
+        const state = Dial9UrlState.parse(window.location.search);
+        if (state.service && availableServices.includes(state.service)) {
+            selectService(state.service, 'replace');
+            return;
+        }
+        serviceInput.value = '';
+        renderServiceTabs();
+        heatmapSegments = [];
+        heatmapRows = [];
+        // Drop the previous service's selection so the profiling buttons don't
+        // stay enabled against stale keys (setHeatmapSelection also refreshes
+        // the selection count). Mirrors resetBrowsePane's clearing.
+        setHeatmapSelection(null);
+        heatmapView.style.display = 'none';
+        browseStatus.style.display = '';
+        browseStatus.className = 'status';
+        browseStatus.textContent = 'Choose a service to browse its traces.';
+    });
 
     // The initial time range is restored from the URL (or defaulted to last
     // 1hr) in the state-restore block above, before /api/config resolves.
-
-    // On page load, automatically run the last-1hr search so the heatmap is
-    // populated without an extra click.
-    let autoSearched = false;
-    function autoSearch() {
-        if (autoSearched) return;
-        autoSearched = true;
-        if (bucketInput.value.trim() && !document.getElementById('search-btn').disabled) {
-            doTimeRangeSearch();
-        }
-    }
 
     // ── Region auto-detection ──
     // A bring-your-own-credentials request signs S3 for the region carried in
@@ -1032,6 +1080,116 @@
         }
     }
 
+    let availableServices = [];
+    let availableServiceMetadata = new Map();
+    let serviceDiscoveryGeneration = 0;
+    let browseGeneration = 0;
+
+    function renderServiceTabs() {
+        const tabs = document.getElementById('service-tabs');
+        tabs.innerHTML = '';
+        tabs.style.display =
+            currentTab === 'browse' && availableServices.length > 0 ? '' : 'none';
+        for (const service of availableServices) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.role = 'tab';
+            button.append(document.createTextNode(service));
+            if (availableServiceMetadata.has(service)) {
+                const hostCount = availableServiceMetadata.get(service);
+                const metadata = document.createElement('span');
+                metadata.className = 'service-tab-meta';
+                metadata.textContent = `${hostCount} ${hostCount === 1 ? 'host' : 'hosts'}`;
+                button.appendChild(metadata);
+            }
+            const active = serviceInput.value === service;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-selected', String(active));
+            button.addEventListener('click', () => selectService(service));
+            tabs.appendChild(button);
+        }
+    }
+
+    function selectService(service, historyMode = 'push') {
+        if (!availableServices.includes(service)) return;
+        if (serviceInput.value === service && heatmapRows.length) return;
+        serviceInput.value = service;
+        renderServiceTabs();
+        syncUrl(historyMode);
+        doTimeRangeSearch();
+    }
+
+    async function discoverServices() {
+        const generation = ++serviceDiscoveryGeneration;
+        browseGeneration++;
+        const bucket = bucketInput.value.trim();
+        if (!bucket || document.getElementById('search-btn').disabled) return;
+        const from = pickerToDate(document.getElementById('range-from').value);
+        const to = pickerToDate(document.getElementById('range-to').value);
+        if (!from || !to) return;
+
+        const fromEpoch = Math.floor(from.getTime() / 1000);
+        const toEpoch = Math.floor(to.getTime() / 1000);
+        const keyPrefix = !serverHasPrefix ? prefixInput.value.trim() : '';
+        const requested = serviceInput.value.trim();
+        if (requested) {
+            // A service in the URL is an exact navigation target, not a hint to
+            // validate through discovery. Discovery intentionally scans only a
+            // recent subset and can therefore omit a valid, quiet service.
+            availableServices = [requested];
+            availableServiceMetadata = new Map();
+            renderServiceTabs();
+            setBrowseWarning(null);
+            browseStatus.textContent = 'Loading service…';
+            browseStatus.className = 'status';
+            browseStatus.style.display = '';
+            syncUrl();
+            await doTimeRangeSearch();
+            return;
+        }
+        resetBrowsePane(false);
+        browseStatus.textContent = 'Finding services…';
+
+        try {
+            let url = `/api/services?bucket=${encodeURIComponent(bucket)}` +
+                `&from=${fromEpoch}&to=${toEpoch}`;
+            if (keyPrefix) url += `&prefix=${encodeURIComponent(keyPrefix)}`;
+            const resp = await apiFetch(url);
+            if (!resp.ok) {
+                const body = await resp.text().catch(() => '');
+                throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+            }
+            const result = await resp.json();
+            if (generation !== serviceDiscoveryGeneration) return;
+            availableServices = result.services || [];
+            availableServiceMetadata = new Map(
+                (result.service_metadata || []).map(metadata =>
+                    [metadata.service, metadata.host_count])
+            );
+            const active = availableServices.length === 1
+                ? availableServices[0]
+                : availableServices.includes(requested) ? requested : '';
+            serviceInput.value = active;
+            renderServiceTabs();
+            setBrowseWarning(result.truncated
+                ? 'Service discovery reached its time-range limit. Narrow the window to see every service.'
+                : null);
+            syncUrl();
+
+            if (active) {
+                await doTimeRangeSearch();
+            } else {
+                browseStatus.textContent = availableServices.length
+                    ? 'Choose a service to browse its traces.'
+                    : 'No services found in this time range.';
+            }
+        } catch (err) {
+            if (generation !== serviceDiscoveryGeneration) return;
+            browseStatus.textContent = 'Error: ' + err.message;
+            browseStatus.className = 'status error';
+        }
+    }
+
     // Re-discover when bucket changes (on commit), and keep the URL in sync as
     // the user types. Prefix discovery hits the server, so only run it on the
     // less-frequent `change`; mirror to the URL on every keystroke.
@@ -1042,7 +1200,8 @@
     // counterpart to the picker's selectBucket() region detection.
     bucketInput.addEventListener('change', async () => {
         await detectRegionForBucket(bucketInput.value.trim());
-        discoverPrefixes();
+        await discoverPrefixes();
+        await discoverServices();
         syncUrl();
     });
     bucketInput.addEventListener('input', syncUrl);
@@ -1191,6 +1350,7 @@
         document.getElementById('tab-raw').classList.toggle('active', tab === 'raw');
         document.getElementById('browse-view').style.display = tab === 'browse' ? '' : 'none';
         document.getElementById('raw-view').style.display = tab === 'raw' ? '' : 'none';
+        renderServiceTabs();
         // Raw mode has Select All/Deselect; browse mode has the CPU Profiling button.
         document.getElementById('raw-actions').style.display = tab === 'raw' ? 'flex' : 'none';
         document.getElementById('cpu-btn').style.display = tab === 'browse' ? '' : 'none';
@@ -1223,7 +1383,12 @@
         // When the server has its own prefix it owns prefixing; otherwise pass
         // the user-entered key prefix. The server combines it with any default.
         const keyPrefix = !serverHasPrefix ? prefixInput.value.trim() : '';
-
+        const service = serviceInput.value.trim();
+        if (!service) {
+            await discoverServices();
+            return;
+        }
+        const generation = ++browseGeneration;
         browseStatus.textContent = 'Searching…';
         browseStatus.className = 'status';
         browseStatus.style.display = '';
@@ -1235,12 +1400,14 @@
             let url = `/api/browse?bucket=${encodeURIComponent(bucket)}` +
                 `&from=${fromEpoch}&to=${toEpoch}`;
             if (keyPrefix) url += `&prefix=${encodeURIComponent(keyPrefix)}`;
+            if (service) url += `&service=${encodeURIComponent(service)}`;
             const resp = await apiFetch(url);
             if (!resp.ok) {
                 const body = await resp.text().catch(() => '');
                 throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
             }
             const result = await resp.json();
+            if (generation !== browseGeneration) return;
             allObjects = result.objects || [];
 
             // The server lists whole time buckets, so the first/last bucket can
@@ -1266,11 +1433,16 @@
                 heatmapView.style.display = 'none';
                 // Show sample keys to help the user understand the bucket layout
                 try {
-                    const sampleResp = await apiFetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
+                    let sampleUrl = `/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`;
+                    if (service) sampleUrl += `&service=${encodeURIComponent(service)}`;
+                    const sampleResp = await apiFetch(sampleUrl);
                     const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
+                    if (generation !== browseGeneration) return;
                     if (samples.length > 0) {
                         browseStatus.innerHTML = 'No traces found in this time range. Sample keys in this bucket:<br>' +
                             samples.slice(0, 5).map(o => `<code style="color:#7ec8e3;font-size:0.85em">${esc(o.key)}</code>`).join('<br>');
+                    } else if (service) {
+                        browseStatus.textContent = 'No traces found for this service in this time range.';
                     } else {
                         browseStatus.textContent = 'No traces found in this time range. Bucket appears empty.';
                     }
@@ -1386,6 +1558,9 @@
         }
 
         drawHeatmapCanvas();
+        // setHeatmapSelection(null) ran before the full domain existed. Refresh
+        // now so profile actions can fall back to the newly loaded service.
+        updateSelectionCount();
     }
 
     function drawHeatmapCanvas() {
@@ -1677,7 +1852,15 @@
     // Wipe the browse pane back to its initial empty state. Used when
     // credentials are cleared: the heatmap belongs to the now-removed identity's
     // bucket, so it must not linger.
-    function resetBrowsePane() {
+    function resetBrowsePane(invalidate = true) {
+        if (invalidate) {
+            serviceDiscoveryGeneration++;
+            browseGeneration++;
+        }
+        availableServices = [];
+        availableServiceMetadata = new Map();
+        serviceInput.value = '';
+        renderServiceTabs();
         heatmapSegments = [];
         heatmapRows = [];
         heatmapDomain = null;
@@ -1688,7 +1871,7 @@
         heatmapView.style.display = 'none';
         browseStatus.style.display = '';
         browseStatus.className = 'status';
-        browseStatus.textContent = 'Select a time range and click Search to find traces.';
+        browseStatus.textContent = 'Select a bucket to find services.';
     }
 
     function resetHeatmapZoom() {
@@ -1886,6 +2069,19 @@
         return new URLSearchParams(query);
     }
 
+    // Profiling actions use the explicit heatmap box when present. With no box,
+    // they cover the full service currently loaded in the browse pane.
+    function effectiveProfileSelection() {
+        if (heatmapSelection && heatmapSelection.keys.length) return heatmapSelection;
+        if (!heatmapSegments.length || !heatmapFullDomain) return null;
+        return {
+            keys: heatmapSegments.map(segment => segment.key),
+            bytes: totalBytes(heatmapSegments),
+            t0: heatmapFullDomain.tMin,
+            t1: heatmapFullDomain.tMax,
+        };
+    }
+
     // CPU Profiling button: open a flamegraph of the selected segments. The
     // flamegraph view builds from the trace's CpuSampleEvents (and resolves
     // symbols from SymbolTableEntry), ignoring all other event types, so we
@@ -1897,10 +2093,11 @@
         // returns unless BOTH sides are set, so a partial capture still falls
         // through to the single-scope flamegraph of the current selection.
         if (diffA && diffB) { launchDiff('flamegraph'); return; }
-        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const selection = effectiveProfileSelection();
+        if (!selection) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
-        const keys = heatmapSelection.keys;
+        const keys = selection.keys;
         // Demand-driven mode: drive the sampled server-side refinement loop over
         // the selection's host/time BOX (not these exact files). The loop lists
         // the matching segments, samples a representative subset in a
@@ -1915,7 +2112,7 @@
             // (A box spanning >1 service sends no service filter — all services
             // in the box — matching exact mode, rather than the old "first
             // service wins" which silently dropped the others.)
-            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
+            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
             const base = new URLSearchParams();
             base.set('api', '1');
             const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
@@ -1931,7 +2128,7 @@
         // can't overflow CloudFront's 8192-byte request-URI cap and 414 the tab)
         // and stateless (so a shared deep link re-resolves in any browser).
         const fgParams = traceTitleParams(keys);
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeScope(fgParams, scope);
         if (hostsDropped) warnHostsDropped();
         window.open('flamegraph.html?' + query, '_blank');
@@ -1952,24 +2149,26 @@
         // In diff mode the top button opens the A/B diff (issue #626); a partial
         // capture falls through to a single-scope tokio-stats view.
         if (diffA && diffB) { launchDiff('tokio'); return; }
-        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const selection = effectiveProfileSelection();
+        if (!selection) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
-        const keys = heatmapSelection.keys;
+        const keys = selection.keys;
         // Same scope the aggregation flamegraph uses, same param vocabulary —
         // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         window.open('tokio_stats.html?' + query, '_blank');
     }
 
     function viewSpanExplorer() {
-        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const selection = effectiveProfileSelection();
+        if (!selection) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
-        const keys = heatmapSelection.keys;
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
+        const keys = selection.keys;
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
         const base = new URLSearchParams();
         base.set('api', '1');
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
@@ -2265,7 +2464,8 @@
 
         if (currentTab === 'browse') {
             const sel = heatmapSelection;
-            if (!sel || !sel.keys.length) {
+            const profileSel = effectiveProfileSelection();
+            if (!profileSel) {
                 viewBtn.disabled = true;
                 cpuBtn.disabled = true;
                 healthBtn.disabled = true;
@@ -2275,19 +2475,21 @@
                 count.textContent = '';
                 return;
             }
-            const over = sel.bytes > MAX_OPEN_BYTES;
-            viewBtn.disabled = over;
+            const over = profileSel.bytes > MAX_OPEN_BYTES;
+            viewBtn.disabled = !sel || over;
             cpuBtn.disabled = over && !aggregationEnabled;
             healthBtn.disabled = !aggregationEnabled;
             if (spansBtn) spansBtn.disabled = !aggregationEnabled;
             // Diff is an aggregate-only feature (both flamegraph and tokio-stats
             // diffs run the server-side refinement loop per side).
-            diffAddBtn.disabled = !aggregationEnabled;
+            diffAddBtn.disabled = !sel || !aggregationEnabled;
             warn.textContent = over && !aggregationEnabled
-                ? `Too large to open (${formatSize(sel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
+                ? `Too large to open (${formatSize(profileSel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
                 : '';
-            const win = sel.t0 && sel.t1 ? ` · ${fmtTick(sel.t0)}–${fmtTick(sel.t1)}` : '';
-            count.textContent = `${sel.keys.length} segment${sel.keys.length !== 1 ? 's' : ''} · ${formatSize(sel.bytes)}${win}`;
+            const win = profileSel.t0 && profileSel.t1
+                ? ` · ${fmtTick(profileSel.t0)}–${fmtTick(profileSel.t1)}` : '';
+            const scopeLabel = sel ? '' : 'Current service · ';
+            count.textContent = `${scopeLabel}${profileSel.keys.length} segment${profileSel.keys.length !== 1 ? 's' : ''} · ${formatSize(profileSel.bytes)}${win}`;
             return;
         }
 

@@ -41,6 +41,8 @@ pub struct BrowseParams {
     /// Optional key prefix (the portion before the date), e.g. `traces`. When
     /// omitted the server's default prefix (if any) is used.
     pub prefix: Option<String>,
+    /// Optional exact service path segment. Empty values are treated as absent.
+    pub service: Option<String>,
     /// Inclusive start of the window, unix seconds.
     pub from: i64,
     /// Inclusive end of the window, unix seconds.
@@ -75,6 +77,7 @@ pub async fn browse(
     creds: MaybeCreds,
     Query(params): Query<BrowseParams>,
 ) -> Result<BrowseOk, (StatusCode, String)> {
+    let service = normalize_service(params.service.as_deref())?;
     let backend = state.resolve(creds).await?;
 
     let bucket = params
@@ -95,30 +98,48 @@ pub async fn browse(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let base = match (&state.default_prefix, key_prefix) {
-        (Some(pfx), Some(kp)) => format!("{}/{}", pfx.trim_end_matches('/'), kp),
-        (Some(pfx), None) => pfx.clone(),
-        (None, Some(kp)) => kp.to_string(),
-        (None, None) => String::new(),
-    };
+    let base = resolve_base(state.default_prefix.as_deref(), key_prefix);
 
     let window = params.to - params.from;
 
-    // Local mode: flat listing (no date-prefix fan-out).
-    if !state.allow_byo_creds {
-        return browse_local(backend, &bucket, &base).await;
+    // Flat-layout mode: one listing, with no date-prefix fan-out.
+    if !state.time_partitioned_source {
+        return browse_local(backend, &bucket, &base, service).await;
     }
 
-    browse_s3(backend, &bucket, &base, params.from, params.to, window).await
+    browse_s3(
+        backend,
+        &bucket,
+        &base,
+        params.from,
+        params.to,
+        window,
+        service,
+    )
+    .await
 }
 
-/// Local mode: flat listing filtered to trace segments.
-/// Called when `allow_byo_creds == false` (i.e. `--local-dir`).
+/// Normalize a service query into one safe, exact key path segment.
+fn normalize_service(service: Option<&str>) -> Result<Option<&str>, (StatusCode, String)> {
+    let Some(service) = service.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if service.contains('/') || service.chars().any(char::is_control) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "`service` must be a single key path segment".to_string(),
+        ));
+    }
+    Ok(Some(service))
+}
+
+/// Flat-layout mode: one listing filtered to trace segments.
 /// No time filtering — the frontend shows all results, positioned by mtime.
 async fn browse_local(
     backend: Arc<dyn StorageBackend>,
     bucket: &str,
     base: &str,
+    service: Option<&str>,
 ) -> Result<BrowseOk, (StatusCode, String)> {
     let page = backend
         .list_objects(bucket, base, PER_PREFIX_CAP)
@@ -128,6 +149,9 @@ async fn browse_local(
         .objects
         .into_iter()
         .filter(|o| crate::ingest::aggregate::is_trace_segment(&o.key))
+        // Local flat listings cannot infer a service from legacy buffer paths.
+        // For the S3-style layout, the segment after YYYY-MM-DD/HHMM is exact.
+        .filter(|o| service.is_none_or(|wanted| key_service(&o.key) == Some(wanted)))
         .collect();
     let op = OperationMetrics::browse(objects.len(), 0, page.truncated, false);
     Ok((
@@ -147,14 +171,18 @@ async fn browse_s3(
     from: i64,
     to: i64,
     window: i64,
+    service: Option<&str>,
 ) -> Result<BrowseOk, (StatusCode, String)> {
-    let gran = if window < MINUTE_GRANULARITY_THRESHOLD_SECS {
+    let gran = if service.is_some() || window < MINUTE_GRANULARITY_THRESHOLD_SECS {
         Granularity::Minute
     } else {
         Granularity::Hour
     };
 
-    let (prefixes, range_truncated) = time_prefixes(base, from, to, gran);
+    let (prefixes, range_truncated) = match service {
+        Some(service) => service_time_prefixes(base, from, to, service),
+        None => time_prefixes(base, from, to, gran),
+    };
 
     // Per-request operational detail — the request-rate/latency signal lives in
     // the per-request EMF metrics now, so keep this at debug to avoid log spam.
@@ -238,6 +266,75 @@ async fn browse_s3(
     // and `prefixes_fanned_out`/`refined` show how hard the listing worked.
     let op = OperationMetrics::browse(objects.len(), prefixes.len(), truncated, refined);
     Ok((Extension(op), Json(BrowseResponse { objects, truncated })))
+}
+
+/// Find the service segment in the known
+/// `{base}/{YYYY-MM-DD}/{HHMM}/{service}/...` key layout.
+pub(super) fn key_service(key: &str) -> Option<&str> {
+    let parts: Vec<&str> = key.split('/').collect();
+    let date = parts.iter().position(|part| is_date_segment(part))?;
+    let hhmm = *parts.get(date + 1)?;
+    if hhmm.len() != 4 || !hhmm.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    parts.get(date + 2).copied().filter(|s| !s.is_empty())
+}
+
+/// Find the host segment in the known
+/// `{base}/{YYYY-MM-DD}/{HHMM}/{service}/{host}/...` key layout.
+pub(super) fn key_host(key: &str) -> Option<&str> {
+    let parts: Vec<&str> = key.split('/').collect();
+    let date = parts.iter().position(|part| is_date_segment(part))?;
+    let hhmm = *parts.get(date + 1)?;
+    if hhmm.len() != 4 || !hhmm.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    parts.get(date + 3).copied().filter(|s| !s.is_empty())
+}
+
+fn is_date_segment(segment: &str) -> bool {
+    let b = segment.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..].iter().all(u8::is_ascii_digit)
+}
+
+/// Build exact minute prefixes ending at a selected service segment.
+fn service_time_prefixes(base: &str, from: i64, to: i64, service: &str) -> (Vec<String>, bool) {
+    let (mut prefixes, truncated) = minute_time_prefixes(base, from, to);
+    for prefix in &mut prefixes {
+        prefix.push('/');
+        prefix.push_str(service);
+        prefix.push('/');
+    }
+    (prefixes, truncated)
+}
+
+pub(super) fn resolve_base(default_prefix: Option<&str>, key_prefix: Option<&str>) -> String {
+    match (default_prefix, key_prefix) {
+        (Some(pfx), Some(kp)) => {
+            let default = pfx.trim_matches('/');
+            let requested = kp.trim_matches('/');
+            if default.is_empty()
+                || requested == default
+                || requested.starts_with(&format!("{default}/"))
+            {
+                requested.to_string()
+            } else {
+                format!("{default}/{requested}")
+            }
+        }
+        (Some(pfx), None) => pfx.to_string(),
+        (None, Some(kp)) => kp.to_string(),
+        (None, None) => String::new(),
+    }
+}
+
+pub(super) fn minute_time_prefixes(base: &str, from: i64, to: i64) -> (Vec<String>, bool) {
+    time_prefixes(base, from, to, Granularity::Minute)
 }
 
 /// Build the date+time S3 key prefixes covering `[from, to]` (unix seconds),
@@ -372,6 +469,77 @@ mod tests {
                 "p/2026-06-09/1912"
             ]
         );
+    }
+
+    #[test]
+    fn selected_service_prefixes_are_exact_full_minutes() {
+        let from = OffsetDateTime::from_unix_timestamp(1_781_032_200).unwrap(); // 19:10
+        let to = from.unix_timestamp() + 2 * 60; // 19:12
+        let (prefixes, truncated) =
+            service_time_prefixes("traces", from.unix_timestamp(), to, "api");
+        assert!(!truncated);
+        assert_eq!(
+            prefixes,
+            vec![
+                "traces/2026-06-09/1910/api/",
+                "traces/2026-06-09/1911/api/",
+                "traces/2026-06-09/1912/api/",
+            ]
+        );
+    }
+
+    #[test]
+    fn scope_prefix_already_under_default_is_not_duplicated() {
+        assert_eq!(resolve_base(Some("traces"), Some("traces")), "traces");
+        assert_eq!(
+            resolve_base(Some("traces"), Some("traces/team-a")),
+            "traces/team-a"
+        );
+        assert_eq!(
+            resolve_base(Some("traces"), Some("team-a")),
+            "traces/team-a"
+        );
+    }
+
+    #[test]
+    fn service_normalization_trims_and_treats_empty_as_absent() {
+        assert_eq!(normalize_service(None).unwrap(), None);
+        assert_eq!(normalize_service(Some("")).unwrap(), None);
+        assert_eq!(normalize_service(Some(" \t ")).unwrap(), None);
+        assert_eq!(normalize_service(Some(" api ")).unwrap(), Some("api"));
+    }
+
+    #[test]
+    fn service_normalization_rejects_non_segments() {
+        for service in ["api/worker", "api\nworker"] {
+            let error = normalize_service(Some(service)).unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "{service:?}");
+        }
+        for service in [r"api\worker", ".", ".."] {
+            assert_eq!(normalize_service(Some(service)).unwrap(), Some(service));
+        }
+    }
+
+    #[test]
+    fn known_layout_service_is_exact() {
+        assert_eq!(
+            key_service("root/2026-06-09/1910/api/host/boot/1-0.bin.gz"),
+            Some("api")
+        );
+        assert_eq!(
+            key_service("root/2026-06-09/1910/api-worker/host/boot/1-0.bin.gz"),
+            Some("api-worker")
+        );
+        assert_eq!(key_service("boot/trace.0.bin"), None);
+    }
+
+    #[test]
+    fn known_layout_host_is_exact() {
+        assert_eq!(
+            key_host("root/2026-06-09/1910/api/host-a/boot/1-0.bin.gz"),
+            Some("host-a")
+        );
+        assert_eq!(key_host("boot/trace.0.bin"), None);
     }
 
     /// Empty base prefix yields a bare `{date}/{time}` prefix (no leading slash).

@@ -403,7 +403,7 @@ export class ColumnarWorkerSpans {
     for (let si = 0; si < m; si++) {
       const sample = samples[si]!;
       const c = this.byWorker.get(sample.workerId);
-      if (!c) { sample.spawnLoc = null; sample.inPoll = false; continue; }
+      if (!c) { sample.spawnLoc = null; continue; }
       const isSched = sample.source === 1;
       if (!isSched) c.cpuSampleTimes.push(sample.timestamp);
       const pi = c.pollCovering(sample.timestamp);

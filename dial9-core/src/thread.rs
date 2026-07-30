@@ -56,10 +56,33 @@ impl Drop for ThreadTrackingGuard {
 ///
 /// `gettid()` on Linux/Android (a vDSO/syscall); a stable per-thread counter
 /// elsewhere. Allocation-free, so it is safe to call from the allocator hook.
+/// On hot paths prefer [`cached_tid`], which pays the syscall once per
+/// thread.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn current_tid() -> u32 {
     // SAFETY: gettid takes no args and only returns the caller's tid.
     unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+}
+
+/// [`current_tid`], read once per thread and cached: a thread's tid never
+/// changes, and `gettid` is a real syscall on Linux.
+///
+/// Allocation-free (const-initialized thread local), so it is as
+/// hook-safe as [`current_tid`] itself.
+pub fn cached_tid() -> u32 {
+    use std::cell::Cell;
+    thread_local! {
+        static TID: Cell<u32> = const { Cell::new(0) };
+    }
+    TID.with(|tid| {
+        let cached = tid.get();
+        if cached != 0 {
+            return cached;
+        }
+        let fresh = current_tid();
+        tid.set(fresh);
+        fresh
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -68,6 +91,22 @@ pub fn current_tid() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1);
     thread_local! { static TID: u32 = NEXT.fetch_add(1, Ordering::Relaxed); }
     TID.with(|t| *t)
+}
+
+#[cfg(test)]
+mod tid_tests {
+    use super::*;
+
+    #[test]
+    fn cached_tid_matches_current_tid_and_is_stable() {
+        assert_eq!(cached_tid(), current_tid());
+        assert_eq!(cached_tid(), cached_tid());
+        let other = std::thread::spawn(|| (cached_tid(), current_tid()))
+            .join()
+            .unwrap();
+        assert_eq!(other.0, other.1);
+        assert_ne!(other.0, cached_tid(), "tids must differ across threads");
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.5.0-rc0"
+version = "0.5.0-rc1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,25 +11,40 @@ categories = ["asynchronous", "development-tools::profiling"]
 
 [package.metadata.docs.rs]
 all-features = true
+# `--all-features` turns on `taskdump`, which requires `--cfg tokio_unstable`.
+rustdoc-args = ["--cfg", "tokio_unstable"]
+rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ target }-v{ version }{ archive-suffix }"
 pkg-fmt = "tgz"
 bin-dir = "dial9{ binary-ext }"
 
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "dial9"
 path = "src/main.rs"
 required-features = ["cli"]
 
+[[test]]
+name = "cli_trace_shape"
+required-features = ["cli"]
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
 [dependencies]
 dial9-core = { workspace = true }
 dial9-util = { version = "0.5.0-rc0", path = "../dial9-util" }
+dial9-trace-format = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
-dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry", optional = true }
+dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry", optional = true }
 dial9-macro = { workspace = true, optional = true }
+dial9-metrique = { workspace = true, optional = true }
 
-dial9-viewer = { version = "0.5.0-rc0", path = "../dial9-viewer", optional = true }
+dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
 
 tokio = { version = "1.52.0", optional = true, default-features = false, features = [
@@ -40,7 +55,7 @@ bon = { version = "3", optional = true }
 tracing = { version = "0.1.44", optional = true }
 
 [features]
-default = ["cli"]
+default = []
 
 ## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
 cli = ["dep:dial9-viewer", "dep:anyhow"]
@@ -69,6 +84,7 @@ tokio = [
     "dep:bon",
     "dep:tracing",
     "pipeline",
+    "dial9-metrique?/tokio",
 ]
 
 ## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
@@ -104,8 +120,16 @@ tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
 ## wrappers are always available; this only adds the tower integration.
 tower = ["dial9-util/tower"]
 
+## Metrique sink recording unit-of-work metric entries into dial9 traces.
+## Standalone; combine with the `tokio` feature to capture task ids.
+metrique-sink = ["dep:dial9-metrique"]
+
+## Serde deserialization of decoded events (`RawEvent::deserialize`).
+## Reading a trace with [`Decoder`] needs no feature.
+deserialize = ["dial9-trace-format/serde-deserialize"]
+
 ## Trace file reading + analysis toolkit (offline decode).
-analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
+analysis = ["deserialize", "tokio", "dial9-tokio-telemetry/analysis"]
 
 ## S3 upload pipeline stage.
 worker-s3 = ["tokio", "dial9-tokio-telemetry/worker-s3"]
@@ -130,6 +154,7 @@ dial9 = { path = ".", features = [
     "linux-socket",
     "tracing-layer",
     "tower",
+    "metrique-sink",
     "unstable-events",
     "worker-s3",
 ] }
@@ -148,7 +173,7 @@ tower-layer = "0.3"
 tower-service = "0.3"
 flate2 = "1"
 clap = { version = "4", features = ["derive", "env"] }
-metrique = { version = "0.1.23", features = ["local-format"] }
+metrique = { version = "0.1.29", features = ["local-format"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -250,6 +275,10 @@ required-features = ["worker-s3"]
 [[example]]
 name = "tracing_sleep"
 required-features = ["tracing-layer"]
+
+[[example]]
+name = "metrique_metrics"
+required-features = ["metrique-sink", "tokio"]
 
 [[example]]
 name = "block_in_place_workload"

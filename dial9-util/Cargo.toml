@@ -32,7 +32,7 @@ tower = ["dep:tower-service", "dep:tower-layer"]
 # The span tests need a traced Tokio runtime to capture events; that machinery
 # lives in dial9-tokio-telemetry. It's a dev-dependency only, so no dependency
 # cycle (nothing in this crate's normal deps touches tokio-telemetry).
-dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry" }
+dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry" }
 dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 tokio = { version = "1.52.0", features = ["rt", "rt-multi-thread", "macros", "time"] }

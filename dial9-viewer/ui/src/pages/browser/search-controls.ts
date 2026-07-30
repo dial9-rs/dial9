@@ -13,8 +13,14 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
   });
   els.bucketInput.addEventListener("change", () => {
     void (async () => {
+      // A committed bucket edit points at a (possibly) new bucket, so any
+      // leftover service belongs to the old one. Clear it: otherwise
+      // discoverServices sees a non-empty serviceInput, skips discovery, and
+      // browses the stale service against the new bucket.
+      els.serviceInput.value = "";
       await actions.detectRegionForBucket(els.bucketInput.value.trim());
-      void actions.discoverPrefixes();
+      await actions.discoverPrefixes();
+      await actions.discoverServices();
       actions.syncUrl();
     })();
   });
@@ -44,7 +50,7 @@ export function mountSearchControls({ store, els, actions }: PageCtx): void {
 
   // Run the time-range (Browse) search.
   els.searchBtn.addEventListener("click", () => {
-    void actions.doTimeRangeSearch();
+    actions.submitBrowseSearch();
   });
 
   // Renders -------------------------------------------------------------

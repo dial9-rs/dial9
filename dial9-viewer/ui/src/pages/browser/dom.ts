@@ -37,6 +37,8 @@ export interface BrowserEls {
   bucketInput: HTMLInputElement;
   prefixInput: HTMLInputElement;
   prefixSuggestions: HTMLSpanElement;
+  serviceInput: HTMLInputElement;
+  serviceTabs: HTMLDivElement;
   quickBtns: readonly HTMLButtonElement[];
   rangeFrom: HTMLInputElement;
   rangeTo: HTMLInputElement;
@@ -101,6 +103,8 @@ export function queryEls(): BrowserEls {
     bucketInput: byId("bucket-input"),
     prefixInput: byId("prefix-input"),
     prefixSuggestions: byId("prefix-suggestions"),
+    serviceInput: byId("service-input"),
+    serviceTabs: byId("service-tabs"),
     quickBtns: [...document.querySelectorAll<HTMLButtonElement>(".quick-btns button")],
     rangeFrom: byId("range-from"),
     rangeTo: byId("range-to"),

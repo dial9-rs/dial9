@@ -156,7 +156,9 @@ struct SkillInfo {
 }
 
 fn env_dir_include_str(env: &str, path: impl AsRef<Path>) -> String {
-    let path = path.as_ref().to_str().unwrap();
+    // Emit forward slashes: `include_str!` accepts them on all platforms, and a
+    // backslash path (Windows) would be invalid escapes in the generated string.
+    let path = path.as_ref().to_str().unwrap().replace('\\', "/");
     format!("include_str!(concat!(env!(\"{env}\"), \"/{path}\"))")
 }
 
@@ -188,10 +190,10 @@ fn collect_files(
         if abs_path.is_dir() && !abs_path.is_symlink() {
             collect_files(manifest_dir, base, &rel, out);
         } else if abs_path.is_file() || abs_path.is_symlink() {
-            out.push((
-                rel.to_string_lossy().into_owned(),
-                RelReference::SrcRel(base.join(rel)),
-            ));
+            // Forward slashes: this string is both the archive key and what
+            // `TOOLKIT_FILES` prefix-matches on, so it must not vary by host OS.
+            let key = rel.to_string_lossy().replace('\\', "/");
+            out.push((key, RelReference::SrcRel(base.join(rel))));
         }
     }
 }

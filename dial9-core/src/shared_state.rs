@@ -32,6 +32,15 @@ pub struct SharedState {
     dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
 }
 
+impl std::fmt::Debug for SharedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedState")
+            .field("enabled", &self.enabled)
+            .field("start_time_ns", &self.start_time_ns)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SharedState {
     crate::test_util_pub! {
         fn new(start_time_ns: u64) -> Self {
@@ -252,6 +261,7 @@ impl SharedState {
 /// active. All event-recording calls should go through this type so that
 /// callers cannot accidentally emit events without an enabled check.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {

@@ -39,6 +39,9 @@ symbolize-processor = ["dial9-core/pipeline", "dep:tokio"]
 ## Test-only helpers.
 test-util = []
 
+[lints.rust]
+missing_debug_implementations = "warn"
+
 [dependencies]
 bon = { version = "3", optional = true }
 bytes = "1"

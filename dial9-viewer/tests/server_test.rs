@@ -585,6 +585,175 @@ async fn browse_uses_minute_granularity_for_short_window() {
     check!(objects[0]["key"].as_str().unwrap().contains("1910"));
 }
 
+/// A selected service uses exact `{date}/{HHMM}/{service}/` prefixes even for a
+/// window that would otherwise use broad hour prefixes.
+#[tokio::test]
+async fn browse_filters_exact_service_for_wide_window() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    for (service, payload) in [("api", b"a".as_slice()), ("api-worker", b"b".as_slice())] {
+        put_object(
+            &s3,
+            "traces-bucket",
+            &format!("2026-04-09/1910/{service}/host/1000-0.bin.gz"),
+            &gzip_bytes(payload),
+        )
+        .await;
+    }
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 22 * 60; // wide enough to use hour prefixes when unfiltered
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&service=api&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("/api/"));
+}
+
+#[tokio::test]
+async fn services_discovers_sorted_unique_services_without_browse_objects() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    for key in [
+        "2026-04-09/1925/worker/host-a/1000-0.bin.gz",
+        "2026-04-09/1925/api/host-a/1000-0.bin.gz",
+        "2026-04-09/1926/api/host-b/1001-0.bin.gz",
+        "2026-04-09/2010/outside/host/1002-0.bin.gz",
+    ] {
+        put_object(&s3, "traces-bucket", key, &gzip_bytes(b"trace")).await;
+    }
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 22 * 60;
+    let resp = client
+        .get(format!(
+            "{base}/api/services?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["api", "worker"]));
+    check!(
+        body["service_metadata"]
+            == serde_json::json!([
+                {"service": "api", "host_count": 2},
+                {"service": "worker", "host_count": 1}
+            ])
+    );
+    check!(body["truncated"] == false);
+    check!(body.get("objects").is_none());
+}
+
+#[tokio::test]
+async fn services_discovers_only_the_trailing_ten_minutes_of_a_long_range() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+
+    for key in [
+        "2026-04-09/1910/old-service/host/1000-0.bin.gz",
+        "2026-04-09/2005/recent-service/host/1001-0.bin.gz",
+    ] {
+        put_object(&s3, "traces-bucket", key, &gzip_bytes(b"trace")).await;
+    }
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 60 * 60; // 20:08:00Z
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/services?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["recent-service"]));
+    check!(
+        body["service_metadata"]
+            == serde_json::json!([{"service": "recent-service", "host_count": 1}])
+    );
+    check!(body["truncated"] == false);
+}
+
+#[tokio::test]
+async fn services_honors_default_and_request_prefix() {
+    let (s3, base, _dir) = setup_s3_test(
+        "traces-bucket",
+        Some("traces-bucket".into()),
+        Some("root".into()),
+    )
+    .await;
+
+    for key in [
+        "root/team-a/2026-04-09/1925/api/host/1000-0.bin.gz",
+        "root/team-b/2026-04-09/1925/worker/host/1000-0.bin.gz",
+    ] {
+        put_object(&s3, "traces-bucket", key, &gzip_bytes(b"trace")).await;
+    }
+
+    let from = 1_775_761_680;
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/services?bucket=traces-bucket&prefix=team-a&from={from}&to={}",
+            from + 22 * 60
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["api"]));
+    check!(body["service_metadata"] == serde_json::json!([{"service": "api", "host_count": 1}]));
+}
+
+#[tokio::test]
+async fn browse_empty_service_is_unfiltered_and_invalid_service_is_rejected() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    for service in ["api", "worker"] {
+        put_object(
+            &s3,
+            "traces-bucket",
+            &format!("2026-04-09/1910/{service}/host/1000-0.bin.gz"),
+            &gzip_bytes(b"trace"),
+        )
+        .await;
+    }
+
+    let from = 1_775_761_680;
+    let to = from + 22 * 60;
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&service=%20%20&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["objects"].as_array().unwrap().len() == 2);
+
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&service=api%2Fworker&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
 /// `/api/browse` rejects a window where `to` precedes `from`.
 #[tokio::test]
 async fn browse_rejects_inverted_range() {
@@ -1080,6 +1249,69 @@ async fn browse_local_mode_finds_buffer_traces() {
     check!(keys.contains(&"aczi-148206/trace.0.bin"));
     check!(keys.contains(&"aczi-148206/trace.1.bin"));
     check!(keys.contains(&"bxyz-999999/trace.0.bin.gz"));
+}
+
+#[tokio::test]
+async fn browse_local_mode_filters_known_layout_by_exact_service() {
+    let dir = tempfile::tempdir().unwrap();
+    for service in ["api", "api-worker"] {
+        let path = dir.path().join(format!("2026-04-09/1910/{service}/host"));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("1000-0.bin.gz"), gzip_bytes(b"trace")).unwrap();
+    }
+
+    let base = start_server(local_state(dir.path())).await;
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/browse?bucket=local&service=api&from=0&to=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("/api/"));
+}
+
+#[tokio::test]
+async fn services_local_mode_reports_unique_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    for (service, host) in [
+        ("api", "host-a"),
+        ("api", "host-b"),
+        ("api", "host-a"),
+        ("worker", "host-c"),
+    ] {
+        let minute = if host == "host-a" { "1910" } else { "1911" };
+        let path = dir
+            .path()
+            .join(format!("2026-04-09/{minute}/{service}/{host}"));
+        std::fs::create_dir_all(&path).unwrap();
+        let segment = path.join(format!(
+            "{}-0.bin.gz",
+            std::fs::read_dir(&path).unwrap().count()
+        ));
+        std::fs::write(segment, gzip_bytes(b"trace")).unwrap();
+    }
+
+    let base = start_server(local_state(dir.path())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/services?bucket=local&from=0&to=1"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["api", "worker"]));
+    check!(
+        body["service_metadata"]
+            == serde_json::json!([
+                {"service": "api", "host_count": 2},
+                {"service": "worker", "host_count": 1}
+            ])
+    );
 }
 
 // --- trace upload tests ---

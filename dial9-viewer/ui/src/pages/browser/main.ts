@@ -6,7 +6,7 @@
 
 import "../../styles/browser.css";
 import { createActions } from "./actions.js";
-import type { ApiConfig } from "./api.js";
+import { usesFlatSourceLayout, type ApiConfig } from "./api.js";
 import { mountActionsBar } from "./actions-bar.js";
 import { resolveBucketFilter } from "./bucket-filter.js";
 import { mountBrowseView } from "./browse-view.js";
@@ -22,6 +22,7 @@ import { mountHeatmapKeys } from "./heatmap-keys.js";
 import { mountBrowserPageKeys } from "./page-keys.js";
 import { mountRawView } from "./raw-view.js";
 import { mountSearchControls } from "./search-controls.js";
+import { mountServiceTabs } from "./service-tabs.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
@@ -66,6 +67,7 @@ function boot(): void {
   mountHeader(ctx);
   mountSearchControls(ctx);
   mountTabs(ctx);
+  mountServiceTabs(ctx);
   mountBrowseView(ctx);
   mountSelectionOverlay(ctx);
   mountHeatmapInteraction(ctx);
@@ -92,6 +94,7 @@ function boot(): void {
   }
   if (urlState.bucket) els.bucketInput.value = urlState.bucket;
   if (urlState.prefix) els.prefixInput.value = urlState.prefix;
+  if (urlState.service) els.serviceInput.value = urlState.service;
   if (urlState.q) els.rawSearchInput.value = urlState.q;
   actions.mirrorPrefix();
   if (urlState.tab === "raw") actions.switchTab("raw");
@@ -177,9 +180,10 @@ function boot(): void {
       // button drives the sampled server-side loop instead of decoding raw
       // traces; Tokio Stats enables on selection.
       store.update("config", { aggregationEnabled: !!config.aggregation_enabled });
-      // Local-dir servers have no BYO credentials; their buffer-style keys
-      // carry no scope, so selections open directly by key (#627).
-      store.update("config", { localMode: !config.supports_byo_credentials });
+      // Flat-layout sources carry no scope in buffer-style keys, so selections
+      // open directly by key (#627). Simulator keys are time-partitioned even
+      // though the simulator intentionally has no credential support.
+      store.update("config", { localMode: usesFlatSourceLayout(config) });
       // The server's bucket-picker filter applies unless the page URL
       // pinned an override at load (which wins). Servers predating the
       // field leave the "dial9" default in place.
@@ -200,11 +204,21 @@ function boot(): void {
       return actions
         .detectRegionForBucket(els.bucketInput.value.trim())
         .then(() => actions.discoverPrefixes())
-        .then(() => actions.autoSearch());
+        .then(() => actions.discoverServices());
     })
     .catch(() => {
-      void actions.discoverPrefixes().then(() => actions.autoSearch());
+      void actions.discoverPrefixes().then(() => actions.discoverServices());
     });
+
+  window.addEventListener("popstate", () => {
+    const state = window.Dial9UrlState.parse(window.location.search);
+    const service = state.service ?? "";
+    if (service) {
+      actions.selectService(service, "replace");
+    } else {
+      actions.clearBrowseNoService();
+    }
+  });
 }
 
 /** Run every subscriber once so the first frame renders the initial state. */

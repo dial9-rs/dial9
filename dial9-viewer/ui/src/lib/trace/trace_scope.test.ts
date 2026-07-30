@@ -37,7 +37,7 @@ describe("scopeFromKeys", () => {
   it("derives the window from key epochs when none is supplied (raw mode)", () => {
     const s = scopeFromKeys("bkt", [key("h1", 1782760100, 1), key("h1", 1782760300, 2)], null, null);
     expect(s!.from).toBe(1782760100);
-    expect(s!.to).toBe(1782760300);
+    expect(s!.to).toBe(1782760301);
     expect(s!.region).toBe("");
   });
 

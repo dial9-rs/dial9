@@ -26,6 +26,10 @@ use std::time::Duration;
 pub struct ThreadLocalEncoder<'a> {
     encoder: &'a mut Encoder<Vec<u8>>,
     location_cache: &'a mut FxHashMap<&'static Location<'static>, String>,
+    /// Events written through this handle; feeds the buffer's batch count so
+    /// callers that decline to write (e.g. the metrique sink dropping an
+    /// entry) are not counted.
+    events_written: &'a mut usize,
 }
 
 impl std::fmt::Debug for ThreadLocalEncoder<'_> {
@@ -59,6 +63,7 @@ impl ThreadLocalEncoder<'_> {
     /// to cache schema registrations per concrete type.
     pub fn encode(&mut self, event: &(impl dial9_trace_format::TraceEvent + 'static)) {
         self.encoder.write_infallible(event);
+        *self.events_written += 1;
     }
 
     /// Write an event with a dynamically-registered schema.
@@ -80,14 +85,18 @@ impl ThreadLocalEncoder<'_> {
     /// ```
     // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
     #[doc(hidden)]
+    /// Errors on validation failure; the event is dropped and the calling
+    /// thread is never panicked. The caller decides whether and how to
+    /// report (it knows the event's provenance; rate-limit in loops).
+    #[must_use = "a validation failure means the event was dropped"]
     pub fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
         values: &[dial9_trace_format::types::FieldValue],
-    ) {
-        self.encoder
-            .write_event(schema, values)
-            .expect("writing to Vec<u8> is infallible");
+    ) -> std::io::Result<()> {
+        self.encoder.write_event(schema, values)?;
+        *self.events_written += 1;
+        Ok(())
     }
 
     /// Intern a `&'static Location` (caching the `to_string()` result).
@@ -240,6 +249,7 @@ impl ThreadLocalBuffer {
         ThreadLocalEncoder {
             encoder: &mut self.encoder,
             location_cache: &mut self.location_cache,
+            events_written: &mut self.event_count,
         }
     }
 
@@ -247,7 +257,6 @@ impl ThreadLocalBuffer {
     #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
     fn record_encodable(&mut self, event: &dyn Encodable) {
         event.encode(&mut self.thread_local_encoder());
-        self.event_count += 1;
     }
 
     fn should_flush(&self) -> bool {
@@ -349,7 +358,6 @@ pub(crate) fn with_encoder(
         };
         let first_call = buf.set_collector(collector);
         f(&mut buf.thread_local_encoder());
-        buf.event_count += 1;
         let current_epoch = drain_epoch.load(Ordering::Relaxed);
         if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
             collector.accept_flush(buf.flush());

@@ -8,6 +8,19 @@ pub use dial9_core::recorder::{
 };
 pub use dial9_core::recording::Recorder;
 
+/// The trace format: define events with `#[derive(TraceEvent)]`, encode your own
+/// types with [`TraceField`](format::TraceField), read a trace back with
+/// [`Decoder`](format::Decoder).
+pub mod format {
+    pub use dial9_trace_format::decoder::{self, Decoder};
+    pub use dial9_trace_format::types::{self, EventEncoder, FieldType, InternedString};
+    pub use dial9_trace_format::{TraceEvent, TraceField};
+
+    /// Error from [`RawEvent::deserialize`](decoder::RawEvent::deserialize).
+    #[cfg(feature = "deserialize")]
+    pub use dial9_trace_format::DeserError;
+}
+
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
 /// write custom encoders, author custom segment processors, reach the raw
 /// recording modules.
@@ -62,6 +75,8 @@ pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::{TracedFuture, block_on, spawn, spawn_in};
 
+#[cfg(all(feature = "tokio", feature = "worker-s3"))]
+pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9TokioHandle, RecorderPipelineExt, RecorderTokioExt, TaskDumpConfig,
@@ -135,3 +150,13 @@ pub use dial9_util::dial9_span;
 /// that emits span events directly into a dial9 trace with no `tracing`
 /// subscriber. Construct spans with the [`dial9_span!`] macro.
 pub use dial9_util::span;
+
+// Metrique unit-of-work entry sink.
+#[cfg(feature = "metrique-sink")]
+pub use dial9_metrique as metrique_sink;
+
+// The metrique field flags at the crate root, so `#[metrics(...)]`
+// attributes read as `flags(dial9::Interned)` / `flags(dial9::Skip)`
+// without imports.
+#[cfg(feature = "metrique-sink")]
+pub use dial9_metrique::{Interned, Skip};

@@ -291,6 +291,15 @@ pub struct CpuProfiler {
     metadata_emitted: bool,
 }
 
+impl std::fmt::Debug for CpuProfiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CpuProfiler")
+            .field("pid", &self.pid)
+            .field("backend", &self.effective_backend)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CpuProfiler {
     /// [`Source::name`] of the CPU profiler. The runtime builder keys off this
     /// to decide whether the pipeline symbolizes.
@@ -458,6 +467,14 @@ pub struct SchedProfiler {
     config: SchedEventConfig,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
+}
+
+impl std::fmt::Debug for SchedProfiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedProfiler")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SchedProfiler {

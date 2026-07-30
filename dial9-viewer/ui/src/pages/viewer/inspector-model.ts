@@ -17,13 +17,19 @@ import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type {
   CallframeSymbols,
   CustomTraceEvent,
+  ParsedTrace,
   PollSpan,
   SampleGroup,
   SymbolFrame,
+  TaskDump,
   TracingSpan,
   WorkerLane,
 } from "../../lib/trace/index.js";
-import type { PinnedCustomEvent, SelectionSlice } from "../../types/state.js";
+import type {
+  PinnedCustomEvent,
+  SelectionSlice,
+  TaskDumpSelection,
+} from "../../types/state.js";
 
 // ── Frame formatting ─────────────────────────────────────────────────────
 
@@ -579,6 +585,20 @@ export function buildSpawnedTasksView(
 
 // ── Tab availability ──────────────────────────────────────────────────────
 
+/** Resolve a task-dump selection against the current trace after load/reparse. */
+export function resolveTaskDumpCaptures(
+  trace: Pick<ParsedTrace, "taskDumps"> | null,
+  selection: TaskDumpSelection | null,
+): readonly TaskDump[] {
+  if (trace === null || selection === null || selection.timestamps.length === 0) {
+    return [];
+  }
+  const wanted = new Set(selection.timestamps);
+  return (trace.taskDumps.get(selection.taskId) ?? []).filter((dump) =>
+    wanted.has(dump.timestamp),
+  );
+}
+
 /** The inspector tabs. */
 export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
 
@@ -603,7 +623,7 @@ export interface TabAvailability {
  * Compute which tabs have content for the current selection. A single pinned
  * event enables Event + Related; a cluster pin enables Event only (Related is
  * single-event). A selected task enables Task; a clicked poll enables Poll; a
- * retained range (spawned-tasks or region) enables Stack.
+ * task-dump trace or retained range (spawned-tasks or region) enables Stack.
  */
 export function tabAvailability(sel: SelectionSlice): TabAvailability {
   const pinned = sel.pinnedEvent;
@@ -612,14 +632,18 @@ export function tabAvailability(sel: SelectionSlice): TabAvailability {
     poll: sel.pollDetail !== null,
     event: pinned !== null,
     related: pinned !== null && pinned.detailEvent !== null,
-    stack: sel.spawnedTasksRange !== null || sel.sidebarRange !== null,
+    stack:
+      sel.taskDump !== null ||
+      sel.spawnedTasksRange !== null ||
+      sel.sidebarRange !== null,
   };
 }
 
 /**
  * The tab a fresh selection should activate (re-scope in the same action).
  * Ordered by the interaction that most likely just happened: a poll click ->
- * Poll; an event pin -> Event; a range drag -> Stack; a task select -> Task.
+ * Poll; an event pin -> Event; a range or task-dump click -> Stack; a task
+ * select -> Task.
  * Returns null when nothing is selected (the inspector shows its resting
  * at-cursor readout).
  */
@@ -627,6 +651,7 @@ export function preferredTab(sel: SelectionSlice): InspectorTab | null {
   if (sel.pollDetail !== null) return "poll";
   if (sel.pinnedEvent !== null) return "event";
   if (sel.spawnedTasksRange !== null || sel.sidebarRange !== null) return "stack";
+  if (sel.taskDump !== null) return "stack";
   if (sel.selectedTaskId !== null) return "task";
   return null;
 }
@@ -637,6 +662,7 @@ export function hasNoSelection(sel: SelectionSlice): boolean {
     sel.selectedTaskId === null &&
     sel.pollDetail === null &&
     sel.pinnedEvent === null &&
+    sel.taskDump === null &&
     sel.spawnedTasksRange === null &&
     sel.sidebarRange === null
   );

@@ -22,7 +22,7 @@ type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 /// Each entry maps an instruction pointer address to a resolved symbol name.
 /// When a function has inlined callees, multiple entries share the same `addr`
 /// with increasing `inline_depth` (0 = outermost).
-#[derive(dial9_trace_format::TraceEvent)]
+#[derive(Debug, dial9_trace_format::TraceEvent)]
 pub struct SymbolTableEntry {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,

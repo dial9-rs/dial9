@@ -25,6 +25,7 @@ function selection(over: Partial<SelectionSlice> = {}): SelectionSlice {
     focusedSpanId: null,
     pollDetail: null,
     pinnedEvent: null,
+    taskDump: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
     spawnedTasksRange: null,

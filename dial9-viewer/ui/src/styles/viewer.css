@@ -1618,8 +1618,10 @@ body {
 }
 .d9-poll-fg-section.on { color: #fff; background: var(--d9-accent); border-color: var(--d9-accent); }
 .d9-poll-fg-section:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
-.d9-poll-fg-host { min-height: 320px; height: 42vh; position: relative; }
-.d9-poll-fg { width: 100%; height: 100%; }
+.d9-poll-fg-host,
+.d9-task-dump-fg-host { min-height: 320px; height: 42vh; position: relative; }
+.d9-poll-fg,
+.d9-task-dump-fg { width: 100%; height: 100%; }
 
 /* Blocking-calls panel. */
 .d9-block-groupby select {

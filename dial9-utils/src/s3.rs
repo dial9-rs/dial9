@@ -128,8 +128,8 @@ pub struct S3Config {
     /// circuit breaker then decide whether to re-drive. Without it a hung
     /// request could block the upload worker indefinitely. Defaults to 30s.
     ///
-    /// Only applied to the client dial9 builds itself (the `.s3(..)` path). A
-    /// client supplied through `.s3_with_client(..)` keeps its own timeout
+    /// Only applied to the client dial9 builds itself (the `.s3(..)` path).
+    /// Pre-built and future-supplied clients keep their own timeout
     /// configuration untouched.
     #[builder(default = Duration::from_secs(30))]
     operation_attempt_timeout: Duration,
@@ -470,9 +470,8 @@ impl S3Uploader {
 
 // === S3 pipeline processor ===
 
-/// S3 uploader processor. Construction is synchronous — the AWS client and
-/// bucket region are resolved lazily on the first `process()` call, inside
-/// the worker's tokio runtime.
+/// S3 uploader processor. Construction is synchronous; the worker resolves the
+/// AWS client and bucket region on its Tokio runtime before processing starts.
 pub struct S3PipelineUploader {
     state: S3UploaderState,
     /// Triggered mode: object keys written per dump id, accumulated while
@@ -482,10 +481,31 @@ pub struct S3PipelineUploader {
     pub(crate) dump_keys: HashMap<String, Vec<String>>,
 }
 
+type BoxedS3ClientFuture = Pin<Box<dyn Future<Output = aws_sdk_s3::Client> + Send + 'static>>;
+
+// The private mutex preserves `Sync`; initialization uses `get_mut`, so polling
+// still requires exclusive access and does not lock at runtime.
+struct S3ClientFuture(tokio::sync::Mutex<BoxedS3ClientFuture>);
+
+impl S3ClientFuture {
+    fn new(future: impl Future<Output = aws_sdk_s3::Client> + Send + 'static) -> Self {
+        Self(tokio::sync::Mutex::new(Box::pin(future)))
+    }
+
+    fn get_mut(&mut self) -> &mut BoxedS3ClientFuture {
+        self.0.get_mut()
+    }
+}
+
+enum S3ClientSource {
+    Future(S3ClientFuture),
+    Ready(aws_sdk_s3::Client),
+}
+
 enum S3UploaderState {
     Pending {
         s3_config: S3Config,
-        client: Option<aws_sdk_s3::Client>,
+        client_source: S3ClientSource,
     },
     Ready {
         uploader: S3Uploader,
@@ -500,38 +520,96 @@ impl std::fmt::Debug for S3PipelineUploader {
 }
 
 impl S3PipelineUploader {
+    fn default_client_source(s3_config: &S3Config) -> S3ClientSource {
+        let operation_attempt_timeout = s3_config.operation_attempt_timeout();
+        S3ClientSource::Future(S3ClientFuture::new(async move {
+            // Bound each attempt so a hung PutObject/HeadBucket can't wedge the
+            // upload worker; retries are left to the SDK policy and pipeline
+            // circuit breaker.
+            let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                .operation_attempt_timeout(operation_attempt_timeout)
+                .build();
+            let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .timeout_config(timeout_config)
+                .load()
+                .await;
+            aws_sdk_s3::Client::new(&sdk_config)
+        }))
+    }
+
     /// Create a new uploader from an [`S3Config`](S3Config) and an
     /// optional pre-built S3 client. If `client` is `None`, the default
-    /// AWS configuration chain is used. Region detection and transfer
-    /// manager construction are deferred to the first `process()` call.
+    /// AWS configuration chain is used. Client and transfer-manager
+    /// construction run when the worker initializes the pipeline.
     pub fn new(s3_config: S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
+        let client_source = match client {
+            Some(client) => S3ClientSource::Ready(client),
+            None => Self::default_client_source(&s3_config),
+        };
         Self {
-            state: S3UploaderState::Pending { s3_config, client },
+            state: S3UploaderState::Pending {
+                s3_config,
+                client_source,
+            },
             dump_keys: HashMap::new(),
         }
     }
 
+    /// Construct the S3 client asynchronously when the pipeline worker starts.
+    ///
+    /// The future is created by the caller and polled exactly once on the
+    /// worker's Tokio runtime. If initialization is cancelled while it is
+    /// pending, a later attempt resumes the same pinned future.
+    #[must_use]
+    pub fn with_client_future<F>(mut self, client_future: F) -> Self
+    where
+        F: Future<Output = aws_sdk_s3::Client> + Send + 'static,
+    {
+        match &mut self.state {
+            S3UploaderState::Pending { client_source, .. } => {
+                *client_source = S3ClientSource::Future(S3ClientFuture::new(client_future));
+            }
+            S3UploaderState::Ready { .. } => {
+                unreachable!("with_client_future called after uploader initialization")
+            }
+        }
+        self
+    }
+
     /// Set (or override) the pre-built S3 client. Must be called before the
-    /// uploader has been initialized (i.e. before the first segment has been
-    /// processed);
+    /// pipeline worker initializes the uploader.
     /// Note: the only caller is the builder, which runs before the
     /// worker is spawned, so reaching the `Ready` arm is a programmer error.
     pub fn set_client(&mut self, client: aws_sdk_s3::Client) {
         match &mut self.state {
-            S3UploaderState::Pending { client: slot, .. } => *slot = Some(client),
+            S3UploaderState::Pending { client_source, .. } => {
+                *client_source = S3ClientSource::Ready(client);
+            }
             S3UploaderState::Ready { .. } => {
                 unreachable!("set_client called after uploader initialization")
             }
         }
     }
 
-    /// Take any previously-stashed client out of a `Pending` uploader so it
-    /// can be carried into a replacement. Returns `None` once the uploader
-    /// has been initialized.
+    /// Take a pre-built client out of a pending uploader so it can be carried
+    /// into a replacement. Returns `None` for a future-backed or initialized
+    /// uploader.
     pub fn take_client(&mut self) -> Option<aws_sdk_s3::Client> {
-        match &mut self.state {
-            S3UploaderState::Pending { client, .. } => client.take(),
-            S3UploaderState::Ready { .. } => None,
+        let S3UploaderState::Pending {
+            s3_config,
+            client_source,
+        } = &mut self.state
+        else {
+            return None;
+        };
+        if !matches!(client_source, S3ClientSource::Ready(_)) {
+            return None;
+        }
+
+        let replacement = Self::default_client_source(s3_config);
+        match std::mem::replace(client_source, replacement) {
+            S3ClientSource::Ready(client) => Some(client),
+            S3ClientSource::Future(_) => unreachable!("client source changed while borrowed"),
         }
     }
 
@@ -544,8 +622,8 @@ impl S3PipelineUploader {
         }
     }
 
-    /// Construct an uploader directly in the `Ready` state. Test-only —
-    /// production code goes through [`new`](Self::new) and lazy init.
+    /// Construct an uploader directly in the `Ready` state. Test-only;
+    /// production code goes through [`new`](Self::new) and worker initialization.
     #[cfg(test)]
     pub(crate) fn from_ready(
         uploader: S3Uploader,
@@ -560,28 +638,10 @@ impl S3PipelineUploader {
         }
     }
 
-    async fn initialize(
+    async fn build_uploader(
         s3_config: S3Config,
-        client: Option<aws_sdk_s3::Client>,
+        bootstrap_client: aws_sdk_s3::Client,
     ) -> (S3Uploader, connection::CircuitBreaker) {
-        let bootstrap_client = match client {
-            Some(c) => c,
-            None => {
-                // Bound each attempt so a hung PutObject/HeadBucket can't wedge
-                // the upload worker; retries are left to the SDK policy and the
-                // pipeline circuit breaker. Only the client we build ourselves
-                // gets this — a caller-supplied client keeps its own config.
-                let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
-                    .operation_attempt_timeout(s3_config.operation_attempt_timeout())
-                    .build();
-                let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .timeout_config(timeout_config)
-                    .load()
-                    .await;
-                aws_sdk_s3::Client::new(&sdk_config)
-            }
-        };
-
         let region = match s3_config.region() {
             Some(r) => r.to_owned(),
             None => detect_bucket_region(&bootstrap_client, s3_config.bucket()).await,
@@ -601,6 +661,33 @@ impl S3PipelineUploader {
             connection::CircuitBreaker::new(),
         )
     }
+
+    async fn ensure_initialized(&mut self) {
+        let (s3_config, bootstrap_client) = match &mut self.state {
+            S3UploaderState::Pending {
+                s3_config,
+                client_source,
+            } => {
+                let s3_config = s3_config.clone();
+                let client = match client_source {
+                    S3ClientSource::Future(client_future) => {
+                        let client = client_future.get_mut().as_mut().await;
+                        *client_source = S3ClientSource::Ready(client.clone());
+                        client
+                    }
+                    S3ClientSource::Ready(client) => client.clone(),
+                };
+                (s3_config, client)
+            }
+            S3UploaderState::Ready { .. } => return,
+        };
+
+        let (uploader, circuit_breaker) = Self::build_uploader(s3_config, bootstrap_client).await;
+        self.state = S3UploaderState::Ready {
+            uploader,
+            circuit_breaker,
+        };
+    }
 }
 
 impl SegmentProcessor for S3PipelineUploader {
@@ -608,34 +695,28 @@ impl SegmentProcessor for S3PipelineUploader {
         "S3Upload"
     }
 
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            self.ensure_initialized().await;
+            Ok(())
+        })
+    }
+
     fn process(
         &mut self,
         mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
-            // Lazy init: clone the config + client and run `initialize`
-            // without mutating `self.state`. If the init future panics or
-            // is cancelled mid-await, the worker's outer `catch_unwind`
-            // recovers and `self.state` stays `Pending`, so the next
-            // segment will retry. Mutating before the await would leave
-            // the uploader stuck in a transient state forever.
-            if let S3UploaderState::Pending { s3_config, client } = &self.state {
-                let cfg = s3_config.clone();
-                let cli = client.clone();
-                let (uploader, circuit_breaker) = Self::initialize(cfg, cli).await;
-                self.state = S3UploaderState::Ready {
-                    uploader,
-                    circuit_breaker,
-                };
-            }
+            // Keep direct SegmentProcessor drivers compatible even if they do
+            // not call the worker lifecycle hook.
+            self.ensure_initialized().await;
             let S3UploaderState::Ready {
                 uploader,
                 circuit_breaker,
             } = &mut self.state
             else {
-                // unreachable: we just transitioned above and the state
-                // doesn't otherwise revert. Fall through with an error so
-                // a future refactor doesn't silently break.
+                // Initialization currently always transitions to Ready. Return
+                // an error so a future state change cannot silently lose data.
                 return Err(ProcessError::io(
                     data,
                     std::io::Error::other("S3 uploader in unexpected state"),
@@ -703,18 +784,9 @@ impl SegmentProcessor for S3PipelineUploader {
         }
         let manifest = DumpManifest::new(completion, segments);
         Box::pin(async move {
-            // The manifest may be the first object of the run (e.g. an
-            // empty dump before any segment upload): lazily initialize
-            // exactly like `process()` does.
-            if let S3UploaderState::Pending { s3_config, client } = &self.state {
-                let cfg = s3_config.clone();
-                let cli = client.clone();
-                let (uploader, circuit_breaker) = Self::initialize(cfg, cli).await;
-                self.state = S3UploaderState::Ready {
-                    uploader,
-                    circuit_breaker,
-                };
-            }
+            // Keep direct SegmentProcessor drivers compatible if they call
+            // finalize without first invoking the lifecycle hook.
+            self.ensure_initialized().await;
             let S3UploaderState::Ready {
                 uploader,
                 circuit_breaker,
@@ -1351,6 +1423,34 @@ mod worker_integration_tests {
         let uploader = S3Uploader::new(sdk_client.clone(), s3_config);
         let mut pipeline_uploader = S3PipelineUploader::from_ready(uploader, CircuitBreaker::new());
         pipeline_uploader.set_client(sdk_client);
+    }
+
+    #[test]
+    fn take_client_preserves_pending_fallback() {
+        let s3_config = s3::S3Config::builder()
+            .bucket("test")
+            .service_name("test")
+            .instance_path("test")
+            .region("us-east-1")
+            .build();
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
+        let mut pipeline_uploader = S3PipelineUploader::new(s3_config, Some(sdk_client));
+
+        check!(pipeline_uploader.take_client().is_some());
+        check!(pipeline_uploader.take_client().is_none());
+    }
+
+    #[test]
+    fn pipeline_uploader_remains_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<S3PipelineUploader>();
     }
 
     /// The S3 stage clears per-dump state but writes no manifest for a

@@ -1,328 +1,115 @@
 # Metrique integration
 
-> **Status: design, not yet implemented.**
+> **Status: implemented.** The sink is the `dial9-metrique` crate, re-exported as `dial9::metrique_sink` behind the `metrique-sink` feature. The crate is tokio-free; its `tokio` feature adds task-id capture and is enabled by the facade when dial9's `tokio` feature is also on. This document records the design; for API details, see the crate rustdoc (`dial9_metrique`), which is kept authoritative.
 
-Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EMF/JSON metrique pipeline; every metrique entry that flows through the configured sink is also recorded into the dial9 trace. A single trace file carries both tokio runtime telemetry and per-request application metrics.
+Dial9 is a peer metrique sink. Users configure dial9 alongside their existing EMF/JSON metrique pipeline; every metrique entry that flows through the configured sink is also recorded into the dial9 trace, so application metrics and runtime telemetry share one file.
 
-The sink reads metrique's entry descriptor for each entry to learn its structural shape (fields, optionality, `Flex`, units), identifies caller-thread context via a sink-specific field tag on flattened context fields, and encodes the user-selected subset of fields into the dial9 trace. Nothing about the integration requires a dial9-specific metrique macro or dial9-specific newtype wrappers on fields.
+The sink reads metrique's entry descriptor for each entry to learn its structural shape (fields, flags, units), identifies caller-thread context via a sink-internal field flag on flattened context fields, and encodes the user-selected subset of fields into the dial9 trace. Nothing about the integration requires a dial9-specific metrique macro or dial9-specific newtype wrappers on fields.
 
-This design depends on the entry descriptor system in metrique (see `docs/entry-descriptors.md` in the metrique repo; tracked under [awslabs/metrique#282](https://github.com/awslabs/metrique/pull/282)). The dial9 side is a descriptor-aware sink; the metrique side is where descriptors and field tags are defined.
+The metrique side is the entry descriptor and field flag system (`docs/entry-descriptors.md` in the metrique repo).
 
 ## Glossary
 
-- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `attach_to_stream_with_dial9`, `metrique_sink(...)`, or a manual `tee(emf, Dial9Stream::new(..))`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
-- **`Dial9Context`**: a metrique struct users flatten into their entries. Its constructor captures caller-thread `worker_id`, `task_id`, and `monotonic_ns_start`; its `CloseValue` captures `monotonic_ns_end`. These four fields are tagged `dial9::Context` internally so the sink can route them to the trace event header rather than into the payload.
-- **`dial9::Emit`**: the user-facing field tag that opts a field into the dial9 payload. Applied at struct scope via `#[metrics(default_field_tag(Emit))]` or at field scope via `#[metrics(field_tag(Emit))]`; inverted with `skip(Emit)`.
-- **`dial9::Interned`**: the user-facing field tag that asks dial9 to route string data in this field through its string pool. Orthogonal to `Emit`.
-- **`dial9::Context`**: a `#[doc(hidden)]` dial9-internal field tag carried by `Dial9Context`'s own fields. Users do not interact with it directly; they flatten `Dial9Context` into their entry, and the sink walks the descriptor on first-use to find fields tagged `Context`. The name is not a stable guarantee; a future typed source-extraction mechanism would replace this tag-based discovery.
-- **`Dial9EntryWriter`**: the dial9 adapter that walks `Entry::write` on the flush thread. Uses the cached context- and payload-field index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip.
-- **First-use per-descriptor**: the moment a `Dial9Stream` first sees an entry with a given `DescriptorId`. Dial9 walks the descriptor once, caches the index sets and any diagnostics, and uses the cache for every subsequent entry of that type.
-- **Trace format**: dial9's wire format, defined in `dial9-trace-format/SPEC.md`. Carries schema frames (one per entry type), event frames (one per emission), pool frames (deduplicated strings and stack frames), and schema-annotation frames (per-field metadata). This design relies on two format features that ship independently of the integration: `TAG_SCHEMA_ANNOTATIONS` and the `DynamicList` / `DynamicMap` field types.
+- **`Dial9Stream`**: the dial9 `EntryIoStream` implementation. Composed into a user's metrique pipeline via `Dial9Stream::tee(&handle, emf)`. Consumes every entry that flows through the pipeline and encodes dial9-opted entries into the trace.
+- **`WithoutDial9Fields`**: `EntryIoStream` wrapper that hides `dial9.`-prefixed fields from the sink it wraps. `Dial9Stream::tee` puts it around the non-dial9 side so the trace gets the runtime context and the EMF/JSON output does not.
+- **`Dial9Context`**: metrique subfield users include in their entries to capture per-request runtime context (see its rustdoc).
+- **`Dial9Event<E>`**: hand-written wrapper entry that contributes the same context fields around an existing entry, for callers who cannot or would rather not add a field. `Dial9EntryExt::append_on_drop_dial9` is the ergonomic entry point.
+- **`Skip`** / **`Interned`**: the user-facing field flags for excluding a field from the payload and for string pooling (see their rustdoc).
+- **`Context`**: crate-internal field flag carried by `Dial9Context`'s own fields; the sink discovers context fields by it when walking descriptors, and their presence is what opts an entry in. Would be replaced by a typed source-extraction mechanism in metrique.
+- **Encode plan**: the cached per-entry-type routing table (`metrique_sink/plan.rs`). Built once per distinct descriptor-id sequence: wire schema with unit annotations, and an action (header / payload / skip) per field position.
+- **Trace format**: dial9's wire format (`dial9-trace-format/SPEC.md`). The integration uses the schema-annotations frame (`TAG_SCHEMA_ANNOTATIONS`) for units and the self-describing `DynamicList` field type for list-shaped fields.
 
 ## User-facing API
 
-### Opt-in on the entry
+See the `dial9_metrique` crate docs for the opt-in model and worked example.
 
-```rust
-use dial9::{Dial9Context, Emit, Interned};
+There are two ways to include the context, both producing the same event: flatten a `Dial9Context` field into the entry, or wrap the entry with `Dial9Event` (via `append_on_drop_dial9`). The wrapper exists because adding a field is intrusive for shared or externally-owned metrics structs, and because a `#[cfg]` around one call site is easier to maintain than one around a struct field.
 
-#[metrics(default_field_tag(Emit))]
-struct RequestMetrics {
-    // Dial9 context fields. Flatten with skip(Emit) so context data is not
-    // duplicated into the dial9 payload; the sink picks it up via the
-    // dial9::Context tag that Dial9Context's fields carry.
-    #[metrics(flatten, field_tag(skip(Emit)))]
-    dial9: Dial9Context,
+`Dial9Event` is hand-written because the macro does not emit the `where` clause a generic flattened field needs. It implements `InflectableEntry` at the default style only, which is enough for a root entry, and writes the wrapped entry before the context so the event is named after the entry rather than the context.
 
-    #[metrics(field_tag(Interned))]
-    route: String,
+Convenience wiring (`ServiceMetrics::attach_to_stream_with_dial9`-style extension traits, a `metrique_sink(...)` builder) is deliberately **later scope**: it drags `metrique-service-metrics` into the public API surface. `Dial9Stream::tee(&handle, other)` is the supported path: it composes the two sinks and filters dial9's fields out of `other` in one call, without naming any service-metrics type.
 
-    operation: &'static str,
-    request_id: String,
+### Keeping dial9's fields out of the other formats
 
-    #[metrics(field_tag(skip(Emit)))]
-    debug_blob: String,
-}
-```
+`Dial9Context`'s fields are ordinary metrique fields, so they reach every sink in the pipeline. The monotonic timestamps are useless in EMF, and the thread/task ids are noise there too. Metrique has no per-format field exclusion, so `WithoutDial9Fields` wraps the other sink and drops `dial9.`-prefixed fields as they arrive: values are filtered in the `EntryWriter`, and the context's descriptor segment is dropped alongside them so a descriptor-aware downstream sink still sees a descriptor that matches the values it received. Dropping whole segments is enough because the context is always its own segment, whether flattened or wrapped. (A segment that mixes dial9-named and user fields, which takes a user field literally named `dial9.*`, cannot be subset out of `&'static` descriptor storage, so it degrades to `Descriptors::Unavailable` instead of reporting fields that no longer match the values.)
 
-What this means:
-
-- `Dial9Context` is a dial9-provided metrique struct. Its fields (worker id, task id, start monotonic timestamp, end monotonic timestamp) are tagged with a dial9-internal `dial9::Context` marker. The constructor captures caller-thread start-time state; the end-time monotonic is captured via `CloseValue` at close.
-- `flatten` spreads `Dial9Context`'s fields into the parent. `field_tag(skip(Emit))` on the flatten site propagates to the flattened children as their default, so the context fields aren't duplicated into the dial9 payload.
-- `Emit` marks fields that should appear in the dial9 trace payload. `skip(Emit)` at the field level overrides.
-- `Interned` tells the sink to route string data in this field through dial9's string pool.
-
-### Sink construction
-
-```rust
-use dial9::AttachDial9Ext;
-use metrique::ServiceMetrics;
-
-let _handle = ServiceMetrics::attach_to_stream_with_dial9(
-    emf_stream,
-    &telemetry_handle,
-);
-```
-
-The builder and manual composition paths are unchanged from the original design. `metrique_sink(emf_stream, &telemetry_handle).build()` returns a standalone sink; `tee(emf_stream, Dial9Stream::new(&telemetry_handle))` is the primitive composition for users who want to wire their own.
+A general `drop_fields` in metrique itself would be the better long-term home, per review discussion.
 
 ## Architecture
 
-```text
-┌────────────────────────────────────────────────────────────────┐
-│ COMPILE TIME: metrique macro                                   │
-│                                                                │
-│ Dial9 defines (in its own crate):                              │
-│   pub struct Emit;          // field tag for payload           │
-│   pub struct Interned;      // field tag for string pool       │
-│   #[doc(hidden)] pub struct Context;  // internal marker       │
-│                                                                │
-│   #[metrics]                                                   │
-│   pub struct Dial9Context { /* fields tagged Context */ }      │
-│                                                                │
-│ User-side:                                                     │
-│   #[metrics(default_field_tag(Emit))]                          │
-│   struct RequestMetrics {                                      │
-│       #[metrics(flatten, field_tag(skip(Emit)))]               │
-│       dial9: Dial9Context,                                     │
-│                                                                │
-│       #[metrics(field_tag(Interned))]                          │
-│       route: String,                                           │
-│       ...                                                      │
-│   }                                                            │
-│                                                                │
-│ Macro emits:                                                   │
-│   impl Entry for ClosedRequestMetrics (as today)               │
-│   static EntryDescriptor (fields, tags, units, canonical name) │
-│   impl Entry::descriptor() returning Some(DescriptorRef)       │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ CALLER THREAD: request path                                    │
-│                                                                │
-│ let m = RequestMetrics { dial9: Dial9Context::capture(), ... };│
-│   Dial9Context::capture() reads:                               │
-│     tokio worker id, task id, monotonic clock (start)          │
-│   other fields populated normally                              │
-│                                                                │
-│ Caller-thread overhead: a few TL reads + clock_monotonic_ns()  │
-│ per entry. No allocations beyond what metrique already does.   │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ CALLER THREAD: append-on-drop / close                          │
-│                                                                │
-│ All CloseValue runs (Timer, Duration, Option, ...).            │
-│ Dial9Context's CloseValue reads the monotonic clock (end).     │
-│                                                                │
-│ Entry is pushed to BackgroundQueue as BoxEntry.                │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ FLUSH THREAD: BackgroundQueue / tee                            │
-│                                                                │
-│ Each entry is delivered to every registered sink:              │
-│                                                                │
-│   ├── EMF sink: calls Entry::write as today.                   │
-│   │             Does not call descriptor().                    │
-│   │                                                            │
-│   └── Dial9Stream (descriptor-aware):                          │
-│         desc = entry.descriptor()                              │
-│           None    -> skip (hand-written entry, report once)    │
-│           Some(d) -> continue                                  │
-│                                                                │
-│         on first-use per DescriptorId, compute:                │
-│           context_fields: indices into d.fields() where the    │
-│                           dial9::Context tag is present        │
-│           payload_fields: indices where Emit is present        │
-│                                                                │
-│         cache those indices keyed on d.id()                    │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│ FLUSH THREAD: inside Dial9Stream, per entry                    │
-│                                                                │
-│ Walk entry.write(Dial9EntryWriter { ... }):                    │
-│   for each (name, value) callback (in descriptor order):       │
-│     if index is in context_fields:                             │
-│       pull value into the trace event header (worker, task,    │
-│       monotonic_ns_start, monotonic_ns_end)                    │
-│                                                                │
-│     else if index is in payload_fields:                        │
-│       encode according to FieldShape:                          │
-│            Known   : encode scalar                             │
-│            Optional: encode presence byte + inner              │
-│            List    : encode <count> <tag + value per element>   │
-│            Flex    : encode <count> <key_tag+key+val_tag+val>  │
-│            Opaque  : report + skip (sink-side validation)      │
-│                                                                │
-│     if field is tagged Interned and carries string data:       │
-│       route through encoder.intern_string(..)                  │
-│                                                                │
-│ encoder.finish_event()                                         │
-└────────────────────────────────────────────────────────────────┘
-```
+Compile time: the metrique macro generates the entry descriptor (fields, flags, units, canonical name) alongside the existing `Entry` impl. Dial9 contributes only the three flag marker types and `Dial9Context`.
 
-Work on the caller thread is bounded to constructing `Dial9Context` and wrapping the entry for the queue. All encoding happens on the flush thread. Entries that have no dial9 content pay essentially nothing.
+Caller thread: `Dial9Context::capture()` reads the OS thread id, `tokio::task::try_id()` (with the `tokio` feature), and the monotonic clock. Entry close records the end timestamp. The entry is queued as usual; dial9 adds no other request-path work.
 
-## Components
+Flush thread (whatever thread drives the metrique pipeline, e.g. `BackgroundQueue`'s): `Dial9Stream::next` per entry:
 
-### `Dial9Context` (metrique field type)
+1. Disabled handle: return immediately (the tee still delivers entries to the other formats).
+2. `entry.descriptors()`: `Unavailable` (hand-written entries that do not implement `descriptors()`, or entries containing `Flex` dynamic-key fields, whose descriptors are unavailable by construction) is skipped with a rate-limited warning.
+3. Plan lookup keyed on the descriptor-id sequence; first use walks the descriptor segments and builds the plan (schema registration, unit annotations, diagnostics).
+4. Walk `entry.write` with a capturing `EntryWriter` that routes each value callback per the plan, then assemble and encode the event.
 
-Regular metrique struct defined in the dial9 crate:
+### Value routing is positional
 
-```rust
-#[metrics]
-pub struct Dial9Context {
-    #[metrics(field_tag(dial9::Context))]
-    worker_id: WorkerId,
+Metrique guarantees that walking `descriptors()` segments in sequence yields fields in exactly the order `Entry::write` emits `EntryWriter::value` callbacks, with each segment covering a contiguous slice of the write output (`docs/entry-descriptors.md`; for entries with interleaved flatten sites this means one descriptor segment per contiguous field run). The plan is therefore a flat action list in descriptor order, and the walk consumes it by callback index.
 
-    #[metrics(field_tag(dial9::Context))]
-    task_id: Option<TaskId>,
+Counting the callbacks is a cheap defensive guard, so the sink does it: if the count differs from the plan in either direction the event is dropped with a rate-limited warning rather than recording mis-attributed values.
 
-    #[metrics(field_tag(dial9::Context))]
-    monotonic_ns_start: u64,
+Field names still matter for the wire schema: two payload fields that emit the same post-rename name cannot share a schema, so the first occurrence keeps the name and later ones are skipped with a once-per-type diagnostic. Prefixing the flatten site (`#[metrics(flatten, prefix = "...")]`) is the documented remedy. Dial9's own header fields are outside this hazard entirely, being `dial9.`-prefixed.
 
-    /// Captures the monotonic clock at close, not at construction.
-    #[metrics(field_tag(dial9::Context))]
-    monotonic_ns_end: MonotonicAtClose,
-}
+`Dial9Context`'s fields use literal `#[metrics(name = "dial9.<field>")]` names rather than a prefix at the flatten site. Literal names are identical under every `NameStyle`, so a parent's `rename_all` cannot restyle them: the sink matches roles by exact base name, and the wire header names stay stable across entries that style their own fields differently.
 
-/// Field type that reads the monotonic clock when its CloseValue runs.
-/// Its closed form is u64 (monotonic nanoseconds at close).
-pub struct MonotonicAtClose;
+### Event layout
 
-impl CloseValue for MonotonicAtClose {
-    type Closed = u64;
-    fn close(self) -> u64 { clock_monotonic_ns() }
-}
+One schema per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit event timestamp is `dial9.monotonic_ns_start` (flush-thread clock as fallback). Schema fields: `dial9.thread_id` (OS thread id, the same id space worker and CPU-sample events record), `dial9.task_id` (with the `tokio` feature), `dial9.duration_ns` (absent unless the context captured both timestamps; durations varint-encode in a fraction of the bytes an absolute end timestamp takes), `dial9.wall_clock_ns` (from `#[metrics(timestamp)]`, if any), then one field per supported descriptor field that is not flagged `Skip`. Every dial9-owned name, on the wire and in the other formats, carries the `dial9.` prefix, so it cannot collide with a user field and is trivially filterable.
 
-impl Dial9Context {
-    pub fn capture() -> Self { /* read worker/task/monotonic_start */ }
-}
-```
-
-The metrique macro's generated `CloseValue` impl for `Dial9Context` delegates to each field's own `CloseValue::close`, which is the standard metrique pattern (the same way `Timer` and other close-time field types work). `MonotonicAtClose::close` reads the monotonic clock at close time; `u64` appears in the closed form.
-
-Construction always captures the monotonic clock at request start. Tokio runtime state (worker id, task id) is captured if the thread is owned by a tokio runtime; otherwise those fields remain `None` / unset. `capture()` is infallible.
-
-`Dial9Context` deliberately does not implement `Default` or `Clone`. `Default::default()` would produce zero-valued fields that silently look like "valid context captured at monotonic time 0" without ever firing the "no context" diagnostic (the `dial9::Context` tag is still present, the values are just meaningless). Users construct it with `Dial9Context::capture()` at the field initializer site; forgetting produces a clear compile error about the missing field.
-
-The end monotonic is captured at close time via `CloseValue`, so the event carries both endpoints. Dial9 viewers can render events as timeline spans (start + end + duration) rather than single points.
-
-If no dial9 runtime is attached at all (inert `TelemetryHandle`), `Dial9Stream` short-circuits the event; the `Dial9Context` field is harmlessly constructed and discarded.
-
-When flattened into a user struct, the four fields become part of the parent's descriptor with the `dial9::Context` tag. Dial9 finds them by walking the descriptor at first-use.
-
-### `Dial9Stream`
-
-`EntryIoStream` implementor. Constructed with a `TelemetryHandle`. Runs on whatever thread metrique's pipeline calls `next` on; for the global and builder paths, that is the `BackgroundQueue` flush thread.
-
-Per entry:
-
-1. If the handle is inert: return `Ok(())` immediately; entries still reach EMF through the tee.
-2. Look up `entry.descriptor()`. `None` is reported once (per observed concrete type id via `inner_any().type_id()`) and skipped.
-3. First-use per `DescriptorId`: walk the descriptor to compute the context-field indices (fields tagged `dial9::Context`) and payload-field indices (tagged `dial9::Emit`). Build the wire schema with annotations for units.
-4. Walk `entry.write(..)` with a `Dial9EntryWriter` that uses the cached index sets to route each callback to either the event header (context) or the payload encoder (Emit), or to skip. `Interned` fields have their string data routed through the dial9 string pool. Relies on the metrique contract that `Entry::write` emits `value` callbacks in descriptor order.
-
-`Dial9EntryWriter` overrides `ValueWriter::values()` (the default implementation comma-joins elements into a string) to preserve the self-describing list wire encoding for `Vec<T>` fields.
-
-A `catch_unwind(AssertUnwindSafe(..))` guard around the `Entry::write` walk drops offending events (rate-limited log) without poisoning the flush thread's state.
-
-### Schema handling
-
-Dial9 registers one schema per distinct `DescriptorId`. One registration per entry type, regardless of which optional fields happen to be present or which `Flex` keys appear at runtime.
-
-Optional fields use dial9's existing optional wire encoding (high-bit optional variants on `FieldType`). `Flex` maps and `Vec`-style lists use dial9's new typed wire support (see "Trace format additions").
-
-No shape fingerprinting on the hot path. No LRU eviction. The cache is bounded by the number of distinct descriptors the process instantiates, which is a compile-time property.
+Wire types come from the descriptor's `FieldShape`: unsigned widths map to `Varint` (dial9's `FieldValue` carrier for scalar integers; the fixed-width wire types would not match its encoding), signed to `I64`, floats to `F64`, `bool` to `Bool`, strings to `String` or `PooledString` per the `Interned` flag, with `Optional` variants for optional shapes. List shapes (`Vec<T>`, slices) map to the self-describing `DynamicList` type; elements are captured through the `values()` value callback and encode with their own scalar tags, so an `Interned` list of strings pools each element. Absent optional elements are omitted from the encoded list, the same way metrique's other formats leave them out of their arrays.
 
 ### Units
 
-The descriptor carries `Option<Unit>` per field. Dial9 emits units as schema-level annotations, not field-name suffixes and not wire-type variants. The annotation key is `"metrique.unit"`; the value is the unit's string representation. Fields with no unit pay no annotation bytes.
-
-For `Flex` fields, the unit applies to the map values, not the keys.
+The descriptor carries `Option<Unit>` per field, resolved by metrique from the `Value` trait or an explicit `#[metrics(unit = ..)]`. Dial9 emits units as schema-level annotations with key `"unit"`, normalized to the vocabulary the viewer formats (`us`/`ms`/`s`/`bytes`, plus plain `count`); units outside it keep their CloudWatch name and render unformatted.
 
 ### Observability
 
-- Periodic `tracing::debug!` reporting schema cache size and cumulative counters (registrations, events emitted, entries skipped for `None` descriptor).
-- Rate-limited `tracing::warn!` on each distinct hand-written entry seen (one report per distinct concrete type id observed).
-
-## Visualization data shape
-
-Dial9 produces a trace with per-event data that supports viewer tooling. The design does not prescribe how the viewer renders, but the structural surface it receives from dial9 includes:
-
-- **Timeline placement**: start and end monotonic timestamps from `Dial9Context` (start from `capture()`, end from `CloseValue`). Events render as timeline spans with duration `end - start`.
-- **Worker placement**: `worker_id` from `Dial9Context`. Events pin to their starting tokio worker. Off-runtime events carry `WorkerId::UNKNOWN`.
-- **Task correlation**: `task_id: Option<TaskId>` from `Dial9Context`. Lets the viewer correlate events that ran on the same task (e.g., a `DbQueryMetrics` emitted inside a `RequestMetrics` block sharing `task_id`).
-- **Event type identity**: the entry's canonical name from `EntryDescriptor::name()`. Viewer tooling can group, filter, or color-code by event type.
-- **Full payload with units**: every `Emit`-tagged field of the event, with:
-  - Field name (post-rename, as emitted via `Entry::write`).
-  - Field value (decoded per `FieldShape`: scalars, optionals, lists, dynamic maps; pooled strings transparently resolved through the trace's string pool).
-  - Unit from `FieldDescriptor::unit()`, encoded as a schema-level annotation.
-  - Future schema annotations (display hints, privacy labels, `dial9.kpi` markers, etc.) arrive through the same annotation mechanism.
-- **Canonical wall-clock timestamp** (optional): `#[metrics(timestamp)]` fields, emitted through `EntryWriter::timestamp`. Supplements the monotonic start/end when present. Some events may not have one (monotonic is sufficient for dial9's ordering).
-- **Entry schema enumeration**: descriptor-aware viewer tooling can enumerate all fields and their shapes from the `EntryDescriptor` independently of any specific event, so search/filter UI knows up-front which fields exist on which event types.
-
-The viewer is free to render this data however fits: timeline spans, grouped lanes, inspector panels, correlation views, histograms, whatever. The design does not prescribe UI.
-
-## Trace format additions
-
-The integration depends on two trace-format extensions, both now tracked in `dial9-trace-format/SPEC.md`:
-
-- **Schema annotations frame** (`TAG_SCHEMA_ANNOTATIONS = 0x07`): carries per-field `(key, value)` string tuples attached to a previously-registered schema by `type_id` and `field_index`. Dial9 uses it for units today (`metrique.unit` = `microseconds`) and will use it for future display hints, semantic-convention labels, privacy tiers, and `dial9.kpi` markers without further format changes. See `dial9-trace-format/SPEC.md` section "Schema Annotations Frame" for the wire layout.
-- **Typed list and map field types** (`FieldType::List`, `FieldType::Map`, and their `Optional` forms): model `Vec<T>` and `Flex<(String, T)>` respectively, producing one schema per entry type regardless of runtime cardinality. Inner types (including inner `Optional` and nested containers) are expressed recursively in the schema encoding. See `dial9-trace-format/SPEC.md` sections "Field Types" and "List Encoding" / "Map Encoding" for the wire layout.
-
-Pooled-string positions are selected per-position by using the existing pooled-string field type as the list element or map value. The `dial9::Interned` field tag on a `Vec` or `Flex` field drives that choice during schema registration.
-
-## Error handling and resilience
-
-- **Hand-written entries**: `descriptor()` is `None`. Dial9 reports once per distinct concrete type id observed and skips. A future extension can let hand-written entries opt in via metrique's `DescribeEntry` follow-up.
-- **Entries with `Emit` fields but no `dial9::Context`-tagged fields**: dial9 treats the entry as having no context. The event header falls back to a flush-thread monotonic timestamp with `WorkerId::UNKNOWN` / `task_id = None`. A single `tracing::error!` per descriptor (deduped by `DescriptorId`, not time-rate-limited) names the offending entry type and hints that `#[cfg]` gating or forgotten `Dial9Context` field may be responsible. In debug builds this is `debug_assert!`. The payload still encodes; dropping the event would be worse.
-- **Entries with `FieldShape::Opaque` selected for `Emit`**: `debug_assert!` in debug, rate-limited `tracing::error!` in release, keyed per `(DescriptorId, field)` pair; the field is skipped on the wire. The rest of the entry still encodes.
-- **Inert telemetry handle**: `Dial9Stream` returns `Ok(())` immediately. Entries still reach EMF.
-- **Caller thread not owned by a tokio runtime**: `Dial9Context::capture()` still records a monotonic timestamp; tokio fields remain unset. The entry encodes normally.
-- **Panic inside `Value::write`**: caught per entry; the offending event is dropped with a rate-limited log. The flush thread's encoder state stays valid.
+Aggregate counters (plans built, events emitted, entries skipped/dropped) are reported at `debug` level every 60 s. Structural diagnostics fire once per entry type at plan build; per-entry failures are rate-limited. See the validation table below.
 
 ## Validation
 
-Validation runs in two places.
+The metrique macro catches intrinsic structural mistakes at compile time (conflicting flags). Dial9-specific diagnostics are runtime because the macro does not interpret flag identity.
 
-### Compile-time
-
-The metrique macro catches intrinsic structural mistakes that do not depend on dial9: conflicting `field_tag` + `field_tag(skip)`, conflicting struct-level defaults. These fire regardless of whether dial9 is in the picture.
-
-Dial9-specific diagnostics are runtime (see below) because the metrique macro does not interpret tag identity.
-
-### First-use (descriptor-local, per descriptor)
-
-The first time `Dial9Stream` encounters a `DescriptorId`, it walks the descriptor for dial9-specific structural errors. The verdict caches on `DescriptorId`; each descriptor is validated at most once.
+First-use, per descriptor-id sequence (cached, so at most once per type):
 
 | Condition | Behaviour |
 | --- | --- |
-| `descriptor() == None` (hand-written entry) | rate-limited warn once per distinct concrete type id observed; entry dropped from dial9 path; EMF unaffected |
-| Descriptor has `Emit` fields but no `dial9::Context`-tagged fields | `debug_assert!` in debug, single `tracing::error!` per descriptor in release (deduped by `DescriptorId`); entries of this type encode with UNKNOWN worker and flush-thread monotonic fallback |
-| `Interned` on a non-string-capable shape | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
-| `FieldShape::Opaque` field tagged `Emit` | `debug_assert!` in debug, rate-limited `tracing::error!` in release; the offending field is skipped on the wire; rest of entry encodes |
-| Inert `TelemetryHandle` | `Ok(())` fast path; no work; entries still reach EMF |
-| Panic inside `Value::write` | event dropped; rate-limited warn; flush-thread state preserved |
+| `descriptors()` unavailable (hand-written entry without a `descriptors()` impl, or `Flex` anywhere in the entry) | rate-limited warn; skipped on the dial9 side only |
+| No `Context`-flagged fields (entry never opted in) | silently inert: the plan records nothing and `Entry::write` is not walked for entries of this type |
+| Payload field name collides with an earlier payload field | one `tracing::error!` per type; the later occurrence is skipped. Header fields cannot be collided with: they are `dial9.`-prefixed |
+| Two `Dial9Context`s flattened into one entry | warn per duplicated context field at plan build; the first flatten site keeps the header slots |
+| `Interned` on a shape with no string data | one `tracing::error!` per type; field skipped on the wire; rest of entry encodes |
+| `Opaque` shape (histograms, custom `Value` without `SHAPE`) | one `tracing::debug!` per type; field left out of the payload; rest encodes. Expected under implicit opt-in, so not an error |
+| Unsupported list element shape (nested lists, bytes, `Flex`, `Opaque`) | one `tracing::debug!` per type; field left out of the payload; rest encodes |
 
-None of these failure modes crash the sink in release builds. Each diagnostic includes enough context (entry type name via `EntryDescriptor::name()`, descriptor pointer as a fallback) to find the offending struct.
+Per entry:
 
-Periodic `tracing::debug!` reports aggregate counters: descriptors seen, descriptors skipped, events emitted, fields skipped. Off at `info` by default.
+| Condition | Behaviour |
+| --- | --- |
+| Inert handle / disabled recording | fast-path return; no work |
+| Value callback count differs from the descriptor (metrique descriptor/write contract violation) | event dropped, rate-limited warn |
+| Required field produced no value or mismatched data (including numeric lists through metrique's boxed dyn bridge, which stringifies elements) | event dropped, rate-limited warn naming the field |
+| Panic inside `Value::write` | caught; event dropped, rate-limited warn; no event bytes are written until the walk completes, so at most orphaned string-pool entries remain (harmless) |
+| Encoder rejects the assembled event (validation failure) | event dropped; dial9-core logs the reason |
 
-Note: the initial release does not have a binary-wide "sink attached, no dial9-compatible structs in this binary" startup check. That check depends on metrique's deferred source system (see `metrique/docs/entry-descriptors.md` → "Appendix: possible evolution, typed source extraction"). Until it reopens, dial9 relies on the first-use diagnostics above.
+## Performance
+
+Measured by `dial9-metrique/benches/metrique_sink_bench.rs`; current numbers live in the module docs' Overhead section. On dial9's side, steady state allocates only for payload string and list values: routing tables, key lookups, and value buffers are cached or reused across entries. Metrique's `descriptors()` itself may allocate per entry once a layout exceeds its inline segment capacity; the precomputed sequence id ([awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348)) removes that walk entirely.
 
 ## Future evolution
 
-- **Hand-written `Entry` impls opting into descriptors** (once metrique ships `DescribeEntry`) so they participate in dial9 without derive sugar.
-- **Binary-wide source discovery at sink construction** (once metrique's source system re-opens). Would add a `Dial9Stream::builder().startup_discovery(true)` toggle and a warn when no dial9-bearing structs are registered.
-- **Typed source extraction for context** (paired with the above). Would let `Dial9Context` be read as a typed snapshot rather than walking flattened fields. Cleaner API at the cost of more metrique-side machinery. Existing dial9 users' code continues to work unchanged.
-- **Per-sink compile-time wire plans**, once metrique can emit them, to replace the flush-thread `Entry::write` walk with a direct encode.
-- **More schema annotations**: display hints, aggregation hints, privacy labels, `dial9.kpi` markers for fields that should be graphed. Same mechanism as units.
-- **Heterogeneous `Flex` values** once metrique carries a tagged runtime value model for them.
-- **Nested container widening**: once metrique lifts its one-optional-layer restriction on `List` and `Flex.value`, dial9's `List` and `Map` wire variants already accept the richer shapes (they recurse at the type level).
+- **Viewer span rendering for metrique events.** Events carry start (`timestamp`) and `dial9.duration_ns`, so the span pipeline can synthesize a closed span per event (one segment, payload as span fields) with a small branch where span events are classified: `buildSpanData` in the legacy `trace_analysis.js` and its TypeScript port under `dial9-viewer/ui/src/lib/trace/`. Deferred until the UI migration (#672-674) leaves one implementation to change. Until then, metrique events appear in the events pane with fields and units.
+- **A `Kpi` field flag** emitting a `dial9.kpi` annotation, once the viewer can graph flagged fields; the annotation mechanism needs no format changes.
+- **Streaming event encoder** (transactional begin/commit/abort on the thread-local buffer), removing the buffered `FieldValue` stage here and the per-span allocations in the tracing layer.
+- **Convenience wiring**: `attach_to_stream_with_dial9` / `metrique_sink(...)` builder, once we accept `metrique-service-metrics` in the public surface (later scope, see "User-facing API").
+- **`Flex` support**, blocked on metrique giving `Flex` entries a self-describing descriptor shape (today `Flex::descriptors()` is `Unavailable`, which makes any entry containing one unavailable).
+- **Numeric lists through `GlobalEntrySink`**, blocked on metrique's dyn bridge forwarding list elements without stringifying them ([awslabs/metrique#349](https://github.com/awslabs/metrique/issues/349)); until then only lists of strings work through a global sink, and entries with numeric list fields are dropped there.
+- **Precomputed descriptor-sequence ids** (upstream), replacing the per-entry `descriptors()` walk and id hashing with a single `u64` read; identification is most of the gap between this sink and plain EMF formatting. Proposed in [awslabs/metrique#348](https://github.com/awslabs/metrique/issues/348).
+- **A general `drop_fields` upstream in metrique**, replacing `WithoutDial9Fields` and letting a mixed segment be filtered properly instead of degrading to `Unavailable`.
+- **More schema annotations**: display hints, aggregation hints, privacy labels, `dial9.kpi` markers. Same mechanism as units.

@@ -14,7 +14,11 @@ import {
   scopeFromKeys,
 } from "../../lib/trace/trace_scope.js";
 import type { BrowserEls } from "./dom.js";
-import type { BrowserStore } from "./state.js";
+import type {
+  BrowseSlice,
+  BrowserStore,
+  HeatmapSelection,
+} from "./state.js";
 
 // The bucket's region, stamped onto every link this page opens so the
 // opened tab's URL is self-contained (signs the right regional S3 endpoint
@@ -36,6 +40,23 @@ function warnHostsDropped(): void {
       "view covers ALL hosts in the selected time window. Narrow the time " +
       "range or host selection for an exact match.",
   );
+}
+
+/**
+ * Scope used by profiling actions. An explicit heatmap box wins; otherwise
+ * profile the full service currently loaded in the browse pane.
+ */
+export function effectiveProfileSelection(
+  browse: Readonly<BrowseSlice>,
+): HeatmapSelection | null {
+  if (browse.selection?.keys.length) return browse.selection;
+  if (!browse.segments.length || !browse.fullDomain) return null;
+  return {
+    keys: browse.segments.map((segment) => segment.key),
+    bytes: browse.segments.reduce((sum, segment) => sum + segment.size, 0),
+    t0: browse.fullDomain.tMin,
+    t1: browse.fullDomain.tMax,
+  };
 }
 
 // The current selection as an aggregate scope (bucket/prefix/service/
@@ -137,8 +158,8 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       launchDiff("flamegraph");
       return;
     }
-    const sel = s.browse.selection;
-    if (!sel || !sel.keys.length) return;
+    const sel = effectiveProfileSelection(s.browse);
+    if (!sel) return;
     const bucket = els.bucketInput.value.trim();
     if (!bucket) {
       alert("Bucket is required");
@@ -172,8 +193,8 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       launchDiff("tokio");
       return;
     }
-    const sel = s.browse.selection;
-    if (!sel || !sel.keys.length) return;
+    const sel = effectiveProfileSelection(s.browse);
+    if (!sel) return;
     const bucket = els.bucketInput.value.trim();
     if (!bucket) {
       alert("Bucket is required");
@@ -190,8 +211,8 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
   // flamegraph and tokio-stats (/api/span-stats reads the same param
   // vocabulary). No diff route - the Span Explorer has no two-sided view.
   function viewSpanExplorer(): void {
-    const sel = store.getState().browse.selection;
-    if (!sel || !sel.keys.length) return;
+    const sel = effectiveProfileSelection(store.getState().browse);
+    if (!sel) return;
     const bucket = els.bucketInput.value.trim();
     if (!bucket) {
       alert("Bucket is required");

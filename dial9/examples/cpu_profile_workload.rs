@@ -14,9 +14,9 @@
 
 use dial9::analysis::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 use dial9::cpu::CpuProfilingConfig;
+use dial9::format::Decoder;
 use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
-use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
 fn burn_cpu(duration: Duration) {

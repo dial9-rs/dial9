@@ -1,6 +1,6 @@
 [package]
 name = "dial9-viewer"
-version = "0.5.0-rc0"
+version = "0.5.0-rc1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -68,7 +68,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Per-request operational metrics. `emf` emits CloudWatch EMF to stdout in
 # production; `local-format` renders a human-readable variant under `--local`.
-metrique = { version = "0.1.23", features = ["emf", "local-format"] }
+metrique = { version = "0.1.28", features = ["emf", "local-format"] }
 metrique-writer = "0.1"
 time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
@@ -93,7 +93,7 @@ urlencoding = "2"
 
 [dev-dependencies]
 assert2 = { workspace = true }
-metrique = { version = "0.1.23", features = ["emf", "local-format", "test-util"] }
+metrique = { version = "0.1.28", features = ["emf", "local-format", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 s3s = "0.14.1"

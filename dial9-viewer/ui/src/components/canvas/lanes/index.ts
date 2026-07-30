@@ -137,6 +137,9 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     // Size the inner spacer so the box scrolls exactly the overflow past the
     // window (the sticky canvas occupies the first `viewportH` of flow).
     setSpacerHeight(box, Math.max(0, rowLayout.contentHeight - viewportH));
+    if (Math.abs(box.scrollTop - state.uiPrefs.lanesScrollTop) >= 1) {
+      box.scrollTop = state.uiPrefs.lanesScrollTop;
+    }
     const scrollTop = box.scrollTop;
 
     // Own the canvas's DPR backing store (resize only on geometry change).
@@ -186,6 +189,10 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
   let scrolledBox: HTMLElement | null = null;
   let scrollRaf = 0;
   const onBoxScroll = (): void => {
+    const top = scrolledBox?.scrollTop ?? 0;
+    if (top !== store.getState().uiPrefs.lanesScrollTop) {
+      store.update("uiPrefs", { lanesScrollTop: top });
+    }
     if (scrollRaf) return;
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = 0;
@@ -300,6 +307,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       if (next === top) return false;
 
       box.scrollTop = next;
+      store.update("uiPrefs", { lanesScrollTop: next });
       // The canvas is sticky and painted from scrollTop, so a programmatic
       // scroll has to repaint exactly as a user scroll does.
       draw();

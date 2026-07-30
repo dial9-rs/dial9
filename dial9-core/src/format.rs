@@ -3,7 +3,7 @@ use dial9_trace_format::TraceEvent;
 
 crate::test_util_pub! {
 /// Segment metadata as key/value entries, written when a segment is sealed.
-#[derive(TraceEvent)]
+#[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
 struct SegmentMetadataEvent {
     #[traceevent(timestamp)]
@@ -19,7 +19,7 @@ crate::test_util_pub! {
 /// monotonic event stream.
 ///
 /// [`clock_pair`]: crate::clock::clock_pair
-#[derive(TraceEvent)]
+#[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
 struct ClockSyncEvent {
     #[traceevent(timestamp)]

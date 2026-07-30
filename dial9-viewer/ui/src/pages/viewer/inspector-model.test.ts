@@ -11,6 +11,7 @@ import {
   buildSpawnedTasksView,
   hasNoSelection,
   preferredTab,
+  resolveTaskDumpCaptures,
   tabAvailability,
   type RelatedContext,
   type RelatedUiState,
@@ -64,6 +65,7 @@ function sel(over: Partial<SelectionSlice>): SelectionSlice {
     focusedSpanId: null,
     pinnedEvent: null,
     pollDetail: null,
+    taskDump: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
     spawnedTasksRange: null,
@@ -270,6 +272,23 @@ describe("buildSpawnedTasksView", () => {
 });
 
 // ── Tab families + activation ────────────────────────────────────────────────
+describe("task-dump selection resolution", () => {
+  it("re-resolves timestamps against the current trace after replacement", () => {
+    const oldDump = { timestamp: 3, callchain: ["old"] };
+    const newDump = { timestamp: 3, callchain: ["new"] };
+    const selection = { taskId: 9, timestamps: [3] };
+    const traceWith = (dump: typeof oldDump | null) =>
+      ({
+        taskDumps: new Map(dump === null ? [] : [[9, [dump]]]),
+      }) as Parameters<typeof resolveTaskDumpCaptures>[0];
+
+    expect(resolveTaskDumpCaptures(traceWith(oldDump), selection)).toEqual([oldDump]);
+    expect(resolveTaskDumpCaptures(traceWith(null), selection)).toEqual([]);
+    const resolved = resolveTaskDumpCaptures(traceWith(newDump), selection);
+    expect(resolved).toEqual([newDump]);
+    expect(resolved[0]).not.toBe(oldDump);
+  });
+});
 
 describe("tab availability + preferred tab", () => {
   it("a poll click enables + prefers Poll", () => {
@@ -299,10 +318,15 @@ describe("tab availability + preferred tab", () => {
     expect(tabAvailability(cluster).related).toBe(false);
   });
 
-  it("a task select prefers Task; a range prefers Stack", () => {
+  it("a task select prefers Task; a range or task dump prefers Stack", () => {
     expect(preferredTab(sel({ selectedTaskId: 9 }))).toBe("task");
     expect(preferredTab(sel({ spawnedTasksRange: { startNs: 0, endNs: 5 } }))).toBe("stack");
     expect(preferredTab(sel({ sidebarRange: { startNs: 0, endNs: 5 } }))).toBe("stack");
+    const taskDump = { taskId: 9, timestamps: [3] };
+    const dumpSelection = sel({ taskDump });
+    expect(tabAvailability(dumpSelection).stack).toBe(true);
+    expect(preferredTab(dumpSelection)).toBe("stack");
+    expect(hasNoSelection(dumpSelection)).toBe(false);
   });
 
   it("hasNoSelection is true only at rest, and preferredTab is null then", () => {

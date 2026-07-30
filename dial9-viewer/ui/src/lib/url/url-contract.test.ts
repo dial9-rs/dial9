@@ -30,6 +30,7 @@ import {
   resolveViewState,
 } from "./view-state.js";
 import { FLAMEGRAPH_LEGACY_PARAMS } from "./legacy-params.fixture.js";
+import { VIEWER_VIEW_QUERY_PARAMS } from "../../pages/viewer/url-state.js";
 
 const require = createRequire(import.meta.url);
 const uiDir = fileURLToPath(new URL("../../../", import.meta.url));
@@ -125,6 +126,7 @@ describe("URL contract: README tables match the recorded fixtures", () => {
       bucket: "b",
       region: "eu-west-1",
       prefix: "p",
+      service: "svc",
       tab: "raw",
       tz: "local",
       q: "query",
@@ -139,6 +141,13 @@ describe("URL contract: README tables match the recorded fixtures", () => {
 
   it("every-page table is exactly the ui switch param", () => {
     expect(tableNames(subsection("Query params - every page"))).toEqual(["ui"]);
+  });
+
+  it("new-viewer durable-state table = viewer URL registry", () => {
+    const documented = tableNames(
+      subsection("Query params - new/viewer.html durable view state"),
+    );
+    expect(sorted(documented)).toEqual(sorted(VIEWER_VIEW_QUERY_PARAMS));
   });
 
   it("hash table = v + live/defined codec keys + reserved keys", () => {

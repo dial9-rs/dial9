@@ -184,13 +184,23 @@ describe("demo-trace anchors (#593 measurements)", () => {
   });
 
   // [query, expected frames, expected pct of the in-view total]
+  //
+  // Exact measurements of the committed demo trace: a snapshot guarding
+  // against drift in the parser/tree/search path between regens, NOT a
+  // correctness oracle (the synthetic-tree tests above are). On a demo
+  // regen, re-measure (rerun; received values are the new measurements)
+  // but first rule out a code regression: point DEMO at the previous
+  // trace bytes (git show <base>:dial9-viewer/ui/public/demo-trace.bin)
+  // and confirm the old anchors still reproduce. Then sanity-check the
+  // new values before copying: poll/tokio should dominate, spawn should
+  // stay tiny, and shifts should be explainable by the capture.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 146, "100.0"],
-    ["tokio", 230, "100.0"],
-    ["axum", 32, "92.5"],
-    ["dispatcher", 24, "68.7"],
-    ["framebuf", 8, "54.4"],
-    ["spawn", 2, "100.0"],
+    ["poll", 150, "81.9"],
+    ["tokio", 192, "81.9"],
+    ["axum", 25, "69.8"],
+    ["dispatcher", 28, "71.9"],
+    ["framebuf", 6, "3.0"],
+    ["spawn", 2, "81.9"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {
