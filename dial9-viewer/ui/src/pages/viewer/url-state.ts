@@ -739,8 +739,6 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   return out;
 }
 
-/** Encode one repeatable, versioned JSON tuple so arbitrary schema names
- * round-trip without reserving a delimiter inside those names. */
 function encodeFieldChart(chart: FieldChartSpec): string | null {
   if (
     !isValidFieldChartTrackId(chart.id) ||
@@ -750,32 +748,20 @@ function encodeFieldChart(chart: FieldChartSpec): string | null {
   ) {
     return null;
   }
-  return `v1:${JSON.stringify([
+  return encodeList([
     chart.id,
     chart.eventName,
     chart.fieldName,
     chart.kind,
-  ])}`;
+  ]);
 }
 
 function decodeFieldChart(value: string): FieldChartSpec | null {
-  if (!value.startsWith("v1:")) return null;
-  let parts: unknown;
-  try {
-    parts = JSON.parse(value.slice(3));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(parts) || parts.length !== 4) return null;
+  const parts = decodeList(value);
+  if (parts === null || parts.length !== 4) return null;
   const [id, eventName, fieldName, kind] = parts;
   if (
-    typeof id !== "string" ||
-    typeof eventName !== "string" ||
-    typeof fieldName !== "string" ||
-    typeof kind !== "string" ||
     !isValidFieldChartTrackId(id) ||
-    eventName.length === 0 ||
-    fieldName.length === 0 ||
     !(FIELD_CHART_KINDS as readonly string[]).includes(kind)
   ) {
     return null;

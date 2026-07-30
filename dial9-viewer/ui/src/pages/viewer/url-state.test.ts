@@ -180,44 +180,44 @@ describe("viewer URL state: dynamic field charts", () => {
     const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
 
     expect(params.getAll("field-chart")).toEqual([
-      'v1:["fc-1","request,finished","bytes,total","counter"]',
-      'v1:["fc-2","queue.depth","active","updown-counter"]',
+      "v1:fc-1\trequest,finished\tbytes,total\tcounter",
+      "v1:fc-2\tqueue.depth\tactive\tupdown-counter",
     ]);
     expect(out.fieldCharts).toEqual(charts);
   });
 
-  it("round-trips tabs and literal percent escapes in event and field names", () => {
+  it("round-trips literal percent escapes in event and field names", () => {
     const charts: StoreState["view"]["fieldCharts"] = [
       {
-        id: "fc-tabs",
-        eventName: "request\t50%",
-        fieldName: "bytes\t%09",
+        id: "fc-percent",
+        eventName: "request 50%",
+        fieldName: "bytes %09",
         kind: "gauge",
       },
     ];
 
     const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
     expect(params.get("field-chart")).toBe(
-      'v1:["fc-tabs","request\\t50%","bytes\\t%09","gauge"]',
+      "v1:fc-percent\trequest 50%\tbytes %09\tgauge",
     );
     expect(out.fieldCharts).toEqual(charts);
   });
 
   it("drops malformed definitions and duplicate ids", () => {
-    const valid = 'v1:["fc-a","Metric","value","gauge"]';
+    const valid = "v1:fc-a\tMetric\tvalue\tgauge";
     const params = new URLSearchParams();
     params.append("field-chart", "legacy,shape");
     params.append(
       "field-chart",
-      'v1:["bad-id","Metric","value","gauge"]',
+      "v1:bad-id\tMetric\tvalue\tgauge",
     );
     params.append(
       "field-chart",
-      'v1:["fc-with,comma","Metric","value","gauge"]',
+      "v1:fc-with,comma\tMetric\tvalue\tgauge",
     );
     params.append(
       "field-chart",
-      'v1:["fc-b","Metric","value","histogram"]',
+      "v1:fc-b\tMetric\tvalue\thistogram",
     );
     params.append("field-chart", valid);
     params.append("field-chart", valid);
@@ -410,8 +410,7 @@ describe("viewer URL state: store hydration", () => {
       "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
         "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
         "&stack-view=flame&inspector-width=444" +
-        "&field-chart=v1%3A%5B%22fc-1%22%2C%22Metric%22%2C" +
-        "%22value%22%2C%22counter%22%5D",
+        "&field-chart=v1%3Afc-1%09Metric%09value%09counter",
     );
 
     hydrateViewerStore(store, decoded, {
