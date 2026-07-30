@@ -15,21 +15,13 @@ import type {
   FieldChartSpec,
 } from "../../types/state.js";
 import type { ViewerStore } from "../../store/store.js";
-import {
-  formatFieldValue,
-  formatHumanDuration,
-} from "../../lib/trace/index.js";
+import { formatFieldValue } from "../../lib/trace/index.js";
 import {
   createTooltip,
   tooltipRowsTemplate,
   type TooltipHandle,
   type TooltipRow,
 } from "../../components/overlay/tooltip.js";
-import {
-  deriveAxisInputs,
-  fmtAxisTick,
-  isDateQualified,
-} from "./axis.js";
 import {
   createFieldChartSeriesCache,
   type FieldChartNumeric,
@@ -179,8 +171,6 @@ function upperBound(
 
 export interface FieldChartHover {
   value: FieldChartNumeric;
-  timestamp: number;
-  endTimestamp: number | null;
 }
 
 /**
@@ -202,8 +192,6 @@ export function fieldChartHoverAt(
       timestamp < sample.endTimestamp
       ? {
           value: sample.value,
-          timestamp: sample.timestamp,
-          endTimestamp: sample.endTimestamp,
         }
       : null;
   }
@@ -242,8 +230,6 @@ export function fieldChartHoverAt(
     ? null
     : {
         value: sample.value,
-        timestamp: sample.timestamp,
-        endTimestamp: null,
       };
 }
 
@@ -252,34 +238,15 @@ export function fieldChartTooltipRows(
   hover: FieldChartHover,
   spec: FieldChartSpec,
   unit: string | null,
-  formatTimestamp: (timestamp: number) => string,
 ): TooltipRow[] {
-  const rows: TooltipRow[] = [
-    [{ label: "Series:", value: `${spec.eventName}.${spec.fieldName}` }],
+  return [
     [
       {
-        label: spec.kind === "gauge" ? "Value:" : "Delta:",
+        label: `${spec.fieldName}:`,
         value: compactFieldChartValue(hover.value, unit),
       },
     ],
   ];
-  if (hover.endTimestamp === null) {
-    rows.push([{ label: "Time:", value: formatTimestamp(hover.timestamp) }]);
-  } else {
-    rows.push([
-      {
-        label: "Interval:",
-        value:
-          `${formatTimestamp(hover.timestamp)} \u2192 ` +
-          formatTimestamp(hover.endTimestamp),
-      },
-      {
-        label: "Duration:",
-        value: formatHumanDuration(hover.endTimestamp - hover.timestamp),
-      },
-    ]);
-  }
-  return rows;
 }
 
 function xAt(
@@ -819,12 +786,6 @@ export function createFieldChartTrack(
         return;
       }
 
-      const axis = deriveAxisInputs(store.getState());
-      const withDate = isDateQualified(
-        axis,
-        current.viewStart,
-        current.viewEnd,
-      );
       tooltip ??= createTooltip(canvas.ownerDocument);
       tooltip.show(
         tooltipRowsTemplate(
@@ -832,7 +793,6 @@ export function createFieldChartTrack(
             hover,
             current.spec,
             current.series.unit,
-            (ns) => fmtAxisTick(axis, ns, withDate),
           ),
         ),
         event,

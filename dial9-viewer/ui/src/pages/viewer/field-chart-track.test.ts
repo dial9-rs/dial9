@@ -220,8 +220,6 @@ describe("field-chart hover", () => {
     const gauge = series([point(0, 1n), point(10, 3n)]);
     expect(fieldChartHoverAt(gauge, "gauge", 6)).toEqual({
       value: 3n,
-      timestamp: 10,
-      endTimestamp: null,
     });
 
     const withGap = series([
@@ -241,39 +239,29 @@ describe("field-chart hover", () => {
 
     expect(fieldChartHoverAt(counter, "counter", 4.9)).toEqual({
       value: 2n,
-      timestamp: 0,
-      endTimestamp: 5,
     });
     expect(fieldChartHoverAt(counter, "counter", 5)).toEqual({
       value: 3n,
-      timestamp: 5,
-      endTimestamp: 10,
     });
     expect(fieldChartHoverAt(counter, "counter", 10)).toBeNull();
   });
 
-  it("describes a counter delta with its interval and duration", () => {
+  it("shows only the field name and formatted value", () => {
     const spec = {
       id: "field-chart-1",
       eventName: "Metric",
-      fieldName: "value",
+      fieldName: "requests_total",
       kind: "counter",
     } as const;
 
     expect(
       fieldChartTooltipRows(
-        { value: 3n, timestamp: 1_000, endTimestamp: 6_000 },
+        { value: 3n },
         spec,
         "widgets",
-        (timestamp) => `t${timestamp}`,
       ),
     ).toEqual([
-      [{ label: "Series:", value: "Metric.value" }],
-      [{ label: "Delta:", value: "3 widgets" }],
-      [
-        { label: "Interval:", value: "t1000 → t6000" },
-        { label: "Duration:", value: "5.0µs" },
-      ],
+      [{ label: "requests_total:", value: "3 widgets" }],
     ]);
   });
 });
