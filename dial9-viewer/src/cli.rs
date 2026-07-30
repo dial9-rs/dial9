@@ -1,5 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+use std::time::Duration;
 
 mod skills {
     include!(concat!(env!("OUT_DIR"), "/skills.rs"));
@@ -44,6 +45,54 @@ enum Commands {
         /// S3 key prefix
         #[arg(long)]
         prefix: Option<String>,
+
+        /// Run without S3 using generated traces. With no value, uses
+        /// `synthetic`; `demo` replays the bundled demo trace in every segment.
+        #[arg(
+            long,
+            value_enum,
+            num_args = 0..=1,
+            default_missing_value = "synthetic",
+            conflicts_with_all = [
+                "bucket",
+                "local_dir",
+                "agg",
+                "agg_source_dir",
+                "agg_output_dir",
+                "agg_output_bucket",
+                "agg_output_prefix",
+                "agg_segment_secs",
+                "enable_upload"
+            ]
+        )]
+        simulator: Option<SimulatorModeArg>,
+
+        /// Number of simulated hosts.
+        #[arg(long, default_value_t = 3, requires = "simulator")]
+        simulator_hosts: usize,
+
+        /// Duration and key spacing of each simulated segment, in seconds.
+        #[arg(long, default_value_t = 60, requires = "simulator")]
+        simulator_segment_secs: u64,
+
+        /// Template repetitions inside each synthetic segment.
+        #[arg(long, default_value_t = 1, requires = "simulator")]
+        simulator_repetitions: u32,
+
+        /// Synthetic feature groups to include, comma-separated. Omit for all;
+        /// use `none` for clock/metadata events only.
+        #[arg(
+            long,
+            value_enum,
+            value_delimiter = ',',
+            num_args = 1..,
+            requires = "simulator"
+        )]
+        simulator_features: Option<Vec<SimulatorFeatureArg>>,
+
+        /// Synthetic stack-symbol naming. Omit for anonymous placeholders.
+        #[arg(long, value_enum, requires = "simulator")]
+        simulator_symbols: Option<SimulatorSymbolModeArg>,
 
         /// Serve traces from a local directory instead of S3
         #[arg(long, conflicts_with = "bucket")]
@@ -103,6 +152,30 @@ enum Commands {
         #[command(subcommand)]
         action: ReportAction,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SimulatorModeArg {
+    Synthetic,
+    Demo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SimulatorSymbolModeArg {
+    Anonymous,
+    Realistic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SimulatorFeatureArg {
+    Cpu,
+    Scheduling,
+    Tasks,
+    Spans,
+    Memory,
+    Resources,
+    CustomEvents,
+    None,
 }
 
 #[derive(Subcommand, Debug)]
@@ -250,6 +323,12 @@ pub async fn run() -> anyhow::Result<()> {
             port,
             bucket,
             prefix,
+            simulator,
+            simulator_hosts,
+            simulator_segment_secs,
+            simulator_repetitions,
+            simulator_features,
+            simulator_symbols,
             local_dir,
             dev,
             local,
@@ -269,20 +348,53 @@ pub async fn run() -> anyhow::Result<()> {
             crate::init_tracing(local);
             let _metrics = crate::attach_request_metrics(local);
 
-            let app = crate::build_app(crate::ViewerConfig {
-                bucket,
-                prefix,
-                local_dir,
-                dev,
-                agg,
-                agg_source_dir,
-                agg_output_dir,
-                agg_output_bucket,
-                agg_output_prefix,
-                agg_segment_secs,
-                enable_upload,
-            })
-            .await?;
+            let app = if let Some(mode) = simulator {
+                if mode == SimulatorModeArg::Demo && simulator_features.is_some() {
+                    anyhow::bail!("--simulator-features applies only to synthetic simulator mode");
+                }
+                if mode == SimulatorModeArg::Demo && simulator_symbols.is_some() {
+                    anyhow::bail!("--simulator-symbols applies only to synthetic simulator mode");
+                }
+                let features = build_simulator_features(simulator_features.as_deref())?;
+                let symbol_mode = match simulator_symbols {
+                    Some(SimulatorSymbolModeArg::Realistic) => {
+                        crate::simulator::SimulatorSymbolMode::Realistic
+                    }
+                    Some(SimulatorSymbolModeArg::Anonymous) | None => {
+                        crate::simulator::SimulatorSymbolMode::Anonymous
+                    }
+                };
+                let trace_mode = match mode {
+                    SimulatorModeArg::Synthetic => crate::simulator::SimulatorTraceMode::Synthetic,
+                    SimulatorModeArg::Demo => crate::simulator::SimulatorTraceMode::DemoReplay,
+                };
+                let config = crate::simulator::SimulatorConfig::builder()
+                    .trace_mode(trace_mode)
+                    .hosts(simulator_hosts)
+                    .segment_duration(Duration::from_secs(simulator_segment_secs))
+                    .repetitions_per_segment(simulator_repetitions)
+                    .features(features)
+                    .symbol_mode(symbol_mode)
+                    .prefix(prefix.unwrap_or_else(|| "traces".to_string()))
+                    .dev(dev)
+                    .build();
+                crate::simulator::build_simulator_app(config).await?
+            } else {
+                crate::build_app(crate::ViewerConfig {
+                    bucket,
+                    prefix,
+                    local_dir,
+                    dev,
+                    agg,
+                    agg_source_dir,
+                    agg_output_dir,
+                    agg_output_bucket,
+                    agg_output_prefix,
+                    agg_segment_secs,
+                    enable_upload,
+                })
+                .await?
+            };
 
             let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
             tracing::info!(port, "dial9-viewer listening");
@@ -314,4 +426,119 @@ pub async fn run() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+fn build_simulator_features(
+    selected: Option<&[SimulatorFeatureArg]>,
+) -> anyhow::Result<crate::simulator::SimulatorFeatures> {
+    let Some(selected) = selected else {
+        return Ok(crate::simulator::SimulatorFeatures::default());
+    };
+    let none = selected.contains(&SimulatorFeatureArg::None);
+    if none && selected.len() != 1 {
+        anyhow::bail!("simulator feature `none` cannot be combined with other feature groups");
+    }
+    let enabled = |feature| !none && selected.contains(&feature);
+    Ok(crate::simulator::SimulatorFeatures::builder()
+        .cpu(enabled(SimulatorFeatureArg::Cpu))
+        .scheduling(enabled(SimulatorFeatureArg::Scheduling))
+        .tasks(enabled(SimulatorFeatureArg::Tasks))
+        .spans(enabled(SimulatorFeatureArg::Spans))
+        .memory(enabled(SimulatorFeatureArg::Memory))
+        .resources(enabled(SimulatorFeatureArg::Resources))
+        .custom_events(enabled(SimulatorFeatureArg::CustomEvents))
+        .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_without_simulator_still_parses() {
+        let cli = Cli::try_parse_from(["dial9", "serve"]).unwrap();
+        let Commands::Serve { simulator, .. } = cli.command else {
+            panic!("expected serve command");
+        };
+        assert_eq!(simulator, None);
+    }
+
+    #[test]
+    fn simulator_flag_defaults_to_synthetic_without_a_value() {
+        let cli = Cli::try_parse_from(["dial9", "serve", "--simulator"]).unwrap();
+        let Commands::Serve {
+            simulator,
+            simulator_hosts,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        assert_eq!(simulator, Some(SimulatorModeArg::Synthetic));
+        assert_eq!(simulator_hosts, 3);
+    }
+
+    #[test]
+    fn simulator_parses_host_and_feature_configuration() {
+        let cli = Cli::try_parse_from([
+            "dial9",
+            "serve",
+            "--simulator",
+            "synthetic",
+            "--simulator-hosts",
+            "8",
+            "--simulator-features",
+            "cpu,spans",
+        ])
+        .unwrap();
+        let Commands::Serve {
+            simulator,
+            simulator_hosts,
+            simulator_features,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        assert_eq!(simulator, Some(SimulatorModeArg::Synthetic));
+        assert_eq!(simulator_hosts, 8);
+        assert_eq!(
+            simulator_features,
+            Some(vec![SimulatorFeatureArg::Cpu, SimulatorFeatureArg::Spans])
+        );
+    }
+
+    #[test]
+    fn simulator_parses_realistic_symbol_mode() {
+        let cli = Cli::try_parse_from([
+            "dial9",
+            "serve",
+            "--simulator",
+            "synthetic",
+            "--simulator-symbols",
+            "realistic",
+        ])
+        .unwrap();
+        let Commands::Serve {
+            simulator_symbols, ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        assert_eq!(simulator_symbols, Some(SimulatorSymbolModeArg::Realistic));
+    }
+
+    #[test]
+    fn simulator_rejects_real_storage_inputs() {
+        let error = Cli::try_parse_from([
+            "dial9",
+            "serve",
+            "--simulator",
+            "demo",
+            "--bucket",
+            "real-bucket",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }

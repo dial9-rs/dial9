@@ -103,6 +103,12 @@
 //! with different tracing behavior, and tooling (CDK, Docker, k8s, etc.)
 //! can flip knobs without a rebuild.
 //!
+//! ### Segment metadata
+//!
+//! Static build and deployment context belongs in segment metadata so it is
+//! available when any rotated segment is loaded independently. This example
+//! records the compiled application's Cargo package version in every segment.
+//!
 //! ### Getting Useful Data
 //!
 //! To get the most use out of dial9, you need application-specific events in your traces to make sense of your data. The best way to do this is to emit some sort
@@ -299,7 +305,12 @@ fn configure_dial9(opts: &Dial9Opts) -> Recorder {
     };
 
     let core = configure_sources(
-        dial9::recorder(writer).metrics_sink(stderr_metrics_sink()),
+        dial9::recorder(writer)
+            .segment_metadata([(
+                "application.version".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            )])
+            .metrics_sink(stderr_metrics_sink()),
         opts,
     );
 

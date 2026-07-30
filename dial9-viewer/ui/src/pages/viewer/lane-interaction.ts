@@ -165,6 +165,11 @@ export function mountLaneInteraction(
         } else {
           // Hand the range to the store; the region panel opens by data
           // present. This also retains the range (blocks kb-selection).
+          store.update("view", {
+            regionMode: null,
+            regionWorkerZoom: [],
+            regionOffworkerZoom: [],
+          });
           store.update("selection", {
             sidebarRange: { startNs: cmd.startNs, endNs: cmd.endNs },
             taskDump: null,
@@ -390,8 +395,9 @@ export function mountLaneInteraction(
     const trace = store.getState().trace.trace;
     if (trace === null || trace === lastTrace) return;
     lastTrace = trace;
-    // initViewportFromTrace (registered earlier) has fitted the viewport in
-    // this same flush, so the current window is the baseline undo target.
+    // The explicit loaded-trace transition commits the fitted/restored
+    // viewport synchronously before this notification flush, so subscriber
+    // registration order cannot change the baseline.
     viewport.resetHistory();
     viewport.recordCurrent();
     ensureControls();

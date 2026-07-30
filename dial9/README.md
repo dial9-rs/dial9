@@ -49,7 +49,13 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     // Downgrades to a disabled recorder if the writer can't be created; use
     // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
-    let recorder = dial9::recorder_or_disabled(writer).build();
+    let recorder = dial9::recorder_or_disabled(writer)
+        .segment_metadata([("service".to_string(), "checkout".to_string())])
+        .segment_metadata([(
+            "application.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        )])
+        .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all().worker_threads(4);
@@ -73,6 +79,12 @@ async fn main() {
         .unwrap();
 }
 ```
+
+Use [`RecorderBuilder::segment_metadata`](https://docs.rs/dial9/latest/dial9/struct.RecorderBuilder.html#method.segment_metadata)
+for static context that should be available when any rotated segment is loaded
+independently, such as the service, host, deployment, or compiled application
+version. Calls are merged, including calls made by integration layers; when a
+key is repeated, the later value wins.
 
 For zero-code configuration in production, use `dial9::recorder_from_env`:
 
@@ -214,6 +226,11 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 `recorder.handle().attach_tokio_runtime(..)` takes a Tokio runtime builder you configured, installs
 dial9's hooks on it, and builds it. Pair the recorder with the runtime to get a
 `dial9::AttachedRuntime`, which is what a `#[dial9::main]` config must produce.
+
+Driving that runtime yourself, reach for [`dial9::block_on`](https://docs.rs/dial9/latest/dial9/fn.block_on.html) rather than
+`Runtime::block_on`. Poll and wake events come from Tokio's per-task hooks, and `Runtime::block_on` would
+polls its future outside any task, so that future and everything awaited inline under it would be absent
+from the trace. `dial9::block_on` spawns it first. `#[dial9::main]` already does this for you.
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
@@ -599,7 +616,7 @@ You can emit your own application-level events into the trace alongside the buil
 # fn main() {
 use dial9::Dial9Handle;
 use dial9::core::clock_monotonic_ns;
-use dial9_trace_format::TraceEvent;
+use dial9::format::TraceEvent;
 
 #[derive(TraceEvent)]
 struct RequestCompleted {
@@ -629,8 +646,8 @@ periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,no_run
 use dial9::core::CustomEventsConfig;
+use dial9::format::TraceEvent;
 use dial9::{RecorderSourceExt, recorder};
-use dial9_trace_format::TraceEvent;
 
 #[derive(TraceEvent)]
 struct CacheEvent {
@@ -857,9 +874,49 @@ dial9 serve --local-dir /tmp/my_traces
 
 # Serve traces from S3
 AWS_PROFILE=my-profile dial9 serve --bucket my-trace-bucket
+
+# Explore the complete browser and aggregation flow without S3
+dial9 serve --simulator --local
 ```
 
 Open `http://localhost:3000` to browse traces. Enter a search prefix (e.g. `2026-04-09/1910/checkout-api`), select one or more segments, and click "View Selected" to open them in the viewer.
+
+#### Simulator mode
+
+Simulator mode exposes lazily generated traces through the same S3-shaped keys
+and storage interface as a real trace bucket. Browser discovery, object
+downloads, spans, flamegraphs, and Tokio stats therefore use their production
+paths, while aggregate rollups stay in a process-local temporary directory.
+No bucket or AWS credentials are required.
+
+```bash
+# Sanitized synthetic traces with every feature group enabled
+dial9 serve --simulator --local
+
+# Replay the bundled demo trace in each virtual segment
+dial9 serve --simulator demo --local
+
+# Model a larger fleet with five-minute segments
+dial9 serve --simulator --simulator-hosts 12 --simulator-segment-secs 300 --local
+
+# Keep selected synthetic features and repeat the template for more data
+dial9 serve --simulator synthetic \
+  --simulator-features cpu,scheduling,tasks,spans \
+  --simulator-repetitions 3 \
+  --simulator-symbols realistic --local
+```
+
+The default fleet has 3 hosts and one-minute virtual segments across any
+requested time range. The catalog is deterministic and independent of server
+uptime; payload bytes are generated only when an object is fetched. Use
+`--simulator-hosts`, `--simulator-segment-secs`, and
+`--simulator-repetitions` to change its shape and data volume. Synthetic
+feature groups are `cpu`, `scheduling`, `tasks`, `spans`, `memory`,
+`resources`, and `custom-events`; omit `--simulator-features` to enable all of
+them, or pass `none` for clock and segment metadata only. Use
+`--simulator-symbols realistic` for deterministic Rust-like stack-frame names;
+anonymous placeholders remain the default. Demo replay preserves the bundled
+trace's event data while rebasing one copy into every virtual segment.
 
 ### `agents`
 

@@ -19,9 +19,14 @@ import {
   isLoadPerfEnabled,
   Dial9Creds,
 } from "../../lib/trace/index.js";
-import type { ReparseRange } from "../../lib/trace/index.js";
+import type {
+  ParsedTrace,
+  ReparseRange,
+  TraceSliceStore,
+} from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { EscCascade } from "./esc-cascade.js";
+import type { LoadedTraceKind } from "./viewer-reconstruction.js";
 import {
   createLoadController,
   initialUrlLabel,
@@ -41,6 +46,10 @@ export interface LoadChromeOptions {
   initialUrls?: readonly string[];
   /** Toolbar label for the boot source (shown once it loads). */
   initialLabel?: string;
+  /** Deep-linked parse filter applied to the first URL load. */
+  initialRange?: ReparseRange;
+  /** Explicit production transition that commits each successfully parsed trace. */
+  onTraceLoaded?(trace: ParsedTrace, kind: LoadedTraceKind): void;
   /** Test seams. */
   document?: Document;
   startLoad?: LoadControllerDeps["startLoad"];
@@ -50,6 +59,8 @@ export interface LoadChromeOptions {
 export interface LoadChrome {
   /** Toolbar "New File" click: the controller runs the confirm. */
   requestNewFile(): void;
+  /** Whether another browser can reload the current trace from this URL. */
+  isSourceShareable(): boolean;
   /** The current source label for the toolbar (updates on each load). */
   currentLabel(): string;
   /**
@@ -65,7 +76,7 @@ export interface LoadChrome {
    * remains true only while this scope load is current.
    */
   scopeLoading(label: string): () => boolean;
-  loadUrls(urls: readonly string[], label: string): void;
+  loadUrls(urls: readonly string[], label: string, range?: ReparseRange): void;
   scopeFailed(): void;
   dispose(): void;
 }
@@ -117,7 +128,18 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     hasTrace: () => store.getState().trace.trace !== null,
     startLoad:
       options.startLoad ??
-      ((urls, opts) => loadTraceOnMainThread(store, urls, opts)),
+      ((urls, opts) => {
+        const target: TraceSliceStore = {
+          update(_slice, patch): void {
+            if (options.onTraceLoaded !== undefined) {
+              options.onTraceLoaded(patch.trace, opts.kind);
+            } else {
+              store.update("trace", patch);
+            }
+          },
+        };
+        return loadTraceOnMainThread(target, urls, opts);
+      }),
     confirm: options.confirm ?? ((message) => window.confirm(message)),
     onError: options.onError,
     onChange: renderLayer,
@@ -281,7 +303,11 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
 
   // Boot: auto-load `?trace=` components, else leave the drop zone waiting.
   if (options.initialUrls && options.initialUrls.length > 0) {
-    controller.loadUrls(options.initialUrls, initialUrlLabel(options.initialUrls.length));
+    controller.loadUrls(
+      options.initialUrls,
+      initialUrlLabel(options.initialUrls.length),
+      options.initialRange,
+    );
   }
 
   return {
@@ -291,15 +317,18 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
       pendingLabel = committedLabel;
       controller.requestNewFile();
     },
+    isSourceShareable: () => controller.isSourceShareable(),
     currentLabel: () => committedLabel,
-    reparseToRange: (range) => controller.reparse(range),
+    reparseToRange: (range) => {
+      controller.reparse(range);
+    },
     scopeLoading: (label) => {
       const token = controller.showLoading(label);
       return () => controller.isCurrentLoad(token);
     },
-    loadUrls: (urls, label) => {
+    loadUrls: (urls, label, range) => {
       pendingLabel = label;
-      controller.loadUrls(urls, label);
+      controller.loadUrls(urls, label, range);
     },
     scopeFailed: () => controller.cancel(),
     dispose(): void {

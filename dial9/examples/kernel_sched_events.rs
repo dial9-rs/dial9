@@ -47,9 +47,9 @@
 
 use dial9::analysis::analysis_events::{CpuSampleSource, Dial9Event};
 use dial9::cpu::SchedEventConfig;
+use dial9::format::Decoder;
 use dial9::{Dial9HandleTokioExt, RecorderPerfExt, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {

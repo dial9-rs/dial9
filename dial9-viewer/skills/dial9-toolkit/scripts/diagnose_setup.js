@@ -7,6 +7,7 @@
 //   2. Missing wake events (tasks not instrumented)
 //   3. Missing debug symbols (no source locations)
 //   4. No scheduling events (informational)
+//   5. Runtime activity but no task polls (Runtime::block_on instead of dial9::block_on)
 "use strict";
 
 const fs = require('fs');
@@ -28,12 +29,19 @@ async function diagnoseSetup(tracePath) {
   let callchainDepths = [];
   let totalSymbols = 0, symbolsWithLocation = 0;
   let totalWakeEvents = 0, totalTaskSpawns = 0;
+  let totalPollStarts = 0, totalUnparks = 0;
   let uniqueAddresses = new Set();
 
   for await (const trace of parseTrace(tracePath)) {
     // Wake events
     totalWakeEvents += trace.events.filter(e => e.eventType === EVENT_TYPES.WakeEvent).length;
     totalTaskSpawns += trace.taskSpawnTimes.size;
+
+    // Runtime activity vs task polls
+    for (const e of trace.events) {
+      if (e.eventType === EVENT_TYPES.PollStart) totalPollStarts++;
+      else if (e.eventType === EVENT_TYPES.WorkerUnpark) totalUnparks++;
+    }
 
     // CPU samples
     for (const s of trace.cpuSamples) {
@@ -139,12 +147,32 @@ use spawn_blocking instead of running on the async runtime.`,
     });
   }
 
+  // ── Check 5: Runtime woke up repeatedly but never polled a task ──
+  // An idle runtime parks and stays parked; repeated unparks mean it had work.
+  if (totalUnparks > 10 && totalPollStarts === 0) {
+    findings.push({
+      severity: 'warning',
+      check: 'no-task-polls',
+      message: `The runtime unparked ${totalUnparks} times but recorded 0 task polls. Its work is running outside any task.`,
+      fix: `Drive the runtime with dial9's block_on instead of Runtime::block_on:
+
+use dial9::block_on;
+
+block_on(&runtime, async { /* your work */ });
+
+Poll and wake events come from Tokio's per-task hooks. Runtime::block_on polls
+its future on the calling thread, outside any task, so that future and anything
+awaited inline under it never reach the trace. dial9::block_on spawns it first.
+#[dial9::main] already does this.`,
+    });
+  }
+
   // ── Report ──
   console.log(`\n${'='.repeat(60)}`);
   console.log('DIAL9 SETUP DIAGNOSTIC');
   console.log(`${'='.repeat(60)}`);
   console.log(`CPU samples: ${totalOnCpu} on-CPU, ${totalOffCpu} off-CPU`);
-  console.log(`Tasks spawned: ${totalTaskSpawns}, Wake events: ${totalWakeEvents}`);
+  console.log(`Tasks spawned: ${totalTaskSpawns}, Wake events: ${totalWakeEvents}, Task polls: ${totalPollStarts}`);
   console.log(`Symbols: ${totalSymbols} resolved (${symbolsWithLocation} with source locations)`);
   console.log();
 

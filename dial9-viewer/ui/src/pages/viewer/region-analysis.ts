@@ -26,6 +26,11 @@ import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import type { ParsedTrace } from "../../types/trace.js";
 import type { TimeRange } from "../../types/trace.js";
+import { buildRegionFlamegraphPopoutUrl } from "./region-popout.js";
+import {
+  regionComputedCacheSignature,
+  regionWidgetCacheSignature,
+} from "./analysis-cache-signature.js";
 import {
   buildBlockingView,
   collectSchedSamplesInRange,
@@ -57,6 +62,8 @@ const MODE_LABELS: Record<RegionMode, string> = {
 export interface RegionAnalysisDeps {
   /** The inspector aside; the Stack tab's `[data-region-host]` lives here. */
   inspectorHost: HTMLElement;
+  /** Whether the current successful source can be reconstructed from the URL. */
+  isSourceShareable(): boolean;
   /** Surface an error (pop-out with no trace URL, etc.) as a toast. */
   notify?(message: string): void;
   /** ARIA/status announcer for the "show in timeline" navigation. */
@@ -93,21 +100,32 @@ export function createRegionAnalysis(
     s.trace.trace ? deriveLaneData(s.trace.trace) : null,
   );
 
-  // ── local UI state ──────────────────────────────────────────────────────
-  let mode: RegionMode | null = null;
-  let pendingMode: RegionMode | null = null; // set by a toolbar open
-  let heapMode: "bytes" | "count" = "bytes";
-  let groupBy: "leaf" | "full" = "leaf";
-  let showExtent: TimeRange | null = null; // extent for the current zoom
+  // ── durable UI state mirrors ───────────────────────────────────────────
+  // The store is authoritative; locals are render caches used by this
+  // imperative controller and are refreshed by its `view` subscription.
+  let mode: RegionMode | null = store.getState().view.regionMode;
+  let heapMode: "bytes" | "count" = store.getState().view.regionHeapMode;
+  let groupBy: "leaf" | "full" = store.getState().view.regionGroupBy;
+  let showExtent: TimeRange | null = null; // derived from the current zoom
   let lastRangeKey: string | null = null;
+  let applyingView = false;
 
   // ── widget lifecycle (lazy, single instance reused) ─────────────────────
-  // The container/instance/ResizeObserver/appliedSig discipline lives in the
-  // shared host helper (the inspector hosts a second instance the same way).
   const fg = createFlamegraphHost({
     doc: deps.inspectorHost.ownerDocument,
     className: "d9-region-fg",
-    onZoom: onZoomChange,
+    onZoom: () => {
+      if (applyingView) return;
+      const path = fg.instance()?.getZoomPath();
+      if (path !== undefined) {
+        store.update("view", {
+          regionWorkerZoom: path.worker,
+          regionOffworkerZoom: path.offworker,
+          regionInspectFocus: fg.instance()?.getInspectFocus() ?? null,
+        });
+      }
+      onZoomChange();
+    },
   });
   let computedView: ComputedView = { kind: "empty" };
   let computedSig: string | null = null;
@@ -125,12 +143,18 @@ export function createRegionAnalysis(
     return `${range.startNs}-${range.endNs}`;
   }
 
-  function viewSig(m: RegionMode | null, range: TimeRange): string {
-    const key = rangeKey(range);
-    if (m === "heap") return `heap:${key}:${heapMode}`;
-    if (m === "blocking") return `blocking:${key}:${groupBy}`;
-    if (m === "cpu") return `cpu:${key}`;
-    return `empty:${key}`;
+  function viewSig(
+    trace: ParsedTrace,
+    m: RegionMode | null,
+    range: TimeRange,
+  ): string {
+    return regionComputedCacheSignature({
+      trace,
+      mode: m,
+      range,
+      heapMode,
+      groupBy,
+    });
   }
 
   // ── flamegraph widget ───────────────────────────────────────────────────
@@ -231,11 +255,12 @@ export function createRegionAnalysis(
       // toolbar's forced kind, else the data-present default (reset to the
       // default on each fresh region, not the previous mode).
       lastRangeKey = key;
-      mode = pendingMode ?? defaultRegionMode(present);
-      pendingMode = null;
+      mode = state().view.regionMode ?? defaultRegionMode(present);
+      if (mode !== state().view.regionMode) store.update("view", { regionMode: mode });
       showExtent = null;
     } else if (mode !== null && !present[mode]) {
       mode = defaultRegionMode(present);
+      store.update("view", { regionMode: mode });
     }
 
     const coverage = regionCoverage(state().segments, range);
@@ -250,7 +275,7 @@ export function createRegionAnalysis(
     present: { cpu: boolean; blocking: boolean; heap: boolean },
     coverage: RegionCoverage,
   ): void {
-    const sig = viewSig(mode, range);
+    const sig = viewSig(trace, mode, range);
     if (sig !== computedSig) {
       computedView = computeView(mode, range, trace, ld);
       computedSig = sig;
@@ -270,7 +295,11 @@ export function createRegionAnalysis(
       if (fgHost === null) return;
       // The flame pref is part of the signature so switching list<->flame for
       // blocking re-applies setData.
-      const fgSig = blockingFlame ? `${sig}:flame` : sig;
+      const fgSig = regionWidgetCacheSignature({
+        trace,
+        computed: sig,
+        blockingFlame,
+      });
       fg.sync({
         hostEl: fgHost,
         sig: fgSig,
@@ -304,6 +333,43 @@ export function createRegionAnalysis(
       instance.setData(computedView.samples, trace.callframeSymbols, {
         exportTitle: `Blocking calls - ${regionTitle(range)}`,
         runtimeWorkers: trace.runtimeWorkers,
+      });
+    }
+    const view = state().view;
+    applyingView = true;
+    try {
+      instance.applyViewState(
+        {
+          ...(view.regionWorkerZoom.length > 0
+            ? { workerZoom: view.regionWorkerZoom }
+            : {}),
+          ...(view.regionOffworkerZoom.length > 0
+            ? { offworkerZoom: view.regionOffworkerZoom }
+            : {}),
+          ...(view.regionInspectFocus !== null
+            ? {
+                inspect: {
+                  name: view.regionInspectFocus,
+                  fullName: view.regionInspectFocus,
+                },
+              }
+            : {}),
+        },
+        { silent: true },
+      );
+    } finally {
+      applyingView = false;
+    }
+    const actual = instance.getZoomPath();
+    if (
+      actual.worker.join("\t") !== view.regionWorkerZoom.join("\t") ||
+      actual.offworker.join("\t") !== view.regionOffworkerZoom.join("\t") ||
+      instance.getInspectFocus() !== view.regionInspectFocus
+    ) {
+      store.update("view", {
+        regionWorkerZoom: actual.worker,
+        regionOffworkerZoom: actual.offworker,
+        regionInspectFocus: instance.getInspectFocus(),
       });
     }
   }
@@ -567,18 +633,31 @@ export function createRegionAnalysis(
     if (m === mode) return;
     mode = m;
     showExtent = null;
+    store.update("view", {
+      regionMode: m,
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+      regionInspectFocus: null,
+    });
     sync();
   }
 
   function setHeapMode(m: "bytes" | "count"): void {
     if (m === heapMode) return;
     heapMode = m;
+    store.update("view", {
+      regionHeapMode: m,
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+      regionInspectFocus: null,
+    });
     sync();
   }
 
   function onGroupByChange(e: Event): void {
     const v = (e.target as HTMLSelectElement).value;
     groupBy = v === "full" ? "full" : "leaf";
+    store.update("view", { regionGroupBy: groupBy });
     sync();
   }
 
@@ -608,19 +687,17 @@ export function createRegionAnalysis(
 
   /** Pop Out: open flamegraph.html preserving trace URL(s), range, zoom. */
   function popOut(range: TimeRange): void {
-    const params = new URLSearchParams(window.location.search);
-    const traceUrls = params.getAll("trace").filter((u) => u.length > 0);
-    if (traceUrls.length === 0) {
-      deps.notify?.("Pop-out requires a URL-loaded trace (open with ?trace=).");
+    const url = buildRegionFlamegraphPopoutUrl(
+      window.location.search,
+      range,
+      state().view,
+      deps.isSourceShareable(),
+    );
+    if (url === null) {
+      deps.notify?.(
+        "Pop-out requires the current trace to be loaded from a reproducible URL.",
+      );
       return;
-    }
-    const qs = traceUrls.map((u) => `trace=${encodeURIComponent(u)}`).join("&");
-    let url = `flamegraph.html?${qs}&start=${Math.round(range.startNs)}&end=${Math.round(range.endNs)}`;
-    const fgInstance = fg.instance();
-    if (fgInstance !== null) {
-      const z = fgInstance.getZoomPath();
-      if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
-      if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;
     }
     window.open(url, "_blank");
   }
@@ -636,7 +713,13 @@ export function createRegionAnalysis(
     // The whole-trace analysis reuses the retained-region mechanism so the Stack
     // tab activates and the analyzed scope is boxed; the forced kind opens the
     // requested analysis even when other data is present.
-    pendingMode = kind;
+    mode = kind;
+    store.update("view", {
+      regionMode: kind,
+      regionWorkerZoom: [],
+      regionOffworkerZoom: [],
+      regionInspectFocus: null,
+    });
     store.update("selection", {
       sidebarRange: { startNs: vp.minTs, endNs: vp.maxTs },
       pinnedEvent: null,
@@ -648,7 +731,14 @@ export function createRegionAnalysis(
 
   // Own subscription: viewport + segments drive the badge/extent (the inspector
   // re-renders on trace/selection/uiPrefs and calls sync too).
-  const unsubscribe = store.subscribe(["viewport", "segments"], () => sync());
+  const unsubscribe = store.subscribe(["viewport", "segments", "view"], (s, changed) => {
+    if (changed.has("view")) {
+      mode = s.view.regionMode;
+      heapMode = s.view.regionHeapMode;
+      groupBy = s.view.regionGroupBy;
+    }
+    sync();
+  });
 
   return {
     sync,

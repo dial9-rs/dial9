@@ -91,7 +91,7 @@ export interface BindViewStateOptions<S> {
 }
 
 export interface ViewStateBinding {
-  /** Write any pending state NOW (copy-link calls this before copying). */
+  /** Project current state NOW (copy-link calls this before copying). */
   flush(): void;
   /** Unsubscribe and cancel any pending write. */
   dispose(): void;
@@ -110,6 +110,7 @@ export function bindViewStateToUrl<S extends { [K in keyof S]: object }>(
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
 
   let pending: unknown = null;
+  let disposed = false;
 
   function write(): void {
     const state = options.project(store.getState());
@@ -153,12 +154,15 @@ export function bindViewStateToUrl<S extends { [K in keyof S]: object }>(
 
   return {
     flush() {
-      if (pending === null) return;
-      timer.clear(pending);
-      pending = null;
+      if (disposed) return;
+      if (pending !== null) {
+        timer.clear(pending);
+        pending = null;
+      }
       write();
     },
     dispose() {
+      disposed = true;
       unsubscribe();
       if (pending !== null) {
         timer.clear(pending);

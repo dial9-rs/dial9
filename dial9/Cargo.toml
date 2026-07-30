@@ -37,6 +37,7 @@ missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true }
+dial9-trace-format = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
 dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry", optional = true }
 dial9-macro = { workspace = true, optional = true }
@@ -117,8 +118,12 @@ tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
 ## Standalone; combine with the `tokio` feature to capture task ids.
 metrique-sink = ["dep:dial9-metrique"]
 
+## Serde deserialization of decoded events (`RawEvent::deserialize`).
+## Reading a trace with [`Decoder`] needs no feature.
+deserialize = ["dial9-trace-format/serde-deserialize"]
+
 ## Trace file reading + analysis toolkit (offline decode).
-analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
+analysis = ["deserialize", "tokio", "dial9-tokio-telemetry/analysis"]
 
 ## S3 upload pipeline stage.
 worker-s3 = ["tokio", "dial9-tokio-telemetry/worker-s3"]

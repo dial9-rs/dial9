@@ -102,8 +102,8 @@ pub async fn browse(
 
     let window = params.to - params.from;
 
-    // Local mode: flat listing (no date-prefix fan-out).
-    if !state.allow_byo_creds {
+    // Flat-layout mode: one listing, with no date-prefix fan-out.
+    if !state.time_partitioned_source {
         return browse_local(backend, &bucket, &base, service).await;
     }
 
@@ -133,8 +133,7 @@ fn normalize_service(service: Option<&str>) -> Result<Option<&str>, (StatusCode,
     Ok(Some(service))
 }
 
-/// Local mode: flat listing filtered to trace segments.
-/// Called when `allow_byo_creds == false` (i.e. `--local-dir`).
+/// Flat-layout mode: one listing filtered to trace segments.
 /// No time filtering — the frontend shows all results, positioned by mtime.
 async fn browse_local(
     backend: Arc<dyn StorageBackend>,
@@ -316,7 +315,18 @@ fn service_time_prefixes(base: &str, from: i64, to: i64, service: &str) -> (Vec<
 
 pub(super) fn resolve_base(default_prefix: Option<&str>, key_prefix: Option<&str>) -> String {
     match (default_prefix, key_prefix) {
-        (Some(pfx), Some(kp)) => format!("{}/{}", pfx.trim_end_matches('/'), kp),
+        (Some(pfx), Some(kp)) => {
+            let default = pfx.trim_matches('/');
+            let requested = kp.trim_matches('/');
+            if default.is_empty()
+                || requested == default
+                || requested.starts_with(&format!("{default}/"))
+            {
+                requested.to_string()
+            } else {
+                format!("{default}/{requested}")
+            }
+        }
         (Some(pfx), None) => pfx.to_string(),
         (None, Some(kp)) => kp.to_string(),
         (None, None) => String::new(),
@@ -475,6 +485,19 @@ mod tests {
                 "traces/2026-06-09/1911/api/",
                 "traces/2026-06-09/1912/api/",
             ]
+        );
+    }
+
+    #[test]
+    fn scope_prefix_already_under_default_is_not_duplicated() {
+        assert_eq!(resolve_base(Some("traces"), Some("traces")), "traces");
+        assert_eq!(
+            resolve_base(Some("traces"), Some("traces/team-a")),
+            "traces/team-a"
+        );
+        assert_eq!(
+            resolve_base(Some("traces"), Some("team-a")),
+            "traces/team-a"
         );
     }
 

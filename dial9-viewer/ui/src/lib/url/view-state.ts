@@ -94,6 +94,7 @@ export interface ViewState {
    * it (a task's poll at a given start is unique). Re-resolved on load.
    */
   pollAnchor?: string;
+  taskDumpAnchor?: string;
   /** Pinned-event anchor: the cluster timestamp ns (re-resolved on load). */
   pinnedEventTs?: number;
   /** Retained region (`"startNs-endNs"`) -> selection.sidebarRange. */
@@ -115,6 +116,41 @@ export interface ViewState {
   spanNames?: readonly string[];
   /** Custom-event legend name chips toggled on for display filtering. */
   eventNames?: readonly string[];
+  /** Active rail tab and Tasks-tab ordering/cursor. */
+  railTab?: string;
+  taskSort?: string;
+  taskIndex?: number;
+  /** Runtime groups hidden in the worker lanes. */
+  collapsedRuntimes?: readonly string[];
+  /** Shareable layout geometry and vertical lane position. */
+  inspectorWidth?: number;
+  lanesHeight?: number;
+  lanesScrollTop?: number;
+  /** Stack sample presentation shared by poll and blocking analyses. */
+  stackView?: string;
+  /** Inspector and poll-detail view controls. */
+  inspectorTab?: string;
+  pollSection?: string;
+  expandedPollGroups?: readonly string[];
+  pollWorkerZoom?: readonly string[];
+  pollOffworkerZoom?: readonly string[];
+  /** Related-tab disclosure and correlation state. */
+  relatedCollapsed?: readonly string[];
+  relatedExpand?: readonly string[];
+  relatedCorrelateKey?: string;
+  relatedCorrelateValue?: string;
+  /** Region-analysis controls and embedded flamegraph zoom. */
+  regionMode?: string;
+  regionHeapMode?: string;
+  regionGroupBy?: string;
+  regionWorkerZoom?: readonly string[];
+  regionOffworkerZoom?: readonly string[];
+  regionInspectFocus?: string;
+  /** Span match navigation cursor. */
+  spanNavIndex?: number;
+  /** Active parse filter, distinct from the viewport window. */
+  dataStart?: number;
+  dataEnd?: number;
 }
 
 /** An unrecognized-but-versioned hash entry, preserved for rewrite. */

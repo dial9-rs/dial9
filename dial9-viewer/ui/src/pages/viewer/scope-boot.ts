@@ -6,10 +6,11 @@ import {
   type TraceScope,
 } from "../../lib/trace/trace_scope.js";
 import { initialUrlLabel } from "./load-controller.js";
+import type { ReparseRange } from "../../lib/trace/index.js";
 
 export interface ScopeLoadTarget {
   scopeLoading(label: string): () => boolean;
-  loadUrls(urls: readonly string[], label: string): void;
+  loadUrls(urls: readonly string[], label: string, range?: ReparseRange): void;
   scopeFailed(): void;
 }
 
@@ -25,6 +26,7 @@ export interface ScopeBootOptions {
   hasInlineUrls: boolean;
   loadChrome: ScopeLoadTarget;
   onError(message: string): void;
+  dataRange?: ReparseRange;
   /** Test seam for the credentialed `/api/browse` request. */
   fetchJson?: ((url: string) => Promise<unknown>) | undefined;
   /** Test seam for the tab-scoped credentials store. */
@@ -55,6 +57,7 @@ export async function bootScopeFromSearch(
     options.onError,
     fetchJson,
     creds,
+    options.dataRange,
   );
   return true;
 }
@@ -75,6 +78,7 @@ async function loadFromScope(
   onError: (message: string) => void,
   fetchJson: (url: string) => Promise<unknown>,
   creds: ScopeBootCredentials,
+  dataRange?: ReparseRange,
 ): Promise<void> {
   // Fold the scope's pinned region into the creds store so /api/browse and the
   // subsequent /api/object fetches sign for the bucket's actual region.
@@ -97,7 +101,7 @@ async function loadFromScope(
       loadChrome.scopeFailed();
       return;
     }
-    loadChrome.loadUrls(urls, initialUrlLabel(urls.length));
+    loadChrome.loadUrls(urls, initialUrlLabel(urls.length), dataRange);
   } catch (err) {
     if (!isCurrent()) return;
     const raw = err instanceof Error ? err.message : String(err);

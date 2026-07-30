@@ -14,6 +14,7 @@
 //! use std::time::Duration;
 //! use dial9_core::buffer::DiskBuffer;
 //! use dial9_core::recorder::recorder;
+//! use dial9_tokio_telemetry::block_on;
 //! use dial9_tokio_telemetry::telemetry::{spawn, Dial9HandleTokioExt, TokioAttachOptions};
 //!
 //! # fn main() -> std::io::Result<()> {
@@ -33,7 +34,7 @@
 //!     TokioAttachOptions::builder().runtime_name("io").build(),
 //! )?;
 //!
-//! main_rt.block_on(async { spawn(async { /* work */ }).await.unwrap() });
+//! block_on(&main_rt, async { spawn(async { /* work */ }).await.unwrap() });
 //!
 //! // graceful_shutdown is synchronous; drop the runtimes first so their workers
 //! // flush, then drain.
@@ -270,6 +271,10 @@ pub trait Dial9HandleTokioExt {
     /// Drop the runtime before calling
     /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
     /// on the recorder this handle came from, so the runtime's workers flush.
+    ///
+    /// Drive the root future with [`block_on`](crate::block_on), not
+    /// [`Runtime::block_on`](tokio::runtime::Runtime::block_on): to ensure polls and wakes
+    /// are captured.
     ///
     /// ```no_run
     /// use dial9_core::buffer::MemoryBuffer;

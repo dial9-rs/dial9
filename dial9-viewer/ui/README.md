@@ -225,10 +225,74 @@ page emits it via `traceTitleParams`/`objectTraceUrls`):
 
 `start`/`end` are ABSOLUTE monotonic nanoseconds, the same values carried by
 `event.ts`/`trace.minTs` from `TraceParser.parseTrace()`, NOT offsets from
-trace start. `?worker=`, `?task=`, `?source=` do NOT exist on these pages -
-unknown query params are silently ignored, so inventing params fails
-silently. Selection/highlight travels in the HASH once implemented (see
-reserved keys below).
+trace start. On the legacy exact-mode pages `start`/`end` are parse filters;
+on `/new/viewer.html` they are viewport bounds and the additive
+`data-start`/`data-end` pair carries the parse filter. The legacy pages do not
+honor the new-viewer state table below; the migrated viewer does.
+
+### Query params - new/viewer.html durable view state
+
+Only the migrated trace viewer owns these additive parameters. They are
+canonicalized with `history.replaceState` after each settled store update;
+defaults are omitted. Values are semantic anchors where possible, so agents
+can construct them directly. `start`/`end` are the visible viewport here;
+`data-start`/`data-end` are the distinct parse-time Set Range filter. For
+`v1:` lists, percent-encode the complete query value once in the normal URL
+way (`TAB` becomes `%09`, newline `%0A`); commas inside names need no special
+list escaping. Previously emitted comma/pre-encoded list values remain readable.
+
+| Param | Value | Meaning |
+|-------|-------|---------|
+| `start` | monotonic ns | Visible viewport start (does not discard data). |
+| `end` | monotonic ns | Visible viewport end. Valid only with `start < end`. |
+| `task` | integer or `0x` hex | Selected task. |
+| `span-filter` | string | Span text filter. |
+| `track-order` | comma-separated track ids | Analysis-track order. |
+| `collapsed` | comma-separated track ids | Collapsed analysis tracks. |
+| `span` | span id | Lane-highlighted span (ancestor chain is re-derived). |
+| `span-focus` | span id | Span-panel subtree root. |
+| `poll` | `<startNs>:<taskId>` | Poll-detail anchor. |
+| `task-dump` | `<taskId>:<timestamp>[,<timestamp>...]` | Selected task-dump captures. |
+| `event` | monotonic ns | Pinned custom-event cluster timestamp. |
+| `region` | `<startNs>-<endNs>` | Retained analysis region. |
+| `spawned` | `<startNs>-<endNs>` | Queue-track spawned-task range. |
+| `issue` | POI detector id | Issues filter. |
+| `issue-sort` | `<worker\|kind\|time\|duration>,<asc\|desc>` | Issues ordering. |
+| `issue-index` | non-negative integer | Current issues cursor. |
+| `span-pct` | `50` \| `90` \| `95` \| `99` | Span percentile floor. |
+| `span-names` | `v1:` + TAB-joined names | Enabled span legend chips. |
+| `event-names` | same | Enabled custom-event legend chips. |
+| `rail` | `issues` \| `tasks` | Visible rail tab. |
+| `task-sort` | `<id\|loc\|polls\|total\|longest\|lifetime>,<asc\|desc>` | Tasks ordering. |
+| `task-index` | non-negative integer | Current Tasks cursor. |
+| `runtime-collapsed` | `v1:` + TAB-joined names | Folded runtime groups. |
+| `inspector-width` | positive CSS pixels | Inspector width. |
+| `lanes-height` | positive CSS pixels | Worker-lanes viewport height. |
+| `lanes-scroll` | non-negative CSS pixels | Worker-lanes vertical position. |
+| `stack-view` | `list` \| `flame` | Poll/blocking stack presentation. |
+| `inspector` | `task` \| `poll` \| `event` \| `related` \| `stack` | Visible inspector tab. |
+| `poll-section` | `cpu` \| `sched` | Poll flamegraph sample family. |
+| `poll-expanded` | `v1:` + TAB-joined group ids | Expanded poll list groups. |
+| `poll-worker-zoom` | TAB-joined frame path | Poll worker-tree flamegraph zoom. |
+| `poll-offworker-zoom` | same | Poll off-worker-tree flamegraph zoom. |
+| `related-collapsed` | `v1:` + TAB-joined titles | Collapsed Related sections. |
+| `related-expand` | `v1:` + newline-joined `<title><TAB><before><TAB><after>` entries | Related load-more counts. |
+| `related-key` | string | Correlation field key. |
+| `related-value` | string | Correlation field value; active with `related-key`. |
+| `analysis` | `cpu` \| `blocking` \| `heap` | Region-analysis mode. |
+| `heap-weight` | `bytes` \| `count` | Heap flamegraph weighting. |
+| `blocking-group` | `leaf` \| `full` | Blocking-list grouping. |
+| `analysis-worker-zoom` | TAB-joined frame path | Region worker-tree flamegraph zoom. |
+| `analysis-offworker-zoom` | same | Region off-worker-tree flamegraph zoom. |
+| `analysis-inspect` | full frame key | Region flamegraph butterfly/inspect focus. |
+| `span-index` | non-negative integer | Current filtered-span navigation cursor. |
+| `data-start` | monotonic ns | Parse-time Set Range lower bound. |
+| `data-end` | monotonic ns | Parse-time Set Range upper bound. |
+
+Clock mode (`tm`) and timezone (`tz`) remain in the versioned hash. Unknown
+query params are preserved. Invalid known values are ignored rather than
+coerced. Hover, in-flight drag, temporary search/help modals, toasts, and load
+progress are intentionally transient and are not deep-linked.
 
 ### Query params - flamegraph.html aggregated API mode (`?api=1`)
 
@@ -297,31 +361,30 @@ status:
 | `fg.s` | live (flamegraph) | Frames-search query; overrides legacy `search`. |
 | `fg.sp` | live (flamegraph) | Spawn-location filter value (exact mode); overrides legacy `spawn`. |
 | `fg.rt` | live (flamegraph) | Runtime filter value (exact mode); overrides legacy `runtime`. |
-| `tm` | defined, unwritten | Clock display mode (`rel`\|`abs`); the chunk-2 viewer wires it. |
-| `tz` | defined, unwritten | Timezone (`utc`\|`local`) for absolute timestamps. |
-| `vp` | reserved - completes with chunk 2 (T21-T23) | Viewport time window. NOT honored yet; do not emit. |
-| `sel.*` | reserved - completes with chunk 2 (T21-T23) | Selection/highlight (task, span, event). NOT honored yet; do not emit. |
-| `poi` | reserved - completes with chunk 2 (T21-T23) | POI position for n/p stepping. NOT honored yet; do not emit. |
+| `tm` | live (new viewer) | Clock display mode (`rel`\|`abs`). |
+| `tz` | live (new viewer) | Timezone (`utc`\|`local`) for absolute timestamps. |
+| `vp` | reserved hash name | Not honored in hash; new viewer uses query `start`/`end`. |
+| `sel.*` | reserved hash names | Not honored in hash; new viewer uses readable selection query params. |
+| `poi` | reserved hash name | Not honored in hash; rail cursors are page-owned query params. |
 
-Reserved keys claim the NAME only. Emitting them today does nothing (a
-tolerant reader preserves them verbatim but restores nothing); links that
-need selection or viewport state become constructible when the chunk-2
-viewer tickets land and this table flips their status to live.
+Reserved hash keys claim the NAME only. Emitting them does nothing; the
+new-viewer query implementation does not activate or reinterpret them.
 
 ### Deep-link recipes for agents (issue #303)
 
 The three asks from #303, in contract terms:
 
-1. **Set a time range / open the viewer at an exact window** (works today,
-   on the legacy viewer and any migrated page honoring the same params):
+1. **Open the new viewer at an exact window, optionally with Set Range:**
 
    ```
-   viewer.html?trace=<trace-url>&start=<ns>&end=<ns>
+   new/viewer.html?trace=<trace-url>&start=<visible-start-ns>&end=<visible-end-ns>
+   new/viewer.html?trace=<trace-url>&data-start=<parse-start-ns>&data-end=<parse-end-ns>&start=<visible-start-ns>&end=<visible-end-ns>
    ```
 
-   Compute `start`/`end` as `trace.minTs + offsetNs` (absolute monotonic
-   ns). The page parses only events in `[start, end]` and shows "Clear
-   Range" immediately.
+   All values are absolute monotonic nanoseconds. Omit `data-start`/`data-end`
+   to keep the full trace zoomable; include them to reproduce a Set Range
+   reparse exactly. Legacy `viewer.html` continues to interpret `start`/`end`
+   as its parse filter.
 
 2. **Open a flamegraph, optionally pre-zoomed to a subtree:**
 
@@ -337,10 +400,17 @@ The three asks from #303, in contract terms:
    filter reproducing the shared tree (F151), so carry the same
    `start`/`end` the zoomed view had (or none).
 
-3. **Highlight / select:** NOT constructible yet. The `sel.*` and `vp` hash
-   keys are reserved and complete with chunk 2 (T21-T23); until then there
-   is no selection param on any page, and inventing query params fails
-   silently (see above).
+3. **Select an analysis target and exact surface:**
+
+   ```
+   new/viewer.html?trace=<trace-url>&task=0x2a&start=<ns>&end=<ns>
+   new/viewer.html?trace=<trace-url>&region=<a>-<b>&analysis=heap&heap-weight=count&inspector=stack
+   new/viewer.html?trace=<trace-url>&poll=<poll-start>:<task-id>&inspector=poll&stack-view=flame&poll-section=sched&poll-worker-zoom=<f1>%09<f2>
+   ```
+
+   Selection anchors that depend on trace content are validated after load;
+   an anchor absent from that trace is dropped without disturbing the rest of
+   the link. The full parameter table above is the source of truth for agents.
 
 ### Enforcement
 
