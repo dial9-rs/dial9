@@ -87,6 +87,9 @@ describe("materializeFieldChartSeries", () => {
       9_007_199_254_740_994n,
       9_007_199_254_740_995n,
     ]);
+    expect(series.samples.every((sample) => sample.endTimestamp === null)).toBe(
+      true,
+    );
     expect(series.unit).toBe("bytes");
   });
 
@@ -102,14 +105,14 @@ describe("materializeFieldChartSeries", () => {
     );
 
     expect(series.samples).toEqual([
-      { timestamp: 1, value: 10n, gap: null },
-      { timestamp: 2, value: null, gap: "missing" },
-      { timestamp: 3, value: null, gap: "missing" },
-      { timestamp: 4, value: 12n, gap: null },
+      { timestamp: 1, endTimestamp: null, value: 10n, gap: null },
+      { timestamp: 2, endTimestamp: null, value: null, gap: "missing" },
+      { timestamp: 3, endTimestamp: null, value: null, gap: "missing" },
+      { timestamp: 4, endTimestamp: null, value: 12n, gap: null },
     ]);
   });
 
-  it("breaks a monotonic counter on decrease and starts from the new baseline", () => {
+  it("materializes monotonic increments as intervals and resets the baseline", () => {
     const series = materializeFieldChartSeries(
       [
         event("Metric", 1, "100"),
@@ -121,22 +124,50 @@ describe("materializeFieldChartSeries", () => {
     );
 
     expect(series.samples).toEqual([
-      { timestamp: 1, value: 100n, gap: null },
-      { timestamp: 2, value: 110n, gap: null },
-      { timestamp: 3, value: null, gap: "reset" },
-      { timestamp: 3, value: 4n, gap: null },
-      { timestamp: 4, value: 9n, gap: null },
+      { timestamp: 1, endTimestamp: 2, value: 10n, gap: null },
+      { timestamp: 3, endTimestamp: null, value: null, gap: "reset" },
+      { timestamp: 3, endTimestamp: 4, value: 5n, gap: null },
     ]);
   });
 
-  it("keeps decreases continuous for an up/down counter", () => {
+  it("materializes signed up/down counter deltas over their intervals", () => {
     const series = materializeFieldChartSeries(
       [event("Metric", 1, 10), event("Metric", 2, 3)],
       spec("updown-counter"),
     );
     expect(series.samples).toEqual([
-      { timestamp: 1, value: 10n, gap: null },
-      { timestamp: 2, value: 3n, gap: null },
+      { timestamp: 1, endTimestamp: 2, value: -7n, gap: null },
+    ]);
+  });
+
+  it("keeps large integer counter deltas exact", () => {
+    const series = materializeFieldChartSeries(
+      [
+        event("Metric", 1, "900719925474099300000"),
+        event("Metric", 2, "900719925474099300007"),
+      ],
+      spec("counter"),
+    );
+
+    expect(series.samples).toEqual([
+      { timestamp: 1, endTimestamp: 2, value: 7n, gap: null },
+    ]);
+  });
+
+  it("does not bridge a missing counter observation", () => {
+    const series = materializeFieldChartSeries(
+      [
+        event("Metric", 1, 10),
+        event("Metric", 2, undefined),
+        event("Metric", 3, 20),
+        event("Metric", 4, 25),
+      ],
+      spec("counter"),
+    );
+
+    expect(series.samples).toEqual([
+      { timestamp: 2, endTimestamp: null, value: null, gap: "missing" },
+      { timestamp: 3, endTimestamp: 4, value: 5n, gap: null },
     ]);
   });
 

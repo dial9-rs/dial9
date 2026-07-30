@@ -1,9 +1,10 @@
 // Pure model and lifecycle actions for URL-defined custom-event field charts.
 //
 // A chart materializes one event-name stream into timestamp order exactly once
-// per (trace, panel definition). Numeric values stay as bigint when possible,
-// so counters larger than Number.MAX_SAFE_INTEGER retain exact reset detection
-// and relative shape. The canvas layer converts only the visible range to
+// per (trace, panel definition). Gauges retain observations; counters retain
+// deltas over explicit time intervals. Numeric values stay as bigint when
+// possible, so counters larger than Number.MAX_SAFE_INTEGER retain exact reset
+// detection and deltas. The canvas layer converts only the visible range to
 // pixels.
 
 import type { ViewerStore } from "../../store/store.js";
@@ -28,7 +29,10 @@ export type FieldChartNumeric = number | bigint;
 export type FieldChartGap = "missing" | "reset";
 
 export interface FieldChartSample {
+  /** Observation time for gauges; interval start for counters. */
   timestamp: number;
+  /** Counter interval end; null for gauge observations and gap markers. */
+  endTimestamp: number | null;
   value: FieldChartNumeric | null;
   /** Why this timestamp breaks the rendered path. Null on numeric samples. */
   gap: FieldChartGap | null;
@@ -38,7 +42,6 @@ export interface FieldChartSeries {
   samples: readonly FieldChartSample[];
   /** Unit annotation recovered from the matching event schema, if present. */
   unit: string | null;
-  numericSampleCount: number;
 }
 
 // Strict decimal syntax: no hexadecimal, Infinity, NaN, separators, or
@@ -78,6 +81,17 @@ function lessThan(a: FieldChartNumeric, b: FieldChartNumeric): boolean {
     : Number(a) < Number(b);
 }
 
+function subtract(
+  current: FieldChartNumeric,
+  previous: FieldChartNumeric,
+): FieldChartNumeric | null {
+  if (typeof current === "bigint" && typeof previous === "bigint") {
+    return current - previous;
+  }
+  const delta = Number(current) - Number(previous);
+  return Number.isFinite(delta) ? delta : null;
+}
+
 interface OrderedEvent {
   event: CustomTraceEvent;
   sourceIndex: number;
@@ -85,8 +99,11 @@ interface OrderedEvent {
 
 /**
  * Filter one event type, materialize it in timestamp order, parse the selected
- * field, and insert explicit null gaps for missing values and monotonic-counter
- * resets. Sorting is stable for equal timestamps through `sourceIndex`.
+ * field, and insert explicit null gaps for missing values. Gauges keep the
+ * observations. Counters become deltas over [previous timestamp, current
+ * timestamp); a monotonic decrease emits a reset marker and establishes a new
+ * baseline instead of producing a negative delta. Sorting is stable for equal
+ * timestamps through `sourceIndex`.
  */
 export function materializeFieldChartSeries(
   events: readonly CustomTraceEvent[],
@@ -104,8 +121,7 @@ export function materializeFieldChartSeries(
   );
 
   let unit: string | null = null;
-  let numericSampleCount = 0;
-  let previous: FieldChartNumeric | null = null;
+  let previous: { timestamp: number; value: FieldChartNumeric } | null = null;
   const samples: FieldChartSample[] = [];
   for (const { event } of ordered) {
     unit ??= event.units?.[spec.fieldName] ?? null;
@@ -113,6 +129,7 @@ export function materializeFieldChartSeries(
     if (value === null) {
       samples.push({
         timestamp: event.timestamp,
+        endTimestamp: null,
         value: null,
         gap: "missing",
       });
@@ -120,26 +137,59 @@ export function materializeFieldChartSeries(
       continue;
     }
 
+    if (spec.kind === "gauge") {
+      samples.push({
+        timestamp: event.timestamp,
+        endTimestamp: null,
+        value,
+        gap: null,
+      });
+      continue;
+    }
+
+    if (previous === null) {
+      previous = { timestamp: event.timestamp, value };
+      continue;
+    }
+
     if (
       spec.kind === "counter" &&
-      previous !== null &&
-      lessThan(value, previous)
+      lessThan(value, previous.value)
     ) {
       samples.push({
         timestamp: event.timestamp,
+        endTimestamp: null,
         value: null,
         gap: "reset",
       });
+      previous = { timestamp: event.timestamp, value };
+      continue;
     }
-    samples.push({ timestamp: event.timestamp, value, gap: null });
-    numericSampleCount++;
-    previous = value;
+
+    if (event.timestamp > previous.timestamp) {
+      const delta = subtract(value, previous.value);
+      if (delta === null) {
+        samples.push({
+          timestamp: event.timestamp,
+          endTimestamp: null,
+          value: null,
+          gap: "missing",
+        });
+      } else {
+        samples.push({
+          timestamp: previous.timestamp,
+          endTimestamp: event.timestamp,
+          value: delta,
+          gap: null,
+        });
+      }
+    }
+    previous = { timestamp: event.timestamp, value };
   }
 
   return {
     samples,
     unit,
-    numericSampleCount,
   };
 }
 

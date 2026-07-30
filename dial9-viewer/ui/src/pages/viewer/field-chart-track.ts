@@ -1,8 +1,8 @@
 // Canvas renderer for URL-defined custom-event numeric-field tracks.
 //
-// Gauge uses a linear stroke. Counter and Up/down counter use step-after
-// strokes with filled areas; the model's null samples split paths, so a
-// monotonic counter reset never draws a misleading vertical connection.
+// Gauge uses a linear stroke. Counter and Up/down counter use filled,
+// step-after deltas over the model's explicit intervals; null samples split
+// paths, so a monotonic counter reset never invents an increment.
 // Downsampling retains first/min/max/last per pixel column, bounding canvas
 // work without hiding narrow spikes and without allocating a visible-series
 // copy on every pan/zoom.
@@ -50,6 +50,14 @@ export interface FieldChartPlot {
   min: FieldChartNumeric | null;
   max: FieldChartNumeric | null;
   baselineY: number;
+  stats: FieldChartStats;
+}
+
+export interface FieldChartStats {
+  count: number;
+  sum: FieldChartNumeric | null;
+  min: FieldChartNumeric | null;
+  max: FieldChartNumeric | null;
 }
 
 interface RawPoint {
@@ -77,6 +85,31 @@ function compare(a: FieldChartNumeric, b: FieldChartNumeric): number {
 
 function zeroFor(value: FieldChartNumeric): FieldChartNumeric {
   return typeof value === "bigint" ? 0n : 0;
+}
+
+function add(
+  a: FieldChartNumeric,
+  b: FieldChartNumeric,
+): FieldChartNumeric | null {
+  if (typeof a === "bigint" && typeof b === "bigint") return a + b;
+  const sum = Number(a) + Number(b);
+  return Number.isFinite(sum) ? sum : null;
+}
+
+function emptyStats(): FieldChartStats {
+  return { count: 0, sum: null, min: null, max: null };
+}
+
+function includeStat(stats: FieldChartStats, value: FieldChartNumeric): void {
+  stats.sum =
+    stats.count === 0
+      ? value
+      : stats.sum === null
+        ? null
+        : add(stats.sum, value);
+  stats.count++;
+  if (stats.min === null || compare(value, stats.min) < 0) stats.min = value;
+  if (stats.max === null || compare(value, stats.max) > 0) stats.max = value;
 }
 
 function ratio(
@@ -169,10 +202,10 @@ function stepAfter(vertices: readonly FieldChartVertex[]): FieldChartVertex[] {
 }
 
 /**
- * Build a pixel-bounded plot for the visible window. One neighboring sample on
- * either side is retained so lines enter/leave the viewport at the right
- * value. Nulls split segments; a step segment carries its prior value only up
- * to the null timestamp.
+ * Build a pixel-bounded plot for the visible window. Gauge keeps one neighboring
+ * observation on either side so the line intersects the viewport correctly.
+ * Counter samples already describe explicit intervals and are clipped to their
+ * own end, never carried through an unobserved span. Nulls split segments.
  */
 export function buildFieldChartPlot(
   series: FieldChartSeries,
@@ -191,6 +224,7 @@ export function buildFieldChartPlot(
       min: null,
       max: null,
       baselineY: chartBottom,
+      stats: emptyStats(),
     };
   }
 
@@ -201,9 +235,18 @@ export function buildFieldChartPlot(
   );
   let min: FieldChartNumeric | null = null;
   let max: FieldChartNumeric | null = null;
+  const stats = emptyStats();
   for (let i = from; i < to; i++) {
     const sample = samples[i]!;
     if (sample.value === null) continue;
+    const visible =
+      kind === "gauge"
+        ? sample.timestamp >= viewStart && sample.timestamp <= viewEnd
+        : sample.endTimestamp !== null &&
+          sample.endTimestamp > viewStart &&
+          sample.timestamp < viewEnd;
+    if (visible) includeStat(stats, sample.value);
+    if (kind !== "gauge" && !visible) continue;
     if (min === null || compare(sample.value, min) < 0) min = sample.value;
     if (max === null || compare(sample.value, max) > 0) max = sample.value;
   }
@@ -214,10 +257,11 @@ export function buildFieldChartPlot(
       min: null,
       max: null,
       baselineY: chartBottom,
+      stats,
     };
   }
 
-  if (kind === "updown-counter") {
+  if (kind !== "gauge") {
     const zero = zeroFor(min);
     if (compare(zero, min) < 0) min = zero;
     if (compare(zero, max) > 0) max = zero;
@@ -226,12 +270,13 @@ export function buildFieldChartPlot(
   const yAt = (value: FieldChartNumeric): number =>
     chartBottom - ratio(value, min!, max!) * chartH;
   const baselineY =
-    kind === "updown-counter" ? yAt(zeroFor(min)) : chartBottom;
+    kind === "gauge" ? chartBottom : yAt(zeroFor(min));
 
   const segments: FieldChartVertex[][] = [];
   const resetXs = new Set<number>();
   let rawSegment: RawPoint[] = [];
   let bucket: Bucket | null = null;
+  let segmentEnd: number | null = null;
 
   const flushBucket = (): void => {
     if (bucket === null) return;
@@ -239,7 +284,7 @@ export function buildFieldChartPlot(
     bucket = null;
   };
 
-  const flushSegment = (carryTo: number | null): void => {
+  const flushSegment = (): void => {
     flushBucket();
     if (rawSegment.length === 0) return;
     let vertices = rawSegment.map((point) => ({
@@ -248,20 +293,21 @@ export function buildFieldChartPlot(
     }));
     if (kind !== "gauge") {
       vertices = stepAfter(vertices);
-      if (carryTo !== null) {
-        const x = xAt(carryTo, viewStart, viewEnd, drawW);
+      if (segmentEnd !== null) {
+        const x = xAt(segmentEnd, viewStart, viewEnd, drawW);
         const last = vertices[vertices.length - 1]!;
         if (x > last.x) vertices.push({ x, y: last.y });
       }
     }
     segments.push(vertices);
     rawSegment = [];
+    segmentEnd = null;
   };
 
   for (let i = from; i < to; i++) {
     const sample = samples[i]!;
     if (sample.value === null) {
-      flushSegment(sample.timestamp);
+      flushSegment();
       if (
         sample.gap === "reset" &&
         sample.timestamp >= viewStart &&
@@ -275,6 +321,21 @@ export function buildFieldChartPlot(
         );
       }
       continue;
+    }
+    if (
+      kind !== "gauge" &&
+      (sample.endTimestamp === null ||
+        sample.endTimestamp <= viewStart ||
+        sample.timestamp >= viewEnd)
+    ) {
+      continue;
+    }
+    if (
+      kind !== "gauge" &&
+      segmentEnd !== null &&
+      sample.timestamp !== segmentEnd
+    ) {
+      flushSegment();
     }
     const point: RawPoint = {
       index: i,
@@ -297,8 +358,9 @@ export function buildFieldChartPlot(
       if (compare(point.value, bucket.min.value) < 0) bucket.min = point;
       if (compare(point.value, bucket.max.value) > 0) bucket.max = point;
     }
+    segmentEnd = sample.endTimestamp;
   }
-  flushSegment(kind === "gauge" ? null : viewEnd);
+  flushSegment();
 
   return {
     segments,
@@ -306,6 +368,7 @@ export function buildFieldChartPlot(
     min,
     max,
     baselineY,
+    stats,
   };
 }
 
@@ -368,10 +431,15 @@ function compactBigInt(value: bigint): string {
     : `${sign}${digits[0]}.${digits.slice(1, 4)}e${digits.length - 1}`;
 }
 
-function compactValue(value: FieldChartNumeric, unit: string | null): string {
+export function compactFieldChartValue(
+  value: FieldChartNumeric,
+  unit: string | null,
+): string {
   const raw = typeof value === "bigint" ? compactBigInt(value) : String(value);
   if (unit !== null) {
-    if (!["ns", "us", "ms", "s", "bytes"].includes(unit)) return raw;
+    if (!["ns", "us", "ms", "s", "bytes"].includes(unit)) {
+      return `${raw} ${unit}`;
+    }
     const safeBigInt =
       typeof value !== "bigint" ||
       (value >= -MAX_SAFE_BIGINT && value <= MAX_SAFE_BIGINT);
@@ -396,8 +464,43 @@ function compactValue(value: FieldChartNumeric, unit: string | null): string {
 }
 
 function clippedLabel(value: FieldChartNumeric, unit: string | null): string {
-  const text = compactValue(value, unit);
+  const text = compactFieldChartValue(value, unit);
   return text.length <= 22 ? text : `${text.slice(0, 21)}\u2026`;
+}
+
+function averageValue(stats: FieldChartStats): FieldChartNumeric | null {
+  if (stats.count === 0 || stats.sum === null) return null;
+  if (typeof stats.sum === "number") return stats.sum / stats.count;
+  const divisor = BigInt(stats.count);
+  const quotient = stats.sum / divisor;
+  const remainder = stats.sum % divisor;
+  if (remainder === 0n) return quotient;
+  if (stats.sum >= -MAX_SAFE_BIGINT && stats.sum <= MAX_SAFE_BIGINT) {
+    return Number(stats.sum) / stats.count;
+  }
+  const roundsAwayFromZero =
+    (remainder < 0n ? -remainder : remainder) * 2n >= divisor;
+  return roundsAwayFromZero
+    ? quotient + (stats.sum < 0n ? -1n : 1n)
+    : quotient;
+}
+
+/** Compact visible-window summary shown in the track's top-right corner. */
+export function fieldChartReadoutText(
+  stats: FieldChartStats,
+  unit: string | null,
+  kind: FieldChartKind,
+): string {
+  const average = averageValue(stats);
+  if (average === null || stats.max === null) return "";
+  const parts = [
+    `avg ${compactFieldChartValue(average, unit)}`,
+  ];
+  if (kind === "updown-counter" && stats.min !== null) {
+    parts.push(`min ${compactFieldChartValue(stats.min, unit)}`);
+  }
+  parts.push(`max ${compactFieldChartValue(stats.max, unit)}`);
+  return parts.join(" \u00b7 ");
 }
 
 export function renderFieldChart(
@@ -498,18 +601,17 @@ export function renderFieldChart(
     ctx.fillText(clippedLabel(plot.min, series.unit), 3, chartBottom);
   }
   ctx.textAlign = "right";
-  const kind =
-    spec.kind === "updown-counter"
-      ? "Up/down"
-      : spec.kind[0]!.toUpperCase() + spec.kind.slice(1);
-  ctx.fillText(
-    `${kind} \u00b7 ${series.numericSampleCount} samples`,
-    Math.max(0, drawW - 5),
-    11,
-  );
-  if (series.numericSampleCount === 0) {
+  const readout = fieldChartReadoutText(plot.stats, series.unit, spec.kind);
+  if (readout !== "") {
+    ctx.fillText(readout, Math.max(0, drawW - 5), 11);
+  }
+  if (plot.segments.length === 0) {
     ctx.textAlign = "center";
-    ctx.fillText("No numeric samples", drawW / 2, height / 2);
+    ctx.fillText(
+      spec.kind === "gauge" ? "No numeric samples" : "No numeric intervals",
+      drawW / 2,
+      height / 2,
+    );
   }
 }
 

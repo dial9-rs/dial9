@@ -25,8 +25,10 @@ const KIND_LABEL: Record<FieldChartKind, string> = {
 
 const KIND_HELP: Record<FieldChartKind, string> = {
   gauge: "A line joining observed values.",
-  counter: "A stepped area; decreases are treated as resets and break the line.",
-  "updown-counter": "A stepped area that may increase or decrease.",
+  counter:
+    "Deltas between successive observations, shown over each interval; decreases reset the baseline.",
+  "updown-counter":
+    "Signed deltas between successive observations, shown over each interval.",
 };
 
 interface PendingField {

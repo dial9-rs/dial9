@@ -1,26 +1,33 @@
 import { describe, expect, it } from "vitest";
 import type { FieldChartSample, FieldChartSeries } from "./field-chart-model.js";
-import { buildFieldChartPlot } from "./field-chart-track.js";
+import {
+  buildFieldChartPlot,
+  fieldChartReadoutText,
+} from "./field-chart-track.js";
 
 function series(samples: readonly FieldChartSample[]): FieldChartSeries {
-  const numeric = samples.filter((sample) => sample.value !== null);
   return {
     samples,
     unit: null,
-    numericSampleCount: numeric.length,
   };
 }
 
-const sample = (
+const point = (
   timestamp: number,
   value: number | bigint | null,
   gap: FieldChartSample["gap"] = null,
-): FieldChartSample => ({ timestamp, value, gap });
+): FieldChartSample => ({ timestamp, endTimestamp: null, value, gap });
+
+const interval = (
+  timestamp: number,
+  endTimestamp: number,
+  value: number | bigint,
+): FieldChartSample => ({ timestamp, endTimestamp, value, gap: null });
 
 describe("buildFieldChartPlot", () => {
   it("draws a gauge as a linear path", () => {
     const plot = buildFieldChartPlot(
-      series([sample(0, 0n), sample(5, 10n)]),
+      series([point(0, 0n), point(5, 10n)]),
       "gauge",
       0,
       10,
@@ -39,7 +46,7 @@ describe("buildFieldChartPlot", () => {
 
   it("keeps gauge neighbors outside the viewport for true edge interpolation", () => {
     const plot = buildFieldChartPlot(
-      series([sample(0, 0n), sample(10, 10n)]),
+      series([point(0, 0n), point(10, 10n)]),
       "gauge",
       2,
       8,
@@ -51,14 +58,13 @@ describe("buildFieldChartPlot", () => {
     expect(plot.segments[0]?.map(({ x }) => x)).toEqual([-20, 80]);
   });
 
-  it("draws counters step-after and breaks the path at resets", () => {
+  it("draws counter deltas over their intervals and breaks at resets", () => {
     const plot = buildFieldChartPlot(
       series([
-        sample(0, 100n),
-        sample(4, 120n),
-        sample(5, null, "reset"),
-        sample(5, 3n),
-        sample(9, 8n),
+        interval(0, 2, 20n),
+        interval(2, 4, 10n),
+        point(5, null, "reset"),
+        interval(5, 9, 5n),
       ]),
       "counter",
       0,
@@ -70,19 +76,17 @@ describe("buildFieldChartPlot", () => {
 
     expect(plot.resetXs).toEqual([50]);
     expect(plot.segments).toHaveLength(2);
-    expect(plot.segments[0]?.at(-1)?.x).toBe(50);
+    expect(plot.segments[0]?.at(-1)?.x).toBe(40);
     expect(plot.segments[1]?.[0]?.x).toBe(50);
     expect(plot.segments[0]?.at(-1)?.y).not.toBe(
       plot.segments[1]?.[0]?.y,
     );
-    expect(plot.segments[0]?.slice(0, 3).map(({ x }) => x)).toEqual([
-      0, 40, 40,
-    ]);
+    expect(plot.segments[0]?.map(({ x }) => x)).toEqual([0, 20, 20, 40]);
   });
 
-  it("uses a zero baseline and keeps decreases continuous for up/down counters", () => {
+  it("uses a zero baseline for signed up/down deltas", () => {
     const plot = buildFieldChartPlot(
-      series([sample(0, 4), sample(5, -2)]),
+      series([interval(0, 5, -6), interval(5, 10, 3)]),
       "updown-counter",
       0,
       10,
@@ -99,7 +103,7 @@ describe("buildFieldChartPlot", () => {
 
   it("does not apply a counter sample that occurs after the viewport", () => {
     const plot = buildFieldChartPlot(
-      series([sample(0, 0n), sample(5, 5n), sample(15, 10n)]),
+      series([interval(0, 5, 5n), interval(15, 20, 10n)]),
       "counter",
       0,
       10,
@@ -109,17 +113,14 @@ describe("buildFieldChartPlot", () => {
     );
 
     expect(plot.max).toBe(5n);
-    expect(plot.segments[0]?.map(({ x }) => x)).toEqual([0, 50, 50, 100]);
-    expect(plot.segments[0]?.at(-1)?.y).toBe(
-      plot.segments[0]?.at(-2)?.y,
-    );
+    expect(plot.segments[0]?.map(({ x }) => x)).toEqual([0, 50]);
   });
 
   it("keeps adjacent large bigint values visually distinct", () => {
     const plot = buildFieldChartPlot(
       series([
-        sample(0, 9_007_199_254_740_993n),
-        sample(5, 9_007_199_254_740_994n),
+        point(0, 9_007_199_254_740_993n),
+        point(5, 9_007_199_254_740_994n),
       ]),
       "gauge",
       0,
@@ -136,7 +137,7 @@ describe("buildFieldChartPlot", () => {
 
   it("bounds retained vertices by pixel width while preserving extrema", () => {
     const samples = Array.from({ length: 10_000 }, (_, index) =>
-      sample(index / 10, index % 97),
+      interval(index / 10, (index + 1) / 10, index % 97),
     );
     const plot = buildFieldChartPlot(
       series(samples),
@@ -157,5 +158,42 @@ describe("buildFieldChartPlot", () => {
     expect(vertices).toBeLessThanOrEqual(20 * 8 + 1);
     expect(plot.min).toBe(0);
     expect(plot.max).toBe(96);
+  });
+
+  it("computes average and max from values intersecting the visible window", () => {
+    const plot = buildFieldChartPlot(
+      series([
+        interval(0, 4, 2n),
+        interval(4, 8, 6n),
+        interval(8, 12, 10n),
+        interval(20, 25, 100n),
+      ]),
+      "counter",
+      0,
+      10,
+      100,
+      0,
+      100,
+    );
+
+    expect(plot.stats).toEqual({
+      count: 3,
+      sum: 18n,
+      min: 2n,
+      max: 10n,
+    });
+    expect(fieldChartReadoutText(plot.stats, null, "counter")).toBe(
+      "avg 6 · max 10",
+    );
+  });
+
+  it("includes min in the up/down summary so negative deltas stay visible", () => {
+    expect(
+      fieldChartReadoutText(
+        { count: 2, sum: 1n, min: -2n, max: 3n },
+        null,
+        "updown-counter",
+      ),
+    ).toBe("avg 0.5 · min -2 · max 3");
   });
 });
