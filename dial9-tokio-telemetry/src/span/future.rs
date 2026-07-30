@@ -1,6 +1,7 @@
 //! Future combinator for attaching a [`Span`] to a future.
 
 use super::Span;
+use crate::telemetry::{Dial9Handle, clock_monotonic_ns};
 use pin_project_lite::pin_project;
 use std::fmt;
 use std::future::Future;
@@ -8,20 +9,46 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 pin_project! {
-    /// A future that records span enter/exit timing around each poll of the
-    /// inner future, produced by [`Instrument::instrument`].
+    /// A future that records span timing around the inner future, produced by
+    /// [`Instrument::instrument`].
     ///
-    /// Each poll records one span segment, so a future that is polled, suspends
-    /// at an `.await`, and is later polled again shows up as multiple segments
-    /// with a gap between them — matching how the `tracing` layer records
-    /// instrumented futures. When the future (and thus the span) is dropped, the
-    /// span is closed.
+    /// Unlike a per-poll enter/exit, this emits a single `SpanEnter` on the
+    /// first poll and a single completion `SpanExit` when the future resolves
+    /// (or is dropped/cancelled). The exit carries the aggregate the span
+    /// observed: `active_ns` (summed poll durations), `idle_ns` (time suspended
+    /// between polls), `poll_count`, and whether it ran to completion. Per-poll
+    /// detail is recoverable by correlating the span's window with the task's
+    /// poll events, so the span itself stays cheap.
+    ///
+    /// When the future (and thus the span) is dropped, the span is closed.
     pub struct Instrumented<F, S: Span> {
         #[pin]
         inner: F,
         // Not pinned: dropped in place when `Instrumented` drops, which is what
         // emits the span's close event (the span type's `Drop`).
         span: S,
+        entered: bool,
+        exited: bool,
+        first_enter_ns: u64,
+        active_ns: u64,
+        poll_count: u64,
+    }
+
+    impl<F, S: Span> PinnedDrop for Instrumented<F, S> {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+            // Cancelled (dropped before the inner future resolved): still emit
+            // the completion exit with what we observed, marked not-completed.
+            // `span`'s own `Drop` (a field, dropped after this) emits close.
+            if *this.entered && !*this.exited {
+                let handle = Dial9Handle::current();
+                let idle_ns = clock_monotonic_ns()
+                    .saturating_sub(*this.first_enter_ns)
+                    .saturating_sub(*this.active_ns);
+                this.span
+                    .__emit_exit(&handle, *this.active_ns, idle_ns, *this.poll_count, false);
+            }
+        }
     }
 }
 
@@ -38,10 +65,31 @@ impl<F: Future, S: Span> Future for Instrumented<F, S> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        // Enter now; the guard emits the exit when it drops at the end of this
-        // poll, capturing exactly the time spent in `inner.poll`.
-        let _entered = this.span.enter();
-        this.inner.poll(cx)
+        let handle = Dial9Handle::current();
+
+        let t0 = clock_monotonic_ns();
+        if !*this.entered {
+            this.span.__emit_enter(&handle);
+            *this.first_enter_ns = t0;
+            *this.entered = true;
+        }
+
+        let result = this.inner.poll(cx);
+
+        let t1 = clock_monotonic_ns();
+        *this.active_ns = this.active_ns.saturating_add(t1.saturating_sub(t0));
+        *this.poll_count += 1;
+
+        if result.is_ready() {
+            let idle_ns = t1
+                .saturating_sub(*this.first_enter_ns)
+                .saturating_sub(*this.active_ns);
+            this.span
+                .__emit_exit(&handle, *this.active_ns, idle_ns, *this.poll_count, true);
+            *this.exited = true;
+        }
+
+        result
     }
 }
 
@@ -60,10 +108,19 @@ impl<F: Future, S: Span> Future for Instrumented<F, S> {
 /// # }
 /// ```
 pub trait Instrument: Future + Sized {
-    /// Attach `span` to this future. The span records timing around every poll
-    /// and is closed when the future is dropped.
+    /// Attach `span` to this future. The span is entered on the first poll and
+    /// its completion event (with aggregate timing) is emitted when the future
+    /// resolves or is dropped; the span is closed on drop.
     fn instrument<S: Span>(self, span: S) -> Instrumented<Self, S> {
-        Instrumented { inner: self, span }
+        Instrumented {
+            inner: self,
+            span,
+            entered: false,
+            exited: false,
+            first_enter_ns: 0,
+            active_ns: 0,
+            poll_count: 0,
+        }
     }
 }
 

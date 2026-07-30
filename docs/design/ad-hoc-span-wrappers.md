@@ -57,7 +57,7 @@ format:
 | event | schema name | fields |
 |---|---|---|
 | enter | `SpanEnter:<file>:<line>:<col>` (macro) or `SpanEnter:adhoc::runtime` (name-only) | base + user fields (**typed**) |
-| exit  | `SpanExit:<file>:<line>:<col>` (macro) or `SpanExit:adhoc::runtime` (name-only) | base (minus `parent_span_id`) + user fields |
+| exit  | `SpanExit:<file>:<line>:<col>` (macro) or `SpanExit:adhoc::runtime` (name-only) | base (minus `parent_span_id`) + `active_ns`, `idle_ns`, `poll_count`, `completed` + user fields |
 | close | `SpanCloseEvent` (existing struct, private copy per producer) | `timestamp_ns`, `span_id` |
 
 The schema id is the callsite (`file:line:col`), not the span name. The name may
@@ -186,12 +186,29 @@ type (so it must be `TraceField + Clone + 'static`); `%`/`?` render any
 `Display`/`Debug` value to an owned `String`. This replaces the earlier
 stringify-everything approach and is what makes numeric fields zero-cost.
 
-**The sync guard emits one enter/exit pair; the future combinator emits one
-pair per poll.** The guard covers on-thread blocking work, so a single segment
-is exact. `Instrumented::poll` enters at the top of each poll and exits when the
-guard drops at the end of that poll, so a future that suspends and resumes shows
-as multiple segments with gaps — matching what `tracing::Instrument` + the
-tracing layer produce, and carrying per-segment worker attribution.
+**The future combinator emits one enter + one completion exit, not a pair per
+poll.** `Instrumented` emits `SpanEnter` on the first poll, then times each poll
+and accumulates `active_ns` (summed poll durations) and `poll_count`; when the
+future resolves (or is dropped/cancelled) it emits a single `SpanExit` carrying
+`active_ns`, `idle_ns` (wall since enter minus active), `poll_count`, and a
+`completed` flag. Per-poll segment detail is recoverable by correlating the
+span's `[enter, exit]` window with the task's existing `PollStart`/`PollEnd`
+events, so the span itself doesn't re-emit it — cheaper on the wire and the
+completion event directly answers the analytics question (time distribution).
+The **sync guard** emits one enter/exit pair for its single on-CPU segment,
+reporting `(active = duration, idle = 0, poll_count = 1, completed = true)` — the
+same schema, filled trivially.
+
+Because a span type has a single `SpanExit` schema per callsite (used whether the
+span is `enter`ed or `instrument`ed), the aggregate fields live on that one exit
+event; the sync and async paths just populate them differently.
+
+Viewer note: the viewer today derives a span's active time by pairing
+enter/exit intervals, so it reads the single `enter → completion` interval as
+active for the whole wall time. The accurate `active_ns`/`idle_ns` are present as
+fields on the exit for analytics; teaching the viewer to prefer the reported
+`active_ns` over interval-pairing for these spans is a cosmetic follow-up, not a
+blocker (nothing breaks — the span renders and the data is present).
 
 **`Entered` is `!Send` and must not be held across `.await`.** Same rule as
 `tracing::span::Entered`, enforced the same way: a `PhantomData<*const ()>`

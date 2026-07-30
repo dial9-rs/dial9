@@ -182,10 +182,11 @@ fn sync_guard_emits_one_pair_and_closes() {
     );
 }
 
-/// The instrumented future emits one enter/exit pair per poll and a single
-/// close, with the span's fields on each segment.
+/// The instrumented future emits exactly one enter and one completion exit
+/// (not one per poll), and the exit carries the aggregate timing: `poll_count`
+/// (>= 2 for a future that yields), a `completed` flag, and `active_ns`.
 #[test]
-fn instrumented_future_emits_per_poll() {
+fn instrumented_future_emits_enter_and_completion() {
     let events = run_traced(2, || async {
         async fn two_polls() {
             tokio::task::yield_now().await; // forces a second poll
@@ -195,16 +196,13 @@ fn instrumented_future_emits_per_poll() {
             .await;
     });
 
-    // yield_now → at least two polls → at least two enter/exit pairs.
-    assert!(
-        events.enter_count >= 2,
-        "expected >= 2 enters (one per poll), got {}",
-        events.enter_count
-    );
-    assert_eq!(events.enter_count, events.exit_count, "enter/exit paired");
-    assert_eq!(events.close_count, 1, "exactly one close for the span");
+    // One enter, one exit, one close — regardless of poll count.
+    assert_eq!(events.enter_count, 1, "exactly one enter");
+    assert_eq!(events.exit_count, 1, "exactly one completion exit");
+    assert_eq!(events.close_count, 1, "exactly one close");
     assert!(events.enter_names.contains(&"db.query".to_string()));
 
+    // User fields on both enter and the completion exit.
     assert!(
         events
             .enter_fields
@@ -215,8 +213,31 @@ fn instrumented_future_emits_per_poll() {
         events
             .exit_fields
             .iter()
-            .any(|(k, v)| k == "rows" && v == "3"),
-        "field should ride an exit: {:?}",
+            .any(|(k, v)| k == "rows" && v == "3")
+    );
+
+    // Aggregate timing rides the completion exit.
+    let poll_count = events
+        .exit_fields
+        .iter()
+        .find(|(k, _)| k == "poll_count")
+        .map(|(_, v)| v.parse::<u64>().unwrap());
+    assert!(
+        poll_count.is_some_and(|n| n >= 2),
+        "poll_count should be >= 2 for a yielding future: {:?}",
+        events.exit_fields
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "completed" && v == "true"),
+        "completed future must report completed=true: {:?}",
+        events.exit_fields
+    );
+    assert!(
+        events.exit_fields.iter().any(|(k, _)| k == "active_ns"),
+        "completion exit must carry active_ns: {:?}",
         events.exit_fields
     );
 }
@@ -339,10 +360,10 @@ fn off_runtime_is_silent_noop() {
     // Reaching here without panicking is the assertion.
 }
 
-/// A cancelled (dropped) future still emits a close so the viewer can finalize
-/// the span.
+/// A cancelled (dropped) future still emits a completion exit — marked
+/// `completed=false` — and a close, so the viewer can finalize the span.
 #[test]
-fn cancelled_future_still_closes() {
+fn cancelled_future_emits_incomplete_exit_and_closes() {
     let events = run_traced(1, || async {
         // A future that never completes; poll it once then drop it.
         let mut fut = Box::pin(std::future::pending::<()>().instrument(dial9_span!("stuck")));
@@ -350,12 +371,22 @@ fn cancelled_future_still_closes() {
         let mut cx = std::task::Context::from_waker(waker);
         let poll = fut.as_mut().poll(&mut cx);
         assert!(matches!(poll, Poll::Pending));
-        drop(fut); // cancellation → close on drop
+        drop(fut); // cancellation → completion exit (not completed) + close on drop
     });
 
     assert!(events.enter_names.contains(&"stuck".to_string()));
+    assert_eq!(events.enter_count, 1, "one enter");
+    assert_eq!(events.exit_count, 1, "cancellation still emits the exit");
     assert_eq!(events.close_count, 1, "cancelled span must still close");
     assert_eq!(events.entered_span_ids, events.closed_span_ids);
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "completed" && v == "false"),
+        "cancelled future must report completed=false: {:?}",
+        events.exit_fields
+    );
 }
 
 /// A `%`-formatted string field (owned `String` on the wire) round-trips, and a
@@ -388,7 +419,7 @@ fn typed_and_display_fields_roundtrip() {
 }
 
 /// The tower layer creates one span per request; a `make_span` closure names
-/// it, and the response future is entered/exited per poll and closed once.
+/// it, and the response future emits one enter + one completion exit + close.
 #[test]
 fn tower_layer_wraps_request() {
     use std::convert::Infallible;
@@ -425,10 +456,17 @@ fn tower_layer_wraps_request() {
     });
 
     assert!(events.enter_names.contains(&"request".to_string()));
+    assert_eq!(events.enter_count, 1, "one enter per request");
+    assert_eq!(events.exit_count, 1, "one completion exit per request");
     assert_eq!(events.close_count, 1, "one span per request");
+    // The yielding response future was polled more than once.
     assert!(
-        events.enter_count >= 2,
-        "response future polled more than once"
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "poll_count" && v.parse::<u64>().is_ok_and(|n| n >= 2)),
+        "poll_count should reflect the yield: {:?}",
+        events.exit_fields
     );
     assert!(
         events

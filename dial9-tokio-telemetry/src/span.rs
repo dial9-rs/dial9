@@ -115,14 +115,25 @@ pub trait Span: Sized {
     #[doc(hidden)]
     fn __set_parent(&mut self, parent_span_id: u64);
 
-    /// Emit the enter segment on `handle`. Implementation detail of
+    /// Emit the enter event on `handle`. Implementation detail of
     /// [`enter`](Self::enter) and [`Instrumented`].
     #[doc(hidden)]
     fn __emit_enter(&self, handle: &Dial9Handle);
 
-    /// Emit the exit segment on `handle`.
+    /// Emit the exit event on `handle`, carrying the aggregate timing the span
+    /// observed: `active_ns` (time on-CPU, i.e. summed poll durations),
+    /// `idle_ns` (time suspended between polls), `poll_count`, and whether the
+    /// future ran to completion (`true`) or was cancelled (`false`). For the
+    /// synchronous guard these are `(duration, 0, 1, true)`.
     #[doc(hidden)]
-    fn __emit_exit(&self, handle: &Dial9Handle);
+    fn __emit_exit(
+        &self,
+        handle: &Dial9Handle,
+        active_ns: u64,
+        idle_ns: u64,
+        poll_count: u64,
+        completed: bool,
+    );
 
     /// Set this span's parent explicitly. The viewer nests the child under the
     /// parent; without a parent it infers nesting from timestamp containment.
@@ -148,10 +159,12 @@ pub trait Span: Sized {
         // Acquire the current handle once and reuse it for the matching exit:
         // the guard is `!Send`, so exit lands on this same thread.
         let handle = Dial9Handle::current();
+        let enter_ns = clock_monotonic_ns();
         self.__emit_enter(&handle);
         Entered {
             span: self,
             handle,
+            enter_ns,
             _not_send: PhantomData,
         }
     }
@@ -171,6 +184,8 @@ pub struct Entered<'a, S: Span> {
     /// The handle captured at enter, reused for the matching exit (safe because
     /// the guard is `!Send`, so exit runs on the entering thread).
     handle: Dial9Handle,
+    /// Enter timestamp, so the exit can report the scope's active duration.
+    enter_ns: u64,
     /// Makes the guard `!Send` (a raw pointer is neither `Send` nor `Sync`).
     _not_send: PhantomData<*const ()>,
 }
@@ -183,7 +198,10 @@ impl<S: Span> fmt::Debug for Entered<'_, S> {
 
 impl<S: Span> Drop for Entered<'_, S> {
     fn drop(&mut self) {
-        self.span.__emit_exit(&self.handle);
+        // A synchronous scope is one contiguous on-CPU segment: active = its
+        // wall duration, no idle, one "poll", completed.
+        let active_ns = clock_monotonic_ns().saturating_sub(self.enter_ns);
+        self.span.__emit_exit(&self.handle, active_ns, 0, 1, true);
     }
 }
 
@@ -244,6 +262,12 @@ struct RuntimeExit {
     worker_id: u64,
     span_id: u64,
     span_name: InternedString,
+    #[traceevent(unit = "ns")]
+    active_ns: u64,
+    #[traceevent(unit = "ns")]
+    idle_ns: u64,
+    poll_count: u64,
+    completed: bool,
 }
 
 impl Dial9Span {
@@ -289,7 +313,14 @@ impl Span for Dial9Span {
         });
     }
 
-    fn __emit_exit(&self, handle: &Dial9Handle) {
+    fn __emit_exit(
+        &self,
+        handle: &Dial9Handle,
+        active_ns: u64,
+        idle_ns: u64,
+        poll_count: u64,
+        completed: bool,
+    ) {
         handle.with_encoder(|enc| {
             let span_name = enc.intern_string(&self.name);
             enc.encode(&RuntimeExit {
@@ -297,6 +328,10 @@ impl Span for Dial9Span {
                 worker_id: current_worker_id_u64(),
                 span_id: self.span_id,
                 span_name,
+                active_ns,
+                idle_ns,
+                poll_count,
+                completed,
             });
         });
     }
@@ -415,6 +450,12 @@ macro_rules! __dial9_span_build {
             worker_id: u64,
             span_id: u64,
             span_name: $crate::span::__rt::InternedString,
+            #[traceevent(unit = "ns")]
+            active_ns: u64,
+            #[traceevent(unit = "ns")]
+            idle_ns: u64,
+            poll_count: u64,
+            completed: bool,
             $( $key: $key, )*
         }
 
@@ -451,7 +492,14 @@ macro_rules! __dial9_span_build {
                 });
             }
 
-            fn __emit_exit(&self, __h: &$crate::span::__rt::Dial9Handle) {
+            fn __emit_exit(
+                &self,
+                __h: &$crate::span::__rt::Dial9Handle,
+                active_ns: u64,
+                idle_ns: u64,
+                poll_count: u64,
+                completed: bool,
+            ) {
                 __h.with_encoder(|__enc| {
                     let __name = __enc.intern_string(__DIAL9_NAME);
                     __enc.encode(&__Dial9Exit {
@@ -459,6 +507,10 @@ macro_rules! __dial9_span_build {
                         worker_id: $crate::span::__rt::current_worker_id_u64(),
                         span_id: self.span_id,
                         span_name: __name,
+                        active_ns,
+                        idle_ns,
+                        poll_count,
+                        completed,
                         $( $key: ::core::clone::Clone::clone(&self.$key), )*
                     });
                 });

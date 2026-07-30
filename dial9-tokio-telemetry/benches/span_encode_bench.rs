@@ -43,6 +43,10 @@ struct HandExit {
     worker_id: u64,
     span_id: u64,
     span_name: InternedString,
+    active_ns: u64,
+    idle_ns: u64,
+    poll_count: u64,
+    completed: bool,
     x: u64,
     y: u64,
 }
@@ -64,6 +68,7 @@ fn hand_span(x: u64, y: u64) {
     // for the enter/exit pair (same thread), a fresh one for the close (a
     // future's drop may land on another thread).
     let handle = Dial9Handle::current();
+    let enter_ns = clock_monotonic_ns();
     handle.with_encoder(|enc| {
         let span_name = enc.intern_string("handbench");
         enc.encode(&HandEnter {
@@ -76,6 +81,8 @@ fn hand_span(x: u64, y: u64) {
             y,
         });
     });
+    // Measure the scope's active duration, exactly as the macro's guard does.
+    let active_ns = clock_monotonic_ns().saturating_sub(enter_ns);
     handle.with_encoder(|enc| {
         let span_name = enc.intern_string("handbench");
         enc.encode(&HandExit {
@@ -83,6 +90,10 @@ fn hand_span(x: u64, y: u64) {
             worker_id: current_worker_id().as_u64(),
             span_id,
             span_name,
+            active_ns,
+            idle_ns: 0,
+            poll_count: 1,
+            completed: true,
             x,
             y,
         });
@@ -111,6 +122,18 @@ fn bench_span_emit(c: &mut Criterion) {
     // `Dial9Handle::current()` is live and events actually encode.
     let rec = recorder(MemoryBuffer::new(1 << 24).expect("memory buffer")).build();
     set_tl_handle(rec.handle().clone());
+
+    // Guard against silently measuring disabled no-ops: the handle must be live
+    // and the encoder closure must actually run on this thread.
+    let handle = Dial9Handle::current();
+    assert!(handle.is_enabled(), "bench handle is not recording");
+    let mut encoded = false;
+    handle.with_encoder(|_enc| encoded = true);
+    assert!(
+        encoded,
+        "with_encoder did not run — events would not encode"
+    );
+
     // Warm up: first emit registers this thread's encoder buffer.
     hand_span(1, 2);
     macro_span(1, 2);
