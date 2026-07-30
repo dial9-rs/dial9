@@ -31,7 +31,7 @@ function event(
 
 function spec(kind: FieldChartSpec["kind"] = "gauge"): FieldChartSpec {
   return {
-    id: "field-chart-1",
+    id: "fc-1",
     eventName: "Metric",
     fieldName: "value",
     kind,
@@ -189,7 +189,7 @@ describe("field-chart lifecycle", () => {
 
   it("uses only the field name as the short track title", () => {
     expect(fieldChartTrackSpecs([spec()])).toEqual([
-      { id: "field-chart-1", label: "value", height: 112 },
+      { id: "fc-1", label: "value", height: 112 },
     ]);
   });
 
@@ -202,11 +202,20 @@ describe("field-chart lifecycle", () => {
     });
     const second = addFieldChart(store, "Metric", "other", "counter");
 
-    expect([first.id, second.id]).toEqual(["field-chart-1", "field-chart-2"]);
+    expect([first.id, second.id]).toEqual(["fc-1", "fc-2"]);
     closeFieldChart(store, first.id);
     expect(store.getState().view.fieldCharts).toEqual([second]);
     expect(store.getState().uiPrefs.trackOrder).toEqual(["events", "cpu"]);
     expect(store.getState().uiPrefs.collapsed).toEqual({ cpu: true });
+  });
+
+  it("continues generated ids in base 36", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    const charts = Array.from({ length: 10 }, (_, index) =>
+      addFieldChart(store, "Metric", `value_${index}`, "gauge"),
+    );
+
+    expect(charts.at(-1)?.id).toBe("fc-a");
   });
 
   it("drops the materialized list as soon as its panel is reconciled away", () => {

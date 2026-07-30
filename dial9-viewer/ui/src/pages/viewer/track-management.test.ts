@@ -332,8 +332,12 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
   it("never writes dynamic chart order or collapse state to localStorage", () => {
     vi.stubGlobal("localStorage", fakeLocalStorage());
     saveTrackPrefs({
-      trackOrder: ["events", "field-chart-1", "cpu"],
-      collapsed: { events: true, "field-chart-1": true },
+      trackOrder: ["events", "fc-1", "fc-future.v2", "cpu"],
+      collapsed: {
+        events: true,
+        "fc-1": true,
+        "fc-future.v2": true,
+      },
     });
 
     expect(loadTrackPrefs()).toEqual({
@@ -347,8 +351,12 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     ls.setItem(
       TRACK_PREFS_STORAGE_KEY,
       JSON.stringify({
-        trackOrder: ["field-chart-old", "queue"],
-        collapsed: { "field-chart-old": true, queue: true },
+        trackOrder: ["fc-old", "fc-future.v2", "queue"],
+        collapsed: {
+          "fc-old": true,
+          "fc-future.v2": true,
+          queue: true,
+        },
       }),
     );
     vi.stubGlobal("localStorage", ls);

@@ -38,12 +38,13 @@ export function lanesScrollbarWidth(columnEl: HTMLElement): number {
  * tracks reuse the PanelKind vocabulary.
  */
 export type StaticTrackId = "timeline" | "lanes" | PanelKind;
-export type FieldChartTrackId = `field-chart-${string}`;
+export const FIELD_CHART_TRACK_ID_PREFIX = "fc-";
+export type FieldChartTrackId = `${typeof FIELD_CHART_TRACK_ID_PREFIX}${string}`;
 export type TrackId = StaticTrackId | FieldChartTrackId;
 
-/** Runtime guard for URL-defined numeric-field tracks. */
+/** Runtime guard for numeric-field tracks in the reserved dynamic namespace. */
 export function isFieldChartTrackId(id: string): id is FieldChartTrackId {
-  return /^field-chart-[A-Za-z0-9_-]+$/.test(id);
+  return id.startsWith(FIELD_CHART_TRACK_ID_PREFIX);
 }
 
 export interface TrackSpec {

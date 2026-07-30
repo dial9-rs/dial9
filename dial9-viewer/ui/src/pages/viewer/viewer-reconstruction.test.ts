@@ -147,7 +147,7 @@ describe("viewer deep-link reconstruction", () => {
     source.update("view", {
       fieldCharts: [
         {
-          id: "field-chart-1",
+          id: "fc-1",
           eventName: event.name,
           fieldName: "value",
           kind: "counter",

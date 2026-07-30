@@ -78,19 +78,19 @@ describe("visibleTracks", () => {
         vm({
           fieldCharts: [
             {
-              id: "field-chart-1",
+              id: "fc-1",
               eventName: "runtime.metrics",
               fieldName: "jobs",
               kind: "counter",
             },
           ],
-          trackOrder: ["field-chart-1", "events"],
+          trackOrder: ["fc-1", "events"],
         }),
       ),
     ).toEqual([
       "timeline",
       "lanes",
-      "field-chart-1",
+      "fc-1",
       "events",
       "cpu",
       "queue",

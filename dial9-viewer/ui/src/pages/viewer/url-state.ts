@@ -25,7 +25,10 @@ import type { ViewState } from "../../lib/url/index.js";
 import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
 import { POI_FILTERS } from "./poi.js";
 import { FIELD_CHART_KINDS } from "./field-chart-model.js";
-import { isFieldChartTrackId } from "../../lib/canvas/track-layout.js";
+import {
+  FIELD_CHART_TRACK_ID_PREFIX,
+  isFieldChartTrackId,
+} from "../../lib/canvas/track-layout.js";
 
 const P_START = "start";
 const P_END = "end";
@@ -740,7 +743,7 @@ export function readViewerUrlState(search: string): ViewerUrlState {
  * round-trip without reserving a delimiter inside those names. */
 function encodeFieldChart(chart: FieldChartSpec): string | null {
   if (
-    !isFieldChartTrackId(chart.id) ||
+    !isValidFieldChartTrackId(chart.id) ||
     chart.eventName.length === 0 ||
     chart.fieldName.length === 0 ||
     !(FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
@@ -770,7 +773,7 @@ function decodeFieldChart(value: string): FieldChartSpec | null {
     typeof eventName !== "string" ||
     typeof fieldName !== "string" ||
     typeof kind !== "string" ||
-    !isFieldChartTrackId(id) ||
+    !isValidFieldChartTrackId(id) ||
     eventName.length === 0 ||
     fieldName.length === 0 ||
     !(FIELD_CHART_KINDS as readonly string[]).includes(kind)
@@ -783,6 +786,17 @@ function decodeFieldChart(value: string): FieldChartSpec | null {
     fieldName,
     kind: kind as FieldChartKind,
   };
+}
+
+const FIELD_CHART_TRACK_ID_SUFFIX = /^[A-Za-z0-9_-]+$/;
+
+function isValidFieldChartTrackId(id: string): boolean {
+  return (
+    isFieldChartTrackId(id) &&
+    FIELD_CHART_TRACK_ID_SUFFIX.test(
+      id.slice(FIELD_CHART_TRACK_ID_PREFIX.length),
+    )
+  );
 }
 
 /** Decode the modern marked list, falling back to the previously emitted

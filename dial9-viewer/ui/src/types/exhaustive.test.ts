@@ -201,7 +201,7 @@ const initialState: StoreState = {
   view: {
     fieldCharts: [
       {
-        id: "field-chart-1",
+        id: "fc-1",
         eventName: "MyEvent",
         fieldName: "latency",
         kind: "gauge",

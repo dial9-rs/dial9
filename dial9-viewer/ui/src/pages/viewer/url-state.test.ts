@@ -165,13 +165,13 @@ describe("viewer URL state: dynamic field charts", () => {
   it("round-trips repeatable definitions without delimiter ambiguity from commas", () => {
     const charts: StoreState["view"]["fieldCharts"] = [
       {
-        id: "field-chart-1",
+        id: "fc-1",
         eventName: "request,finished",
         fieldName: "bytes,total",
         kind: "counter",
       },
       {
-        id: "field-chart-2",
+        id: "fc-2",
         eventName: "queue.depth",
         fieldName: "active",
         kind: "updown-counter",
@@ -180,8 +180,8 @@ describe("viewer URL state: dynamic field charts", () => {
     const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
 
     expect(params.getAll("field-chart")).toEqual([
-      'v1:["field-chart-1","request,finished","bytes,total","counter"]',
-      'v1:["field-chart-2","queue.depth","active","updown-counter"]',
+      'v1:["fc-1","request,finished","bytes,total","counter"]',
+      'v1:["fc-2","queue.depth","active","updown-counter"]',
     ]);
     expect(out.fieldCharts).toEqual(charts);
   });
@@ -189,7 +189,7 @@ describe("viewer URL state: dynamic field charts", () => {
   it("round-trips tabs and literal percent escapes in event and field names", () => {
     const charts: StoreState["view"]["fieldCharts"] = [
       {
-        id: "field-chart-tabs",
+        id: "fc-tabs",
         eventName: "request\t50%",
         fieldName: "bytes\t%09",
         kind: "gauge",
@@ -198,13 +198,13 @@ describe("viewer URL state: dynamic field charts", () => {
 
     const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
     expect(params.get("field-chart")).toBe(
-      'v1:["field-chart-tabs","request\\t50%","bytes\\t%09","gauge"]',
+      'v1:["fc-tabs","request\\t50%","bytes\\t%09","gauge"]',
     );
     expect(out.fieldCharts).toEqual(charts);
   });
 
   it("drops malformed definitions and duplicate ids", () => {
-    const valid = 'v1:["field-chart-a","Metric","value","gauge"]';
+    const valid = 'v1:["fc-a","Metric","value","gauge"]';
     const params = new URLSearchParams();
     params.append("field-chart", "legacy,shape");
     params.append(
@@ -213,14 +213,18 @@ describe("viewer URL state: dynamic field charts", () => {
     );
     params.append(
       "field-chart",
-      'v1:["field-chart-b","Metric","value","histogram"]',
+      'v1:["fc-with,comma","Metric","value","gauge"]',
+    );
+    params.append(
+      "field-chart",
+      'v1:["fc-b","Metric","value","histogram"]',
     );
     params.append("field-chart", valid);
     params.append("field-chart", valid);
 
     expect(readViewerUrlState(`?${params.toString()}`).fieldCharts).toEqual([
       {
-        id: "field-chart-a",
+        id: "fc-a",
         eventName: "Metric",
         fieldName: "value",
         kind: "gauge",
@@ -406,7 +410,7 @@ describe("viewer URL state: store hydration", () => {
       "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
         "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
         "&stack-view=flame&inspector-width=444" +
-        "&field-chart=v1%3A%5B%22field-chart-1%22%2C%22Metric%22%2C" +
+        "&field-chart=v1%3A%5B%22fc-1%22%2C%22Metric%22%2C" +
         "%22value%22%2C%22counter%22%5D",
     );
 
@@ -429,7 +433,7 @@ describe("viewer URL state: store hydration", () => {
     expect(store.getState().view).toMatchObject({
       fieldCharts: [
         {
-          id: "field-chart-1",
+          id: "fc-1",
           eventName: "Metric",
           fieldName: "value",
           kind: "counter",

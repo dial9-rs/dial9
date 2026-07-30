@@ -18,6 +18,7 @@ import type {
   ParsedTrace,
 } from "../../lib/trace/index.js";
 import {
+  FIELD_CHART_TRACK_ID_PREFIX,
   isFieldChartTrackId,
   type FieldChartTrackId,
   type TrackSpec,
@@ -275,7 +276,8 @@ export function fieldChartTrackSpecs(
 
 function nextFieldChartId(usedIds: ReadonlySet<string>): FieldChartTrackId {
   for (let n = 1; ; n++) {
-    const id = `field-chart-${n.toString(36)}` as FieldChartTrackId;
+    const id =
+      `${FIELD_CHART_TRACK_ID_PREFIX}${n.toString(36)}` as FieldChartTrackId;
     if (!usedIds.has(id)) return id;
   }
 }

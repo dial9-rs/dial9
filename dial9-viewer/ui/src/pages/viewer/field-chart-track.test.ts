@@ -248,7 +248,7 @@ describe("field-chart hover", () => {
 
   it("shows only the field name and formatted value", () => {
     const spec = {
-      id: "field-chart-1",
+      id: "fc-1",
       eventName: "Metric",
       fieldName: "requests_total",
       kind: "counter",
