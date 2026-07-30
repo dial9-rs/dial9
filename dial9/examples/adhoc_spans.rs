@@ -9,7 +9,7 @@
 //! ```sh
 //! cargo run -p dial9 --example adhoc_spans --features tokio,tower
 //! ```
-use dial9::span::{Dial9Span, Instrument as _, Span as _};
+use dial9::span::{Instrument as _, Span as _};
 use dial9::{DiskBuffer, RecorderTokioExt, dial9_span, recorder};
 use std::time::Duration;
 
@@ -52,9 +52,10 @@ async fn checkout(order_id: u64) {
 
     // 3. Explicit parenting across a spawn. The viewer nests spans by timestamp
     //    containment, which breaks when a task outlives its parent, so link the
-    //    audit span explicitly. `id()` is the handle that crosses the boundary.
+    //    audit span explicitly. `id()`/`with_parent_id()` are `Span` methods, so
+    //    they work on a `dial9_span!` span just like `Dial9Span::new`.
     let charge_span = dial9_span!("payment.charge", order_id = order_id, tax_cents = tax);
-    let audit = Dial9Span::new("audit.emit").with_parent_id(charge_span.id());
+    let audit = dial9_span!("audit.emit").with_parent_id(charge_span.id());
     let audit_task = tokio::spawn(
         async {
             tokio::time::sleep(Duration::from_millis(3)).await;

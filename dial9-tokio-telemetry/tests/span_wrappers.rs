@@ -310,7 +310,9 @@ fn explicit_parent_across_spawn() {
     let events = run_traced(2, || async {
         let parent = dial9_span!("payment.charge", order_id = 1u64);
         let parent_id = parent.id();
-        let child = Dial9Span::new("audit.emit").with_parent_id(parent_id);
+        // `id()`/`with_parent_id()` are `Span`-trait methods, so parenting works
+        // on a macro span exactly as on `Dial9Span::new`.
+        let child = dial9_span!("audit.emit").with_parent_id(parent_id);
 
         tokio::spawn(async {}.instrument(child)).await.unwrap();
         // Drive the parent too so it appears in the trace.
