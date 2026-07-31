@@ -23,6 +23,7 @@ import {
   locTableTemplate,
   longPollsTemplate,
   schedulingDelaysTemplate,
+  workerActivityTemplate,
 } from "./render.js";
 
 // Two classic breakout payloads: an element-context inject and an
@@ -359,6 +360,133 @@ describe("XSS: source guard against the #587 innerHTML class", () => {
       "unsafeStatic(",
     ]) {
       expect(src, `render.ts must not use ${banned}`).not.toContain(banned);
+    }
+  });
+});
+
+describe("workerActivityTemplate (Worker activity card)", () => {
+  const worker = (over: Record<string, unknown> = {}) => ({
+    worker_id: 0,
+    host: "h1",
+    total_polls: 10,
+    busy_ns: 1_000,
+    span_ns: 10_000,
+    busy_pct: 10,
+    notable_polls: 1,
+    worst_poll_ns: 5_000,
+    ...over,
+  });
+  const state = (over: Record<string, unknown> = {}) => ({
+    sortKey: "busyPct" as const,
+    sortDesc: true,
+    expandedHosts: new Set<string>(),
+    onSort: () => {},
+    onToggleHost: () => {},
+    ...over,
+  });
+  const data = (workers: unknown[]): TokioStatsResponse =>
+    ({
+      time_span_ns: 60e9,
+      total_polls: 100,
+      bucket: "b",
+      by_spawn_loc: [],
+      worker_activity: workers,
+    }) as TokioStatsResponse;
+
+  it("returns nothing when the response carries no worker activity", () => {
+    const bare: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 10,
+      bucket: "b",
+      by_spawn_loc: [],
+    };
+    expect(workerActivityTemplate(bare, null, () => {}, state())).toBe(nothing);
+  });
+
+  it("renders one collapsed host row, hiding per-worker detail", () => {
+    const t = split(
+      workerActivityTemplate(
+        data([worker({ worker_id: 0 }), worker({ worker_id: 1 })]),
+        null,
+        () => {},
+        state(),
+      ),
+    );
+    expect(t.leaves).toContain("h1");
+    expect(t.leaves).toContain("▸"); // collapsed affordance
+    // The per-worker rows are not rendered while the host is collapsed.
+    expect(t.leaves).not.toContain("w0");
+  });
+
+  it("expands per-worker detail for a host in expandedHosts", () => {
+    const t = split(
+      workerActivityTemplate(
+        data([worker({ worker_id: 0 }), worker({ worker_id: 1 })]),
+        null,
+        () => {},
+        state({ expandedHosts: new Set(["h1"]) }),
+      ),
+    );
+    expect(t.leaves).toContain("▾"); // expanded affordance
+    expect(t.leaves).toContain(0); // worker ids reach the detail rows
+    expect(t.leaves).toContain(1);
+  });
+
+  it("an expanded worker row deep-links its worst-poll exemplar", () => {
+    const t = split(
+      workerActivityTemplate(
+        data([
+          worker({
+            worst_exemplar: {
+              start_ns: 1000,
+              end_ns: 2000,
+              duration_ns: 1000,
+              host: "h1",
+              source_key: "traces/a.bin.gz",
+            },
+          }),
+        ]),
+        null,
+        () => {},
+        state({ expandedHosts: new Set(["h1"]) }),
+      ),
+    );
+    const url = t.leaves.find(
+      (v): v is string => typeof v === "string" && v.startsWith("viewer.html?"),
+    );
+    expect(url).toBeDefined();
+    expect(url).toContain("focus_start=1000");
+  });
+
+  it("marks the active sort column with a direction indicator", () => {
+    const asc = split(
+      workerActivityTemplate(data([worker()]), null, () => {}, state({ sortDesc: false })),
+    );
+    expect(asc.leaves).toContain(" ▲");
+    const desc = split(
+      workerActivityTemplate(data([worker()]), null, () => {}, state({ sortDesc: true })),
+    );
+    expect(desc.leaves).toContain(" ▼");
+  });
+
+  it("a hostile host name is an interpolated VALUE, never an inline handler", () => {
+    // The legacy page built onclick="toggleWorkerHost('${host}')", so a quote in
+    // a host name could break out into script. lit-html binds a real listener,
+    // so the name is only ever text/attribute data.
+    const t = split(
+      workerActivityTemplate(
+        data([worker({ host: HOSTILE_TAG })]),
+        null,
+        () => {},
+        state({ expandedHosts: new Set([HOSTILE_TAG]) }),
+      ),
+    );
+    expect(t.leaves).toContain(HOSTILE_TAG);
+    for (const chunk of t.strings) {
+      expect(chunk).not.toContain(HOSTILE_TAG);
+      expect(chunk).not.toContain("onerror");
+      expect(chunk).not.toContain("onclick");
+      expect(chunk).not.toContain("toggleWorkerHost");
     }
   });
 });

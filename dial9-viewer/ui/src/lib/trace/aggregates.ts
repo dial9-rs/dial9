@@ -280,6 +280,37 @@ export interface SchedulingDelayCoverage {
   missing_readiness_unmeasured_polls: number;
 }
 
+/**
+ * One worker's busyness + poll distribution for the "Worker activity" rollup
+ * (server `WorkerStats`). Workers are keyed per-host: worker 0 on host-A is a
+ * different runtime instance from worker 0 on host-B, so consumers must group by
+ * `host` before comparing ids.
+ */
+export interface WorkerStats {
+  worker_id: number;
+  host: string;
+  /** All polls observed on this worker (including sub-floor). */
+  total_polls: number;
+  /** Sum of ALL poll durations on this worker (ns). */
+  busy_ns: number;
+  /**
+   * The worker's OBSERVED active time (ns) — the `busy_pct` denominator, not a
+   * wall-clock span. Exposed so the UI can show `busy_ns / span_ns = busy_pct`.
+   */
+  span_ns: number;
+  /**
+   * `busy_ns / span_ns * 100`. Bounded to <=100% because a worker's polls are
+   * sequential, so `busy_ns <= span_ns`.
+   */
+  busy_pct: number;
+  /** Polls above the server's duration floor on this worker. */
+  notable_polls: number;
+  /** Longest poll duration on this worker (drives heat-coloring). */
+  worst_poll_ns: number;
+  /** Exemplar of the worst poll, for deep-linking; absent when unavailable. */
+  worst_exemplar?: PollExemplar;
+}
+
 export interface TokioStatsResponse {
   /** Time span covered by the data (ns), for per-minute rates. Min 1. */
   time_span_ns: number;
@@ -306,6 +337,11 @@ export interface TokioStatsResponse {
    * server predating the rollup, in which case the section is hidden.
    */
   scheduling_delay_coverage?: SchedulingDelayCoverage;
+  /**
+   * Per-worker busyness + poll distribution. Optional so consumers tolerate a
+   * response that omits it (a server predating the rollup); read it as `[]`.
+   */
+  worker_activity?: WorkerStats[];
   /**
    * See FlamegraphResponse.coverage. Quirk: tokio-stats reports files
    * READ this request as `samples_folded` (its folded unit is files).

@@ -10,14 +10,18 @@ import { html, nothing, render, type TemplateResult } from "lit-html";
 import { live } from "lit-html/directives/live.js";
 import type { SchedulingDelay, TokioStatsResponse } from "../../lib/trace/index.js";
 import { formatDuration, nsToDatetime, schedulingDelayEvidenceLabel } from "./format.js";
-import { latencyHeat } from "../../lib/trace/tokio_stats_api.js";
+import { busynessHeat, latencyHeat } from "../../lib/trace/tokio_stats_api.js";
 import { exemplarLink } from "./exemplar.js";
 import {
   buildDiffModel,
+  buildHostRows,
   singlePeriodRows,
+  sortedWorkers,
   type DiffModel,
+  type HostRow,
   type LocStats,
   type PeriodStats,
+  type WorkerSortKey,
 } from "./stats.js";
 
 /** Period-tag palette, cycling blue/purple/green/orange. */
@@ -441,6 +445,146 @@ export function schedulingDelaysTemplate(
   `;
 }
 
+/** The "Worker activity" interaction state and its handlers. */
+export interface WorkerActivityState {
+  sortKey: WorkerSortKey;
+  sortDesc: boolean;
+  /** Hosts whose per-worker detail rows are expanded. */
+  expandedHosts: ReadonlySet<string>;
+  onSort: (key: WorkerSortKey) => void;
+  onToggleHost: (host: string) => void;
+}
+
+/** A busyness bar; width is clamped so a >100% value cannot overflow the cell. */
+function busynessBar(busyPct: number, color: string): TemplateResult {
+  const width = Math.min(busyPct, 100);
+  return html`<div
+    style="background:${color}33;border-radius:2px;height:14px;width:${width}%"
+  ></div>`;
+}
+
+/** The worst-poll cell: heat-colored duration, or an em dash when there is none. */
+function worstPollCell(worstPollNs: number): TemplateResult {
+  if (worstPollNs <= 0) return html`—`;
+  return html`<span style="color:${latencyHeat(worstPollNs)};font-weight:600"
+    >${formatDuration(worstPollNs)}</span
+  >`;
+}
+
+/** The per-worker detail rows shown under an expanded host. */
+function workerDetailRows(
+  row: HostRow,
+  data: TokioStatsResponse,
+  bucketParam: string | null,
+  onOpen: (url: string) => void,
+): TemplateResult {
+  return html`${sortedWorkers(row).map((w) => {
+    const url = w.worst_exemplar ? exemplarLink(w.worst_exemplar, data.bucket, bucketParam) : "";
+    const busyFmt = `${w.busy_pct.toFixed(3)}%`;
+    const color = busynessHeat(w.busy_pct);
+    // The verification breakdown the rollup promises: busy / observed = pct.
+    const spanFmt = w.span_ns ? formatDuration(w.span_ns) : "?";
+    const verify = `${formatDuration(w.busy_ns)} busy / ${spanFmt} span = ${busyFmt}`;
+    const cells = html`
+      <td style="padding-left:28px;font-weight:normal">w${w.worker_id}</td>
+      <td></td>
+      <td title=${verify}><span style="color:${color}">${busyFmt}</span></td>
+      <td style="width:120px">${busynessBar(w.busy_pct, color)}</td>
+      <td>${w.total_polls.toLocaleString()}</td>
+      <td>${w.notable_polls.toLocaleString()}</td>
+      <td>${worstPollCell(w.worst_poll_ns)}</td>
+    `;
+    return url
+      ? html`<tr
+          style="cursor:pointer;background:#1a1f26"
+          data-url=${url}
+          @click=${() => onOpen(url)}
+        >
+          ${cells}
+        </tr>`
+      : html`<tr style="background:#1a1f26">${cells}</tr>`;
+  })}`;
+}
+
+/**
+ * "Worker activity": per-host busyness with expandable per-worker detail. A
+ * host's busyness POOLS its workers (Σ busy / Σ observed, via the frozen
+ * hostBusyPct) so it stays bounded <=100% and weights each worker by observed
+ * time. Exported for the XSS regression test: the host name is
+ * attacker-influenceable, and unlike the legacy page's `onclick="…('${host}')"`
+ * string handler, lit-html binds a real listener so a quote in a host name is
+ * structurally inert.
+ */
+export function workerActivityTemplate(
+  data: TokioStatsResponse,
+  bucketParam: string | null,
+  onOpen: (url: string) => void,
+  state: WorkerActivityState,
+): TemplateResult | typeof nothing {
+  const rows = buildHostRows(data, state.sortKey, state.sortDesc);
+  if (!rows.length) return nothing;
+
+  const totalWorkers = (data.worker_activity ?? []).length;
+  const indicator = (key: WorkerSortKey) =>
+    state.sortKey === key ? (state.sortDesc ? " ▼" : " ▲") : "";
+  const sortableTh = (label: unknown, key: WorkerSortKey) => html`<th
+    style="cursor:pointer"
+    @click=${() => state.onSort(key)}
+  >
+    ${label}${indicator(key)}
+  </th>`;
+
+  return html`
+    <h3 style="margin:20px 0 8px">⚙️ Worker activity</h3>
+    <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">
+      ${totalWorkers} workers across ${rows.length}
+      host${rows.length > 1 ? "s" : ""} — busyness = poll time / observed active
+      time; a host's busyness pools its workers (Σ busy / Σ observed). Click a
+      host row to expand individual workers.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          ${sortableTh("Host", "host")}
+          ${sortableTh(
+            html`Workers<br /><span style="font-weight:normal;color:#8b949e"
+                >active / total</span
+              >`,
+            "numWorkers",
+          )}
+          ${sortableTh("Busy", "busyPct")}
+          <th>Bar</th>
+          ${sortableTh("Polls", "totalPolls")}
+          ${sortableTh("Notable", "notablePolls")}
+          ${sortableTh("Worst poll", "worstPollNs")}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => {
+          const expanded = state.expandedHosts.has(row.host);
+          const busyFmt = `${row.busyPct.toFixed(3)}%`;
+          const color = busynessHeat(row.busyPct);
+          return html`
+            <tr
+              style="cursor:pointer;font-weight:600"
+              @click=${() => state.onToggleHost(row.host)}
+            >
+              <td>${expanded ? "▾" : "▸"} ${row.host}</td>
+              <td>${row.activeWorkers} / ${row.numWorkers}</td>
+              <td><span style="color:${color}">${busyFmt}</span></td>
+              <td style="width:120px">${busynessBar(row.busyPct, color)}</td>
+              <td>${row.totalPolls.toLocaleString()}</td>
+              <td>${row.notablePolls.toLocaleString()}</td>
+              <td>${worstPollCell(row.worstPollNs)}</td>
+            </tr>
+            ${expanded ? workerDetailRows(row, data, bucketParam, onOpen) : nothing}
+          `;
+        })}
+      </tbody>
+    </table>
+  `;
+}
+
 /** Per-table row limits and their change handlers for the single-period view. */
 export interface RowLimits {
   longPolls: number;
@@ -459,10 +603,16 @@ export function renderSinglePeriod(
   bucketParam: string | null,
   onOpen: (url: string) => void,
   limits: RowLimits,
+  workers: WorkerActivityState,
 ): void {
   render(summaryCardsTemplate(s, threshNs), sumEl);
   render(
-    html`${locTableTemplate(s, data, bucketParam, onOpen)}${longPollsTemplate(
+    html`${locTableTemplate(s, data, bucketParam, onOpen)}${workerActivityTemplate(
+      data,
+      bucketParam,
+      onOpen,
+      workers,
+    )}${longPollsTemplate(
       data,
       threshNs,
       bucketParam,
