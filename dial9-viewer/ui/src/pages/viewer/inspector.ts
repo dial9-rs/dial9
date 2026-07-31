@@ -818,7 +818,7 @@ export function mountInspector(
     eventName: string,
   ): TemplateResult {
     const { key, value, corrVal, chart } = row;
-    return html`<div class="d9-kv-row">
+    return html`<div class="d9-kv-row d9-event-row">
       <span class="k">${key}</span><span class="v">${value}</span>
       ${corrVal !== null
         ? html`<button

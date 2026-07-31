@@ -1123,6 +1123,21 @@ body {
 
 /* Event tab. */
 .d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
+.d9-event-row {
+    display: grid;
+    grid-template-columns: minmax(72px, 3fr) minmax(0, 2fr) repeat(3, 24px);
+    align-items: start;
+    gap: 6px;
+}
+.d9-event-row .k {
+    grid-column: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.d9-event-row .v { grid-column: 2; min-width: 0; }
+.d9-event-row .d9-kv-corr { grid-column: 3; }
+.d9-event-row .d9-kv-chart { grid-column: 4; }
+.d9-event-row .d9-kv-copy { grid-column: 5; }
 .d9-kv-corr, .d9-kv-copy, .d9-kv-chart {
     flex-shrink: 0;
     font-size: 0.85em;
@@ -1132,6 +1147,16 @@ body {
     border-radius: 4px;
     padding: 0 5px;
     cursor: pointer;
+}
+.d9-event-row .d9-kv-corr,
+.d9-event-row .d9-kv-copy,
+.d9-event-row .d9-kv-chart {
+    width: 24px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
 }
 .d9-kv-corr:hover, .d9-kv-copy:hover, .d9-kv-chart:hover {
     color: var(--d9-fg);
