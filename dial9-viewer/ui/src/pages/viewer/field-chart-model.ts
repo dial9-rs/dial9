@@ -266,11 +266,6 @@ export function fieldChartKindFromAnnotation(
   return FIELD_CHART_KINDS.find((kind) => kind === value) ?? null;
 }
 
-export function nextFieldChartKind(kind: FieldChartKind): FieldChartKind {
-  const index = FIELD_CHART_KINDS.indexOf(kind);
-  return FIELD_CHART_KINDS[(index + 1) % FIELD_CHART_KINDS.length]!;
-}
-
 /** Convert dynamic definitions to the ordinary track catalogue shape. */
 export function fieldChartTrackSpecs(
   charts: readonly FieldChartSpec[],

@@ -13,7 +13,6 @@ import {
   fieldChartTrackSpecs,
   isChartableNumericValue,
   materializeFieldChartSeries,
-  nextFieldChartKind,
 } from "./field-chart-model.js";
 
 function event(
@@ -182,12 +181,6 @@ describe("materializeFieldChartSeries", () => {
 });
 
 describe("field-chart lifecycle", () => {
-  it("cycles gauge -> counter -> up/down counter -> gauge", () => {
-    expect(nextFieldChartKind("gauge")).toBe("counter");
-    expect(nextFieldChartKind("counter")).toBe("updown-counter");
-    expect(nextFieldChartKind("updown-counter")).toBe("gauge");
-  });
-
   it("uses only the field name as the short track title", () => {
     expect(fieldChartTrackSpecs([spec()])).toEqual([
       { id: "fc-1", label: "value", height: 112 },

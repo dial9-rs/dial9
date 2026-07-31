@@ -32,6 +32,8 @@ export type AnalysisKind = "cpu" | "blocking" | "heap";
 
 /** Injected surface seams for controls whose panels other components own. */
 export interface ToolbarDeps {
+  /** Open the trace-wide catalogue of graphable custom-event fields. */
+  onOpenFieldCharts(): void;
   /** Open a whole-trace analysis in the inspector. */
   onOpenAnalysis(kind: AnalysisKind): void;
   /** Set a time-range filter from the current viewport (reparse). */
@@ -252,6 +254,7 @@ function analysisTemplate(
 
   return html`
     ${redFlagsChip(trace)}
+    ${fieldChartsButton(deps.onOpenFieldCharts)}
     ${schedCount > 0
       ? analysisButton(
           "d9-btn-blocking",
@@ -277,6 +280,35 @@ function analysisTemplate(
         )
       : ""}
     ${infoMenu(trace, sourceLabel, uninstrumented)}
+  `;
+}
+
+function fieldChartsButton(onClick: () => void): TemplateResult {
+  const title = "Browse graphable custom-event fields";
+  return html`
+    <button
+      type="button"
+      class="d9-toolbar-btn d9-field-charts-btn"
+      id="d9-btn-field-charts"
+      title=${title}
+      aria-label=${title}
+      @click=${onClick}
+    >
+      <svg
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <path d="M2.5 2.5v11h11"></path>
+        <path d="m4 10 2.5-3 2.2 1.8L12.5 4"></path>
+      </svg>
+      Field charts
+    </button>
   `;
 }
 

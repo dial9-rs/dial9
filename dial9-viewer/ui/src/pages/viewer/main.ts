@@ -151,6 +151,7 @@ function boot(): void {
     // toolbar reconciles it against the trace-embedded metadata.
     keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
     onNewFile: () => loadChrome?.requestNewFile(),
+    onOpenFieldCharts: () => fieldChartDialog.openCatalog(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     // Set Range: re-parse the loaded trace filtered to the current view, off
     // the main thread; the reparsed trace's extent becomes the new bounds
