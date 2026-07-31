@@ -5,9 +5,7 @@
 
 mod common;
 
-use dial9_tokio_telemetry::telemetry::{
-    RecorderTokioExt, TokioAttachOptions, TokioHooks, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{TokioAttachOptions, TokioHooks, recorder};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +14,7 @@ fn graceful_shutdown_releases_shared_state() {
     let rec = recorder(common::small_mem_writer()).build();
     let weak = Arc::downgrade(rec.shared().expect("enabled recorder"));
 
-    let (rec, rt) = rec
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("attach runtime");
+    let rt = common::attach(&rec, 1, TokioAttachOptions::default());
     rt.block_on(async {});
     drop(rt);
     rec.graceful_shutdown(Duration::ZERO);
@@ -38,11 +32,7 @@ fn drop_releases_shared_state() {
     let rec = recorder(common::small_mem_writer()).build();
     let weak = Arc::downgrade(rec.shared().expect("enabled recorder"));
 
-    let (rec, rt) = rec
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("attach runtime");
+    let rt = common::attach(&rec, 1, TokioAttachOptions::default());
     rt.block_on(async {});
     drop(rec);
     drop(rt);
@@ -67,14 +57,11 @@ fn hook_closures_are_released() {
         let _ = &canary;
     });
 
-    let (rec, rt) = rec
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.worker_threads(1);
-            },
-        )
-        .expect("attach runtime");
+    let rt = common::attach(
+        &rec,
+        1,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
     rt.block_on(async {});
     drop(rt);
     rec.graceful_shutdown(Duration::ZERO);

@@ -15,7 +15,7 @@ use std::time::Duration;
 use dial9_core::buffer::{Disk, DiskBuffer, SegmentWriter};
 use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::telemetry::{
-    AttachedRuntime, RecorderTokioExt, TaskDumpConfig, TokioAttachOptions,
+    AttachedRuntime, Dial9HandleTokioExt, TaskDumpConfig, TokioAttachOptions,
 };
 
 #[cfg(feature = "worker-s3")]
@@ -572,7 +572,15 @@ fn recorder_from_env_source(
 ) -> io::Result<AttachedRuntime> {
     let (recorder, runtime_config) = env_recorder(resolve_env_config(parse_env_config(env)));
     let recorder = recorder.unwrap_or_else(dial9_core::recorder::recorder_disabled);
-    recorder.attach_tokio_runtime_with(env_tokio_options(runtime_config), configure)
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    configure(&mut builder);
+
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, env_tokio_options(runtime_config))?;
+    Ok((recorder, runtime))
 }
 
 /// Build the enabled recorder from resolved env config, plus the runtime knobs for the Tokio

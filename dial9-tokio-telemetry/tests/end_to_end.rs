@@ -3,8 +3,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder,
-    spawn,
+    DiskBuffer, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder, spawn,
 };
 use std::time::Duration;
 
@@ -20,11 +19,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(num_workers);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, num_workers, TokioAttachOptions::default());
 
     let tokio_metrics = rt.block_on(async move {
         let mut handles = Vec::new();
@@ -140,16 +135,13 @@ fn task_spawn_events_from_main_thread_are_captured() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();
@@ -186,16 +178,13 @@ fn task_terminate_events_are_captured() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();
@@ -239,11 +228,7 @@ fn custom_event_appears_in_trace() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     let handle = recorder.handle().clone();
     rt.block_on(async move {
@@ -283,16 +268,13 @@ fn spawn_audit_detects_uninstrumented_spawns() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut joins = Vec::new();

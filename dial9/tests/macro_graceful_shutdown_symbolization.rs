@@ -11,7 +11,10 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9::cpu::CpuProfilingConfig;
-use dial9::{AttachedRuntime, DiskBuffer, RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt};
+use dial9::{
+    AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, RecorderPerfExt, RecorderPipelineExt,
+    TokioAttachOptions,
+};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io;
@@ -43,7 +46,12 @@ fn macro_test_config() -> io::Result<AttachedRuntime> {
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_custom_pipeline(move |p| p.symbolize().gzip().write_back_to(output.clone()))
         .build();
-    recorder.attach_tokio_runtime(|_| {})
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+    Ok((recorder, runtime))
 }
 
 /// Burn CPU for a fixed window so the profiler reliably captures stack samples.

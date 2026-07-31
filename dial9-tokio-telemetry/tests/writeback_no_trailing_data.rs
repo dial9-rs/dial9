@@ -4,8 +4,10 @@
 //! rewritten the segment, appending trailing garbage.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
+mod common;
+
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, TokioAttachOptions, recorder};
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::time::Duration;
@@ -25,12 +27,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         .with_cpu_profiling(CpuProfilingConfig::default())
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     rt.block_on(async {
         // Spawn enough work to fill thread-local buffers. The bug requires

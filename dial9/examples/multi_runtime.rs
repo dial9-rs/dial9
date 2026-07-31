@@ -2,7 +2,7 @@
 //!
 //! A common pattern is to run separate runtimes for different workload types
 //! (e.g. request handling vs background I/O). This example builds a recorder and
-//! attaches two named runtimes to it with `attach_tokio_runtime_with`, so all workers
+//! attaches two named runtimes to it with `attach_tokio_runtime`, so all workers
 //! appear in a single trace file with their runtime names in the segment
 //! metadata. Requests run on one runtime and push their flush work onto the
 //! other with `dial9::spawn_in`, so the trace attributes each to its own
@@ -14,7 +14,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/multi_runtime/trace.0.bin
 
-use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -30,19 +30,19 @@ fn main() -> std::io::Result<()> {
     let recorder = recorder(writer).build();
 
     // Primary runtime for request handling.
-    let (recorder, main_rt) = recorder.attach_tokio_runtime_with(
+    let mut main_builder = tokio::runtime::Builder::new_multi_thread();
+    main_builder.enable_all().worker_threads(2);
+    let main_rt = recorder.handle().attach_tokio_runtime(
+        main_builder,
         TokioAttachOptions::builder().runtime_name("main").build(),
-        |t| {
-            t.worker_threads(2);
-        },
     )?;
 
     // Secondary runtime for background I/O, sharing the same recorder.
-    let (recorder, io_rt) = recorder.attach_tokio_runtime_with(
+    let mut io_builder = tokio::runtime::Builder::new_multi_thread();
+    io_builder.enable_all().worker_threads(2);
+    let io_rt = recorder.handle().attach_tokio_runtime(
+        io_builder,
         TokioAttachOptions::builder().runtime_name("io").build(),
-        |t| {
-            t.worker_threads(2);
-        },
     )?;
 
     println!("Running workload on two named runtimes...");

@@ -177,9 +177,11 @@ impl Recorder {
             let _ = t.join();
         }
 
-        // Nothing drains sources once the flush thread is gone, so release them
-        // and whatever they own.
+        // Stop is permanent from here: recording off, enable() and new
+        // attaches refused. Nothing drains sources once the flush thread is
+        // gone, so release them and whatever they own.
         if let Some(shared) = self.handle.shared() {
+            shared.mark_stopped();
             shared.clear_sources();
         }
 

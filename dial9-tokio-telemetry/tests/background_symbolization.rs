@@ -5,8 +5,10 @@
 //! back to disk with gzip compression.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
+mod common;
+
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, TokioAttachOptions, recorder};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -47,12 +49,7 @@ fn background_symbolization_produces_symbol_table_entries() {
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     // Burn CPU across multiple threads to generate CpuSample events.
     rt.block_on(async {
