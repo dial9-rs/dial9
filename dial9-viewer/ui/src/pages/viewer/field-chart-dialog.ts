@@ -3,6 +3,7 @@
 
 import type { ViewerStore } from "../../store/store.js";
 import type { FieldChartKind } from "../../types/state.js";
+import type { ParsedTrace } from "../../lib/trace/index.js";
 import { ESC_PRIORITY, type EscCascade } from "./esc-cascade.js";
 import {
   buildFieldChartCatalog,
@@ -74,9 +75,17 @@ export function mountFieldChartDialog(
   store: ViewerStore,
   esc: EscCascade,
 ): FieldChartDialog {
-  const getCatalog = store.derived(["trace"], (state) =>
-    buildFieldChartCatalog(state.trace.trace?.customEvents ?? []),
-  );
+  const catalogs = new WeakMap<ParsedTrace, FieldChartCatalog>();
+  const getCatalog = (): FieldChartCatalog => {
+    const trace = store.getState().trace.trace;
+    if (trace === null) return { annotated: [], other: [] };
+    let catalog = catalogs.get(trace);
+    if (catalog === undefined) {
+      catalog = buildFieldChartCatalog(trace.customEvents ?? []);
+      catalogs.set(trace, catalog);
+    }
+    return catalog;
+  };
 
   const backdrop = doc.createElement("div");
   backdrop.className = "d9-field-chart-backdrop";
@@ -136,6 +145,7 @@ export function mountFieldChartDialog(
     if (!isOpen()) return;
     backdrop.classList.remove("open");
     mode = null;
+    body.replaceChildren();
     restoreFocus?.focus();
     restoreFocus = null;
   }
