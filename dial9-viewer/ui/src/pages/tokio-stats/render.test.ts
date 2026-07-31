@@ -179,6 +179,11 @@ describe("longPollsTemplate (Longest polls card)", () => {
     expect(t.leaves).not.toContain(1003);
   });
 
+  it("keeps the legacy heading, emoji included (affordance parity)", () => {
+    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
+    expect(t.strings.join("")).toContain("🕒 Longest polls");
+  });
+
   it("each row deep-links its poll via a non-destructive focus link", () => {
     const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
     const url = t.leaves.find(

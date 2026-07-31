@@ -288,7 +288,7 @@ export function longPollsTemplate(
   const bucketFromData = data.bucket;
   return html`
     <h3 style="margin:20px 0 8px;display:flex;align-items:center;gap:12px">
-      Longest polls ${rowLimitSelect(limit, onLimitChange)}
+      🕒 Longest polls ${rowLimitSelect(limit, onLimitChange)}
     </h3>
     <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">
       Single polls that held a worker thread longest; long polls starve other
