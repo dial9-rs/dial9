@@ -7,8 +7,8 @@
 //!
 //! Produces: `block_in_place_trace/trace.*.bin` in the current directory.
 
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use std::time::Duration;
 
 /// CPU-intensive work that shows up in CPU profiles.
@@ -56,16 +56,20 @@ fn main() {
         .max_total_size(500 * 1024 * 1024)
         .build()
         .unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(Default::default())
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .expect("build tokio runtime");
 

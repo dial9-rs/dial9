@@ -181,7 +181,7 @@ async fn worker_task(id: usize) {
 }
 
 #[dial9::main(config = || {
-    use dial9::{RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions};
+    use dial9::{Dial9HandleTokioExt, RecorderPipelineExt, TokioAttachOptions};
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let writer = DiskBuffer::builder()
         .base_path(TRACE_DIR)
@@ -206,12 +206,15 @@ async fn worker_task(id: usize) {
             .gzip()
             .write_back())
         .build();
-    recorder.attach_tokio_runtime_with(
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder().task_tracking_enabled(true).build(),
-        |t| {
-            t.worker_threads(4);
-        },
-    )
+    )?;
+    Ok((recorder, runtime))
 })]
 async fn main() {
     println!("Running workload, traces under {TRACE_DIR}/");

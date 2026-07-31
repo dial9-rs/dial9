@@ -47,6 +47,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Tokio attach moved to `Dial9Handle`. `RecorderTokioExt` and its `Recorder::attach_tokio_runtime` / `attach_tokio_runtime_with` are gone; `Dial9HandleTokioExt::attach_tokio_runtime(builder, options)` is the only way to attach ([#732](https://github.com/dial9-rs/dial9/pull/732)).
+
+  Attach borrows the handle instead of consuming the recorder, so a thread-per-core service can clone one handle and let each thread build and attach its own runtime. You now build the Tokio builder yourself, which also means calling `enable_all()` (previously implicit) and picking the flavor directly rather than reassigning `*t`.
+
+  ```rust
+  let recorder = dial9::recorder(writer).build();
+
+  let mut builder = tokio::runtime::Builder::new_multi_thread();
+  builder.enable_all().worker_threads(4);
+  let runtime = recorder.handle().attach_tokio_runtime(
+      builder,
+      TokioAttachOptions::builder().runtime_name("api").build(),
+  )?;
+  ```
+
+  Since a handle can now outlive its recorder, attach after `graceful_shutdown` returns an error, and surviving handles go inert: `is_enabled` reports false and `enable` is a no-op.
 - `dial9-core`: `ThreadLocalEncoder::write_event` returns `io::Result<()>` instead of panicking the calling thread on a validation failure; the event is dropped and callers own reporting ([#723](https://github.com/dial9-rs/dial9/pull/723)).
 - `dial9-core`: `Dial9Handle::is_enabled` now reports whether recording currently does anything (connected AND not paused), not just connectedness. Use `handle.shared().is_some()` to ask only whether the handle is connected ([#723](https://github.com/dial9-rs/dial9/pull/723)).
 

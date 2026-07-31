@@ -1,8 +1,8 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
-};
+mod common;
+
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::io::{BufWriter, Write};
 use std::process::Command;
@@ -44,16 +44,13 @@ fn test_js_parser_matches_rust() {
             );
         }
         let recorder = rec.build();
-        let (recorder, rt) = recorder
-            .attach_tokio_runtime_with(
-                TokioAttachOptions::builder()
-                    .task_tracking_enabled(true)
-                    .build(),
-                |t| {
-                    t.worker_threads(2);
-                },
-            )
-            .expect("build tokio runtime");
+        let rt = common::attach(
+            &recorder,
+            2,
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+        );
 
         rt.block_on(async {
             let mut tasks = vec![];

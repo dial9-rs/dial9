@@ -6,7 +6,7 @@ use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
     MemoryBuffer, ProcessResourceUsageConfig, RecorderPerfExt, RecorderPipelineExt,
-    RecorderTokioExt, recorder,
+    TokioAttachOptions, recorder,
 };
 use std::time::Duration;
 
@@ -18,12 +18,7 @@ fn traced_runtime_records_process_resource_usage() {
         .with_process_resource_usage(ProcessResourceUsageConfig::default())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(1));
@@ -53,12 +48,7 @@ fn traced_runtime_does_not_record_process_resource_usage_by_default() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(1));

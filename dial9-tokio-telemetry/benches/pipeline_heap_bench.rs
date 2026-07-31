@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPerfExt, RecorderPipelineExt,
-    RecorderTokioExt, TokioAttachOptions, recorder,
+    Dial9HandleTokioExt, Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPerfExt,
+    RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -253,14 +253,15 @@ fn measure(mode: Mode) -> Sample {
                     .build()
             }
         };
-        let (recorder, runtime) = recorder
-            .attach_tokio_runtime_with(
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(WORKER_THREADS);
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(
+                builder,
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(true)
                     .build(),
-                |t| {
-                    t.worker_threads(WORKER_THREADS);
-                },
             )
             .expect("build runtime");
 

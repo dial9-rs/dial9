@@ -14,7 +14,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
     use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
     use dial9_tokio_telemetry::telemetry::{
-        RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt, recorder,
+        RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -27,12 +27,11 @@ fn sched_event_timestamps_align_with_wall_clock() {
         .with_sched_events(SchedEventConfig::default())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(num_workers as usize);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        num_workers as usize,
+        TokioAttachOptions::default(),
+    );
 
     let _trace_start = recorder.start_time();
     let sleep_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));

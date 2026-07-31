@@ -6,7 +6,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TaskId,
+    Dial9HandleTokioExt, Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPipelineExt, TaskId,
     TokioAttachOptions, recorder,
 };
 use serde::Deserialize;
@@ -37,17 +37,13 @@ fn build_capturing_runtime() -> (Recorder, tokio::runtime::Runtime, Arc<Mutex<Ve
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
     (recorder, rt, batches)
 }
 
@@ -96,17 +92,13 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let handle = Dial9TokioHandle::current();
 
@@ -160,17 +152,13 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
 #[test]
 fn spawn_with_returns_closure_value() {
     let recorder = recorder(common::small_mem_writer()).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let handle = Dial9TokioHandle::current();
 
@@ -193,27 +181,29 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
 
-    let (recorder, rt_a) = recorder
-        .attach_tokio_runtime_with(
+    let mut builder_a = tokio::runtime::Builder::new_multi_thread();
+    builder_a.worker_threads(1).enable_all().thread_name("rt-a");
+    let rt_a = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder_a,
             TokioAttachOptions::builder()
                 .runtime_name("a")
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(1).enable_all().thread_name("rt-a");
-            },
         )
         .expect("attach runtime a");
 
-    let (recorder, rt_b) = recorder
-        .attach_tokio_runtime_with(
+    let mut builder_b = tokio::runtime::Builder::new_multi_thread();
+    builder_b.worker_threads(1).enable_all().thread_name("rt-b");
+    let rt_b = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder_b,
             TokioAttachOptions::builder()
                 .runtime_name("b")
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(1).enable_all().thread_name("rt-b");
-            },
         )
         .expect("attach runtime b");
 

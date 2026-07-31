@@ -10,10 +10,14 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use dial9_core::buffer::DiskBuffer;
+use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::recorder::recorder;
+use dial9_core::schema_extensions::{self, roles};
 use dial9_core::thread::current_tid;
-use dial9_metrique::{Dial9Context, Dial9EntryExt, Dial9Stream, Interned, Skip};
-use dial9_tokio_telemetry::telemetry::RecorderTokioExt;
+use dial9_metrique::{
+    Dial9Context, Dial9EntryExt, Dial9Stream, Interned, SPAN_TYPE, Skip, SpanName, field_names,
+};
+use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
 use dial9_trace_format::types::FieldValueRef;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
@@ -31,8 +35,40 @@ struct DecodedEvent {
     field_names: Vec<String>,
     /// field name → unit annotation value.
     units: HashMap<String, String>,
+    /// field name → annotation key/value pairs.
+    annotations: HashMap<String, HashMap<String, String>>,
     /// Names of fields carried as pooled strings.
     pooled_fields: Vec<String>,
+}
+
+fn assert_valid_span_context(event: &DecodedEvent) {
+    let _: u64 = event.fields[field_names::THREAD_ID]
+        .parse()
+        .expect("dial9.thread_id must be an unsigned integer");
+    let duration: u64 = event.fields[field_names::SPAN_DURATION_NS]
+        .parse()
+        .expect("dial9.span.duration_ns must be an unsigned integer");
+    assert!(
+        duration <= event.timestamp_ns,
+        "duration exceeds the packed close timestamp: {event:#?}"
+    );
+    assert_eq!(
+        event.annotations[field_names::THREAD_ID][schema_extensions::ROLE_KEY],
+        roles::THREAD_ID
+    );
+    assert_eq!(
+        event.annotations[field_names::TOKIO_TASK_ID][schema_extensions::ROLE_KEY],
+        roles::TOKIO_TASK_ID
+    );
+    assert_eq!(
+        event.annotations[field_names::SPAN_DURATION_NS][schema_extensions::ROLE_KEY],
+        roles::SPAN_DURATION
+    );
+    assert_eq!(
+        event.annotations[field_names::SPAN_DURATION_NS][schema_extensions::SPAN_TYPE_KEY],
+        SPAN_TYPE
+    );
+    assert_eq!(event.units[field_names::SPAN_DURATION_NS], "ns");
 }
 
 fn render(value: &FieldValueRef<'_>, pool: &dial9_trace_format::decoder::StringPool) -> String {
@@ -78,6 +114,7 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
             let mut fields = HashMap::new();
             let mut field_names = Vec::new();
             let mut units = HashMap::new();
+            let mut annotations = HashMap::new();
             let mut pooled_fields = Vec::new();
             for (i, (def, value)) in ev.schema.fields().iter().zip(ev.fields.iter()).enumerate() {
                 fields.insert(def.name().to_owned(), render(value, ev.string_pool));
@@ -93,8 +130,14 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
                     pooled_fields.push(def.name().to_owned());
                 }
                 for ann in ev.schema.annotations() {
-                    if ann.field_index() as usize == i && ann.key() == "unit" {
-                        units.insert(def.name().to_owned(), ann.value().to_owned());
+                    if ann.field_index() as usize == i {
+                        annotations
+                            .entry(def.name().to_owned())
+                            .or_insert_with(HashMap::new)
+                            .insert(ann.key().to_owned(), ann.value().to_owned());
+                        if ann.key() == "unit" {
+                            units.insert(def.name().to_owned(), ann.value().to_owned());
+                        }
                     }
                 }
             }
@@ -104,6 +147,7 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
                 fields,
                 field_names,
                 units,
+                annotations,
                 pooled_fields,
             });
         });
@@ -178,6 +222,7 @@ struct RequestMetrics {
     #[metrics(flags(Interned))]
     route: String,
 
+    #[metrics(flags(SpanName))]
     operation: &'static str,
 
     #[metrics(unit = Microsecond)]
@@ -220,11 +265,11 @@ fn full_entry_round_trips() {
     struct Decoded {
         timestamp_ns: u64,
         #[serde(rename = "dial9.thread_id")]
-        thread_id: Option<u64>,
-        #[serde(rename = "dial9.task_id")]
+        thread_id: u64,
+        #[serde(rename = "dial9.tokio.task_id")]
         task_id: Option<u64>,
-        #[serde(rename = "dial9.duration_ns")]
-        duration_ns: Option<u64>,
+        #[serde(rename = "dial9.span.duration_ns")]
+        duration_ns: u64,
         #[serde(rename = "Route")]
         route: String,
         #[serde(rename = "Operation")]
@@ -268,13 +313,15 @@ fn full_entry_round_trips() {
     assert_eq!(ev.load, 0.5);
     assert_eq!(ev.elapsed_ms, 250.0);
 
-    // Off-runtime capture records the calling thread's tid and timestamps;
-    // the task id is absent. Close-time duration is present (arbitrarily
-    // small: the entry closes right after capture).
-    assert_eq!(ev.thread_id, Some(u64::from(current_tid())));
+    // Off-runtime capture records the calling thread's tid and a span
+    // duration; the task id is absent. The packed timestamp is the close, so
+    // the duration cannot exceed it (start = end - duration >= 0).
+    assert_eq!(ev.thread_id, u64::from(current_tid()));
     assert_eq!(ev.task_id, None);
-    assert!(ev.timestamp_ns > 0, "start timestamp missing");
-    assert!(ev.duration_ns.is_some(), "duration missing: {ev:#?}");
+    assert!(
+        ev.duration_ns <= ev.timestamp_ns,
+        "duration exceeds the packed close timestamp: {ev:#?}"
+    );
 
     assert_eq!(typed[1].retries, None);
 
@@ -289,8 +336,271 @@ fn full_entry_round_trips() {
     );
     assert_eq!(raw.units["LatencyUs"], "us");
     assert_eq!(raw.units["Elapsed"], "ms");
+    assert_eq!(raw.units[field_names::SPAN_DURATION_NS], "ns");
+    assert_eq!(
+        raw.annotations[field_names::SPAN_DURATION_NS][schema_extensions::ROLE_KEY],
+        roles::SPAN_DURATION
+    );
+    assert_eq!(
+        raw.annotations[field_names::SPAN_DURATION_NS][schema_extensions::SPAN_TYPE_KEY],
+        SPAN_TYPE
+    );
+    assert_eq!(
+        raw.annotations[field_names::THREAD_ID][schema_extensions::ROLE_KEY],
+        roles::THREAD_ID
+    );
+    assert_eq!(
+        raw.annotations[field_names::TOKIO_TASK_ID][schema_extensions::ROLE_KEY],
+        roles::TOKIO_TASK_ID
+    );
+    assert_eq!(
+        raw.annotations["Operation"][schema_extensions::ROLE_KEY],
+        roles::SPAN_NAME
+    );
     assert!(raw.pooled_fields.contains(&"Route".to_owned()));
     assert!(!raw.pooled_fields.contains(&"Operation".to_owned()));
+}
+
+#[test]
+fn packed_timestamps_follow_close_order_not_start_order() {
+    let events = run_sink_test(|stream| {
+        let older = sample_request(None);
+        std::thread::sleep(Duration::from_millis(1));
+        let newer = sample_request(None);
+
+        // Close the newer entry first. Start order and emission order are now
+        // deliberately opposite.
+        feed_entry!(stream, newer);
+        feed_entry!(stream, older);
+    });
+
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_valid_span_context(event);
+    }
+    // The start is reconstructed as `end - duration`; the packed timestamp is
+    // the end (close).
+    let start = |ev: &DecodedEvent| {
+        let duration: u64 = ev.fields[field_names::SPAN_DURATION_NS].parse().unwrap();
+        ev.timestamp_ns - duration
+    };
+    assert!(
+        start(&events[0]) > start(&events[1]),
+        "test setup must reverse start and close order"
+    );
+    assert!(
+        events[0].timestamp_ns <= events[1].timestamp_ns,
+        "packed timestamps must follow close/emission order: {events:#?}"
+    );
+}
+
+#[test]
+fn packed_timestamp_is_captured_at_close_not_encoding() {
+    let mut close_lower_bound = None;
+    let mut close_upper_bound = None;
+    let events = run_sink_test(|stream| {
+        // Bracket the close with clock reads: the packed timestamp must be a
+        // clock value captured at close, so it falls between the read taken
+        // just before close and the one taken just after — and strictly
+        // before the later spin-advanced encode time.
+        let lower_bound = clock_monotonic_ns();
+        close_lower_bound = Some(lower_bound);
+        let closed = metrique::RootEntry::new(metrique::CloseValue::close(sample_request(None)));
+        let upper_bound = clock_monotonic_ns();
+        close_upper_bound = Some(upper_bound);
+
+        // Spin the clock well past close, then encode. If the timestamp were
+        // captured at encode time it would land after this window.
+        while clock_monotonic_ns() <= upper_bound {
+            std::hint::spin_loop();
+        }
+        stream.next(&closed).unwrap();
+    });
+
+    assert_eq!(events.len(), 1);
+    let ts = events[0].timestamp_ns;
+    assert!(
+        ts >= close_lower_bound.unwrap() && ts <= close_upper_bound.unwrap(),
+        "packed timestamp must be the close-time clock read, within \
+         [{}, {}]: {events:#?}",
+        close_lower_bound.unwrap(),
+        close_upper_bound.unwrap(),
+    );
+}
+
+#[test]
+fn duplicate_span_name_first_wins_rest_plain() {
+    // Two `SpanName` fields: the first is honored, the second is demoted to an
+    // ordinary payload field. The event is still recorded either way.
+    #[metrics]
+    struct DuplicateNames {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(flags(SpanName))]
+        first: String,
+        #[metrics(flags(SpanName))]
+        second: String,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            DuplicateNames {
+                dial9: Dial9Context::capture(),
+                first: "one".to_owned(),
+                second: "two".to_owned(),
+            }
+        );
+    });
+
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_valid_span_context(ev);
+    assert_eq!(ev.fields["first"], "one");
+    assert_eq!(ev.fields["second"], "two");
+    // Only the first field claims the span.name role.
+    assert_eq!(
+        ev.annotations["first"][schema_extensions::ROLE_KEY],
+        roles::SPAN_NAME
+    );
+    assert!(
+        ev.annotations
+            .get("second")
+            .and_then(|a| a.get(schema_extensions::ROLE_KEY))
+            .is_none(),
+        "the second SpanName field must not carry the role: {ev:#?}"
+    );
+}
+
+#[test]
+fn unhonorable_span_name_falls_back_to_schema_name() {
+    use metrique_writer::core::descriptor::FieldShape;
+
+    // An un-honorable `SpanName` flag must never drop the event: the field is
+    // recorded like any other (unless separately skipped), no `span.name` role
+    // is emitted, and the span falls back to its schema name.
+    #[metrics]
+    struct NumericName {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(flags(SpanName))]
+        name: u64,
+    }
+
+    // An opaque shape has no wire representation at all, so `SpanName` on it
+    // hits the plan's unencodable-shape branch: the field is left out of the
+    // payload and the span falls back to the schema name.
+    #[derive(Debug)]
+    struct OpaqueValue;
+    impl metrique_writer::Value for OpaqueValue {
+        const SHAPE: FieldShape<'static> = FieldShape::Opaque;
+        fn write(&self, writer: impl metrique_writer::ValueWriter) {
+            writer.string("opaque");
+        }
+    }
+    impl metrique::CloseValue for OpaqueValue {
+        type Closed = OpaqueValue;
+        fn close(self) -> OpaqueValue {
+            self
+        }
+    }
+
+    #[metrics]
+    struct OpaqueName {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(flags(SpanName))]
+        name: OpaqueValue,
+        keep: u64,
+    }
+
+    #[metrics]
+    struct SkippedName {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(flags(Skip, SpanName))]
+        name: String,
+        keep: u64,
+    }
+
+    #[metrics]
+    struct CollidingName {
+        #[metrics(flatten)]
+        dial9: Dial9Context,
+        #[metrics(name = "dial9.thread_id", flags(SpanName))]
+        name: String,
+        keep: u64,
+    }
+
+    let events = run_sink_test(|stream| {
+        feed_entry!(
+            stream,
+            SkippedName {
+                dial9: Dial9Context::capture(),
+                name: "skipped".to_owned(),
+                keep: 1,
+            }
+        );
+        feed_entry!(
+            stream,
+            CollidingName {
+                dial9: Dial9Context::capture(),
+                name: "colliding".to_owned(),
+                keep: 2,
+            }
+        );
+        feed_entry!(
+            stream,
+            NumericName {
+                dial9: Dial9Context::capture(),
+                name: 7,
+            }
+        );
+        feed_entry!(
+            stream,
+            OpaqueName {
+                dial9: Dial9Context::capture(),
+                name: OpaqueValue,
+                keep: 3,
+            }
+        );
+    });
+
+    // Every entry is still recorded (nothing dropped over a bad name hint).
+    assert_eq!(
+        events.len(),
+        4,
+        "un-honorable SpanName layouts must still record their events: {events:#?}"
+    );
+    for event in &events {
+        assert_valid_span_context(event);
+        assert!(
+            !event.annotations.values().any(|ann| ann
+                .get(schema_extensions::ROLE_KEY)
+                .map(String::as_str)
+                == Some(roles::SPAN_NAME)),
+            "no field should carry the span.name role: {event:#?}"
+        );
+    }
+
+    let by_name = |suffix: &str| {
+        events
+            .iter()
+            .find(|e| e.schema_name.contains(suffix))
+            .unwrap_or_else(|| panic!("missing event for {suffix}: {events:#?}"))
+    };
+    // A numeric SpanName field records as its numeric value.
+    assert_eq!(by_name("NumericName").fields["name"], "7");
+    // Skip still wins over SpanName: the field stays out, siblings remain.
+    assert!(!by_name("SkippedName").fields.contains_key("name"));
+    assert_eq!(by_name("SkippedName").fields["keep"], "1");
+    // A name colliding with a header is dropped as a duplicate; the sibling
+    // payload survives.
+    assert_eq!(by_name("CollidingName").fields["keep"], "2");
+    // An opaque SpanName field is left out of the payload; the sibling
+    // survives.
+    assert!(!by_name("OpaqueName").fields.contains_key("name"));
+    assert_eq!(by_name("OpaqueName").fields["keep"], "3");
 }
 
 #[test]
@@ -299,10 +609,11 @@ fn on_runtime_context_captures_task_id() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
 
     let mut stream = Dial9Stream::new(recorder.handle());
@@ -320,9 +631,14 @@ fn on_runtime_context_captures_task_id() {
     let ev = &events[0];
     // Captured inside a spawned task on a worker thread: a tid that is not
     // the test thread's, and a task id.
-    let tid: u64 = ev.fields["dial9.thread_id"].parse().unwrap();
+    let tid: u64 = ev.fields[field_names::THREAD_ID].parse().unwrap();
     assert_ne!(tid, u64::from(current_tid()), "expected a worker tid");
-    assert_ne!(ev.fields["dial9.task_id"], "<none>", "expected a task id");
+    assert_ne!(
+        ev.fields[field_names::TOKIO_TASK_ID],
+        "<none>",
+        "expected a task id"
+    );
+    assert_valid_span_context(ev);
 }
 
 #[test]
@@ -403,7 +719,7 @@ fn context_only_entry_emits_header_event() {
 
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_ne!(ev.fields["dial9.duration_ns"], "<none>");
+    assert_valid_span_context(ev);
 }
 
 #[test]
@@ -581,7 +897,9 @@ fn timestamp_field_lands_in_wall_clock_header() {
     });
 
     assert_eq!(events.len(), 1);
-    let wall: u64 = events[0].fields["dial9.wall_clock_ns"].parse().unwrap();
+    let wall: u64 = events[0].fields[field_names::WALL_CLOCK_NS]
+        .parse()
+        .unwrap();
     assert!(
         wall > 1_500_000_000_000_000_000,
         "implausible wall clock: {wall}"
@@ -589,14 +907,15 @@ fn timestamp_field_lands_in_wall_clock_header() {
 }
 
 #[test]
-fn payload_field_named_like_a_header_field_coexists_with_it() {
-    // The `dial9.` prefix on header fields means a user field named
-    // `thread_id` is not a collision: both land, side by side.
+fn payload_field_named_like_a_structural_field_is_skipped() {
+    // An application payload must opt into dial9's namespace to collide.
+    // The structural field wins and the rest of the entry still records.
     #[metrics]
     struct SameNames {
         #[metrics(flatten)]
         dial9: Dial9Context,
-        thread_id: u64,
+        #[metrics(name = "dial9.thread_id")]
+        colliding_thread_id: u64,
         count: u64,
     }
 
@@ -605,7 +924,7 @@ fn payload_field_named_like_a_header_field_coexists_with_it() {
             stream,
             SameNames {
                 dial9: Dial9Context::capture(),
-                thread_id: 42,
+                colliding_thread_id: 42,
                 count: 7,
             }
         );
@@ -614,11 +933,15 @@ fn payload_field_named_like_a_header_field_coexists_with_it() {
     assert_eq!(events.len(), 1, "entry must record: {events:#?}");
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "7");
-    // The payload keeps its own value...
-    assert_eq!(ev.fields["thread_id"], "42");
-    // ...and the header carries the captured context, unaffected.
-    assert_ne!(ev.fields["dial9.thread_id"], "42");
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert_ne!(ev.fields[field_names::THREAD_ID], "42");
+    assert_eq!(
+        ev.field_names
+            .iter()
+            .filter(|name| name.as_str() == field_names::THREAD_ID)
+            .count(),
+        1
+    );
+    assert_valid_span_context(ev);
 }
 
 #[test]
@@ -648,7 +971,7 @@ fn duplicate_contexts_first_wins() {
     assert_eq!(events.len(), 1, "entry must record: {events:#?}");
     let ev = &events[0];
     assert_eq!(ev.fields["count"], "1");
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert_valid_span_context(ev);
 }
 
 #[test]
@@ -742,7 +1065,7 @@ fn prefixed_context_still_routes() {
     struct Prefixed {
         #[metrics(flatten, prefix = "req_")]
         dial9: Dial9Context,
-        thread_id: u64,
+        application_thread_id: u64,
     }
 
     let events = run_sink_test(|stream| {
@@ -750,7 +1073,7 @@ fn prefixed_context_still_routes() {
             stream,
             Prefixed {
                 dial9: Dial9Context::capture(),
-                thread_id: 7,
+                application_thread_id: 7,
             }
         );
     });
@@ -758,9 +1081,8 @@ fn prefixed_context_still_routes() {
     assert_eq!(events.len(), 1, "prefixed entry must record: {events:#?}");
     let ev = &events[0];
     // Context still routes (roles match on base name, prefix-insensitive).
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
-    assert_ne!(ev.fields["dial9.thread_id"], "7");
-    assert_eq!(ev.fields["thread_id"], "7");
+    assert_valid_span_context(ev);
+    assert_eq!(ev.fields["application_thread_id"], "7");
 }
 
 #[test]
@@ -868,7 +1190,7 @@ fn entry_enum_variants_get_distinct_schemas() {
     assert_eq!(events[2].fields["bytes"], "300");
     // Context routed for every variant.
     for ev in &events {
-        let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+        assert_valid_span_context(ev);
     }
 }
 
@@ -1212,10 +1534,11 @@ fn every_context_role_routes() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
 
     let mut stream = Dial9Stream::new(recorder.handle());
@@ -1228,19 +1551,17 @@ fn every_context_role_routes() {
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    // ThreadId, TaskId, MonotonicEnd routed; MonotonicStart is the event
-    // timestamp.
-    let _tid: u64 = ev.fields["dial9.thread_id"].parse().unwrap();
-    assert_ne!(ev.fields["dial9.task_id"], "<none>");
-    assert_ne!(ev.fields["dial9.duration_ns"], "<none>");
-    assert!(ev.timestamp_ns > 0);
+    // ThreadId and MonotonicStart are fields; MonotonicEnd is the packed
+    // timestamp. TaskId is present because capture happened inside a task.
+    assert_valid_span_context(ev);
+    assert_ne!(ev.fields[field_names::TOKIO_TASK_ID], "<none>");
 }
 
 #[test]
-fn parent_rename_all_does_not_restyle_context_names() {
-    // Context routing and the `dial9.` header names both rely on
-    // Dial9Context's literal field names being style-invariant. A parent
-    // asking for a different style must not reach them.
+fn parent_rename_all_does_not_restyle_structural_names() {
+    // Context routing relies on Dial9Context's literal internal field names.
+    // The generated structural field names are also fixed independently of
+    // the parent entry's style.
     #[metrics(rename_all = "PascalCase")]
     struct Styled {
         #[metrics(flatten)]
@@ -1262,14 +1583,20 @@ fn parent_rename_all_does_not_restyle_context_names() {
     let ev = &events[0];
     // The payload field is restyled...
     assert_eq!(ev.fields["SomeCount"], "4");
-    // ...while the header keeps its literal lowercase names, and the
-    // context still routed into it.
+    // ...while the structural fields keep their literal lowercase names,
+    // and the context still routed into them.
     assert!(
-        ev.field_names.contains(&"dial9.thread_id".to_owned()),
-        "header names must not be restyled: {:?}",
+        ev.field_names
+            .iter()
+            .any(|name| name == field_names::THREAD_ID)
+            && ev
+                .field_names
+                .iter()
+                .any(|name| name == field_names::SPAN_DURATION_NS),
+        "structural names must not be restyled: {:?}",
         ev.field_names
     );
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert_valid_span_context(ev);
 }
 
 #[test]
@@ -1354,9 +1681,7 @@ fn boxed_entries_round_trip() {
         ev.pooled_fields.contains(&"labels".to_owned()),
         "interning must survive the box: {ev:#?}"
     );
-    let _duration: u64 = ev.fields["dial9.duration_ns"]
-        .parse()
-        .expect("context must route through the box");
+    assert_valid_span_context(ev);
 }
 
 #[test]
@@ -1476,7 +1801,7 @@ fn tee_hides_dial9_fields_from_the_other_sink() {
     // dial9's own side still recorded the context.
     let events = decode_metrique_events(dir.path());
     assert_eq!(events.len(), 1, "dial9 side must still record: {events:#?}");
-    let _duration: u64 = events[0].fields["dial9.duration_ns"].parse().unwrap();
+    assert_valid_span_context(&events[0]);
 }
 
 #[test]
@@ -1551,11 +1876,10 @@ fn wrapping_an_entry_records_the_same_context_as_flattening_one() {
     // ...and the context landed in the header exactly as a flattened
     // Dial9Context would.
     assert_eq!(
-        ev.fields["dial9.thread_id"],
+        ev.fields[field_names::THREAD_ID],
         u64::from(current_tid()).to_string()
     );
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
-    assert!(ev.timestamp_ns > 0, "start timestamp missing");
+    assert_valid_span_context(ev);
     // The wrapper contributes no payload field of its own.
     assert!(
         !ev.field_names.iter().any(|n| n == "dial9"),
@@ -1600,7 +1924,7 @@ fn append_on_drop_dial9_records_through_a_sink() {
     let ev = &events[0];
     assert_eq!(ev.fields["LatencyMs"], "7");
     assert_eq!(ev.fields["Success"], "true");
-    let _duration: u64 = ev.fields["dial9.duration_ns"].parse().unwrap();
+    assert_valid_span_context(ev);
 }
 
 #[test]

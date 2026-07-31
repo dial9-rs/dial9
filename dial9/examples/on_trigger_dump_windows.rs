@@ -31,7 +31,7 @@ use dial9::DiskBuffer;
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
 
 #[dial9::main(config = || {
-    use dial9::{RecorderPipelineExt, RecorderTokioExt};
+    use dial9::{Dial9HandleTokioExt, RecorderPipelineExt, TokioAttachOptions};
     let _ = std::fs::remove_dir_all(TRACE_DIR);
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let writer = DiskBuffer::builder()
@@ -48,9 +48,14 @@ const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
         .build();
-    recorder.attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+    Ok((recorder, runtime))
 })]
 async fn main() {
     // Reach the dump trigger through the ambient handle; the runtime stashed

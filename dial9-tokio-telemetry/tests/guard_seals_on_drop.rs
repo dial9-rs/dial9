@@ -1,4 +1,6 @@
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+mod common;
+
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 /// After the recorder is dropped, all trace files should be sealed (.bin),
@@ -14,11 +16,7 @@ fn guard_drop_produces_sealed_bin_files() {
         .build()
         .unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     rt.block_on(async {
         for _ in 0..100 {

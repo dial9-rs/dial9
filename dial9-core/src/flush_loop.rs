@@ -37,8 +37,6 @@ fn flush_once<M: BufferMode>(
     shared: &SharedState,
     drain_self: bool,
 ) -> FlushStats {
-    use crate::primitives::sync::atomic::Ordering;
-
     let events_before = *events_written;
     let cpu_events_time = std::time::Instant::now();
     if shared.is_enabled() {
@@ -69,7 +67,7 @@ fn flush_once<M: BufferMode>(
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to transcode batch: {e}");
                 });
-                shared.enabled.store(false, Ordering::Relaxed);
+                shared.disable();
                 return FlushStats {
                     event_count: *events_written - events_before,
                     dropped_batches: dropped as u64,

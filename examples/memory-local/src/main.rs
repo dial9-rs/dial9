@@ -8,7 +8,7 @@
 
 use dial9::Dial9Handle;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions};
 use std::io;
 use std::time::Duration;
 
@@ -34,14 +34,16 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     let recorder = dial9::recorder_or_disabled(writer).build();
 
-    recorder.attach_tokio_runtime_with(
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .build(),
-        |t| {
-            t.worker_threads(2);
-        },
-    )
+    )?;
+    Ok((recorder, runtime))
 }
 
 #[dial9::main(config = my_config)]

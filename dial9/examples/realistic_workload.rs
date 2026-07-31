@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Duration;
 
-use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -12,14 +12,17 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_total_size(256 * 1024 * 1024)
         .build();
     let recorder = dial9::recorder_or_disabled(writer).build();
-    recorder.attach_tokio_runtime_with(
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .build(),
-        |t| {
-            t.worker_threads(4);
-        },
-    )
+    )?;
+    Ok((recorder, runtime))
 }
 
 async fn cpu_bound_work(n: u64) -> u64 {

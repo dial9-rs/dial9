@@ -6,7 +6,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
-    MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder,
+    MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,16 +22,13 @@ fn active_tasks_reflects_spawned_tasks_via_runtime_metrics() {
     let rec = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (rec, rt) = rec
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &rec,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let barrier = Arc::new(Barrier::new(num_tasks + 1));
@@ -87,16 +84,13 @@ fn active_tasks_decreases_after_tasks_complete() {
     let rec = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (rec, rt) = rec
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &rec,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();

@@ -6,8 +6,10 @@
 //! growth in production.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
+mod common;
+
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderPerfExt, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 /// Produce enough trace data to trigger multiple rotations and evictions,
@@ -40,12 +42,7 @@ fn eviction_cleans_up_processed_gz_segments() {
         .with_cpu_profiling(CpuProfilingConfig::default())
         .worker_poll_interval(Duration::from_millis(50))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     // Generate enough work to produce many sealed segments, exceeding the
     // total budget so eviction must kick in.

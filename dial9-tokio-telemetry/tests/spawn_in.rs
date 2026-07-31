@@ -6,7 +6,7 @@ mod common;
 
 use common::{capture_processor, decode_all, small_mem_writer};
 use dial9_tokio_telemetry::telemetry::{
-    RecorderPipelineExt, RecorderTokioExt, TaskId, TokioAttachOptions, block_on, recorder, spawn_in,
+    RecorderPipelineExt, TaskId, TokioAttachOptions, block_on, recorder, spawn_in,
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -38,16 +38,13 @@ fn build_capturing_recorder() -> (
     let rec = recorder(small_mem_writer())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (rec, rt) = rec
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &rec,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
     (rec, rt, batches)
 }
 

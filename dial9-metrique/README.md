@@ -18,7 +18,7 @@ struct RequestMetrics {
     // Including a Dial9Context opts this entry into the trace.
     #[metrics(flatten)]
     dial9: Dial9Context,
-    #[metrics(flags(dial9::Interned))]
+    #[metrics(flags(dial9::Interned, dial9::SpanName))]
     operation: &'static str,
     latency_ms: u64,
 }

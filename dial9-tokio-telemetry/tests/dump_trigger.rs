@@ -6,7 +6,7 @@ use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::dump::DumpError;
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder,
+    DiskBuffer, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 
 /// `with_dump_trigger` is available in every pipeline state (compile check).
@@ -37,12 +37,7 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
@@ -73,12 +68,7 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 

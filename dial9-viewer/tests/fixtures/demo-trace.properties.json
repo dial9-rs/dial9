@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 5359,
+  "total_samples": 14220,
   "by_source": {
-    "0": 59,
-    "1": 5300
+    "0": 141,
+    "1": 14079
   },
   "on_off_all": {
-    "on_runtime": 5354,
-    "off_runtime": 5
+    "on_runtime": 14196,
+    "off_runtime": 24
   },
   "on_off_by_source": {
     "0": {
-      "on": 54,
-      "off": 5
+      "on": 117,
+      "off": 24
     },
     "1": {
-      "on": 5300,
+      "on": 14079,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 59,
-    "distinct_stacks": 58,
-    "stack_sig_digest": "92bd17a0589dbc97",
-    "ts_count": 59,
-    "ts_span_ns": 3533002169,
-    "ts_delta_digest": "56e663eead4a447d",
+    "count": 141,
+    "distinct_stacks": 118,
+    "stack_sig_digest": "a60a449ebb3e28c2",
+    "ts_count": 141,
+    "ts_span_ns": 4415479824,
+    "ts_delta_digest": "80459a0a2506e18b",
     "top_stacks": [
       {
+        "count": 11,
+        "depth": 1,
+        "leaf": "__libc_write"
+      },
+      {
+        "count": 4,
+        "depth": 1,
+        "leaf": "_int_malloc"
+      },
+      {
+        "count": 3,
+        "depth": 1,
+        "leaf": "__malloc"
+      },
+      {
         "count": 2,
-        "depth": 113,
-        "leaf": "[unknown] 0xffff877dde60"
+        "depth": 23,
+        "leaf": "std::thread::local::LocalKey<T>::with"
       },
       {
-        "count": 1,
-        "depth": 106,
-        "leaf": "[unknown] 0xffff875feac0"
+        "count": 2,
+        "depth": 1,
+        "leaf": "[unknown] 0x7f5143ce9392"
       },
       {
-        "count": 1,
-        "depth": 119,
-        "leaf": "<aws_smithy_runtime::client::retries::strategy::standard::TokenBucketProvider as aws_smithy_runtime_api::client::interceptors::Intercept>::modify_before_retry_loop"
+        "count": 2,
+        "depth": 1,
+        "leaf": "__pthread_mutex_unlock_usercnt"
       },
       {
-        "count": 1,
-        "depth": 118,
-        "leaf": "<T as metrique_writer_core::sink::EntrySink<E>>::append"
+        "count": 2,
+        "depth": 23,
+        "leaf": "std::io::Write::write_all"
       },
       {
-        "count": 1,
-        "depth": 110,
-        "leaf": "<alloc::vec::into_iter::IntoIter<T,A> as core::iter::traits::iterator::Iterator>::try_fold"
-      },
-      {
-        "count": 1,
-        "depth": 119,
-        "leaf": "aws_smithy_runtime_api::client::runtime_components::RuntimeComponentsBuilder::merge_from"
-      },
-      {
-        "count": 1,
-        "depth": 120,
-        "leaf": "hashbrown::map::HashMap<K,V,S,A>::insert"
-      },
-      {
-        "count": 1,
-        "depth": 106,
-        "leaf": "[unknown] 0xffff8760d214"
+        "count": 2,
+        "depth": 1,
+        "leaf": "pthread_mutex_lock"
       }
     ]
   }

@@ -182,6 +182,9 @@ Annotation keys and values are free-form at the wire level. By convention:
 
 Viewers ignore annotation keys or values they do not recognize.
 
+Higher-level interpretations of annotations, including Dial9's single-event
+span convention, are outside this wire-format specification.
+
 ## Field Types
 
 | Tag | Name              | Wire Encoding                                                           | Size        |

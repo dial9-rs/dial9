@@ -7,10 +7,10 @@ use std::time::{Duration, SystemTime};
 use dial9_trace_format::types::FieldValue;
 use metrique_writer::{EntryConfig, EntryWriter, Observation, Value, ValueWriter};
 
-use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::encoder::ThreadLocalEncoder;
 use dial9_core::rate_limited;
 
+use super::context::context_field_names;
 use super::plan::{ContextRole, FieldAction, HEADER_FIELDS, Header, Plan, ScalarKind, ValueKind};
 
 /// Captured event-header values, filled in by [`ContextRole`]-routed fields
@@ -66,6 +66,12 @@ pub(crate) enum WalkError<'p> {
     /// mismatch); the wire format has no absent encoding for required
     /// fields.
     MissingRequired { field: &'p str },
+    /// A required value from `Dial9Context` was not captured. Unreachable
+    /// through the public API — `Dial9Context::capture` always fills thread
+    /// id, start, and end — so these guards are purely defensive against an
+    /// internal misimplementation (a future context source that forgets a
+    /// role) rather than a user-facing condition.
+    MissingContext { field: &'static str },
 }
 
 impl<'p, 'enc> EntryWalk<'p, 'enc> {
@@ -110,26 +116,32 @@ impl<'p, 'enc> EntryWalk<'p, 'enc> {
             }
         }
 
-        // Timestamp: request start, or the flush-thread clock as fallback.
-        self.values[0] =
-            FieldValue::Varint(self.ctx.monotonic_start.unwrap_or_else(clock_monotonic_ns));
+        let thread_id = self.ctx.thread_id.ok_or(WalkError::MissingContext {
+            field: Header::ThreadId.name(),
+        })?;
+        let start = self.ctx.monotonic_start.ok_or(WalkError::MissingContext {
+            field: context_field_names::MONOTONIC_NS_START,
+        })?;
+        let end = self.ctx.monotonic_end.ok_or(WalkError::MissingContext {
+            field: context_field_names::MONOTONIC_NS_END,
+        })?;
+        // The span duration. A well-behaved monotonic clock gives `end >=
+        // start`; if a non-monotonic read or corrupted context puts start
+        // after end, `saturating_sub` yields 0 rather than dropping the event.
+        // A zero duration is a truthful "we could not measure a positive span"
+        // and still carries the (more useful) thread/task/attribute context to
+        // the trace.
+        let duration = end.saturating_sub(start);
+
+        // Completed entries are emitted at close, so the packed timestamp is
+        // the close time. This mostly keeps delta encoding in emission order:
+        // concurrent closes can still race and land slightly out of order.
+        self.values[0] = FieldValue::Varint(end);
         for (i, header) in Header::ALL.into_iter().enumerate() {
             self.values[1 + i] = match header {
-                Header::ThreadId => self
-                    .ctx
-                    .thread_id
-                    .map(FieldValue::Varint)
-                    .unwrap_or(FieldValue::None),
+                Header::ThreadId => FieldValue::Varint(thread_id),
                 Header::TaskId => opt(self.ctx.task_id),
-                // Absent unless the context captured both timestamps; the
-                // flush-thread fallback timestamp would make a nonsense
-                // duration. `MonotonicAtClose` fires after `capture` on the
-                // same clock, so the subtraction cannot wrap in practice.
-                Header::Duration => opt(self
-                    .ctx
-                    .monotonic_start
-                    .zip(self.ctx.monotonic_end)
-                    .map(|(start, end)| end.saturating_sub(start))),
+                Header::Duration => FieldValue::Varint(duration),
                 Header::WallClock => opt(self.ctx.wall_clock_ns),
             };
         }

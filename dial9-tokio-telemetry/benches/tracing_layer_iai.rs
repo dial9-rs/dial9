@@ -19,7 +19,9 @@
 fn main() {}
 
 use dial9_core::recording::Recorder;
-use dial9_tokio_telemetry::telemetry::{AttachedRuntime, MemoryBuffer, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{
+    AttachedRuntime, Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, recorder,
+};
 use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
@@ -34,13 +36,14 @@ struct Harness {
 
 /// A recorder with one attached current-thread runtime, which the caller drives.
 fn attached_runtime() -> AttachedRuntime {
-    recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
-        .build()
-        .attach_tokio_runtime(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-            t.enable_all();
-        })
-        .unwrap()
+    let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
+        .unwrap();
+    (recorder, runtime)
 }
 
 fn setup_tracing_only() -> Harness {

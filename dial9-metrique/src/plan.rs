@@ -3,13 +3,14 @@
 
 use std::collections::HashSet;
 
+use dial9_core::schema_extensions::{self, roles};
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::{FieldAnnotation, FieldDef, SchemaEntry};
 use dial9_trace_format::types::FieldType;
 use metrique_writer::core::descriptor::{AvailableDescriptors, FieldShape, FieldView, KnownShape};
 
-use super::context::field_names;
-use super::{Context, Interned, Skip};
+use super::context::context_field_names;
+use super::{Context, Interned, SPAN_TYPE, Skip, SpanName, field_names};
 
 /// Annotation key carrying a field's unit. Matches the key the `TraceEvent`
 /// derive emits, so viewers surface both through the same path.
@@ -110,7 +111,7 @@ pub(crate) enum ScalarKind {
 /// sequence, used for every entry of that type.
 #[derive(Debug)]
 pub(crate) struct Plan {
-    /// Wire schema: implicit timestamp, the four header fields, then one
+    /// Wire schema: implicit close timestamp, the four header fields, then one
     /// field per supported `Emit`-tagged descriptor field. Payload slot `i`
     /// is schema field `HEADER_FIELDS + i`.
     pub(crate) schema: Schema,
@@ -127,8 +128,8 @@ pub(crate) struct Plan {
 /// payload fields. The event timestamp is implicit and not part of the
 /// schema field list.
 ///
-/// Names are `dial9.`-prefixed so they cannot collide with a user payload
-/// field: an entry is free to carry its own `thread_id`.
+/// Names are `dial9.`-prefixed to avoid collisions with user payload fields.
+/// An explicitly dial9-prefixed payload can still collide and is skipped.
 //
 // `ALL` is the single source of truth for header order: the schema builder
 // here and the value assembly in `writer.rs` both iterate it, so the two
@@ -138,8 +139,8 @@ pub(crate) struct Plan {
 pub(crate) enum Header {
     ThreadId,
     TaskId,
-    /// Request duration, from the context's start and close-time captures
-    /// (`end = event timestamp + duration`).
+    /// Span duration in nanoseconds. The implicit event timestamp is the
+    /// close time (span end), so the start is `end - duration`.
     Duration,
     WallClock,
 }
@@ -152,20 +153,19 @@ impl Header {
         Header::WallClock,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
-            Header::ThreadId => "dial9.thread_id",
-            Header::TaskId => "dial9.task_id",
-            Header::Duration => "dial9.duration_ns",
-            Header::WallClock => "dial9.wall_clock_ns",
+            Header::ThreadId => field_names::THREAD_ID,
+            Header::TaskId => field_names::TOKIO_TASK_ID,
+            Header::Duration => field_names::SPAN_DURATION_NS,
+            Header::WallClock => field_names::WALL_CLOCK_NS,
         }
     }
 
     fn field_type(self) -> FieldType {
         match self {
-            Header::ThreadId | Header::TaskId | Header::Duration | Header::WallClock => {
-                FieldType::OptionalVarint
-            }
+            Header::ThreadId | Header::Duration => FieldType::Varint,
+            Header::TaskId | Header::WallClock => FieldType::OptionalVarint,
         }
     }
 }
@@ -179,6 +179,43 @@ fn header_field_defs() -> Vec<FieldDef> {
         .iter()
         .map(|h| FieldDef::new(h.name(), h.field_type()))
         .collect()
+}
+
+fn header_annotations() -> Vec<FieldAnnotation> {
+    // Iterate `ALL` so header indices come from the one source of truth for
+    // header order; a variant's schema field index and its annotations cannot
+    // drift apart.
+    let mut annotations = Vec::new();
+    for (i, header) in Header::ALL.into_iter().enumerate() {
+        let index = i as u16;
+        match header {
+            Header::ThreadId => annotations.push(FieldAnnotation::new(
+                index,
+                schema_extensions::ROLE_KEY,
+                roles::THREAD_ID,
+            )),
+            Header::TaskId => annotations.push(FieldAnnotation::new(
+                index,
+                schema_extensions::ROLE_KEY,
+                roles::TOKIO_TASK_ID,
+            )),
+            Header::Duration => {
+                annotations.push(FieldAnnotation::new(
+                    index,
+                    schema_extensions::ROLE_KEY,
+                    roles::SPAN_DURATION,
+                ));
+                annotations.push(FieldAnnotation::new(
+                    index,
+                    schema_extensions::SPAN_TYPE_KEY,
+                    SPAN_TYPE,
+                ));
+                annotations.push(FieldAnnotation::new(index, UNIT_ANNOTATION_KEY, "ns"));
+            }
+            Header::WallClock => {}
+        }
+    }
+    annotations
 }
 
 /// Walk the descriptor segments once and build the encode plan.
@@ -197,8 +234,9 @@ pub(crate) fn build_plan(
 
     let mut actions = Vec::new();
     let mut fields = header_field_defs();
-    let mut annotations = Vec::new();
+    let mut annotations = header_annotations();
     let mut has_context = false;
+    let mut span_name_claimed = false;
     let mut roles_seen = [false; ContextRole::COUNT];
 
     for seg in descs.iter() {
@@ -210,7 +248,34 @@ pub(crate) fn build_plan(
                 continue;
             }
 
+            // A `SpanName` field is a request to use this field's value as the
+            // span's display name. When the request cannot be honored (a
+            // second flagged field, a skipped/colliding/unencodable/non-string
+            // field), the field is handled exactly as if unflagged and the
+            // span falls back to the schema name — an invalid display-name hint
+            // is never worth dropping the whole event over.
+            let mut span_name = field.flags().any(|f| f.is::<SpanName>());
+            if span_name && span_name_claimed {
+                span_name = false;
+                tracing::warn!(
+                    entry = %entry_name,
+                    field = %field.base_name(),
+                    "multiple metrique fields use SpanName; keeping the first, \
+                     recording this one as a plain field"
+                );
+            } else if span_name {
+                span_name_claimed = true;
+            }
+
             if field.flags().any(|f| f.is::<Skip>()) {
+                if span_name {
+                    tracing::warn!(
+                        entry = %entry_name,
+                        field = %field.base_name(),
+                        "metrique field combines SpanName and Skip; skipping it and \
+                         using the schema name for the span"
+                    );
+                }
                 actions.push(FieldAction::Skip);
                 continue;
             }
@@ -220,6 +285,8 @@ pub(crate) fn build_plan(
             // Positional routing does not care about names, but the schema
             // does: two fields with the same name would be indistinguishable
             // to trace consumers. First occurrence (headers included) wins.
+            // A colliding `SpanName` field simply does not become the span
+            // name; the span falls back to the schema name.
             if fields.iter().any(|f| f.name() == full_name) {
                 tracing::error!(
                     entry = %entry_name,
@@ -234,20 +301,47 @@ pub(crate) fn build_plan(
             let interned = field.flags().any(|f| f.is::<Interned>());
             match resolve_shape(field.shape(), interned) {
                 Ok((field_type, kind)) => {
-                    // `to_option` filters `Unit::None`, which some custom
-                    // `Value` impls surface as `Some(Unit::None)`.
-                    if let Some(unit) = field.unit().and_then(|u| u.to_option()) {
-                        match u16::try_from(fields.len()) {
-                            Ok(index) => annotations.push(FieldAnnotation::new(
-                                index,
-                                UNIT_ANNOTATION_KEY,
-                                unit_annotation_value(unit),
-                            )),
-                            Err(_) => tracing::warn!(
+                    let field_index = match u16::try_from(fields.len()) {
+                        Ok(index) => Some(index),
+                        Err(_) => {
+                            // Covers a `SpanName` field too: with no index we
+                            // cannot annotate it, so the span falls back to the
+                            // schema name.
+                            tracing::warn!(
                                 entry = %entry_name,
                                 field = %full_name,
-                                "field index exceeds annotation range; unit not recorded"
-                            ),
+                                "field index exceeds annotation range; metadata not recorded"
+                            );
+                            None
+                        }
+                    };
+                    // `to_option` filters `Unit::None`, which some custom
+                    // `Value` impls surface as `Some(Unit::None)`.
+                    if let Some(unit) = field.unit().and_then(|u| u.to_option())
+                        && let Some(index) = field_index
+                    {
+                        annotations.push(FieldAnnotation::new(
+                            index,
+                            UNIT_ANNOTATION_KEY,
+                            unit_annotation_value(unit),
+                        ));
+                    }
+                    if span_name {
+                        if matches!(kind, ValueKind::Scalar(ScalarKind::Str { .. })) {
+                            if let Some(index) = field_index {
+                                annotations.push(FieldAnnotation::new(
+                                    index,
+                                    schema_extensions::ROLE_KEY,
+                                    roles::SPAN_NAME,
+                                ));
+                            }
+                        } else {
+                            tracing::warn!(
+                                entry = %entry_name,
+                                field = %full_name,
+                                "SpanName requires a scalar string field; recording the \
+                                 field but using the schema name for the span"
+                            );
                         }
                     }
                     fields.push(FieldDef::new(full_name, field_type));
@@ -257,6 +351,14 @@ pub(crate) fn build_plan(
                     });
                 }
                 Err(err) => {
+                    if span_name {
+                        tracing::warn!(
+                            entry = %entry_name,
+                            field = %full_name,
+                            "SpanName field cannot be encoded; using the schema name for \
+                             the span"
+                        );
+                    }
                     // Once per descriptor sequence (plans are cached), so no
                     // rate limiting needed. An unsupported shape is expected
                     // under implicit opt-in (an opted-in entry may carry
@@ -306,7 +408,8 @@ pub(crate) fn build_plan(
 
 /// Classify one `Context`-flagged field into a header role.
 //
-// Roles match exactly on the descriptor's base name (see `field_names` in
+// Roles match exactly on the descriptor's base name (see
+// `context_field_names` in
 // `context.rs`; those names are style-invariant). Each role routes at most
 // once; repeats (a second `Dial9Context` in the same entry) and unrecognized
 // names are skipped with a warning.
@@ -316,10 +419,10 @@ fn context_action(
     roles_seen: &mut [bool; ContextRole::COUNT],
 ) -> FieldAction {
     let role = match field.base_name() {
-        field_names::THREAD_ID => Some(ContextRole::ThreadId),
-        field_names::TASK_ID => Some(ContextRole::TaskId),
-        field_names::MONOTONIC_NS_START => Some(ContextRole::MonotonicStart),
-        field_names::MONOTONIC_NS_END => Some(ContextRole::MonotonicEnd),
+        context_field_names::THREAD_ID => Some(ContextRole::ThreadId),
+        context_field_names::TASK_ID => Some(ContextRole::TaskId),
+        context_field_names::MONOTONIC_NS_START => Some(ContextRole::MonotonicStart),
+        context_field_names::MONOTONIC_NS_END => Some(ContextRole::MonotonicEnd),
         _ => None,
     };
     match role {
