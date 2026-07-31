@@ -440,4 +440,14 @@ describe("metrique events", () => {
       });
     }
   });
+
+  it("TCP accept queue depth surfaces as a gauge", () => {
+    const events = trace.customEvents.filter(
+      (event) => event.name === "TcpAcceptQueueEvent",
+    );
+    expect(events.length, "No TCP accept queue events found").toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.fieldKinds).toMatchObject({ pending_connections: "gauge" });
+    }
+  });
 });
