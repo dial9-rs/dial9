@@ -37,8 +37,8 @@ async fn charge(order_id: u64) {
 
 /// One checkout request, instrumented three different ways.
 async fn checkout(order_id: u64) {
-    // 1. Instrumented future. Enters/exits around each poll, so the awaits
-    //    inside show as idle rather than as span time.
+    // 1. Instrumented future. Emits one enter on the first poll and one
+    //    completion event (with active/idle time + poll count) when it resolves.
     let order = load_order(order_id)
         .instrument(dial9_span!("db.load_order", order_id = order_id))
         .await;
@@ -154,5 +154,5 @@ fn main() {
 
     println!("wrote adhoc_spans_trace.0.bin — open it in the dial9 viewer");
     #[cfg(not(feature = "tower"))]
-    println!("(rebuild with --features tokio,tower to include the middleware section)");
+    println!("(rebuild with --features tower to include the middleware section)");
 }

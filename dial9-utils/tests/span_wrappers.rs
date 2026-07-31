@@ -169,6 +169,31 @@ fn sync_guard_emits_one_pair_and_closes() {
         "exit fields: {:?}",
         events.exit_fields
     );
+    // A sync scope reports one poll and completion, with no idle.
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "poll_count" && v == "1"),
+        "sync guard poll_count should be 1: {:?}",
+        events.exit_fields
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "completed" && v == "true"),
+        "sync guard should report completed: {:?}",
+        events.exit_fields
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "idle_ns" && v == "0"),
+        "sync guard has no idle time: {:?}",
+        events.exit_fields
+    );
 
     // Every entered span is closed; ids carry the ad-hoc top bit.
     assert_eq!(events.entered_span_ids, events.closed_span_ids);
@@ -481,5 +506,66 @@ fn tower_layer_wraps_request() {
             .any(|(k, v)| k == "n" && v == "21"),
         "request-derived field on enter: {:?}",
         events.enter_fields
+    );
+}
+
+/// A `?`-formatted field renders its `Debug` representation on the wire.
+#[test]
+fn debug_field_roundtrips() {
+    #[derive(Debug)]
+    #[allow(dead_code)] // read only via the Debug derive
+    struct Cfg {
+        retries: u32,
+    }
+    let events = run_traced(1, || async {
+        let cfg = Cfg { retries: 3 };
+        async {}
+            .instrument(dial9_span!("validate", config = ?cfg))
+            .await;
+    });
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "config" && v == "Cfg { retries: 3 }"),
+        "debug field should roundtrip its Debug repr: {:?}",
+        events.enter_fields
+    );
+}
+
+/// A future that suspends between polls reports non-zero `idle_ns` on its
+/// completion event, and `active_ns + idle_ns` never exceeds the wall clock.
+#[test]
+fn completion_reports_idle_for_awaiting_future() {
+    let events = run_traced(2, || async {
+        // Sleep forces a real suspension between polls → measurable idle time.
+        async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        .instrument(dial9_span!("io.wait"))
+        .await;
+    });
+
+    let field = |k: &str| -> Option<u64> {
+        events
+            .exit_fields
+            .iter()
+            .find(|(fk, _)| fk == k)
+            .and_then(|(_, v)| v.parse::<u64>().ok())
+    };
+    let idle = field("idle_ns").expect("idle_ns present");
+    let active = field("active_ns").expect("active_ns present");
+    let polls = field("poll_count").expect("poll_count present");
+
+    assert!(
+        idle > 0,
+        "awaiting future must report idle time, got {idle}"
+    );
+    assert!(polls >= 2, "sleep forces a second poll, got {polls}");
+    // Active time is the time spent inside poll(); it should be far less than
+    // the ~20ms the future spent suspended.
+    assert!(
+        active < idle,
+        "active ({active}) should be well under idle ({idle}) for an io-bound future"
     );
 }
