@@ -195,12 +195,12 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 150, "81.9"],
-    ["tokio", 192, "81.9"],
-    ["axum", 25, "69.8"],
-    ["dispatcher", 28, "71.9"],
-    ["framebuf", 6, "3.0"],
-    ["spawn", 2, "81.9"],
+    ["poll", 100, "71.8"],
+    ["tokio", 127, "71.8"],
+    ["axum", 20, "63.2"],
+    ["dispatcher", 33, "61.5"],
+    ["framebuf", 3, "4.3"],
+    ["spawn", 2, "71.8"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {

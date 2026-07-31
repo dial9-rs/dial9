@@ -31,6 +31,7 @@ pub mod core {
     pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
     pub use dial9_core::handle::{self, clear_tl_handle, current_handle, set_tl_handle};
     pub use dial9_core::recorder;
+    pub use dial9_core::schema_extensions;
     pub use dial9_core::source::{self, FlushContext, Source};
     pub use dial9_core::thread::{ThreadTrackingGuard, current_tid};
 
@@ -148,7 +149,8 @@ pub use dial9_tokio_telemetry::tracing_layer;
 pub use dial9_metrique as metrique_sink;
 
 // The metrique field flags at the crate root, so `#[metrics(...)]`
-// attributes read as `flags(dial9::Interned)` / `flags(dial9::Skip)`
+// attributes read as `flags(dial9::Interned)` / `flags(dial9::Skip)` /
+// `flags(dial9::SpanName)`
 // without imports.
 #[cfg(feature = "metrique-sink")]
-pub use dial9_metrique::{Interned, Skip};
+pub use dial9_metrique::{Interned, Skip, SpanName};

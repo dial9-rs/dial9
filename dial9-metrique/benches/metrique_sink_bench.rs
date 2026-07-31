@@ -19,7 +19,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use dial9_core::buffer::MemoryBuffer;
 use dial9_core::handle::Dial9Handle;
 use dial9_core::recorder::recorder;
-use dial9_metrique::{Dial9Context, Dial9Stream, Interned, WithoutDial9Fields};
+use dial9_metrique::{Dial9Context, Dial9Stream, Interned, SpanName, WithoutDial9Fields};
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
 use metrique_writer::{EntryIoStream, IoStreamError};
@@ -31,6 +31,7 @@ struct RequestMetrics {
     dial9: Dial9Context,
     #[metrics(flags(Interned))]
     route: String,
+    #[metrics(flags(SpanName))]
     operation: &'static str,
     #[metrics(unit = Microsecond)]
     latency_us: u64,
@@ -87,7 +88,7 @@ struct InternedMetrics {
     dial9: Dial9Context,
     #[metrics(flags(Interned))]
     route: String,
-    #[metrics(flags(Interned))]
+    #[metrics(flags(Interned, SpanName))]
     operation: &'static str,
     latency_us: u64,
     success: bool,
