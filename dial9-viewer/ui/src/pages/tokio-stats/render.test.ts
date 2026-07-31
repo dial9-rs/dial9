@@ -346,6 +346,23 @@ describe("XSS: hostile diff-table cells render inert (G9, both #587 sinks)", () 
   });
 });
 
+describe("renderSinglePeriod section order", () => {
+  it("composes the rollups in display order: locations, workers, delays, long polls", () => {
+    // renderSinglePeriod renders into a live DOM, and the repo keeps no DOM test
+    // env, so pin the order where it is decided: the composition site. Scheduling
+    // delays sit ABOVE long polls (a deliberate ordering choice).
+    const src = readFileSync(
+      fileURLToPath(new URL("./render.ts", import.meta.url)),
+      "utf8",
+    );
+    const body = src.slice(src.indexOf("export function renderSinglePeriod"));
+    const order = ["locTableTemplate", "workerActivityTemplate", "schedulingDelaysTemplate", "longPollsTemplate"];
+    const positions = order.map((name) => body.indexOf(`${name}(`));
+    expect(positions.every((i) => i > -1), "all four rollups are composed").toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+});
+
 describe("XSS: source guard against the #587 innerHTML class", () => {
   it("render.ts never uses innerHTML or an unsafe lit-html directive", () => {
     const src = readFileSync(

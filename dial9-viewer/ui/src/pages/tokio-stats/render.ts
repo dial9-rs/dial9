@@ -612,6 +612,12 @@ export function renderSinglePeriod(
       bucketParam,
       onOpen,
       workers,
+    )}${schedulingDelaysTemplate(
+      data,
+      bucketParam,
+      onOpen,
+      limits.schedulingDelays,
+      limits.onSchedulingDelaysChange,
     )}${longPollsTemplate(
       data,
       threshNs,
@@ -619,12 +625,6 @@ export function renderSinglePeriod(
       onOpen,
       limits.longPolls,
       limits.onLongPollsChange,
-    )}${schedulingDelaysTemplate(
-      data,
-      bucketParam,
-      onOpen,
-      limits.schedulingDelays,
-      limits.onSchedulingDelaysChange,
     )}`,
     tableEl,
   );
