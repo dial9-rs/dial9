@@ -298,8 +298,6 @@ fn on_recording_start_fires_at_enable() {
 /// from several threads at once.
 #[test]
 fn shared_recorder_attaches_from_many_threads() {
-    use dial9::Dial9HandleTokioExt;
-
     const CORES: usize = 4;
 
     let dir = tempfile::tempdir().unwrap();

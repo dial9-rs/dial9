@@ -1,6 +1,5 @@
 ---
 source: dial9-macro/src/lib.rs
-assertion_line: 407
 expression: output
 ---
 fn main() {

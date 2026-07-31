@@ -1,6 +1,5 @@
 ---
 source: dial9-macro/src/lib.rs
-assertion_line: 393
 expression: output
 ---
 #[allow(unused)]

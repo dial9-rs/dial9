@@ -24,12 +24,24 @@ struct MainArgs {
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
                            #[dial9::main(config = dial9::recorder_from_env)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || dial9::recorder_from_env_with(|t| { t.worker_threads(4); }))]";
+                           #[dial9::main(config = || {\n    \
+                           let rec = dial9::recorder(writer).build();\n    \
+                           let mut b = tokio::runtime::Builder::new_multi_thread();\n    \
+                           b.enable_all();\n    \
+                           let rt = rec.handle().attach_tokio_runtime(b, TokioAttachOptions::default())?;\n    \
+                           Ok((rec, rt))\n  \
+                           })]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure returning `std::io::Result<dial9::AttachedRuntime>`, e.g.\n  \
                            #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || dial9::recorder_from_env_with(|t| { t.worker_threads(4); }))]";
+                           #[dial9::main(config = || {\n    \
+                           let rec = dial9::recorder(writer).build();\n    \
+                           let mut b = tokio::runtime::Builder::new_multi_thread();\n    \
+                           b.enable_all();\n    \
+                           let rt = rec.handle().attach_tokio_runtime(b, TokioAttachOptions::default())?;\n    \
+                           Ok((rec, rt))\n  \
+                           })]";
 
 /// `config`'s value: a bare function path or a zero-argument closure. Anything
 /// else (a call, a literal) is the mistake `CONFIG_MUST_BE_ZERO_ARG_HELP` names.

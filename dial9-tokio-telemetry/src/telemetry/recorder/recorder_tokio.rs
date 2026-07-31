@@ -257,6 +257,7 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
     ///
     /// - `builder`: yours to configure. dial9 does not seed it, so call
     ///   `enable_all` (or the drivers you need) yourself, and pick the flavor.
+    ///   Taken by value: the hooks installed on it belong to this one runtime.
     /// - `options`: dial9 tracing behavior for this runtime (runtime name, task
     ///   tracking, task-dump config, composed hooks).
     ///
@@ -271,6 +272,15 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
     /// Drop the runtime before calling
     /// [`Recorder::graceful_shutdown`](dial9_core::recording::Recorder::graceful_shutdown)
     /// on the recorder this handle came from, so the runtime's workers flush.
+    ///
+    /// Attach claims the calling thread: the handle is installed
+    /// thread-locally, so [`Dial9Handle::current`] and `dial9::spawn` work
+    /// there before the first poll, replacing any handle a previous attach
+    /// installed. Attach a `current_thread` runtime on the thread that will
+    /// drive it.
+    ///
+    /// Attaching is permanent: contexts and metrics of attached runtimes stay
+    /// registered for the recorder's life, even after the runtime drops.
     ///
     /// # Errors
     ///
@@ -320,7 +330,7 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
     ///             let runtime = handle
     ///                 .attach_tokio_runtime(builder, TokioAttachOptions::default())
     ///                 .expect("build runtime");
-    ///             runtime.block_on(async { /* ... */ });
+    ///             dial9_tokio_telemetry::block_on(&runtime, async { /* ... */ });
     ///         })
     ///     })
     ///     .collect();

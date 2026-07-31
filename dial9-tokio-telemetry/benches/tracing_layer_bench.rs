@@ -29,10 +29,10 @@ fn bench_single_thread(c: &mut Criterion) {
     // Recorder with an in-memory writer and a current_thread runtime, so
     // block_on runs spans on a dial9-claimed thread and the layer encodes
     // for real (no disk I/O in the measurement).
-    let _recorder = recorder(MemoryBuffer::new(64 * 1024 * 1024).unwrap()).build();
+    let recorder = recorder(MemoryBuffer::new(64 * 1024 * 1024).unwrap()).build();
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
-    let runtime = _recorder
+    let runtime = recorder
         .handle()
         .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
