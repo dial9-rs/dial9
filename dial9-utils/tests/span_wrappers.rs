@@ -510,6 +510,76 @@ fn tower_layer_wraps_request() {
     );
 }
 
+/// `Dial9SpanLayerWithResponse` records a late field from the response: the
+/// `finish` callback sets a `Slot` after the inner service resolves, and the
+/// value rides the completion exit — absent from enter.
+#[cfg(feature = "tower")]
+#[test]
+fn tower_response_layer_records_late_field() {
+    use dial9_utils::span::Dial9SpanLayerWithResponse;
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use tower_service::Service;
+
+    struct Doubler;
+    impl Service<u32> for Doubler {
+        type Response = u32;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<u32, Infallible>> + Send>>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: u32) -> Self::Future {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                Ok(req * 2)
+            })
+        }
+    }
+
+    let events = run_traced(1, || async {
+        use tower_layer::Layer;
+        // `n` is request-derived (eager); `doubled` is response-derived (late),
+        // set by the finish callback that captures the span's slots.
+        let layer = Dial9SpanLayerWithResponse::new(|n: &u32| {
+            let (span, slots) = dial9_span!("request", n = *n, doubled: u64);
+            (span, move |resp: &u32| slots.doubled.set(*resp as u64))
+        });
+        let mut svc = layer.layer(Doubler);
+        let out = svc.call(21).await.unwrap();
+        assert_eq!(out, 42);
+    });
+
+    assert_eq!(events.enter_count, 1, "one enter per request");
+    assert_eq!(events.exit_count, 1, "one completion exit per request");
+    // Eager request field on enter; the late field must not be on enter.
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "n" && v == "21"),
+        "request-derived field on enter: {:?}",
+        events.enter_fields
+    );
+    assert!(
+        !events.enter_fields.iter().any(|(k, _)| k == "doubled"),
+        "late field must not appear on enter: {:?}",
+        events.enter_fields
+    );
+    // The response-derived late field lands on the completion exit.
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "doubled" && v == "42"),
+        "response-derived late field on exit: {:?}",
+        events.exit_fields
+    );
+}
+
 /// A `?`-formatted field renders its `Debug` representation on the wire.
 #[test]
 fn debug_field_roundtrips() {
@@ -568,5 +638,104 @@ fn completion_reports_idle_for_awaiting_future() {
     assert!(
         active < idle,
         "active ({active}) should be well under idle ({idle}) for an io-bound future"
+    );
+}
+
+/// A late field (`name: Type`) set during the future's body lands on the
+/// completion (exit) event and is absent from the enter event. Eager fields
+/// still ride both.
+#[test]
+fn late_field_lands_on_exit_only() {
+    let events = run_traced(2, || async {
+        let (span, slots) = dial9_span!("request", route = "/checkout", status: u16, bytes: u64);
+        async move {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            slots.status.set(200u16);
+            slots.bytes.set(4096u64);
+        }
+        .instrument(span)
+        .await;
+    });
+
+    // Eager field on enter; late fields must NOT be on enter (not set yet).
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "route" && v == "/checkout"),
+        "eager route on enter: {:?}",
+        events.enter_fields
+    );
+    assert!(
+        !events
+            .enter_fields
+            .iter()
+            .any(|(k, _)| k == "status" || k == "bytes"),
+        "late fields must not appear on enter: {:?}",
+        events.enter_fields
+    );
+    // Late values land on exit, keeping their numeric type on the wire.
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "status" && v == "200"),
+        "late status on exit: {:?}",
+        events.exit_fields
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "bytes" && v == "4096"),
+        "late bytes on exit: {:?}",
+        events.exit_fields
+    );
+}
+
+/// A late field that is never set is recorded as `None`, so it carries no
+/// readable value on exit.
+#[test]
+fn late_field_unset_is_none_on_exit() {
+    let events = run_traced(1, || async {
+        let (span, _slots) = dial9_span!("request", status: u16);
+        // Never call `_slots.status.set(..)`.
+        async {}.instrument(span).await;
+    });
+
+    assert_eq!(events.exit_count, 1, "one exit");
+    assert!(
+        !events.exit_fields.iter().any(|(k, _)| k == "status"),
+        "an unset late field should decode as None (no value): {:?}",
+        events.exit_fields
+    );
+}
+
+/// Late fields also work with the sync guard: set during the guarded scope,
+/// read when the guard drops (exit).
+#[test]
+fn late_field_with_sync_guard() {
+    let events = run_traced(1, || async {
+        let (span, slots) = dial9_span!("pricing", order_id = 7u64, tax_cents: u64);
+        let entered = span.enter();
+        slots.tax_cents.set(123u64);
+        drop(entered); // exit reads the slot
+    });
+
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "order_id" && v == "7"),
+        "eager field on exit: {:?}",
+        events.exit_fields
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "tax_cents" && v == "123"),
+        "late field set in a sync scope on exit: {:?}",
+        events.exit_fields
     );
 }

@@ -77,23 +77,28 @@ pub(crate) mod wire;
 pub use future::{Instrument, Instrumented};
 #[cfg(feature = "tower")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-pub use tower::{Dial9SpanLayer, Dial9SpanService};
+pub use tower::{
+    Dial9SpanLayer, Dial9SpanLayerWithResponse, Dial9SpanService, Dial9SpanServiceWithResponse,
+    OnResponse,
+};
 
 use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::handle::Dial9Handle;
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::{Arc, OnceLock};
 
 /// Re-exports used by the [`dial9_span!`](crate::dial9_span) macro expansion.
 /// Not a stable API.
 #[doc(hidden)]
 pub mod __rt {
     pub use super::wire::next_span_id;
-    pub use super::{Span, current_worker_id_u64, emit_close};
+    pub use super::{Slot, Span, current_worker_id_u64, emit_close};
     pub use dial9_core::clock::clock_monotonic_ns;
     pub use dial9_core::handle::Dial9Handle;
     pub use dial9_trace_format::{InternedString, TraceEvent, TraceField};
+    pub use std::sync::{Arc, OnceLock};
 }
 
 /// A named, optionally-parented region of work recorded into the trace with
@@ -355,6 +360,45 @@ impl Drop for Dial9Span {
     }
 }
 
+// ── Late fields ───────────────────────────────────────────────────────────────
+
+/// A write-once handle to a *late* span field, declared as `name: Type` in
+/// [`dial9_span!`](crate::dial9_span). Set it any time before the span
+/// completes; the value is recorded on the span's completion (exit) event as
+/// `Some(value)`, or `None` if it was never set. First write wins (it wraps a
+/// [`OnceLock`]).
+///
+/// The macro hands these back alongside the span — `let (span, slots) =
+/// dial9_span!(..)` — but only when at least one late field is declared. A span
+/// with only eager fields is returned bare, exactly as before.
+pub struct Slot<T> {
+    cell: Arc<OnceLock<T>>,
+}
+
+impl<T> Slot<T> {
+    /// Record this field's value. Only the first call takes effect; later
+    /// calls are ignored, like the [`OnceLock`] this wraps.
+    pub fn set(&self, value: T) {
+        // First-write-wins: a later `set` hands back the rejected value, which
+        // we intentionally drop — the slot already holds its value.
+        let _ = self.cell.set(value);
+    }
+
+    /// Wrap the shared cell the macro also stored in the span. Not a stable API.
+    #[doc(hidden)]
+    pub fn __from_arc(cell: Arc<OnceLock<T>>) -> Self {
+        Self { cell }
+    }
+}
+
+impl<T> fmt::Debug for Slot<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Slot")
+            .field("set", &self.cell.get().is_some())
+            .finish()
+    }
+}
+
 // ── The `dial9_span!` macro ───────────────────────────────────────────────────
 
 /// Construct a span, capturing the call site and typed fields.
@@ -386,37 +430,77 @@ impl Drop for Dial9Span {
 /// `String`, …) and be `'static`; use `%`/`?` to render any `Display`/`Debug`
 /// value to an owned `String`. The span name must be a `&'static str`
 /// expression (for a runtime name, use [`Dial9Span::new`](span::Dial9Span::new)).
+///
+/// ## Late fields
+///
+/// A field declared as `name: Type` (a type instead of `= value`) is *late*:
+/// its value is unknown at the call site and set later, before the span
+/// completes. Declaring any late field changes the macro's return to
+/// `(span, slots)`; set values through `slots`, and they land on the span's
+/// completion (exit) event as `Some(value)` — or `None` if never set.
+///
+/// ```
+/// use dial9_utils::dial9_span;
+/// use dial9_utils::span::Instrument as _;
+/// # async fn handle() -> u16 { 200 }
+/// # async fn demo() {
+/// let (span, slots) = dial9_span!("request", route = "/checkout", status: u16);
+/// async move {
+///     let code = handle().await;
+///     slots.status.set(code); // recorded on completion
+/// }
+/// .instrument(span)
+/// .await;
+/// # }
+/// ```
+///
+/// The late field's type must satisfy `Option<Type>: TraceField` — the numeric
+/// types, `bool`, and `String`. A late field costs one shared allocation; spans
+/// with only eager fields are returned bare and stay allocation-free.
 #[macro_export]
 macro_rules! dial9_span {
     ($name:expr $(,)?) => {
         $crate::__dial9_span_build!($name; [])
     };
     ($name:expr, $($fields:tt)+) => {
-        $crate::__dial9_span_munch!($name; [] ; $($fields)+)
+        $crate::__dial9_span_munch!($name; [] ; [] ; $($fields)+)
     };
 }
 
-/// Token-muncher that formats each field value (handling the `%`/`?`/bare
-/// sigils) and accumulates `(key : value_expr)` pairs for the build step.
+/// Token-muncher that sorts each field into one of two accumulators: eager
+/// `(key : value_expr)` pairs (handling the `%`/`?`/bare sigils) and late
+/// `(key : type)` pairs (declared as `key: Type`). The build step reads both.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __dial9_span_munch {
-    ($name:expr; [$($acc:tt)*] ; ) => {
-        $crate::__dial9_span_build!($name; [$($acc)*])
+    // Done, no late fields: the classic build, returning the span bare.
+    ($name:expr; [$($eager:tt)*] ; [] ; ) => {
+        $crate::__dial9_span_build!($name; [$($eager)*])
     };
-    ($name:expr; [$($acc:tt)*] ; $key:ident = %$val:expr $(, $($rest:tt)*)?) => {
+    // Done, with late fields: build with slots, returning `(span, slots)`.
+    ($name:expr; [$($eager:tt)*] ; [$($late:tt)+] ; ) => {
+        $crate::__dial9_span_build_late!($name; [$($eager)*] ; [$($late)+])
+    };
+    // Late field: `key: Type` (a type, no `= value`).
+    ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident : $ty:ty $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key : ::std::string::ToString::to_string(&$val))] ; $($($rest)*)?
+            $name; [$($eager)*] ; [$($late)* ($key : $ty)] ; $($($rest)*)?
         )
     };
-    ($name:expr; [$($acc:tt)*] ; $key:ident = ?$val:expr $(, $($rest:tt)*)?) => {
+    // Eager `%` (Display), `?` (Debug), or bare (keeps its Rust type).
+    ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident = %$val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key : ::std::format!("{:?}", $val))] ; $($($rest)*)?
+            $name; [$($eager)* ($key : ::std::string::ToString::to_string(&$val))] ; [$($late)*] ; $($($rest)*)?
         )
     };
-    ($name:expr; [$($acc:tt)*] ; $key:ident = $val:expr $(, $($rest:tt)*)?) => {
+    ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident = ?$val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($acc)* ($key : $val)] ; $($($rest)*)?
+            $name; [$($eager)* ($key : ::std::format!("{:?}", $val))] ; [$($late)*] ; $($($rest)*)?
+        )
+    };
+    ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident = $val:expr $(, $($rest:tt)*)?) => {
+        $crate::__dial9_span_munch!(
+            $name; [$($eager)* ($key : $val)] ; [$($late)*] ; $($($rest)*)?
         )
     };
 }
@@ -543,5 +627,154 @@ macro_rules! __dial9_span_build {
             parent_span_id: ::core::option::Option::None,
             $( $key: $val, )*
         }
+    }};
+}
+
+/// Build step for spans with one or more *late* fields. Mirrors
+/// [`__dial9_span_build!`](crate::__dial9_span_build), but the exit event gains
+/// an `Option<Type>` column per late field, the span holds a shared
+/// `Arc<OnceLock<Type>>` for each, and the macro returns `(span, slots)` where
+/// `slots` exposes a [`Slot`](crate::span::Slot) per late field. Enter still
+/// carries only eager fields — late values aren't set yet.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __dial9_span_build_late {
+    (
+        $name:expr;
+        [$( ($key:ident : $val:expr) )*] ;
+        [$( ($lkey:ident : $lty:ty) )+]
+    ) => {{
+        const __DIAL9_NAME: &str = $name;
+
+        // Enter: eager fields only (late fields have no value yet).
+        #[derive($crate::span::__rt::TraceEvent)]
+        #[traceevent(name = ::core::concat!(
+            "SpanEnter:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
+        ))]
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Enter<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            worker_id: u64,
+            span_id: u64,
+            parent_span_id: ::core::option::Option<u64>,
+            span_name: $crate::span::__rt::InternedString,
+            $( $key: $key, )*
+        }
+
+        // Exit: eager fields, then each late field as `Option<Type>`.
+        #[derive($crate::span::__rt::TraceEvent)]
+        #[traceevent(name = ::core::concat!(
+            "SpanExit:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
+        ))]
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Exit<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            worker_id: u64,
+            span_id: u64,
+            span_name: $crate::span::__rt::InternedString,
+            #[traceevent(unit = "ns")]
+            active_ns: u64,
+            #[traceevent(unit = "ns")]
+            idle_ns: u64,
+            poll_count: u64,
+            completed: bool,
+            $( $key: $key, )*
+            $( $lkey: ::core::option::Option<$lty>, )+
+        }
+
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Span<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+            span_id: u64,
+            parent_span_id: ::core::option::Option<u64>,
+            $( $key: $key, )*
+            $( $lkey: $crate::span::__rt::Arc<$crate::span::__rt::OnceLock<$lty>>, )+
+        }
+
+        #[allow(non_camel_case_types, non_snake_case)]
+        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
+            $crate::span::__rt::Span for __Dial9Span<$($key),*>
+        {
+            fn id(&self) -> u64 {
+                self.span_id
+            }
+
+            fn __set_parent(&mut self, parent_span_id: u64) {
+                self.parent_span_id = ::core::option::Option::Some(parent_span_id);
+            }
+
+            fn __emit_enter(&self, __h: &$crate::span::__rt::Dial9Handle) {
+                __h.with_encoder(|__enc| {
+                    let __name = __enc.intern_string(__DIAL9_NAME);
+                    __enc.encode(&__Dial9Enter {
+                        timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
+                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        span_id: self.span_id,
+                        parent_span_id: self.parent_span_id,
+                        span_name: __name,
+                        $( $key: ::core::clone::Clone::clone(&self.$key), )*
+                    });
+                });
+            }
+
+            fn __emit_exit(
+                &self,
+                __h: &$crate::span::__rt::Dial9Handle,
+                active_ns: u64,
+                idle_ns: u64,
+                poll_count: u64,
+                completed: bool,
+            ) {
+                __h.with_encoder(|__enc| {
+                    let __name = __enc.intern_string(__DIAL9_NAME);
+                    __enc.encode(&__Dial9Exit {
+                        timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
+                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        span_id: self.span_id,
+                        span_name: __name,
+                        active_ns,
+                        idle_ns,
+                        poll_count,
+                        completed,
+                        $( $key: ::core::clone::Clone::clone(&self.$key), )*
+                        $( $lkey: self.$lkey.get().cloned(), )+
+                    });
+                });
+            }
+        }
+
+        #[allow(non_camel_case_types, non_snake_case)]
+        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
+            ::core::ops::Drop for __Dial9Span<$($key),*>
+        {
+            fn drop(&mut self) {
+                $crate::span::__rt::emit_close(self.span_id);
+            }
+        }
+
+        // One `Slot<Type>` per late field, each sharing the span's cell.
+        #[allow(non_camel_case_types, non_snake_case)]
+        struct __Dial9Slots {
+            $( $lkey: $crate::span::__rt::Slot<$lty>, )+
+        }
+
+        // Allocate each shared cell once, then hand one clone to the span and
+        // one to the slots.
+        $(
+            let $lkey: $crate::span::__rt::Arc<$crate::span::__rt::OnceLock<$lty>> =
+                $crate::span::__rt::Arc::new($crate::span::__rt::OnceLock::new());
+        )+
+
+        let __dial9_span = __Dial9Span {
+            span_id: $crate::span::__rt::next_span_id(),
+            parent_span_id: ::core::option::Option::None,
+            $( $key: $val, )*
+            $( $lkey: ::core::clone::Clone::clone(&$lkey), )+
+        };
+        let __dial9_slots = __Dial9Slots {
+            $( $lkey: $crate::span::__rt::Slot::__from_arc($lkey), )+
+        };
+        (__dial9_span, __dial9_slots)
     }};
 }

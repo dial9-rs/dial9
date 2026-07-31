@@ -42,12 +42,13 @@ events yourself (see *Zero-cost*).
   across tasks (see the comment in `tracing_layer.rs::on_enter`); the viewer
   infers nesting from timestamp containment. We only support *explicit*
   parenting, same as the tracing layer.
-- Late / deferred fields. Fields are captured when the span is built (that is
-  what lets each callsite bake in a typed, compile-time schema). A value only
-  knowable later (e.g. an HTTP status) is recorded by building the span where
-  that value is in scope, not by mutating a live span.
 - Log-style events (one-shot points without duration). `record_event` with a
   custom `#[derive(TraceEvent)]` struct already covers that.
+
+> **Late / deferred fields are now supported** (they were originally a
+> non-goal). A value only knowable after the span is built — an HTTP status, a
+> response size — is declared as `name: Type` and set through a returned `slots`
+> handle; it rides the completion event. See *[Late fields](#late-fields)*.
 
 ## Wire format: reuse the existing standardized span events
 
@@ -180,6 +181,13 @@ Tower layer (feature `tower`):
 ```rust
 Dial9SpanLayer::new(|req: &Req| dial9_span!("rpc", route = %req.path())) // per-request
 Dial9SpanLayer::new(|_req: &Req| dial9_span!("http_request"))            // fixed name
+
+// Response-derived (late) fields: make_span returns (span, finish); finish
+// captures the slots and is called with the successful response.
+Dial9SpanLayerWithResponse::new(|req: &Req| {
+    let (span, slots) = dial9_span!("http_request", route = %req.path(), status: u16);
+    (span, move |resp: &Resp| slots.status.set(resp.status()))
+})
 ```
 
 ### Design decisions
@@ -235,6 +243,78 @@ close checks `Dial9Handle::is_enabled()`. Wrappers are always safe to leave in
 code paths that sometimes run outside a dial9-traced runtime, and are no-ops
 (branch + return) when dial9 is disabled.
 
+## Late fields
+
+A field written as `name: Type` (a type instead of `= value`) is *late*: its
+value is not known at the call site but set later, before the span completes.
+Declaring at least one late field changes the macro's return from a bare span
+to `(span, slots)`:
+
+```rust
+let (span, slots) = dial9_span!("request", route = "/checkout", status: u16, bytes: u64);
+async move {
+    let resp = handle().await;
+    slots.status.set(resp.status);   // recorded on completion
+    slots.bytes.set(resp.len());
+}
+.instrument(span)
+.await;
+```
+
+`slots.<name>` is a `Slot<Type>`, a write-once handle; `set` takes the first
+write and ignores the rest (it wraps a `OnceLock`). A span with only eager
+fields is returned bare exactly as before — **no source change for existing
+callers.** The type must satisfy `Option<Type>: TraceField` (the numeric types,
+`bool`, `String`); render anything else to a `String` before `set`.
+
+**Why this shape, and why not the `tracing` one.** The `tracing` recipe is
+`field::Empty` + `span.record(..)` later. It relies on two things dial9 ad-hoc
+spans don't have: a live, subscriber-owned mutable field bag (a dial9 span *is*
+the producer — it emits its own events and has nothing to mutate after the
+fact), and untyped fields (dial9 fields are typed and monomorphized per
+callsite, so a late field's type must be named up front). Two consequences fall
+out directly:
+
+- A late value can land only on the **completion (exit) event**, never enter —
+  which composes with the decision above that the completion event is where
+  post-hoc metadata already lives. Late fields are just more of it.
+- The setter and the span both need a handle to the same storage, because the
+  span is moved into `.instrument(..)` while `set` is called from inside the
+  body. That shared storage is an `Arc<OnceLock<T>>`: one clone in the span, one
+  in the `Slot`. On exit the span reads `get().cloned()` → `Some(v)` or `None`.
+
+**Mechanics.** The macro's muncher sorts fields into an eager `(key, value)`
+list and a late `(key, type)` list and dispatches on whether the late list is
+empty: empty → the original build (unchanged); non-empty →
+`__dial9_span_build_late!`, which adds one `Option<Type>` column per late field
+to the `SpanExit` struct, one `Arc<OnceLock<Type>>` per late field to the span,
+and a generated `__Dial9Slots` handle. `SpanEnter` is untouched.
+
+**Backwards compatibility.** Late fields only *add* columns to a callsite's
+`SpanExit` schema — always safe per the trace-format rules (the schema is on
+the wire ahead of the events; old traces just lack the columns). The stored
+type is `Option<Type>`, whose wire tag carries a present/absent discriminant,
+so a never-set field is a genuine `None`, not a zero sentinel. No decoder
+change is needed to read these traces; surfacing the new columns in the viewer
+detail panel is folded into the same cosmetic follow-up as `active_ns` above.
+
+**Cost.** Opt-in and localized. An eager-only callsite is byte-for-byte the old
+path — no `Arc`, no atomics, still allocation-free (the zero-cost benchmark is
+unaffected). A late field costs one shared allocation plus an atomic write/read
+— the irreducible cost of moving a value across the `.instrument(..)` boundary.
+
+**Through the tower layer.** The response-derived case (a status code, a body
+size) is exactly the per-request shape the tower layer serves, so it has
+first-class support via `Dial9SpanLayerWithResponse` (see *Tower layer
+semantics*). The obstacle is that the slots type is generated per call site and
+cannot be named — so a separate `on_response(|slots, resp| …)` closure could
+neither name nor infer its argument. The resolution is to have `make_span`
+return `(span, finish)` where `finish` is a closure that **captures the slots
+itself** and receives only the response; the un-nameable type never appears in
+a signature the user writes. `finish` runs the instant the inner future
+resolves (before the span's completion event), so the values it sets ride that
+event.
+
 ## Span ID space
 
 The tracing layer uses `tracing`'s subscriber-allocated `span::Id` (small
@@ -261,6 +341,17 @@ needed. 2^63 ids does not wrap in practice (at 1B spans/sec: ~292 years).
 - The layer is fully generic over the request/response types; nothing in it
   depends on `http`. The example program shows it on an axum stack because that
   is the motivating case.
+- **Response-derived (late) fields** use a second layer,
+  `Dial9SpanLayerWithResponse`, whose `make_span` returns `(span, finish)`.
+  `finish: Fn(&Resp)` is called with the successful response before the span
+  closes — the place to set late `Slot`s captured from `make_span`'s
+  `dial9_span!` (see *Late fields*). Internally it wraps the inner future in an
+  `OnResponse` combinator that runs `finish` on `Poll::Ready(Ok(_))`, nested
+  inside the usual `Instrumented`, so the set values are present when the
+  completion event is emitted. It is a distinct type (not a method on
+  `Dial9SpanLayer`) because the eager `make_span` returns `impl Span` while the
+  late one returns a tuple — two incompatible return shapes that would collide
+  under one `Service` impl. `finish` is **not** called on the error path in v1.
 
 ## Crate placement & Tokio-independence
 

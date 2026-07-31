@@ -37,11 +37,18 @@ async fn charge(order_id: u64) {
 
 /// One checkout request, instrumented three different ways.
 async fn checkout(order_id: u64) {
-    // 1. Instrumented future. Emits one enter on the first poll and one
-    //    completion event (with active/idle time + poll count) when it resolves.
-    let order = load_order(order_id)
-        .instrument(dial9_span!("db.load_order", order_id = order_id))
-        .await;
+    // 1. Instrumented future with a *late* field. `total_cents` isn't known at
+    //    the call site — it's only known once the order loads — so it's
+    //    declared as `total_cents: u64` and set through `slots` inside the body.
+    //    It rides the completion event, not the enter event.
+    let (load_span, slots) = dial9_span!("db.load_order", order_id = order_id, total_cents: u64);
+    let order = async {
+        let order = load_order(order_id).await;
+        slots.total_cents.set(order.total_cents);
+        order
+    }
+    .instrument(load_span)
+    .await;
 
     // 2. Sync RAII guard for a blocking/CPU section. The macro captures fields
     //    at construction; they ride every segment.
@@ -83,7 +90,7 @@ async fn settlement_worker() {
 
 #[cfg(feature = "tower")]
 async fn tower_demo() {
-    use dial9_utils::span::Dial9SpanLayer;
+    use dial9_utils::span::Dial9SpanLayerWithResponse;
     use std::convert::Infallible;
     use tower_layer::Layer;
     use tower_service::Service;
@@ -111,8 +118,14 @@ async fn tower_demo() {
     }
 
     // `make_span` receives the request, so it can attach request-derived fields
-    // (here the order id) rather than hardcoding them.
-    let layer = Dial9SpanLayer::new(|order_id: &u64| dial9_span!("checkout", order_id = *order_id));
+    // (the order id) eagerly. The status code is only known once the service
+    // responds, so it's a *late* field: the `finish` closure captures the
+    // span's slots and sets it from the response, and it rides the completion
+    // event.
+    let layer = Dial9SpanLayerWithResponse::new(|order_id: &u64| {
+        let (span, slots) = dial9_span!("checkout", order_id = *order_id, status: u16);
+        (span, move |status: &u16| slots.status.set(*status))
+    });
 
     let mut svc = layer.layer(Checkout);
     for order_id in 0..3u64 {
