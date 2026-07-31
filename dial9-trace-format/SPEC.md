@@ -175,7 +175,12 @@ Multiple annotation frames for the same `type_id` are permitted; the decoder acc
 
 A decoder that encounters an annotation frame referencing an unknown `type_id` may skip it leniently (the annotations have nowhere to attach).
 
-Annotation keys and values are free-form at the wire level. By convention, the `unit` key carries a field's unit; the values the viewer recognizes for human-friendly rendering are `ns`, `us`, `ms`, `s`, and `bytes` (the same set the `#[traceevent(unit = "...")]` derive attribute accepts at compile time). Unrecognized values render as the raw number.
+Annotation keys and values are free-form at the wire level. By convention:
+
+- `unit` carries a field's display unit. The values the viewer recognizes are `ns`, `us`, `ms`, `s`, and `bytes`, matching `#[traceevent(unit = "...")]`.
+- `kind` carries a numeric field's chart interpretation. The values the viewer recognizes are `gauge`, `counter`, and `updown-counter`, matching `#[traceevent(kind = "...")]`.
+
+Viewers ignore annotation keys or values they do not recognize.
 
 ## Field Types
 

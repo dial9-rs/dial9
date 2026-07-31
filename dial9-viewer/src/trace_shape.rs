@@ -63,11 +63,23 @@ const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 /// The derive macro and the metrique sink emit `"unit"`; `"metrique.unit"`
 /// only appears in SPEC.md examples and annotation tests, kept for
 /// compatibility with traces built from them.
-const SAFE_ANNOTATION_KEYS: &[&str] = &["unit", "metrique.unit"];
+const SAFE_ANNOTATION_KEYS: &[&str] = &["unit", "metrique.unit", "kind"];
 
 /// Safe annotation values (units). Must stay in sync with the derive macro's
 /// `SUPPORTED_UNITS` in `dial9-trace-format-derive/src/lib.rs`.
 const SAFE_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes", "count"];
+
+/// Safe field interpretations. Must stay in sync with the derive macro's
+/// `SUPPORTED_KINDS` and the viewer's `FieldChartKind`.
+const SAFE_FIELD_KINDS: &[&str] = &["gauge", "counter", "updown-counter"];
+
+fn is_safe_annotation_value(key: &str, value: &str) -> bool {
+    match key {
+        "unit" | "metrique.unit" => SAFE_UNITS.contains(&value),
+        "kind" => SAFE_FIELD_KINDS.contains(&value),
+        _ => false,
+    }
+}
 
 /// Maximum recursion depth for nested dynamic values.
 const MAX_DYNAMIC_DEPTH: usize = 8;
@@ -1725,7 +1737,7 @@ pub(crate) fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
                     .iter()
                     .filter_map(|a| {
                         if SAFE_ANNOTATION_KEYS.contains(&a.key())
-                            && SAFE_UNITS.contains(&a.value())
+                            && is_safe_annotation_value(a.key(), a.value())
                         {
                             if (a.field_index() as usize) >= fields.len() {
                                 return None;
@@ -2227,9 +2239,10 @@ fn validate_shape(shape: &TraceShape) -> anyhow::Result<()> {
                 ann.key
             );
             ensure!(
-                SAFE_UNITS.contains(&ann.value.as_str()),
-                "schema '{}' annotation has unsafe value '{}'",
+                is_safe_annotation_value(&ann.key, &ann.value),
+                "schema '{}' annotation '{}' has unsafe value '{}'",
                 schema.name,
+                ann.key,
                 ann.value
             );
             ensure!(
@@ -5933,6 +5946,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_annotation_value_for_different_key() {
+        let mut shape = minimal_shape(
+            vec![ShapeField {
+                name: "x".into(),
+                field_type: FieldType::Varint as u8,
+                repeat_meta: None,
+            }],
+            vec![ShapeValue::U(1)],
+        );
+        shape.schemas[0].annotations = vec![ShapeAnnotation {
+            field_index: 0,
+            key: "kind".into(),
+            value: "ns".into(),
+        }];
+        let err = validate_shape(&shape).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("annotation 'kind' has unsafe value 'ns'"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn validate_summary_type_counts_both_directions() {
         // Extra entry in summary not in actual events
         let mut shape = minimal_shape(
@@ -7354,8 +7390,9 @@ mod tests {
     // ─── Finding #5: Annotation parity regression ───────────────────────
 
     #[test]
-    fn annotation_unit_key_preserved() {
-        // (5) The derive macro emits "unit" (not "metrique.unit"). Verify both are accepted.
+    fn safe_annotation_keys_and_values_preserved() {
+        // (5) Verify derive-style metadata and the legacy unit key are accepted,
+        // while an unsupported value on a safe key is still discarded.
         use dial9_trace_format::schema::{FieldAnnotation, SchemaEntry};
         let mut enc = Encoder::new();
         let fields = vec![
@@ -7365,6 +7402,8 @@ mod tests {
         let annotations = vec![
             FieldAnnotation::new(0, "unit", "ns"),
             FieldAnnotation::new(1, "metrique.unit", "ms"),
+            FieldAnnotation::new(0, "kind", "counter"),
+            FieldAnnotation::new(1, "kind", "histogram"),
         ];
         let entry = SchemaEntry::with_annotations("TestEvent", true, fields, annotations);
         let schema = dial9_trace_format::encoder::Schema::from_entry(entry);
@@ -7382,7 +7421,7 @@ mod tests {
 
         let shape = extract_shape(&trace).unwrap();
         let schema_shape = &shape.schemas[0];
-        assert_eq!(schema_shape.annotations.len(), 2);
+        assert_eq!(schema_shape.annotations.len(), 3);
         let ann_keys: Vec<&str> = schema_shape
             .annotations
             .iter()
@@ -7395,6 +7434,10 @@ mod tests {
         assert!(
             ann_keys.contains(&"metrique.unit"),
             "legacy 'metrique.unit' annotation not preserved"
+        );
+        assert!(
+            ann_keys.contains(&"kind"),
+            "derive-style 'kind' annotation not preserved"
         );
     }
 

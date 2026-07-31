@@ -598,6 +598,7 @@ struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
+    #[traceevent(unit = "us", kind = "gauge")]
     latency_us: u64,
     /// Optional fields use 1 byte on the wire when absent.
     error_message: Option<String>,
@@ -612,6 +613,10 @@ handle.record_event(RequestCompleted {
 });
 # }
 ```
+
+`unit` controls value formatting in the viewer. `kind` lets numeric fields open
+directly as a `gauge`, `counter`, or `updown-counter` chart without prompting
+for an interpretation.
 
 ### Custom event callbacks
 
