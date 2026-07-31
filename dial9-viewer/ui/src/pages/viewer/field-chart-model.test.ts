@@ -26,6 +26,7 @@ function event(
     timestamp,
     fields: value === undefined ? {} : { value },
     units: { value: "bytes" },
+    fieldKinds: null,
   };
 }
 

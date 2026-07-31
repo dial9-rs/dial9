@@ -12,6 +12,8 @@ import {
 
 export interface FieldChartDialog {
   open(eventName: string, fieldName: string): void;
+  /** Create without opening the modal when schema metadata supplies the kind. */
+  create(eventName: string, fieldName: string, kind: FieldChartKind): void;
   close(): void;
   isOpen(): boolean;
   dispose(): void;
@@ -122,6 +124,21 @@ export function mountFieldChartDialog(
     restoreFocus = null;
   }
 
+  function createChart(
+    eventName: string,
+    fieldName: string,
+    chartKind: FieldChartKind,
+  ): void {
+    const chart = addFieldChart(store, eventName, fieldName, chartKind);
+    // The new track is appended after the built-ins. Reveal it after the
+    // store-driven shell render creates its row.
+    doc.defaultView?.requestAnimationFrame(() => {
+      doc
+        .querySelector(`[data-track-manage="${chart.id}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
   selector.addEventListener("click", () => {
     kind = nextFieldChartKind(kind);
     renderKind();
@@ -133,20 +150,8 @@ export function mountFieldChartDialog(
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (pending === null) return;
-    const chart = addFieldChart(
-      store,
-      pending.eventName,
-      pending.fieldName,
-      kind,
-    );
+    createChart(pending.eventName, pending.fieldName, kind);
     close();
-    // The new track is appended after the built-ins. Reveal it after the
-    // store-driven shell render creates its row.
-    doc.defaultView?.requestAnimationFrame(() => {
-      doc
-        .querySelector(`[data-track-manage="${chart.id}"]`)
-        ?.scrollIntoView({ block: "nearest" });
-    });
   });
   form.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
@@ -164,6 +169,7 @@ export function mountFieldChartDialog(
 
   return {
     open,
+    create: createChart,
     close,
     isOpen,
     dispose(): void {

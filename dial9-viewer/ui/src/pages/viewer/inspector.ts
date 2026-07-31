@@ -37,7 +37,12 @@ import { ESC_PRIORITY } from "./esc-cascade.js";
 import type { EscCascade } from "./esc-cascade.js";
 import type { RegionAnalysisController } from "./region-analysis.js";
 import type { ViewerStore } from "../../store/store.js";
-import type { AtCursorReadout, SelectionSlice, StoreState } from "../../types/state.js";
+import type {
+  AtCursorReadout,
+  FieldChartKind,
+  SelectionSlice,
+  StoreState,
+} from "../../types/state.js";
 import {
   INSPECTOR_TABS,
   buildEventDetail,
@@ -88,8 +93,12 @@ export interface InspectorDeps {
    * region panel owns what opens.
    */
   regionPanel: RegionAnalysisController;
-  /** Open the chart-kind modal for one numeric custom-event field. */
-  openFieldChart(eventName: string, fieldName: string): void;
+  /** Create a field chart directly when `kind` is known, or prompt otherwise. */
+  chartField(
+    eventName: string,
+    fieldName: string,
+    kind: FieldChartKind | null,
+  ): void;
   /** True when the URL explicitly selected the initial inspector tab. */
   preserveInitialTab?: boolean;
   /** True when poll disclosure/section/zoom came explicitly from the URL. */
@@ -808,7 +817,7 @@ export function mountInspector(
     row: ReturnType<typeof buildEventDetail>["rows"][number],
     eventName: string,
   ): TemplateResult {
-    const { key, value, corrVal, chartable } = row;
+    const { key, value, corrVal, chart } = row;
     return html`<div class="d9-kv-row">
       <span class="k">${key}</span><span class="v">${value}</span>
       ${corrVal !== null
@@ -822,13 +831,13 @@ export function mountInspector(
             ↔
           </button>`
         : nothing}
-      ${chartable
+      ${chart !== null
         ? html`<button
             type="button"
             class="d9-kv-chart"
             title="Chart numeric field"
             aria-label="Chart ${key}"
-            @click=${() => deps.openFieldChart(eventName, key)}
+            @click=${() => deps.chartField(eventName, key, chart.kind)}
           >
             <svg
               viewBox="0 0 16 16"

@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 13961,
+  "total_samples": 11861,
   "by_source": {
-    "0": 199,
-    "1": 13762
+    "0": 113,
+    "1": 11748
   },
   "on_off_all": {
-    "on_runtime": 13961,
-    "off_runtime": 0
+    "on_runtime": 11854,
+    "off_runtime": 7
   },
   "on_off_by_source": {
     "0": {
-      "on": 199,
-      "off": 0
+      "on": 106,
+      "off": 7
     },
     "1": {
-      "on": 13762,
+      "on": 11748,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 199,
-    "distinct_stacks": 145,
-    "stack_sig_digest": "68191d4e5ce711c1",
-    "ts_count": 199,
-    "ts_span_ns": 4049993373,
-    "ts_delta_digest": "c5f3560d8300ced3",
+    "count": 113,
+    "distinct_stacks": 105,
+    "stack_sig_digest": "973cab9ab1812686",
+    "ts_count": 113,
+    "ts_span_ns": 3722997710,
+    "ts_delta_digest": "628a66cb2f83e904",
     "top_stacks": [
       {
-        "count": 33,
-        "depth": 82,
-        "leaf": "writev"
-      },
-      {
-        "count": 5,
-        "depth": 1,
-        "leaf": "malloc_consolidate"
-      },
-      {
-        "count": 4,
-        "depth": 1,
-        "leaf": "__libc_free"
-      },
-      {
         "count": 3,
-        "depth": 89,
-        "leaf": "__GI___getrandom"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__memmove_avx512_unaligned_erms"
-      },
-      {
-        "count": 3,
-        "depth": 85,
-        "leaf": "recv"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__lll_lock_wake_private"
+        "depth": 95,
+        "leaf": "axum::routing::Router<S>::call_with_state"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "__libc_realloc"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8b16eacc"
+      },
+      {
+        "count": 2,
+        "depth": 89,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 107,
+        "leaf": "[unknown] 0xffff8b34de58"
+      },
+      {
+        "count": 2,
+        "depth": 113,
+        "leaf": "[unknown] 0xffff8b34c918"
+      },
+      {
+        "count": 2,
+        "depth": 107,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8b34de60"
+      },
+      {
+        "count": 1,
+        "depth": 126,
+        "leaf": "<aws_smithy_runtime::client::http::body::minimum_throughput::UploadThroughputCheckFuture as core::future::future::Future>::poll"
       }
     ]
   }

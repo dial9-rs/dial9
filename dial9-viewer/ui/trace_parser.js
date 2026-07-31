@@ -1057,6 +1057,7 @@
                             timestamp: ts,
                             fields: v,
                             units: dec.schemas.get(frame.typeId)?.units || null,
+                            fieldKinds: dec.schemas.get(frame.typeId)?.fieldKinds || null,
                         });
                     }
                 }

@@ -259,6 +259,13 @@ export const FIELD_CHART_KINDS: readonly FieldChartKind[] = [
   "updown-counter",
 ];
 
+/** Accept only chart interpretations the viewer can render. */
+export function fieldChartKindFromAnnotation(
+  value: string | null | undefined,
+): FieldChartKind | null {
+  return FIELD_CHART_KINDS.find((kind) => kind === value) ?? null;
+}
+
 export function nextFieldChartKind(kind: FieldChartKind): FieldChartKind {
   const index = FIELD_CHART_KINDS.indexOf(kind);
   return FIELD_CHART_KINDS[(index + 1) % FIELD_CHART_KINDS.length]!;

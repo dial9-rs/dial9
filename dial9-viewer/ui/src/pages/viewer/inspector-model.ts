@@ -13,6 +13,7 @@ import {
   formatHumanDuration,
 } from "../../lib/trace/index.js";
 import {
+  fieldChartKindFromAnnotation,
   isChartableNumericValue,
   isFieldChartNameSupported,
 } from "./field-chart-model.js";
@@ -30,6 +31,7 @@ import type {
   WorkerLane,
 } from "../../lib/trace/index.js";
 import type {
+  FieldChartKind,
   PinnedCustomEvent,
   SelectionSlice,
   TaskDumpSelection,
@@ -195,8 +197,8 @@ export interface KvRow {
    *  nowhere (cluster rows, the `@`/`Task` rows, or a value unique to one
    *  event). */
   corrVal: string | null;
-  /** True when the value is numeric and its event/field names fit the URL tuple. */
-  chartable: boolean;
+  /** Chart action; a null kind means the viewer must ask for an interpretation. */
+  chart: { kind: FieldChartKind | null } | null;
 }
 
 /** The Event tab view: kv rows + the resolved task (single or cluster). */
@@ -260,21 +262,24 @@ export function buildEventDetail(
       const corrVal = String(v);
       const display = formatFieldValue(v, ev.units?.[k]);
       const shared = countWithField(allEvents, k, corrVal) > 1;
+      const chartable =
+        isChartableNumericValue(v) &&
+        isFieldChartNameSupported(ev.name) &&
+        isFieldChartNameSupported(k);
       rows.push({
         key: k,
         value: display,
         corrVal: shared ? corrVal : null,
-        chartable:
-          isChartableNumericValue(v) &&
-          isFieldChartNameSupported(ev.name) &&
-          isFieldChartNameSupported(k),
+        chart: chartable
+          ? { kind: fieldChartKindFromAnnotation(ev.fieldKinds?.[k]) }
+          : null,
       });
     }
     rows.push({
       key: "@",
       value: fmtTs(ev.timestamp),
       corrVal: null,
-      chartable: false,
+      chart: null,
     });
   } else {
     const first = events[0]!;
@@ -284,19 +289,24 @@ export function buildEventDetail(
       key: "Cluster",
       value: `${events.length} events`,
       corrVal: null,
-      chartable: false,
+      chart: null,
     });
     rows.push({
       key: "Types",
       value: topEventNames(events),
       corrVal: null,
-      chartable: false,
+      chart: null,
     });
     const range =
       last.timestamp !== first.timestamp
         ? `${fmtTs(first.timestamp)} – ${fmtTs(last.timestamp)}`
         : fmtTs(first.timestamp);
-    rows.push({ key: "@", value: range, corrVal: null, chartable: false });
+    rows.push({
+      key: "@",
+      value: range,
+      corrVal: null,
+      chart: null,
+    });
   }
 
   if (pinned.taskId != null) {
@@ -305,7 +315,7 @@ export function buildEventDetail(
       key: "Task",
       value: `${hex} (selected)`,
       corrVal: null,
-      chartable: false,
+      chart: null,
     });
   }
   return { title, rows, taskId: pinned.taskId, isSingle };

@@ -40,6 +40,7 @@ function spanEvent(name: string, ts: number, spanId: string): CustomTraceEvent {
     timestamp: ts,
     fields: { worker_id: 0, span_id: spanId, span_name: "s" } as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 

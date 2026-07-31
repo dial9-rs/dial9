@@ -202,7 +202,13 @@ function boot(): void {
   const inspector = mountInspector(shell.inspectorRegion, store, {
     esc,
     regionPanel,
-    openFieldChart: fieldChartDialog.open,
+    chartField: (eventName, fieldName, kind) => {
+      if (kind === null) {
+        fieldChartDialog.open(eventName, fieldName);
+      } else {
+        fieldChartDialog.create(eventName, fieldName, kind);
+      }
+    },
     preserveInitialTab: urlView.inspectorTab !== undefined,
     preserveInitialPollView:
       urlView.poll !== undefined &&
