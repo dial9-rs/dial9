@@ -7,8 +7,8 @@
 // work without hiding narrow spikes and without allocating a visible-series
 // copy on every pan/zoom.
 
-import { createCanvasSizer } from "../../lib/canvas/dpr.js";
-import type { CanvasSizer } from "../../lib/canvas/dpr.js";
+import { createCanvasSizer, nsToDrawX } from "../../lib/canvas/index.js";
+import type { CanvasSizer, Vertex } from "../../lib/canvas/index.js";
 import type { PanelGeometry } from "../../types/state.js";
 import type {
   FieldChartKind,
@@ -45,13 +45,8 @@ const CHART_BOTTOM_PAD = 8;
 const BIGINT_RATIO_SCALE = 1_000_000_000_000n;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
-export interface FieldChartVertex {
-  x: number;
-  y: number;
-}
-
 export interface FieldChartPlot {
-  segments: readonly (readonly FieldChartVertex[])[];
+  segments: readonly (readonly Vertex[])[];
   resetXs: readonly number[];
   min: FieldChartNumeric | null;
   max: FieldChartNumeric | null;
@@ -246,15 +241,6 @@ export function fieldChartTooltipRows(
   ];
 }
 
-function xAt(
-  timestamp: number,
-  viewStart: number,
-  viewEnd: number,
-  drawW: number,
-): number {
-  return ((timestamp - viewStart) / (viewEnd - viewStart || 1)) * drawW;
-}
-
 function pixelColumn(x: number, drawW: number): number {
   return Math.min(
     Math.max(0, Math.floor(x)),
@@ -273,9 +259,9 @@ function bucketPoints(bucket: Bucket): RawPoint[] {
     .filter((point, i, all) => i === 0 || point.index !== all[i - 1]!.index);
 }
 
-function stepAfter(vertices: readonly FieldChartVertex[]): FieldChartVertex[] {
+function stepAfter(vertices: readonly Vertex[]): Vertex[] {
   if (vertices.length < 2) return [...vertices];
-  const out: FieldChartVertex[] = [vertices[0]!];
+  const out: Vertex[] = [vertices[0]!];
   for (let i = 1; i < vertices.length; i++) {
     const previous = vertices[i - 1]!;
     const next = vertices[i]!;
@@ -361,7 +347,7 @@ export function buildFieldChartPlot(
   const baselineY =
     kind === "gauge" ? chartBottom : yAt(zeroFor(scaleMin));
 
-  const segments: FieldChartVertex[][] = [];
+  const segments: Vertex[][] = [];
   const resetXs = new Set<number>();
   let rawSegment: RawPoint[] = [];
   let bucket: Bucket | null = null;
@@ -377,13 +363,13 @@ export function buildFieldChartPlot(
     flushBucket();
     if (rawSegment.length === 0) return;
     let vertices = rawSegment.map((point) => ({
-      x: xAt(point.timestamp, viewStart, viewEnd, drawW),
+      x: nsToDrawX(point.timestamp, viewStart, viewEnd, drawW),
       y: yAt(point.value),
     }));
     if (kind !== "gauge") {
       vertices = stepAfter(vertices);
       if (segmentEnd !== null) {
-        const x = xAt(segmentEnd, viewStart, viewEnd, drawW);
+        const x = nsToDrawX(segmentEnd, viewStart, viewEnd, drawW);
         const last = vertices[vertices.length - 1]!;
         if (x > last.x) vertices.push({ x, y: last.y });
       }
@@ -404,7 +390,7 @@ export function buildFieldChartPlot(
       ) {
         resetXs.add(
           pixelColumn(
-            xAt(sample.timestamp, viewStart, viewEnd, drawW),
+            nsToDrawX(sample.timestamp, viewStart, viewEnd, drawW),
             drawW,
           ),
         );
@@ -431,7 +417,7 @@ export function buildFieldChartPlot(
       timestamp: sample.timestamp,
       value: sample.value,
     };
-    const x = xAt(sample.timestamp, viewStart, viewEnd, drawW);
+    const x = nsToDrawX(sample.timestamp, viewStart, viewEnd, drawW);
     const column = pixelColumn(x, drawW);
     if (bucket === null || bucket.column !== column) {
       flushBucket();
@@ -463,7 +449,7 @@ export function buildFieldChartPlot(
 
 function path(
   ctx: CanvasRenderingContext2D,
-  vertices: readonly FieldChartVertex[],
+  vertices: readonly Vertex[],
 ): void {
   const first = vertices[0];
   if (first === undefined) return;
@@ -476,7 +462,7 @@ function path(
 
 function fillSegments(
   ctx: CanvasRenderingContext2D,
-  segments: readonly (readonly FieldChartVertex[])[],
+  segments: readonly (readonly Vertex[])[],
   baselineY: number,
   fillStyle: string,
 ): void {
@@ -500,7 +486,7 @@ function fillSegments(
 
 function strokeSegments(
   ctx: CanvasRenderingContext2D,
-  segments: readonly (readonly FieldChartVertex[])[],
+  segments: readonly (readonly Vertex[])[],
   color: string,
 ): void {
   ctx.beginPath();
