@@ -51,7 +51,6 @@
 use super::register_runtime_context;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::rate_limit::rate_limited;
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::buffer::BufferMode;
@@ -60,7 +59,6 @@ use dial9_core::recorder::RecorderBuilder;
 use dial9_core::recording::Recorder;
 use dial9_core::shared_state::SharedState;
 use std::io;
-use std::time::Duration;
 
 /// dial9 pipeline presets on the recorder builder.
 ///
@@ -365,8 +363,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
                 "recorder has shut down; attach runtimes before graceful_shutdown",
             ));
         }
-        let instrumented = options.tokio_instrumentation_enabled;
-        install_tokio_hooks(self, &mut builder, options);
+        let instrumented = install_tokio_hooks(self, &mut builder, options)?;
         let runtime = builder.build()?;
 
         if let Some(shared) = self.shared()
@@ -382,27 +379,27 @@ impl Dial9HandleTokioExt for Dial9Handle {
 /// recorder's shared runtime-context source. Worker IDs are reserved lazily on
 /// first poll.
 ///
+/// Returns whether hooks were installed: a disabled recorder and
+/// `tokio_instrumentation_enabled(false)` both leave the builder untouched.
+/// Errors only when instrumentation was asked for and could not be wired up.
+///
 /// [`Dial9HandleTokioExt::attach_tokio_runtime`] is the public API that also
 /// builds the runtime.
 pub(crate) fn install_tokio_hooks(
     handle: &Dial9Handle,
     builder: &mut tokio::runtime::Builder,
     options: TokioAttachOptions,
-) {
+) -> io::Result<bool> {
     let Some(shared) = handle.shared() else {
-        return;
+        return Ok(false);
     };
     if !options.tokio_instrumentation_enabled {
-        return;
+        return Ok(false);
     }
     let Some(registry) = runtime_registry(shared) else {
-        rate_limited!(Duration::from_secs(60), {
-            tracing::error!(
-                target: "dial9_telemetry",
-                "source registry unavailable (poisoned or recorder stopped); Tokio runtime not attached"
-            );
-        });
-        return;
+        return Err(io::Error::other(
+            "dial9 source registry unavailable; Tokio runtime not attached",
+        ));
     };
 
     let task_dump_config = options.task_dump_config;
@@ -426,6 +423,7 @@ pub(crate) fn install_tokio_hooks(
     if let Some(config) = task_dump_config {
         crate::task_dumped::set_taskdump_config(config);
     }
+    Ok(true)
 }
 
 /// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that
