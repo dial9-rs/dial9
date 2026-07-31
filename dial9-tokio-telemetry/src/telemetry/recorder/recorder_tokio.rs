@@ -196,7 +196,7 @@ fn apply_s3_uploader<M: BufferMode>(
 
 /// Per-runtime attach settings. All optional; runtime-scoped only (session-wide
 /// settings like the pipeline, S3, and segment metadata stay on the recorder).
-#[derive(bon::Builder)]
+#[derive(Clone, bon::Builder)]
 pub struct TokioAttachOptions {
     /// Human-readable runtime name, recorded into segment metadata as
     /// `runtime.{name}`.
