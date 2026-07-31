@@ -403,9 +403,16 @@ describe("metrique events", () => {
       const f = ev.fields;
       expect(f["dial9.thread_id"], `dial9.thread_id missing on ${ev.name}`).toBeDefined();
       expect(f["dial9.thread_id"], `dial9.thread_id null on ${ev.name}`).not.toBeNull();
-      const duration = Number(f["dial9.duration_ns"]);
-      expect(duration, `dial9.duration_ns missing on ${ev.name}`).not.toBeNaN();
-      expect(duration, "duration must be non-negative").toBeGreaterThanOrEqual(0);
+      const duration = Number(f["dial9.span.duration_ns"]);
+      expect(duration, `dial9.span.duration_ns missing on ${ev.name}`).not.toBeNaN();
+      expect(
+        duration,
+        "duration must not exceed the packed close timestamp",
+      ).toBeLessThanOrEqual(ev.timestamp);
+      expect(
+        ev.units?.["dial9.span.duration_ns"],
+        `dial9.span.duration_ns unit missing on ${ev.name}`,
+      ).toBe("ns");
       expect(f["Operation"], `Operation missing on ${ev.name}`).toBeTruthy();
       expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
     }

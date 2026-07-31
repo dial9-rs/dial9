@@ -9,7 +9,7 @@ use super::Context;
 
 /// Field type that reads the monotonic clock when its `CloseValue` runs
 /// (at `append_on_drop` / close time), so the event carries an end
-/// timestamp without any user bookkeeping.
+/// timestamp without reading the clock later on the metrics queue.
 #[derive(Debug)]
 pub(crate) struct MonotonicAtClose;
 
@@ -46,7 +46,7 @@ impl CloseValue for &MonotonicAtClose {
 ///
 /// The fields also flow to the other formats in the pipeline (EMF/JSON) as
 /// ordinary fields. Their names are literal and `dial9.`-prefixed
-/// (`dial9.thread_id`, `dial9.task_id`, `dial9.monotonic_ns_start`,
+/// (`dial9.thread_id`, `dial9.tokio.task_id`, `dial9.monotonic_ns_start`,
 /// `dial9.monotonic_ns_end`), which keeps them out of the way of your own
 /// field names and makes them easy to filter out of a format that does not
 /// want them (see [`WithoutDial9Fields`](crate::WithoutDial9Fields)).
@@ -62,7 +62,7 @@ pub struct Dial9Context {
     thread_id: u64,
     /// Tokio task id of the capturing task. Absent when not inside a task
     /// or when the `tokio` feature is disabled.
-    #[metrics(name = "dial9.task_id", flags(Context))]
+    #[metrics(name = "dial9.tokio.task_id", flags(Context))]
     task_id: Option<u64>,
     /// Monotonic nanoseconds at capture (request start).
     #[metrics(name = "dial9.monotonic_ns_start", flags(Context))]
@@ -133,9 +133,9 @@ fn current_task_id() -> Option<u64> {
 /// comparison against the descriptor's base name. A `prefix` at the flatten
 /// site prepends to the emitted name but leaves the base name alone, so
 /// routing survives that too.
-pub(crate) mod field_names {
-    pub(crate) const THREAD_ID: &str = "dial9.thread_id";
-    pub(crate) const TASK_ID: &str = "dial9.task_id";
+pub(crate) mod context_field_names {
+    pub(crate) const THREAD_ID: &str = crate::field_names::THREAD_ID;
+    pub(crate) const TASK_ID: &str = crate::field_names::TOKIO_TASK_ID;
     pub(crate) const MONOTONIC_NS_START: &str = "dial9.monotonic_ns_start";
     pub(crate) const MONOTONIC_NS_END: &str = "dial9.monotonic_ns_end";
 }

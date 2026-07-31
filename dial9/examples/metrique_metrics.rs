@@ -29,7 +29,7 @@ struct RequestMetrics {
     dial9: Dial9Context,
 
     /// Interned: repeated values hit dial9's string pool.
-    #[metrics(flags(dial9::Interned))]
+    #[metrics(flags(dial9::Interned, dial9::SpanName))]
     operation: &'static str,
 
     #[metrics(unit = Millisecond)]

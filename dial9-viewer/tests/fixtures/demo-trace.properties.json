@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 13961,
+  "total_samples": 14220,
   "by_source": {
-    "0": 199,
-    "1": 13762
+    "0": 141,
+    "1": 14079
   },
   "on_off_all": {
-    "on_runtime": 13961,
-    "off_runtime": 0
+    "on_runtime": 14196,
+    "off_runtime": 24
   },
   "on_off_by_source": {
     "0": {
-      "on": 199,
-      "off": 0
+      "on": 117,
+      "off": 24
     },
     "1": {
-      "on": 13762,
+      "on": 14079,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 199,
-    "distinct_stacks": 145,
-    "stack_sig_digest": "68191d4e5ce711c1",
-    "ts_count": 199,
-    "ts_span_ns": 4049993373,
-    "ts_delta_digest": "c5f3560d8300ced3",
+    "count": 141,
+    "distinct_stacks": 118,
+    "stack_sig_digest": "a60a449ebb3e28c2",
+    "ts_count": 141,
+    "ts_span_ns": 4415479824,
+    "ts_delta_digest": "80459a0a2506e18b",
     "top_stacks": [
       {
-        "count": 33,
-        "depth": 82,
-        "leaf": "writev"
-      },
-      {
-        "count": 5,
+        "count": 11,
         "depth": 1,
-        "leaf": "malloc_consolidate"
+        "leaf": "__libc_write"
       },
       {
         "count": 4,
         "depth": 1,
-        "leaf": "__libc_free"
-      },
-      {
-        "count": 3,
-        "depth": 89,
-        "leaf": "__GI___getrandom"
+        "leaf": "_int_malloc"
       },
       {
         "count": 3,
         "depth": 1,
-        "leaf": "__memmove_avx512_unaligned_erms"
+        "leaf": "__malloc"
       },
       {
-        "count": 3,
-        "depth": 85,
-        "leaf": "recv"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__lll_lock_wake_private"
+        "count": 2,
+        "depth": 23,
+        "leaf": "std::thread::local::LocalKey<T>::with"
       },
       {
         "count": 2,
         "depth": 1,
-        "leaf": "__libc_realloc"
+        "leaf": "[unknown] 0x7f5143ce9392"
+      },
+      {
+        "count": 2,
+        "depth": 1,
+        "leaf": "__pthread_mutex_unlock_usercnt"
+      },
+      {
+        "count": 2,
+        "depth": 23,
+        "leaf": "std::io::Write::write_all"
+      },
+      {
+        "count": 2,
+        "depth": 1,
+        "leaf": "pthread_mutex_lock"
       }
     ]
   }

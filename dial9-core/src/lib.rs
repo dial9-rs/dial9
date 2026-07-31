@@ -65,6 +65,8 @@ pub mod recording;
 /// Geometric/Poisson sampling primitives (RNG, exponential draws).
 #[doc(hidden)]
 pub mod sampling;
+/// Dial9 conventions layered on top of trace schema annotations.
+pub mod schema_extensions;
 /// Sealed-segment detection. The segment types are public via [`pipeline`].
 pub(crate) mod sealed;
 /// Runtime-agnostic recording state shared across threads.

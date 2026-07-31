@@ -18,7 +18,7 @@
 //! [`Skip`](crate::Skip) field flag:
 //!
 //! ```no_run
-//! use dial9_metrique::{Dial9Context, Dial9Stream, Interned, Skip};
+//! use dial9_metrique::{Dial9Context, Dial9Stream, Interned, Skip, SpanName};
 //! use metrique::ServiceMetrics;
 //! use metrique::unit_of_work::metrics;
 //! use metrique::writer::{AttachGlobalEntrySinkExt, GlobalEntrySink};
@@ -34,6 +34,7 @@
 //!     #[metrics(flags(Interned))]
 //!     route: String,
 //!
+//!     #[metrics(flags(Interned, SpanName))]
 //!     operation: &'static str,
 //!
 //!     // Keep bulky or high-cardinality fields out of the trace.
@@ -113,11 +114,11 @@
 //! # Overhead
 //!
 //! Measured by `benches/metrique_sink_bench.rs`: `Dial9Context::capture()`
-//! costs ~31 ns on the request path, plus ~30 ns for the end-timestamp
-//! clock read when the entry closes. Encoding costs ~420-535 ns per entry
+//! costs ~32 ns on the request path, plus ~24 ns for the end-timestamp
+//! clock read when the entry closes. Encoding costs ~445-540 ns per entry
 //! on the flush thread, from an all-scalar payload up to one carrying an
 //! allocating (non-interned) string; boxed entries from a global sink add
-//! ~35 ns. A paused recorder or a disabled handle costs ~3.5 ns per entry.
+//! ~80 ns. A paused recorder or a disabled handle costs ~3.3 ns per entry.
 //! [`Dial9Stream::tee`]'s field filtering adds well under a nanosecond per
 //! entry to the other sink.
 //!
@@ -127,9 +128,13 @@
 //!
 //! - the entry's canonical name (schema name `metrique:<EntryName>`,
 //!   suffixed `#<layout hash>` when distinct entry types share a name),
-//! - the start timestamp, plus `dial9.duration_ns`, `dial9.thread_id`, and
-//!   `dial9.task_id` from [`Dial9Context`](crate::Dial9Context) (the task id
-//!   needs the `tokio` feature and is absent when captured outside a task),
+//! - the close timestamp (span end) in the packed event header, plus
+//!   annotated `dial9.span.duration_ns`, `dial9.thread_id`, and
+//!   `dial9.tokio.task_id` fields from [`Dial9Context`](crate::Dial9Context)
+//!   (the task id needs the `tokio` feature and is absent when captured
+//!   outside a task; the span start is `end - duration`),
+//! - a field flagged [`SpanName`](crate::SpanName), when present, as the
+//!   span's dynamic display name (otherwise viewers use the schema name),
 //! - `dial9.wall_clock_ns` when the entry declares
 //!   `#[metrics(timestamp)]`,
 //! - every field not flagged [`Skip`](crate::Skip), with units
@@ -152,8 +157,8 @@
 //!   elements. Typed sinks are unaffected.
 //! - Two fields that emit the same post-rename name cannot share a schema:
 //!   the first occurrence keeps the name and later ones are skipped with a
-//!   diagnostic. Prefix flatten sites to disambiguate. Dial9's own fields
-//!   are `dial9.`-prefixed, so they are never part of such a collision.
+//!   diagnostic. This includes the generated `dial9.thread_id`,
+//!   `dial9.tokio.task_id`, and `dial9.span.duration_ns` structural fields.
 //! - A sink wrapped in
 //!   [`WithoutDial9Fields`](crate::WithoutDial9Fields) sees no
 //!   descriptors for an entry that declares its own field literally named
@@ -176,7 +181,34 @@ pub use stream::Dial9Stream;
 
 use metrique_writer::value::{FlagConstructor, MetricFlags, MetricOptions};
 
-// The three flag markers below follow metrique's FlagConstructor pattern:
+/// Physical field names emitted by the metrique sink.
+///
+/// Consumers should use schema annotations for semantics; these constants
+/// describe metrique's concrete names and are useful when inspecting its raw
+/// events.
+pub mod field_names {
+    /// Span duration, in nanoseconds. The packed event timestamp is the span
+    /// end (close), so the start is `end - duration`.
+    pub const SPAN_DURATION_NS: &str = "dial9.span.duration_ns";
+
+    /// OS thread ID captured when the metrique entry starts.
+    pub const THREAD_ID: &str = "dial9.thread_id";
+
+    /// Tokio task ID captured when the metrique entry starts.
+    pub const TOKIO_TASK_ID: &str = "dial9.tokio.task_id";
+
+    /// Optional wall-clock timestamp from metrique's timestamp field.
+    pub const WALL_CLOCK_NS: &str = "dial9.wall_clock_ns";
+}
+
+/// Value emitted under the `dial9.span.type` annotation for metrique spans.
+///
+/// Re-exported from [`dial9_core::schema_extensions::span_types`], the shared
+/// producer/consumer vocabulary, so decoders and this producer name the type
+/// from one source.
+pub const SPAN_TYPE: &str = dial9_core::schema_extensions::span_types::METRIQUE;
+
+// The flag markers below follow metrique's FlagConstructor pattern:
 // each has a zero-sized MetricOptions payload that only the dial9 sink
 // inspects; other formats carry it through untouched.
 
@@ -223,6 +255,40 @@ pub struct Interned;
 impl FlagConstructor for Interned {
     fn construct() -> MetricFlags<'static> {
         MetricFlags::upcast(&InternedOptions)
+    }
+}
+
+/// Runtime payload for [`SpanName`].
+#[derive(Debug)]
+struct SpanNameOptions;
+impl MetricOptions for SpanNameOptions {}
+
+/// Field flag selecting the metrique field used as the span's display name.
+///
+/// Apply this to at most one scalar string field:
+///
+/// ```ignore
+/// #[metrics(flags(dial9::Interned, dial9::SpanName))]
+/// operation: &'static str,
+/// ```
+///
+/// The field remains part of the event payload and receives the
+/// `dial9.role=span.name` schema annotation. [`Interned`] can be combined with
+/// this flag to pool repeated names. Without a `SpanName` field, viewers use
+/// the event's schema name.
+///
+/// The flag is a best-effort display-name hint. If it cannot be honored — a
+/// second `SpanName` field on the same entry, use on a non-string field,
+/// combining it with [`Skip`], or a field whose name collides with a header
+/// or an earlier field — the field is recorded as an ordinary payload field
+/// (a warning is logged) and the span falls back to its schema name. The
+/// event itself is still recorded; only the display name reverts.
+#[derive(Debug)]
+pub struct SpanName;
+
+impl FlagConstructor for SpanName {
+    fn construct() -> MetricFlags<'static> {
+        MetricFlags::upcast(&SpanNameOptions)
     }
 }
 
