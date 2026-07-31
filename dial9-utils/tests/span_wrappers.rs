@@ -3,6 +3,7 @@
 //! These decode the sealed trace and assert on the emitted `SpanEnter:*` /
 //! `SpanExit:*` / `SpanCloseEvent` wire events, the same format the tracing
 //! layer produces.
+#![cfg(feature = "span")]
 
 use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
 use dial9_trace_format::types::FieldValueRef;

@@ -12,7 +12,7 @@ missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
-dial9-trace-format = { workspace = true }
+dial9-trace-format = { workspace = true, optional = true }
 pin-project-lite = "0.2"
 bon = "3"
 # `rt` is needed for `tokio::runtime::worker_index()` (the span `worker_id`).
@@ -68,8 +68,11 @@ axum-08 = [
     "dep:tower",
     "dep:tower-service",
 ]
-## Tower middleware for ad-hoc spans (`span::Dial9SpanLayer`).
-tower = ["dep:tower-service", "dep:tower-layer"]
+## Ad-hoc span wrappers (`span` module: the `dial9_span!` macro, the future
+## combinator, and the sync guard). Independent of any async runtime.
+span = ["dep:dial9-trace-format"]
+## Tower middleware for ad-hoc spans (`span::Dial9SpanLayer`). Implies `span`.
+tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
 [dev-dependencies]
 dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
@@ -96,6 +99,11 @@ s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
 
+[[example]]
+name = "adhoc_spans"
+required-features = ["span"]
+
 [[bench]]
 name = "span_encode_bench"
 harness = false
+required-features = ["span"]
