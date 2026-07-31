@@ -99,39 +99,34 @@ function subtract(
   return Number.isFinite(delta) ? delta : null;
 }
 
-interface OrderedEvent {
-  event: CustomTraceEvent;
-  sourceIndex: number;
-}
-
 /**
  * Filter one event type, materialize it in timestamp order, parse the selected
  * field, and insert explicit null gaps for missing values. Gauges keep the
  * observations. Counters become deltas over [previous timestamp, current
  * timestamp); a monotonic decrease emits a reset marker and establishes a new
- * baseline instead of producing a negative delta. Sorting is stable for equal
- * timestamps through `sourceIndex`.
+ * baseline instead of producing a negative delta. Array sorting is stable, so
+ * equal timestamps retain their source order.
  */
 export function materializeFieldChartSeries(
   events: readonly CustomTraceEvent[],
   spec: FieldChartSpec,
 ): FieldChartSeries {
-  const ordered: OrderedEvent[] = [];
-  for (let i = 0; i < events.length; i++) {
-    const event = events[i]!;
-    if (event.name === spec.eventName) ordered.push({ event, sourceIndex: i });
+  const ordered: CustomTraceEvent[] = [];
+  for (const event of events) {
+    if (event.name === spec.eventName) ordered.push(event);
   }
-  ordered.sort(
-    (a, b) =>
-      a.event.timestamp - b.event.timestamp ||
-      a.sourceIndex - b.sourceIndex,
-  );
+  ordered.sort((a, b) => a.timestamp - b.timestamp);
 
   let unit: string | null = null;
+  let unitConflict = false;
   let previous: { timestamp: number; value: FieldChartNumeric } | null = null;
   const samples: FieldChartSample[] = [];
-  for (const { event } of ordered) {
-    unit ??= event.units?.[spec.fieldName] ?? null;
+  for (const event of ordered) {
+    const annotatedUnit = event.units?.[spec.fieldName] ?? null;
+    if (annotatedUnit !== null) {
+      if (unit === null) unit = annotatedUnit;
+      else if (annotatedUnit !== unit) unitConflict = true;
+    }
     const value = numericValue(event.fields?.[spec.fieldName] ?? null);
     if (value === null) {
       samples.push({
@@ -193,7 +188,7 @@ export function materializeFieldChartSeries(
 
   return {
     samples,
-    unit,
+    unit: unitConflict ? null : unit,
   };
 }
 
@@ -205,8 +200,11 @@ interface CacheEntry {
 
 export interface FieldChartSeriesCache {
   get(trace: ParsedTrace, spec: FieldChartSpec): FieldChartSeries;
-  /** Drop every materialized list whose panel no longer exists. */
-  reconcile(specs: readonly FieldChartSpec[]): void;
+  /** Drop lists for removed panels or a trace that is no longer current. */
+  reconcile(
+    trace: ParsedTrace | null,
+    specs: readonly FieldChartSpec[],
+  ): void;
   clear(): void;
   /** Diagnostic/test seam proving close/dispose releases retained series. */
   entryCount(): number;
@@ -238,10 +236,10 @@ export function createFieldChartSeriesCache(): FieldChartSeriesCache {
       entries.set(spec.id, { trace, spec, series });
       return series;
     },
-    reconcile(specs) {
+    reconcile(trace, specs) {
       const live = new Set(specs.map((spec) => spec.id));
-      for (const id of entries.keys()) {
-        if (!live.has(id)) entries.delete(id);
+      for (const [id, entry] of entries) {
+        if (!live.has(id) || entry.trace !== trace) entries.delete(id);
       }
     },
     clear() {

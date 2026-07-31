@@ -19,12 +19,13 @@ function event(
   name: string,
   timestamp: number,
   value: DecodedFieldValue | undefined,
+  unit: string | null = "bytes",
 ): CustomTraceEvent {
   return {
     name,
     timestamp,
     fields: value === undefined ? {} : { value },
-    units: { value: "bytes" },
+    units: unit === null ? null : { value: unit },
     fieldKinds: null,
   };
 }
@@ -70,27 +71,43 @@ describe("numeric field eligibility", () => {
 });
 
 describe("materializeFieldChartSeries", () => {
-  it("filters one event type, sorts by timestamp, and preserves exact bigints", () => {
+  it("sorts stably by timestamp and preserves exact bigints", () => {
     const series = materializeFieldChartSeries(
       [
         event("Other", 1, 99),
         event("Metric", 30, "9007199254740995"),
         event("Metric", 10, 9_007_199_254_740_993n),
         event("Metric", 20, "9007199254740994"),
+        event("Metric", 20, "9007199254740996"),
       ],
       spec(),
     );
 
-    expect(series.samples.map((sample) => sample.timestamp)).toEqual([10, 20, 30]);
+    expect(series.samples.map((sample) => sample.timestamp)).toEqual([
+      10,
+      20,
+      20,
+      30,
+    ]);
     expect(series.samples.map((sample) => sample.value)).toEqual([
       9_007_199_254_740_993n,
       9_007_199_254_740_994n,
+      9_007_199_254_740_996n,
       9_007_199_254_740_995n,
     ]);
     expect(series.samples.every((sample) => sample.endTimestamp === null)).toBe(
       true,
     );
     expect(series.unit).toBe("bytes");
+  });
+
+  it("does not apply a unit when concatenated schemas disagree", () => {
+    const series = materializeFieldChartSeries(
+      [event("Metric", 1, 10, "bytes"), event("Metric", 2, 20, "ns")],
+      spec(),
+    );
+
+    expect(series.unit).toBeNull();
   });
 
   it("uses explicit null gaps for absent/non-numeric values", () => {
@@ -232,7 +249,22 @@ describe("field-chart lifecycle", () => {
     cache.get(trace, spec());
     expect(cache.entryCount()).toBe(1);
 
-    cache.reconcile([]);
+    cache.reconcile(trace, []);
+    expect(cache.entryCount()).toBe(0);
+  });
+
+  it("drops materialized lists from a replaced trace before repaint", () => {
+    const cache = createFieldChartSeriesCache();
+    const firstTrace = {
+      customEvents: [event("Metric", 1, 10)],
+    } as ParsedTrace;
+    const nextTrace = {
+      customEvents: [event("Metric", 2, 20)],
+    } as ParsedTrace;
+    cache.get(firstTrace, spec());
+
+    cache.reconcile(nextTrace, [spec()]);
+
     expect(cache.entryCount()).toBe(0);
   });
 });

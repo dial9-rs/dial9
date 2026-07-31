@@ -256,12 +256,17 @@ describe("field-chart hover", () => {
 
     expect(
       fieldChartTooltipRows(
-        { value: 3n },
+        { value: 12_345_678_901_234_567_890n },
         spec,
         "widgets",
       ),
     ).toEqual([
-      [{ label: "requests_total:", value: "3 widgets" }],
+      [
+        {
+          label: "requests_total:",
+          value: "12345678901234567890 widgets",
+        },
+      ],
     ]);
   });
 });

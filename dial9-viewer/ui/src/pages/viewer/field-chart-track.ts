@@ -240,7 +240,7 @@ export function fieldChartTooltipRows(
     [
       {
         label: `${spec.fieldName}:`,
-        value: compactFieldChartValue(hover.value, unit),
+        value: fieldChartTooltipValue(hover.value, unit),
       },
     ],
   ];
@@ -520,31 +520,45 @@ function compactBigInt(value: bigint): string {
     : `${sign}${digits[0]}.${digits.slice(1, 4)}e${digits.length - 1}`;
 }
 
+function unitAwareFieldChartValue(
+  value: FieldChartNumeric,
+  unit: string | null,
+  raw: string,
+): string {
+  if (unit === null) return raw;
+  if (!["ns", "us", "ms", "s", "bytes"].includes(unit)) {
+    return `${raw} ${unit}`;
+  }
+  const safeBigInt =
+    typeof value !== "bigint" ||
+    (value >= -MAX_SAFE_BIGINT && value <= MAX_SAFE_BIGINT);
+  const n = Number(value);
+  const multiplier =
+    unit === "us"
+      ? 1e3
+      : unit === "ms"
+        ? 1e6
+        : unit === "s"
+          ? 1e9
+          : 1;
+  return safeBigInt && n >= 0 && Number.isFinite(n * multiplier)
+    ? formatFieldValue(value, unit)
+    : `${raw} ${unit}`;
+}
+
+function fieldChartTooltipValue(
+  value: FieldChartNumeric,
+  unit: string | null,
+): string {
+  return unitAwareFieldChartValue(value, unit, String(value));
+}
+
 export function compactFieldChartValue(
   value: FieldChartNumeric,
   unit: string | null,
 ): string {
   const raw = typeof value === "bigint" ? compactBigInt(value) : String(value);
-  if (unit !== null) {
-    if (!["ns", "us", "ms", "s", "bytes"].includes(unit)) {
-      return `${raw} ${unit}`;
-    }
-    const safeBigInt =
-      typeof value !== "bigint" ||
-      (value >= -MAX_SAFE_BIGINT && value <= MAX_SAFE_BIGINT);
-    const n = Number(value);
-    const multiplier =
-      unit === "us"
-        ? 1e3
-        : unit === "ms"
-          ? 1e6
-          : unit === "s"
-            ? 1e9
-            : 1;
-    return safeBigInt && n >= 0 && Number.isFinite(n * multiplier)
-      ? formatFieldValue(value, unit)
-      : `${raw} ${unit}`;
-  }
+  if (unit !== null) return unitAwareFieldChartValue(value, unit, raw);
   if (typeof value === "bigint") return raw;
   if (value === 0) return "0";
   const abs = Math.abs(value);
@@ -717,7 +731,6 @@ export interface FieldChartTrackController {
 }
 
 interface FieldChartPaintState {
-  series: FieldChartSeries;
   spec: FieldChartSpec;
   viewStart: number;
   viewEnd: number;
@@ -768,13 +781,19 @@ export function createFieldChartTrack(
       const binding = bindings.get(id);
       if (binding === undefined || binding.canvas !== canvas) return;
       const current = binding.state;
+      const trace = store.getState().trace.trace;
+      if (trace === null) {
+        tooltip?.hide();
+        return;
+      }
+      const series = cache.get(trace, current.spec);
       const x = Math.min(Math.max(0, event.offsetX), current.drawW);
       const timestamp =
         current.viewStart +
         (x / (current.drawW || 1)) *
           (current.viewEnd - current.viewStart);
       const hover = fieldChartHoverAt(
-        current.series,
+        series,
         current.spec.kind,
         timestamp,
       );
@@ -789,7 +808,7 @@ export function createFieldChartTrack(
           fieldChartTooltipRows(
             hover,
             current.spec,
-            current.series.unit,
+            series.unit,
           ),
         ),
         event,
@@ -808,8 +827,11 @@ export function createFieldChartTrack(
 
   return {
     reconcile(specs) {
-      cache.reconcile(specs);
-      const live = new Set(specs.map((spec) => spec.id));
+      const trace = store.getState().trace.trace;
+      cache.reconcile(trace, specs);
+      const live = new Set(
+        trace === null ? [] : specs.map((spec) => spec.id),
+      );
       for (const id of bindings.keys()) {
         if (!live.has(id)) removeBinding(id);
       }
@@ -836,7 +858,6 @@ export function createFieldChartTrack(
       );
       const series = cache.get(trace, spec);
       bindCanvas(canvas, {
-        series,
         spec,
         viewStart,
         viewEnd,

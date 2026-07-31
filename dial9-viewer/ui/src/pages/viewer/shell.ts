@@ -59,6 +59,14 @@ const HINT_CHIPS: readonly string[] = [
   "? help",
 ];
 
+const SHELL_RENDER_SLICES = [
+  "trace",
+  "viewport",
+  "selection",
+  "poi",
+  "uiPrefs",
+] as const;
+
 /** Build the view model for a render pass from the current store state. */
 function viewModel(state: StoreState): TracksViewModel {
   const trace = state.trace.trace;
@@ -262,9 +270,10 @@ export interface MountedShell {
 
 /**
  * Mount the shell into `root`, wired to `store`. Subscribes to the slice set
- * that changes the chrome (trace/viewport/selection/uiPrefs/view) and renders +
- * sizes track canvases each frame INSIDE the store's notification tick (the
- * scheduler is the only place renders run and layout reads are batched).
+ * that changes the chrome (trace/viewport/selection/poi/uiPrefs or the
+ * dynamic chart list) and renders + sizes track canvases each frame INSIDE the
+ * store's notification tick (the scheduler is the only place renders run and
+ * layout reads are batched).
  * Returns handles the entry needs (toast region, teardown).
  */
 export function mountShell(
@@ -295,6 +304,7 @@ export function mountShell(
   // track column bind to. Persistence (hydrate on boot + save on change) is
   // wired at the page entry (main.ts) so the store itself stays pure.
   const trackActions = createTrackManageActions(store);
+  let renderedFieldCharts = store.getState().view.fieldCharts;
 
   function renderPass(): void {
     const state = store.getState();
@@ -327,14 +337,22 @@ export function mountShell(
         fieldChartTrack,
       );
     }
+    renderedFieldCharts = vm.fieldCharts;
   }
 
-  // Render the chrome whenever any chrome-affecting slice changes. The shell is
-  // chrome, so it renders declaratively from state; track/inspector content
-  // components add their own slice subscriptions against this store.
+  // Most `view` updates belong only to inspector/popout content. Subscribe so
+  // dynamic charts still appear immediately, but do not resize every canvas
+  // unless that specific list changed.
   const unsubscribe = store.subscribe(
-    ["trace", "viewport", "selection", "poi", "uiPrefs", "view"],
-    () => renderPass(),
+    [...SHELL_RENDER_SLICES, "view"],
+    (state, changed) => {
+      if (
+        state.view.fieldCharts !== renderedFieldCharts ||
+        SHELL_RENDER_SLICES.some((slice) => changed.has(slice))
+      ) {
+        renderPass();
+      }
+    },
   );
 
   // Resize reflow: re-render on window resize so the track canvases refit.
