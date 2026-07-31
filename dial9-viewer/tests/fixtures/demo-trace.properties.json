@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 11861,
+  "total_samples": 11013,
   "by_source": {
-    "0": 113,
-    "1": 11748
+    "0": 221,
+    "1": 10792
   },
   "on_off_all": {
-    "on_runtime": 11854,
-    "off_runtime": 7
+    "on_runtime": 10992,
+    "off_runtime": 21
   },
   "on_off_by_source": {
     "0": {
-      "on": 106,
-      "off": 7
+      "on": 200,
+      "off": 21
     },
     "1": {
-      "on": 11748,
+      "on": 10792,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 113,
-    "distinct_stacks": 105,
-    "stack_sig_digest": "973cab9ab1812686",
-    "ts_count": 113,
-    "ts_span_ns": 3722997710,
-    "ts_delta_digest": "628a66cb2f83e904",
+    "count": 221,
+    "distinct_stacks": 187,
+    "stack_sig_digest": "33589bb18e4a0eff",
+    "ts_count": 221,
+    "ts_span_ns": 3987006752,
+    "ts_delta_digest": "42f0f41c8c924c75",
     "top_stacks": [
       {
-        "count": 3,
-        "depth": 95,
-        "leaf": "axum::routing::Router<S>::call_with_state"
-      },
-      {
-        "count": 2,
-        "depth": 106,
-        "leaf": "[unknown] 0xffff8b16eacc"
-      },
-      {
-        "count": 2,
-        "depth": 89,
-        "leaf": "_Unwind_Find_FDE"
-      },
-      {
-        "count": 2,
-        "depth": 107,
-        "leaf": "[unknown] 0xffff8b34de58"
-      },
-      {
-        "count": 2,
+        "count": 8,
         "depth": 113,
-        "leaf": "[unknown] 0xffff8b34c918"
+        "leaf": "_Unwind_Find_FDE"
       },
       {
-        "count": 2,
+        "count": 4,
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8542de58"
+      },
+      {
+        "count": 4,
+        "depth": 106,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 4,
+        "depth": 113,
+        "leaf": "[unknown] 0xffff8525d200"
+      },
+      {
+        "count": 3,
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8542de54"
+      },
+      {
+        "count": 3,
         "depth": 107,
         "leaf": "_Unwind_Find_FDE"
       },
       {
-        "count": 2,
-        "depth": 106,
-        "leaf": "[unknown] 0xffff8b34de60"
+        "count": 3,
+        "depth": 113,
+        "leaf": "[unknown] 0xffff8542de60"
       },
       {
-        "count": 1,
-        "depth": 126,
-        "leaf": "<aws_smithy_runtime::client::http::body::minimum_throughput::UploadThroughputCheckFuture as core::future::future::Future>::poll"
+        "count": 3,
+        "depth": 31,
+        "leaf": "write"
       }
     ]
   }
