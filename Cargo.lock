@@ -2037,7 +2037,6 @@ dependencies = [
  "bon",
  "criterion 0.5.1",
  "dial9-core",
- "dial9-tokio-telemetry",
  "dial9-trace-format",
  "flate2",
  "futures-util",
