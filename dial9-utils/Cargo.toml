@@ -46,6 +46,7 @@ serde_json = "1"
 [features]
 ## A traced replacement for `axum::serve` from Axum 0.7.
 axum-07 = [
+    "dep:dial9-trace-format",
     "dep:axum-0-7",
     "dep:axum-core-0-4",
     "dep:futures-util",
@@ -58,6 +59,7 @@ axum-07 = [
 ]
 ## A traced replacement for `axum::serve` from Axum 0.8.
 axum-08 = [
+    "dep:dial9-trace-format",
     "dep:axum-0-8",
     "dep:axum-core-0-5",
     "dep:futures-util",
