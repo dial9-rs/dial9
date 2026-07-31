@@ -226,11 +226,8 @@ export function fieldChartHoverAt(
             afterNumeric.timestamp - timestamp
         ? beforeNumeric
         : afterNumeric;
-  return sample === null
-    ? null
-    : {
-        value: sample.value,
-      };
+  if (sample === null || sample.value === null) return null;
+  return { value: sample.value };
 }
 
 /** Structured content for the shared viewer tooltip. */

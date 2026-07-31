@@ -762,9 +762,13 @@ function encodeFieldChart(chart: FieldChartSpec): string | null {
 
 function decodeFieldChart(value: string): FieldChartSpec | null {
   const parts = value.split(FIELD_CHART_URL_SEPARATOR);
-  if (parts.length !== 4 || parts.some((part) => part.length === 0)) return null;
+  if (parts.length !== 4) return null;
   const [id, eventName, fieldName, kind] = parts;
   if (
+    !id ||
+    !eventName ||
+    !fieldName ||
+    !kind ||
     !isValidFieldChartTrackId(id) ||
     !isFieldChartNameSupported(eventName) ||
     !isFieldChartNameSupported(fieldName) ||
