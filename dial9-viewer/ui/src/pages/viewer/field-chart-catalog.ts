@@ -53,25 +53,28 @@ export function buildFieldChartCatalog(
 
   for (const event of events) {
     if (!isFieldChartNameSupported(event.name)) continue;
-    const fieldNames = new Set([
-      ...Object.keys(event.fields ?? {}),
-      ...Object.keys(event.fieldKinds ?? {}),
-    ]);
+    const eventFields = event.fields ?? {};
+    const fieldNames = Object.keys(eventFields);
+    for (const annotatedField of Object.keys(event.fieldKinds ?? {})) {
+      if (!Object.hasOwn(eventFields, annotatedField)) {
+        fieldNames.push(annotatedField);
+      }
+    }
     for (const fieldName of fieldNames) {
       if (!isFieldChartNameSupported(fieldName)) continue;
       const kind = fieldChartKindFromAnnotation(event.fieldKinds?.[fieldName]);
-      const numeric = isChartableNumericValue(event.fields?.[fieldName] ?? null);
+      const numeric = isChartableNumericValue(eventFields[fieldName] ?? null);
       if (kind === null && !numeric) continue;
 
-      let fields = byEvent.get(event.name);
-      if (fields === undefined) {
-        fields = new Map();
-        byEvent.set(event.name, fields);
+      let candidatesByField = byEvent.get(event.name);
+      if (candidatesByField === undefined) {
+        candidatesByField = new Map();
+        byEvent.set(event.name, candidatesByField);
       }
-      let candidate = fields.get(fieldName);
+      let candidate = candidatesByField.get(fieldName);
       if (candidate === undefined) {
         candidate = { fieldName, numericSeen: false, kinds: new Set() };
-        fields.set(fieldName, candidate);
+        candidatesByField.set(fieldName, candidate);
       }
       candidate.numericSeen ||= numeric;
       if (kind !== null) candidate.kinds.add(kind);

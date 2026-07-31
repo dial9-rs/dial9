@@ -101,15 +101,14 @@ export function mountFieldChartDialog(
   const back = doc.createElement("button");
   back.type = "button";
   back.textContent = "Back";
-  const actionSpacer = doc.createElement("span");
-  actionSpacer.className = "d9-field-chart-action-spacer";
   const cancel = doc.createElement("button");
   cancel.type = "button";
+  cancel.className = "d9-field-chart-cancel";
   const create = doc.createElement("button");
   create.type = "submit";
   create.className = "primary";
   create.textContent = "Create";
-  actions.append(back, actionSpacer, cancel, create);
+  actions.append(back, cancel, create);
 
   form.append(title, body, actions);
   dialog.appendChild(form);
@@ -233,7 +232,7 @@ export function mountFieldChartDialog(
       heading.textContent = "Annotated fields";
       section.appendChild(heading);
       if (filtered.annotated.length > 0) {
-        appendSourceGroups(section, filtered.annotated, true);
+        appendSourceGroups(section, filtered.annotated);
       } else {
         section.appendChild(emptyMessage("No annotated fields in this trace."));
       }
@@ -251,7 +250,7 @@ export function mountFieldChartDialog(
     );
     summary.textContent = `All other fields (${otherCount})`;
     details.appendChild(summary);
-    appendSourceGroups(details, filtered.other, false);
+    appendSourceGroups(details, filtered.other);
     details.addEventListener("toggle", () => {
       if (query.trim() === "") otherExpanded = details.open;
     });
@@ -268,7 +267,6 @@ export function mountFieldChartDialog(
   function appendSourceGroups(
     parent: HTMLElement,
     groups: readonly FieldChartSourceGroup[],
-    annotated: boolean,
   ): void {
     for (const group of groups) {
       const groupEl = doc.createElement("div");
@@ -280,16 +278,13 @@ export function mountFieldChartDialog(
       eventName.textContent = group.eventName;
       groupEl.appendChild(eventName);
       for (const source of group.fields) {
-        groupEl.appendChild(sourceButton(source, annotated));
+        groupEl.appendChild(sourceButton(source));
       }
       parent.appendChild(groupEl);
     }
   }
 
-  function sourceButton(
-    source: FieldChartSource,
-    annotated: boolean,
-  ): HTMLButtonElement {
+  function sourceButton(source: FieldChartSource): HTMLButtonElement {
     const button = doc.createElement("button");
     button.type = "button";
     button.className = "d9-field-chart-source-button";
@@ -299,17 +294,18 @@ export function mountFieldChartDialog(
     field.className = "d9-field-chart-field";
     field.textContent = source.fieldName;
     const meta = doc.createElement("span");
-    meta.className = annotated
+    meta.className = source.kind !== null
       ? "d9-field-chart-kind-badge"
       : "d9-field-chart-choose";
-    meta.textContent =
-      source.kind === null ? "Choose type" : kindOption(source.kind).label;
+    const kindLabel =
+      source.kind === null ? null : KIND_OPTION_CONTENT[source.kind].label;
+    meta.textContent = kindLabel ?? "Choose type";
     button.append(field, meta);
     button.setAttribute(
       "aria-label",
       source.kind === null
         ? `Choose chart type for ${source.eventName}.${source.fieldName}`
-        : `Create ${source.eventName}.${source.fieldName} as ${kindOption(source.kind).label}`,
+        : `Create ${source.eventName}.${source.fieldName} as ${kindLabel}`,
     );
     button.addEventListener("click", () => {
       if (source.kind !== null) {
@@ -407,10 +403,6 @@ export function mountFieldChartDialog(
       button.classList.toggle("selected", selected);
       button.setAttribute("aria-pressed", String(selected));
     }
-  }
-
-  function kindOption(chartKind: FieldChartKind): KindOption {
-    return { kind: chartKind, ...KIND_OPTION_CONTENT[chartKind] };
   }
 
   back.addEventListener("click", () => {
