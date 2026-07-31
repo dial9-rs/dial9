@@ -78,9 +78,6 @@ tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
 [dev-dependencies]
 dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
-# The span tests need a traced Tokio runtime; that lives in dial9-tokio-telemetry.
-# Dev-dependency only, so no dependency cycle.
-dial9-tokio-telemetry = { path = "../dial9-tokio-telemetry" }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 assert2 = { workspace = true }
 async-trait = "0.1.89"

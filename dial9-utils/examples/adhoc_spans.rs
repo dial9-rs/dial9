@@ -9,7 +9,9 @@
 //! ```sh
 //! cargo run -p dial9-utils --example adhoc_spans --features tower
 //! ```
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9_core::buffer::DiskBuffer;
+use dial9_core::handle::set_tl_handle;
+use dial9_core::recorder::recorder;
 use dial9_utils::dial9_span;
 use dial9_utils::span::{Instrument as _, Span as _};
 use std::time::Duration;
@@ -137,11 +139,17 @@ async fn tower_demo() {
 fn main() {
     let writer = DiskBuffer::single_file("adhoc_spans_trace.bin").unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-            t.enable_all();
-        })
+
+    // Install the recorder handle on the block_on thread and each worker. The
+    // ad-hoc spans need only dial9-core, so recording is set up without the
+    // dial9-tokio-telemetry runtime integration.
+    set_tl_handle(recorder.handle().clone());
+    let worker_handle = recorder.handle().clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .on_thread_start(move || set_tl_handle(worker_handle.clone()))
+        .build()
         .unwrap();
 
     runtime.block_on(async {
@@ -162,8 +170,10 @@ fn main() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(recorder);
+    // Drop the runtime first so worker threads exit and flush their
+    // thread-local buffers, then finalize the segment.
     drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(0));
 
     println!("wrote adhoc_spans_trace.0.bin — open it in the dial9 viewer");
     #[cfg(not(feature = "tower"))]

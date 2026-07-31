@@ -5,7 +5,9 @@
 //! layer produces.
 #![cfg(feature = "span")]
 
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9_core::buffer::DiskBuffer;
+use dial9_core::handle::set_tl_handle;
+use dial9_core::recorder::recorder;
 use dial9_trace_format::types::FieldValueRef;
 use dial9_utils::dial9_span;
 use dial9_utils::span::{Dial9Span, Instrument as _, Span as _};
@@ -117,11 +119,19 @@ where
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(worker_threads);
-            t.enable_all();
-        })
+
+    // Install the recorder handle on the block_on thread and every worker, so
+    // spans emit no matter which thread polls them. The spans need only
+    // dial9-core, so the tests set up recording without the
+    // dial9-tokio-telemetry runtime attach (which is unpublishable as a
+    // dev-dependency and broke `cargo package`).
+    set_tl_handle(recorder.handle().clone());
+    let worker_handle = recorder.handle().clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .on_thread_start(move || set_tl_handle(worker_handle.clone()))
+        .build()
         .unwrap();
 
     runtime.block_on(async {
@@ -129,8 +139,10 @@ where
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(recorder);
+    // Drop the runtime first so worker threads exit and flush their
+    // thread-local buffers, then finalize the segment.
     drop(runtime);
+    recorder.graceful_shutdown(Duration::ZERO);
 
     decode(&dir.path().join("trace.0.bin"))
 }
