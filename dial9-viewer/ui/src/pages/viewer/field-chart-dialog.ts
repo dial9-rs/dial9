@@ -258,11 +258,18 @@ export function mountFieldChartDialog(
     );
     summary.textContent = `All other fields (${otherCount})`;
     details.appendChild(summary);
-    appendSourceGroups(details, filtered.other);
+    let populated = false;
+    const populate = (): void => {
+      if (!details.open || populated) return;
+      appendSourceGroups(details, filtered.other);
+      populated = true;
+    };
     details.addEventListener("toggle", () => {
       if (query.trim() === "") otherExpanded = details.open;
+      populate();
     });
     results.appendChild(details);
+    populate();
   }
 
   function emptyMessage(text: string): HTMLElement {
