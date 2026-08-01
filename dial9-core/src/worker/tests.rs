@@ -439,7 +439,7 @@ mod worker_pipeline_tests {
     /// A retryable error keeps the segment on disk for a later attempt. (The
     /// real S3 transient-failure and circuit-breaker-open paths both surface
     /// as a retryable transfer error; they're covered against real S3 in
-    /// `dial9-s3`.)
+    /// `dial9-destinations-s3`.)
     #[tokio::test]
     async fn failed_segment_kept_on_transient_error() {
         let dir = tempfile::tempdir().unwrap();

@@ -3,7 +3,7 @@
 mod common;
 
 use common::{fast_sealing_writer, wait_for_sealed_segment};
-use dial9_s3::S3Config;
+use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::dump::DumpError;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,

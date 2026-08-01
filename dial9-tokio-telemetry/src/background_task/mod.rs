@@ -14,9 +14,9 @@ pub use dial9_core::pipeline::{ProcessError, ProcessErrorKind, SegmentData, Segm
 pub use dial9_core::worker::BackgroundTaskConfig;
 pub(crate) use dial9_core::worker::processors::{GzipCompressor, WriteBackProcessor};
 #[cfg(feature = "worker-s3")]
-pub use dial9_s3;
+pub use dial9_destinations_s3;
 #[cfg(feature = "worker-s3")]
-pub(crate) use dial9_s3::S3PipelineUploader;
+pub(crate) use dial9_destinations_s3::S3PipelineUploader;
 
 /// Closure-scoped builder for assembling a custom processor pipeline.
 ///
@@ -99,7 +99,7 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     ///
     /// [`s3_with_client`]: Self::s3_with_client
     #[cfg(feature = "worker-s3")]
-    pub fn s3(mut self, config: dial9_s3::S3Config) -> Self {
+    pub fn s3(mut self, config: dial9_destinations_s3::S3Config) -> Self {
         self.processors
             .push(Box::new(S3PipelineUploader::new(config, None)));
         self
@@ -111,7 +111,7 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     #[cfg(feature = "worker-s3")]
     pub fn s3_with_client(
         mut self,
-        config: dial9_s3::S3Config,
+        config: dial9_destinations_s3::S3Config,
         client: aws_sdk_s3::Client,
     ) -> Self {
         self.processors
@@ -124,7 +124,11 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     ///
     /// The future is polled when the pipeline worker starts.
     #[cfg(feature = "worker-s3")]
-    pub fn s3_with_client_future<F>(mut self, config: dial9_s3::S3Config, client_future: F) -> Self
+    pub fn s3_with_client_future<F>(
+        mut self,
+        config: dial9_destinations_s3::S3Config,
+        client_future: F,
+    ) -> Self
     where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {

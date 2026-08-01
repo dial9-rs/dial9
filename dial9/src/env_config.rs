@@ -444,8 +444,8 @@ fn build_memory_profiling_config(
 }
 
 #[cfg(feature = "worker-s3")]
-fn build_s3_config(config: ResolvedS3Config) -> dial9_s3::S3Config {
-    dial9_s3::S3Config::builder()
+fn build_s3_config(config: ResolvedS3Config) -> dial9_destinations_s3::S3Config {
+    dial9_destinations_s3::S3Config::builder()
         .bucket(config.bucket)
         .service_name(config.service_name.unwrap_or_else(default_service_name))
         .prefix(config.prefix)

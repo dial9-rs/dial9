@@ -1656,7 +1656,7 @@ mod tests {
     #[test]
     fn recorder_builder_s3_config_builds_successfully() {
         use crate::telemetry::RecorderPipelineExt;
-        use dial9_s3::S3Config;
+        use dial9_destinations_s3::S3Config;
 
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 

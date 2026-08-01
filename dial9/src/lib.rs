@@ -60,7 +60,7 @@ pub mod core {
 /// Upload sealed segments to S3.
 #[cfg(all(feature = "tokio", feature = "worker-s3"))]
 pub mod s3 {
-    pub use dial9_s3::{
+    pub use dial9_destinations_s3::{
         InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn, S3PipelineUploader,
     };
 }

@@ -1,4 +1,4 @@
-# dial9-s3
+# dial9-destinations-s3
 
 The S3 upload destination for [dial9](https://crates.io/crates/dial9): a pipeline
 stage that uploads sealed trace segments to S3.

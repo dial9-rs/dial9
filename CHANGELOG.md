@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-s3` crate. The `worker-s3` feature is unchanged.
+- S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-destinations-s3` crate. The `worker-s3` feature is unchanged.
 
 ### Added
 

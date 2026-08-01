@@ -67,7 +67,7 @@ time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 metrique-timesource = "0.1"
 shuttle = { version = "0.9.1", optional = true }
 dial9-core = { workspace = true, features = ["pipeline"] }
-dial9-s3 = { workspace = true, optional = true }
+dial9-destinations-s3 = { workspace = true, optional = true }
 
 [features]
 analysis = []
@@ -106,7 +106,7 @@ memory-profiling = [
     "dial9-perf-self-profile/memory-profiling",
 ]
 worker-s3 = [
-    "dep:dial9-s3",
+    "dep:dial9-destinations-s3",
     "dep:aws-sdk-s3",
     "dep:aws-config",
     "dep:time",
@@ -152,7 +152,7 @@ tokio = { version = "1.52.0", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dial9-s3 = { workspace = true }
+dial9-destinations-s3 = { workspace = true }
 s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
