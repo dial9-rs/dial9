@@ -43,16 +43,17 @@ fn put_error_kind(e: SdkError<PutObjectError>) -> ProcessErrorKind {
     ProcessErrorKind::transfer(Box::new(e), retryable)
 }
 
-/// Metadata about a sealed trace segment, passed to custom key functions.
+/// What [`S3KeyFn`] gets to build an object key from.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct SegmentInfo {
+pub struct KeyContext {
     /// The segment index (e.g. 3 for `trace.3.bin`).
     pub index: u32,
     /// Segment creation time as seconds since the Unix epoch.
     pub epoch_secs: u64,
-    /// Identifier for this process lifetime. A new value each application
-    /// start, so segment indices from different runs do not collide.
+    /// Identifier for this process lifetime, from the uploader's
+    /// [`S3Config`]. A new value each application start, so segment indices
+    /// from different runs do not collide.
     pub boot_id: String,
 }
 
@@ -62,14 +63,14 @@ pub struct SegmentInfo {
 /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin.gz`.
 pub trait S3KeyFn: Send + Sync {
     /// Generate the S3 object key for the given segment.
-    fn object_key(&self, segment: &SegmentInfo) -> String;
+    fn object_key(&self, segment: &KeyContext) -> String;
 }
 
 impl<F> S3KeyFn for F
 where
-    F: Fn(&SegmentInfo) -> String + Send + Sync,
+    F: Fn(&KeyContext) -> String + Send + Sync,
 {
-    fn object_key(&self, segment: &SegmentInfo) -> String {
+    fn object_key(&self, segment: &KeyContext) -> String {
         self(segment)
     }
 }
@@ -199,7 +200,7 @@ impl S3Config {
             .unwrap_or(0);
 
         if let Some(key_fn) = &self.key_fn {
-            let info = SegmentInfo {
+            let info = KeyContext {
                 index: segment.index(),
                 epoch_secs,
                 boot_id: self.boot_id.clone(),
@@ -1007,7 +1008,7 @@ mod tests {
             .bucket("test-bucket")
             .service_name("svc")
             .instance_path("host")
-            .key_fn(|segment: &SegmentInfo| {
+            .key_fn(|segment: &KeyContext| {
                 format!("custom/{}-{}.bin.gz", segment.epoch_secs, segment.index)
             })
             .build();

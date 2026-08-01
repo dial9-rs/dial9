@@ -228,7 +228,7 @@ fn main() -> std::io::Result<()> {
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
     let recorder = if let Some(bucket) = &args.s3_bucket {
-        use dial9::core::pipeline::s3::S3Config;
+        use dial9::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)

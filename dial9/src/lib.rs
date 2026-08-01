@@ -40,7 +40,7 @@ pub mod core {
     pub use dial9_core::{dump, worker};
 
     /// Segment pipeline: processors, offline symbolization, and (with `tokio`)
-    /// the pipeline builder, worker config, and S3 upload stage.
+    /// the pipeline builder and worker config.
     #[cfg(feature = "pipeline")]
     pub mod pipeline {
         pub use dial9_core::pipeline::{
@@ -54,10 +54,15 @@ pub mod core {
 
         #[cfg(feature = "tokio")]
         pub use dial9_tokio_telemetry::background_task::{BackgroundTaskConfig, PipelineBuilder};
-
-        #[cfg(all(feature = "tokio", feature = "worker-s3"))]
-        pub use dial9_tokio_telemetry::background_task::s3;
     }
+}
+
+/// Upload sealed segments to S3.
+#[cfg(all(feature = "tokio", feature = "worker-s3"))]
+pub mod s3 {
+    pub use dial9_s3::{
+        InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn, S3PipelineUploader,
+    };
 }
 
 use crate::core::{Encodable, current_handle};

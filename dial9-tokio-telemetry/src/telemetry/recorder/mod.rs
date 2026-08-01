@@ -1655,8 +1655,8 @@ mod tests {
     #[cfg(feature = "worker-s3")]
     #[test]
     fn recorder_builder_s3_config_builds_successfully() {
-        use crate::background_task::s3::S3Config;
         use crate::telemetry::RecorderPipelineExt;
+        use dial9_s3::S3Config;
 
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 

@@ -237,7 +237,7 @@ from the trace. `dial9::block_on` spawns it first. `#[dial9::main]` already does
 # mod inner {
 use std::io;
 
-use dial9::core::pipeline::s3::S3Config;
+use dial9::s3::S3Config;
 use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
@@ -726,7 +726,7 @@ dial9 = { version = "0.5", features = ["worker-s3"] }
 # mod inner {
 use std::io;
 
-use dial9::core::pipeline::s3::S3Config;
+use dial9::s3::S3Config;
 use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
@@ -767,7 +767,7 @@ For custom credentials or AWS SDK settings, defer client construction to the
 pipeline worker runtime:
 
 ```rust,no_run
-use dial9::core::pipeline::s3::S3Config;
+use dial9::s3::S3Config;
 use dial9::{Dial9HandleTokioExt, DiskBuffer, RecorderS3ClientExt, TokioAttachOptions};
 use std::time::Duration;
 
@@ -824,7 +824,7 @@ To run with **no filesystem dependency** (disk unavailable, read-only, or unwelc
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # mod inner {
-use dial9::core::pipeline::s3::S3Config;
+use dial9::s3::S3Config;
 use dial9::{MemoryBuffer, RecorderPipelineExt, recorder};
 
 # fn example() -> std::io::Result<()> {
