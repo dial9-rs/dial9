@@ -4,7 +4,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::{
-    MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder,
+    MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -30,11 +30,7 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
     // Generate park/unpark cycles by spawning work that yields.
     rt.block_on(async {

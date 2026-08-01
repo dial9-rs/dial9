@@ -14,16 +14,19 @@ mod fluent_builder {
     use std::io;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use dial9::{AttachedRuntime, DiskBuffer, Recorder, RecorderTokioExt};
+    use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, Recorder, TokioAttachOptions};
 
     use super::tmp_base_path;
 
     /// Attach a default multi-thread runtime to `recorder` and hand both to the
     /// macro.
     fn with_runtime(recorder: Recorder, worker_threads: usize) -> io::Result<AttachedRuntime> {
-        recorder.attach_tokio_runtime(|t| {
-            t.worker_threads(worker_threads);
-        })
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(worker_threads);
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+        Ok((recorder, runtime))
     }
 
     fn test_config() -> io::Result<AttachedRuntime> {
@@ -178,9 +181,13 @@ mod fluent_builder {
     // --- Disabled telemetry ---
 
     fn disabled_config_default() -> io::Result<AttachedRuntime> {
-        dial9::recorder_disabled().attach_tokio_runtime(|t| {
-            t.enable_all();
-        })
+        let recorder = dial9::recorder_disabled();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+        Ok((recorder, runtime))
     }
 
     #[dial9::main(config = disabled_config)]
@@ -257,7 +264,9 @@ mod in_memory {
     use dial9::Dial9Handle;
     use dial9::Dial9TokioHandle;
     use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
-    use dial9::{AttachedRuntime, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt};
+    use dial9::{
+        AttachedRuntime, Dial9HandleTokioExt, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions,
+    };
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -281,12 +290,15 @@ mod in_memory {
             .max_total_size(16 * 1024 * 1024)
             .build()
             .expect("in-memory writer build failed");
-        dial9::recorder(writer)
+        let recorder = dial9::recorder(writer)
             .with_custom_pipeline(|p| p.pipe(NoopProcessor))
-            .build()
-            .attach_tokio_runtime(|t| {
-                t.enable_all();
-            })
+            .build();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+        Ok((recorder, runtime))
     }
 
     #[dial9::main(config = memory_config)]
@@ -315,7 +327,7 @@ mod fluent_builder_fallback {
     use std::path::PathBuf;
 
     use dial9::Dial9Handle;
-    use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt};
+    use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions};
 
     use super::tmp_base_path;
 
@@ -327,11 +339,13 @@ mod fluent_builder_fallback {
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build();
-        dial9::recorder_or_disabled(writer)
-            .build()
-            .attach_tokio_runtime(|t| {
-                t.enable_all();
-            })
+        let recorder = dial9::recorder_or_disabled(writer).build();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+        Ok((recorder, runtime))
     }
 
     fn fallback_config() -> io::Result<AttachedRuntime> {
@@ -378,19 +392,21 @@ mod fluent_builder_fallback {
     }
 }
 
-/// `Recorder::attach_tokio_runtime` builds an instrumented runtime and hands back both.
+/// `Dial9HandleTokioExt::attach_tokio_runtime` builds an instrumented runtime
+/// from a recorder's handle.
 mod attach_tokio_runtime {
-    use dial9::{MemoryBuffer, RecorderTokioExt, TokioAttachOptions};
+    use dial9::{AttachedRuntime, Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions};
 
     #[test]
     fn builds_an_instrumented_runtime() {
-        let (recorder, runtime) = dial9::recorder(MemoryBuffer::new(4 * 1024 * 1024).unwrap())
-            .build()
-            .attach_tokio_runtime_with(
+        let recorder = dial9::recorder(MemoryBuffer::new(4 * 1024 * 1024).unwrap()).build();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(2);
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(
+                builder,
                 TokioAttachOptions::builder().runtime_name("main").build(),
-                |t| {
-                    t.worker_threads(2);
-                },
             )
             .expect("build tokio runtime");
 
@@ -404,17 +420,29 @@ mod attach_tokio_runtime {
     /// A disabled recorder still yields a usable runtime, just an untraced one.
     #[test]
     fn disabled_recorder_gives_a_plain_runtime() {
-        let (recorder, runtime) = dial9::recorder_disabled()
-            .attach_tokio_runtime(|_| {})
+        let recorder = dial9::recorder_disabled();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())
             .expect("build tokio runtime");
 
         assert_eq!(runtime.block_on(async { 42 }), 42);
         assert!(!recorder.handle().is_enabled());
     }
 
-    /// `attach_tokio_runtime`'s return value is exactly what `config` must produce, so
-    /// it goes straight into `#[dial9::main]` — nothing to unwrap or assemble.
-    #[dial9::main(config = || dial9::recorder_disabled().attach_tokio_runtime(|t| { t.worker_threads(2); }))]
+    /// An inline `config` closure that attaches a runtime and hands
+    /// `#[dial9::main]` the recorder and runtime it expects.
+    #[dial9::main(config = || -> std::io::Result<AttachedRuntime> {
+        let recorder = dial9::recorder_disabled();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(2);
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+        Ok((recorder, runtime))
+    })]
     async fn runs_from_an_attach_runtime_config() -> u32 {
         dial9::spawn(async { 21 + 21 }).await.unwrap()
     }

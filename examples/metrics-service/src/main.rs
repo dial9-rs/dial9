@@ -14,9 +14,9 @@ use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
 use dial9::socket::SocketAcceptQueuesConfig;
 use dial9::tracing_layer::Dial9TracingLayer;
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, RecorderPipelineExt};
 use dial9::{Dial9TokioHandle, TaskDumpConfig, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt};
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
@@ -228,7 +228,7 @@ fn main() -> std::io::Result<()> {
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
     let recorder = if let Some(bucket) = &args.s3_bucket {
-        use dial9::core::pipeline::s3::S3Config;
+        use dial9::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)
@@ -253,14 +253,16 @@ fn main() -> std::io::Result<()> {
             .idle_threshold(Duration::from_millis(5))
             .build()
     });
-    let (recorder, runtime) = recorder.attach_tokio_runtime_with(
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(args.worker_threads);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .maybe_task_dump_config(task_dumps)
             .build(),
-        |t| {
-            t.worker_threads(args.worker_threads);
-        },
     )?;
 
     // Per-request metrique entries (routes::RequestMetrics) flow into the

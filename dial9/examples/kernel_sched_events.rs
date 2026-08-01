@@ -48,8 +48,8 @@
 use dial9::analysis::analysis_events::{CpuSampleSource, Dial9Event};
 use dial9::cpu::SchedEventConfig;
 use dial9::format::Decoder;
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {
@@ -67,20 +67,24 @@ fn main() {
     let trace_read_path = format!("{trace_dir}/kernel_sched_trace.0.bin");
 
     let writer = DiskBuffer::single_file(&trace_base).unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_sched_events(
             SchedEventConfig::default()
                 .sampling_interval(5)
                 .include_kernel(true),
         )
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(2);
-            },
         )
         .expect("build tokio runtime");
 

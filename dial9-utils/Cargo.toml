@@ -4,7 +4,7 @@ version = "0.5.0-rc0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pipeline and runtime integration utilities for dial9"
+description = "Opt-in integrations for dial9"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
@@ -14,9 +14,8 @@ missing_debug_implementations = "warn"
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
 pin-project-lite = "0.2"
-bon = "3"
 # `rt` is needed for `tokio::runtime::worker_index()` (the span `worker_id`).
-tokio = { version = "1", features = ["fs", "rt"], default-features = false }
+tokio = { version = "1", features = ["rt"], default-features = false }
 tracing = "0.1.44"
 axum-0-7 = { package = "axum", version = "0.7", optional = true }
 axum-core-0-4 = { package = "axum-core", version = "0.4", optional = true }
@@ -31,17 +30,6 @@ hyper-util = { version = "0.1", features = [
 tower = { version = "0.5", optional = true }
 tower-service = { version = "0.3", optional = true }
 tower-layer = { version = "0.3", optional = true }
-aws-sdk-s3 = { version = "1", default-features = false, features = [
-    "behavior-version-latest",
-    "sigv4a",
-    "rt-tokio",
-    "default-https-client",
-] }
-aws-config = { version = "1", default-features = false }
-time = { version = "0.3", features = ["formatting", "macros"] }
-hostname = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 [features]
 ## A traced replacement for `axum::serve` from Axum 0.7.
@@ -77,26 +65,18 @@ span = ["dep:dial9-trace-format"]
 tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
 [dev-dependencies]
-dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
+dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
-assert2 = { workspace = true }
-async-trait = "0.1.89"
 criterion = "0.5"
-flate2 = "1"
 tempfile = "3"
 tokio = { version = "1.52.0", features = [
     "rt",
     "rt-multi-thread",
     "macros",
-    "io-util",
     "net",
     "sync",
     "time",
-    "test-util",
 ] }
-s3s = "0.14.1"
-s3s-fs = "0.14.1"
-s3s-aws = "0.14.1"
 
 [[example]]
 name = "adhoc_spans"

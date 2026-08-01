@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
-use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions, recorder};
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder};
 
 /// Stand-in delivery processor. Inspects each segment, forwards unchanged.
 /// Replace with a real uploader in production.
@@ -65,16 +65,20 @@ async fn workload() {
 fn main() -> std::io::Result<()> {
     let writer = MemoryBuffer::new(16 * 1024 * 1024)?; // 16 MB
 
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_custom_pipeline(|p| p.pipe(PrintProcessor))
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .expect("build tokio runtime");
 

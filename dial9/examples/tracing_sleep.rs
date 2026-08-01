@@ -1,7 +1,7 @@
 //! Demonstrates tracing spans across async sleep boundaries.
 //! Each span is polled multiple times (producing multiple segments in the viewer).
 use dial9::tracing_layer::Dial9TracingLayer;
-use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
@@ -20,15 +20,18 @@ async fn inner_work(id: u32) {
 
 fn main() {
     let writer = DiskBuffer::single_file("tracing_sleep_trace.bin").unwrap();
-    let (recorder, rt) = recorder(writer)
-        .build()
-        .attach_tokio_runtime_with(
+    let recorder = recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(2);
-            },
         )
         .expect("build tokio runtime");
 

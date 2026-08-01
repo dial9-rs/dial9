@@ -270,7 +270,9 @@ mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
     use crate::telemetry::buffer::{DiskBuffer, MemoryBuffer};
-    use crate::telemetry::recorder::{Dial9TokioHandle, RecorderTokioExt, traced_handle};
+    use crate::telemetry::recorder::{
+        Dial9HandleTokioExt, Dial9TokioHandle, TokioAttachOptions, traced_handle,
+    };
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use dial9_core::recorder::recorder;
     use dial9_core::test_util;
@@ -320,12 +322,11 @@ mod tests {
         // Build a current-thread runtime so that all tasks — and all thread-local
         // BUFFER accesses — share a single thread with the test itself.
         let rec = recorder(DiskBuffer::single_file(&trace_path).unwrap()).build();
-        let (rec, runtime) = rec
-            .attach_tokio_runtime(|t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-                t.enable_all();
-                t.enable_all();
-            })
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let runtime = rec
+            .handle()
+            .attach_tokio_runtime(builder, TokioAttachOptions::default())
             .unwrap();
         let handle =
             Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));

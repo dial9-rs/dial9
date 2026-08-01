@@ -31,6 +31,7 @@ pub mod core {
     pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
     pub use dial9_core::handle::{self, clear_tl_handle, current_handle, set_tl_handle};
     pub use dial9_core::recorder;
+    pub use dial9_core::schema_extensions;
     pub use dial9_core::source::{self, FlushContext, Source};
     pub use dial9_core::thread::{ThreadTrackingGuard, current_tid};
 
@@ -39,7 +40,7 @@ pub mod core {
     pub use dial9_core::{dump, worker};
 
     /// Segment pipeline: processors, offline symbolization, and (with `tokio`)
-    /// the pipeline builder, worker config, and S3 upload stage.
+    /// the pipeline builder and worker config.
     #[cfg(feature = "pipeline")]
     pub mod pipeline {
         pub use dial9_core::pipeline::{
@@ -53,10 +54,15 @@ pub mod core {
 
         #[cfg(feature = "tokio")]
         pub use dial9_tokio_telemetry::background_task::{BackgroundTaskConfig, PipelineBuilder};
-
-        #[cfg(all(feature = "tokio", feature = "worker-s3"))]
-        pub use dial9_tokio_telemetry::background_task::s3;
     }
+}
+
+/// Upload sealed segments to S3.
+#[cfg(all(feature = "tokio", feature = "worker-s3"))]
+pub mod s3 {
+    pub use dial9_destinations_s3::{
+        InstanceIdentity, KeyContext, S3Config, S3ConfigBuilder, S3KeyFn, S3PipelineUploader,
+    };
 }
 
 use crate::core::{Encodable, current_handle};
@@ -79,7 +85,7 @@ pub use dial9_tokio_telemetry::{TracedFuture, block_on, spawn, spawn_in};
 pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
-    AttachedRuntime, Dial9TokioHandle, RecorderPipelineExt, RecorderTokioExt, TaskDumpConfig,
+    AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, RecorderPipelineExt, TaskDumpConfig,
     TokioAttachOptions, TokioHooks,
 };
 
@@ -148,7 +154,8 @@ pub use dial9_tokio_telemetry::tracing_layer;
 pub use dial9_metrique as metrique_sink;
 
 // The metrique field flags at the crate root, so `#[metrics(...)]`
-// attributes read as `flags(dial9::Interned)` / `flags(dial9::Skip)`
+// attributes read as `flags(dial9::Interned)` / `flags(dial9::Skip)` /
+// `flags(dial9::SpanName)`
 // without imports.
 #[cfg(feature = "metrique-sink")]
-pub use dial9_metrique::{Interned, Skip};
+pub use dial9_metrique::{Interned, Skip, SpanName};

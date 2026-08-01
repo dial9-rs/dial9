@@ -6,7 +6,7 @@ mod bmf;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RecorderPerfExt};
 use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
+    Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder,
 };
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -75,14 +75,15 @@ fn main() {
     }
     let recorder = rec.build();
 
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime_with(
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .unwrap();
 

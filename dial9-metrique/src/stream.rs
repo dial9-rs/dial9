@@ -252,6 +252,16 @@ impl EntryIoStream for Dial9Stream {
                             );
                         });
                     }
+                    WalkError::MissingContext { field } => {
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(
+                                entry = %plan.entry_name,
+                                %field,
+                                "metrique entry is missing required dial9 span context; \
+                                 event dropped"
+                            );
+                        });
+                    }
                 }
                 return;
             }

@@ -1858,6 +1858,7 @@ dependencies = [
  "clap",
  "dial9",
  "dial9-core",
+ "dial9-destinations-s3",
  "dial9-macro",
  "dial9-metrique",
  "dial9-perf-self-profile",
@@ -1898,6 +1899,29 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "dial9-destinations-s3"
+version = "0.5.0-rc0"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "bon",
+ "dial9-core",
+ "flate2",
+ "hostname",
+ "s3s",
+ "s3s-aws",
+ "s3s-fs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1967,10 +1991,10 @@ dependencies = [
  "bytes",
  "criterion 0.5.1",
  "dial9-core",
+ "dial9-destinations-s3",
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
- "dial9-utils",
  "flate2",
  "futures-util",
  "hdrhistogram",
@@ -2026,34 +2050,18 @@ dependencies = [
 name = "dial9-utils"
 version = "0.5.0-rc0"
 dependencies = [
- "assert2",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
  "axum 0.7.9",
  "axum 0.8.9",
  "axum-core 0.4.5",
  "axum-core 0.5.6",
- "bon",
- "criterion 0.5.1",
  "dial9-core",
  "dial9-trace-format",
- "flate2",
  "futures-util",
- "hostname",
  "hyper",
  "hyper-util",
- "pin-project-lite",
- "s3s",
- "s3s-aws",
- "s3s-fs",
- "serde",
- "serde_json",
  "tempfile",
- "time",
  "tokio",
  "tower",
- "tower-layer",
  "tower-service",
  "tracing",
 ]

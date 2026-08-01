@@ -12,7 +12,7 @@
 //! ```
 
 use dial9::metrique_sink::{Dial9Context, Dial9EntryExt, Dial9Stream};
-use dial9::{DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::unit::Millisecond;
@@ -29,7 +29,7 @@ struct RequestMetrics {
     dial9: Dial9Context,
 
     /// Interned: repeated values hit dial9's string pool.
-    #[metrics(flags(dial9::Interned))]
+    #[metrics(flags(dial9::Interned, dial9::SpanName))]
     operation: &'static str,
 
     #[metrics(unit = Millisecond)]
@@ -78,15 +78,18 @@ async fn health_check() {
 
 fn main() {
     let writer = DiskBuffer::single_file("metrique_trace.bin").unwrap();
-    let (recorder, rt) = recorder(writer)
-        .build()
-        .attach_tokio_runtime_with(
+    let recorder = recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(2);
-            },
         )
         .expect("build tokio runtime");
 

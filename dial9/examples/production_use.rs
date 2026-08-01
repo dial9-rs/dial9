@@ -173,8 +173,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9::{
-    AttachedRuntime, Disk, DiskBuffer, Recorder, RecorderBuilder, RecorderPipelineExt,
-    RecorderTokioExt, TokioAttachOptions,
+    AttachedRuntime, Dial9HandleTokioExt, Disk, DiskBuffer, Recorder, RecorderBuilder,
+    RecorderPipelineExt, TokioAttachOptions,
 };
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
@@ -317,7 +317,7 @@ fn configure_dial9(opts: &Dial9Opts) -> Recorder {
     #[cfg(feature = "worker-s3")]
     if let (Some(bucket), Some(service_name)) = (opts.s3_bucket.clone(), opts.service_name.clone())
     {
-        use dial9::core::pipeline::s3::S3Config;
+        use dial9::s3::S3Config;
         let s3 = S3Config::builder()
             .bucket(bucket)
             .service_name(service_name)
@@ -356,12 +356,17 @@ fn my_config() -> io::Result<AttachedRuntime> {
         }
     );
     let recorder = configure_dial9(&opts);
-    recorder.attach_tokio_runtime_with(
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .build(),
-        |_| {},
-    )
+    )?;
+    Ok((recorder, runtime))
 }
 
 async fn workload_task(id: usize) {

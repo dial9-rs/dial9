@@ -177,6 +177,9 @@ A decoder that encounters an annotation frame referencing an unknown `type_id` m
 
 Annotation keys and values are free-form at the wire level. By convention, the `unit` key carries a field's unit; the values the viewer recognizes for human-friendly rendering are `ns`, `us`, `ms`, `s`, and `bytes` (the same set the `#[traceevent(unit = "...")]` derive attribute accepts at compile time). Unrecognized values render as the raw number.
 
+Higher-level interpretations of annotations, including Dial9's single-event
+span convention, are outside this wire-format specification.
+
 ## Field Types
 
 | Tag | Name              | Wire Encoding                                                           | Size        |

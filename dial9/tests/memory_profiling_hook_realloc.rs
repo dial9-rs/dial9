@@ -8,7 +8,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9::analysis::analysis_events::Dial9Event;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -43,11 +43,11 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
 
     let handle = recorder.handle().clone();

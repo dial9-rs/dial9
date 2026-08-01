@@ -21,7 +21,7 @@ struct RequestMetrics {
     #[metrics(flatten)]
     dial9: Dial9Context,
 
-    #[metrics(flags(dial9::Interned))]
+    #[metrics(flags(dial9::Interned, dial9::SpanName))]
     operation: &'static str,
 
     #[metrics(flags(dial9::Interned))]
