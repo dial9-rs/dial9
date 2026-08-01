@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
 import { FieldType, TraceDecoder } from "../../../decode.js";
+
+const require = createRequire(import.meta.url);
+const { parseTrace } = require("../../../trace_parser.js") as {
+  parseTrace: (bytes: Uint8Array) => Promise<{
+    customEvents: Array<{
+      units: Record<string, string> | null;
+      fieldKinds: Record<string, string> | null;
+    }>;
+  }>;
+};
 
 const TYPE_ID = 1;
 const utf8 = (value: string): number[] => [
@@ -28,21 +39,27 @@ function annotationFrame(key: string, value: string): number[] {
   ];
 }
 
+function schemaFrame(): number[] {
+  const name = utf8("Metric");
+  const field = utf8("value");
+  return [
+    0x01,
+    ...u16(TYPE_ID),
+    ...u16(name.length),
+    ...name,
+    1,
+    ...u16(1),
+    ...u16(field.length),
+    ...field,
+    FieldType.Varint,
+  ];
+}
+
 describe("TraceDecoder schema annotations", () => {
   it("accumulates unit and kind from separate annotation frames", () => {
-    const name = utf8("Metric");
-    const field = utf8("value");
     const bytes = Uint8Array.from([
       0x54, 0x52, 0x43, 0x00, 1,
-      0x01,
-      ...u16(TYPE_ID),
-      ...u16(name.length),
-      ...name,
-      1,
-      ...u16(1),
-      ...u16(field.length),
-      ...field,
-      FieldType.Varint,
+      ...schemaFrame(),
       ...annotationFrame("unit", "bytes"),
       ...annotationFrame("kind", "counter"),
     ]);
@@ -56,6 +73,25 @@ describe("TraceDecoder schema annotations", () => {
         { fieldIndex: 0, key: "unit", value: "bytes" },
         { fieldIndex: 0, key: "kind", value: "counter" },
       ],
+      units: { value: "bytes" },
+      fieldKinds: { value: "counter" },
+    });
+  });
+
+  it("attaches annotations that arrive after a custom event", async () => {
+    const trace = await parseTrace(Uint8Array.from([
+      0x54, 0x52, 0x43, 0x00, 1,
+      ...schemaFrame(),
+      0x02,
+      ...u16(TYPE_ID),
+      1, 0, 0,
+      7,
+      ...annotationFrame("unit", "bytes"),
+      ...annotationFrame("kind", "counter"),
+    ]));
+
+    expect(trace.customEvents).toHaveLength(1);
+    expect(trace.customEvents[0]).toMatchObject({
       units: { value: "bytes" },
       fieldKinds: { value: "counter" },
     });
