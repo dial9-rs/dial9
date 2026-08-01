@@ -317,7 +317,7 @@ fn configure_dial9(opts: &Dial9Opts) -> Recorder {
     #[cfg(feature = "worker-s3")]
     if let (Some(bucket), Some(service_name)) = (opts.s3_bucket.clone(), opts.service_name.clone())
     {
-        use dial9::core::pipeline::s3::S3Config;
+        use dial9::s3::S3Config;
         let s3 = S3Config::builder()
             .bucket(bucket)
             .service_name(service_name)

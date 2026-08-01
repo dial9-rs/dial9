@@ -58,6 +58,8 @@ use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::RecorderBuilder;
 use dial9_core::recording::Recorder;
 use dial9_core::shared_state::SharedState;
+#[cfg(feature = "worker-s3")]
+use dial9_destinations_s3::S3Config;
 use std::io;
 
 /// dial9 pipeline presets on the recorder builder.
@@ -83,16 +85,12 @@ pub trait RecorderPipelineExt<M: BufferMode>: Sized {
     /// Upload sealed segments to S3 instead of writing them back, using the
     /// default AWS credential chain.
     #[cfg(feature = "worker-s3")]
-    fn with_s3_uploader(self, config: crate::background_task::s3::S3Config) -> Self;
+    fn with_s3_uploader(self, config: S3Config) -> Self;
 
     /// Like [`with_s3_uploader`](Self::with_s3_uploader), but with a pre-built S3
     /// client (custom credentials, endpoint, or a test double).
     #[cfg(feature = "worker-s3")]
-    fn with_s3_uploader_client(
-        self,
-        config: crate::background_task::s3::S3Config,
-        client: aws_sdk_s3::Client,
-    ) -> Self;
+    fn with_s3_uploader_client(self, config: S3Config, client: aws_sdk_s3::Client) -> Self;
 }
 
 impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
@@ -107,16 +105,12 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
     }
 
     #[cfg(feature = "worker-s3")]
-    fn with_s3_uploader(self, config: crate::background_task::s3::S3Config) -> Self {
+    fn with_s3_uploader(self, config: S3Config) -> Self {
         apply_s3_uploader(self, config, |uploader| uploader)
     }
 
     #[cfg(feature = "worker-s3")]
-    fn with_s3_uploader_client(
-        self,
-        config: crate::background_task::s3::S3Config,
-        client: aws_sdk_s3::Client,
-    ) -> Self {
+    fn with_s3_uploader_client(self, config: S3Config, client: aws_sdk_s3::Client) -> Self {
         apply_s3_uploader(self, config, |mut uploader| {
             uploader.set_client(client);
             uploader
@@ -134,11 +128,7 @@ pub trait RecorderS3ClientExt<M: BufferMode>:
 {
     /// Like [`RecorderPipelineExt::with_s3_uploader`], but constructs the S3
     /// client asynchronously on the pipeline worker's Tokio runtime.
-    fn with_s3_uploader_client_future<F>(
-        self,
-        config: crate::background_task::s3::S3Config,
-        client_future: F,
-    ) -> Self
+    fn with_s3_uploader_client_future<F>(self, config: S3Config, client_future: F) -> Self
     where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static;
 }
@@ -154,11 +144,7 @@ mod recorder_s3_client_ext_sealed {
 
 #[cfg(feature = "worker-s3")]
 impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
-    fn with_s3_uploader_client_future<F>(
-        self,
-        config: crate::background_task::s3::S3Config,
-        client_future: F,
-    ) -> Self
+    fn with_s3_uploader_client_future<F>(self, config: S3Config, client_future: F) -> Self
     where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {
@@ -174,7 +160,7 @@ impl<M: BufferMode> RecorderS3ClientExt<M> for RecorderBuilder<M> {
 #[cfg(feature = "worker-s3")]
 fn apply_s3_uploader<M: BufferMode>(
     builder: RecorderBuilder<M>,
-    config: crate::background_task::s3::S3Config,
+    config: S3Config,
     configure: impl FnOnce(
         crate::background_task::S3PipelineUploader,
     ) -> crate::background_task::S3PipelineUploader,

@@ -7,7 +7,7 @@ mod common;
 mod fake_s3;
 
 use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
-use dial9_tokio_telemetry::background_task::s3::S3Config;
+use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-destinations-s3` crate. The `worker-s3` feature is unchanged.
+
 ### Added
 
 - Metrique sink: dial9 can record [metrique](https://docs.rs/metrique) unit-of-work entries into the trace as a peer of an existing EMF/JSON pipeline, with per-request thread/task/timing context. New tokio-free `dial9-metrique` crate, re-exported as `dial9::metrique_sink` behind the `metrique-sink` feature; combine with the `tokio` feature to capture task ids ([#189](https://github.com/dial9-rs/dial9/issues/189), [#723](https://github.com/dial9-rs/dial9/pull/723)).
