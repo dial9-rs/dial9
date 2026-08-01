@@ -274,7 +274,7 @@ export function fieldChartTrackSpecs(
     )
     .map((chart) => ({
       id: chart.id,
-      // Intentionally short: the 100px gutter also hosts management controls.
+      // Intentionally short: the label gutter also hosts management controls.
       label: chart.fieldName,
       height: FIELD_CHART_TRACK_HEIGHT,
     }));

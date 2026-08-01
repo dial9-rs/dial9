@@ -1,6 +1,6 @@
 // Trace-wide catalogue of custom-event fields that can feed dynamic charts.
-// Built once per loaded trace through store.derived(): the UI can browse every
-// source without first finding and selecting an individual event marker.
+// Built lazily and cached per loaded trace so the UI can browse every source
+// without first finding and selecting an individual event marker.
 
 import type { CustomTraceEvent } from "../../lib/trace/index.js";
 import type { FieldChartKind } from "../../types/state.js";
