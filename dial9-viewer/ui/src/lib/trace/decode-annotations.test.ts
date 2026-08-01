@@ -78,14 +78,23 @@ describe("TraceDecoder schema annotations", () => {
     });
   });
 
-  it("attaches annotations that arrive after a custom event", async () => {
-    const trace = await parseTrace(Uint8Array.from([
+  it("keeps absent metadata nullable and attaches late annotations", async () => {
+    const eventFrames = [
       0x54, 0x52, 0x43, 0x00, 1,
       ...schemaFrame(),
       0x02,
       ...u16(TYPE_ID),
       1, 0, 0,
       7,
+    ];
+    const unannotated = await parseTrace(Uint8Array.from(eventFrames));
+    expect(unannotated.customEvents[0]).toMatchObject({
+      units: null,
+      fieldKinds: null,
+    });
+
+    const trace = await parseTrace(Uint8Array.from([
+      ...eventFrames,
       ...annotationFrame("unit", "bytes"),
       ...annotationFrame("kind", "counter"),
     ]));

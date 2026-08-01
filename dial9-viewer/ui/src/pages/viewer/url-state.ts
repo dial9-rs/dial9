@@ -17,7 +17,6 @@ import type {
   TaskSortKey,
   InspectorTab,
   RegionAnalysisMode,
-  FieldChartKind,
   FieldChartSpec,
 } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
@@ -743,15 +742,24 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   return out;
 }
 
+interface EncodedFieldChart {
+  id: string;
+  eventName: string;
+  fieldName: string;
+  kind: string;
+}
+
+function isValidFieldChart(chart: EncodedFieldChart): chart is FieldChartSpec {
+  return (
+    isValidFieldChartTrackId(chart.id) &&
+    isFieldChartNameSupported(chart.eventName) &&
+    isFieldChartNameSupported(chart.fieldName) &&
+    (FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
+  );
+}
+
 function encodeFieldChart(chart: FieldChartSpec): string | null {
-  if (
-    !isValidFieldChartTrackId(chart.id) ||
-    !isFieldChartNameSupported(chart.eventName) ||
-    !isFieldChartNameSupported(chart.fieldName) ||
-    !(FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
-  ) {
-    return null;
-  }
+  if (!isValidFieldChart(chart)) return null;
   return [
     chart.id,
     chart.eventName,
@@ -763,25 +771,13 @@ function encodeFieldChart(chart: FieldChartSpec): string | null {
 function decodeFieldChart(value: string): FieldChartSpec | null {
   const parts = value.split(FIELD_CHART_URL_SEPARATOR);
   if (parts.length !== 4) return null;
-  const [id, eventName, fieldName, kind] = parts;
-  if (
-    !id ||
-    !eventName ||
-    !fieldName ||
-    !kind ||
-    !isValidFieldChartTrackId(id) ||
-    !isFieldChartNameSupported(eventName) ||
-    !isFieldChartNameSupported(fieldName) ||
-    !(FIELD_CHART_KINDS as readonly string[]).includes(kind)
-  ) {
-    return null;
-  }
-  return {
-    id,
-    eventName,
-    fieldName,
-    kind: kind as FieldChartKind,
+  const chart: EncodedFieldChart = {
+    id: parts[0]!,
+    eventName: parts[1]!,
+    fieldName: parts[2]!,
+    kind: parts[3]!,
   };
+  return isValidFieldChart(chart) ? chart : null;
 }
 
 const FIELD_CHART_TRACK_ID_SUFFIX = /^[A-Za-z0-9_-]+$/;

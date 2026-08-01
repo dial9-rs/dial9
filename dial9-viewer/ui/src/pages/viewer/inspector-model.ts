@@ -199,6 +199,15 @@ export interface KvRow {
   chart: boolean;
 }
 
+function kvRow(
+  key: string,
+  value: string,
+  corrVal: string | null = null,
+  chart = false,
+): KvRow {
+  return { key, value, corrVal, chart };
+}
+
 /** The Event tab view: kv rows + the resolved task (single or cluster). */
 export interface EventDetailView {
   /** Sidebar title: event name (single) or `Cluster · N events`. */
@@ -264,55 +273,25 @@ export function buildEventDetail(
         isChartableNumericValue(v) &&
         isFieldChartNameSupported(ev.name) &&
         isFieldChartNameSupported(k);
-      rows.push({
-        key: k,
-        value: display,
-        corrVal: shared ? corrVal : null,
-        chart: chartable,
-      });
+      rows.push(kvRow(k, display, shared ? corrVal : null, chartable));
     }
-    rows.push({
-      key: "@",
-      value: fmtTs(ev.timestamp),
-      corrVal: null,
-      chart: false,
-    });
+    rows.push(kvRow("@", fmtTs(ev.timestamp)));
   } else {
     const first = events[0]!;
     const last = events[events.length - 1]!;
     title = `Cluster · ${events.length} events`;
-    rows.push({
-      key: "Cluster",
-      value: `${events.length} events`,
-      corrVal: null,
-      chart: false,
-    });
-    rows.push({
-      key: "Types",
-      value: topEventNames(events),
-      corrVal: null,
-      chart: false,
-    });
+    rows.push(kvRow("Cluster", `${events.length} events`));
+    rows.push(kvRow("Types", topEventNames(events)));
     const range =
       last.timestamp !== first.timestamp
         ? `${fmtTs(first.timestamp)} – ${fmtTs(last.timestamp)}`
         : fmtTs(first.timestamp);
-    rows.push({
-      key: "@",
-      value: range,
-      corrVal: null,
-      chart: false,
-    });
+    rows.push(kvRow("@", range));
   }
 
   if (pinned.taskId != null) {
     const hex = "0x" + pinned.taskId.toString(16);
-    rows.push({
-      key: "Task",
-      value: `${hex} (selected)`,
-      corrVal: null,
-      chart: false,
-    });
+    rows.push(kvRow("Task", `${hex} (selected)`));
   }
   return { title, rows, taskId: pinned.taskId, isSingle };
 }

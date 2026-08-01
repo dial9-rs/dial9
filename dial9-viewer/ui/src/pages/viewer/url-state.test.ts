@@ -207,7 +207,6 @@ describe("viewer URL state: dynamic field charts", () => {
     const valid = "fc-a,Metric,value,gauge";
     const params = new URLSearchParams();
     params.append("field-chart", "legacy,shape");
-    params.append("field-chart", "v1:fc-a\tMetric\tvalue\tgauge");
     params.append("field-chart", "bad-id,Metric,value,gauge");
     params.append("field-chart", "fc-b,Metric,value,total,gauge");
     params.append("field-chart", "fc-c,Metric,value,histogram");

@@ -42,6 +42,7 @@ const ZERO_STROKE = "rgba(255,255,255,0.24)";
 const RESET_STROKE = "rgba(255, 184, 77, 0.72)";
 const CHART_TOP = 20;
 const CHART_BOTTOM_PAD = 8;
+const GAUGE_HOVER_RADIUS_PX = 6;
 const BIGINT_RATIO_SCALE = 1_000_000_000_000n;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -134,14 +135,9 @@ function ratio(
   // Divide before subtracting so [-1e308, 1e308] does not overflow.
   const scale = Math.max(Math.abs(lo), Math.abs(hi), Math.abs(v), 1);
   const normalized = (v / scale - lo / scale) / (hi / scale - lo / scale);
-  if (Number.isFinite(normalized)) {
-    return Math.min(1, Math.max(0, normalized));
-  }
-  // Mixed decimal/BigInt series can exceed Number's range. Keep the canvas
-  // coordinates finite even when an exact mixed-type ratio is unavailable.
-  if (compare(value, min) <= 0) return 0;
-  if (compare(value, max) >= 0) return 1;
-  return 0.5;
+  return Number.isFinite(normalized)
+    ? Math.min(1, Math.max(0, normalized))
+    : 0.5;
 }
 
 function lowerBound(
@@ -179,12 +175,14 @@ export interface FieldChartHover {
 /**
  * Resolve the value under a timestamp without scanning the series. Gauge only
  * considers the two adjacent entries, so it never skips over a run of explicit
- * gaps. Counters resolve the exact half-open interval.
+ * gaps, and requires the nearest observation to be within the caller's hover
+ * radius. Counters resolve the exact half-open interval.
  */
 export function fieldChartHoverAt(
   series: FieldChartSeries,
   kind: FieldChartKind,
   timestamp: number,
+  gaugeMaxDistance = 0,
 ): FieldChartHover | null {
   const { samples } = series;
   if (kind !== "gauge") {
@@ -229,7 +227,13 @@ export function fieldChartHoverAt(
             afterNumeric.timestamp - timestamp
         ? beforeNumeric
         : afterNumeric;
-  if (sample === null || sample.value === null) return null;
+  if (
+    sample === null ||
+    sample.value === null ||
+    Math.abs(sample.timestamp - timestamp) > gaugeMaxDistance
+  ) {
+    return null;
+  }
   return { value: sample.value };
 }
 
@@ -521,7 +525,7 @@ function unitAwareFieldChartValue(
 ): string {
   if (unit === null) return raw;
   if (!["ns", "us", "ms", "s", "bytes"].includes(unit)) {
-    return `${raw} ${unit}`;
+    return raw;
   }
   const safeBigInt =
     typeof value !== "bigint" ||
@@ -790,6 +794,8 @@ export function createFieldChartTrack(
         series,
         current.spec.kind,
         timestamp,
+        (GAUGE_HOVER_RADIUS_PX / (current.drawW || 1)) *
+          (current.viewEnd - current.viewStart),
       );
       if (hover === null) {
         tooltip?.hide();

@@ -45,12 +45,9 @@ describe("numeric field eligibility", () => {
     -1.25,
     9_007_199_254_740_993n,
     "0",
-    "-42",
-    "+12.50",
-    ".75",
-    "1e9",
-    "  123456789012345678901234567890  ",
-  ] as DecodedFieldValue[])("accepts finite decimal value %s", (value) => {
+    "42",
+    "18446744073709551615",
+  ] as DecodedFieldValue[])("accepts numeric wire value %s", (value) => {
     expect(isChartableNumericValue(value)).toBe(true);
   });
 
@@ -61,11 +58,19 @@ describe("numeric field eligibility", () => {
     " ",
     "12px",
     "0x10",
+    "-42",
+    "+12.50",
+    ".75",
+    "1e9",
+    " 42 ",
+    "042",
+    "18446744073709551616",
+    1n << 63n,
     "NaN",
     "Infinity",
     [1, 2],
     { n: "3" },
-  ] as DecodedFieldValue[])("rejects non-decimal value %s", (value) => {
+  ] as DecodedFieldValue[])("rejects non-numeric wire value %s", (value) => {
     expect(isChartableNumericValue(value)).toBe(false);
   });
 });
@@ -160,8 +165,8 @@ describe("materializeFieldChartSeries", () => {
   it("keeps large integer counter deltas exact", () => {
     const series = materializeFieldChartSeries(
       [
-        event("Metric", 1, "900719925474099300000"),
-        event("Metric", 2, "900719925474099300007"),
+        event("Metric", 1, "9007199254740993"),
+        event("Metric", 2, "9007199254741000"),
       ],
       spec("counter"),
     );
@@ -186,14 +191,6 @@ describe("materializeFieldChartSeries", () => {
       { timestamp: 2, endTimestamp: null, value: null, gap: "missing" },
       { timestamp: 3, endTimestamp: 4, value: 5n, gap: null },
     ]);
-  });
-
-  it("keeps exact integers in a mixed integer/decimal series", () => {
-    const series = materializeFieldChartSeries(
-      [event("Metric", 1, "10"), event("Metric", 2, "10.5")],
-      spec(),
-    );
-    expect(series.samples.map((sample) => sample.value)).toEqual([10n, 10.5]);
   });
 });
 

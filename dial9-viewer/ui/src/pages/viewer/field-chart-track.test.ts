@@ -152,26 +152,6 @@ describe("buildFieldChartPlot", () => {
     );
   });
 
-  it("keeps coordinates finite for mixed values beyond Number's range", () => {
-    const plot = buildFieldChartPlot(
-      series([
-        point(0, 1e308),
-        point(5, 10n ** 400n),
-        point(10, 10n ** 401n),
-      ]),
-      "gauge",
-      0,
-      10,
-      100,
-      0,
-      100,
-    );
-
-    expect(plot.segments.flat().every(({ y }) => Number.isFinite(y))).toBe(
-      true,
-    );
-  });
-
   it("bounds retained vertices by pixel width while preserving extrema", () => {
     const samples = Array.from({ length: 10_000 }, (_, index) =>
       interval(index / 10, (index + 1) / 10, index % 97),
@@ -238,16 +218,17 @@ describe("buildFieldChartPlot", () => {
 describe("field-chart hover", () => {
   it("selects the nearest gauge observation and stops on an explicit gap", () => {
     const gauge = series([point(0, 1n), point(10, 3n)]);
-    expect(fieldChartHoverAt(gauge, "gauge", 6)).toEqual({
+    expect(fieldChartHoverAt(gauge, "gauge", 6, 4)).toEqual({
       value: 3n,
     });
+    expect(fieldChartHoverAt(gauge, "gauge", 20, 4)).toBeNull();
 
     const withGap = series([
       point(0, 1n),
       point(5, null, "missing"),
       point(10, 3n),
     ]);
-    expect(fieldChartHoverAt(withGap, "gauge", 5)).toBeNull();
+    expect(fieldChartHoverAt(withGap, "gauge", 5, 4)).toBeNull();
   });
 
   it("resolves the exact counter interval and leaves gaps empty", () => {
@@ -276,15 +257,15 @@ describe("field-chart hover", () => {
 
     expect(
       fieldChartTooltipRows(
-        { value: 12_345_678_901_234_567_890n },
+        { value: 2_048n },
         spec,
-        "widgets",
+        "bytes",
       ),
     ).toEqual([
       [
         {
           label: "requests_total:",
-          value: "12345678901234567890 widgets",
+          value: "2.00 KiB",
         },
       ],
     ]);

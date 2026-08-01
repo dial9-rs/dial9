@@ -639,10 +639,6 @@ handle.record_event(RequestCompleted {
 # }
 ```
 
-`unit` controls value formatting in the viewer. `kind` lets numeric fields open
-directly as a `gauge`, `counter`, or `updown-counter` chart without prompting
-for an interpretation.
-
 ### Custom event callbacks
 
 You can also register a callback that runs from dial9's flush thread and emits

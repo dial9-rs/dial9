@@ -46,33 +46,34 @@ export interface FieldChartSeries {
   unit: string | null;
 }
 
-// Strict decimal syntax: no hexadecimal, Infinity, NaN, separators, or
-// partially numeric strings. Varints decoded as decimal strings take the exact
-// bigint path; decimal/exponent strings take the finite-number path.
-const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
-const INTEGER = /^[+-]?\d+$/;
+// Varints arrive as canonical unsigned u64 decimal strings. Restricting the
+// string path to that wire representation avoids interpreting signed, decimal,
+// or exponent-form String fields as numbers.
+const VARINT_DECIMAL = /^(?:0|[1-9]\d*)$/;
+const I64_MIN = -(1n << 63n);
+const I64_MAX = (1n << 63n) - 1n;
+const U64_MAX = (1n << 64n) - 1n;
 
 function numericValue(value: DecodedFieldValue): FieldChartNumeric | null {
-  if (typeof value === "bigint") return value;
+  if (typeof value === "bigint") {
+    return value >= I64_MIN && value <= I64_MAX ? value : null;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return null;
     return Number.isSafeInteger(value) ? BigInt(value) : value;
   }
-  if (typeof value !== "string") return null;
-  const text = value.trim();
-  if (text === "" || !DECIMAL.test(text)) return null;
-  if (INTEGER.test(text)) {
-    try {
-      return BigInt(text);
-    } catch {
-      return null;
-    }
+  if (
+    typeof value !== "string" ||
+    value.length > 20 ||
+    !VARINT_DECIMAL.test(value)
+  ) {
+    return null;
   }
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed : null;
+  const parsed = BigInt(value);
+  return parsed <= U64_MAX ? parsed : null;
 }
 
-/** True when a decoded field can be graphed as a finite decimal number. */
+/** True when a decoded field has one of the scalar numeric wire shapes. */
 export function isChartableNumericValue(value: DecodedFieldValue): boolean {
   return numericValue(value) !== null;
 }
