@@ -133,7 +133,15 @@ function ratio(
   const hi = Number(max);
   // Divide before subtracting so [-1e308, 1e308] does not overflow.
   const scale = Math.max(Math.abs(lo), Math.abs(hi), Math.abs(v), 1);
-  return (v / scale - lo / scale) / (hi / scale - lo / scale);
+  const normalized = (v / scale - lo / scale) / (hi / scale - lo / scale);
+  if (Number.isFinite(normalized)) {
+    return Math.min(1, Math.max(0, normalized));
+  }
+  // Mixed decimal/BigInt series can exceed Number's range. Keep the canvas
+  // coordinates finite even when an exact mixed-type ratio is unavailable.
+  if (compare(value, min) <= 0) return 0;
+  if (compare(value, max) >= 0) return 1;
+  return 0.5;
 }
 
 function lowerBound(

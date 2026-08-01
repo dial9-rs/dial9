@@ -152,6 +152,26 @@ describe("buildFieldChartPlot", () => {
     );
   });
 
+  it("keeps coordinates finite for mixed values beyond Number's range", () => {
+    const plot = buildFieldChartPlot(
+      series([
+        point(0, 1e308),
+        point(5, 10n ** 400n),
+        point(10, 10n ** 401n),
+      ]),
+      "gauge",
+      0,
+      10,
+      100,
+      0,
+      100,
+    );
+
+    expect(plot.segments.flat().every(({ y }) => Number.isFinite(y))).toBe(
+      true,
+    );
+  });
+
   it("bounds retained vertices by pixel width while preserving extrema", () => {
     const samples = Array.from({ length: 10_000 }, (_, index) =>
       interval(index / 10, (index + 1) / 10, index % 97),
