@@ -691,10 +691,6 @@
             segmentMetadata: new Map(), // latest segment metadata key → value
             taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
             customEvents: [], // unrecognized event types: {name, timestamp, fields}
-            // Schema active when each custom event was decoded. Kept parallel to
-            // customEvents only until finalizeParse so annotation frames that
-            // legally arrive after an event still reach that event's metadata.
-            customEventSchemas: [],
             // Optional columnar sink for SPAN custom events (SpanEnter/Exit/Close):
             // when supplied, those route into typed columns instead of the fat
             // customEvents array (buildSpanData reads them). Mirrors eventSink /
@@ -716,7 +712,7 @@
     /**
      * @private Handle a single decoded frame, mutating `state`. `dec` is the
      * decoder the frame came from (used only to read a custom event's schema
-     * units). This is the single shared switch body — do not duplicate it.
+     * metadata). This is the single shared switch body — do not duplicate it.
      */
     function processFrame(frame, state, dec) {
         const { startTime, endTime } = state;
@@ -1057,15 +1053,15 @@
                 if (ts != null) {
                     if (!(spanEventSink && spanEventSink.pushIfSpan(frame.name, ts, v))) {
                         const schema = dec.schemas.get(frame.typeId);
-                        const event = {
+                        customEvents.push({
                             name: frame.name,
                             timestamp: ts,
                             fields: v,
-                            units: null,
-                            fieldKinds: null,
-                        };
-                        customEvents.push(event);
-                        state.customEventSchemas.push(schema);
+                            // Decoder schemas own stable maps, so annotations
+                            // that arrive after this event remain visible.
+                            units: schema?.units || null,
+                            fieldKinds: schema?.fieldKinds || null,
+                        });
                     }
                 }
                 break;
@@ -1098,7 +1094,6 @@
             segmentMetadata,
             taskDumps,
             customEvents,
-            customEventSchemas,
             clockSyncAnchors,
             maxEvents,
             startTime,
@@ -1114,15 +1109,6 @@
             cpuSamplesSink && cpuSamplesSink.samples !== undefined
                 ? cpuSamplesSink.samples
                 : cpuSamplesSink;
-
-        // Annotation frames may follow events. Resolve against the exact schema
-        // object active for each event now that every frame has been consumed,
-        // then let the temporary parallel array die with the parse state.
-        for (let i = 0; i < customEvents.length; i++) {
-            const schema = customEventSchemas[i];
-            customEvents[i].units = schema?.units || null;
-            customEvents[i].fieldKinds = schema?.fieldKinds || null;
-        }
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
         // time + earliest monotonic event timestamp. This is best-effort only.

@@ -289,7 +289,17 @@ class TraceDecoder {
       const ft = this._view.getUint8(this._pos); this._pos++;
       fields.push({ name: fn_, fieldType: ft });
     }
-    const schema = { typeId, name, hasTimestamp, fields };
+    // Keep annotation containers stable for the schema's lifetime. Events may
+    // reference these maps before a later annotation frame populates them.
+    const schema = {
+      typeId,
+      name,
+      hasTimestamp,
+      fields,
+      annotations: [],
+      units: {},
+      fieldKinds: {},
+    };
     this.schemas.set(typeId, schema);
     return { type: 'schema', ...schema };
   }
@@ -352,9 +362,6 @@ class TraceDecoder {
     // parsed (to keep the stream aligned) but not attached.
     const schema = this.schemas.get(typeId);
     if (schema) {
-      schema.annotations ??= [];
-      schema.units ??= {};
-      schema.fieldKinds ??= {};
       schema.annotations.push(...annotations);
       for (const a of annotations) {
         const field = schema.fields[a.fieldIndex];
