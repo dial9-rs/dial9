@@ -45,14 +45,13 @@ function ev(
   name: string,
   timestamp: number,
   fields: Record<string, unknown> = {},
-  fieldKinds: Record<string, string> | null = null,
 ): CustomTraceEvent {
   return {
     name,
     timestamp,
     fields: fields as CustomTraceEvent["fields"],
     units: null,
-    fieldKinds,
+    fieldKinds: null,
   };
 }
 
@@ -183,10 +182,10 @@ describe("buildEventDetail", () => {
     const id = v.rows.find((r) => r.key === "id")!;
     expect(path.corrVal).toBe("/a"); // shared -> correlation offered
     expect(id.corrVal).toBeNull(); // unique -> no correlation
-    expect(path.chart).toBeNull();
-    expect(id.chart).not.toBeNull();
+    expect(path.chart).toBe(false);
+    expect(id.chart).toBe(true);
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100");
-    expect(v.rows.find((r) => r.key === "@")!.chart).toBeNull();
+    expect(v.rows.find((r) => r.key === "@")!.chart).toBe(false);
     expect(v.rows.find((r) => r.key === "Task")!.value).toBe("0x2a (selected)");
   });
 
@@ -219,36 +218,14 @@ describe("buildEventDetail", () => {
         [commaEvent],
         fmtTs,
       ).rows.find((row) => row.key === "value")?.chart,
-    ).toBeNull();
+    ).toBe(false);
     expect(
       buildEventDetail(
         pinnedSingle(commaField, null),
         [commaField],
         fmtTs,
       ).rows.find((row) => row.key === "value,total")?.chart,
-    ).toBeNull();
-  });
-
-  it("accepts supported field kinds and ignores unknown annotations", () => {
-    const e = ev(
-      "Metrics",
-      100,
-      { observed: 1, cumulative: 2, active: 3, histogram: 4 },
-      {
-        observed: "gauge",
-        cumulative: "counter",
-        active: "updown-counter",
-        histogram: "histogram",
-      },
-    );
-    const rows = buildEventDetail(pinnedSingle(e, null), [e], fmtTs).rows;
-    const kind = (field: string) =>
-      rows.find((row) => row.key === field)?.chart?.kind;
-
-    expect(kind("observed")).toBe("gauge");
-    expect(kind("cumulative")).toBe("counter");
-    expect(kind("active")).toBe("updown-counter");
-    expect(kind("histogram")).toBeNull();
+    ).toBe(false);
   });
 });
 

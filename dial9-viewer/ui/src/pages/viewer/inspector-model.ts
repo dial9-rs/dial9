@@ -13,7 +13,6 @@ import {
   formatHumanDuration,
 } from "../../lib/trace/index.js";
 import {
-  fieldChartKindFromAnnotation,
   isChartableNumericValue,
   isFieldChartNameSupported,
 } from "./field-chart-model.js";
@@ -31,7 +30,6 @@ import type {
   WorkerLane,
 } from "../../lib/trace/index.js";
 import type {
-  FieldChartKind,
   PinnedCustomEvent,
   SelectionSlice,
   TaskDumpSelection,
@@ -197,8 +195,8 @@ export interface KvRow {
    *  nowhere (cluster rows, the `@`/`Task` rows, or a value unique to one
    *  event). */
   corrVal: string | null;
-  /** Chart action; a null kind means the viewer must ask for an interpretation. */
-  chart: { kind: FieldChartKind | null } | null;
+  /** Whether this row can open a numeric-field chart. */
+  chart: boolean;
 }
 
 /** The Event tab view: kv rows + the resolved task (single or cluster). */
@@ -270,16 +268,14 @@ export function buildEventDetail(
         key: k,
         value: display,
         corrVal: shared ? corrVal : null,
-        chart: chartable
-          ? { kind: fieldChartKindFromAnnotation(ev.fieldKinds?.[k]) }
-          : null,
+        chart: chartable,
       });
     }
     rows.push({
       key: "@",
       value: fmtTs(ev.timestamp),
       corrVal: null,
-      chart: null,
+      chart: false,
     });
   } else {
     const first = events[0]!;
@@ -289,13 +285,13 @@ export function buildEventDetail(
       key: "Cluster",
       value: `${events.length} events`,
       corrVal: null,
-      chart: null,
+      chart: false,
     });
     rows.push({
       key: "Types",
       value: topEventNames(events),
       corrVal: null,
-      chart: null,
+      chart: false,
     });
     const range =
       last.timestamp !== first.timestamp
@@ -305,7 +301,7 @@ export function buildEventDetail(
       key: "@",
       value: range,
       corrVal: null,
-      chart: null,
+      chart: false,
     });
   }
 
@@ -315,7 +311,7 @@ export function buildEventDetail(
       key: "Task",
       value: `${hex} (selected)`,
       corrVal: null,
-      chart: null,
+      chart: false,
     });
   }
   return { title, rows, taskId: pinned.taskId, isSingle };

@@ -16,12 +16,10 @@ import {
 import { addFieldChart, FIELD_CHART_KINDS } from "./field-chart-model.js";
 
 export interface FieldChartDialog {
-  /** Open the kind picker for an unannotated contextual field. */
+  /** Create an annotated source directly, or ask how to interpret it. */
   open(eventName: string, fieldName: string): void;
   /** Browse every graphable field in the loaded trace. */
   openCatalog(): void;
-  /** Create without opening the dialog when schema metadata supplies the kind. */
-  create(eventName: string, fieldName: string, kind: FieldChartKind): void;
   close(): void;
   isOpen(): boolean;
   dispose(): void;
@@ -329,6 +327,17 @@ export function mountFieldChartDialog(
   }
 
   function open(eventName: string, fieldName: string): void {
+    for (const group of getCatalog().annotated) {
+      if (group.eventName !== eventName) continue;
+      const source = group.fields.find(
+        (field) => field.fieldName === fieldName,
+      );
+      if (source !== undefined && source.kind !== null) {
+        createChart(eventName, fieldName, source.kind);
+        return;
+      }
+      break;
+    }
     beginOpen();
     showKindPicker(eventName, fieldName, false);
   }
@@ -447,7 +456,6 @@ export function mountFieldChartDialog(
   return {
     open,
     openCatalog,
-    create: createChart,
     close,
     isOpen,
     dispose(): void {

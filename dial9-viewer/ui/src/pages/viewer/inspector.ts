@@ -39,7 +39,6 @@ import type { RegionAnalysisController } from "./region-analysis.js";
 import type { ViewerStore } from "../../store/store.js";
 import type {
   AtCursorReadout,
-  FieldChartKind,
   SelectionSlice,
   StoreState,
 } from "../../types/state.js";
@@ -93,12 +92,8 @@ export interface InspectorDeps {
    * region panel owns what opens.
    */
   regionPanel: RegionAnalysisController;
-  /** Create a field chart directly when `kind` is known, or prompt otherwise. */
-  chartField(
-    eventName: string,
-    fieldName: string,
-    kind: FieldChartKind | null,
-  ): void;
+  /** Create directly when metadata is unambiguous, or prompt otherwise. */
+  chartField(eventName: string, fieldName: string): void;
   /** True when the URL explicitly selected the initial inspector tab. */
   preserveInitialTab?: boolean;
   /** True when poll disclosure/section/zoom came explicitly from the URL. */
@@ -831,13 +826,13 @@ export function mountInspector(
             ↔
           </button>`
         : nothing}
-      ${chart !== null
+      ${chart
         ? html`<button
             type="button"
             class="d9-kv-chart"
             title="Chart numeric field"
             aria-label="Chart ${key}"
-            @click=${() => deps.chartField(eventName, key, chart.kind)}
+            @click=${() => deps.chartField(eventName, key)}
           >
             <svg
               viewBox="0 0 16 16"
