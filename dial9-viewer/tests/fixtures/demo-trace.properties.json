@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 12134,
+  "total_samples": 10777,
   "by_source": {
-    "0": 100,
-    "1": 12034
+    "0": 104,
+    "1": 10673
   },
   "on_off_all": {
-    "on_runtime": 12124,
-    "off_runtime": 10
+    "on_runtime": 10769,
+    "off_runtime": 8
   },
   "on_off_by_source": {
     "0": {
-      "on": 90,
-      "off": 10
+      "on": 96,
+      "off": 8
     },
     "1": {
-      "on": 12034,
+      "on": 10673,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 100,
+    "count": 104,
     "distinct_stacks": 91,
-    "stack_sig_digest": "daf091d3af017c50",
-    "ts_count": 100,
-    "ts_span_ns": 3402001126,
-    "ts_delta_digest": "c544cc9eeb1231f6",
+    "stack_sig_digest": "2f7a364392f98d34",
+    "ts_count": 104,
+    "ts_span_ns": 3207001835,
+    "ts_delta_digest": "b39c93cf60c19d14",
     "top_stacks": [
       {
         "count": 3,
         "depth": 113,
-        "leaf": "[unknown] 0xffffadc9de8c"
+        "leaf": "[unknown] 0xffffacf0de48"
       },
       {
         "count": 3,
+        "depth": 107,
+        "leaf": "[unknown] 0xffffacd3d200"
+      },
+      {
+        "count": 3,
+        "depth": 107,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 3,
+        "depth": 106,
+        "leaf": "[unknown] 0xffffacf0de8c"
+      },
+      {
+        "count": 2,
+        "depth": 106,
+        "leaf": "[unknown] 0xffffacf0c9c0"
+      },
+      {
+        "count": 2,
+        "depth": 114,
+        "leaf": "[unknown] 0xffffacf43724"
+      },
+      {
+        "count": 2,
         "depth": 113,
         "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 106,
-        "leaf": "_Unwind_Find_FDE"
-      },
-      {
-        "count": 2,
-        "depth": 107,
-        "leaf": "[unknown] 0xffffadacd200"
-      },
-      {
-        "count": 2,
-        "depth": 32,
-        "leaf": "write"
-      },
-      {
-        "count": 2,
-        "depth": 94,
-        "leaf": "<hyper::proto::h1::role::Server as hyper::proto::h1::Http1Transaction>::parse"
-      },
-      {
-        "count": 2,
-        "depth": 89,
-        "leaf": "_Unwind_Find_FDE"
-      },
-      {
-        "count": 1,
-        "depth": 144,
-        "leaf": "hashbrown::map::HashMap<K,V,S,A>::insert"
+        "depth": 61,
+        "leaf": "0xffffacf7d2f8"
       }
     ]
   }
