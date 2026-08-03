@@ -25,26 +25,23 @@ import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
-import { initViewportFromTrace } from "./viewport-init.js";
 import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
 import { bootScopeFromSearch } from "./scope-boot.js";
 import {
   bindViewStateToUrl,
-  resolveViewState,
   type ViewStateBinding,
 } from "../../lib/url/index.js";
 import {
   projectViewerState,
   mirrorViewerToQuery,
-  readViewerUrlState,
+  VIEWER_URL_SLICES,
 } from "./url-state.js";
-import { resolveFocusLink, resolveUrlSelection } from "./url-selection.js";
-import { focusWindow, readFocusLink } from "./focus-link.js";
 import { mountViewerSearch } from "./search-overlay.js";
 import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
-import type { StoreState } from "../../types/state.js";
+import { createViewerReconstruction } from "./viewer-reconstruction.js";
+import { mountFieldChartDialog } from "./field-chart-dialog.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
 // <head> auto-boot is a no-op on this off-root new-UI path.
@@ -76,45 +73,11 @@ function boot(): void {
   // order/collapse) apply now - OVER the localStorage hydrate above, so a
   // shared URL wins. The viewport window + task selection apply after the trace
   // loads (below), once minTs/maxTs and the task set exist.
-  const urlView = readViewerUrlState(window.location.search);
-  // Non-destructive exemplar deep link, read once alongside the view state.
-  // Unlike `start`/`end` this never filters the parse - it only pans/zooms and
-  // selects (see focus-link.ts).
-  const focusLink = readFocusLink(window.location.search);
-  const urlHash = resolveViewState({
+  const reconstruction = createViewerReconstruction(store, {
     search: window.location.search,
     hash: window.location.hash,
   });
-  const bootPrefs: Partial<StoreState["uiPrefs"]> = {};
-  if (urlHash.timeMode !== undefined) bootPrefs.timeMode = urlHash.timeMode;
-  if (urlHash.timeZone !== undefined) bootPrefs.tz = urlHash.timeZone;
-  if (urlView.spanFilter !== undefined) bootPrefs.spanFilter = urlView.spanFilter;
-  if (urlView.trackOrder !== undefined) bootPrefs.trackOrder = urlView.trackOrder;
-  if (urlView.collapsed !== undefined) {
-    bootPrefs.collapsed = Object.fromEntries(
-      urlView.collapsed.map((id) => [id, true]),
-    );
-  }
-  if (urlView.spanPct !== undefined) bootPrefs.spanPctFilter = urlView.spanPct;
-  if (urlView.spanNames !== undefined) {
-    bootPrefs.selectedSpanNames = new Set(urlView.spanNames);
-  }
-  if (urlView.eventNames !== undefined) {
-    bootPrefs.selectedEventNames = new Set(urlView.eventNames);
-  }
-  if (Object.keys(bootPrefs).length > 0) store.update("uiPrefs", bootPrefs);
-
-  // Issues-rail restore. Filter/sort/index are plain values (index maps into
-  // the trace-derived list once it exists, so setting it now is safe); no part
-  // needs the trace to be valid.
-  const poiPatch: Partial<StoreState["poi"]> = {};
-  if (urlView.poiFilter !== undefined) poiPatch.filter = urlView.poiFilter;
-  if (urlView.poiSort !== undefined) {
-    poiPatch.sortKey = urlView.poiSort.key;
-    poiPatch.sortDir = urlView.poiSort.dir;
-  }
-  if (urlView.poiIndex !== undefined) poiPatch.index = urlView.poiIndex;
-  if (Object.keys(poiPatch).length > 0) store.update("poi", poiPatch);
+  const urlView = reconstruction.urlState;
 
   // The URL sync binding, assigned after mount; forward-referenced by the
   // status bar's copy-link flush so a copy always reflects the live state.
@@ -137,24 +100,32 @@ function boot(): void {
     getIndex: () => searchIndex(),
     onPick: (r) => navigateToSearchResult(r),
   });
+  const fieldChartDialog = mountFieldChartDialog(document, store, esc);
   function navigateToSearchResult(r: SearchResult): void {
     const vp = store.getState().viewport;
     if (r.nav.kind === "poi") {
       const j = poiJump(r.nav.poi, vp);
       store.update("viewport", { viewStart: j.viewStart, viewEnd: j.viewEnd });
       if (j.selectedTaskId !== null) {
-        store.update("selection", { selectedTaskId: j.selectedTaskId });
+        store.update("selection", {
+          selectedTaskId: j.selectedTaskId,
+          taskDump: null,
+        });
       }
       return;
     }
     const win = searchWindow(r.nav.startNs, r.nav.endNs, vp.minTs, vp.maxTs);
     store.update("viewport", { viewStart: win.start, viewEnd: win.end });
     if (r.nav.kind === "task") {
-      store.update("selection", { selectedTaskId: r.nav.taskId });
+      store.update("selection", {
+        selectedTaskId: r.nav.taskId,
+        taskDump: null,
+      });
     } else {
       store.update("selection", {
         spanFocus: { spanId: r.nav.spanId, chain: new Set([r.nav.spanId]) },
         focusedSpanId: r.nav.spanId,
+        taskDump: null,
       });
     }
   }
@@ -180,6 +151,7 @@ function boot(): void {
     // toolbar reconciles it against the trace-embedded metadata.
     keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
     onNewFile: () => loadChrome?.requestNewFile(),
+    onOpenFieldCharts: () => fieldChartDialog.openCatalog(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     // Set Range: re-parse the loaded trace filtered to the current view, off
     // the main thread; the reparsed trace's extent becomes the new bounds
@@ -196,6 +168,7 @@ function boot(): void {
   // pop-out/no-trace errors can surface.
   regionPanel = createRegionAnalysis(store, {
     inspectorHost: shell.inspectorRegion,
+    isSourceShareable: () => loadChrome?.isSourceShareable() === true,
     notify,
     announcer,
   });
@@ -227,7 +200,25 @@ function boot(): void {
   // imperatively into the shell's empty inspector aside; re-scopes to the
   // selection in the same action. Registered with the esc-cascade so its
   // content selection clears before the entry's task-selection fallback.
-  const inspector = mountInspector(shell.inspectorRegion, store, { esc, regionPanel });
+  const inspector = mountInspector(shell.inspectorRegion, store, {
+    esc,
+    regionPanel,
+    chartField: (eventName, fieldName) =>
+      fieldChartDialog.open(eventName, fieldName),
+    preserveInitialTab: urlView.inspectorTab !== undefined,
+    preserveInitialPollView:
+      urlView.poll !== undefined &&
+      (urlView.pollSection !== undefined ||
+        urlView.expandedPollGroups !== undefined ||
+        urlView.pollWorkerZoom !== undefined ||
+        urlView.pollOffworkerZoom !== undefined),
+    preserveInitialRelatedView:
+      urlView.pinnedEventTs !== undefined &&
+      (urlView.relatedCollapsed !== undefined ||
+        urlView.relatedExpand !== undefined ||
+        urlView.relatedCorrelate !== undefined),
+    preserveInitialWidth: urlView.inspectorWidth !== undefined,
+  });
 
   // Overview minimap: tier-1 density + POI ticks + a draggable viewport box,
   // filling the shell's minimap host. Drag/click dispatch store viewport
@@ -245,67 +236,25 @@ function boot(): void {
         spanFocus: null,
         focusedSpanId: null,
         pinnedEvent: null,
+        taskDump: null,
       });
     },
-    // Flush the debounced URL write so copy-link copies the live state.
-    beforeCopyLink: () => urlBinding?.flush(),
-  });
-
-  // Initialize the viewport from the trace the moment it loads. Registered
-  // BEFORE the lane interaction so its zoom-history baseline records the
-  // fitted view (both subscribe to `trace`; order = registration order).
-  initViewportFromTrace(store);
-
-  // Apply the URL's viewport window + task selection to the FIRST loaded trace.
-  // Registered AFTER initViewportFromTrace so it overrides the full-fit;
-  // one-shot, so a later Set-Range reparse refits to its own extent instead of
-  // snapping back to the shared window.
-  {
-    let applied = false;
-    const unsubUrlRestore = store.subscribe(["trace"], (state) => {
-      const trace = state.trace.trace;
-      if (applied || trace === null) return;
-      applied = true;
-      unsubUrlRestore();
-      if (urlView.viewStart !== undefined && urlView.viewEnd !== undefined) {
-        store.update("viewport", {
-          viewStart: urlView.viewStart,
-          viewEnd: urlView.viewEnd,
+    // Flush the debounced URL write so copy-link copies the live state. Local
+    // files/demo loads have no reproducible source encoded in the URL, so do
+    // not put a misleading link on the clipboard.
+    beforeCopyLink: () => {
+      if (loadChrome?.isSourceShareable() !== true) {
+        toasts.show({
+          id: "copy-unshareable",
+          type: "error",
+          message: "This trace came from a local or demo file; load it from a URL or trace scope to copy a reproducible link.",
         });
+        return false;
       }
-      // Re-resolve the canvas-selection anchors (span/poll/event/region/
-      // spawned) against the loaded trace, plus the task, into one patch.
-      // Unresolvable anchors are silently dropped.
-      const selPatch = resolveUrlSelection(trace, urlView);
-
-      // A `focus_*` deep link (Span Explorer / Tokio Stats exemplar). Prefer
-      // landing ON the span: a long span's window overlaps dozens of others, so
-      // a plain pan leaves the user hunting. Falls back to that plain pan when
-      // nothing matches.
-      if (focusLink !== null) {
-        const focused = resolveFocusLink(trace, focusLink);
-        if (focused !== null) {
-          Object.assign(selPatch, focused.patch);
-          store.update("viewport", focused.viewport);
-        } else {
-          const w = focusWindow(focusLink, trace.clockOffsetNs);
-          if (Number.isFinite(w.start)) {
-            const pad = Math.max((w.end - w.start) * 2, 1e6);
-            store.update("viewport", {
-              viewStart: Math.max(trace.minTs ?? w.start, w.start - pad),
-              viewEnd: Math.min(trace.maxTs ?? w.end, w.end + pad),
-            });
-          }
-        }
-      }
-      if (urlView.selectedTaskId !== undefined) {
-        selPatch.selectedTaskId = urlView.selectedTaskId;
-      }
-      if (Object.keys(selPatch).length > 0) {
-        store.update("selection", selPatch);
-      }
-    });
-  }
+      urlBinding?.flush();
+      return true;
+    },
+  });
 
   // Lane interaction: pointer pan/zoom/region gestures, wheel zoom,
   // click-select, the selection overlay, and the viewport controls. Its key
@@ -361,6 +310,8 @@ function boot(): void {
     ...(source.urls.length > 0
       ? { initialUrls: source.urls, initialLabel: source.label }
       : {}),
+    ...(urlView.dataRange !== undefined ? { initialRange: urlView.dataRange } : {}),
+    onTraceLoaded: reconstruction.applyLoadedTrace,
   });
   loadChrome = boot;
 
@@ -373,13 +324,14 @@ function boot(): void {
     loadChrome: boot,
     onError: (message) =>
       toasts.show({ id: "load-error", type: "error", message }),
+    ...(urlView.dataRange !== undefined ? { dataRange: urlView.dataRange } : {}),
   });
 
   // Mirror the shareable state INTO the URL as it changes, debounced.
   // Registered last so the boot-time restore above does not fight it; the
   // copy-link button flushes it first (beforeCopyLink) so a copy is current.
   urlBinding = bindViewStateToUrl(store, {
-    slices: ["viewport", "selection", "uiPrefs", "poi"],
+    slices: VIEWER_URL_SLICES,
     project: projectViewerState,
     mirrorToQuery: mirrorViewerToQuery,
   });
@@ -388,6 +340,7 @@ function boot(): void {
   window.addEventListener("beforeunload", () => {
     urlBinding?.dispose();
     search.dispose();
+    fieldChartDialog.dispose();
     disposeTrackPrefs();
     loadChrome?.dispose();
     statusBar.dispose();

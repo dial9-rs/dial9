@@ -9,7 +9,7 @@
 //! After running, inspect the trace files:
 //!   cargo run --example analyze_trace -- /tmp/telemetry_rotating/trace.0.bin
 
-use dial9::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -28,11 +28,14 @@ fn main() -> std::io::Result<()> {
 
     // recorder(writer).build() plus attach_tokio_runtime installs telemetry hooks on the
     // tokio runtime; the recorder owns the background flush/sampler thread.
-    let (recorder, rt) = recorder(writer)
-        .build()
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(4);
-        })
+    let recorder = recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("build tokio runtime");
 
     dial9::block_on(&rt, async {

@@ -6,9 +6,11 @@ members = [
     "dial9-trace-format",
     "dial9-trace-format-derive",
     "dial9-macro",
+    "dial9-metrique",
     "dial9-viewer",
     "dial9",
     "dial9-utils",
+    "dial9-destinations-s3",
     "perf-self-profile",
     "examples/metrics-service",
     "examples/simple-local",
@@ -27,10 +29,12 @@ repository = "https://github.com/dial9-rs/dial9"
 libc = "0.2"
 dial9-core = { version = "0.5.0-rc0", path = "dial9-core" }
 dial9-utils = { version = "0.5.0-rc0", path = "dial9-utils" }
+dial9-destinations-s3 = { version = "0.5.0-rc0", path = "dial9-destinations-s3" }
 dial9-perf-self-profile = { version = "0.5.0-rc0", path = "perf-self-profile" }
 dial9-trace-format = { version = "0.5.0-rc0", path = "dial9-trace-format" }
 dial9-trace-format-derive = { version = "0.5.0-rc0", path = "dial9-trace-format-derive" }
 dial9-macro = { version = "0.5.0-rc0", path = "dial9-macro" }
+dial9-metrique = { version = "0.5.0-rc0", path = "dial9-metrique" }
 assert2 = "0.4"
 
 [profile.release]

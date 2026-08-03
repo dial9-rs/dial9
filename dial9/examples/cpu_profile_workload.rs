@@ -14,9 +14,9 @@
 
 use dial9::analysis::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 use dial9::cpu::CpuProfilingConfig;
+use dial9::format::Decoder;
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderTokioExt, TokioAttachOptions};
-use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
 fn burn_cpu(duration: Duration) {
@@ -51,16 +51,20 @@ fn main() {
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
-    let (recorder, rt) = recorder(writer)
+    let recorder = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .build()
-        .attach_tokio_runtime_with(
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
             TokioAttachOptions::builder()
                 .task_tracking_enabled(true)
                 .build(),
-            |t| {
-                t.worker_threads(4);
-            },
         )
         .expect("build tokio runtime");
 

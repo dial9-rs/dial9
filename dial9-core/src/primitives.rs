@@ -297,6 +297,16 @@ pub struct BoundedQueue<T> {
 }
 
 #[cfg(not(shuttle))]
+impl<T> std::fmt::Debug for BoundedQueue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundedQueue")
+            .field("len", &self.inner.len())
+            .field("capacity", &self.inner.capacity())
+            .finish()
+    }
+}
+
+#[cfg(not(shuttle))]
 impl<T> BoundedQueue<T> {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -318,6 +328,15 @@ impl<T> BoundedQueue<T> {
 pub struct BoundedQueue<T> {
     inner: shuttle::sync::Mutex<std::collections::VecDeque<T>>,
     capacity: usize,
+}
+
+#[cfg(shuttle)]
+impl<T> std::fmt::Debug for BoundedQueue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundedQueue")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(shuttle)]

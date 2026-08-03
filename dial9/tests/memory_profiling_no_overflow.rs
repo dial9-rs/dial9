@@ -6,7 +6,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::{MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -35,11 +35,11 @@ fn no_overflow_event_when_ring_has_capacity() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
 
     let handle = recorder.handle().clone();

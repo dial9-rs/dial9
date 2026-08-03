@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 8993,
+  "total_samples": 12134,
   "by_source": {
-    "0": 147,
-    "1": 8846
+    "0": 100,
+    "1": 12034
   },
   "on_off_all": {
-    "on_runtime": 8993,
-    "off_runtime": 0
+    "on_runtime": 12124,
+    "off_runtime": 10
   },
   "on_off_by_source": {
     "0": {
-      "on": 147,
-      "off": 0
+      "on": 90,
+      "off": 10
     },
     "1": {
-      "on": 8846,
+      "on": 12034,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 147,
-    "distinct_stacks": 116,
-    "stack_sig_digest": "a9a7f7ccc3890e67",
-    "ts_count": 147,
-    "ts_span_ns": 3637993460,
-    "ts_delta_digest": "f23bfcd1eaa71887",
+    "count": 100,
+    "distinct_stacks": 91,
+    "stack_sig_digest": "daf091d3af017c50",
+    "ts_count": 100,
+    "ts_span_ns": 3402001126,
+    "ts_delta_digest": "c544cc9eeb1231f6",
     "top_stacks": [
       {
-        "count": 8,
-        "depth": 129,
-        "leaf": "_Unwind_Find_FDE"
-      },
-      {
-        "count": 6,
-        "depth": 129,
-        "leaf": "0xffff9ba4de60"
-      },
-      {
-        "count": 4,
-        "depth": 122,
-        "leaf": "0xffff9ba4c97c"
-      },
-      {
-        "count": 4,
-        "depth": 129,
-        "leaf": "0xffff9b87d200"
+        "count": 3,
+        "depth": 113,
+        "leaf": "[unknown] 0xffffadc9de8c"
       },
       {
         "count": 3,
-        "depth": 129,
-        "leaf": "0xffff9ba4de8c"
-      },
-      {
-        "count": 3,
-        "depth": 59,
-        "leaf": "0xffff9babd2f8"
-      },
-      {
-        "count": 3,
-        "depth": 122,
+        "depth": 113,
         "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 122,
-        "leaf": "0xffff9ba4de54"
+        "depth": 106,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 107,
+        "leaf": "[unknown] 0xffffadacd200"
+      },
+      {
+        "count": 2,
+        "depth": 32,
+        "leaf": "write"
+      },
+      {
+        "count": 2,
+        "depth": 94,
+        "leaf": "<hyper::proto::h1::role::Server as hyper::proto::h1::Http1Transaction>::parse"
+      },
+      {
+        "count": 2,
+        "depth": 89,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 1,
+        "depth": 144,
+        "leaf": "hashbrown::map::HashMap<K,V,S,A>::insert"
       }
     ]
   }

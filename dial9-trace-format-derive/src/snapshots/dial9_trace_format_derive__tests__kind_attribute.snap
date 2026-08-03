@@ -1,0 +1,47 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+assertion_line: 365
+expression: "expand_to_string(quote!\n{\n    struct Metrics\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64,\n        #[traceevent(unit = \"ns\", kind = \"counter\")] cpu_time_ns: u64,\n        #[traceevent(kind = \"gauge\")] queue_depth: u64,\n        #[traceevent(kind = \"updown-counter\")] active_requests: i64,\n    }\n})"
+---
+impl ::dial9_trace_format::TraceEvent for Metrics {
+    fn event_name() -> &'static str {
+        "Metrics"
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef::new("cpu_time_ns", < u64 as
+            ::dial9_trace_format::TraceField > ::field_type(),),
+            ::dial9_trace_format::schema::FieldDef::new("queue_depth", < u64 as
+            ::dial9_trace_format::TraceField > ::field_type(),),
+            ::dial9_trace_format::schema::FieldDef::new("active_requests", < i64 as
+            ::dial9_trace_format::TraceField > ::field_type(),)
+        ]
+    }
+    fn schema_entry() -> ::dial9_trace_format::schema::SchemaEntry {
+        ::dial9_trace_format::schema::SchemaEntry::with_annotations(
+            Self::event_name(),
+            Self::has_timestamp(),
+            Self::field_defs(),
+            vec![
+                ::dial9_trace_format::schema::FieldAnnotation::new(0u16, "unit", "ns"),
+                ::dial9_trace_format::schema::FieldAnnotation::new(0u16, "kind",
+                "counter"), ::dial9_trace_format::schema::FieldAnnotation::new(1u16,
+                "kind", "gauge"),
+                ::dial9_trace_format::schema::FieldAnnotation::new(2u16, "kind",
+                "updown-counter")
+            ],
+        )
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <u64 as ::dial9_trace_format::TraceField>::encode(&self.cpu_time_ns, enc)?;
+        <u64 as ::dial9_trace_format::TraceField>::encode(&self.queue_depth, enc)?;
+        <i64 as ::dial9_trace_format::TraceField>::encode(&self.active_requests, enc)?;
+        Ok(())
+    }
+}

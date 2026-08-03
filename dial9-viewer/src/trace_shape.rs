@@ -59,14 +59,26 @@ const SYNTHETIC_EPOCH_NS: u64 = 1_577_836_800_000_000_000;
 /// Gzip magic bytes.
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
-/// Safe annotation keys that are preserved verbatim.
-/// The derive macro emits `"unit"` as the key; the legacy format uses
-/// `"metrique.unit"`. Both are recognized.
-const SAFE_ANNOTATION_KEYS: &[&str] = &["unit", "metrique.unit"];
+/// Safe annotation keys preserved by shape extraction. `"metrique.unit"` is
+/// retained for compatibility with existing traces; current producers use
+/// `"unit"` and `"kind"`.
+const SAFE_ANNOTATION_KEYS: &[&str] = &["unit", "metrique.unit", "kind"];
 
 /// Safe annotation values (units). Must stay in sync with the derive macro's
 /// `SUPPORTED_UNITS` in `dial9-trace-format-derive/src/lib.rs`.
 const SAFE_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes", "count"];
+
+/// Safe field interpretations. Must stay in sync with the derive macro's
+/// `SUPPORTED_KINDS` and the viewer's `FieldChartKind`.
+const SAFE_FIELD_KINDS: &[&str] = &["gauge", "counter", "updown-counter"];
+
+fn is_safe_annotation_value(key: &str, value: &str) -> bool {
+    match key {
+        "unit" | "metrique.unit" => SAFE_UNITS.contains(&value),
+        "kind" => SAFE_FIELD_KINDS.contains(&value),
+        _ => false,
+    }
+}
 
 /// Maximum recursion depth for nested dynamic values.
 const MAX_DYNAMIC_DEPTH: usize = 8;
@@ -226,7 +238,12 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
                 ("sched_wait_ns", V),
             ],
         ]),
-        "QueueSampleEvent" => Some(&[&[("global_queue", U8)], &[("global_queue", V)]]),
+        "QueueSampleEvent" => Some(&[
+            &[("global_queue", U8), ("active_tasks", V)],
+            &[("global_queue", V), ("active_tasks", V)],
+            &[("global_queue", U8)],
+            &[("global_queue", V)],
+        ]),
         "TaskSpawnEvent" => Some(&[
             &[("task_id", V), ("spawn_loc", PS), ("instrumented", B)],
             &[("task_id", V), ("spawn_loc", PS)],
@@ -1618,7 +1635,7 @@ fn compute_quantiles(values: &mut [u64]) -> Option<Quantiles> {
 /// processed while its active schema, string_pool, and stack_pool are still valid
 /// (reset frames clear these). This fixes panics on traces with mid-stream resets.
 #[allow(clippy::collapsible_if)] // Nested if-let chains are clearer for field matching
-fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
+pub(crate) fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
     // ─── Pass 1: determine global min/max timestamps ────────────────────
     let mut decoder1 = Decoder::new(data).context("invalid trace file header")?;
     let mut global_min_ts: Option<u64> = None;
@@ -1719,7 +1736,7 @@ fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
                     .iter()
                     .filter_map(|a| {
                         if SAFE_ANNOTATION_KEYS.contains(&a.key())
-                            && SAFE_UNITS.contains(&a.value())
+                            && is_safe_annotation_value(a.key(), a.value())
                         {
                             if (a.field_index() as usize) >= fields.len() {
                                 return None;
@@ -1872,6 +1889,128 @@ fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
     validate_shape(&shape).context("extracted shape failed validation")?;
 
     Ok(shape)
+}
+
+/// Retain only events accepted by `keep`, then rebuild and validate every
+/// summary field affected by the filtered event set.
+///
+/// Schemas are deliberately retained even when no surviving event references
+/// them. They are small, and keeping their indices stable avoids rewriting
+/// every event while still ensuring disabled features emit no data.
+pub(crate) fn retain_events(
+    shape: &mut TraceShape,
+    mut keep: impl FnMut(&ShapeSchema, &ShapeEvent) -> bool,
+) -> anyhow::Result<()> {
+    let schemas = &shape.schemas;
+    shape
+        .events
+        .retain(|event| keep(&schemas[event.schema_index as usize], event));
+    ensure!(
+        !shape.events.is_empty(),
+        "event filter removed every event from the trace shape"
+    );
+
+    rebuild_summary(shape);
+    validate_shape(shape).context("filtered shape failed validation")
+}
+
+/// Drop zero-timestamp framing events and move the remaining synthetic
+/// timeline to a zero base. Zero-timestamp symbol records are retained at the
+/// new base because stack samples need them for address resolution.
+///
+/// This is simulator-specific cleanup for source fixtures containing framing
+/// events at timestamp zero. Timestamp-reference fields participate in choosing
+/// the base so subtracting it never invents a plausible fallback value.
+pub(crate) fn rebase_timeline_from_first_nonzero_event(
+    shape: &mut TraceShape,
+) -> anyhow::Result<usize> {
+    let original_len = shape.events.len();
+    shape.events.retain(|event| {
+        let timestamp = event.timestamp_offset_ns;
+        timestamp.is_some_and(|timestamp| timestamp > 0)
+            || (timestamp == Some(0)
+                && shape.schemas[event.schema_index as usize].name == "SymbolTableEntry")
+    });
+    ensure!(
+        !shape.events.is_empty(),
+        "trace shape has no nonzero-timestamp events"
+    );
+
+    let mut base = shape
+        .events
+        .iter()
+        .filter_map(|event| event.timestamp_offset_ns)
+        .filter(|timestamp| *timestamp > 0)
+        .min()
+        .context("trace shape has no positive timestamped events")?;
+    for event in &shape.events {
+        let schema = &shape.schemas[event.schema_index as usize];
+        for (field, value) in schema.fields.iter().zip(event.values.iter()) {
+            if field_shifts_with_timeline(field)
+                && let ShapeValue::U(value) = value
+                && *value > 0
+            {
+                base = base.min(*value);
+            }
+        }
+    }
+
+    for event in &mut shape.events {
+        let timestamp = event
+            .timestamp_offset_ns
+            .context("trace shape event lost its timestamp")?;
+        if timestamp > 0 {
+            event.timestamp_offset_ns = Some(
+                timestamp
+                    .checked_sub(base)
+                    .context("trace shape timestamp precedes selected timeline base")?,
+            );
+        }
+
+        let schema = &shape.schemas[event.schema_index as usize];
+        for (field, value) in schema.fields.iter().zip(event.values.iter_mut()) {
+            if field_shifts_with_timeline(field)
+                && let ShapeValue::U(value) = value
+                && *value > 0
+            {
+                *value = value
+                    .checked_sub(base)
+                    .context("trace shape timestamp reference precedes timeline base")?;
+            }
+        }
+    }
+
+    rebuild_summary(shape);
+    validate_shape(shape).context("rebased shape failed validation")?;
+    Ok(original_len - shape.events.len())
+}
+
+fn field_shifts_with_timeline(field: &ShapeField) -> bool {
+    field.repeat_meta.as_ref().is_some_and(|metadata| {
+        matches!(
+            metadata.semantics,
+            FieldSemantics::TimestampRef | FieldSemantics::RealtimeOffset
+        )
+    })
+}
+
+fn rebuild_summary(shape: &mut TraceShape) {
+    let mut event_type_counts = BTreeMap::new();
+    for event in &shape.events {
+        let name = &shape.schemas[event.schema_index as usize].name;
+        *event_type_counts.entry(name.clone()).or_default() += 1;
+    }
+
+    let recomputed = recompute_summary(shape);
+    shape.summary = ShapeSummary {
+        event_count: recomputed.event_count,
+        duration_ns: recomputed.duration_ns,
+        event_type_counts,
+        worker_cardinality: recomputed.worker_cardinality,
+        task_cardinality: recomputed.task_cardinality,
+        poll_duration_quantiles: recomputed.poll_duration_quantiles,
+        span_duration_quantiles: recomputed.span_duration_quantiles,
+    };
 }
 
 // ─── Validation ─────────────────────────────────────────────────────────────
@@ -2099,9 +2238,10 @@ fn validate_shape(shape: &TraceShape) -> anyhow::Result<()> {
                 ann.key
             );
             ensure!(
-                SAFE_UNITS.contains(&ann.value.as_str()),
-                "schema '{}' annotation has unsafe value '{}'",
+                is_safe_annotation_value(&ann.key, &ann.value),
+                "schema '{}' annotation '{}' has unsafe value '{}'",
                 schema.name,
+                ann.key,
                 ann.value
             );
             ensure!(
@@ -3102,16 +3242,41 @@ fn compute_namespace_strides(shape: &TraceShape) -> anyhow::Result<HashMap<Names
 /// Used by tests that need a Vec<u8> result.
 #[cfg(test)]
 fn generate_trace(shape: &TraceShape, repeat: u32) -> anyhow::Result<Vec<u8>> {
+    generate_trace_with_bases(shape, repeat, 0, SYNTHETIC_EPOCH_NS)
+}
+
+/// Generate an in-memory trace with independently configurable monotonic and
+/// realtime bases.
+///
+/// The CLI uses the fixed privacy-preserving epoch through [`generate_trace`]
+/// and [`generate_to_writer`]. Simulator segments use their S3-key start time
+/// for both bases, which makes repeated objects occupy distinct ranges while
+/// keeping aggregation and browser scope filters in the same wall-clock domain.
+pub(crate) fn generate_trace_with_bases(
+    shape: &TraceShape,
+    repeat: u32,
+    timestamp_base_ns: u64,
+    realtime_base_ns: u64,
+) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    // For the Vec path, we still want preflight checks
     validate_repeat_preflight(shape, repeat)?;
-    generate_to_writer(shape, repeat, &mut buf)?;
+    generate_to_writer_with_bases(shape, repeat, timestamp_base_ns, realtime_base_ns, &mut buf)?;
     Ok(buf)
 }
 
 /// F: Stream trace output through an Encoder writing to any `W: Write`.
 /// Caller must ensure validation and preflight have passed before calling.
 fn generate_to_writer<W: Write>(shape: &TraceShape, repeat: u32, writer: W) -> anyhow::Result<()> {
+    generate_to_writer_with_bases(shape, repeat, 0, SYNTHETIC_EPOCH_NS, writer)
+}
+
+fn generate_to_writer_with_bases<W: Write>(
+    shape: &TraceShape,
+    repeat: u32,
+    timestamp_base_ns: u64,
+    realtime_base_ns: u64,
+    writer: W,
+) -> anyhow::Result<()> {
     // Compute duration and gap with checked arithmetic
     let actual_duration = shape
         .events
@@ -3169,14 +3334,19 @@ fn generate_to_writer<W: Write>(shape: &TraceShape, repeat: u32, writer: W) -> a
                     .ok_or_else(|| anyhow::anyhow!("template_duration + gap overflow"))?,
             )
             .ok_or_else(|| anyhow::anyhow!("rep * (duration+gap) overflow at rep={rep}"))?;
+        let timeline = GenerationTimeline {
+            time_shift_ns: time_shift,
+            realtime_base_ns,
+        };
 
         for event in &shape.events {
             let schema = &schemas[event.schema_index as usize];
             let shape_schema = &shape.schemas[event.schema_index as usize];
 
             let ts_offset = event.timestamp_offset_ns.unwrap_or(0);
-            let ts_ns = ts_offset
-                .checked_add(time_shift)
+            let ts_ns = timestamp_base_ns
+                .checked_add(ts_offset)
+                .and_then(|timestamp| timestamp.checked_add(time_shift))
                 .ok_or_else(|| anyhow::anyhow!("timestamp overflow at rep={rep}"))?;
 
             let mut values = Vec::with_capacity(shape_schema.fields.len() + 1);
@@ -3191,7 +3361,7 @@ fn generate_to_writer<W: Write>(shape: &TraceShape, repeat: u32, writer: W) -> a
                     ft,
                     meta,
                     rep,
-                    time_shift,
+                    timeline,
                     &strides,
                     &mut encoder,
                 )?;
@@ -3211,13 +3381,19 @@ fn generate_to_writer<W: Write>(shape: &TraceShape, repeat: u32, writer: W) -> a
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct GenerationTimeline {
+    time_shift_ns: u64,
+    realtime_base_ns: u64,
+}
+
 /// Convert a ShapeValue to a FieldValue for encoding, applying repetition shifts.
 fn shape_value_to_field_value<W: Write>(
     sv: &ShapeValue,
     ft: FieldType,
     meta: Option<&FieldRepeatMeta>,
     rep: u32,
-    time_shift: u64,
+    timeline: GenerationTimeline,
     strides: &HashMap<NamespaceId, u64>,
     encoder: &mut Encoder<W>,
 ) -> anyhow::Result<FieldValue> {
@@ -3251,14 +3427,16 @@ fn shape_value_to_field_value<W: Write>(
                 }
                 FieldSemantics::TimestampRef => {
                     // alloc_timestamp_ns: add repetition time shift
-                    v.checked_add(time_shift)
+                    v.checked_add(timeline.time_shift_ns)
                         .ok_or_else(|| anyhow::anyhow!("alloc_timestamp_ns overflow"))?
                 }
                 FieldSemantics::RealtimeOffset => {
-                    // B - CLOCK PRIVACY: SYNTHETIC_EPOCH + event_offset + time_shift
-                    SYNTHETIC_EPOCH_NS
+                    // B - CLOCK PRIVACY: configured synthetic epoch + event
+                    // offset + repetition shift.
+                    timeline
+                        .realtime_base_ns
                         .checked_add(*v)
-                        .and_then(|x| x.checked_add(time_shift))
+                        .and_then(|x| x.checked_add(timeline.time_shift_ns))
                         .ok_or_else(|| anyhow::anyhow!("realtime_ns overflow"))?
                 }
                 FieldSemantics::Structural => *v,
@@ -3337,7 +3515,9 @@ fn shape_value_to_field_value<W: Write>(
         ShapeValue::List(items) => {
             let mapped: Vec<FieldValue> = items
                 .iter()
-                .map(|item| convert_nested_shape_value(item, rep, time_shift, strides, encoder))
+                .map(|item| {
+                    convert_nested_shape_value(item, rep, timeline.time_shift_ns, strides, encoder)
+                })
                 .collect::<anyhow::Result<_>>()?;
             Ok(FieldValue::List(mapped))
         }
@@ -3345,8 +3525,20 @@ fn shape_value_to_field_value<W: Write>(
             let mapped: Vec<(FieldValue, FieldValue)> = pairs
                 .iter()
                 .map(|(k, v)| {
-                    let kv = convert_nested_shape_value(k, rep, time_shift, strides, encoder)?;
-                    let vv = convert_nested_shape_value(v, rep, time_shift, strides, encoder)?;
+                    let kv = convert_nested_shape_value(
+                        k,
+                        rep,
+                        timeline.time_shift_ns,
+                        strides,
+                        encoder,
+                    )?;
+                    let vv = convert_nested_shape_value(
+                        v,
+                        rep,
+                        timeline.time_shift_ns,
+                        strides,
+                        encoder,
+                    )?;
                     Ok((kv, vv))
                 })
                 .collect::<anyhow::Result<_>>()?;
@@ -5753,6 +5945,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_annotation_value_for_different_key() {
+        let mut shape = minimal_shape(
+            vec![ShapeField {
+                name: "x".into(),
+                field_type: FieldType::Varint as u8,
+                repeat_meta: None,
+            }],
+            vec![ShapeValue::U(1)],
+        );
+        shape.schemas[0].annotations = vec![ShapeAnnotation {
+            field_index: 0,
+            key: "kind".into(),
+            value: "ns".into(),
+        }];
+        let err = validate_shape(&shape).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("annotation 'kind' has unsafe value 'ns'"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn validate_summary_type_counts_both_directions() {
         // Extra entry in summary not in actual events
         let mut shape = minimal_shape(
@@ -7174,8 +7389,9 @@ mod tests {
     // ─── Finding #5: Annotation parity regression ───────────────────────
 
     #[test]
-    fn annotation_unit_key_preserved() {
-        // (5) The derive macro emits "unit" (not "metrique.unit"). Verify both are accepted.
+    fn safe_annotation_keys_and_values_preserved() {
+        // (5) Verify derive-style metadata and the legacy unit key are accepted,
+        // while an unsupported value on a safe key is still discarded.
         use dial9_trace_format::schema::{FieldAnnotation, SchemaEntry};
         let mut enc = Encoder::new();
         let fields = vec![
@@ -7185,6 +7401,8 @@ mod tests {
         let annotations = vec![
             FieldAnnotation::new(0, "unit", "ns"),
             FieldAnnotation::new(1, "metrique.unit", "ms"),
+            FieldAnnotation::new(0, "kind", "counter"),
+            FieldAnnotation::new(1, "kind", "histogram"),
         ];
         let entry = SchemaEntry::with_annotations("TestEvent", true, fields, annotations);
         let schema = dial9_trace_format::encoder::Schema::from_entry(entry);
@@ -7202,7 +7420,7 @@ mod tests {
 
         let shape = extract_shape(&trace).unwrap();
         let schema_shape = &shape.schemas[0];
-        assert_eq!(schema_shape.annotations.len(), 2);
+        assert_eq!(schema_shape.annotations.len(), 3);
         let ann_keys: Vec<&str> = schema_shape
             .annotations
             .iter()
@@ -7215,6 +7433,10 @@ mod tests {
         assert!(
             ann_keys.contains(&"metrique.unit"),
             "legacy 'metrique.unit' annotation not preserved"
+        );
+        assert!(
+            ann_keys.contains(&"kind"),
+            "derive-style 'kind' annotation not preserved"
         );
     }
 

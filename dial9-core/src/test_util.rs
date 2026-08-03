@@ -51,7 +51,7 @@ pub use pipeline_helpers::*;
 
 /// Worker-pipeline drivers for sibling-crate processor tests. They build the
 /// `Fs` + `WorkerLoop` + dump channel internally and expose only opaque handles
-/// plus already-public types, so callers (e.g. `dial9-utils`) can exercise a real
+/// plus already-public types, so callers (e.g. `dial9-destinations-s3`) can exercise a real
 /// `SegmentProcessor` end-to-end without touching the worker internals.
 #[cfg(feature = "pipeline")]
 mod pipeline_helpers {
@@ -153,6 +153,12 @@ mod pipeline_helpers {
         fs: Arc<Fs>,
         stop: CancellationToken,
         join: JoinHandle<()>,
+    }
+
+    impl std::fmt::Debug for TriggeredPipeline {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TriggeredPipeline").finish_non_exhaustive()
+        }
     }
 
     impl TriggeredPipeline {

@@ -67,14 +67,24 @@ impl Dial9Handle {
         Self { inner: None }
     }
 
-    /// Whether this handle is connected to a live recorder.
+    /// Whether recording through this handle currently does anything: the
+    /// handle is connected to a live recorder AND recording is enabled (not
+    /// paused via [`disable`](Self::disable)).
     ///
-    /// Returns `false` for handles obtained via
-    /// [`Dial9Handle::disabled`], and for handles returned by
-    /// [`Dial9Handle::current`] when called from a thread that is
-    /// not owned by a dial9 runtime.
+    /// Returns `false` for handles obtained via [`Dial9Handle::disabled`],
+    /// for handles returned by [`Dial9Handle::current`] on a thread not
+    /// owned by a dial9 runtime, and while a connected recorder is paused.
+    ///
+    /// Cheaper than attempting a record: sources that do per-event work
+    /// before reaching [`with_encoder`](Self::with_encoder) can skip it
+    /// entirely while recording is off. The check is a relaxed atomic load;
+    /// racing a concurrent enable/disable is benign (the event lands or is
+    /// skipped, exactly as if it had arrived a moment earlier or later).
+    ///
+    /// To ask only whether the handle is connected at all, regardless of
+    /// pause state, use [`shared`](Self::shared)`().is_some()`.
     pub fn is_enabled(&self) -> bool {
-        self.inner.is_some()
+        self.inner.as_ref().is_some_and(|i| i.shared.is_enabled())
     }
 
     /// Access this handle's [`SharedState`].

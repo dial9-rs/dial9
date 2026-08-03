@@ -251,7 +251,7 @@ test("scopeFromKeys derives the window from key epochs when none is supplied", (
   const keys = [key("h1", 1782760100, 1), key("h1", 1782760300, 2)];
   const s = scope.scopeFromKeys("bkt", keys, null, null);
   assert.strictEqual(s.from, 1782760100, "min epoch");
-  assert.strictEqual(s.to, 1782760300, "max epoch");
+  assert.strictEqual(s.to, 1782760301, "exclusive bound after max epoch");
 });
 
 test("scopeFromKeys returns null when no window and no parseable epochs", () => {
@@ -298,6 +298,46 @@ asyncTests.push(testAsync("resolveScope lists the window, filters to the host se
   assert.strictEqual(urls.length, 1, "only the in-window h1 object survives");
   assert.ok(urls[0].startsWith("/api/object?"), "maps to /api/object");
   assert.ok(urls[0].includes(encodeURIComponent(key("h1", 1782760100, 1))), "carries the right key");
+}));
+
+asyncTests.push(testAsync("resolveScope uses half-open boundaries for adjacent segments", async () => {
+  const s = {
+    bucket: "bkt",
+    prefix: "traces",
+    service: "shale",
+    hosts: ["h1"],
+    from: 1782760100,
+    to: 1782760160,
+  };
+  const selected = key("h1", 1782760100, 1);
+  const adjacent = key("h1", 1782760160, 2);
+  const previous = key("h1", 1782760040, 0);
+  const browse = {
+    objects: [
+      {
+        key: previous,
+        size: 10,
+        last_modified: "2026-06-29T19:08:20Z",
+      },
+      {
+        key: selected,
+        size: 10,
+        last_modified: "2026-06-29T19:09:20Z",
+      },
+      {
+        key: adjacent,
+        size: 10,
+        last_modified: "2026-06-29T19:10:20Z",
+      },
+    ],
+  };
+
+  const urls = await scope.resolveScope(s, async () => browse);
+  assert.strictEqual(urls.length, 1, "segments touching either scope boundary must be excluded");
+  assert.strictEqual(
+    new URL(urls[0], "http://dial9.test").searchParams.get("key"),
+    selected,
+  );
 }));
 
 asyncTests.push(testAsync("resolveScope sends an encoded service and retains client-side service filtering", async () => {

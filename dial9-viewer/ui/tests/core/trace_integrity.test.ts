@@ -40,6 +40,14 @@ interface ClockSyncAnchor {
   realtimeNs: number;
 }
 
+interface CustomEvent {
+  name: string;
+  timestamp: number;
+  fields: Record<string, unknown>;
+  units: Record<string, string> | null;
+  fieldKinds: Record<string, string> | null;
+}
+
 interface ParsedTrace {
   events: TraceEvent[];
   version: number;
@@ -49,6 +57,7 @@ interface ParsedTrace {
   taskTerminateTimes: Map<number, number>;
   clockSyncAnchors: ClockSyncAnchor[];
   clockOffsetNs: number | null;
+  customEvents: CustomEvent[];
 }
 
 const { parseTrace, EVENT_TYPES } = require("../../trace_parser.js") as {
@@ -373,5 +382,79 @@ describe("clock-sync", () => {
       reconstructedAnchorWall / 1e6,
       `reconstructed wall clock ${reconstructedAnchorWall} is implausibly old`,
     ).toBeGreaterThanOrEqual(MIN_PLAUSIBLE_WALL_CLOCK_MS);
+  });
+});
+
+describe("metrique events", () => {
+  // Assertions target the demo app's RequestMetrics specifically, so adding
+  // other metrique entry types to the demo does not break them. (If this
+  // ever fails with zero events despite the demo emitting them, check for a
+  // "metrique:RequestMetrics#<hash>" schema-name suffix from a
+  // canonical-name collision.)
+  function requestMetrics(): CustomEvent[] {
+    return trace.customEvents.filter((e) => e.name === "metrique:RequestMetrics");
+  }
+
+  it("demo app records metrique request metrics", () => {
+    expect(requestMetrics().length, "No metrique:RequestMetrics events found").toBeGreaterThan(0);
+  });
+
+  it("metrique events carry context and payload fields", () => {
+    for (const ev of requestMetrics()) {
+      const f = ev.fields;
+      expect(f["dial9.thread_id"], `dial9.thread_id missing on ${ev.name}`).toBeDefined();
+      expect(f["dial9.thread_id"], `dial9.thread_id null on ${ev.name}`).not.toBeNull();
+      const duration = Number(f["dial9.span.duration_ns"]);
+      expect(duration, `dial9.span.duration_ns missing on ${ev.name}`).not.toBeNaN();
+      expect(
+        duration,
+        "duration must not exceed the packed close timestamp",
+      ).toBeLessThanOrEqual(ev.timestamp);
+      expect(
+        ev.units?.["dial9.span.duration_ns"],
+        `dial9.span.duration_ns unit missing on ${ev.name}`,
+      ).toBe("ns");
+      expect(f["Operation"], `Operation missing on ${ev.name}`).toBeTruthy();
+      expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
+    }
+  });
+
+  it("metrique unit annotations surface as schema units", () => {
+    const withLatency = requestMetrics().filter((e) => e.fields["Latency"] != null);
+    expect(withLatency.length, "No metrique events with a Latency field").toBeGreaterThan(0);
+    for (const ev of withLatency) {
+      // Normalized to the shared derive/viewer unit vocabulary.
+      expect(ev.units?.["Latency"], `Latency unit missing on ${ev.name}`).toBe("ms");
+    }
+  });
+
+  it("process resource field kinds surface from schema annotations", () => {
+    const events = trace.customEvents.filter(
+      (event) => event.name === "ProcessResourceUsageEvent",
+    );
+    expect(events.length, "No process resource usage events found").toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.fieldKinds).toMatchObject({
+        user_cpu_ns: "counter",
+        system_cpu_ns: "counter",
+        max_rss_bytes: "gauge",
+        minor_faults: "counter",
+        major_faults: "counter",
+        block_input_ops: "counter",
+        block_output_ops: "counter",
+        voluntary_context_switches: "counter",
+        involuntary_context_switches: "counter",
+      });
+    }
+  });
+
+  it("TCP accept queue depth surfaces as a gauge", () => {
+    const events = trace.customEvents.filter(
+      (event) => event.name === "TcpAcceptQueueEvent",
+    );
+    expect(events.length, "No TCP accept queue events found").toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.fieldKinds).toMatchObject({ pending_connections: "gauge" });
+    }
   });
 });

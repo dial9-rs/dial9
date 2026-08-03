@@ -13,6 +13,7 @@ fn unsupported<T>() -> io::Result<T> {
 /// Stub `PerfSampler` for non-Linux platforms.
 ///
 /// All constructors return [`io::ErrorKind::Unsupported`].
+#[derive(Debug)]
 pub struct PerfSampler {
     _private: (),
 }

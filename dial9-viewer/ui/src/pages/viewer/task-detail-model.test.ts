@@ -229,6 +229,41 @@ function wakeInfo(effectiveWake: number, wakerTaskId: number, label: string): Po
 }
 
 describe("buildTaskDetailRenderModel: wake bands", () => {
+  it("renders spawn-to-first-poll as a scheduling delay without a waker", () => {
+    const spawnTs = 1_000_000;
+    const firstPollTs = 8_135_941;
+    const data = detailData({
+      polls: [poll(firstPollTs, firstPollTs + 100_000, 1)],
+      spawnTs,
+    });
+    const m = buildTaskDetailRenderModel({
+      data,
+      viewStart: 0,
+      viewEnd: 10_000_000,
+      drawW: 1000,
+    });
+
+    expect(m.schedulingBands).toEqual([
+      {
+        kind: "spawn",
+        x1: 100,
+        x2: 813.5941,
+        delayNs: 7_135_941,
+        severity: "high",
+        showDelayLabel: true,
+      },
+    ]);
+    expect(m.wakeRegions).toHaveLength(0);
+
+    const hit = m.hitRegions.find((r) => r.type === "scheduled");
+    expect(hit?.detail).toBe(
+      "Scheduled — waiting 7.14ms for first poll after task spawn",
+    );
+    expect(
+      statusTextAt(m, 500, BAND_TOP + BAND_H / 2),
+    ).toBe("⏳ Scheduled — waiting 7.14ms for first poll after task spawn");
+  });
+
   it("colours bands by delay severity and gates the labels on width", () => {
     // 1:1 ns->x would need a huge drawW; use a 10ms window / 1000px so the
     // three severities and both width thresholds are all exercised.
@@ -241,10 +276,12 @@ describe("buildTaskDetailRenderModel: wake bands", () => {
       ],
     });
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 10_000_000, drawW: 1000 });
-    expect(m.wakeBands.map((b) => b.severity)).toEqual(["high", "low", "mid"]);
+    expect(m.schedulingBands.map((b) => b.severity)).toEqual(["high", "low", "mid"]);
     // Width thresholds: delay label when > 25px, waker label when > 40px.
-    expect(m.wakeBands.map((b) => b.showDelayLabel)).toEqual([true, false, true]);
-    expect(m.wakeBands.map((b) => b.showWakerLabel)).toEqual([true, false, true]);
+    expect(m.schedulingBands.map((b) => b.showDelayLabel)).toEqual([true, false, true]);
+    expect(
+      m.schedulingBands.map((b) => b.kind === "wake" && b.showWakerLabel),
+    ).toEqual([true, false, true]);
     // A waker region exists only for the labelled (w>40) bands.
     expect(m.wakeRegions.map((r) => r.wakerTaskId)).toEqual([20, 22]);
     // Hit regions for the bands are typed "scheduled" and come first.
@@ -324,6 +361,12 @@ describe("buildTaskDetailRenderModel: idle gaps + lifespan", () => {
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
     expect(m.lifespan).toEqual({ x1: 50, x2: 800, showSpawn: true, showDone: true });
   });
+
+  it("shows the spawn edge when termination was not observed", () => {
+    const data = detailData({ polls: [poll(100, 200, 1)], spawnTs: 50 });
+    const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
+    expect(m.lifespan).toEqual({ x1: 50, x2: 1000, showSpawn: true, showDone: false });
+  });
 });
 
 // ── Hit-region ordering + status/waker lookups ────────────────────────────
@@ -365,7 +408,7 @@ describe("hit-region order + status/waker lookups", () => {
 
   it("returns nothing for a degenerate view (drawW <= 0 / no polls)", () => {
     const empty = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 0 });
-    expect(empty.wakeBands).toHaveLength(0);
+    expect(empty.schedulingBands).toHaveLength(0);
     expect(empty.pollBars).toHaveLength(0);
     expect(empty.hitRegions).toHaveLength(0);
     expect(hitRegionAt(empty, 10, BAND_TOP + 1)).toBeNull();

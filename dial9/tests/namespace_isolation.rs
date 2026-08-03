@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dial9::{DiskBuffer, RecorderPipelineExt, RecorderTokioExt};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions};
 
 /// Names a directory entry that looks like a boot_id (`{4-alpha}-{pid}`).
 fn is_boot_id_dir(path: &Path) -> bool {
@@ -59,10 +59,11 @@ fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskBuffer {
 /// shut it down so segments are sealed.
 fn run_workload(trace_dir: &Path, gc_dead_namespaces: bool) {
     let recorder = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces)).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
     assert!(recorder.handle().is_enabled());
     runtime.block_on(async {
@@ -157,7 +158,7 @@ fn gc_enabled_reclaims_dead_peer() {
 fn s3_boot_id_matches_namespace_dir() {
     use std::collections::HashMap;
 
-    use dial9::core::pipeline::s3::S3Config;
+    use dial9::s3::S3Config;
     use dial9_trace_format::decoder::Decoder;
 
     let dir = tempfile::tempdir().unwrap();
@@ -169,10 +170,11 @@ fn s3_boot_id_matches_namespace_dir() {
                 .build(),
         )
         .build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
     runtime.block_on(async {
         tokio::task::yield_now().await;

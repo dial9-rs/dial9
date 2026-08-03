@@ -2,9 +2,7 @@
 //! (or minimally overlapping) time ranges.
 
 use common::decode_file;
-use dial9_tokio_telemetry::telemetry::{
-    DiskBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use serde::Deserialize;
 use std::time::Duration;
@@ -130,22 +128,13 @@ fn rotated_segments_have_bounded_time_overlap() {
     // Unused current-thread primary; the workload runs on the "main" runtime
     // attached below.
     let recorder = recorder(writer).metrics_sink(metrics_sink).build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-            t.enable_all();
-            t.enable_all();
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach_current_thread(&recorder, TokioAttachOptions::default());
 
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().runtime_name("main").build(),
-            |t| {
-                t.worker_threads(num_workers);
-            },
-        )
-        .unwrap();
+    let runtime = common::attach(
+        &recorder,
+        num_workers,
+        TokioAttachOptions::builder().runtime_name("main").build(),
+    );
 
     runtime.block_on(async {
         let start = tokio::time::Instant::now();

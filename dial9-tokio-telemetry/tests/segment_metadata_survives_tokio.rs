@@ -5,7 +5,7 @@ mod common;
 
 use common::decode_file;
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 #[test]
@@ -16,11 +16,7 @@ fn core_segment_metadata_survives_attach_runtime() {
     let recorder = recorder(writer)
         .segment_metadata([("service".to_string(), "checkout".to_string())])
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(1);
-        })
-        .expect("build tokio runtime");
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
     rt.block_on(async {
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -45,6 +45,15 @@ pub struct Recorder {
     worker: Option<WorkerHandle>,
 }
 
+impl std::fmt::Debug for Recorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recorder")
+            .field("enabled", &self.handle.is_enabled())
+            .field("recording", &self.flush_thread.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// A hook run once, with the live [`Dial9Handle`], when the recorder first
 /// enables recording.
 pub type RecordingStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
@@ -168,9 +177,11 @@ impl Recorder {
             let _ = t.join();
         }
 
-        // Nothing drains sources once the flush thread is gone, so release them
-        // and whatever they own.
+        // Stop is permanent from here: recording off, enable() and new
+        // attaches refused. Nothing drains sources once the flush thread is
+        // gone, so release them and whatever they own.
         if let Some(shared) = self.handle.shared() {
+            shared.mark_stopped();
             shared.clear_sources();
         }
 

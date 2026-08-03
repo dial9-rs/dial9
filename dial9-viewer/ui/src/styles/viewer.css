@@ -107,6 +107,8 @@ body {
 .d9-toolbar-btn:hover:not(:disabled) { background: #33335a; }
 .d9-toolbar-btn:disabled { opacity: 0.4; cursor: default; }
 .d9-toolbar-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-field-charts-btn { display: inline-flex; align-items: center; gap: 5px; }
+.d9-field-charts-btn svg { width: 1em; height: 1em; }
 .d9-hidden { display: none !important; }
 
 /* Screen-reader-only label text (visually hidden, still announced). */
@@ -453,7 +455,7 @@ body {
     border-right: 1px solid var(--d9-border);
 }
 .d9-track-name { font-size: 0.8em; color: var(--d9-fg); }
-/* On a manageable track the visible name lives in the strip's 3-column header;
+/* On a manageable track the visible name lives in the management strip;
    keep the inner name for aria-labelledby, but hide it visually (sr-only). */
 .d9-track-manage .d9-track-label .d9-track-name {
     position: absolute;
@@ -474,6 +476,7 @@ body {
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
+.d9-field-chart-canvas { cursor: crosshair; }
 
 /* ── Worker-lanes box: fixed-height rows in a resizeable inner-scroll box ── */
 /* The lanes track stacks its label + scroll box in a row, then a resize gutter
@@ -524,15 +527,12 @@ body {
    BEHAVIOR survives, one-line-fold presentation retired). The affordances
    overlay a reserved strip at the LEFT edge of the
    label gutter so the frozen per-track labels are not modified; the strip is
-   pointer-events:none except the two controls, so the rest of the label (e.g.
+   pointer-events:none except its controls, so the rest of the label (e.g.
    the spans copy buttons) stays interactive. ── */
 .d9-track-manage { position: relative; }
 /* Reserve room for the strip so it never covers the label text / copy buttons. */
-/* The manageable-track header: a top-fixed 3-column row spanning the label
-   gutter - [collapse caret] [label] [drag grip]. Anchored to the top with
-   padding, so the three columns never move when the track collapses or
-   resizes. Overlays the (aria-only) inner label; the caret/grip are the only
-   interactive parts. */
+/* The manageable-track header is a top-fixed row spanning the label gutter:
+   collapse, label, drag, and (for dynamic charts) close. */
 .d9-track-manage-strip {
     position: absolute;
     left: 0;
@@ -553,9 +553,12 @@ body {
     line-height: 1.15;
     color: var(--d9-fg);
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .d9-track-caret,
-.d9-track-grip {
+.d9-track-grip,
+.d9-track-close {
     pointer-events: auto;
     width: 18px;
     height: 20px;
@@ -574,7 +577,8 @@ body {
    right = collapsed. Keeps the glyph out of the TS source. */
 .d9-track-caret::before { content: "\25BE"; }
 .d9-track-manage.is-collapsed .d9-track-caret::before { content: "\25B8"; }
-.d9-track-caret:focus-visible {
+.d9-track-caret:focus-visible,
+.d9-track-close:focus-visible {
     outline: 2px solid var(--d9-accent);
     outline-offset: 1px;
     border-radius: 3px;
@@ -585,6 +589,20 @@ body {
 }
 .d9-track-grip::before { content: "\2261"; } /* triple bar = drag handle */
 .d9-track-grip:active { cursor: grabbing; }
+.d9-track-close {
+    color: var(--d9-fg-muted);
+    font-size: 17px;
+}
+.d9-track-close:hover { color: #ff6b81; }
+.d9-track-manage.is-dynamic .d9-track-manage-strip {
+    gap: 2px;
+    padding-inline: 4px;
+}
+.d9-track-manage.is-dynamic .d9-track-caret,
+.d9-track-manage.is-dynamic .d9-track-grip,
+.d9-track-manage.is-dynamic .d9-track-close {
+    width: 16px;
+}
 /* Collapsed (label-only, legacy 24px): hide the drawing body. Covers both
    body variants (spans/events) and the canvas-wrap variants (cpu/queue). */
 .d9-track-manage.is-collapsed .d9-track-body,
@@ -1105,7 +1123,22 @@ body {
 
 /* Event tab. */
 .d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
-.d9-kv-corr, .d9-kv-copy {
+.d9-event-row {
+    display: grid;
+    grid-template-columns: minmax(72px, 3fr) minmax(0, 2fr) repeat(3, 24px);
+    align-items: start;
+    gap: 6px;
+}
+.d9-event-row .k {
+    grid-column: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.d9-event-row .v { grid-column: 2; min-width: 0; }
+.d9-event-row .d9-kv-corr { grid-column: 3; }
+.d9-event-row .d9-kv-chart { grid-column: 4; }
+.d9-event-row .d9-kv-copy { grid-column: 5; }
+.d9-kv-corr, .d9-kv-copy, .d9-kv-chart {
     flex-shrink: 0;
     font-size: 0.85em;
     color: var(--d9-fg-muted);
@@ -1115,7 +1148,254 @@ body {
     padding: 0 5px;
     cursor: pointer;
 }
-.d9-kv-corr:hover, .d9-kv-copy:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
+.d9-event-row .d9-kv-corr,
+.d9-event-row .d9-kv-copy,
+.d9-event-row .d9-kv-chart {
+    width: 24px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+.d9-kv-corr:hover, .d9-kv-copy:hover, .d9-kv-chart:hover {
+    color: var(--d9-fg);
+    border-color: var(--d9-accent);
+}
+.d9-kv-chart svg {
+    display: block;
+    width: 1em;
+    height: 1em;
+}
+
+/* ── Global field catalogue + chart-kind picker ───────────────────────── */
+.d9-field-chart-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1060;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.58);
+}
+.d9-field-chart-backdrop.open { display: flex; }
+.d9-field-chart-dialog {
+    width: min(480px, calc(100vw - 40px));
+    max-height: min(78vh, 680px);
+    display: flex;
+    flex-direction: column;
+    padding: 18px;
+    color: var(--d9-fg);
+    background: #151530;
+    border: 1px solid var(--d9-accent);
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65);
+}
+.d9-field-chart-dialog.is-catalog {
+    width: min(620px, calc(100vw - 40px));
+}
+.d9-field-chart-form {
+    min-height: 0;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+}
+.d9-field-chart-dialog h2 {
+    margin: 0 0 8px;
+    font-size: 1rem;
+}
+.d9-field-chart-body {
+    min-height: 0;
+    overflow-y: auto;
+}
+.d9-field-chart-dialog.is-catalog .d9-field-chart-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.d9-field-chart-intro {
+    margin: 0 0 10px;
+    color: var(--d9-fg-muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.d9-field-chart-search {
+    flex-shrink: 0;
+    width: 100%;
+    padding: 8px 10px;
+    color: var(--d9-fg);
+    background: #0f1629;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+    outline: none;
+}
+.d9-field-chart-search:focus { border-color: var(--d9-accent); }
+.d9-field-chart-search::placeholder { color: var(--d9-fg-muted); }
+.d9-field-chart-catalog {
+    min-height: 0;
+    margin-top: 10px;
+    overflow-y: auto;
+}
+.d9-field-chart-section h3,
+.d9-field-chart-other > summary {
+    color: var(--d9-fg-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+.d9-field-chart-section h3 { margin: 0 0 6px; }
+.d9-field-chart-other {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--d9-border);
+}
+.d9-field-chart-other > summary {
+    cursor: pointer;
+    user-select: none;
+}
+.d9-field-chart-other[open] > summary { margin-bottom: 7px; }
+.d9-field-chart-source-group {
+    margin-bottom: 8px;
+    overflow: hidden;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+}
+.d9-field-chart-event {
+    padding: 5px 9px;
+    overflow: hidden;
+    color: var(--d9-fg-muted);
+    background: var(--d9-bg-panel);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-field-chart-source-button {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 9px;
+    color: var(--d9-fg);
+    text-align: left;
+    background: #0f1629;
+    border: 0;
+    border-top: 1px solid var(--d9-border);
+    cursor: pointer;
+}
+.d9-field-chart-source-button:hover,
+.d9-field-chart-source-button:focus-visible {
+    background: #22224a;
+    outline: none;
+}
+.d9-field-chart-field {
+    overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-field-chart-kind-badge,
+.d9-field-chart-choose {
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+.d9-field-chart-kind-badge {
+    padding: 2px 6px;
+    color: #0d1728;
+    background: #55d6be;
+    border-radius: 999px;
+    font-weight: 600;
+}
+.d9-field-chart-choose { color: var(--d9-fg-muted); }
+.d9-field-chart-empty {
+    margin: 6px 0;
+    color: var(--d9-fg-muted);
+    font-size: 0.8rem;
+    font-style: italic;
+}
+.d9-field-chart-source {
+    margin-bottom: 14px;
+    color: var(--d9-fg-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+.d9-field-chart-kind-label {
+    margin: 0 0 7px;
+    color: var(--d9-fg-muted);
+    font-size: 0.8rem;
+}
+.d9-field-chart-kind-options {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+.d9-field-chart-kind {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 6px;
+    text-align: left;
+    color: var(--d9-fg);
+    background: #0f1629;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+    cursor: pointer;
+}
+.d9-field-chart-kind:hover,
+.d9-field-chart-kind:focus-visible,
+.d9-field-chart-kind.selected {
+    border-color: var(--d9-accent);
+    outline: none;
+}
+.d9-field-chart-kind.selected { background: #22224a; }
+.d9-field-chart-kind svg { width: 28px; height: 28px; }
+.d9-field-chart-kind-text { min-width: 0; text-align: center; }
+.d9-field-chart-kind-name,
+.d9-field-chart-kind-description { display: block; }
+.d9-field-chart-kind-name { font-size: 0.8rem; font-weight: 600; }
+.d9-field-chart-kind-description {
+    margin-top: 2px;
+    color: var(--d9-fg-muted);
+    font-size: 0.68rem;
+}
+.d9-field-chart-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-shrink: 0;
+}
+.d9-field-chart-cancel { margin-left: auto; }
+.d9-field-chart-actions button {
+    padding: 6px 10px;
+    color: var(--d9-fg);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    cursor: pointer;
+}
+.d9-field-chart-actions button:hover { border-color: var(--d9-accent); }
+.d9-field-chart-actions button.primary {
+    color: #0d1728;
+    background: #55d6be;
+    border-color: #55d6be;
+    font-weight: 600;
+}
+@media (max-width: 520px) {
+    .d9-field-chart-kind-options { grid-template-columns: 1fr; }
+    .d9-field-chart-kind {
+        flex-direction: row;
+        justify-content: flex-start;
+        text-align: left;
+    }
+    .d9-field-chart-kind-text { text-align: left; }
+}
 
 /* Related tab. */
 .d9-related-section { margin-bottom: 4px; }
@@ -1618,8 +1898,10 @@ body {
 }
 .d9-poll-fg-section.on { color: #fff; background: var(--d9-accent); border-color: var(--d9-accent); }
 .d9-poll-fg-section:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
-.d9-poll-fg-host { min-height: 320px; height: 42vh; position: relative; }
-.d9-poll-fg { width: 100%; height: 100%; }
+.d9-poll-fg-host,
+.d9-task-dump-fg-host { min-height: 320px; height: 42vh; position: relative; }
+.d9-poll-fg,
+.d9-task-dump-fg { width: 100%; height: 100%; }
 
 /* Blocking-calls panel. */
 .d9-block-groupby select {

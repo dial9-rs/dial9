@@ -1,4 +1,3 @@
-mod axum_traced;
 mod buffer;
 mod ddb;
 mod routes;
@@ -15,14 +14,17 @@ use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
 use dial9::socket::SocketAcceptQueuesConfig;
 use dial9::tracing_layer::Dial9TracingLayer;
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, RecorderPipelineExt};
 use dial9::{Dial9TokioHandle, TaskDumpConfig, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderPerfExt, RecorderPipelineExt, RecorderTokioExt};
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+use dial9::metrique_sink::Dial9Stream;
+use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
+use metrique::writer::AttachGlobalEntrySinkExt;
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
 
@@ -226,7 +228,7 @@ fn main() -> std::io::Result<()> {
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
     let recorder = if let Some(bucket) = &args.s3_bucket {
-        use dial9::core::pipeline::s3::S3Config;
+        use dial9::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)
@@ -251,15 +253,30 @@ fn main() -> std::io::Result<()> {
             .idle_threshold(Duration::from_millis(5))
             .build()
     });
-    let (recorder, runtime) = recorder.attach_tokio_runtime_with(
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(args.worker_threads);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .maybe_task_dump_config(task_dumps)
             .build(),
-        |t| {
-            t.worker_threads(args.worker_threads);
-        },
     )?;
+
+    // Per-request metrique entries (routes::RequestMetrics) flow into the
+    // dial9 trace AND a conventional metrics stream, the way a production
+    // service tees dial9 alongside its EMF pipeline. `Dial9Stream::tee`
+    // keeps the `dial9.*` context fields out of the conventional side.
+    let request_metrics_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&args.trace_path).join("request-metrics.log"))?;
+    let metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::tee(
+        recorder.handle(),
+        LocalFormat::new(OutputStyle::Pretty).output_to(request_metrics_file),
+    ));
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -360,7 +377,10 @@ fn main() -> std::io::Result<()> {
                     }
                 });
 
-                axum_traced::serve(listener, app.into_make_service())
+                dial9_utils::dial9_axum::axum_0_8::serve(listener, app.into_make_service())
+                    .with_executor(|future| {
+                        dial9::spawn(future);
+                    })
                     .with_graceful_shutdown(async move { shutdown.cancelled().await })
                     .await
                     .unwrap();
@@ -369,8 +389,10 @@ fn main() -> std::io::Result<()> {
             .unwrap();
     });
 
-    // Drop the runtime first so worker threads flush their thread-local
-    // telemetry buffers, then drain the background worker.
+    // Shutdown order: drain the metrique queue into dial9, then drop the
+    // runtime so workers flush their thread-local buffers, then seal the
+    // trace.
+    drop(metrics_join);
     drop(runtime);
     recorder.graceful_shutdown(Duration::from_secs(5));
 

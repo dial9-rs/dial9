@@ -152,11 +152,12 @@ impl MemoryProfiler {
 
     /// Install the profiler with the given handle.
     ///
-    /// On a disabled handle, install is a no-op (returns `Ok` but does not
-    /// publish state). `ACTIVE.get()` remains `None` so the allocator hook
-    /// short-circuits.
+    /// On a disconnected handle, install is a no-op (returns `Ok` but does
+    /// not publish state). `ACTIVE.get()` remains `None` so the allocator
+    /// hook short-circuits. A connected-but-paused recorder installs
+    /// normally, so sampling starts when recording is enabled.
     pub fn install(self, handle: Dial9Handle) -> Result<MemoryProfilerGuard, InstallError> {
-        if !handle.is_enabled() {
+        if handle.shared().is_none() {
             return Ok(MemoryProfilerGuard { _private: () });
         }
 

@@ -11,6 +11,7 @@ import {
   buildSpawnedTasksView,
   hasNoSelection,
   preferredTab,
+  resolveTaskDumpCaptures,
   tabAvailability,
   type RelatedContext,
   type RelatedUiState,
@@ -50,6 +51,7 @@ function ev(
     timestamp,
     fields: fields as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 
@@ -64,6 +66,7 @@ function sel(over: Partial<SelectionSlice>): SelectionSlice {
     focusedSpanId: null,
     pinnedEvent: null,
     pollDetail: null,
+    taskDump: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
     spawnedTasksRange: null,
@@ -179,7 +182,10 @@ describe("buildEventDetail", () => {
     const id = v.rows.find((r) => r.key === "id")!;
     expect(path.corrVal).toBe("/a"); // shared -> correlation offered
     expect(id.corrVal).toBeNull(); // unique -> no correlation
+    expect(path.chart).toBe(false);
+    expect(id.chart).toBe(true);
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100");
+    expect(v.rows.find((r) => r.key === "@")!.chart).toBe(false);
     expect(v.rows.find((r) => r.key === "Task")!.value).toBe("0x2a (selected)");
   });
 
@@ -200,6 +206,26 @@ describe("buildEventDetail", () => {
     expect(v.rows.find((r) => r.key === "Cluster")!.value).toBe("2 events");
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100 – t300");
     expect(v.rows.every((r) => r.corrVal === null)).toBe(true);
+  });
+
+  it("does not offer charts for comma-delimited event or field names", () => {
+    const commaEvent = ev("Req,Finished", 100, { value: 42 });
+    const commaField = ev("Req", 200, { "value,total": 42 });
+
+    expect(
+      buildEventDetail(
+        pinnedSingle(commaEvent, null),
+        [commaEvent],
+        fmtTs,
+      ).rows.find((row) => row.key === "value")?.chart,
+    ).toBe(false);
+    expect(
+      buildEventDetail(
+        pinnedSingle(commaField, null),
+        [commaField],
+        fmtTs,
+      ).rows.find((row) => row.key === "value,total")?.chart,
+    ).toBe(false);
   });
 });
 
@@ -270,6 +296,23 @@ describe("buildSpawnedTasksView", () => {
 });
 
 // ── Tab families + activation ────────────────────────────────────────────────
+describe("task-dump selection resolution", () => {
+  it("re-resolves timestamps against the current trace after replacement", () => {
+    const oldDump = { timestamp: 3, callchain: ["old"] };
+    const newDump = { timestamp: 3, callchain: ["new"] };
+    const selection = { taskId: 9, timestamps: [3] };
+    const traceWith = (dump: typeof oldDump | null) =>
+      ({
+        taskDumps: new Map(dump === null ? [] : [[9, [dump]]]),
+      }) as Parameters<typeof resolveTaskDumpCaptures>[0];
+
+    expect(resolveTaskDumpCaptures(traceWith(oldDump), selection)).toEqual([oldDump]);
+    expect(resolveTaskDumpCaptures(traceWith(null), selection)).toEqual([]);
+    const resolved = resolveTaskDumpCaptures(traceWith(newDump), selection);
+    expect(resolved).toEqual([newDump]);
+    expect(resolved[0]).not.toBe(oldDump);
+  });
+});
 
 describe("tab availability + preferred tab", () => {
   it("a poll click enables + prefers Poll", () => {
@@ -299,10 +342,15 @@ describe("tab availability + preferred tab", () => {
     expect(tabAvailability(cluster).related).toBe(false);
   });
 
-  it("a task select prefers Task; a range prefers Stack", () => {
+  it("a task select prefers Task; a range or task dump prefers Stack", () => {
     expect(preferredTab(sel({ selectedTaskId: 9 }))).toBe("task");
     expect(preferredTab(sel({ spawnedTasksRange: { startNs: 0, endNs: 5 } }))).toBe("stack");
     expect(preferredTab(sel({ sidebarRange: { startNs: 0, endNs: 5 } }))).toBe("stack");
+    const taskDump = { taskId: 9, timestamps: [3] };
+    const dumpSelection = sel({ taskDump });
+    expect(tabAvailability(dumpSelection).stack).toBe(true);
+    expect(preferredTab(dumpSelection)).toBe("stack");
+    expect(hasNoSelection(dumpSelection)).toBe(false);
   });
 
   it("hasNoSelection is true only at rest, and preferredTab is null then", () => {

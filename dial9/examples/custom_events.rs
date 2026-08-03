@@ -10,8 +10,8 @@
 //! ```
 
 use dial9::core::{Encodable, ThreadLocalEncoder, clock_monotonic_ns};
-use dial9::{DiskBuffer, RecorderTokioExt, recorder};
-use dial9_trace_format::{InternedString, TraceEvent};
+use dial9::format::{InternedString, TraceEvent};
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use std::time::Duration;
 
 // ── Simple: derive-only, no interning ───────────────────────────────────────
@@ -24,9 +24,9 @@ struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
-    /// The `unit` annotation makes the viewer render this as e.g. "1.50ms"
-    /// instead of a raw microsecond count.
-    #[traceevent(unit = "us")]
+    /// The annotations format this as a duration and chart observed latencies
+    /// directly, without asking for a metric interpretation.
+    #[traceevent(unit = "us", kind = "gauge")]
     latency_us: u64,
     /// Only present for failed requests.
     error_message: Option<String>,
@@ -66,11 +66,14 @@ fn main() -> std::io::Result<()> {
     let trace_path = dir.path().join("trace.bin");
 
     let writer = DiskBuffer::single_file(&trace_path)?;
-    let (recorder, rt) = recorder(writer)
-        .build()
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(2);
-        })
+    let recorder = recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("build tokio runtime");
 
     let handle = recorder.handle();
@@ -110,8 +113,8 @@ fn main() -> std::io::Result<()> {
     // Verify: decode the trace and count our custom events
     let sealed = dir.path().join("trace.0.bin");
     let data = std::fs::read(&sealed)?;
-    let mut decoder = dial9_trace_format::decoder::Decoder::new(&data)
-        .ok_or_else(|| std::io::Error::other("invalid trace"))?;
+    let mut decoder =
+        dial9::format::Decoder::new(&data).ok_or_else(|| std::io::Error::other("invalid trace"))?;
 
     let mut request_completed = 0u32;
     let mut http_request = 0u32;

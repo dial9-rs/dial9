@@ -76,7 +76,7 @@ export class ColumnarCpuSamples {
  */
 export class CpuSample {
   spawnLoc: string | null = null;
-  inPoll = false;
+  inPoll?: boolean;
   private readonly _store: ColumnarCpuSamples;
   private readonly _cs: number;
   private readonly _cl: number;

@@ -1,6 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{
-    RecorderTokioExt, TokioAttachOptions, TokioHooks, recorder,
-};
+use dial9_tokio_telemetry::telemetry::{TokioAttachOptions, TokioHooks, recorder};
 use std::time::Duration;
 
 mod common;
@@ -25,15 +23,11 @@ fn on_thread_start_and_stop_fire() {
         stc.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(num_workers);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        num_workers,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         // Ensure all workers have started by spawning work on each.
@@ -76,33 +70,27 @@ fn each_runtime_gets_own_hooks() {
     hooks_a.on_before_task_poll(move |_meta| {
         ca.fetch_add(1, Ordering::Relaxed);
     });
-    let (recorder, runtime_a) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .runtime_name("a")
-                .tokio_hooks(hooks_a)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("attach runtime a");
+    let runtime_a = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .runtime_name("a")
+            .tokio_hooks(hooks_a)
+            .build(),
+    );
 
     let mut hooks_b = TokioHooks::default();
     hooks_b.on_before_task_poll(move |_meta| {
         cb.fetch_add(1, Ordering::Relaxed);
     });
-    let (recorder, runtime_b) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .runtime_name("b")
-                .tokio_hooks(hooks_b)
-                .build(),
-            |t| {
-                t.worker_threads(2);
-            },
-        )
-        .expect("attach runtime b");
+    let runtime_b = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .runtime_name("b")
+            .tokio_hooks(hooks_b)
+            .build(),
+    );
 
     // Generate work only on runtime A
     runtime_a.block_on(async {
@@ -162,15 +150,11 @@ fn on_thread_park_fires() {
         pc.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         // Sleep to let workers park
@@ -198,15 +182,11 @@ fn on_thread_unpark_fires() {
         uc.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         // Generate work to trigger unparks
@@ -247,15 +227,11 @@ fn task_poll_hooks_fire() {
         ac.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         let handle = tokio::spawn(async {
@@ -300,18 +276,14 @@ fn task_lifecycle_hooks_fire() {
         tc.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .tokio_hooks(hooks)
-                .build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .tokio_hooks(hooks)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();
@@ -353,18 +325,14 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
         sc.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(false)
-                .tokio_hooks(hooks)
-                .build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(false)
+            .tokio_hooks(hooks)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();
@@ -401,18 +369,14 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
         tc.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(false)
-                .tokio_hooks(hooks)
-                .build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(false)
+            .tokio_hooks(hooks)
+            .build(),
+    );
 
     rt.block_on(async {
         let mut handles = Vec::new();
@@ -456,15 +420,11 @@ fn dial9_hooks_run_before_user_hooks() {
         hf.fetch_add(1, Ordering::Relaxed);
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(2);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         tokio::spawn(async {
@@ -495,15 +455,11 @@ fn hook_stacking_single_callback_fires() {
         log_c.lock().unwrap().push("park_a");
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(1);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        1,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         // Sleep to let the worker park at least once
@@ -536,15 +492,11 @@ fn hook_stacking_multiple_callbacks_fire_in_order() {
         log_b.lock().unwrap().push("park_b");
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(1);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        1,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -589,15 +541,11 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
         log_b.lock().unwrap().push("call_2");
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(1);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        1,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -639,15 +587,11 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
         log_b.lock().unwrap().push("poll_b");
     });
 
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-            |t| {
-                t.enable_all();
-                t.worker_threads(1);
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach(
+        &recorder,
+        1,
+        TokioAttachOptions::builder().tokio_hooks(hooks).build(),
+    );
 
     rt.block_on(async {
         tokio::spawn(async {

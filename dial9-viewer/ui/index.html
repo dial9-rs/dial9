@@ -439,6 +439,7 @@
         <span style="color:#555;font-size:0.8em;margin-left:auto">drop a .bin file to open viewer</span>
     </footer>
 
+    <script src="session.js"></script>
     <script src="creds.js"></script>
     <script src="format.js"></script>
     <script src="flamegraph_diff.js"></script>
@@ -498,7 +499,7 @@
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
-    let localMode = false;             // true when server is local-dir (no BYO creds)
+    let localMode = false;             // true when source keys use a flat layout
     let currentQuickRange = null;   // hours, when a "Last Nhr" quick range is active
                                     // (null once the user edits the range manually)
 
@@ -525,7 +526,10 @@
     // (if any are set) to every /api/* request. No-op when no creds are stored.
     function apiFetch(url, opts = {}) {
         const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-        return fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...credHeaders } });
+        return Dial9Session.fetch(url, {
+            ...opts,
+            headers: { ...(opts.headers || {}), ...credHeaders },
+        });
     }
 
     // ── Bring-your-own-credentials panel ──
@@ -919,7 +923,7 @@
     // incoming link into the canonical serialization.
     syncUrl();
 
-    fetch('/api/config').then(async r => {
+    Dial9Session.fetch('/api/config').then(async r => {
         if (!r.ok) {
             const body = await r.text().catch(() => '');
             throw new Error(`HTTP ${r.status}${body ? ': ' + body : ''}`);
@@ -941,7 +945,7 @@
         // When the server runs demand-driven aggregation, the flamegraph button
         // drives the sampled server-side loop instead of decoding raw traces.
         aggregationEnabled = !!config.aggregation_enabled;
-        localMode = !config.supports_byo_credentials;
+        localMode = usesFlatSourceLayout(config);
         if (config.supports_byo_credentials) initCredsUi();
         // Server defaults (bucket/prefix) were filled programmatically above;
         // reflect them in the URL so the link is complete.
@@ -954,6 +958,13 @@
             .then(() => discoverPrefixes())
             .then(discoverServices);
     }).catch(() => { discoverPrefixes().then(discoverServices); });
+
+    function usesFlatSourceLayout(config) {
+        if (config.source_layout === 'flat') return true;
+        if (config.source_layout === 'time-partitioned') return false;
+        // Compatibility with servers that predate the explicit layout field.
+        return !config.supports_byo_credentials;
+    }
 
     window.addEventListener('popstate', () => {
         const state = Dial9UrlState.parse(window.location.search);
@@ -1125,6 +1136,21 @@
         const toEpoch = Math.floor(to.getTime() / 1000);
         const keyPrefix = !serverHasPrefix ? prefixInput.value.trim() : '';
         const requested = serviceInput.value.trim();
+        if (requested) {
+            // A service in the URL is an exact navigation target, not a hint to
+            // validate through discovery. Discovery intentionally scans only a
+            // recent subset and can therefore omit a valid, quiet service.
+            availableServices = [requested];
+            availableServiceMetadata = new Map();
+            renderServiceTabs();
+            setBrowseWarning(null);
+            browseStatus.textContent = 'Loading service…';
+            browseStatus.className = 'status';
+            browseStatus.style.display = '';
+            syncUrl();
+            await doTimeRangeSearch();
+            return;
+        }
         resetBrowsePane(false);
         browseStatus.textContent = 'Finding services…';
 
@@ -2368,7 +2394,7 @@
             rawTable.style.display = 'none';
             try {
                 const bucket = bucketInput.value.trim();
-                const sampleResp = await fetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
+                const sampleResp = await apiFetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
                 const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
                 if (samples.length > 0) {
                     rawStatus.innerHTML = 'No results found. Sample keys in this bucket:<br>' +

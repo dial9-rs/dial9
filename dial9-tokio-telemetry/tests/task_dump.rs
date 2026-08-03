@@ -4,8 +4,8 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, MemoryBuffer, RecorderPipelineExt, RecorderTokioExt, TaskDumpConfig,
-    TokioAttachOptions, recorder,
+    Dial9TokioHandle, MemoryBuffer, RecorderPipelineExt, TaskDumpConfig, TokioAttachOptions,
+    recorder,
 };
 use serde::Deserialize;
 use std::future::Future;
@@ -43,19 +43,13 @@ fn task_dump_emitted_for_long_sleep() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
-                .build(),
-            |t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-                t.enable_all();
-                t.enable_all();
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+            .build(),
+    );
 
     let handle = Dial9TokioHandle::current();
     rt.block_on(async {
@@ -92,24 +86,18 @@ fn no_task_dump_for_short_sleep() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .maybe_task_dump_config(Some(
-                    TaskDumpConfig::builder()
-                        .idle_threshold(Duration::from_secs(1))
-                        .rng_seed(42)
-                        .build(),
-                ))
-                .build(),
-            |t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-                t.enable_all();
-                t.enable_all();
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(
+                TaskDumpConfig::builder()
+                    .idle_threshold(Duration::from_secs(1))
+                    .rng_seed(42)
+                    .build(),
+            ))
+            .build(),
+    );
 
     let handle = Dial9TokioHandle::current();
     rt.block_on(async {
@@ -140,21 +128,15 @@ fn task_dump_does_not_produce_extra_events() {
         let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build();
-        let (recorder, rt) = recorder
-            .attach_tokio_runtime_with(
-                TokioAttachOptions::builder()
-                    .task_tracking_enabled(true)
-                    .maybe_task_dump_config(
-                        enable.then(|| TaskDumpConfig::builder().rng_seed(42).build()),
-                    )
-                    .build(),
-                |t| {
-                    *t = tokio::runtime::Builder::new_current_thread();
-                    t.enable_all();
-                    t.enable_all();
-                },
-            )
-            .expect("build tokio runtime");
+        let rt = common::attach_current_thread(
+            &recorder,
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .maybe_task_dump_config(
+                    enable.then(|| TaskDumpConfig::builder().rng_seed(42).build()),
+                )
+                .build(),
+        );
 
         let handle = Dial9TokioHandle::current();
         rt.block_on(async {
@@ -200,19 +182,13 @@ fn spawn_with_joinset_emits_task_dump() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
-                .build(),
-            |t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-                t.enable_all();
-                t.enable_all();
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+            .build(),
+    );
 
     let handle = Dial9TokioHandle::current();
     rt.block_on(async {
@@ -280,19 +256,13 @@ fn task_dump_capture_repoll_does_not_cause_poll_after_ready() {
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
         .build();
-    let (recorder, rt) = recorder
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder()
-                .task_tracking_enabled(true)
-                .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
-                .build(),
-            |t| {
-                *t = tokio::runtime::Builder::new_current_thread();
-                t.enable_all();
-                t.enable_all();
-            },
-        )
-        .expect("build tokio runtime");
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+            .build(),
+    );
 
     let handle = Dial9TokioHandle::current();
     let result = rt.block_on(async { handle.spawn(CompletesOnSecondPoll { polls: 0 }).await });

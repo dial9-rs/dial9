@@ -32,7 +32,13 @@ import type {
 } from "../../lib/trace/index.js";
 
 function ev(name: string, timestamp: number): CustomTraceEvent {
-  return { name, timestamp, fields: {} as CustomTraceEvent["fields"], units: null };
+  return {
+    name,
+    timestamp,
+    fields: {} as CustomTraceEvent["fields"],
+    units: null,
+    fieldKinds: null,
+  };
 }
 
 /** A viewer store with a no-op frame scheduler (node has no rAF); state +

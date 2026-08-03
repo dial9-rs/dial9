@@ -6,7 +6,9 @@
 //      waker-hover selection write reuses it (no O(all-polls) re-collect).
 //   2. waker-hover dispatch: hovering a waker label writes
 //      selection.hoveredWakerTaskId - the store field the lanes consume.
-//   3. drawTaskDetailCanvas render input: the hovered waker's label bolds, and
+//   3. canvas click dispatch: waker labels select their task, while dumped idle
+//      spans store their captures for the inspector Stack flamegraph.
+//   4. drawTaskDetailCanvas render input: the hovered waker's label bolds, and
 //      the window markers surface a truncated/oversized window.
 
 import { describe, it, expect } from "vitest";
@@ -166,13 +168,72 @@ describe("waker-hover dispatch (the lanes contract)", () => {
   it("clicking a waker label selects that waker task", () => {
     const { store, track, model } = setup();
     const region = model.wakeRegions[0]!;
-    track.clickWaker(model, (region.x1 + region.x2) / 2, (region.y1 + region.y2) / 2);
+    track.clickAt(model, (region.x1 + region.x2) / 2, (region.y1 + region.y2) / 2);
     expect(store.getState().selection.selectedTaskId).toBe(500);
     expect(store.getState().selection.hoveredWakerTaskId).toBeNull();
   });
 });
 
-// ── 3. drawTaskDetailCanvas render input (bolding + markers) ───────────────
+// ── 3. Task-dump click dispatch ───────────────────────────────────────────
+
+describe("task-dump click dispatch", () => {
+  function setup() {
+    const store = createViewerStore({ scheduler: () => {} });
+    const track = createTaskDetailTrack(store);
+    const dumps = [{ timestamp: 200, callchain: ["leaf", "root"] }];
+    const model = buildTaskDetailRenderModel({
+      data: {
+        taskId: 42,
+        polls: [
+          { start: 100, end: 150, taskId: 42, spawnLocId: "L", spawnLoc: null },
+          { start: 300, end: 350, taskId: 42, spawnLocId: "L", spawnLoc: null },
+          { start: 600, end: 650, taskId: 42, spawnLocId: "L", spawnLoc: null },
+        ],
+        wakes: [],
+        pollWakes: [null, null, null],
+        pollCount: 3,
+        wakeCount: 0,
+        spawnLocation: null,
+        isInstrumented: true,
+        spawnTs: null,
+        terminateTs: null,
+        hasTerminate: false,
+        lifetimeNs: null,
+        taskDumps: dumps,
+        workerIdCount: 1,
+        hasPolls: true,
+      },
+      viewStart: 0,
+      viewEnd: 1000,
+      drawW: 1000,
+    });
+    const hit = model.hitRegions.find((region) => region.dumps !== null)!;
+    return { store, track, model, hit };
+  }
+
+  it("stores a semantic anchor for the clicked dump-bearing idle span", () => {
+    const { store, track, model, hit } = setup();
+    store.update("selection", { selectedTaskId: 42 });
+
+    track.clickAt(model, (hit.x1 + hit.x2) / 2, BAND_TOP + 1);
+
+    expect(store.getState().selection.taskDump).toEqual({
+      taskId: 42,
+      timestamps: [200],
+    });
+  });
+
+  it("ignores a click when the painted model belongs to the previously selected task", () => {
+    const { store, track, model, hit } = setup();
+    store.update("selection", { selectedTaskId: 7 });
+
+    track.clickAt(model, (hit.x1 + hit.x2) / 2, BAND_TOP + 1);
+
+    expect(store.getState().selection.taskDump).toBeNull();
+  });
+});
+
+// ── 4. drawTaskDetailCanvas render input (bolding + markers) ───────────────
 
 interface DrawnText {
   text: string;
@@ -251,6 +312,59 @@ function wakeBandModel() {
 }
 
 describe("drawTaskDetailCanvas render input", () => {
+  it("draws a high spawn-to-first-poll delay in scheduling red", () => {
+    const model = buildTaskDetailRenderModel({
+      data: {
+        taskId: 42,
+        polls: [
+          {
+            start: 8_135_941,
+            end: 8_235_941,
+            taskId: 42,
+            spawnLocId: "L",
+            spawnLoc: null,
+          },
+        ],
+        wakes: [],
+        pollWakes: [null],
+        pollCount: 1,
+        wakeCount: 0,
+        spawnLocation: null,
+        isInstrumented: true,
+        spawnTs: 1_000_000,
+        terminateTs: null,
+        hasTerminate: false,
+        lifetimeNs: null,
+        taskDumps: [],
+        workerIdCount: 1,
+        hasPolls: true,
+      },
+      viewStart: 0,
+      viewEnd: 10_000_000,
+      drawW: 1000,
+    });
+    const { ctx, rects, texts } = recordingCtx();
+
+    drawTaskDetailCanvas(
+      ctx,
+      model,
+      null,
+      1000,
+      160,
+      COMPLETE_TASK_DETAIL_WINDOW,
+    );
+
+    expect(
+      rects.some(
+        (r) =>
+          r.x === 100 &&
+          r.w === 713.5941 &&
+          r.fillStyle === "rgba(255,50,50,0.3)",
+      ),
+    ).toBe(true);
+    expect(texts.some((t) => t.text.startsWith("⬆"))).toBe(false);
+  });
+
   it("bolds the hovered waker's label", () => {
     const model = wakeBandModel();
     const hovered = recordingCtx();

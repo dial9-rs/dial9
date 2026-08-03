@@ -119,6 +119,10 @@ export function probeDecode(buffer: Uint8Array): EventSchema | undefined {
         frame.typeId
       )?.units;
       void units;
+      const fieldKinds: Record<string, string> | undefined = dec.schemas.get(
+        frame.typeId
+      )?.fieldKinds;
+      void fieldKinds;
       const ts: string | undefined = frame.timestamp_ns;
       void ts;
     } else if (frame.type === "string_pool") {

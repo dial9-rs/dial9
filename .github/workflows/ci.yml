@@ -64,6 +64,23 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+  windows-cli-check:
+    name: Windows CLI check
+    runs-on: windows-latest
+    if: github.event_name == 'push'
+    env:
+      RUSTFLAGS: "--cfg tokio_unstable"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check -p dial9-viewer
+      - run: cargo check -p dial9 --features cli
+
   android-aarch64-build:
     name: Android aarch64 build
     runs-on: ubuntu-latest
@@ -328,7 +345,9 @@ jobs:
             -p dial9-trace-format \
             -p dial9-perf-self-profile \
             -p dial9-macro \
-            -p dial9-tokio-telemetry
+            -p dial9-tokio-telemetry \
+            -p dial9-metrique \
+            -p dial9-destinations-s3
 
   package:
     name: Cargo package
@@ -351,8 +370,10 @@ jobs:
             -p dial9-trace-format \
             -p dial9-core \
             -p dial9-utils \
+            -p dial9-destinations-s3 \
             -p dial9-perf-self-profile \
             -p dial9-macro \
+            -p dial9-metrique \
             -p dial9-tokio-telemetry \
             -p dial9-viewer
 

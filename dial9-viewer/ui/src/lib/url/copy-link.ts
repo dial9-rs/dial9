@@ -6,8 +6,8 @@
 // element, its inline look, and the copy mechanics.
 
 export interface CopyLinkOptions {
-  /** Run before reading the URL (pages pass the sync binding's flush). */
-  beforeCopy?: () => void;
+  /** Run before reading the URL; return true to proceed or false to cancel. */
+  beforeCopy?: () => boolean;
   /** URL supplier; defaults to the live location href. */
   getText?: () => string;
   /** Clipboard write; injectable for tests/fallbacks. */
@@ -77,7 +77,10 @@ export function mountCopyLink(
   }
 
   const onClick = (): void => {
-    options.beforeCopy?.();
+    if (options.beforeCopy?.() === false) {
+      flash("Not shareable");
+      return;
+    }
     const text = options.getText !== undefined ? options.getText() : window.location.href;
     const copy = options.copy ?? defaultCopy;
     copy(text).then(

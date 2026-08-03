@@ -38,7 +38,7 @@ rustflags = [
 
 ```rust,no_run
 use std::io;
-use dial9::{AttachedRuntime, Dial9TokioHandle, DiskBuffer, RecorderTokioExt, TokioAttachOptions};
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, DiskBuffer, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
     let writer = DiskBuffer::builder()
@@ -49,13 +49,25 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .build();
     // Downgrades to a disabled recorder if the writer can't be created; use
     // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
-    dial9::recorder_or_disabled(writer).build().attach_tokio_runtime_with(
+    let recorder = dial9::recorder_or_disabled(writer)
+        .segment_metadata([("service".to_string(), "checkout".to_string())])
+        .segment_metadata([(
+            "application.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        )])
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .runtime_name("main")
             .task_tracking_enabled(true)
             .build(),
-        |t| { t.worker_threads(4); },
-    )
+    )?;
+
+    Ok((recorder, runtime))
 }
 
 #[dial9::main(config = my_config)] // inline config function is also supported
@@ -67,6 +79,12 @@ async fn main() {
         .unwrap();
 }
 ```
+
+Use [`RecorderBuilder::segment_metadata`](https://docs.rs/dial9/latest/dial9/struct.RecorderBuilder.html#method.segment_metadata)
+for static context that should be available when any rotated segment is loaded
+independently, such as the service, host, deployment, or compiled application
+version. Calls are merged, including calls made by integration layers; when a
+key is repeated, the later value wins.
 
 For zero-code configuration in production, use `dial9::recorder_from_env`:
 
@@ -90,14 +108,23 @@ async fn main() {
 }
 ```
 
-Every `config` returns `std::io::Result<dial9::AttachedRuntime>`: the recorder plus its
-instrumented runtime, which is exactly what `attach_tokio_runtime` hands back. With no runtime
-knobs to set, that is one expression:
+Every `config` returns `std::io::Result<dial9::AttachedRuntime>`: the recorder plus a runtime
+attached to it. Attach through the recorder's handle, configuring the Tokio builder yourself:
 
 ```rust,no_run
-use dial9::RecorderTokioExt;
+use dial9::{Dial9HandleTokioExt, TokioAttachOptions};
 # fn writer() -> std::io::Result<dial9::DiskBuffer> { unimplemented!() }
-#[dial9::main(config = || dial9::recorder_or_disabled(writer()).build().attach_tokio_runtime(|_| {}))]
+#[dial9::main(config = || {
+    let recorder = dial9::recorder_or_disabled(writer()).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+
+    Ok((recorder, runtime))
+})]
 async fn main() {
     /* ... */
 }
@@ -186,6 +213,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
 - [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
+- [Metrique metrics](#metrique-metrics-opt-in): dial9 can record metrique unit-of-work metric entries alongside your EMF/JSON pipeline
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace
 
@@ -195,17 +223,22 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 1. The wake event, when your future was _ready_ to run vs. when Tokio actually started running it.
 2. A "task dump", a stack trace of what your future was doing when it went idle.
 
-`recorder.attach_tokio_runtime(..)` builds an instrumented runtime and hands back both. It returns the
-recorder too, so calling it again attaches another runtime to the same trace. Its return type,
-`std::io::Result<dial9::AttachedRuntime>`, is what a `#[dial9::main]` config must produce.
+`recorder.handle().attach_tokio_runtime(..)` takes a Tokio runtime builder you configured, installs
+dial9's hooks on it, and builds it. Pair the recorder with the runtime to get a
+`dial9::AttachedRuntime`, which is what a `#[dial9::main]` config must produce.
+
+Driving that runtime yourself, reach for [`dial9::block_on`](https://docs.rs/dial9/latest/dial9/fn.block_on.html) rather than
+`Runtime::block_on`. Poll and wake events come from Tokio's per-task hooks, and `Runtime::block_on` would
+polls its future outside any task, so that future and everything awaited inline under it would be absent
+from the trace. `dial9::block_on` spawns it first. `#[dial9::main]` already does this for you.
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # mod inner {
 use std::io;
 
-use dial9::core::pipeline::s3::S3Config;
-use dial9::{AttachedRuntime, DiskBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions};
+use dial9::s3::S3Config;
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
     let s3_config = S3Config::builder()
@@ -219,13 +252,18 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_total_size(500 * 1024 * 1024)
         .build()
         .expect("build trace writer");
-    dial9::recorder(writer)
+    let recorder = dial9::recorder(writer)
         .with_s3_uploader(s3_config)
-        .build()
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().task_tracking_enabled(true).build(),
-            |t| { t.worker_threads(4); },
-        )
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
+        TokioAttachOptions::builder().task_tracking_enabled(true).build(),
+    )?;
+
+    Ok((recorder, runtime))
 }
 # }
 # fn main() {}
@@ -233,8 +271,8 @@ fn my_config() -> io::Result<AttachedRuntime> {
 
 #### Instrumenting multiple runtimes
 
-`dial9` can also capture data from multiple runtimes: call `attach_tokio_runtime` once per runtime and
-they all feed the same trace.
+`dial9` can also capture data from multiple runtimes: the handle attaches as many as you like and
+they all feed the same trace. Clone it and each thread can build its own runtime.
 See [`examples/thread_per_core.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/thread_per_core.rs) and [`examples/multi_runtime.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/multi_runtime.rs) for complete examples.
 
 ### Process resource usage (Unix)
@@ -465,7 +503,68 @@ tracing_subscriber::registry()
     .init();
 ```
 
-Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs ~300ns total (~50-100ns is dial9 encoding overhead).
+Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs roughly 650-800ns total on a modern server core, most of which is dial9 encoding (the same span through a bare `tracing` registry costs ~100-200ns).
+
+### Metrique metrics (opt-in)
+
+If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Each event is pinned to the thread and task that served the request, with start and end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.
+
+**Enable the `metrique-sink` feature** (with `tokio` also on, events carry the task id; the sink itself does not need a tokio runtime):
+```toml
+[dependencies]
+dial9 = { version = "0.5", features = ["metrique-sink", "tokio"] }
+```
+
+**Opt an entry in and tee the stream:**
+```rust,ignore
+use dial9::metrique_sink::{Dial9Context, Dial9Stream};
+use metrique::unit_of_work::metrics;
+
+#[metrics(rename_all = "PascalCase")]
+struct RequestMetrics {
+    // Including a Dial9Context opts this entry into the trace.
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
+    #[metrics(flags(dial9::Interned))]
+    operation: &'static str,
+
+    latency_ms: u64,
+    success: bool,
+
+    // Keep bulky or high-cardinality fields out of the trace.
+    #[metrics(flags(dial9::Skip))]
+    debug_blob: String,
+}
+
+// dial9 as a peer of the existing pipeline. `tee` also keeps dial9's own
+// `dial9.` fields out of the EMF output:
+let _join = ServiceMetrics::attach_to_stream(
+    Dial9Stream::tee(&handle, emf_stream),
+);
+
+// Use normally.
+let mut m = RequestMetrics {
+    dial9: Dial9Context::capture(),
+    /* ... */
+};
+```
+
+Entries without a `Dial9Context` record nothing, so teeing the sink into an existing pipeline only picks up the entries you opt in.
+
+If adding a field to the entry is awkward (a shared struct, or dial9 support you want to switch from one place), attach the context from the outside instead and leave the struct alone:
+
+```rust,ignore
+use dial9::metrique_sink::Dial9EntryExt;
+
+// `append_on_drop_dial9` in place of `append_on_drop`; field access reaches
+// through the wrapper, so the rest of the call site is unchanged.
+let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
+    .append_on_drop_dial9(ServiceMetrics::sink());
+m.latency_ms = 5;
+```
+
+Field units (from `#[metrics(unit = ..)]` or the value type) are carried into the trace and shown by the viewer. Capture costs a few tens of nanoseconds on the request path; encoding happens on the metrique flush thread. Entries the sink cannot describe are not recorded (hand-written `Entry` impls without a `descriptors()` impl, and entries containing `Flex` dynamic-key fields); histogram fields are left out individually. See the `dial9::metrique_sink` module docs for measured overhead and current limitations. A runnable example is at [`examples/metrique_metrics.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/metrique_metrics.rs).
 
 
 ### Task dumps (Linux only)
@@ -477,7 +576,7 @@ Careful filtering of the data you send to dial9 strongly recommended. dial9 does
 ```rust,no_run
 use std::io;
 use std::time::Duration;
-use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt};
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer};
 use dial9::{TaskDumpConfig, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
@@ -486,15 +585,21 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_total_size(64 * 1024 * 1024)
         .build()
         .expect("build trace writer");
-    dial9::recorder(writer).build().attach_tokio_runtime_with(
+    let recorder = dial9::recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder()
             .task_tracking_enabled(true)
             .task_dump_config(
                 TaskDumpConfig::builder().idle_threshold(Duration::from_millis(10)).build(),
             )
             .build(),
-        |_| {},
-    )
+    )?;
+
+    Ok((recorder, runtime))
 }
 
 #[dial9::main(config = my_config)]
@@ -511,13 +616,14 @@ You can emit your own application-level events into the trace alongside the buil
 # fn main() {
 use dial9::Dial9Handle;
 use dial9::core::clock_monotonic_ns;
-use dial9_trace_format::TraceEvent;
+use dial9::format::TraceEvent;
 
 #[derive(TraceEvent)]
 struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
+    #[traceevent(unit = "us", kind = "gauge")]
     latency_us: u64,
     /// Optional fields use 1 byte on the wire when absent.
     error_message: Option<String>,
@@ -541,8 +647,8 @@ periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,no_run
 use dial9::core::CustomEventsConfig;
+use dial9::format::TraceEvent;
 use dial9::{RecorderSourceExt, recorder};
-use dial9_trace_format::TraceEvent;
 
 #[derive(TraceEvent)]
 struct CacheEvent {
@@ -571,7 +677,7 @@ the callback.
 dial9 installs callbacks on all 8 Tokio runtime hooks to collect telemetry. If you need to run your own logic alongside dial9's instrumentation, pass your own `TokioHooks` when attaching:
 
 ```rust,no_run
-use dial9::{MemoryBuffer, RecorderTokioExt, TokioAttachOptions, TokioHooks, recorder};
+use dial9::{Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, TokioHooks, recorder};
 
 let mut hooks = TokioHooks::default();
 hooks.on_thread_start(|| {
@@ -583,18 +689,22 @@ hooks.on_thread_stop(|| {
 // Also available: on_thread_park, on_thread_unpark,
 // on_task_spawn, on_task_terminate, on_before_task_poll, on_after_task_poll
 
-let (recorder, runtime) = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
-    .build()
-    .attach_tokio_runtime_with(
+let recorder = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
+
+let mut builder = tokio::runtime::Builder::new_multi_thread();
+builder.enable_all().worker_threads(4);
+let runtime = recorder
+    .handle()
+    .attach_tokio_runtime(
+        builder,
         TokioAttachOptions::builder().tokio_hooks(hooks).build(),
-        |t| { t.worker_threads(4); },
     )
     .unwrap();
 ```
 
 dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `Dial9Handle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
 
-**Important:** Do not set thread or task hooks on the `tokio::runtime::Builder` inside your `attach_tokio_runtime` closure; dial9 installs its own and yours would be overwritten. Always go through `TokioHooks` so your callbacks compose with dial9's instrumentation.
+**Important:** Do not set thread or task hooks on the `tokio::runtime::Builder` you hand to `attach_tokio_runtime`; dial9 installs its own and yours would be overwritten. Always go through `TokioHooks` so your callbacks compose with dial9's instrumentation.
 
 ## Getting data out of dial9
 
@@ -617,8 +727,8 @@ dial9 = { version = "0.5", features = ["worker-s3"] }
 # mod inner {
 use std::io;
 
-use dial9::core::pipeline::s3::S3Config;
-use dial9::{AttachedRuntime, DiskBuffer, RecorderPipelineExt, RecorderTokioExt, TokioAttachOptions};
+use dial9::s3::S3Config;
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions};
 
 fn my_config() -> io::Result<AttachedRuntime> {
     let s3_config = S3Config::builder()
@@ -631,13 +741,18 @@ fn my_config() -> io::Result<AttachedRuntime> {
         .max_total_size(1 << 30)
         .build()
         .expect("build trace writer");
-    dial9::recorder(writer)
+    let recorder = dial9::recorder(writer)
         .with_s3_uploader(s3_config)
-        .build()
-        .attach_tokio_runtime_with(
-            TokioAttachOptions::builder().task_tracking_enabled(true).build(),
-            |_| {},
-        )
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
+        TokioAttachOptions::builder().task_tracking_enabled(true).build(),
+    )?;
+
+    Ok((recorder, runtime))
 }
 
 #[dial9::main(config = my_config)]
@@ -653,8 +768,8 @@ For custom credentials or AWS SDK settings, defer client construction to the
 pipeline worker runtime:
 
 ```rust,no_run
-use dial9::core::pipeline::s3::S3Config;
-use dial9::{DiskBuffer, RecorderS3ClientExt, RecorderTokioExt};
+use dial9::s3::S3Config;
+use dial9::{Dial9HandleTokioExt, DiskBuffer, RecorderS3ClientExt, TokioAttachOptions};
 use std::time::Duration;
 
 # fn main() -> std::io::Result<()> {
@@ -669,7 +784,7 @@ let s3_config = S3Config::builder()
 let custom_credentials_provider: aws_sdk_s3::config::Credentials = todo!();
 let custom_endpoint = "https://s3.example.com";
 
-let (recorder, runtime) = dial9::recorder(writer)
+let recorder = dial9::recorder(writer)
     .with_s3_uploader_client_future(s3_config, async move {
         let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .credentials_provider(custom_credentials_provider)
@@ -678,8 +793,13 @@ let (recorder, runtime) = dial9::recorder(writer)
             .await;
         aws_sdk_s3::Client::new(&sdk_config)
     })
-    .build()
-    .attach_tokio_runtime(|_| {})?;
+    .build();
+
+let mut builder = tokio::runtime::Builder::new_multi_thread();
+builder.enable_all();
+let runtime = recorder
+    .handle()
+    .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
 
 drop(runtime);
 recorder.graceful_shutdown(Duration::from_secs(5));
@@ -705,7 +825,7 @@ To run with **no filesystem dependency** (disk unavailable, read-only, or unwelc
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # mod inner {
-use dial9::core::pipeline::s3::S3Config;
+use dial9::s3::S3Config;
 use dial9::{MemoryBuffer, RecorderPipelineExt, recorder};
 
 # fn example() -> std::io::Result<()> {
@@ -755,9 +875,49 @@ dial9 serve --local-dir /tmp/my_traces
 
 # Serve traces from S3
 AWS_PROFILE=my-profile dial9 serve --bucket my-trace-bucket
+
+# Explore the complete browser and aggregation flow without S3
+dial9 serve --simulator --local
 ```
 
 Open `http://localhost:3000` to browse traces. Enter a search prefix (e.g. `2026-04-09/1910/checkout-api`), select one or more segments, and click "View Selected" to open them in the viewer.
+
+#### Simulator mode
+
+Simulator mode exposes lazily generated traces through the same S3-shaped keys
+and storage interface as a real trace bucket. Browser discovery, object
+downloads, spans, flamegraphs, and Tokio stats therefore use their production
+paths, while aggregate rollups stay in a process-local temporary directory.
+No bucket or AWS credentials are required.
+
+```bash
+# Sanitized synthetic traces with every feature group enabled
+dial9 serve --simulator --local
+
+# Replay the bundled demo trace in each virtual segment
+dial9 serve --simulator demo --local
+
+# Model a larger fleet with five-minute segments
+dial9 serve --simulator --simulator-hosts 12 --simulator-segment-secs 300 --local
+
+# Keep selected synthetic features and repeat the template for more data
+dial9 serve --simulator synthetic \
+  --simulator-features cpu,scheduling,tasks,spans \
+  --simulator-repetitions 3 \
+  --simulator-symbols realistic --local
+```
+
+The default fleet has 3 hosts and one-minute virtual segments across any
+requested time range. The catalog is deterministic and independent of server
+uptime; payload bytes are generated only when an object is fetched. Use
+`--simulator-hosts`, `--simulator-segment-secs`, and
+`--simulator-repetitions` to change its shape and data volume. Synthetic
+feature groups are `cpu`, `scheduling`, `tasks`, `spans`, `memory`,
+`resources`, and `custom-events`; omit `--simulator-features` to enable all of
+them, or pass `none` for clock and segment metadata only. Use
+`--simulator-symbols realistic` for deterministic Rust-like stack-frame names;
+anonymous placeholders remain the default. Demo replay preserves the bundled
+trace's event data while rebasing one copy into every virtual segment.
 
 ### `agents`
 

@@ -11,6 +11,7 @@ import {
   buildWorkerSpans,
   canStreamDecode,
   Dial9Creds,
+  Dial9Session,
   loadTraceInWorker,
 } from "../../lib/trace/index.js";
 import type { ParsedTrace, TraceSliceStore } from "../../lib/trace/index.js";
@@ -33,6 +34,7 @@ export async function runExactMode(
   mountCopyLink(els.headerEl, {
     beforeCopy: () => {
       flushUrlState?.();
+      return true;
     },
   });
 
@@ -57,7 +59,7 @@ export async function runExactMode(
 
   // Same-origin credential headers: resolved on the main thread; the core's
   // isSameOrigin withholding still applies per URL in the worker.
-  const credHeaders = Dial9Creds.headers();
+  const credHeaders = Dial9Session.headers(Dial9Creds.headers());
 
   // Loading label: the worker picks stream vs buffered itself with the same
   // canStreamDecode rule, so the main-thread answer sets the initial label;

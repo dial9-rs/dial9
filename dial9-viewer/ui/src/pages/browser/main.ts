@@ -6,7 +6,7 @@
 
 import "../../styles/browser.css";
 import { createActions } from "./actions.js";
-import type { ApiConfig } from "./api.js";
+import { usesFlatSourceLayout, type ApiConfig } from "./api.js";
 import { mountActionsBar } from "./actions-bar.js";
 import { resolveBucketFilter } from "./bucket-filter.js";
 import { mountBrowseView } from "./browse-view.js";
@@ -26,6 +26,7 @@ import { mountServiceTabs } from "./service-tabs.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
+import { Dial9Session } from "../../lib/trace/session.js";
 
 // Dual-UI switch: render the "Switch to legacy UI" control. The
 // ui-switch.js <head> auto-boot is a no-op on this off-root path.
@@ -155,7 +156,7 @@ function boot(): void {
 
   // Config bootstrap. Plain fetch, not apiFetch: /api/config is fetched
   // uncredentialed.
-  fetch("/api/config")
+  Dial9Session.fetch("/api/config")
     .then(async (r) => {
       if (!r.ok) {
         const body = await r.text().catch(() => "");
@@ -180,9 +181,10 @@ function boot(): void {
       // button drives the sampled server-side loop instead of decoding raw
       // traces; Tokio Stats enables on selection.
       store.update("config", { aggregationEnabled: !!config.aggregation_enabled });
-      // Local-dir servers have no BYO credentials; their buffer-style keys
-      // carry no scope, so selections open directly by key (#627).
-      store.update("config", { localMode: !config.supports_byo_credentials });
+      // Flat-layout sources carry no scope in buffer-style keys, so selections
+      // open directly by key (#627). Simulator keys are time-partitioned even
+      // though the simulator intentionally has no credential support.
+      store.update("config", { localMode: usesFlatSourceLayout(config) });
       // The server's bucket-picker filter applies unless the page URL
       // pinned an override at load (which wins). Servers predating the
       // field leave the "dial9" default in place.

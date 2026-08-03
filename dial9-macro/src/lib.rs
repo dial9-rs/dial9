@@ -24,12 +24,24 @@ struct MainArgs {
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
                            #[dial9::main(config = dial9::recorder_from_env)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || dial9::recorder(writer).build().attach_tokio_runtime(|_| {}))]";
+                           #[dial9::main(config = || {\n    \
+                           let rec = dial9::recorder(writer).build();\n    \
+                           let mut b = tokio::runtime::Builder::new_multi_thread();\n    \
+                           b.enable_all();\n    \
+                           let rt = rec.handle().attach_tokio_runtime(b, TokioAttachOptions::default())?;\n    \
+                           Ok((rec, rt))\n  \
+                           })]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure returning `std::io::Result<dial9::AttachedRuntime>`, e.g.\n  \
                            #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || dial9::recorder(writer).build().attach_tokio_runtime(|_| {}))]";
+                           #[dial9::main(config = || {\n    \
+                           let rec = dial9::recorder(writer).build();\n    \
+                           let mut b = tokio::runtime::Builder::new_multi_thread();\n    \
+                           b.enable_all();\n    \
+                           let rt = rec.handle().attach_tokio_runtime(b, TokioAttachOptions::default())?;\n    \
+                           Ok((rec, rt))\n  \
+                           })]";
 
 /// `config`'s value: a bare function path or a zero-argument closure. Anything
 /// else (a call, a literal) is the mistake `CONFIG_MUST_BE_ZERO_ARG_HELP` names.
@@ -199,8 +211,9 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
+            let __dial9_config_result: ::std::io::Result<::dial9::AttachedRuntime> = #config_call;
             let (__dial9_recorder, __dial9_rt) =
-                #config_call.expect("dial9::main: config failed");
+                __dial9_config_result.expect("dial9::main: config failed");
             let __dial9_out = ::dial9::block_on(&__dial9_rt, async move { #(#body_stmts)* });
             drop(__dial9_rt);
             #shutdown_stmt
@@ -223,10 +236,11 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or closure returning
-///   `std::io::Result<`[`dial9::AttachedRuntime`]`>`, which is what
-///   [`RecorderTokioExt::attach_tokio_runtime`](dial9::RecorderTokioExt::attach_tokio_runtime)
-///   hands back. The macro panics if it is an `Err`. Use
-///   [`dial9::recorder_from_env`] for the env-driven setup. Required.
+///   `std::io::Result<`[`dial9::AttachedRuntime`]`>`: a recorder paired with a
+///   runtime attached to it
+///   via [`Dial9HandleTokioExt::attach_tokio_runtime`](dial9::Dial9HandleTokioExt::attach_tokio_runtime).
+///   The macro panics if it is an `Err`. Use [`dial9::recorder_from_env`] for
+///   the env-driven setup. Required.
 /// * `graceful_shutdown` — the drain deadline (a `Duration`); defaults to 1s.
 /// * `disable_graceful_shutdown` — skip the drain; the recorder is just dropped.
 ///
@@ -257,7 +271,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// ```no_run
 /// use std::io;
-/// use dial9::{AttachedRuntime, DiskBuffer, RecorderTokioExt};
+/// use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions};
 ///
 /// fn my_config() -> io::Result<AttachedRuntime> {
 ///     let writer = DiskBuffer::builder()
@@ -265,9 +279,15 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("writer build failed");
-///     dial9::recorder(writer)
-///         .build()
-///         .attach_tokio_runtime(|t| { t.worker_threads(4); })
+///     let recorder = dial9::recorder(writer).build();
+///
+///     let mut builder = tokio::runtime::Builder::new_multi_thread();
+///     builder.enable_all().worker_threads(4);
+///     let runtime = recorder
+///         .handle()
+///         .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+///
+///     Ok((recorder, runtime))
 /// }
 ///
 /// #[dial9::main(config = my_config, graceful_shutdown = std::time::Duration::from_secs(5))]
@@ -280,9 +300,17 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// dial9 off via a feature flag or env var without removing the macro):
 ///
 /// ```no_run
-/// use dial9::RecorderTokioExt;
+/// use dial9::{Dial9HandleTokioExt, TokioAttachOptions};
 ///
-/// #[dial9::main(config = || dial9::recorder_disabled().attach_tokio_runtime(|_| {}))]
+/// #[dial9::main(config = || {
+///     let recorder = dial9::recorder_disabled();
+///     let mut builder = tokio::runtime::Builder::new_multi_thread();
+///     builder.enable_all();
+///     let runtime = recorder
+///         .handle()
+///         .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+///     Ok((recorder, runtime))
+/// })]
 /// async fn main() {
 ///     /* ... */
 /// }
@@ -293,14 +321,20 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// `.with_s3_uploader(..)` or `.with_custom_pipeline(..)`.
 ///
 /// ```no_run
-/// use dial9::RecorderTokioExt;
+/// use dial9::{Dial9HandleTokioExt, TokioAttachOptions};
 ///
 /// #[dial9::main(config = || {
 ///     let writer = dial9::MemoryBuffer::builder()
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("writer build failed");
-///     dial9::recorder(writer).build().attach_tokio_runtime(|_| {})
+///     let recorder = dial9::recorder(writer).build();
+///     let mut builder = tokio::runtime::Builder::new_multi_thread();
+///     builder.enable_all();
+///     let runtime = recorder
+///         .handle()
+///         .attach_tokio_runtime(builder, TokioAttachOptions::default())?;
+///     Ok((recorder, runtime))
 /// })]
 /// async fn main() {
 ///     /* ... */

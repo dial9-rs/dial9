@@ -131,8 +131,8 @@ function statusTemplate(vm: StatusViewModel, onClear: () => void): TemplateResul
 export interface StatusBarDeps {
   /** Clear affordance: clear the selection highlight state. */
   clearSelection(): void;
-  /** Run before copy-link reads the URL (sync-binding flush seam). */
-  beforeCopyLink?(): void;
+  /** Flush live URL state and approve the copy, or reject an unshareable source. */
+  beforeCopyLink?(): boolean;
   /** URL text supplier for copy-link; defaults to the live location href. */
   copyLinkText?(): string;
   /** Clipboard writer; injectable for tests. */

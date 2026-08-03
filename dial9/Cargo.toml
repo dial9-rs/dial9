@@ -20,6 +20,9 @@ pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ t
 pkg-fmt = "tgz"
 bin-dir = "dial9{ binary-ext }"
 
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [[bin]]
 name = "dial9"
 path = "src/main.rs"
@@ -29,11 +32,17 @@ required-features = ["cli"]
 name = "cli_trace_shape"
 required-features = ["cli"]
 
+[lints.rust]
+missing_debug_implementations = "warn"
+
 [dependencies]
 dial9-core = { workspace = true }
+dial9-trace-format = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
 dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry", optional = true }
+dial9-destinations-s3 = { workspace = true, optional = true }
 dial9-macro = { workspace = true, optional = true }
+dial9-metrique = { workspace = true, optional = true }
 
 dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
@@ -74,6 +83,7 @@ tokio = [
     "dep:bon",
     "dep:tracing",
     "pipeline",
+    "dial9-metrique?/tokio",
 ]
 
 ## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
@@ -105,11 +115,19 @@ unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 ## Tracing-subscriber layer emitting span events into dial9 traces.
 tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
 
+## Metrique sink recording unit-of-work metric entries into dial9 traces.
+## Standalone; combine with the `tokio` feature to capture task ids.
+metrique-sink = ["dep:dial9-metrique"]
+
+## Serde deserialization of decoded events (`RawEvent::deserialize`).
+## Reading a trace with [`Decoder`] needs no feature.
+deserialize = ["dial9-trace-format/serde-deserialize"]
+
 ## Trace file reading + analysis toolkit (offline decode).
-analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
+analysis = ["deserialize", "tokio", "dial9-tokio-telemetry/analysis"]
 
 ## S3 upload pipeline stage.
-worker-s3 = ["tokio", "dial9-tokio-telemetry/worker-s3"]
+worker-s3 = ["tokio", "dep:dial9-destinations-s3", "dial9-tokio-telemetry/worker-s3"]
 
 ## Async backtraces at Tokio yield points (Linux only).
 taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
@@ -126,10 +144,12 @@ linux-socket = [
 dial9 = { path = ".", features = [
     "tokio",
     "analysis",
+    "cpu-profiling",
     "memory-profiling",
     "process-resource",
     "linux-socket",
     "tracing-layer",
+    "metrique-sink",
     "unstable-events",
     "worker-s3",
 ] }
@@ -146,7 +166,7 @@ tokio = { version = "1", features = [
 tempfile = "3"
 flate2 = "1"
 clap = { version = "4", features = ["derive", "env"] }
-metrique = { version = "0.1.23", features = ["local-format"] }
+metrique = { version = "0.1.29", features = ["local-format"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -248,6 +268,10 @@ required-features = ["worker-s3"]
 [[example]]
 name = "tracing_sleep"
 required-features = ["tracing-layer"]
+
+[[example]]
+name = "metrique_metrics"
+required-features = ["metrique-sink", "tokio"]
 
 [[example]]
 name = "block_in_place_workload"

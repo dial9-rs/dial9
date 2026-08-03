@@ -20,6 +20,7 @@ import {
   type FocusCandidate,
   type FocusLink,
 } from "./focus-link.js";
+import { resolveTaskDumpCaptures } from "./inspector-model.js";
 
 
 /**
@@ -128,16 +129,19 @@ export function resolveUrlSelection(
   const patch: Partial<SelectionSlice> = {};
   const lane = deriveLaneData(trace);
 
-  // Span: focus + a minimal highlight chain (the span itself).
-  if (url.selectedSpanId !== undefined && lane.spanByIdSingle.has(url.selectedSpanId)) {
-    patch.spanFocus = { spanId: url.selectedSpanId, chain: new Set([url.selectedSpanId]) };
+  const hasSpan = (id: string): boolean =>
+    lane.columnarSpans?.spanIdToRow.has(id) ?? lane.spanByIdSingle.has(id);
+
+  // Span: focus + the same ancestor chain a live click computes.
+  if (url.selectedSpanId !== undefined && hasSpan(url.selectedSpanId)) {
+    patch.spanFocus = { spanId: url.selectedSpanId, chain: focusChain(lane, url.selectedSpanId) };
     patch.focusedSpanId = url.selectedSpanId;
   }
 
   // Span-panel subtree focus, carried independently of the lane highlight. When
   // present it wins over the fallback the span block set above; otherwise that
   // fallback stands (so an old `span`-only URL keeps its prior behavior).
-  if (url.focusedSpanId !== undefined && lane.spanByIdSingle.has(url.focusedSpanId)) {
+  if (url.focusedSpanId !== undefined && hasSpan(url.focusedSpanId)) {
     patch.focusedSpanId = url.focusedSpanId;
   }
 
@@ -154,6 +158,20 @@ export function resolveUrlSelection(
         patch.pollDetail = poll;
         break;
       }
+    }
+  }
+
+  if (url.taskDump !== undefined) {
+    const selection = {
+      taskId: url.taskDump.taskId,
+      timestamps: url.taskDump.timestamps,
+    };
+    const captures = resolveTaskDumpCaptures(trace, selection);
+    if (captures.length > 0) {
+      patch.taskDump = {
+        taskId: selection.taskId,
+        timestamps: captures.map((dump) => dump.timestamp),
+      };
     }
   }
 
@@ -176,9 +194,20 @@ export function resolveUrlSelection(
     }
   }
 
-  // Ranges restore directly (sidebarRange opens the region-analysis panel).
-  if (url.sidebarRange !== undefined) patch.sidebarRange = url.sidebarRange;
-  if (url.spawnedRange !== undefined) patch.spawnedTasksRange = url.spawnedRange;
+  // Ranges are semantic trace anchors. Clamp partial overlap to this trace and
+  // drop wholly stale ranges so the URL never claims an invisible analysis.
+  const resolveRange = (
+    range: { startNs: number; endNs: number } | undefined,
+  ): { startNs: number; endNs: number } | null => {
+    if (range === undefined) return null;
+    const startNs = trace.minTs != null ? Math.max(trace.minTs, range.startNs) : range.startNs;
+    const endNs = trace.maxTs != null ? Math.min(trace.maxTs, range.endNs) : range.endNs;
+    return endNs > startNs ? { startNs, endNs } : null;
+  };
+  const sidebarRange = resolveRange(url.sidebarRange);
+  if (sidebarRange !== null) patch.sidebarRange = sidebarRange;
+  const spawnedRange = resolveRange(url.spawnedRange);
+  if (spawnedRange !== null) patch.spawnedTasksRange = spawnedRange;
 
   return patch;
 }

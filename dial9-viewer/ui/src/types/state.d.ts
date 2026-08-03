@@ -115,6 +115,18 @@ export interface SpanFocus {
 }
 
 /**
+ * Async stack captures selected by clicking a dump-bearing idle span in the
+ * task-detail track. Store semantic timestamps rather than trace-owned objects
+ * so a reparse resolves against the replacement trace.
+ */
+export interface TaskDumpSelection {
+  /** Task whose idle span produced these captures. */
+  taskId: number;
+  /** Capture timestamps attributed to the clicked idle span. */
+  timestamps: readonly number[];
+}
+
+/**
  * Cross-highlight state. All fields are independently clearable, hence all
  * explicitly nullable.
  */
@@ -138,6 +150,11 @@ export interface SelectionSlice {
    * groups from it.
    */
   pollDetail: PollSpan | null;
+  /**
+   * Task-dump captures shown in the Stack inspector after clicking a dumped
+   * idle span in the task-detail track.
+   */
+  taskDump: TaskDumpSelection | null;
   /**
    * Range retained while the sidebar shows a region analysis (region
    * select -> flamegraph/blocking calls); blocks keyboard selection until
@@ -237,20 +254,20 @@ export interface UiPrefsSlice {
   panelCollapsed: Readonly<Record<FoldablePanelKind, boolean>>;
   /**
    * Track order for the unified column. The user drag-reorders the
-   * manageable analysis tracks (cpu/queue/spans/events) by the track-label
-   * grip; this is their resulting id order. Empty = the catalogue order
+   * manageable built-in and dynamic analysis tracks by the track-label grip;
+   * this is their resulting id order. Empty = the catalogue order
    * (track-layout.ts TRACKS). Resolution is robust to unknown or missing ids,
    * so an order stored before a new track was added still resolves (the new
-   * track appears in its catalogue slot). Persisted to localStorage
-   * (dial9.viewer.trackPrefs) so it survives reload.
+   * track appears in its catalogue slot). The full order is URL state; only
+   * built-in ids persist in localStorage (`dial9.viewer.trackPrefs`).
    */
   trackOrder: readonly string[];
   /**
    * Per-track collapsed state. Track id -> true when the user collapsed it to
    * label-only height via the track-label caret. Absent or false = expanded
-   * (analysis surfaces visible by default). Only the manageable analysis
-   * tracks (cpu/queue/spans/events) are collapsible. localStorage-backed
-   * (dial9.viewer.trackPrefs).
+   * (analysis surfaces visible by default). Built-in and dynamic analysis
+   * tracks are collapsible. The full map is URL state; only built-in ids
+   * persist in localStorage (`dial9.viewer.trackPrefs`).
    */
   collapsed: Readonly<Record<string, boolean>>;
   /**
@@ -270,6 +287,8 @@ export interface UiPrefsSlice {
    * scrolls internally, so this only sizes the visible window.
    */
   lanesViewportHeight: number;
+  /** Current vertical scroll offset of the worker-lanes viewport (CSS px). */
+  lanesScrollTop: number;
   /**
    * Legend chip toggles: span / custom-event names currently selected for
    * display filtering. Empty set = no name filter.
@@ -310,6 +329,63 @@ export interface UiPrefsSlice {
    * toggle would reset with it, so the preference has to outlive the selection.
    */
   stacksAsFlamegraph: boolean;
+}
+
+// ── durable view slice ──────────────────────────────────────────────────
+
+/** Inspector surface currently visible. */
+export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
+/** Region analysis selected for a retained range. */
+export type RegionAnalysisMode = "cpu" | "blocking" | "heap";
+/** Rendering semantics for a custom-event numeric field chart. */
+export type FieldChartKind = "gauge" | "counter" | "updown-counter";
+/**
+ * One URL-defined custom-event field chart. The id also keys track order and
+ * collapse state; event + field names resolve against the loaded trace.
+ */
+export interface FieldChartSpec {
+  readonly id: string;
+  /** Non-empty custom-event name; commas are not supported by the URL tuple. */
+  readonly eventName: string;
+  /** Non-empty numeric field name; commas are not supported by the URL tuple. */
+  readonly fieldName: string;
+  readonly kind: FieldChartKind;
+}
+/** One Related-section expansion counter. */
+export interface RelatedExpansion {
+  before: number;
+  after: number;
+}
+
+/**
+ * Durable controls that change what analysis is visible. Unlike TransientSlice,
+ * every field here is part of the deep-link contract. Components must dispatch
+ * changes through this slice rather than keeping local UI truth, so agents can
+ * construct the same view without replaying pointer/keyboard actions.
+ */
+export interface ViewerViewSlice {
+  /** Dynamic numeric-field tracks, persisted only through URL state. */
+  fieldCharts: readonly FieldChartSpec[];
+  inspectorTab: InspectorTab;
+  /** Poll sample groups expanded in list mode (`cpu-N` / `sched-N`). */
+  expandedPollGroups: ReadonlySet<string>;
+  /** Which sample family the poll flamegraph displays when both are present. */
+  pollFlamegraphSection: "cpu" | "sched";
+  pollWorkerZoom: readonly string[];
+  pollOffworkerZoom: readonly string[];
+  relatedCollapsed: Readonly<Record<string, boolean>>;
+  relatedExpand: Readonly<Record<string, RelatedExpansion>>;
+  relatedCorrelate: { key: string; val: string } | null;
+  /** null means choose the data-present default for a newly selected region. */
+  regionMode: RegionAnalysisMode | null;
+  regionHeapMode: "bytes" | "count";
+  regionGroupBy: "leaf" | "full";
+  regionWorkerZoom: readonly string[];
+  regionOffworkerZoom: readonly string[];
+  /** Butterfly/inspect focus in the region flamegraph, by full frame key. */
+  regionInspectFocus: string | null;
+  /** Current next/previous cursor in the filtered span list. */
+  spanNavIndex: number;
 }
 
 // ── transient slice ─────────────────────────────────────────────────────
@@ -506,6 +582,7 @@ export interface StoreState {
   selection: SelectionSlice;
   poi: PoiSlice;
   uiPrefs: UiPrefsSlice;
+  view: ViewerViewSlice;
   transient: TransientSlice;
   segments: SegmentsSlice;
 }

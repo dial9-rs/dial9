@@ -23,7 +23,7 @@ use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderTokioExt, TokioAttachOptions, recorder,
+    Dial9HandleTokioExt, Dial9TokioHandle, DiskBuffer, MemoryBuffer, TokioAttachOptions, recorder,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -114,14 +114,15 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
 
     /// Attach a 4-worker runtime to `recorder` (already recording).
     fn attach(recorder: Recorder, task_tracking: bool) -> Server {
-        let (recorder, runtime) = recorder
-            .attach_tokio_runtime_with(
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(4);
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(
+                builder,
                 TokioAttachOptions::builder()
                     .task_tracking_enabled(task_tracking)
                     .build(),
-                |t| {
-                    t.worker_threads(4);
-                },
             )
             .unwrap();
         Server::Traced(recorder, runtime)

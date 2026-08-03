@@ -3,7 +3,7 @@
 //! Test that install() publishes the process-global ACTIVE state.
 
 use dial9::memory::{MemoryProfiler, MemoryProfilingConfig, is_installed};
-use dial9::{RecorderTokioExt, recorder};
+use dial9::{Dial9HandleTokioExt, TokioAttachOptions, recorder};
 
 mod common;
 
@@ -12,11 +12,11 @@ fn install_publishes_active_inner() {
     assert!(!is_installed(), "should not be installed before install()");
 
     let recorder = recorder(common::small_mem_writer()).build();
-    let (recorder, _rt) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-            t.worker_threads(1);
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(1);
+    let _rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("attach tokio");
 
     let handle = recorder.handle().clone();

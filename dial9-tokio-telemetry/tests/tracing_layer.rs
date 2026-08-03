@@ -3,7 +3,9 @@
 // Only one test per process can do this. All other tests must use `set_default`
 // (thread-local) instead.
 
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+mod common;
+
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
@@ -127,11 +129,7 @@ fn span_events_appear_in_trace() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.worker_threads(4);
-        })
-        .unwrap();
+    let runtime = common::attach(&recorder, 4, TokioAttachOptions::default());
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set global subscriber");
@@ -343,13 +341,7 @@ fn span_events_on_current_thread_runtime() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            *t = tokio::runtime::Builder::new_current_thread();
-            t.enable_all();
-            t.enable_all();
-        })
-        .unwrap();
+    let runtime = common::attach_current_thread(&recorder, TokioAttachOptions::default());
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _sub_guard = tracing::subscriber::set_default(subscriber);

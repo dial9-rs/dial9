@@ -7,7 +7,7 @@
 
 import { createDiffView, parseDiff } from "../../lib/canvas/index.js";
 import type { DiffViewHandle, DiffViewState } from "../../lib/canvas/index.js";
-import { Dial9Creds } from "../../lib/trace/index.js";
+import { Dial9Creds, Dial9Session } from "../../lib/trace/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
 import { readDiffState, writeDiffState } from "./diff-state.js";
@@ -55,7 +55,9 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
   // overrides B once supplied (held in memory for this tab only).
   let credsB: SideBCreds | null = null;
   const headersFor = (side: "a" | "b"): Record<string, string> =>
-    side === "b" && credsB !== null ? credsToHeaders(credsB) : Dial9Creds.headers();
+    Dial9Session.headers(
+      side === "b" && credsB !== null ? credsToHeaders(credsB) : Dial9Creds.headers(),
+    );
 
   let view: DiffViewHandle | null = null;
   let bCredsPrompted = false;
@@ -68,7 +70,10 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
   ): Promise<{ ok: boolean; region?: string | null; error?: string }> {
     const url =
       "/api/credentials/check" + (bBucket ? "?bucket=" + encodeURIComponent(bBucket) : "");
-    const resp = await fetch(url, { method: "POST", headers: credsToHeaders(creds) });
+    const resp = await Dial9Session.fetch(url, {
+      method: "POST",
+      headers: credsToHeaders(creds),
+    });
     if (!resp.ok) {
       return { ok: false, error: await resp.text().catch(() => "check failed") };
     }
