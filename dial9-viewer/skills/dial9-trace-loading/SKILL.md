@@ -55,12 +55,16 @@ configures a sink, so legacy and single-event spans are instead stored in the
 optional `spanEvents` columns and are absent from `customEvents`. The normalized
 projection contains `start`, `end`, `name`, `spanType`, `threadId`, `taskId`,
 `workerId`, `fields`, and `units`; structural-role fields are excluded from
-`fields`. Consumers should read both storage paths through the shared span-data
-builder rather than matching schema or physical field names.
+`fields`, except that the `span.name` field remains an attribute. Consumers
+should read both storage paths through the shared span-data builder rather than
+matching schema or physical field names.
 
-The packed event timestamp is `end`; `start` is decoded from the field carrying
-`dial9.role=span.start` and its `unit` annotation. See
-`docs/design/single-event-spans.md` for the schema convention.
+Span timing uses any two of `start`, `duration`, and `end`. A packed event
+timestamp supplies `end` when present; fields carrying
+`dial9.role=span.start` or `dial9.role=span.duration` supply the other timing
+quantities using their `unit` annotations. Timestamp-less schemas must provide
+both timing fields. See `docs/design/single-event-spans.md` for the schema
+convention.
 
 ## Event types
 

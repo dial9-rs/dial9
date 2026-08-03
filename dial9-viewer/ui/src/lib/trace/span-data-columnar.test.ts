@@ -74,7 +74,7 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     const spanEvents = new ColumnarSpanEvents(1);
     spanEvents.push(
       SPAN_KIND.Complete,
-      150,
+      0,
       {},
       {
         start: 100,

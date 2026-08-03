@@ -1433,6 +1433,7 @@ mod tests {
         assert_eq!(
             span.attributes,
             vec![
+                ("operation".to_string(), "GET /pets".to_string()),
                 ("Route".to_string(), "/pets".to_string()),
                 ("StatusCode".to_string(), "200".to_string()),
                 ("Success".to_string(), "true".to_string()),

@@ -460,10 +460,11 @@ describe("metrique events", () => {
       expect(span?.start).toBe(ev.timestamp - duration);
       expect(span?.name).toBe(f["Operation"]);
       expect(span?.spanType).toBe("metrique");
-      // Structural-role fields are not projected as attributes.
+      // Timing/context fields are not projected as attributes. span.name is
+      // retained so callers can search and group by the original field.
       expect(span?.fields["dial9.span.duration_ns"]).toBeUndefined();
       expect(span?.fields["thread_id"]).toBeUndefined();
-      expect(span?.fields["Operation"]).toBeUndefined();
+      expect(span?.fields["Operation"]).toBe(f["Operation"]);
       expect(span?.fields["dial9.wall_clock_ns"]).toBeUndefined();
       expect(span?.fields["MetricName"]).toBe(f["MetricName"]);
     }

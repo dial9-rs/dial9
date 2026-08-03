@@ -96,6 +96,7 @@ export class ColumnarSpanEvents {
   completeIdx: Int32Array;
   /** Single-event-only lifecycle/context columns, allocated sparsely. */
   private completeStart: Float64Array;
+  private completeEnd: Float64Array;
   private completeThreadId: Float64Array;
   private completeTaskId: Float64Array;
   private completeWorkerId: Float64Array;
@@ -153,6 +154,7 @@ export class ColumnarSpanEvents {
     this.completeIdx = new Int32Array(cap);
     this.completeIdx.fill(-1);
     this.completeStart = new Float64Array(this.completeCap);
+    this.completeEnd = new Float64Array(this.completeCap);
     this.completeThreadId = new Float64Array(this.completeCap);
     this.completeTaskId = new Float64Array(this.completeCap);
     this.completeWorkerId = new Float64Array(this.completeCap);
@@ -202,6 +204,9 @@ export class ColumnarSpanEvents {
     const start = new Float64Array(n);
     start.set(this.completeStart);
     this.completeStart = start;
+    const end = new Float64Array(n);
+    end.set(this.completeEnd);
+    this.completeEnd = end;
     const threadId = new Float64Array(n);
     threadId.set(this.completeThreadId);
     this.completeThreadId = threadId;
@@ -362,6 +367,7 @@ export class ColumnarSpanEvents {
       const completeIdx = this.completeLen++;
       this.completeIdx[i] = completeIdx;
       this.completeStart[completeIdx] = singleEventSpan.start;
+      this.completeEnd[completeIdx] = singleEventSpan.end;
       this.completeThreadId[completeIdx] = singleEventSpan.threadId ?? NaN;
       this.completeTaskId[completeIdx] = singleEventSpan.taskId ?? NaN;
       this.completeWorkerId[completeIdx] = singleEventSpan.workerId ?? NaN;
@@ -411,6 +417,11 @@ export class ColumnarSpanEvents {
   startAt(i: number): number {
     const idx = this.completeIdx[i]!;
     return idx < 0 ? NaN : this.completeStart[idx]!;
+  }
+  /** Single-event end timestamp, or NaN for tracing events. */
+  endAt(i: number): number {
+    const idx = this.completeIdx[i]!;
+    return idx < 0 ? NaN : this.completeEnd[idx]!;
   }
   /** Complete-event OS thread id, or NaN for tracing events / absent data. */
   threadIdAt(i: number): number {

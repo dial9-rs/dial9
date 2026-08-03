@@ -176,7 +176,7 @@ export function buildSpanDataColumnar(
     if (kind === SPAN_KIND.Complete) {
       const spanId = `single-event:${singleEventOrdinal++}`;
       const start = spanEvents.startAt(i);
-      const end = ts;
+      const end = spanEvents.endAt(i);
 
       const directTask = spanEvents.taskIdAt(i);
       const threadId = spanEvents.threadIdAt(i);

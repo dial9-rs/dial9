@@ -62,7 +62,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 tower = { version = "0.5", features = ["limit", "util"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "timeout"] }
 uuid = { version = "1", features = ["v4"] }
 form_urlencoded = "1"
 tracing = "0.1"

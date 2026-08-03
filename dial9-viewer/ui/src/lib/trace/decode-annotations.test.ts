@@ -4,10 +4,15 @@ import { FieldType, TraceDecoder } from "../../../decode.js";
 
 const require = createRequire(import.meta.url);
 const { parseTrace } = require("../../../trace_parser.js") as {
-  parseTrace: (bytes: Uint8Array) => Promise<{
+  parseTrace: (bytes: Uint8Array, options?: unknown) => Promise<{
     customEvents: Array<{
       units: Record<string, string> | null;
       fieldKinds: Record<string, string> | null;
+      singleEventSpan: {
+        start: number;
+        end: number;
+        fields: Record<string, unknown>;
+      } | null;
     }>;
   }>;
 };
@@ -24,14 +29,14 @@ const u32 = (value: number): number[] => [
   value >>> 24,
 ];
 
-function annotationFrame(key: string, value: string): number[] {
+function annotationFrame(key: string, value: string, fieldIndex = 0): number[] {
   const keyBytes = utf8(key);
   const valueBytes = utf8(value);
   return [
     0x06,
     TYPE_ID, // one-byte ULEB128
     ...u16(1),
-    ...u16(0),
+    ...u16(fieldIndex),
     ...u16(keyBytes.length),
     ...keyBytes,
     ...u32(valueBytes.length),
@@ -51,6 +56,42 @@ function schemaFrame(): number[] {
     ...u16(1),
     ...u16(field.length),
     ...field,
+    FieldType.Varint,
+  ];
+}
+
+function durationSpanSchemaFrame(): number[] {
+  const name = utf8("Metric");
+  const field = utf8("duration");
+  return [
+    0x01,
+    ...u16(TYPE_ID),
+    ...u16(name.length),
+    ...name,
+    1,
+    ...u16(1),
+    ...u16(field.length),
+    ...field,
+    FieldType.Varint,
+  ];
+}
+
+function timestampLessSpanSchemaFrame(): number[] {
+  const name = utf8("Detached");
+  const start = utf8("start");
+  const duration = utf8("duration");
+  return [
+    0x01,
+    ...u16(TYPE_ID),
+    ...u16(name.length),
+    ...name,
+    0,
+    ...u16(2),
+    ...u16(start.length),
+    ...start,
+    FieldType.Varint,
+    ...u16(duration.length),
+    ...duration,
     FieldType.Varint,
   ];
 }
@@ -104,5 +145,84 @@ describe("TraceDecoder schema annotations", () => {
       units: { value: "bytes" },
       fieldKinds: { value: "counter" },
     });
+  });
+
+  it("reclassifies earlier events when trailing annotations define a span", async () => {
+    const bytes = Uint8Array.from([
+      0x54, 0x52, 0x43, 0x00, 1,
+      ...durationSpanSchemaFrame(),
+      ...annotationFrame("unit", "ns"),
+      0x02,
+      ...u16(TYPE_ID),
+      10, 0, 0,
+      4,
+      ...annotationFrame("dial9.role", "span.duration"),
+    ]);
+
+    const trace = await parseTrace(bytes);
+    expect(trace.customEvents).toHaveLength(1);
+    expect(trace.customEvents[0]!.singleEventSpan).toEqual({
+      start: 6,
+      end: 10,
+      name: "Metric",
+      spanType: "single-event",
+      threadId: null,
+      taskId: null,
+      workerId: null,
+      fields: {},
+      units: null,
+    });
+
+    const projected: Array<{ timestamp: number; span: unknown }> = [];
+    const spanEventSink = {
+      pushIfSpan(
+        _name: string,
+        timestamp: number,
+        _fields: Record<string, unknown>,
+        span: unknown,
+      ): boolean {
+        if (span == null) return false;
+        projected.push({ timestamp, span });
+        return true;
+      },
+    };
+    const columnarTrace = await parseTrace(bytes, { spanEventSink });
+
+    expect(columnarTrace.customEvents).toHaveLength(0);
+    expect(projected).toEqual([{
+      timestamp: 10,
+      span: trace.customEvents[0]!.singleEventSpan,
+    }]);
+  });
+
+  it("routes a timestamp-less span using its projected end", async () => {
+    const bytes = Uint8Array.from([
+      0x54, 0x52, 0x43, 0x00, 1,
+      ...timestampLessSpanSchemaFrame(),
+      ...annotationFrame("dial9.role", "span.start"),
+      ...annotationFrame("dial9.role", "span.duration", 1),
+      0x02,
+      ...u16(TYPE_ID),
+      30,
+      5,
+    ]);
+    const projectedTimestamps: number[] = [];
+    const spanEventSink = {
+      pushIfSpan(
+        _name: string,
+        timestamp: number,
+        _fields: Record<string, unknown>,
+        span: unknown,
+      ): boolean {
+        if (span == null) return false;
+        projectedTimestamps.push(timestamp);
+        return true;
+      },
+    };
+
+    const trace = await parseTrace(bytes, { spanEventSink });
+
+    expect(trace.customEvents).toHaveLength(0);
+    expect(projectedTimestamps).toEqual([35]);
   });
 });

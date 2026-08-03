@@ -690,6 +690,9 @@
             tidToWorker: new Map(),
             // Per-TID historical bindings for context resolution at span start.
             tidBindings: new Map(),
+            // Unfiltered park/unpark history used to derive block-in-place
+            // handoff gaps that cross a requested time-range boundary.
+            parkUnparkHistory: [],
             // Historical fallback consumers must only use TIDs that remained
             // bound to one worker for the entire segment.
             stableTidToWorker: new Map(),
@@ -772,7 +775,13 @@
     function compileSingleEventSpanSchema(schema) {
         const annotations = schema.annotations || [];
         const cached = schema._singleEventSpanLayout;
-        if (cached && cached.annotations === annotations) return cached.result;
+        if (
+            cached &&
+            cached.annotations === annotations &&
+            cached.annotationCount === annotations.length
+        ) {
+            return cached.result;
+        }
 
         const roleByField = new Array(schema.fields.length).fill(null);
         const roleIndices = new Map();
@@ -944,12 +953,20 @@
                 workerIdField: fieldName(SINGLE_EVENT_ROLES.workerId),
                 spanType: spanType.value || DEFAULT_SINGLE_EVENT_SPAN_TYPE,
                 attributeFields: schema.fields
-                    .filter((_, index) => roleByField[index] == null)
+                    .filter(
+                        (_, index) =>
+                            roleByField[index] == null ||
+                            roleByField[index] === SINGLE_EVENT_ROLES.name,
+                    )
                     .map((field) => field.name),
             };
         })();
 
-        schema._singleEventSpanLayout = { annotations, result };
+        schema._singleEventSpanLayout = {
+            annotations,
+            annotationCount: annotations.length,
+            result,
+        };
         if (result.kind === "invalid") {
             console.warn(
                 `Ignoring invalid single-event span schema ${JSON.stringify(schema.name)}: ${result.error}`,
@@ -1065,6 +1082,17 @@
 
         if (frame.name === "WorkerParkEvent" || frame.name === "WorkerUnparkEvent") {
             recordTidBinding(state, v, ts);
+            if (ts != null) {
+                state.parkUnparkHistory.push({
+                    eventType:
+                        frame.name === "WorkerParkEvent"
+                            ? EVENT_TYPES.WorkerPark
+                            : EVENT_TYPES.WorkerUnpark,
+                    timestamp: ts,
+                    workerId: num(v.worker_id),
+                    tid: v.tid != null ? num(v.tid) : undefined,
+                });
+            }
         }
 
         const capped = state.events.length >= state.maxEvents;
@@ -1151,7 +1179,7 @@
                 spanEventSink &&
                 spanEventSink.pushIfSpan(
                     frame.name,
-                    ts,
+                    singleEventSpan.end,
                     v,
                     singleEventSpan,
                 );
@@ -1516,12 +1544,14 @@
             threadNames,
             tidToWorker,
             tidBindings,
+            parkUnparkHistory,
             stableTidToWorker,
             runtimeWorkers,
             segmentMetadata,
             taskDumps,
             customEvents,
             customEventSchemas,
+            spanEventSink,
             clockSyncAnchors,
             maxEvents,
             startTime,
@@ -1541,11 +1571,49 @@
         // Annotation frames may follow events. Resolve against the exact schema
         // active for each event now that every frame has been consumed, then let
         // the temporary parallel array die with the parse state.
+        let retainedCustomEventCount = 0;
         for (let i = 0; i < customEvents.length; i++) {
+            const event = customEvents[i];
             const schema = customEventSchemas[i];
-            customEvents[i].units = schema?.units || null;
-            customEvents[i].fieldKinds = schema?.fieldKinds || null;
+            event.units = schema?.units || null;
+            event.fieldKinds = schema?.fieldKinds || null;
+
+            // Structural annotations may legally follow the event they
+            // describe. Recompile and project now that the whole stream has
+            // been consumed, then route newly recognized spans to the optional
+            // columnar sink.
+            const layout =
+                schema?.annotations?.length > 0
+                    ? compileSingleEventSpanSchema(schema)
+                    : { kind: "not-span" };
+            event.singleEventSpan =
+                layout.kind === "layout"
+                    ? decodeSingleEventSpan(
+                          layout,
+                          schema,
+                          event.fields,
+                          event.timestamp,
+                      )
+                    : null;
+            if (
+                event.singleEventSpan != null &&
+                spanEventSink &&
+                spanEventSink.pushIfSpan(
+                    event.name,
+                    event.singleEventSpan.end,
+                    event.fields,
+                    event.singleEventSpan,
+                )
+            ) {
+                continue;
+            }
+
+            customEvents[retainedCustomEventCount] = event;
+            customEventSchemas[retainedCustomEventCount] = schema;
+            retainedCustomEventCount++;
         }
+        customEvents.length = retainedCustomEventCount;
+        customEventSchemas.length = retainedCustomEventCount;
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
         // time + earliest monotonic event timestamp. This is best-effort only.
@@ -1625,7 +1693,10 @@
             const w = tidToWorker.get(sample.tid);
             if (w !== undefined) sample.workerId = w;
         }
-        const blockInPlaceGaps = deriveBlockInPlaceGaps(events, cpuSamples);
+        const blockInPlaceGaps = deriveBlockInPlaceGaps(
+            parkUnparkHistory,
+            cpuSamples,
+        );
 
         return {
             magic: "D9TF",

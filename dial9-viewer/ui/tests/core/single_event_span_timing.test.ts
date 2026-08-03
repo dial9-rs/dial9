@@ -246,6 +246,7 @@ describe("single-event span schema compilation", () => {
     expect(result.attributeFields).not.toContain("dur");
     expect(result.attributeFields).not.toContain("tid");
     expect(result.attributeFields).not.toContain("task");
+    expect(result.attributeFields).toContain("Operation");
     expect(result.attributeFields).toContain("MetricName");
     // span.name is the documented exception: it stays a normal attribute too.
     expect(result.nameField).toBe("Operation");

@@ -7,8 +7,10 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 
 mod browse;
 mod buckets;
@@ -65,6 +67,7 @@ pub(crate) fn embedded_ui_asset(path: &str) -> Option<Vec<u8>> {
 
 /// Default output key prefix for aggregate part-files.
 const DEFAULT_AGG_OUTPUT_PREFIX: &str = "flamegraph-data";
+const RAW_SPAN_STATS_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Destination for the aggregate part-files produced by demand-driven folding.
 ///
@@ -584,7 +587,10 @@ fn api_router(state: AppState) -> Router {
     let raw_span_stats_post = axum::routing::post(span_stats::post_raw_span_stats)
         .route_layer(DefaultBodyLimit::max(span_stats::RAW_SPAN_STATS_BODY_LIMIT))
         // Acquire capacity before Bytes extraction buffers the request body.
-        .route_layer(raw_span_stats_concurrency_limit());
+        .route_layer(raw_span_stats_concurrency_limit())
+        // Bound body buffering and decode work. This is outermost so timing out
+        // drops the inner future and releases its concurrency permit.
+        .route_layer(raw_span_stats_timeout(RAW_SPAN_STATS_REQUEST_TIMEOUT));
     let span_stats_route = Router::new().route(
         "/span-stats",
         axum::routing::get(span_stats::get_span_stats).merge(raw_span_stats_post),
@@ -626,9 +632,16 @@ fn raw_span_stats_concurrency_limit() -> ConcurrencyLimitLayer {
     ConcurrencyLimitLayer::new(span_stats::MAX_CONCURRENT_RAW_SPAN_STATS)
 }
 
+fn raw_span_stats_timeout(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
+    use axum::http::Request;
+    use futures::stream;
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
@@ -698,6 +711,40 @@ mod tests {
         for request in requests {
             request.await.unwrap().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn raw_span_stats_stalled_bodies_time_out_and_release_capacity() {
+        let route = axum::routing::post(|_: Bytes| async { StatusCode::OK })
+            .route_layer(DefaultBodyLimit::max(1024))
+            .route_layer(raw_span_stats_concurrency_limit())
+            .route_layer(raw_span_stats_timeout(Duration::from_millis(50)));
+        let app = Router::new().route("/", route);
+        let stalled_request = || {
+            Request::post("/")
+                .body(Body::from_stream(stream::pending::<
+                    Result<Bytes, Infallible>,
+                >()))
+                .unwrap()
+        };
+
+        let first = tokio::spawn(app.clone().oneshot(stalled_request()));
+        let second = tokio::spawn(app.clone().oneshot(stalled_request()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let waiting = tokio::spawn(
+            app.clone()
+                .oneshot(Request::post("/").body(Body::from("complete")).unwrap()),
+        );
+
+        assert_eq!(
+            first.await.unwrap().unwrap().status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            second.await.unwrap().unwrap().status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(waiting.await.unwrap().unwrap().status(), StatusCode::OK);
     }
 
     /// The default output prefix is applied and overridable, and the default

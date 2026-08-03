@@ -443,7 +443,9 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
     let attribute_indices = field_roles
         .iter()
         .enumerate()
-        .filter_map(|(index, role)| role.is_none().then_some(index))
+        .filter_map(|(index, role)| {
+            (role.is_none() || *role == Some(StructuralRole::SpanName)).then_some(index)
+        })
         .collect();
 
     CompiledSingleEventSpan::Layout(SingleEventSpanLayout {
@@ -1073,7 +1075,7 @@ mod tests {
         assert!(layout.timing.packed_end);
         assert_eq!(layout.name_index, Some(1));
         assert_eq!(layout.span_type, "test-producer");
-        assert_eq!(layout.attribute_indices, vec![2, 3]);
+        assert_eq!(layout.attribute_indices, vec![1, 2, 3]);
     }
 
     #[test]
