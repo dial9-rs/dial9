@@ -63,6 +63,7 @@ function mkState(over: {
       ...over.poi,
     },
     view: {
+      fieldCharts: [],
       inspectorTab: "task",
       expandedPollGroups: new Set<string>(),
       pollFlamegraphSection: "cpu",
@@ -157,6 +158,69 @@ describe("viewer URL state: focused span", () => {
     const { params, out } = roundTrip(mkState({ selection: { focusedSpanId: "0xabc" } }));
     expect(params.get("span-focus")).toBe("0xabc");
     expect(out.focusedSpanId).toBe("0xabc");
+  });
+});
+
+describe("viewer URL state: dynamic field charts", () => {
+  it("round-trips repeatable comma-separated definitions without a version", () => {
+    const charts: StoreState["view"]["fieldCharts"] = [
+      {
+        id: "fc-1",
+        eventName: "request.finished",
+        fieldName: "bytes_total",
+        kind: "counter",
+      },
+      {
+        id: "fc-2",
+        eventName: "queue.depth",
+        fieldName: "active",
+        kind: "updown-counter",
+      },
+    ];
+    const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
+
+    expect(params.getAll("field-chart")).toEqual([
+      "fc-1,request.finished,bytes_total,counter",
+      "fc-2,queue.depth,active,updown-counter",
+    ]);
+    expect(out.fieldCharts).toEqual(charts);
+  });
+
+  it("round-trips literal percent escapes in event and field names", () => {
+    const charts: StoreState["view"]["fieldCharts"] = [
+      {
+        id: "fc-percent",
+        eventName: "request 50%",
+        fieldName: "bytes %09",
+        kind: "gauge",
+      },
+    ];
+
+    const { params, out } = roundTrip(mkState({ view: { fieldCharts: charts } }));
+    expect(params.get("field-chart")).toBe(
+      "fc-percent,request 50%,bytes %09,gauge",
+    );
+    expect(out.fieldCharts).toEqual(charts);
+  });
+
+  it("drops malformed definitions and duplicate ids", () => {
+    const valid = "fc-a,Metric,value,gauge";
+    const params = new URLSearchParams();
+    params.append("field-chart", "legacy,shape");
+    params.append("field-chart", "bad-id,Metric,value,gauge");
+    params.append("field-chart", "fc-b,Metric,value,total,gauge");
+    params.append("field-chart", "fc-c,Metric,value,histogram");
+    params.append("field-chart", valid);
+    params.append("field-chart", valid);
+
+    expect(readViewerUrlState(`?${params.toString()}`).fieldCharts).toEqual([
+      {
+        id: "fc-a",
+        eventName: "Metric",
+        fieldName: "value",
+        kind: "gauge",
+      },
+    ]);
   });
 });
 
@@ -336,7 +400,8 @@ describe("viewer URL state: store hydration", () => {
     const decoded = readViewerUrlState(
       "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
         "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
-        "&stack-view=flame&inspector-width=444",
+        "&stack-view=flame&inspector-width=444" +
+        "&field-chart=fc-1%2CMetric%2Cvalue%2Ccounter",
     );
 
     hydrateViewerStore(store, decoded, {
@@ -356,6 +421,14 @@ describe("viewer URL state: store hydration", () => {
       sidebarWidth: 444,
     });
     expect(store.getState().view).toMatchObject({
+      fieldCharts: [
+        {
+          id: "fc-1",
+          eventName: "Metric",
+          fieldName: "value",
+          kind: "counter",
+        },
+      ],
       inspectorTab: "stack",
       regionMode: "cpu",
       regionInspectFocus: "tokio::poll",

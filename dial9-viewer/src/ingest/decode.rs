@@ -37,6 +37,7 @@ use spans::{interval_pairing, legacy};
 
 pub(crate) use types::{
     DecodeResult, DecodeStats, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan,
+    SchedulingDelayKind,
 };
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
@@ -174,7 +175,10 @@ pub(crate) fn decode_samples_with_stats(
             TraceEvent::WorkerPark(_)
             | TraceEvent::WorkerUnpark(_)
             | TraceEvent::PollStart(_)
-            | TraceEvent::PollEnd(_) => {}
+            | TraceEvent::PollEnd(_)
+            | TraceEvent::TaskSpawn(_)
+            | TraceEvent::TaskTerminate(_)
+            | TraceEvent::Wake(_) => {}
             TraceEvent::CpuSample(s) => {
                 let (worker_id, poll_duration_ns, spawn_location) = poll_timeline.attribute_sample(
                     s.tid,

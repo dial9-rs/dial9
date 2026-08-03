@@ -91,13 +91,17 @@ export interface ResolvedFocus {
 
 /**
  * Resolve a `focus_*` link onto the loaded trace, landing ON the span rather
- * than merely near it in time. Returns null when nothing matches, so the caller
- * can fall back to the plain time-window pan.
+ * than merely near it in time. Only Span Explorer links carry `spanName`;
+ * task/poll exemplars use an unnamed window that must pan without selecting an
+ * unrelated overlapping span. Returns null when the link does not identify a
+ * span or nothing matches, so the caller can fall back to the plain
+ * time-window pan.
  */
 export function resolveFocusLink(
   trace: ParsedTrace,
   link: FocusLink,
 ): ResolvedFocus | null {
+  if (link.spanName == null) return null;
   const lane = deriveLaneData(trace);
   const span = matchFocusSpan(focusCandidates(lane), link, trace.clockOffsetNs);
   if (span === null) return null;

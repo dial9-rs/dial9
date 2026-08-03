@@ -20,8 +20,11 @@ import {
   renderSinglePeriod,
   renderNotLoaded,
   renderDiff,
+  type RowLimits,
   type Tab,
+  type WorkerActivityState,
 } from "./render.js";
+import type { WorkerSortKey } from "./stats.js";
 import {
   readScope,
   scopeFromParams,
@@ -167,8 +170,62 @@ function setTab(tab: string): void {
   renderFromCache();
 }
 
+// Each rollup table owns its own row cap, changed via a selector in the table
+// header. Re-rendering after a change keeps the two independent.
+let longPollsLimit = 10;
+let schedulingDelaysLimit = 10;
+
+/** The per-table limits + change handlers handed to renderSinglePeriod. */
+function rowLimits(): RowLimits {
+  return {
+    longPolls: longPollsLimit,
+    onLongPollsChange: (n: number) => {
+      longPollsLimit = n;
+      renderFromCache();
+    },
+    schedulingDelays: schedulingDelaysLimit,
+    onSchedulingDelaysChange: (n: number) => {
+      schedulingDelaysLimit = n;
+      renderFromCache();
+    },
+  };
+}
+
+// "Worker activity" sort + expansion state. Host rows sort by pooled busyness
+// descending until the user picks another column.
+let workerSortKey: WorkerSortKey = "busyPct";
+let workerSortDesc = true;
+const expandedHosts = new Set<string>();
+
+/** The worker-activity state + handlers handed to renderSinglePeriod. */
+function workerActivity(): WorkerActivityState {
+  return {
+    sortKey: workerSortKey,
+    sortDesc: workerSortDesc,
+    expandedHosts,
+    onSort: (key: WorkerSortKey) => {
+      // Re-clicking the active column flips direction; a new column starts
+      // descending (largest first is the useful default for every metric here).
+      if (workerSortKey === key) {
+        workerSortDesc = !workerSortDesc;
+      } else {
+        workerSortKey = key;
+        workerSortDesc = true;
+      }
+      renderFromCache();
+    },
+    onToggleHost: (host: string) => {
+      if (expandedHosts.has(host)) expandedHosts.delete(host);
+      else expandedHosts.add(host);
+      renderFromCache();
+    },
+  };
+}
+
 function renderFromCache(): void {
   const threshNs = thresholdNs(els.slider.value);
+  const limits = rowLimits();
+  const workers = workerActivity();
   const stats = periods.map((p) => computeStats(p.data, threshNs));
   if (stats.every((s) => !s)) return;
 
@@ -194,6 +251,8 @@ function renderFromCache(): void {
       threshNs,
       scope.bucket,
       openExemplar,
+      limits,
+      workers,
     );
     return;
   }
@@ -210,6 +269,8 @@ function renderFromCache(): void {
       threshNs,
       scope.bucket,
       openExemplar,
+      limits,
+      workers,
     );
     return;
   }

@@ -35,4 +35,27 @@ declare module "*/tokio_stats_api.js" {
    * test_tokio_stats_api.js, so consumers must not re-derive them.
    */
   export function latencyHeat(ns: number): string;
+
+  /**
+   * Severity color for a worker busyness percentage, in dial9's palette.
+   * Thresholds are pinned by test_tokio_stats_api.js, so consumers must not
+   * re-derive them.
+   */
+  export function busynessHeat(busyPct: number): string;
+
+  /**
+   * A host's POOLED busyness percentage across its workers
+   * (Σ busy_ns / Σ span_ns * 100), which weights each worker by its observed
+   * time. Averaging per-worker percentages instead would let a sparsely-sampled
+   * worker read as spuriously busy, so consumers must not re-derive this.
+   */
+  export function hostBusyPct(workers: readonly { busy_ns: number; span_ns: number }[]): number;
+
+  /**
+   * A host's `active` (observed) vs `total` (configured) worker counts. Tokio
+   * numbers workers 0..N-1, so `total` is derived as max id + 1.
+   */
+  export function hostWorkerCounts(
+    workers: readonly { worker_id: number }[],
+  ): { active: number; total: number };
 }

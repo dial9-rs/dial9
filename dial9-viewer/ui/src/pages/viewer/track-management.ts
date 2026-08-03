@@ -1,25 +1,32 @@
 // Per-track collapse + drag-reorder for the unified track column. This module
 // owns:
 //
-//   - which tracks are user-manageable (collapse + reorder): the four foldable
-//     analysis surfaces (cpu/queue/spans/events). The two structural tracks
-//     (timeline/lanes) and the selection-only task-detail track are fixed.
+//   - which tracks are user-manageable (collapse + reorder): the four built-in
+//     analysis surfaces plus dynamic field charts. The two structural tracks
+//     and the selection-only task-detail track are fixed.
 //   - the ordering resolution (uiPrefs.trackOrder -> the ordered TrackSpec
 //     list), robust to unknown/missing ids so a stored order predating a new
 //     track still resolves.
 //   - the reorder swap (drop = swap position).
 //   - the collapse predicate + label-only height.
-//   - the store actions (toggle collapse / reorder) the shell's caret + grip
-//     handlers dispatch.
+//   - the store actions (toggle collapse / reorder / close) the shell's track
+//     controls dispatch.
 //   - localStorage persistence (hydrate on boot + persist on change):
-//     trackOrder/collapsed survive reload.
+//     built-in order/collapse survives reload; dynamic ids remain URL-only.
 //
 // Track pinning is out of scope. This operates on the track list/order +
 // per-track height only; it does not touch the per-track render delegation.
 
 import type { ViewerStore } from "../../store/store.js";
-import { TRACKS } from "../../lib/canvas/track-layout.js";
+import {
+  TRACKS,
+  isFieldChartTrackId,
+} from "../../lib/canvas/track-layout.js";
 import type { TrackId, TrackSpec } from "../../lib/canvas/track-layout.js";
+import {
+  closeFieldChart,
+  fieldChartTrackSpecs,
+} from "./field-chart-model.js";
 
 /** Collapsed (label-only) track height in CSS px. */
 export const COLLAPSED_TRACK_H = 36;
@@ -40,8 +47,8 @@ export const MANAGEABLE_TRACK_IDS: readonly TrackId[] = [
 const MANAGEABLE = new Set<string>(MANAGEABLE_TRACK_IDS);
 
 /** True when a track can be collapsed + reordered (a foldable analysis track). */
-export function isManageableTrack(id: TrackId): boolean {
-  return MANAGEABLE.has(id);
+export function isManageableTrack(id: string): id is TrackId {
+  return MANAGEABLE.has(id) || isFieldChartTrackId(id);
 }
 
 /**
@@ -70,8 +77,13 @@ export function isCollapsed(
  */
 export function orderedTracks(
   trackOrder: readonly string[],
+  dynamicTracks: readonly TrackSpec[] = [],
 ): readonly TrackSpec[] {
-  const catalogueManageable = TRACKS.filter((t) => isManageableTrack(t.id));
+  const catalogue = [
+    ...TRACKS,
+    ...dynamicTracks.filter((track) => isFieldChartTrackId(track.id)),
+  ];
+  const catalogueManageable = catalogue.filter((t) => isManageableTrack(t.id));
   const byId = new Map(catalogueManageable.map((t) => [t.id, t] as const));
   const seen = new Set<string>();
   const managed: TrackSpec[] = [];
@@ -87,14 +99,17 @@ export function orderedTracks(
   }
   // Re-lay the catalogue, drawing manageable slots from `managed` in order.
   let mi = 0;
-  return TRACKS.map((t) =>
+  return catalogue.map((t) =>
     isManageableTrack(t.id) ? (managed[mi++] as TrackSpec) : t,
   );
 }
 
 /** The manageable track ids in their current resolved order (persist target). */
-function manageableOrder(trackOrder: readonly string[]): TrackId[] {
-  return orderedTracks(trackOrder)
+function manageableOrder(
+  trackOrder: readonly string[],
+  dynamicTracks: readonly TrackSpec[] = [],
+): TrackId[] {
+  return orderedTracks(trackOrder, dynamicTracks)
     .filter((t) => isManageableTrack(t.id))
     .map((t) => t.id);
 }
@@ -108,8 +123,9 @@ export function computeReorder(
   trackOrder: readonly string[],
   dragged: TrackId,
   target: TrackId,
+  dynamicTracks: readonly TrackSpec[] = [],
 ): TrackId[] {
-  const order = manageableOrder(trackOrder);
+  const order = manageableOrder(trackOrder, dynamicTracks);
   if (
     dragged === target ||
     !isManageableTrack(dragged) ||
@@ -127,12 +143,14 @@ export function computeReorder(
 
 // ── Store actions ────────────────────────────────────────────────────────
 
-/** The collapse/reorder dispatchers the shell's caret + grip handlers call. */
+/** The management dispatchers used by the shell's per-track controls. */
 export interface TrackManageActions {
   /** Toggle a track's collapsed state (caret click / Enter / Space). */
   toggleCollapse(id: TrackId): void;
   /** Reorder: drop `dragged` onto `target`, swapping their positions. */
   reorder(dragged: TrackId, target: TrackId): void;
+  /** Close a URL-defined dynamic chart and clean every reference to its id. */
+  close(id: TrackId): void;
 }
 
 /** Bind the track-management actions to a store (dispatch uiPrefs updates). */
@@ -146,13 +164,18 @@ export function createTrackManageActions(store: ViewerStore): TrackManageActions
       });
     },
     reorder(dragged: TrackId, target: TrackId): void {
-      const cur = store.getState().uiPrefs.trackOrder;
-      const next = computeReorder(cur, dragged, target);
+      const state = store.getState();
+      const cur = state.uiPrefs.trackOrder;
+      const dynamicTracks = fieldChartTrackSpecs(state.view.fieldCharts);
+      const next = computeReorder(cur, dragged, target, dynamicTracks);
       // Only write on an actual change (no store thrash / needless render).
       // Compare against the RESOLVED current order, not the raw stored value:
       // a same-track drop with an empty stored order must not normalize-write.
-      if (sameOrder(manageableOrder(cur), next)) return;
+      if (sameOrder(manageableOrder(cur, dynamicTracks), next)) return;
       store.update("uiPrefs", { trackOrder: next });
+    },
+    close(id: TrackId): void {
+      closeFieldChart(store, id);
     },
   };
 }
@@ -241,9 +264,16 @@ export function loadTrackPrefs(): TrackPrefs | null {
     if (parsed === null || typeof parsed !== "object") return null;
     const obj = parsed as { trackOrder?: unknown; collapsed?: unknown };
     const trackOrder = Array.isArray(obj.trackOrder)
-      ? obj.trackOrder.filter((v): v is string => typeof v === "string")
+      ? obj.trackOrder.filter(
+          (v): v is string =>
+            typeof v === "string" && !isFieldChartTrackId(v),
+        )
       : [];
-    const collapsed = parseBoolMap(obj.collapsed);
+    const collapsed = Object.fromEntries(
+      Object.entries(parseBoolMap(obj.collapsed)).filter(
+        ([id]) => !isFieldChartTrackId(id),
+      ),
+    );
     const cr = (obj as { collapsedRuntimes?: unknown }).collapsedRuntimes;
     const collapsedRuntimes = cr !== undefined ? parseBoolMap(cr) : undefined;
     const lh = (obj as { lanesHeight?: unknown }).lanesHeight;
@@ -262,11 +292,17 @@ export function loadTrackPrefs(): TrackPrefs | null {
 /** Persist track prefs (order + collapse map + runtime fold map + lanes box
  *  height) to localStorage. */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
+  const trackOrder = prefs.trackOrder.filter((id) => !isFieldChartTrackId(id));
+  const collapsed = Object.fromEntries(
+    Object.entries(prefs.collapsed).filter(
+      ([id]) => !isFieldChartTrackId(id),
+    ),
+  );
   storageSet(
     TRACK_PREFS_STORAGE_KEY,
     JSON.stringify({
-      trackOrder: prefs.trackOrder,
-      collapsed: prefs.collapsed,
+      trackOrder,
+      collapsed,
       ...(prefs.collapsedRuntimes !== undefined
         ? { collapsedRuntimes: prefs.collapsedRuntimes }
         : {}),
