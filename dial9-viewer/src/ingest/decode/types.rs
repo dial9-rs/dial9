@@ -5,6 +5,34 @@
 
 use std::collections::HashMap;
 
+use serde::Serialize;
+
+/// Evidence used to establish when a task became runnable, for scheduling-delay
+/// measurement (runnable → first poll). Serialized to the client as the poll's
+/// delay provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(u8)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SchedulingDelayKind {
+    /// Task spawn to its first poll. This remains measurable without wake events.
+    Spawn = 0,
+    /// A wake while the task was idle to its next poll.
+    Wake = 1,
+    /// A wake arrived during a poll, so readiness starts at that poll's end.
+    WakeDuringPoll = 2,
+}
+
+impl SchedulingDelayKind {
+    pub(crate) fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Spawn),
+            1 => Some(Self::Wake),
+            2 => Some(Self::WakeDuringPoll),
+            _ => None,
+        }
+    }
+}
+
 /// A resolved CPU sample ready for Parquet output.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSample {
@@ -52,6 +80,20 @@ pub(crate) struct ResolvedPoll {
     pub(crate) host: String,
     pub(crate) service: String,
     pub(crate) date: String,
+    /// Wall-clock time when the task became runnable, when that transition can
+    /// be proven from a spawn or wake event in this trace segment.
+    pub(crate) ready_at_ns: Option<u64>,
+    /// Time from becoming runnable to this poll start. `None` means the segment
+    /// contains no safe readiness evidence; an inter-poll gap is not a valid
+    /// substitute because it can include legitimate I/O or timer waiting.
+    pub(crate) scheduling_delay_ns: Option<u64>,
+    /// Provenance of the readiness transition backing `scheduling_delay_ns`.
+    pub(crate) scheduling_delay_kind: Option<SchedulingDelayKind>,
+    /// Task that issued the wake, when the readiness evidence came from a wake.
+    pub(crate) waker_task_id: Option<u64>,
+    /// Whether the task used dial9's traced waker. `None` means the source trace
+    /// predates the `instrumented` field.
+    pub(crate) task_instrumented: Option<bool>,
 }
 
 /// A decoded tracing span close summary from the source file, ready for the

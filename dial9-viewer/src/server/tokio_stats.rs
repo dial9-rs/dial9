@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::ingest::aggregate::{self, Scope};
+use crate::ingest::decode::SchedulingDelayKind;
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
@@ -36,6 +37,11 @@ const LONG_POLL_TOP: usize = 100;
 /// truncate to 100) — it amortizes the sort while keeping memory bounded
 /// regardless of scope size.
 const LONG_POLL_SOFT_CAP: usize = LONG_POLL_TOP * 4;
+
+/// Number of observed runnable-to-poll delays shipped to the client.
+const SCHEDULING_DELAY_TOP: usize = 100;
+const SCHEDULING_DELAY_SOFT_CAP: usize = SCHEDULING_DELAY_TOP * 4;
+const HIGH_SCHEDULING_DELAY_NS: i64 = 1_000_000;
 
 #[derive(Deserialize)]
 pub struct TokioStatsParams {
@@ -70,6 +76,10 @@ pub struct TokioStatsResponse {
     /// coordinates to deep-link its trace segment. Ported from IRIS's
     /// `longPolls.top` (rust-ingest `analyze.rs`).
     pub top_long_polls: Vec<LongPoll>,
+    /// Longest runnable-to-poll latencies backed by spawn/wake evidence.
+    pub top_scheduling_delays: Vec<SchedulingDelay>,
+    /// Measurement coverage, including polls that cannot be safely inferred.
+    pub scheduling_delay_coverage: SchedulingDelayCoverage,
     /// Per-worker busyness + poll distribution, ranked by busyness descending.
     /// Ported from IRIS's `workers` rollup, extended with a busyness metric
     /// (sum of poll durations / worker's own observed time span). Workers are
@@ -118,6 +128,57 @@ pub struct LongPoll {
     pub host: String,
     /// Source trace file key for constructing the viewer deep link.
     pub source_key: String,
+}
+
+/// One measured scheduling delay for the top-N "Scheduling delay" list: the gap
+/// between a task becoming runnable (`ready_at_ns`) and the worker starting to
+/// poll it (`poll_start_ns`). Backed by spawn- or wake-inferred evidence; each
+/// row carries the coordinates to deep-link its trace segment.
+#[derive(Serialize, Clone)]
+pub struct SchedulingDelay {
+    pub delay_ns: i64,
+    pub ready_at_ns: i64,
+    pub poll_start_ns: i64,
+    pub poll_end_ns: i64,
+    pub worker_id: u32,
+    pub task_id: u64,
+    /// Where the future was spawned; `None` when the trace didn't record it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_loc: Option<String>,
+    /// How the ready time was established: spawn, wake, or wake-during-poll.
+    pub kind: SchedulingDelayKind,
+    /// The task that woke this one, when the evidence is a wake.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waker_task_id: Option<u64>,
+    pub host: String,
+    /// Source trace file key for constructing the viewer deep link.
+    pub source_key: String,
+}
+
+/// Measurement coverage for the scheduling-delay rollup: how many polls carried
+/// usable readiness evidence versus not, and why the unmeasured ones could not
+/// be inferred. Lets the UI qualify the top-N with an honest denominator rather
+/// than implying every poll was measured.
+#[derive(Serialize, Clone, Default)]
+pub struct SchedulingDelayCoverage {
+    /// Polls with a measured scheduling delay (readiness evidence present).
+    pub observed_polls: u64,
+    /// Polls with no usable readiness evidence.
+    pub unmeasured_polls: u64,
+    /// Measured polls whose delay cleared [`HIGH_SCHEDULING_DELAY_NS`].
+    pub over_1ms_polls: u64,
+    /// Measured polls whose readiness came from a task spawn.
+    pub spawn_inferred_polls: u64,
+    /// Measured polls whose readiness came from an idle wake.
+    pub wake_observed_polls: u64,
+    /// Measured polls whose readiness came from a wake during a prior poll.
+    pub wake_during_poll_polls: u64,
+    /// Unmeasured polls on tasks known NOT to use dial9's traced waker.
+    pub uninstrumented_unmeasured_polls: u64,
+    /// Unmeasured polls where instrumentation state is unknown (old traces).
+    pub instrumentation_unknown_unmeasured_polls: u64,
+    /// Unmeasured polls on instrumented tasks that simply lacked evidence.
+    pub missing_readiness_unmeasured_polls: u64,
 }
 
 /// Per-worker poll distribution + busyness, for the "Worker activity" card.
@@ -411,6 +472,8 @@ fn snapshot_event(
         bucket: ctx.source_bucket.clone(),
         by_spawn_loc,
         top_long_polls: acc.top_long_polls(),
+        top_scheduling_delays: acc.top_scheduling_delays(),
+        scheduling_delay_coverage: acc.scheduling_delay_coverage.clone(),
         worker_activity: acc.worker_activity(),
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
@@ -454,6 +517,12 @@ struct TokioStatsAccum {
     /// when the polls part-file includes the `worker_id` column (older files are
     /// silently skipped, same as long polls).
     by_worker: HashMap<(String, u32), WorkerAccum>,
+    /// Longest scheduling delays seen so far, kept bounded by
+    /// [`TokioStatsAccum::push_scheduling_delay`]. Unsorted between compactions;
+    /// [`TokioStatsAccum::top_scheduling_delays`] produces the ranked list.
+    scheduling_delays: Vec<SchedulingDelay>,
+    /// Running coverage tallies for the scheduling-delay rollup.
+    scheduling_delay_coverage: SchedulingDelayCoverage,
 }
 
 impl TokioStatsAccum {
@@ -476,6 +545,27 @@ impl TokioStatsAccum {
         let mut top = self.long_polls.clone();
         top.sort_unstable_by_key(|p| std::cmp::Reverse(p.duration_ns));
         top.truncate(LONG_POLL_TOP);
+        top
+    }
+
+    /// Record a candidate scheduling delay, compacting to the top
+    /// [`SCHEDULING_DELAY_TOP`] by delay whenever the buffer exceeds the soft
+    /// cap. Same grow-then-truncate strategy as [`Self::push_long_poll`].
+    fn push_scheduling_delay(&mut self, delay: SchedulingDelay) {
+        self.scheduling_delays.push(delay);
+        if self.scheduling_delays.len() > SCHEDULING_DELAY_SOFT_CAP {
+            self.scheduling_delays
+                .sort_unstable_by_key(|d| std::cmp::Reverse(d.delay_ns));
+            self.scheduling_delays.truncate(SCHEDULING_DELAY_TOP);
+        }
+    }
+
+    /// The final ranked top-N scheduling delays (descending by delay). Clones so
+    /// repeated SSE snapshots don't consume the still-growing accumulator.
+    fn top_scheduling_delays(&self) -> Vec<SchedulingDelay> {
+        let mut top = self.scheduling_delays.clone();
+        top.sort_unstable_by_key(|d| std::cmp::Reverse(d.delay_ns));
+        top.truncate(SCHEDULING_DELAY_TOP);
         top
     }
 
@@ -628,6 +718,24 @@ fn read_polls_part(
         let task_arr = batch
             .column_by_name("task_id")
             .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt64Array>());
+        // Scheduling-delay evidence columns. All nullable and absent from
+        // part-files that predate the rollup; rows without a measured delay fall
+        // into the coverage tallies rather than the top-N.
+        let ready_at_arr = batch
+            .column_by_name("ready_at_ns")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+        let scheduling_delay_arr = batch
+            .column_by_name("scheduling_delay_ns")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+        let scheduling_kind_arr = batch
+            .column_by_name("scheduling_delay_kind")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt8Array>());
+        let waker_task_arr = batch
+            .column_by_name("waker_task_id")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt64Array>());
+        let task_instrumented_arr = batch
+            .column_by_name("task_instrumented")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::BooleanArray>());
 
         let Some(duration_arr) = duration_arr else {
             continue;
@@ -672,6 +780,69 @@ fn read_polls_part(
                     let w = seg_windows.entry(key).or_insert((start, end));
                     w.0 = w.0.min(start);
                     w.1 = w.1.max(end);
+                }
+            }
+
+            // Scheduling delay (IRIS has no equivalent; dial9-specific). A poll
+            // is "measured" when the trace carried readiness evidence; otherwise
+            // it lands in the coverage tallies, bucketed by why we couldn't infer
+            // it. Column-absent part-files (predating the rollup) count every row
+            // as instrumentation-unknown, matching the null-instrumented case.
+            let measured = scheduling_delay_arr
+                .zip(ready_at_arr)
+                .filter(|(delay, ready)| !delay.is_null(i) && !ready.is_null(i))
+                .map(|(delay, ready)| (delay.value(i), ready.value(i)));
+            if let Some((delay_ns, ready_at_ns)) = measured {
+                let cov = &mut acc.scheduling_delay_coverage;
+                cov.observed_polls += 1;
+                if delay_ns >= HIGH_SCHEDULING_DELAY_NS {
+                    cov.over_1ms_polls += 1;
+                }
+                let kind = scheduling_kind_arr
+                    .filter(|a| !a.is_null(i))
+                    .and_then(|a| SchedulingDelayKind::from_u8(a.value(i)));
+                match kind {
+                    Some(SchedulingDelayKind::Spawn) => cov.spawn_inferred_polls += 1,
+                    Some(SchedulingDelayKind::Wake) => cov.wake_observed_polls += 1,
+                    Some(SchedulingDelayKind::WakeDuringPoll) => cov.wake_during_poll_polls += 1,
+                    None => {}
+                }
+                // Only rows with a worker + task can be deep-linked, same guard
+                // as the long-polls list; measured rows lacking them still count
+                // toward coverage above.
+                if let (Some(kind), Some(workers), Some(tasks)) = (kind, worker_arr, task_arr) {
+                    let host = host_arr
+                        .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                        .unwrap_or("");
+                    let spawn_loc = spawn_loc_arr
+                        .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                        .map(str::to_string);
+                    let waker_task_id =
+                        waker_task_arr.filter(|a| !a.is_null(i)).map(|a| a.value(i));
+                    acc.push_scheduling_delay(SchedulingDelay {
+                        delay_ns,
+                        ready_at_ns,
+                        poll_start_ns: start_arr.map_or(0, |a| a.value(i)),
+                        poll_end_ns: end_arr.map_or(0, |a| a.value(i)),
+                        worker_id: workers.value(i),
+                        task_id: tasks.value(i),
+                        spawn_loc,
+                        kind,
+                        waker_task_id,
+                        host: host.to_string(),
+                        source_key: source_key.to_string(),
+                    });
+                }
+            } else {
+                let cov = &mut acc.scheduling_delay_coverage;
+                cov.unmeasured_polls += 1;
+                match task_instrumented_arr
+                    .filter(|a| !a.is_null(i))
+                    .map(|a| a.value(i))
+                {
+                    Some(true) => cov.missing_readiness_unmeasured_polls += 1,
+                    Some(false) => cov.uninstrumented_unmeasured_polls += 1,
+                    None => cov.instrumentation_unknown_unmeasured_polls += 1,
                 }
             }
 
@@ -901,8 +1072,50 @@ mod tests {
             "sum of per-worker polls must equal total_polls"
         );
 
+        // Scheduling delay: every poll is accounted for in coverage (measured or
+        // not), the per-kind and per-reason tallies partition their totals, and
+        // the top-N is bounded, ranked descending, carries deep-link coordinates,
+        // and never exceeds the observed count.
+        let cov = &acc.scheduling_delay_coverage;
+        assert_eq!(
+            cov.observed_polls + cov.unmeasured_polls,
+            acc.total_polls,
+            "every poll must be counted as measured or unmeasured"
+        );
+        assert_eq!(
+            cov.spawn_inferred_polls + cov.wake_observed_polls + cov.wake_during_poll_polls,
+            cov.observed_polls,
+            "per-kind tallies must partition the observed polls"
+        );
+        assert_eq!(
+            cov.uninstrumented_unmeasured_polls
+                + cov.instrumentation_unknown_unmeasured_polls
+                + cov.missing_readiness_unmeasured_polls,
+            cov.unmeasured_polls,
+            "per-reason tallies must partition the unmeasured polls"
+        );
+        assert!(
+            cov.over_1ms_polls <= cov.observed_polls,
+            "over-1ms polls are a subset of the measured polls"
+        );
+        let delays = acc.top_scheduling_delays();
+        assert!(delays.len() <= SCHEDULING_DELAY_TOP);
+        assert!(delays.len() as u64 <= cov.observed_polls);
+        assert!(
+            delays.windows(2).all(|w| w[0].delay_ns >= w[1].delay_ns),
+            "top scheduling delays must be ranked descending by delay"
+        );
+        assert!(
+            delays.iter().all(|d| !d.source_key.is_empty()),
+            "each scheduling delay must carry a source key for deep-linking"
+        );
+        assert!(
+            delays.iter().all(|d| d.delay_ns >= 0),
+            "scheduling delay cannot be negative"
+        );
+
         eprintln!(
-            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns), {} workers (busiest {:.1}%)",
+            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns), {} workers (busiest {:.1}%), {} measured delays / {} unmeasured",
             acc.total_polls,
             notable,
             with_exemplar,
@@ -910,6 +1123,41 @@ mod tests {
             top[0].duration_ns,
             workers.len(),
             workers[0].busy_pct,
+            cov.observed_polls,
+            cov.unmeasured_polls,
+        );
+    }
+
+    #[test]
+    fn scheduling_delay_top_n_is_bounded_and_ranked() {
+        let mut acc = TokioStatsAccum::default();
+        // Push more than the soft cap so a compaction runs, with descending
+        // delays so we can assert the top row is the largest.
+        for n in 0..(SCHEDULING_DELAY_SOFT_CAP + 50) {
+            acc.push_scheduling_delay(SchedulingDelay {
+                delay_ns: n as i64,
+                ready_at_ns: 0,
+                poll_start_ns: n as i64,
+                poll_end_ns: n as i64 + 1,
+                worker_id: 0,
+                task_id: n as u64,
+                spawn_loc: None,
+                kind: SchedulingDelayKind::Wake,
+                waker_task_id: Some(1),
+                host: "h".to_string(),
+                source_key: "k".to_string(),
+            });
+        }
+        let top = acc.top_scheduling_delays();
+        assert_eq!(top.len(), SCHEDULING_DELAY_TOP);
+        assert!(
+            top.windows(2).all(|w| w[0].delay_ns >= w[1].delay_ns),
+            "must be ranked descending by delay"
+        );
+        assert_eq!(
+            top[0].delay_ns,
+            (SCHEDULING_DELAY_SOFT_CAP + 50 - 1) as i64,
+            "the largest delay must survive compaction"
         );
     }
 }

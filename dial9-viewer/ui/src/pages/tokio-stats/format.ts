@@ -49,3 +49,21 @@ export function thresholdNs(sliderValue: string): number {
   return Math.pow(10, parseFloat(sliderValue)) * 1e6;
 }
 
+/**
+ * Human-readable provenance for a runnable-to-poll scheduling measurement.
+ * `undefined` (an unknown kind, e.g. from a future wire value) is presented as
+ * "unknown evidence" rather than silently as a measured wake.
+ */
+export function schedulingDelayEvidenceLabel(kind: string | undefined): string {
+  switch (kind) {
+    case "spawn":
+      return "spawn → first poll";
+    case "wake":
+      return "wake → poll";
+    case "wake_during_poll":
+      return "poll end → next poll";
+    default:
+      return "unknown evidence";
+  }
+}
+
