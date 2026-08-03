@@ -372,7 +372,8 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
     // wire decode order. Used to break timestamp ties deterministically.
     let mut span_decode_sequence: u64 = 0;
 
-    // Span events: SpanEnter/Exit with span_id + worker_id and SpanCloseEvent
+    // Span events: SpanEnter/Exit with span_id plus task_id (current) or
+    // worker_id (legacy), and SpanCloseEvent.
     // with only span_id. These are reconstructed into ResolvedSpan rows using
     // local context (`resolve_legacy_spans`).
     let mut legacy_enters: Vec<(String, LegacySpanEnterEvent)> = Vec::new(); // (schema_name, event)

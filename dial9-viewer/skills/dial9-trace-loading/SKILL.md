@@ -19,7 +19,7 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   recordMinTs: number|null,      // earliest sliceable timestamped record (ns), null if none
   recordMaxTs: number|null,      // latest sliceable timestamped record (ns), null if none
   cpuSamples: CpuSample[],      // Periodic stack traces from perf/eBPF
-  customEvents: CustomEvent[],   // SpanEnter/SpanExit events from tracing layer (requires dial9-tokio-telemetry tracing-layer feature)
+  customEvents: CustomEvent[],   // SpanEnter/SpanExit events from Dial9TracingLayer (dial9 or dial9-utils tracing-layer feature)
   spawnLocations: Map<string, string>,    // spawn location ID → source location
   taskSpawnLocs: Map<number, string|null>,// task ID → spawn location (null if unknown)
   taskSpawnTimes: Map<number, number>,    // task ID → spawn timestamp (ns)

@@ -3,15 +3,20 @@
 [![Crates.io](https://img.shields.io/crates/v/dial9-utils.svg)](https://crates.io/crates/dial9-utils)
 ![License](https://img.shields.io/crates/l/dial9-utils.svg)
 
-Opt-in framework integrations for [dial9](https://crates.io/crates/dial9).
+Opt-in integrations for [dial9](https://crates.io/crates/dial9).
+
+The `tracing-layer` feature provides `Dial9TracingLayer`, a
+`tracing_subscriber` layer that records span enter/exit events. Span events
+carry the current Tokio task ID when one is available, without depending on
+the dial9 Tokio runtime integration.
 
 `dial9_axum` provides traced replacements for `axum::serve`, spawning connection
 and HTTP/2 tasks through a dial9 executor so per-connection work lands in the
 trace.
 
-Unlike dial9's other sibling crates this one is not re-exported by the facade.
-Add it alongside `dial9` and pick the feature for your Axum version (neither is
-on by default):
+The tracing layer is also re-exported as `dial9::tracing_layer`. Add this crate
+directly when using an integration such as Axum that is not re-exported by the
+facade:
 
 ```toml
 dial9 = { version = "0.5", features = ["tokio"] }

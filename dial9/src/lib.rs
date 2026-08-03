@@ -147,7 +147,7 @@ pub mod socket {
 
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
-pub use dial9_tokio_telemetry::tracing_layer;
+pub use dial9_utils::tracing_layer;
 
 // Metrique unit-of-work entry sink.
 #[cfg(feature = "metrique-sink")]

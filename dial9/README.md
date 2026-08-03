@@ -480,10 +480,10 @@ Without liveset tracking, the profiler adds negligible overhead. With liveset tr
 
 ### Tracing span events (opt-in)
 
-**Enable the `tracing-layer` feature:**
+**Enable the standalone `tracing-layer` feature, plus `tokio` when using dial9's Tokio runtime integration:**
 ```toml
 [dependencies]
-dial9 = { version = "0.5", features = ["tracing-layer"] }
+dial9 = { version = "0.5", features = ["tokio", "tracing-layer"] }
 ```
 
 **Use tracing_subscriber to connect the `Dial9TracingLayer`:**
