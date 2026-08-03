@@ -71,7 +71,7 @@ function firstOwnedSpan(
   }
 
   const columnar = lane.columnarSpans;
-  if (columnar !== null) {
+  if (columnar !== undefined) {
     for (let row = 0; row < columnar.length; row++) {
       const taskId = columnar.taskIdAt(row);
       if (taskId != null) {
