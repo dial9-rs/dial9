@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.0-rc1"
+version = "0.5.0-rc1.1"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-core"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "assert2",
  "bon",
@@ -1926,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-macro"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "dial9",
  "insta",
@@ -1956,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "blazesym",
  "bon",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "dial9-trace-format",
  "dial9-trace-format-derive",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "insta",
  "prettyplease",
@@ -2048,7 +2048,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-utils"
-version = "0.5.0-rc0"
+version = "0.5.0-rc0.1"
 dependencies = [
  "axum 0.7.9",
  "axum 0.8.9",
@@ -2068,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.5.0-rc1"
+version = "0.5.0-rc1.1"
 dependencies = [
  "anyhow",
  "arrow",
