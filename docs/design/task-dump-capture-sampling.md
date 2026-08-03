@@ -351,10 +351,62 @@ re-poll can cause an immediate wake; that synthetic follow-up poll must not
 consume a new sampling opportunity or start a capture loop.
 
 One `trace_with` call can produce more than one callchain. All callchains from
-the same capture share task ID, timestamp, and inclusion probability. When
-building a time-weighted flamegraph, divide that capture's weight equally
-across its callchains so one selection contributes one interval of time rather
-than multiplying time by the number of chains.
+the same capture share task ID, timestamp, and inclusion probability. Treat
+them as one capture group keyed by `(task_id, timestamp_ns)`, not as independent
+samples. The timestamp is read once and reused while emitting the group.
+
+### Multi-callchain selection
+
+Multiple callchains usually mean the task is waiting on several leaves in a
+`select!`, `timeout`, graceful-shutdown wrapper, or nested future tree. The idle
+interval belongs to the task once; it does not belong independently to every
+leaf.
+
+The checked-in demo trace validates that this is the normal case:
+
+| Shape | Captures | Share of all captures |
+|---|---:|---:|
+| More than one callchain | 12,233 | 99.935% |
+| I/O plus graceful-shutdown notification | 11,053 | 90.295% |
+| I/O, shutdown, request operation, and timer | 624 | 5.098% |
+| I/O, shutdown, and application semaphore | 524 | 4.281% |
+
+The largest group is an active connection wait paired with a persistent
+graceful-shutdown `Notify`. Equal weighting would incorrectly attribute about
+half of normal connection idle time to shutdown handling. Do not divide a
+capture's weight equally across its callchains.
+
+Choose one representative stack for the time-weighted flamegraph:
+
+1. Normalize and deduplicate the callchains, then find their longest common
+   root-side suffix.
+2. Mark a branch as control flow only from its surrounding stack structure:
+   - a deadline `Sleep` is secondary when it is under a timeout combinator and
+     a sibling represents the operation guarded by that same timeout;
+   - a cancellation or graceful-shutdown wait is secondary when its stack
+     traverses the cancellation/shutdown wrapper and another work branch
+     exists.
+3. Never demote a branch solely because its leaf is `Sleep` or `Notify`; either
+   can be the task's primary work.
+4. If one non-control branch remains, use it.
+5. Otherwise, prefer a unique branch whose pre-common-suffix portion contains
+   more application-owned frames than its siblings. Application ownership
+   comes from symbol/source provenance, excluding the Rust sysroot, dependency
+   registry, Tokio, and dial9 capture plumbing.
+6. If no unique winner remains, represent the set with one synthetic
+   `[awaiting any of N]` stack rooted at the common suffix. Include stable,
+   sorted leaf labels in the synthetic frame and retain every raw callchain for
+   the inspector.
+
+This deliberately handles `timeout(operation, deadline)` differently from a
+genuine `select!` over peer operations. The former normally selects the
+operation stack; the latter remains an explicit ambiguous wait set unless one
+branch is provably control flow or uniquely application-specific.
+
+Selection must be deterministic and independent of callback order because
+Tokio may change or randomize branch poll order. Whether a capture resolves to
+a primary stack or a synthetic wait set, it contributes its idle weight exactly
+once.
 
 ## Trace Contract
 
@@ -415,7 +467,8 @@ For eligible pending transition `j`:
 - `I_j` is 1 when selected and 0 otherwise;
 - `p_j` is the recorded inclusion probability;
 - `d_j` is the task's idle duration represented by that capture;
-- `stack_j` is the captured async stack.
+- `stack_j` is the representative primary or synthetic async stack selected
+  from that capture's callchain group.
 
 The Horvitz-Thompson contribution is:
 
@@ -492,12 +545,13 @@ but do not offer the mixed view.
 
 ### Task-dump weights
 
-For each selected task dump:
+For each selected capture group:
 
 1. identify the idle interval beginning at its capture timestamp;
 2. end the interval at the next poll start for that task;
 3. intersect the interval with the selected time window;
-4. divide the overlap duration by `inclusion_probability`.
+4. select its representative stack using the multi-callchain rules above; and
+5. divide the overlap duration by `inclusion_probability`.
 
 When wake data can reliably distinguish the external wake from capture-induced
 wakes, split the interval into:
@@ -508,10 +562,11 @@ wakes, split the interval into:
 Until then, use one `[idle-at-await]` category for poll-end to next-poll and
 state that it includes scheduler delay.
 
-For a capture with `m` callchains:
+The representative primary or synthetic stack receives the full
+inverse-probability weight once:
 
 ```text
-weight per callchain = idle overlap / (inclusion_probability * m)
+capture weight = idle overlap / inclusion_probability
 ```
 
 ### Tree construction
@@ -581,10 +636,12 @@ sampling noise. Task scope is the correct first interface.
 5. Add `TaskDumpEvent.inclusion_probability` and decode it as optional in JS.
 6. Have `TokioRuntimesSource` emit task-dump configuration and per-worker
    sampling-active segment metadata.
-7. Add task-scoped mixed-flamegraph sample construction using CPU frequency
+7. Group sibling callchains and implement deterministic representative-stack
+   selection with an explicit ambiguous-wait fallback.
+8. Add task-scoped mixed-flamegraph sample construction using CPU frequency
    metadata and inverse-probability task-dump weights.
-8. Add the runnable mixed-profile test app and its in-situ integration test.
-9. Keep old traces on their current unweighted task-dump rendering path.
+9. Add the runnable mixed-profile test app and its in-situ integration test.
+10. Keep old traces on their current unweighted task-dump rendering path.
 
 ## Runnable Profiling Test App
 
@@ -611,6 +668,17 @@ blocking-lock phase, a named OS thread holds a `std::sync::Mutex` while a
 `spawn_blocking` closure waits for it; the instrumented task asynchronously
 awaits that closure. The timer phase uses `tokio::time::sleep`. Synchronization,
 not startup timing assumptions, establishes each phase boundary.
+
+The app also needs explicit multi-branch await scenarios:
+
+- `timeout(primary_operation, deadline)` proves the operation branch receives
+  the interval rather than splitting it with the deadline timer;
+- `select!` over work and cancellation proves a recognized control branch is
+  demoted;
+- `select!` over two peer work branches proves an unresolved choice becomes one
+  deterministic `[awaiting any of 2]` stack; and
+- a standalone timer and standalone notification prove those leaf types are
+  not unconditionally classified as control flow.
 
 The app should also include:
 
@@ -650,7 +718,13 @@ hard-code an attach-time offset.
   - use `cpu.profile.frequency_hz`;
   - include only CPU samples and dumps for the selected task;
   - reject missing CPU metadata or missing task dumps;
-  - split weight across multiple callchains from one capture;
+  - group sibling callchains by task ID and capture timestamp;
+  - select timeout operations over their paired deadline timers;
+  - select work over recognized cancellation/shutdown branches;
+  - preserve standalone timer and notification waits;
+  - produce an order-independent synthetic wait set for ambiguous peer
+    branches;
+  - apply one full inverse-probability weight per capture group;
   - clip idle duration to the selected window;
   - pass numeric weights directly to the flamegraph builder.
 
@@ -671,6 +745,9 @@ decoder and mixed-flamegraph builder, and assert:
   within declared statistical tolerances of each task's by-construction
   percentages;
 - the lock-wait and timer-await symbols remain distinct;
+- the timeout, cancellation, peer-select, standalone-timer, and
+  standalone-notification scenarios resolve to their specified representative
+  stacks;
 - the uninstrumented CPU and off-CPU threads do not appear in either
   task-scoped mixed graph; and
 - changing the capture rate changes sample count and variance, but not the
