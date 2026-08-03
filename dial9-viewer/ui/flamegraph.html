@@ -91,6 +91,7 @@
         <script src="flamegraph_diff_view.js"></script>
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
+        <script src="session.js"></script>
         <script src="creds.js"></script>
         <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
@@ -174,7 +175,9 @@
                     // session creds; `credsB` overrides B once supplied.
                     let credsB = null; // {accessKeyId, secretAccessKey, sessionToken?, region?}
                     function sessionHeaders() {
-                        return window.Dial9Creds ? Dial9Creds.headers() : {};
+                        return Dial9Session.headers(
+                            window.Dial9Creds ? Dial9Creds.headers() : {}
+                        );
                     }
                     function credsToHeaders(c) {
                         const h = {
@@ -186,7 +189,9 @@
                         return h;
                     }
                     function headersFor(side) {
-                        if (side === "b" && credsB) return credsToHeaders(credsB);
+                        if (side === "b" && credsB) {
+                            return Dial9Session.headers(credsToHeaders(credsB));
+                        }
                         return sessionHeaders();
                     }
 
@@ -216,7 +221,10 @@
                         // them) so the server can HeadBucket B's bucket.
                         const url = "/api/credentials/check" +
                             (bBucket ? "?bucket=" + encodeURIComponent(bBucket) : "");
-                        const resp = await fetch(url, { method: "POST", headers: credsToHeaders(creds) });
+                        const resp = await Dial9Session.fetch(url, {
+                            method: "POST",
+                            headers: credsToHeaders(creds),
+                        });
                         if (!resp.ok) return { ok: false, error: await resp.text().catch(() => "check failed") };
                         return await resp.json();
                     }
@@ -1342,7 +1350,9 @@
                         }
                         const token = ++streamToken;
                         abortCtl = new AbortController();
-                        const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                        const credHeaders = Dial9Session.headers(
+                            window.Dial9Creds ? Dial9Creds.headers() : {}
+                        );
                         Dial9Sse.openSse(buildApiUrl(), {
                             headers: credHeaders,
                             signal: abortCtl.signal,
@@ -1505,7 +1515,7 @@
                             loadingEl.textContent = "Resolving trace selection…";
                             const fetchJson = async (u) => {
                                 const h = window.Dial9Creds ? Dial9Creds.headers() : {};
-                                const r = await fetch(u, { headers: h });
+                                const r = await Dial9Session.fetch(u, { headers: h });
                                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                                 return r.json();
                             };
@@ -1531,7 +1541,9 @@
                 // unavailable do we fall back to the buffered fetch+concatenate
                 // path (each component fetched and gunzipped independently, then
                 // concatenated).
-                const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                const credHeaders = Dial9Session.headers(
+                    window.Dial9Creds ? Dial9Creds.headers() : {}
+                );
                 let trace;
                 try {
                     if (TraceParser.canStreamDecode()) {

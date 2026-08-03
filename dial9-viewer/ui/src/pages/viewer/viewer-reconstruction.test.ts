@@ -17,6 +17,7 @@ import {
 } from "./url-state.js";
 import { resolveUrlSelection } from "./url-selection.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
+import { taskIndexFor } from "./tasks-model.js";
 
 let settledTrace: ParsedTrace;
 let reconstructedTrace: ParsedTrace;
@@ -69,6 +70,23 @@ function normalizedProjection(
 }
 
 describe("viewer deep-link reconstruction", () => {
+  it("selects focus_task even when no span matches the focus window", () => {
+    const task = taskIndexFor(settledTrace).rows.find((row) => row.pollCount > 0)!;
+    const offset = settledTrace.clockOffsetNs ?? 0;
+    const focusStart = task.firstPollStart + offset;
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search:
+        `?focus_start=${focusStart}&focus_end=${focusStart + 1_000_000}` +
+        `&focus_span_name=definitely-absent&focus_task=${task.taskId}`,
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(settledTrace, "source");
+
+    expect(store.getState().selection.selectedTaskId).toBe(task.taskId);
+  });
+
   it("reconstructs every URL-owned analytical value after the trace loads", () => {
     const source = createViewerStore({ scheduler: () => {} });
     createViewerReconstruction(source, { search: "", hash: "" }).applyLoadedTrace(

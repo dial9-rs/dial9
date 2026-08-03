@@ -102,13 +102,14 @@ export function createViewerReconstruction(
       }
     }
 
-    if (
-      urlState.selectedTaskId !== undefined &&
-      taskIndexFor(trace).rows.some(
-        (row) => row.taskId === urlState.selectedTaskId,
-      )
-    ) {
-      selection.selectedTaskId = urlState.selectedTaskId;
+    // An explicit shareable task selection wins, followed by the exemplar's
+    // focus_task. Keep a task inferred from a matched span only when neither
+    // URL task anchor resolves against this trace.
+    for (const taskId of [urlState.selectedTaskId, focusLink?.taskId]) {
+      if (taskExists(trace, taskId)) {
+        selection.selectedTaskId = taskId;
+        break;
+      }
     }
     if (Object.keys(selection).length > 0) {
       store.update("selection", selection);

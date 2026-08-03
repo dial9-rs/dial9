@@ -26,6 +26,7 @@ import { mountServiceTabs } from "./service-tabs.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
+import { Dial9Session } from "../../lib/trace/session.js";
 
 // Dual-UI switch: render the "Switch to legacy UI" control. The
 // ui-switch.js <head> auto-boot is a no-op on this off-root path.
@@ -155,7 +156,7 @@ function boot(): void {
 
   // Config bootstrap. Plain fetch, not apiFetch: /api/config is fetched
   // uncredentialed.
-  fetch("/api/config")
+  Dial9Session.fetch("/api/config")
     .then(async (r) => {
       if (!r.ok) {
         const body = await r.text().catch(() => "");

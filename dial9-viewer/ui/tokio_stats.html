@@ -43,6 +43,7 @@
 </style>
 </head>
 <body>
+<script src="session.js"></script>
 <script src="creds.js"></script>
 <script src="format.js"></script>
 <script src="flamegraph_diff.js"></script>
@@ -704,7 +705,9 @@
     if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
 
     period.refining = true;
-    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    const credHeaders = Dial9Session.headers(
+      window.Dial9Creds ? Dial9Creds.headers() : {}
+    );
     return new Promise((resolve, reject) => {
       Dial9Sse.openSse(u, {
         headers: credHeaders,

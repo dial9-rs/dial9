@@ -312,6 +312,59 @@ function wakeBandModel() {
 }
 
 describe("drawTaskDetailCanvas render input", () => {
+  it("draws a high spawn-to-first-poll delay in scheduling red", () => {
+    const model = buildTaskDetailRenderModel({
+      data: {
+        taskId: 42,
+        polls: [
+          {
+            start: 8_135_941,
+            end: 8_235_941,
+            taskId: 42,
+            spawnLocId: "L",
+            spawnLoc: null,
+          },
+        ],
+        wakes: [],
+        pollWakes: [null],
+        pollCount: 1,
+        wakeCount: 0,
+        spawnLocation: null,
+        isInstrumented: true,
+        spawnTs: 1_000_000,
+        terminateTs: null,
+        hasTerminate: false,
+        lifetimeNs: null,
+        taskDumps: [],
+        workerIdCount: 1,
+        hasPolls: true,
+      },
+      viewStart: 0,
+      viewEnd: 10_000_000,
+      drawW: 1000,
+    });
+    const { ctx, rects, texts } = recordingCtx();
+
+    drawTaskDetailCanvas(
+      ctx,
+      model,
+      null,
+      1000,
+      160,
+      COMPLETE_TASK_DETAIL_WINDOW,
+    );
+
+    expect(
+      rects.some(
+        (r) =>
+          r.x === 100 &&
+          r.w === 713.5941 &&
+          r.fillStyle === "rgba(255,50,50,0.3)",
+      ),
+    ).toBe(true);
+    expect(texts.some((t) => t.text.startsWith("⬆"))).toBe(false);
+  });
+
   it("bolds the hovered waker's label", () => {
     const model = wakeBandModel();
     const hovered = recordingCtx();

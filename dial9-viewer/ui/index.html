@@ -439,6 +439,7 @@
         <span style="color:#555;font-size:0.8em;margin-left:auto">drop a .bin file to open viewer</span>
     </footer>
 
+    <script src="session.js"></script>
     <script src="creds.js"></script>
     <script src="format.js"></script>
     <script src="flamegraph_diff.js"></script>
@@ -525,7 +526,10 @@
     // (if any are set) to every /api/* request. No-op when no creds are stored.
     function apiFetch(url, opts = {}) {
         const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-        return fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...credHeaders } });
+        return Dial9Session.fetch(url, {
+            ...opts,
+            headers: { ...(opts.headers || {}), ...credHeaders },
+        });
     }
 
     // ── Bring-your-own-credentials panel ──
@@ -919,7 +923,7 @@
     // incoming link into the canonical serialization.
     syncUrl();
 
-    fetch('/api/config').then(async r => {
+    Dial9Session.fetch('/api/config').then(async r => {
         if (!r.ok) {
             const body = await r.text().catch(() => '');
             throw new Error(`HTTP ${r.status}${body ? ': ' + body : ''}`);
@@ -2390,7 +2394,7 @@
             rawTable.style.display = 'none';
             try {
                 const bucket = bucketInput.value.trim();
-                const sampleResp = await fetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
+                const sampleResp = await apiFetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
                 const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
                 if (samples.length > 0) {
                     rawStatus.innerHTML = 'No results found. Sample keys in this bucket:<br>' +

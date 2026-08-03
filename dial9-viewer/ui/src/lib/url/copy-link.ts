@@ -6,8 +6,8 @@
 // element, its inline look, and the copy mechanics.
 
 export interface CopyLinkOptions {
-  /** Run before reading the URL; return false to cancel an unshareable copy. */
-  beforeCopy?: () => void | boolean;
+  /** Run before reading the URL; return true to proceed or false to cancel. */
+  beforeCopy?: () => boolean;
   /** URL supplier; defaults to the live location href. */
   getText?: () => string;
   /** Clipboard write; injectable for tests/fallbacks. */
