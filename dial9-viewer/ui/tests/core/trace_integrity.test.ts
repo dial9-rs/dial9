@@ -454,11 +454,13 @@ describe("metrique events", () => {
       expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
       const span = ev.singleEventSpan;
       expect(span, `single-event projection missing on ${ev.name}`).not.toBeNull();
-      expect(span?.start).toBe(start);
+      // The packed timestamp is the end; the span start is end - duration.
       expect(span?.end).toBe(ev.timestamp);
+      expect(span?.start).toBe(ev.timestamp - duration);
       expect(span?.name).toBe(f["Operation"]);
       expect(span?.spanType).toBe("metrique");
-      expect(span?.fields["span.start_ns"]).toBeUndefined();
+      // Structural-role fields are not projected as attributes.
+      expect(span?.fields["dial9.span.duration_ns"]).toBeUndefined();
       expect(span?.fields["thread_id"]).toBeUndefined();
       expect(span?.fields["Operation"]).toBeUndefined();
       expect(span?.fields["dial9.wall_clock_ns"]).toBeUndefined();

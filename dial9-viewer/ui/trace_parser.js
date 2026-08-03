@@ -752,6 +752,8 @@
     const DEFAULT_SINGLE_EVENT_SPAN_TYPE = "single-event";
     const SINGLE_EVENT_ROLES = Object.freeze({
         start: "span.start",
+        duration: "span.duration",
+        end: "span.end",
         name: "span.name",
         threadId: "thread_id",
         taskId: "tokio.task_id",
@@ -772,14 +774,20 @@
         const roleByField = new Array(schema.fields.length).fill(null);
         const roleIndices = new Map();
         let error = null;
-        let sawSpanStart = false;
+        let sawTiming = false;
         for (const annotation of annotations) {
             if (annotation.key !== DIAL9_ROLE_KEY) continue;
             const role = Object.values(SINGLE_EVENT_ROLES).includes(annotation.value)
                 ? annotation.value
                 : null;
             if (role == null) continue;
-            if (role === SINGLE_EVENT_ROLES.start) sawSpanStart = true;
+            if (
+                role === SINGLE_EVENT_ROLES.start ||
+                role === SINGLE_EVENT_ROLES.duration ||
+                role === SINGLE_EVENT_ROLES.end
+            ) {
+                sawTiming = true;
+            }
             const index = annotation.fieldIndex;
             if (index < 0 || index >= schema.fields.length) {
                 error ||= `${DIAL9_ROLE_KEY} references missing field ${index}`;
@@ -799,140 +807,152 @@
             }
         }
 
-        const startIndex = roleIndices.get(SINGLE_EVENT_ROLES.start);
-        let result;
-        if (startIndex == null) {
-            result = sawSpanStart
-                ? {
-                      kind: "invalid",
-                      error:
-                          error ||
-                          "single-event span schema has no valid span.start field",
-                  }
-                : { kind: "not-span" };
-        } else if (error != null) {
-            result = { kind: "invalid", error };
-        } else if (!schema.hasTimestamp) {
-            result = {
-                kind: "invalid",
-                error: "single-event span schema has no packed end timestamp",
+        // Resolve the layout, or an error/not-span sentinel. Written as an IIFE
+        // so the many validation exits read as early returns.
+        const multipliers = {
+            ns: 1,
+            us: 1_000,
+            ms: 1_000_000,
+            s: 1_000_000_000,
+        };
+        const result = (() => {
+            // Not a span at all unless it carries some timing role.
+            if (!sawTiming) return { kind: "not-span" };
+            if (error != null) return { kind: "invalid", error };
+
+            const annotationValue = (fieldIndex, key) => {
+                let value = null;
+                for (const annotation of annotations) {
+                    if (
+                        annotation.fieldIndex !== fieldIndex ||
+                        annotation.key !== key
+                    ) {
+                        continue;
+                    }
+                    if (value != null && value !== annotation.value) {
+                        return { error: `conflicting ${key} annotations` };
+                    }
+                    value = annotation.value;
+                }
+                return { value };
             };
-        } else if (
-            !INTEGER_FIELD_TYPES.has(
-                innerFieldType(schema.fields[startIndex].fieldType),
-            )
-        ) {
-            result = {
-                kind: "invalid",
-                error: "span.start field must have an integer wire type",
+
+            // A timing field: validate integer type + resolve unit multiplier.
+            // Per spec, an absent unit defaults to ns.
+            const timingField = (role) => {
+                const index = roleIndices.get(role);
+                if (index == null) return { present: false };
+                if (
+                    !INTEGER_FIELD_TYPES.has(
+                        innerFieldType(schema.fields[index].fieldType),
+                    )
+                ) {
+                    return { error: `${role} field must have an integer wire type` };
+                }
+                const unit = annotationValue(index, "unit");
+                if (unit.error) return { error: unit.error };
+                if (unit.value != null && !Object.prototype.hasOwnProperty.call(multipliers, unit.value)) {
+                    return { error: `unsupported ${role} unit ${JSON.stringify(unit.value)}` };
+                }
+                return {
+                    present: true,
+                    field: schema.fields[index].name,
+                    multiplier: unit.value == null ? 1 : multipliers[unit.value],
+                    index,
+                };
             };
-        } else {
+
+            const start = timingField(SINGLE_EVENT_ROLES.start);
+            const duration = timingField(SINGLE_EVENT_ROLES.duration);
+            const end = timingField(SINGLE_EVENT_ROLES.end);
+            for (const t of [start, duration, end]) {
+                if (t.error) return { kind: "invalid", error: t.error };
+            }
+
+            // A span is placed from any two of {start, duration, end}; the
+            // packed event timestamp counts as an end.
+            const packedEnd = !!schema.hasTimestamp;
+            const endsAvailable = (end.present ? 1 : 0) + (packedEnd ? 1 : 0);
+            const quantities =
+                (start.present ? 1 : 0) +
+                (duration.present ? 1 : 0) +
+                (endsAvailable > 0 ? 1 : 0);
+            if (quantities < 2) {
+                return {
+                    kind: "invalid",
+                    error:
+                        "single-event span schema needs any two of span.start, " +
+                        "span.duration, and span.end (the packed event timestamp " +
+                        "counts as an end)",
+                };
+            }
+
             const nameIndex = roleIndices.get(SINGLE_EVENT_ROLES.name);
-            const integerRoleIndices = [
-                roleIndices.get(SINGLE_EVENT_ROLES.threadId),
-                roleIndices.get(SINGLE_EVENT_ROLES.taskId),
-                roleIndices.get(SINGLE_EVENT_ROLES.workerId),
-            ].filter((index) => index != null);
             if (
                 nameIndex != null &&
                 !STRING_FIELD_TYPES.has(
                     innerFieldType(schema.fields[nameIndex].fieldType),
                 )
             ) {
-                result = {
+                return {
                     kind: "invalid",
                     error: "span.name field must have a string wire type",
                 };
-            } else if (
-                integerRoleIndices.some(
+            }
+            const contextIndices = [
+                roleIndices.get(SINGLE_EVENT_ROLES.threadId),
+                roleIndices.get(SINGLE_EVENT_ROLES.taskId),
+                roleIndices.get(SINGLE_EVENT_ROLES.workerId),
+            ].filter((index) => index != null);
+            if (
+                contextIndices.some(
                     (index) =>
                         !INTEGER_FIELD_TYPES.has(
                             innerFieldType(schema.fields[index].fieldType),
                         ),
                 )
             ) {
-                result = {
+                return {
                     kind: "invalid",
                     error: "execution-context field must have an integer wire type",
                 };
-            } else {
-                const annotationValue = (key) => {
-                    let value = null;
-                    for (const annotation of annotations) {
-                        if (
-                            annotation.fieldIndex !== startIndex ||
-                            annotation.key !== key
-                        ) {
-                            continue;
-                        }
-                        if (value != null && value !== annotation.value) {
-                            return { error: `conflicting ${key} annotations` };
-                        }
-                        value = annotation.value;
-                    }
-                    return { value };
-                };
-                const unit = annotationValue("unit");
-                const spanType = annotationValue(DIAL9_SPAN_TYPE_KEY);
-                const multipliers = {
-                    ns: 1,
-                    us: 1_000,
-                    ms: 1_000_000,
-                    s: 1_000_000_000,
-                };
-                if (unit.error || spanType.error) {
-                    result = {
-                        kind: "invalid",
-                        error: unit.error || spanType.error,
-                    };
-                } else if (
-                    !Object.prototype.hasOwnProperty.call(
-                        multipliers,
-                        unit.value,
-                    )
-                ) {
-                    result = {
-                        kind: "invalid",
-                        error:
-                            unit.value == null
-                                ? "span.start field is missing its unit annotation"
-                                : `unsupported span.start unit ${JSON.stringify(unit.value)}`,
-                    };
-                } else {
-                    result = {
-                        kind: "layout",
-                        schemaName: schema.name,
-                        startField: schema.fields[startIndex].name,
-                        startMultiplier: multipliers[unit.value],
-                        nameField:
-                            nameIndex == null ? null : schema.fields[nameIndex].name,
-                        threadIdField:
-                            roleIndices.get(SINGLE_EVENT_ROLES.threadId) == null
-                                ? null
-                                : schema.fields[
-                                      roleIndices.get(SINGLE_EVENT_ROLES.threadId)
-                                  ].name,
-                        taskIdField:
-                            roleIndices.get(SINGLE_EVENT_ROLES.taskId) == null
-                                ? null
-                                : schema.fields[
-                                      roleIndices.get(SINGLE_EVENT_ROLES.taskId)
-                                  ].name,
-                        workerIdField:
-                            roleIndices.get(SINGLE_EVENT_ROLES.workerId) == null
-                                ? null
-                                : schema.fields[
-                                      roleIndices.get(SINGLE_EVENT_ROLES.workerId)
-                                  ].name,
-                        spanType:
-                            spanType.value || DEFAULT_SINGLE_EVENT_SPAN_TYPE,
-                        attributeFields: schema.fields
-                            .filter((_, index) => roleByField[index] == null)
-                            .map((field) => field.name),
-                    };
-                }
             }
-        }
+
+            // Span type rides on whichever timing field is present.
+            const spanTypeIndex = [start, duration, end].find((t) => t.present)
+                .index;
+            const spanType = annotationValue(spanTypeIndex, DIAL9_SPAN_TYPE_KEY);
+            if (spanType.error) return { kind: "invalid", error: spanType.error };
+
+            const fieldName = (role) => {
+                const index = roleIndices.get(role);
+                return index == null ? null : schema.fields[index].name;
+            };
+            return {
+                kind: "layout",
+                schemaName: schema.name,
+                timing: {
+                    start: start.present
+                        ? { field: start.field, multiplier: start.multiplier }
+                        : null,
+                    duration: duration.present
+                        ? { field: duration.field, multiplier: duration.multiplier }
+                        : null,
+                    end: end.present
+                        ? { field: end.field, multiplier: end.multiplier }
+                        : null,
+                    packedEnd,
+                },
+                nameField: fieldName(SINGLE_EVENT_ROLES.name),
+                threadIdField: fieldName(SINGLE_EVENT_ROLES.threadId),
+                taskIdField: fieldName(SINGLE_EVENT_ROLES.taskId),
+                workerIdField: fieldName(SINGLE_EVENT_ROLES.workerId),
+                spanType: spanType.value || DEFAULT_SINGLE_EVENT_SPAN_TYPE,
+                attributeFields: schema.fields
+                    .filter((_, index) => roleByField[index] == null)
+                    .map((field) => field.name),
+            };
+        })();
 
         schema._singleEventSpanLayout = { annotations, result };
         if (result.kind === "invalid") {
@@ -943,18 +963,46 @@
         return result;
     }
 
-    function decodeSingleEventSpan(layout, schema, values, end) {
-        const rawStart = values[layout.startField];
-        const start =
-            rawStart == null ? NaN : Number(rawStart) * layout.startMultiplier;
-        if (
-            !Number.isFinite(start) ||
-            start < 0 ||
-            !Number.isFinite(end) ||
-            start > end
-        ) {
-            return null;
+    /**
+     * Resolve (start, end) in ns from any two of start, duration, and end.
+     * `packedEnd` is the event's packed timestamp (ns) or null. Returns null
+     * if fewer than two quantities are present at runtime or the arithmetic is
+     * invalid.
+     */
+    function resolveSpanTiming(timing, values, packedEnd) {
+        const read = (t) => {
+            if (t == null) return null;
+            const raw = values[t.field];
+            if (raw == null) return null;
+            const value = Number(raw) * t.multiplier;
+            return Number.isFinite(value) && value >= 0 ? value : NaN;
+        };
+        const start = read(timing.start);
+        const duration = read(timing.duration);
+        let end = read(timing.end);
+        if (end == null && timing.packedEnd) end = packedEnd;
+
+        // A read that produced NaN is a malformed value, not an absent one.
+        if ([start, duration, end].some((v) => Number.isNaN(v))) return null;
+
+        if (start != null && end != null) {
+            return start > end ? null : { start, end };
         }
+        if (duration != null && end != null) {
+            // Duration is unsigned; a start after end is unrepresentable.
+            return { start: Math.max(0, end - duration), end };
+        }
+        if (start != null && duration != null) {
+            return { start, end: start + duration };
+        }
+        return null;
+    }
+
+    function decodeSingleEventSpan(layout, schema, values, packedEnd) {
+        const resolved = resolveSpanTiming(layout.timing, values, packedEnd);
+        if (resolved == null) return null;
+        const { start, end } = resolved;
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
         const context = (field, positiveOnly) => {
             if (field == null || values[field] == null) {
                 return { valid: true, value: null };
@@ -2329,6 +2377,10 @@
             symbolizeChain,
             deduplicateSamples,
             deriveBlockInPlaceGaps,
+            // Exported for unit tests: the single-event span schema compiler
+            // and its runtime timing resolution. Not part of the browser API.
+            compileSingleEventSpanSchema,
+            resolveSpanTiming,
         };
     } else {
         exports.TraceParser = {

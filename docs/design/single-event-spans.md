@@ -17,10 +17,12 @@ The trace format is self-describing and already carries arbitrary per-field
 annotations for metadata such as units. Span semantics belong in those
 annotations rather than in event or field-name matching.
 
-A completed span is emitted when the work closes. Its packed event timestamp
-therefore represents the span end. Encoding the start as the packed timestamp
-would move the delta-encoded timestamp stream backwards at close time, forcing
-timestamp resets and destroying emission-order locality.
+A completed span is emitted when the work closes. For a Dial9-owned producer
+its packed event timestamp therefore represents the span end. Encoding the
+start as the packed timestamp would move the delta-encoded timestamp stream
+backwards at close time, forcing timestamp resets and destroying emission-order
+locality. A foreign producer that already packs something else can instead
+carry its end in an explicit `span.end` field.
 
 The second timing quantity a span needs (start or duration) rides in a normal
 annotated field. Duration is preferred there: it is a small elapsed count
@@ -32,21 +34,26 @@ saturates a backwards clock to a 0 duration instead of dropping the span.
 
 A span has three timing quantities — start, duration, and end — related by
 `end = start + duration`. A decoder needs any **two** of them; it derives the
-third. The packed event timestamp always supplies the end (see Motivation), so
-a schema declares one of the other two:
+third:
 
 ```text
-dial9.role = span.start      # start; duration = end - start
-dial9.role = span.duration   # duration; start = end - duration
+dial9.role = span.start      # start
+dial9.role = span.duration   # duration
+dial9.role = span.end        # end; overrides the packed event timestamp
 ```
 
-A schema is a single-event span schema when exactly one field carries a
-`span.start` **or** `span.duration` role (declaring both is redundant and
-treated as an invalid span schema). The annotated field and the packed end
-timestamp are unsigned; start and end are monotonic-clock values, duration is
-an elapsed count. The annotated field's `unit` annotation declares its scale;
-v1 supports `ns`, `us`, `ms`, and `s`. When the `unit` annotation is absent,
-the scale defaults to `ns`.
+The packed event timestamp supplies the end unless a `span.end` field is
+present (see Motivation for why Dial9's own producers pack the end), so a
+producer that packs its end declares just one of `span.start` or
+`span.duration`. A schema is a single-event span schema when at least one
+timing role is present, and it is valid when **two** quantities are resolvable
+— counting the packed timestamp as an end. Each timing role may appear at most
+once.
+
+Timing values are unsigned; start and end are monotonic-clock values, duration
+is an elapsed count. A timing field's `unit` annotation declares its scale; v1
+supports `ns`, `us`, `ms`, and `s`. When the `unit` annotation is absent, the
+scale defaults to `ns`.
 
 Intervals are half-open:
 
@@ -75,11 +82,14 @@ absent or empty, the decoder also falls back to the schema name.
 
 ### Span type
 
-The start/duration field may additionally carry:
+A timing field may additionally carry:
 
 ```text
 dial9.span.type = <producer family>
 ```
+
+Decoders read it from the first timing field present, in the order start,
+duration, end.
 
 For metrique the value is `metrique`. This is the producer/instrumentation
 family, corresponding to the decoded span kind. The schema name remains the
@@ -110,8 +120,8 @@ worker ID must not override a known block-in-place gap.
 
 ### Attributes
 
-Fields carrying the `span.start`/`span.duration` or execution-context roles
-are not copied into the span's attributes. The `span.name` field is the
+Fields carrying a timing role or an execution-context role are not copied into
+the span's attributes. The `span.name` field is the
 exception: it stays a normal attribute (with its original name, value, and
 unit) in addition to supplying the display name. All other event fields remain
 attributes with their original names, values, and units. Decoders may project
@@ -122,18 +132,23 @@ that expose typed attributes also preserve their unit annotations.
 
 Schema validation happens once per wire schema:
 
-- no `span.start` and no `span.duration` role: ordinary custom event;
-- both `span.start` and `span.duration` present, or a duplicate start,
-  duration, name, or context role: invalid span schema;
-- unsupported start/duration/name/context wire type: invalid span schema;
+- no timing role at all: ordinary custom event;
+- fewer than two resolvable timing quantities (counting the packed event
+  timestamp as an end): invalid span schema;
+- a duplicate timing, name, or context role: invalid span schema;
+- unsupported timing/name/context wire type, or an unsupported `unit` on a
+  timing field: invalid span schema;
 - unknown role: ignored for forward compatibility;
 - identical duplicate annotations: idempotent.
 
 An invalid span schema remains decodable as an ordinary custom event and is
-diagnosed once. Per-event failures such as a missing start/duration value or a
-conversion overflow skip only that span projection and use rate-limited
-diagnostics on repeated paths. Decoders must not invent timestamps or
-identifiers.
+diagnosed once. Per-event failures skip only that span projection and use
+rate-limited diagnostics on repeated paths. These include a timing value that
+is absent on the event (an optional field the schema promised), a conversion
+overflow, and a `start` that follows its `end`. Where a derivation cannot
+produce a negative result it saturates instead of failing: deriving `start`
+from `end - duration` clamps at 0, since unsigned duration cannot express
+`start > end`. Decoders must not invent timestamps or identifiers.
 
 ## Metrique adapter
 
