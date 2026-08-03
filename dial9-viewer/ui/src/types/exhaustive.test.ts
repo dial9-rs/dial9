@@ -199,6 +199,14 @@ const initialState: StoreState = {
     stacksAsFlamegraph: false,
   },
   view: {
+    fieldCharts: [
+      {
+        id: "fc-1",
+        eventName: "MyEvent",
+        fieldName: "latency",
+        kind: "gauge",
+      },
+    ],
     inspectorTab: "related",
     expandedPollGroups: new Set(["cpu-0"]),
     pollFlamegraphSection: "sched",
@@ -243,7 +251,15 @@ function populatedState(): StoreState {
       spanFocus: { spanId: "s1", chain: new Set(["s1", "s0"]) },
       focusedSpanId: "s1",
       pinnedEvent: {
-        events: [{ name: "MyEvent", timestamp: 2_000, fields: {}, units: null }],
+        events: [
+          {
+            name: "MyEvent",
+            timestamp: 2_000,
+            fields: {},
+            units: null,
+            fieldKinds: null,
+          },
+        ],
         timestamp: 2_000,
         taskId: 42,
         name: "MyEvent",

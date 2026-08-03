@@ -97,6 +97,7 @@ function enter(ts: number, spanId: string, name: string, extra: Record<string, u
     timestamp: ts,
     fields: { worker_id: 0, span_id: spanId, span_name: name, ...extra } as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 function exit(ts: number, spanId: string, name: string, worker = 0): CustomTraceEvent {
@@ -105,6 +106,7 @@ function exit(ts: number, spanId: string, name: string, worker = 0): CustomTrace
     timestamp: ts,
     fields: { worker_id: worker, span_id: spanId, span_name: name } as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 function lane(polls: { start: number; end: number; taskId: number }[]): WorkerLane {

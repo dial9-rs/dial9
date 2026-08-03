@@ -48,7 +48,7 @@
 //! Lost shutdown telemetry is acceptable in this model; `#[dial9::main]` handles
 //! runtime-drop-before-shutdown ordering for you.
 
-use super::register_runtime_context;
+use super::register_runtime_hooks;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
@@ -342,74 +342,52 @@ impl Dial9HandleTokioExt for Dial9Handle {
         mut builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime> {
-        if let Some(shared) = self.shared()
-            && shared.is_stopped()
-        {
+        let Some(shared) = self.shared() else {
+            return builder.build();
+        };
+        if shared.is_stopped() {
             return Err(io::Error::other(
                 "recorder has shut down; attach runtimes before graceful_shutdown",
             ));
         }
-        let instrumented = install_tokio_hooks(self, &mut builder, options)?;
+        if !options.tokio_instrumentation_enabled {
+            return builder.build();
+        }
+        let Some(registry) = runtime_registry(shared) else {
+            return Err(io::Error::other(
+                "dial9 source registry unavailable; Tokio runtime not attached",
+            ));
+        };
+
+        let task_dump_config = options.task_dump_config;
+        let ctx = register_runtime_hooks(
+            shared,
+            &mut builder,
+            options.runtime_name,
+            self,
+            options.task_tracking_enabled,
+            options.tokio_hooks,
+            task_dump_config,
+        );
+
         let runtime = builder.build()?;
 
-        if let Some(shared) = self.shared()
-            && instrumented
-        {
-            register_runtime_metrics(shared, runtime.handle().metrics());
+        // Publish attach state only after a successful build.
+        // `TokioRuntimesSource` picks the runtime up from the registry on its
+        // next flush.
+        registry.lock().unwrap().push(ctx);
+        // The current-thread driver does not fire `on_thread_start`, so without
+        // this the tracing layer and `dial9::spawn` find no handle until the
+        // first poll.
+        set_tl_handle(self.clone());
+        // Same for the task-dump config.
+        #[cfg(feature = "taskdump")]
+        if let Some(config) = task_dump_config {
+            crate::task_dumped::set_taskdump_config(config);
         }
+        register_runtime_metrics(shared, runtime.handle().metrics());
         Ok(runtime)
     }
-}
-
-/// Register dial9 hooks on a caller-owned Tokio builder and wire it into the
-/// recorder's shared runtime-context source. Worker IDs are reserved lazily on
-/// first poll.
-///
-/// Returns whether hooks were installed: a disabled recorder and
-/// `tokio_instrumentation_enabled(false)` both leave the builder untouched.
-/// Errors only when instrumentation was asked for and could not be wired up.
-///
-/// [`Dial9HandleTokioExt::attach_tokio_runtime`] is the public API that also
-/// builds the runtime.
-pub(crate) fn install_tokio_hooks(
-    handle: &Dial9Handle,
-    builder: &mut tokio::runtime::Builder,
-    options: TokioAttachOptions,
-) -> io::Result<bool> {
-    let Some(shared) = handle.shared() else {
-        return Ok(false);
-    };
-    if !options.tokio_instrumentation_enabled {
-        return Ok(false);
-    }
-    let Some(registry) = runtime_registry(shared) else {
-        return Err(io::Error::other(
-            "dial9 source registry unavailable; Tokio runtime not attached",
-        ));
-    };
-
-    let task_dump_config = options.task_dump_config;
-    register_runtime_context(
-        shared,
-        &registry,
-        builder,
-        options.runtime_name,
-        handle,
-        options.task_tracking_enabled,
-        options.tokio_hooks,
-        task_dump_config,
-    );
-    // Install the handle on this thread. For a current_thread runtime the
-    // caller builds and drives it on this same thread, which gets no
-    // on_thread_start, so the tracing layer and `dial9::spawn` would otherwise
-    // find no handle until the first task poll.
-    set_tl_handle(handle.clone());
-    // Same for the task-dump config: on_thread_start skips this thread.
-    #[cfg(feature = "taskdump")]
-    if let Some(config) = task_dump_config {
-        crate::task_dumped::set_taskdump_config(config);
-    }
-    Ok(true)
 }
 
 /// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that

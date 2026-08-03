@@ -45,6 +45,7 @@ interface CustomEvent {
   timestamp: number;
   fields: Record<string, unknown>;
   units: Record<string, string> | null;
+  fieldKinds: Record<string, string> | null;
   singleEventSpan?: {
     start: number;
     end: number;
@@ -474,6 +475,36 @@ describe("metrique events", () => {
     for (const ev of withLatency) {
       // Normalized to the shared derive/viewer unit vocabulary.
       expect(ev.units?.["Latency"], `Latency unit missing on ${ev.name}`).toBe("ms");
+    }
+  });
+
+  it("process resource field kinds surface from schema annotations", () => {
+    const events = trace.customEvents.filter(
+      (event) => event.name === "ProcessResourceUsageEvent",
+    );
+    expect(events.length, "No process resource usage events found").toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.fieldKinds).toMatchObject({
+        user_cpu_ns: "counter",
+        system_cpu_ns: "counter",
+        max_rss_bytes: "gauge",
+        minor_faults: "counter",
+        major_faults: "counter",
+        block_input_ops: "counter",
+        block_output_ops: "counter",
+        voluntary_context_switches: "counter",
+        involuntary_context_switches: "counter",
+      });
+    }
+  });
+
+  it("TCP accept queue depth surfaces as a gauge", () => {
+    const events = trace.customEvents.filter(
+      (event) => event.name === "TcpAcceptQueueEvent",
+    );
+    expect(events.length, "No TCP accept queue events found").toBeGreaterThan(0);
+    for (const event of events) {
+      expect(event.fieldKinds).toMatchObject({ pending_connections: "gauge" });
     }
   });
 });

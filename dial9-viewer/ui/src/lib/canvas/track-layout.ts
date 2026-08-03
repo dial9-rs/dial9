@@ -37,7 +37,15 @@ export function lanesScrollbarWidth(columnEl: HTMLElement): number {
  * "lanes" hosts the worker rows, so they carry their own ids while the analysis
  * tracks reuse the PanelKind vocabulary.
  */
-export type TrackId = "timeline" | "lanes" | PanelKind;
+export type StaticTrackId = "timeline" | "lanes" | PanelKind;
+export const FIELD_CHART_TRACK_ID_PREFIX = "fc-";
+export type FieldChartTrackId = `${typeof FIELD_CHART_TRACK_ID_PREFIX}${string}`;
+export type TrackId = StaticTrackId | FieldChartTrackId;
+
+/** Runtime guard for numeric-field tracks in the reserved dynamic namespace. */
+export function isFieldChartTrackId(id: string): id is FieldChartTrackId {
+  return id.startsWith(FIELD_CHART_TRACK_ID_PREFIX);
+}
 
 export interface TrackSpec {
   id: TrackId;
@@ -123,6 +131,9 @@ export function trackGeometry(
  * (the `kind` field is advisory - the x-mapping is identical across all kinds).
  */
 function geometryKindFor(id: TrackId): PanelKind {
+  // Dynamic numeric-field charts share the queue chart's ordinary time-panel
+  // geometry. `kind` is advisory; the LABEL_W + drawW mapping is identical.
+  if (isFieldChartTrackId(id)) return "queue";
   switch (id) {
     case "timeline":
     case "lanes":

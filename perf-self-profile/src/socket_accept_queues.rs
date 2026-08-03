@@ -24,6 +24,7 @@ pub struct TcpAcceptQueueEvent {
     /// Local listener port.
     pub local_port: u16,
     /// Completed connections waiting to be accepted.
+    #[traceevent(kind = "gauge")]
     pub pending_connections: u32,
     /// Effective accept backlog limit.
     pub backlog_limit: u32,
@@ -81,6 +82,26 @@ mod tests {
             SocketAcceptQueuesConfig::default().sample_interval(),
             Duration::from_millis(400)
         );
+    }
+
+    #[test]
+    fn pending_connections_is_a_gauge() {
+        use dial9_trace_format::TraceEvent;
+
+        let entry = TcpAcceptQueueEvent::schema_entry();
+        let kind_annotations = entry
+            .annotations()
+            .iter()
+            .filter(|annotation| annotation.key() == "kind")
+            .map(|annotation| {
+                (
+                    entry.fields()[annotation.field_index() as usize].name(),
+                    annotation.value(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(kind_annotations, vec![("pending_connections", "gauge")]);
     }
 }
 

@@ -135,6 +135,8 @@ declare module "*/trace_parser.js" {
     fields: Record<string, import("*/decode.js").DecodedFieldValue>;
     /** field name -> unit annotation ("ns", "bytes", ...), if any. */
     units: Record<string, string> | null;
+    /** field name -> chart interpretation annotation, if any. */
+    fieldKinds: Record<string, string> | null;
     /** Present when schema annotations project this event as a completed span. */
     singleEventSpan?: SingleEventSpan | null;
   }

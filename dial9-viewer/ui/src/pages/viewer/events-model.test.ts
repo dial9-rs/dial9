@@ -40,6 +40,7 @@ function ev(
     timestamp,
     fields: fields as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 
