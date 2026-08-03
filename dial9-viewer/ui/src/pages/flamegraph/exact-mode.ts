@@ -34,6 +34,7 @@ export async function runExactMode(
   mountCopyLink(els.headerEl, {
     beforeCopy: () => {
       flushUrlState?.();
+      return true;
     },
   });
 
