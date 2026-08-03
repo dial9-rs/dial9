@@ -229,21 +229,17 @@ fn register_hooks(
     });
 }
 
-/// Register dial9's telemetry hooks on `builder` and record the runtime's
-/// context. The caller builds the runtime; worker IDs are reserved lazily on
-/// the first poll (see `RuntimeContext::resolve_worker`), since caller-builds
-/// attach has no runtime to count at wire time.
-#[allow(clippy::too_many_arguments)]
-fn register_runtime_context(
+/// Register telemetry hooks and return a runtime context.
+/// Worker IDs are reserved lazily on the first poll.
+fn register_runtime_hooks(
     shared: &Arc<SharedState>,
-    contexts: &runtime_context::RuntimeContextRegistry,
     builder: &mut tokio::runtime::Builder,
     runtime_name: Option<String>,
     handle: &Dial9Handle,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
     taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
-) {
+) -> Arc<RuntimeContext> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name, handle.clone()));
     register_hooks(
         builder,
@@ -254,10 +250,7 @@ fn register_runtime_context(
         tokio_hooks,
         taskdump_config,
     );
-
-    // `TokioRuntimesSource` detects the new runtime and its workers from the
-    // registry on its next flush; no metadata announcement needed.
-    contexts.lock().unwrap().push(ctx);
+    ctx
 }
 
 #[cfg(all(test, not(shuttle)))]
@@ -289,6 +282,35 @@ mod tests {
         assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 1);
         drop(outer);
         assert_eq!(INSTRUMENTED_SPAWN.with(|c| c.get()), 0);
+    }
+
+    #[test]
+    fn runtime_hooks_do_not_publish_before_build() {
+        clear_tl_handle();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let shared = rec.shared().unwrap().clone();
+        let registry = recorder_tokio::runtime_registry(&shared).unwrap();
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+
+        let ctx = register_runtime_hooks(
+            &shared,
+            &mut builder,
+            Some("aborted".to_string()),
+            rec.handle(),
+            false,
+            TokioHooks::default(),
+            None,
+        );
+        let weak = Arc::downgrade(&ctx);
+
+        assert!(registry.lock().unwrap().is_empty());
+        assert!(!Dial9Handle::current().is_enabled());
+
+        drop(builder);
+        drop(ctx);
+        assert!(weak.upgrade().is_none());
+
+        rec.graceful_shutdown(Duration::from_secs(1));
     }
 
     #[test]
