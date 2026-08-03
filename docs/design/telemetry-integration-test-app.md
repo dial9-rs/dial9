@@ -1,109 +1,147 @@
-# Telemetry Integration Test Application
+# Self-Describing Telemetry Integration Test Application
 
 Status: proposed
 
 ## Summary
 
-Add one small workspace application at `examples/telemetry-test-app`. It
-produces a real trace containing CPU profiles, spans, and task dumps. One
-integration test sends the same trace through:
+The test application is an executable description of its expected trace.
+Stable function and span names describe trace structure and relative weights;
+small expectation events record relationships that names alone cannot express.
+The test harness contains no fixture-specific table of expected symbols,
+percentages, or span edges.
 
-1. the production JavaScript parser used for local traces; and
+A test first parses the expected model from the trace itself. It then parses
+the same bytes through:
+
+1. the production JavaScript path used for local traces; and
 2. the production Rust decode and Parquet path used for aggregate traces.
 
-The first version is a tracer bullet, not a fixture framework. It has one
-workload, two small fixture event types, and a handful of assertions. New
-scenarios should be added only when a telemetry feature needs them.
+Both observed results are checked against the trace's declared model. This
+makes the captured trace a portable, self-describing integration fixture.
 
-This application and the basic local/aggregate test must land before task-dump
-mixed flamegraphs. The flamegraph work can then extend the application with
-the specific cases it needs.
+The first application remains deliberately small: one nested workload in which
+CPU samples, spans, and task dumps overlap. It must land before task-dump mixed
+flamegraphs, which can consume the already-declared CPU/wait relationships.
 
-## Goals
+## Core Idea
 
-- Exercise real capture, encoding, symbolization, and both parsing paths.
-- Cover CPU profiles, spans, and task dumps in one trace.
-- Keep expectations in the trace rather than in a sidecar manifest.
-- Make the trace useful when opened manually in the viewer.
-- Establish one obvious place to add future end-to-end telemetry cases.
+The important artifact is not a particular demo workload. It is the
+convention that lets a trace describe what should be found inside it.
 
-## Non-goals
-
-- A general scenario registry or assertion language.
-- A stable, versioned fixture protocol.
-- Exhaustive coverage of each telemetry feature.
-- A checked-in canonical trace.
-- Testing the HTTP server, S3, or viewer rendering.
-- Replacing focused synthetic and unit tests.
-
-## Minimal Workload
-
-Run one dial9-instrumented async task on a small Tokio runtime. After a short
-warm-up, repeat this measured cycle:
+For example:
 
 ```text
-dial9_fixture_span_cycle
-  dial9_fixture_span_cpu
-    dial9_fixture_cpu_short_weight_1
-    dial9_fixture_cpu_long_weight_3
-  dial9_fixture_span_wait
-    dial9_fixture_wait_short_weight_1
-    dial9_fixture_wait_long_weight_2
+dial9_fixture_cpu_inner_weight_3
 ```
 
-The CPU functions busy-loop for one and three quanta. The wait functions use
-`tokio::time::sleep` for one and two quanta. A cycle field is recorded on the
-root span.
+declares that the symbol belongs to the CPU domain, is named `inner`, and has
+relative weight `3`. The test does not separately hard-code those facts.
 
-This is enough to prove:
+Trace data supplies the rest of the structure:
 
-- periodic CPU samples preserve recognizable weighted symbols;
-- parent and child spans with a field survive parsing;
-- task dumps preserve recognizable async wait symbols; and
-- all three sources can describe the same task and time interval.
+- symbol names declare domains, identities, and relative weights;
+- function callchains declare parent/child stack structure;
+- span names and expectation events declare span nesting and which span should
+  be active for a symbol; and
+- marker events declare the measurement window.
 
-Use `#[inline(never)]` and `black_box` where needed to retain the function
-names in release builds. The app does not initially include multiple tasks,
-noise threads, overlapping spans, timeout/cancellation branches, worker
-coverage cases, or multiple capture rates.
+The harness knows only this convention. Adding a named operation to the
+program and registering it in the trace extends the expected model without
+adding a second manifest that can drift.
 
-## Self-Describing Trace
+Expectation registration is necessary because an item missing from the
+captured data cannot announce its own absence. The registration event names
+the expected item and relationships, while the function name remains the
+source of its weight.
 
-Weights remain in stable function-name tokens:
+## Minimal Mixed Workload
+
+Run one dial9-instrumented async task. After warm-up, repeat this nested
+execution:
+
+```text
+function dial9_fixture_mixed_cycle
+`-- span dial9_fixture_span_cycle
+    |-- CPU       dial9_fixture_cpu_outer_weight_1
+    |-- TASK_DUMP dial9_fixture_wait_outer_weight_1
+    `-- function dial9_fixture_mixed_inner
+        `-- span dial9_fixture_span_inner
+            |-- CPU       dial9_fixture_cpu_inner_weight_3
+            `-- TASK_DUMP dial9_fixture_wait_inner_weight_2
+```
+
+CPU functions busy-loop for their declared number of quanta. Wait functions
+use `tokio::time::sleep` for their declared number of quanta. The cycle span is
+open across the entire sequence; the inner span is open across both its CPU
+work and its await.
+
+This is one mixed trace, not three adjacent feature demos. It declares:
+
+- CPU weights of `1:3`;
+- async-wait weights of `1:2`;
+- an overall CPU-to-wait relationship of `4:3`;
+- CPU samples and task dumps directly inside the cycle span;
+- CPU samples and task dumps directly inside the nested inner span; and
+- a span that remains active across async suspension.
+
+The initial integration test needs only presence, hierarchy, and coarse
+relative-weight assertions. Task-dump mixed-flamegraph tests can later consume
+the same names to check the `4:3` whole-cycle and `3:2` inner-subtree mixes.
+
+Use `#[inline(never)]` and `black_box` where needed so release builds retain
+the fixture function hierarchy.
+
+## Trace Convention
+
+Weighted functions use:
 
 ```text
 dial9_fixture_<domain>_<name>_weight_<positive integer>
 ```
 
-The test parses the weight from the symbol. For example, the two CPU functions
-declare a `1:3` expected relationship without a hard-coded percentage in the
-test.
+The initial domains are `cpu` and `wait`. Unweighted fixture parent functions
+use `dial9_fixture_mixed_<name>`. Spans use
+`dial9_fixture_span_<name>`.
 
-The app emits only two fixture-specific event types:
+The application emits two fixture-specific event types.
 
-`TelemetryFixtureExpectationEvent`
+`TelemetryFixtureExpectationEvent` records:
 
-- `feature`: `cpu`, `span`, or `task_dump`;
-- `name`: expected symbol or span name; and
-- optional `parent`: expected parent span name.
+- `feature`: `cpu`, `task_dump`, or `span`;
+- `name`: the stable function or span token;
+- optional `parent`: the expected fixture parent function or parent span; and
+- optional `active_span`: the innermost span expected to contain observations
+  of this symbol. Ancestor containment follows the declared span-parent edges.
 
-`TelemetryFixtureMarkerEvent`
+`TelemetryFixtureMarkerEvent` records:
 
 - `phase`: `measurement_start` or `measurement_end`.
 
-Expectation events are emitted before measurement. They make a completely
-missing symbol or span detectable; expected items are not inferred from
-whatever samples happened to be captured. Marker timestamps define the
-measurement window. There is no separate config event, run identifier,
-contract version, scenario event, or sidecar manifest.
+Expectation events are emitted before measurement. Marker timestamps define
+the interval used for all three telemetry sources. Numeric weights are not
+repeated in events; they are parsed from function names.
 
-These events are test-app implementation details, not public dial9 interfaces.
-If this representation becomes awkward after adding real scenarios, change it
-then.
+A tiny expectation reader converts these events and names into:
 
-## Invocation
+```text
+expected symbols and weights
+expected fixture stack edges
+expected span parent edges
+expected symbol-to-span associations
+measurement start/end
+```
 
-The app requires only a trace directory and an optional cycle count:
+This reader does not inspect CPU samples, spans, or task dumps to derive
+expectations. Those are observations produced independently by the two
+production parsing paths.
+
+There is no sidecar manifest, contract version, scenario registry, or general
+assertion language. These event types are private to the test application.
+
+## Application
+
+Add `examples/telemetry-test-app` as a workspace binary. Its only required
+option is a trace directory; cycle count is optional:
 
 ```bash
 cargo run --release -p telemetry-test-app -- \
@@ -111,77 +149,76 @@ cargo run --release -p telemetry-test-app -- \
     --cycles 40
 ```
 
-Worker count, task-dump capture rate, and phase durations may be constants in
-the first implementation. They should become options only when a test needs
-to vary them.
+Worker count, task-dump capture rate, and phase durations can be constants
+until a test needs to vary them. The application requires no AWS account,
+database, or network service and writes no assertion artifact besides trace
+segments.
 
-The application requires no AWS account, database, or network service. It
-writes trace segments and no other assertion artifact.
+The first version does not need multiple tasks, noise threads, timeout or
+cancellation branches, worker-coverage cases, or capture-rate sweeps.
 
 ## Integration Test
 
-One script or Rust integration test:
+One profiling-capable Linux test:
 
 1. runs the application once in release mode;
 2. collects the generated trace segments;
-3. parses those bytes with `trace_parser.js`;
-4. sends the same bytes through the Rust aggregate decoder and Parquet
+3. reads the declared model from fixture events and names;
+4. parses the same bytes with `trace_parser.js`;
+5. sends the bytes through the Rust aggregate decoder and Parquet
    writer/reader; and
-5. checks both results against the expectation and marker events.
+6. compares each observed result with the declared model.
 
-Do not stand up the HTTP server or simulated S3 for this test. Those paths have
-their own integration coverage.
+Do not stand up the HTTP server or simulated S3. Those paths have separate
+coverage.
 
-Each parser returns only the small result needed here:
+Each production path returns only the test-local facts needed here:
 
 ```text
-measurement start/end
-CPU sample count by fixture symbol
-span (name, parent, fields)
-task-dump symbol set
+CPU fixture stacks and sample counts
+task-dump fixture stacks
+span parent edges and fields
+symbol-to-span associations
 ```
 
-The JavaScript check can print this test-local shape as JSON for the Rust test
-to compare. Do not turn it into a versioned library interface until another
-test needs one.
+The JavaScript check can print this shape as JSON for the Rust test to compare.
+It is not a versioned library interface.
 
 ### Initial assertions
 
-Keep the first assertions deliberately coarse:
-
 - both measurement markers are present and ordered;
-- every expectation event has a matching observation in both paths;
+- every registered symbol, stack edge, span edge, and span association appears
+  in both parsing paths;
+- both CPU and task-dump observations occur under the cycle and inner spans;
 - the long CPU function has more samples than the short CPU function after a
   minimum total sample count;
-- the CPU and wait spans are children of the cycle span, and the cycle span
-  retains its cycle field;
+- the cycle span retains its cycle field;
 - at least one task dump contains each wait symbol; and
-- local and aggregate results agree on expected symbol and span presence.
+- local and aggregate results agree on the registered structure.
 
-Do not assert exact sample counts, exact timestamps, exact ratios, task
-migration, or worker distribution. Focused tests remain responsible for
-decoder edge cases and statistical estimators.
+Do not initially assert exact counts, timestamps, ratios, task migration, or
+worker distribution. Focused tests own decoder edge cases and statistical
+estimators.
 
-The test fails if profiling or task dumps are unavailable. Run it in one
-profiling-capable Linux CI job; other platforms do not need a committed trace
-fallback initially.
+The test fails if CPU profiling or task dumps are unavailable. Other platforms
+do not need a checked-in trace fallback initially.
 
-## Growing the App
+## Growing the Application
 
-When a feature needs an end-to-end case, add the smallest workload phase,
-expectation event, and assertion that proves it. Keep the app linear until
-repetition makes a scenario abstraction useful.
+Add a workload operation only when a telemetry feature needs an end-to-end
+case. Give it a descriptive fixture name, register its expected relationships
+in the trace, and teach the generic comparison only about a new kind of
+relationship if the existing convention cannot express it.
 
-In particular, task-dump mixed flamegraphs should add their weighted wait
-checks and any required multi-branch await case to this app as part of that
-implementation. The initial prerequisite only establishes that a real task
-dump reaches both parsing paths.
+Keep the workload linear until repetition justifies a scenario abstraction.
+Task-dump branch-selection cases remain focused tests unless an end-to-end
+regression shows that one belongs here.
 
 ## Delivery Order
 
-1. Add the application, weighted functions, spans, and two fixture event
-   types.
-2. Add one test that runs it and checks the local JavaScript path.
+1. Add the mixed application, naming convention, and two fixture event types.
+2. Add the expectation reader and local JavaScript check.
 3. Add the aggregate decode/Parquet check to the same test.
 4. Add the profiling-capable Linux CI invocation.
-5. Build task-dump flamegraph scenarios on this working slice.
+5. Use the declared CPU/wait structure to validate task-dump mixed
+   flamegraphs.

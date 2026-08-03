@@ -640,10 +640,10 @@ sampling noise. Task scope is the correct first interface.
    selection with an explicit ambiguous-wait fallback.
 8. Land the minimal
    [telemetry integration test application](telemetry-integration-test-app.md),
-   proving that CPU samples, spans, and task dumps from one real trace reach
-   both parsing paths.
-9. Extend that application only with the cases needed while adding task-scoped
-   mixed-flamegraph construction using CPU frequency metadata and
+   proving that one self-described, mixed CPU/span/task-dump trace reaches both
+   parsing paths.
+9. Use that trace's declared CPU/wait weights while adding task-scoped
+   mixed-flamegraph construction with CPU frequency metadata and
    inverse-probability task-dump weights.
 10. Keep old traces on their current unweighted task-dump rendering path.
 
@@ -652,13 +652,13 @@ sampling noise. Task scope is the correct first interface.
 The minimal
 [telemetry integration test application](telemetry-integration-test-app.md)
 provides one runnable workload and one local/aggregate integration test. It
-covers CPU profiling, spans, and task dumps without attempting to model every
-task-dump case up front.
+mixes CPU profiling and task dumps under the same nested spans and describes
+the expected structure through names and trace events.
 
 That tracer bullet must land before task-dump mixed flamegraphs. Flamegraph
-work should extend the same app with only the weighted-wait and branch cases it
-needs. No sidecar manifest or task-dump-specific test application should be
-introduced.
+work should consume its declared weights and add a branch case only if the
+end-to-end test needs one. No sidecar manifest or task-dump-specific test
+application should be introduced.
 
 ## Test Plan
 
@@ -692,14 +692,15 @@ introduced.
 
 ### Integration conformance
 
-The prerequisite application initially asserts only that CPU profiles, spans,
-and task dumps from one task survive both parsing paths. As part of
-mixed-flamegraph implementation, extend that same trace with the smallest
-weighted CPU/wait scenario needed to prove:
+The prerequisite application encodes its CPU/wait weights and enclosing spans
+in the trace itself. As part of mixed-flamegraph implementation, consume those
+declarations to prove:
 
 - frequency and inverse-probability weights are applied;
-- the expected CPU and async-idle symbols appear in the mixed graph; and
-- local and aggregate parsing agree on those symbols.
+- the expected CPU and async-idle symbols appear in the mixed graph;
+- the whole-cycle and inner-subtree mixes match their declared relationships;
+  and
+- local and aggregate parsing agree on the declared structure.
 
 Keep timeout, cancellation, ambiguous-peer selection, sampler convergence, and
 worker coverage in the focused tests above unless an end-to-end regression
