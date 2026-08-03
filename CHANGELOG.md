@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc1.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc1...dial9-v0.5.0-rc1.1) - 2026-08-03
+
+### Added
+
+- dynamic field chart panels ([#741](https://github.com/dial9-rs/dial9/pull/741))
+- *(metrique)* single-event span format (packed end + span.duration role) ([#736](https://github.com/dial9-rs/dial9/pull/736))
+- *(tokio)* attach a runtime from a shared Dial9Handle ([#732](https://github.com/dial9-rs/dial9/pull/732))
+- re-export dial9-trace-format's event-authoring and decode surface ([#734](https://github.com/dial9-rs/dial9/pull/734))
+- *(viewer)* add virtual trace simulator ([#738](https://github.com/dial9-rs/dial9/pull/738))
+- [**breaking**] metrique → dial9 sink ([#723](https://github.com/dial9-rs/dial9/pull/723))
+- *(s3)* Enable async S3 client construction ([#702](https://github.com/dial9-rs/dial9/pull/702))
+- *(viewer)* Tokio Stats "Scheduling Delay" rollup + focus deep-link ([#715](https://github.com/dial9-rs/dial9/pull/715))
+- *(viewer)* add privacy-preserving session measurement ([#726](https://github.com/dial9-rs/dial9/pull/726))
+
+### Fixed
+
+- *(docs)* point manual attach at dial9::block_on ([#739](https://github.com/dial9-rs/dial9/pull/739))
+- *(core)* implement Debug for Recorder, FlushContext, and perf ([#727](https://github.com/dial9-rs/dial9/pull/727))
+- *(release)* build the dial9 bin with its feature, fix Windows paths ([#717](https://github.com/dial9-rs/dial9/pull/717))
+
+### Other
+
+- *(metrique)* drop version from tokio-telemetry dev-dep ([#750](https://github.com/dial9-rs/dial9/pull/750))
+- *(s3)* [**breaking**] extract the S3 uploader into a dial9-s3 crate ([#742](https://github.com/dial9-rs/dial9/pull/742))
+- document segment metadata configuration ([#731](https://github.com/dial9-rs/dial9/pull/731))
+- *(trace-format)* identity fast path for repeated dynamic Schema handles ([#729](https://github.com/dial9-rs/dial9/pull/729))
+- add dial9-utils readme ([#747](https://github.com/dial9-rs/dial9/pull/747))
+- Add Axum integrations to dial9-util ([#696](https://github.com/dial9-rs/dial9/pull/696))
+
 ### Changed
 
 - S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-destinations-s3` crate. The `worker-s3` feature is unchanged.
