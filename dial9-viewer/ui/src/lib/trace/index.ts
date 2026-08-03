@@ -25,6 +25,7 @@ export {
   SEGMENT_SERVICE_KEY,
   readKeyDerivedIdentity,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
 } from "./segment-metadata.js";
 export type { IdentityField, ReconciledIdentity } from "./segment-metadata.js";

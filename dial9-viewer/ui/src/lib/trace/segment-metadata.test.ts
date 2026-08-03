@@ -14,6 +14,7 @@ import {
   SEGMENT_SERVICE_KEY,
   readKeyDerivedIdentity,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
 } from "./segment-metadata.js";
 
@@ -27,6 +28,9 @@ async function parseFixture(relUrl: string): Promise<ParsedTrace> {
   return parseTraceBuffer(raw);
 }
 
+const trace = (entries: Array<[string, string]>): ParsedTrace =>
+  ({ segmentMetadata: new Map(entries) }) as unknown as ParsedTrace;
+
 describe("segment-metadata key contract", () => {
   it("pins the writer-side key names literally", () => {
     // These match the dial9 writer/source convention (dial9-utils S3 source,
@@ -37,9 +41,6 @@ describe("segment-metadata key contract", () => {
 });
 
 describe("readSegmentIdentity", () => {
-  const trace = (entries: Array<[string, string]>): ParsedTrace =>
-    ({ segmentMetadata: new Map(entries) }) as unknown as ParsedTrace;
-
   it("returns {} for a null trace", () => {
     expect(readSegmentIdentity(null)).toEqual({});
   });
@@ -60,6 +61,25 @@ describe("readSegmentIdentity", () => {
     expect(
       readSegmentIdentity(trace([["process.available_parallelism", "8"]])),
     ).toEqual({});
+  });
+});
+
+describe("readSegmentMetadataEntries", () => {
+  it("returns every entry sorted by key without dropping empty values", () => {
+    const value = trace([
+      ["service", "checkout-api"],
+      ["empty", ""],
+      ["cpu.profile.backend", "perf"],
+      ["host", "i-0abc123"],
+    ]);
+
+    expect(readSegmentMetadataEntries(value)).toEqual([
+      ["cpu.profile.backend", "perf"],
+      ["empty", ""],
+      ["host", "i-0abc123"],
+      ["service", "checkout-api"],
+    ]);
+    expect(readSegmentMetadataEntries(null)).toEqual([]);
   });
 });
 
