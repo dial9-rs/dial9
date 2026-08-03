@@ -694,6 +694,8 @@ mod tests {
                 worker_id: 1,
                 task_id: 11,
                 spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
             },
             PollRecord {
                 start: MonoNs(0),
@@ -701,6 +703,8 @@ mod tests {
                 worker_id: 2,
                 task_id: 22,
                 spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
             },
         ];
         let resolution = resolve(&enters, &exits, &[close(300, 4, 1)], &polls);

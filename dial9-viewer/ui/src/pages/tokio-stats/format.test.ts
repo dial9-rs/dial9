@@ -6,6 +6,7 @@ import {
   datetimeToNs,
   formatDuration,
   nsToDatetime,
+  schedulingDelayEvidenceLabel,
   thresholdNs,
 } from "./format.js";
 
@@ -58,5 +59,20 @@ describe("thresholdNs (log-scale slider)", () => {
     expect(thresholdNs("0")).toBe(1e6); // default -> 1ms
     expect(thresholdNs("-1")).toBe(100000); // floor -> 100us (server floor)
     expect(thresholdNs("3")).toBe(1e9); // ceiling -> 1s
+  });
+});
+
+describe("schedulingDelayEvidenceLabel", () => {
+  it("maps each wire kind to its human label", () => {
+    expect(schedulingDelayEvidenceLabel("spawn")).toBe("spawn → first poll");
+    expect(schedulingDelayEvidenceLabel("wake")).toBe("wake → poll");
+    expect(schedulingDelayEvidenceLabel("wake_during_poll")).toBe(
+      "poll end → next poll",
+    );
+  });
+
+  it("falls back for an unknown or absent kind", () => {
+    expect(schedulingDelayEvidenceLabel(undefined)).toBe("unknown evidence");
+    expect(schedulingDelayEvidenceLabel("bogus")).toBe("unknown evidence");
   });
 });

@@ -316,6 +316,9 @@ export type {
   FlamegraphResponse,
   PollDurationBar,
   PollExemplar,
+  SchedulingDelay,
+  SchedulingDelayCoverage,
+  SchedulingDelayKind,
   ScopeEcho,
   SpanDurationBucket,
   SpanStatsQuery,
@@ -325,6 +328,7 @@ export type {
   TimeComposition,
   TokioStatsQuery,
   TokioStatsResponse,
+  WorkerStats,
 } from "./aggregates.js";
 
 // span_explorer.ts - the frozen Span Explorer helpers: catalog sorting, the

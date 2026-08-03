@@ -6,7 +6,9 @@ import type {
   PollExemplar,
   SpawnLocStats,
   TokioStatsResponse,
+  WorkerStats,
 } from "../../lib/trace/index.js";
+import { hostBusyPct, hostWorkerCounts } from "../../lib/trace/tokio_stats_api.js";
 
 /** Per-spawn-location render model (one row of the single-period table). */
 export interface LocStats {
@@ -243,6 +245,85 @@ export function buildDiffModel(
     improvements,
     newOffenders,
   };
+}
+
+// ─── Worker activity ─────────────────────────────────────────────────────
+
+/** Sort keys offered by the "Worker activity" host-row headers. */
+export type WorkerSortKey =
+  | "host"
+  | "numWorkers"
+  | "busyPct"
+  | "totalPolls"
+  | "notablePolls"
+  | "worstPollNs";
+
+/** One host (runtime) row, aggregating its workers. */
+export interface HostRow {
+  host: string;
+  /** This host's workers, for the expanded detail rows. */
+  workers: WorkerStats[];
+  totalPolls: number;
+  notablePolls: number;
+  /** POOLED busyness (Σ busy / Σ observed), NOT a mean of per-worker pcts. */
+  busyPct: number;
+  worstPollNs: number;
+  /** Observed workers vs configured (max id + 1). */
+  activeWorkers: number;
+  numWorkers: number;
+}
+
+/**
+ * Group `worker_activity` by host into sorted host rows. Busyness is the pooled
+ * ratio from the frozen `hostBusyPct` (weighting each worker by observed time),
+ * so a sparsely-sampled worker cannot read as spuriously busier than one doing
+ * more work. Returns `[]` when the response carries no worker activity.
+ */
+export function buildHostRows(
+  data: TokioStatsResponse | null | undefined,
+  sortKey: WorkerSortKey,
+  sortDesc: boolean,
+): HostRow[] {
+  const workers = data?.worker_activity ?? [];
+  if (!workers.length) return [];
+
+  const byHost = new Map<string, WorkerStats[]>();
+  for (const w of workers) {
+    const host = w.host || "(unknown)";
+    const bucket = byHost.get(host);
+    if (bucket) bucket.push(w);
+    else byHost.set(host, [w]);
+  }
+
+  const rows: HostRow[] = [...byHost].map(([host, ws]) => {
+    const counts = hostWorkerCounts(ws);
+    return {
+      host,
+      workers: ws,
+      totalPolls: ws.reduce((sum, w) => sum + w.total_polls, 0),
+      notablePolls: ws.reduce((sum, w) => sum + w.notable_polls, 0),
+      busyPct: hostBusyPct(ws),
+      worstPollNs: Math.max(...ws.map((w) => w.worst_poll_ns || 0)),
+      activeWorkers: counts.active,
+      numWorkers: counts.total,
+    };
+  });
+
+  rows.sort((a, b) => {
+    const av = a[sortKey];
+    const bv = b[sortKey];
+    const cmp =
+      typeof av === "string" && typeof bv === "string"
+        ? av.localeCompare(bv)
+        : Number(av) - Number(bv);
+    return sortDesc ? -cmp : cmp;
+  });
+  return rows;
+}
+
+/** A host's workers ordered for the expanded detail rows (busiest first). */
+export function sortedWorkers(row: HostRow): WorkerStats[] {
+  return [...row.workers].sort((a, b) => b.busy_pct - a.busy_pct);
 }
 
 // Re-export for tests that build synthetic exemplars.
