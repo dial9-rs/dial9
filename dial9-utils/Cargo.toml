@@ -7,6 +7,9 @@ repository.workspace = true
 description = "Opt-in integrations for dial9"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 missing_debug_implementations = "warn"
