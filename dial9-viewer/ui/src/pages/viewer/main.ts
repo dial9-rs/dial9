@@ -145,6 +145,7 @@ function boot(): void {
     toastsRef?.show({ id: "t33-seam", type: "info", message });
   };
   const shell = mountShell(root, store, {
+    esc,
     toggleHelp: () => help.toggle(),
     sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
     // Key-derived svc/host from the browser handoff. A boot constant: the
