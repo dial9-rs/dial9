@@ -937,7 +937,9 @@ describe("buildSpanData", () => {
     const workerSpans = {
       0: { polls: [{ start: 100, end: 200, taskId: 1 }] },
     };
-    const customEvents = [{
+    // `any` at the boundary (see the file header): the second half of this test
+    // reassigns workerId, which a literal `null` would otherwise pin to `null`.
+    const customEvents: any[] = [{
       name: "producer:Work",
       timestamp: 170,
       fields: {},

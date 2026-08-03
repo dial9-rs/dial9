@@ -11,9 +11,10 @@ export async function fetchRawTraceBytes(
 ): Promise<ArrayBuffer> {
   const url = new URL(traceUrl, origin);
   const sameOrigin = url.origin === new URL(origin).origin;
-  const response = await request(url, {
-    headers: sameOrigin ? headers : undefined,
-  });
+  // Cross-origin fetches must not carry our auth headers. Omit the key
+  // entirely rather than setting it to `undefined`, which the project's
+  // `exactOptionalPropertyTypes` rejects.
+  const response = await request(url, sameOrigin ? { headers } : {});
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} fetching raw trace`);
   }

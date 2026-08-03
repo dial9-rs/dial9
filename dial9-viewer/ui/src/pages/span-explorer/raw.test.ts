@@ -5,7 +5,10 @@ import { fetchRawTraceBytes, rawStatsSummary, requestRawSpanStats } from "./raw"
 describe("fetchRawTraceBytes", () => {
   it("forwards compressed bytes unchanged and keeps credentials same-origin", async () => {
     const gzip = new Uint8Array([0x1f, 0x8b, 0x01, 0x02]);
-    const request = vi.fn(async () => new Response(gzip));
+    const request = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+        new Response(gzip),
+    );
 
     const result = await fetchRawTraceBytes(
       "/api/object?key=trace.bin.gz",
@@ -21,7 +24,10 @@ describe("fetchRawTraceBytes", () => {
   });
 
   it("does not send Dial9 credentials cross-origin", async () => {
-    const request = vi.fn(async () => new Response(new Uint8Array([1])));
+    const request = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+        new Response(new Uint8Array([1])),
+    );
     await fetchRawTraceBytes(
       "https://example.test/trace.bin",
       "http://viewer.test",
@@ -79,7 +85,6 @@ describe("rawStatsSummary", () => {
     expect(
       rawStatsSummary({
         span_types: [{ count: 7 }, { count: 3 }] as never,
-        coverage: undefined,
         types_truncated: true,
         total_span_types_tracked: 1_200,
         types_overflow_instances: 42,
