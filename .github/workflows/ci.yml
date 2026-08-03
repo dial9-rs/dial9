@@ -346,7 +346,7 @@ jobs:
             -p dial9-perf-self-profile \
             -p dial9-macro \
             -p dial9-tokio-telemetry \
-            -p dial9-metrique
+            -p dial9-metrique \
             -p dial9-destinations-s3
 
   package:
