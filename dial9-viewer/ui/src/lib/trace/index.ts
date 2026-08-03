@@ -245,6 +245,10 @@ export type {
   StoredCredentials,
 } from "./creds.js";
 
+// session.ts - opaque tab-scoped request correlation for same-origin APIs.
+export { Dial9Session } from "./session.js";
+export type { Dial9SessionApi, SessionStorageLike } from "./session.js";
+
 // api_format.ts - aggregated-mode (`?api=1`) display/format helpers,
 // re-exported from the legacy-shared flamegraph_api.js (+
 // formatHumanDuration from the frozen format.js) so both UI generations
