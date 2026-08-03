@@ -14,6 +14,7 @@ function vm(over: Partial<TracksViewModel> = {}): TracksViewModel {
     viewEnd: 1000,
     axis: {} as AxisInputs,
     cpu: {} as CpuInputs,
+    fieldCharts: [],
     trackOrder: [],
     collapsed: {},
     emptyTracks: new Set<TrackId>(),
@@ -69,5 +70,31 @@ describe("visibleTracks", () => {
       }),
     );
     expect(shown).toEqual(["timeline", "lanes", "events", "spans", "cpu"]);
+  });
+
+  it("includes URL-defined field charts in the manageable order", () => {
+    expect(
+      ids(
+        vm({
+          fieldCharts: [
+            {
+              id: "fc-1",
+              eventName: "runtime.metrics",
+              fieldName: "jobs",
+              kind: "counter",
+            },
+          ],
+          trackOrder: ["fc-1", "events"],
+        }),
+      ),
+    ).toEqual([
+      "timeline",
+      "lanes",
+      "fc-1",
+      "events",
+      "cpu",
+      "queue",
+      "spans",
+    ]);
   });
 });
