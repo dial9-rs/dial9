@@ -1,4 +1,4 @@
-use crate::storage::{EphemeralS3Config, LocalBackend, S3Backend, StorageBackend};
+use crate::storage::{LocalBackend, StorageBackend};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
@@ -11,14 +11,24 @@ use tower_http::cors::CorsLayer;
 
 mod browse;
 mod buckets;
+#[cfg(feature = "s3")]
 mod check;
 mod config;
+#[cfg(feature = "s3")]
+pub mod credentials;
+#[cfg(not(feature = "s3"))]
+#[path = "credentials_disabled.rs"]
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
 pub(crate) mod fold_stream;
 pub(crate) mod metrics;
 mod prefixes;
+#[cfg(feature = "s3")]
+mod s3;
+#[cfg(not(feature = "s3"))]
+#[path = "s3_disabled.rs"]
+mod s3;
 mod services;
 pub(crate) mod span_stats;
 pub(crate) mod tokio_stats;
@@ -27,27 +37,10 @@ mod upload;
 
 pub use upload::{UploadLimits, UploadStore};
 
-use credentials::{CredError, CredSource, MaybeCreds};
+use credentials::MaybeCreds;
 
-/// Detect a bucket's region via `HeadBucket`, reading `bucket_region()` on
-/// success and the `x-amz-bucket-region` response header on the redirect error
-/// that S3 returns when the client's region doesn't match the bucket's.
-///
-/// Shared by startup region detection ([`crate::build_app`]) and the
-/// `/api/credentials/check` endpoint.
-pub(crate) async fn region_from_head_bucket(
-    client: &aws_sdk_s3::Client,
-    bucket: &str,
-) -> Option<String> {
-    match client.head_bucket().bucket(bucket).send().await {
-        Ok(resp) => resp.bucket_region().map(|r| r.to_string()),
-        Err(err) => err.raw_response().and_then(|r| {
-            r.headers()
-                .get("x-amz-bucket-region")
-                .map(|v| v.to_string())
-        }),
-    }
-}
+#[cfg(feature = "s3")]
+pub(crate) use s3::region_from_head_bucket;
 
 // Embed ONLY the built artifact set (`npm run build` output), never sources,
 // tests, or node_modules. A cargo-only checkout still compiles: the committed
@@ -180,12 +173,14 @@ pub struct AppState {
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
-    pub ephemeral_s3: Option<EphemeralS3Config>,
+    #[cfg(feature = "s3")]
+    pub ephemeral_s3: Option<crate::storage::EphemeralS3Config>,
     /// Mints credentials for the assume-role path (`x-dial9-aws-role-arn`). When
     /// `None`, role-arn requests are refused (the server has no identity wired to
     /// do the assuming); production sets the STS-backed assumer, tests inject a
     /// fake. Independent of `allow_byo_creds` so a deployment can offer one path,
     /// both, or neither.
+    #[cfg(feature = "s3")]
     pub role_assumer: Option<Arc<dyn credentials::RoleAssumer>>,
     /// Destination for BYOC aggregate part-files: an operator-owned S3 bucket
     /// (persistent) or a process-local temporary directory (the default,
@@ -220,34 +215,15 @@ impl AppState {
             uploads: None,
             allow_byo_creds: false,
             time_partitioned_source: false,
+            #[cfg(feature = "s3")]
             ephemeral_s3: None,
+            #[cfg(feature = "s3")]
             role_assumer: None,
             agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
             bucket_filter: "dial9".to_string(),
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
-    }
-
-    /// Build an `AppState` backed by an S3 bucket, with automatic region
-    /// detection, bring-your-own-credentials support, and the assume-role
-    /// credential path enabled.
-    ///
-    /// This is the high-level entry point for embedders who want to serve
-    /// traces from S3 without replicating the CLI's setup logic:
-    ///
-    /// ```ignore
-    /// let state = AppState::from_bucket("my-traces", None).await;
-    /// let app = dial9_viewer::server::router(state);
-    /// // … customize app, then bind …
-    /// ```
-    pub async fn from_bucket(bucket: impl Into<String>, prefix: Option<String>) -> Self {
-        let bucket = bucket.into();
-        let backend = Arc::new(crate::s3_backend_for(&bucket).await);
-        let assumer = credentials::StsRoleAssumer::from_env().await;
-        Self::new(backend, Some(bucket), prefix)
-            .with_byo_creds(true)
-            .with_role_assumer(Arc::new(assumer))
     }
 
     /// Build an `AppState` backed by a local directory.
@@ -294,21 +270,6 @@ impl AppState {
     /// discovery without enabling AWS credential handling.
     pub fn with_time_partitioned_source(mut self) -> Self {
         self.time_partitioned_source = true;
-        self
-    }
-
-    /// Inject ephemeral-S3 plumbing (test seam; production leaves this unset).
-    #[doc(hidden)]
-    pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
-        self.ephemeral_s3 = Some(cfg);
-        self
-    }
-
-    /// Enable the assume-role credential path with the given assumer. Production
-    /// passes an [`crate::server::credentials::StsRoleAssumer`]; tests inject a
-    /// fake. Without this, `x-dial9-aws-role-arn` requests are refused.
-    pub fn with_role_assumer(mut self, assumer: Arc<dyn credentials::RoleAssumer>) -> Self {
-        self.role_assumer = Some(assumer);
         self
     }
 
@@ -393,139 +354,6 @@ impl AppState {
             Ok(self.agg.clone())
         }
     }
-
-    /// Pick the storage backend for a request given its credential source.
-    ///
-    /// Supplying credentials is always optional, and the two credentialed
-    /// transports are alternatives (the extractor already rejected supplying
-    /// both):
-    /// - malformed/incomplete/conflicting headers → 400
-    /// - [`CredSource::Static`] (and BYO enabled) → ephemeral S3 backend signed
-    ///   with the user's keys directly
-    /// - [`CredSource::AssumeRole`] (and an assumer wired) → assume the role with
-    ///   the server's own identity via STS, then build the ephemeral backend from
-    ///   the minted credentials
-    /// - [`CredSource::Default`] → the server's default backend
-    ///
-    /// When BYO is disabled (local-dir mode) any supplied credentials are
-    /// ignored and the default backend is used. A role-arn request against a
-    /// server with no assumer wired is a 400 (the feature is off here).
-    ///
-    /// The ephemeral client is pinned to the region carried on the request (the
-    /// `x-dial9-aws-region` header or `aws_region` query param). A cross-region
-    /// bucket therefore requires the correct region to ride along — the UI
-    /// detects it once via `/api/credentials/check` and then keeps it in the
-    /// stored credentials and the URL, so every subsequent request carries it.
-    /// A request that reaches the wrong regional endpoint fails with
-    /// [`StorageError::WrongRegion`] rather than an opaque error.
-    ///
-    /// [`StorageError::WrongRegion`]: crate::storage::StorageError::WrongRegion
-    pub async fn resolve(
-        &self,
-        creds: MaybeCreds,
-    ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
-        self.resolve_with_region(creds, None).await
-    }
-
-    /// Resolve a backend for aggregate reads, honoring a deep-linked region even
-    /// when the request uses the server's ambient credentials. Explicit BYO or
-    /// assumed-role credentials already carry their own validated region.
-    async fn resolve_with_region(
-        &self,
-        creds: MaybeCreds,
-        ambient_region: Option<&str>,
-    ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
-        let parsed = match creds.0 {
-            Ok(parsed) => parsed,
-            Err(
-                e @ (CredError::Incomplete
-                | CredError::Malformed
-                | CredError::InvalidRegion
-                | CredError::ConflictingCredentials
-                | CredError::InvalidRoleArn),
-            ) => {
-                return Err((StatusCode::BAD_REQUEST, e.message().to_string()));
-            }
-        };
-
-        match parsed {
-            CredSource::Static(temp) if self.allow_byo_creds => {
-                self.log_chosen_identity(&temp, "bring-your-own credentials");
-                Ok(self.ephemeral_backend(temp))
-            }
-            CredSource::AssumeRole { role_arn, region } if self.allow_byo_creds => {
-                let temp = self.assume(&role_arn, region.as_deref()).await?;
-                self.log_chosen_identity(&temp, "assumed-role credentials");
-                Ok(self.ephemeral_backend(temp))
-            }
-            // BYO disabled (local-dir) — credentials are meaningless here.
-            CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
-            CredSource::Default => {
-                if self.allow_byo_creds {
-                    if let Some(region) = ambient_region {
-                        tracing::debug!(%region, "using ambient credentials in request region");
-                        return Ok(Arc::new(S3Backend::from_env_in_region(region).await));
-                    }
-                    tracing::debug!(
-                        "no x-dial9-aws-* credentials on request; using server's default identity"
-                    );
-                }
-                Ok(self.backend.clone())
-            }
-        }
-    }
-
-    /// Assume `role_arn` (with the server's own identity) and return the minted
-    /// credentials. Shared by `resolve` and the `/api/credentials/check` handler
-    /// so the single assume-and-map-to-error policy can't drift between them:
-    ///
-    /// - no assumer wired → 400 (the feature is off here; never silently fall
-    ///   back to the ambient identity, which would read the *wrong* account).
-    /// - STS failure → 401 with a generic body; the concrete cause (which can
-    ///   name the role/account) is logged server-side, never reflected.
-    pub(crate) async fn assume(
-        &self,
-        role_arn: &credentials::RoleArn,
-        region: Option<&str>,
-    ) -> Result<credentials::TempCredentials, (StatusCode, String)> {
-        let Some(assumer) = &self.role_assumer else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "this server does not support assume-role credentials".to_string(),
-            ));
-        };
-        tracing::info!(role_arn = %role_arn.as_str(), "assuming role for request");
-        assumer.assume_role(role_arn, region).await.map_err(|e| {
-            tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                "could not assume the requested role".to_string(),
-            )
-        })
-    }
-
-    /// Build an ephemeral S3 backend from temporary credentials (shared by the
-    /// BYOC and assume-role paths — both end here once they hold creds).
-    fn ephemeral_backend(&self, temp: credentials::TempCredentials) -> Arc<dyn StorageBackend> {
-        Arc::new(S3Backend::from_credentials(
-            temp.credentials,
-            temp.region.as_deref(),
-            &self.ephemeral_s3,
-        ))
-    }
-
-    /// Log which identity served the request — the access-key-id PREFIX only,
-    /// never the secret/token — so it is unambiguous in the logs whether the
-    /// user's keys, an assumed role, or the server's ambient identity made the
-    /// S3 call.
-    fn log_chosen_identity(&self, temp: &credentials::TempCredentials, via: &str) {
-        let akid_prefix: String = temp.credentials.access_key_id().chars().take(8).collect();
-        tracing::info!(
-            akid_prefix = %akid_prefix,
-            region = temp.region.as_deref().unwrap_or("(default)"),
-            "using {via} for request"
-        );
-    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -581,13 +409,9 @@ fn api_router(state: AppState) -> Router {
         .route("/upload", axum::routing::post(upload::upload_trace))
         .layer(DefaultBodyLimit::max(upload_body_limit));
 
-    Router::new()
+    let router = Router::new()
         .route("/config", axum::routing::get(config::get_config))
         .route("/buckets", axum::routing::get(buckets::list_buckets))
-        .route(
-            "/credentials/check",
-            axum::routing::post(check::check_credentials),
-        )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
         .route("/services", axum::routing::get(services::list_services))
         .route("/browse", axum::routing::get(browse::browse))
@@ -604,7 +428,9 @@ fn api_router(state: AppState) -> Router {
             "/span-stats",
             axum::routing::get(span_stats::get_span_stats),
         )
-        .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
+        .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded));
+    let router = s3::add_routes(router);
+    router
         .merge(upload_route)
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.

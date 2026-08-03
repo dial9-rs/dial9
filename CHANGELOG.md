@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-destinations-s3` crate. The `worker-s3` feature is unchanged.
+- **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`
+  feature. The `dial9` crate keeps its empty default feature set, while `cli`
+  retains the existing S3-enabled binary. For a local-only viewer without S3
+  or the AWS SDK, use `dial9-viewer` directly with its default features
+  disabled.
 
 ### Added
 
