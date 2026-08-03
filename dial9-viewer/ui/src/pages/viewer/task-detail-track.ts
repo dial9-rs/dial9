@@ -457,7 +457,9 @@ export function drawTaskDetailCanvas(
       ctx.fillStyle =
         band.severity === "high" ? "#ff4444" : band.severity === "mid" ? "#ff8a65" : "#888";
       ctx.textAlign = "center";
-      ctx.fillText(formatHumanDuration(band.delayNs), band.x1 + w / 2, BAND_TOP - 6);
+      const labelY =
+        band.kind === "spawn" ? BAND_TOP + BAND_H / 2 + 3 : BAND_TOP - 6;
+      ctx.fillText(formatHumanDuration(band.delayNs), band.x1 + w / 2, labelY);
     }
 
     if (band.kind !== "wake") continue;

@@ -12,7 +12,11 @@
 //      the window markers surface a truncated/oversized window.
 
 import { describe, it, expect } from "vitest";
-import { EVENT_TYPES, type ParsedTrace } from "../../lib/trace/index.js";
+import {
+  EVENT_TYPES,
+  formatHumanDuration,
+  type ParsedTrace,
+} from "../../lib/trace/index.js";
 import { createViewerStore } from "./store.js";
 import {
   createTaskDetailDerivation,
@@ -237,6 +241,8 @@ describe("task-dump click dispatch", () => {
 
 interface DrawnText {
   text: string;
+  x: number;
+  y: number;
   font: string;
   fillStyle: string;
 }
@@ -266,9 +272,15 @@ function recordingCtx(): {
       const self = this as CanvasRenderingContext2D;
       rects.push({ x, w, fillStyle: String(self.fillStyle) });
     },
-    fillText(text: string, _x: number, _y: number) {
+    fillText(text: string, x: number, y: number) {
       const self = this as CanvasRenderingContext2D;
-      texts.push({ text, font: self.font, fillStyle: String(self.fillStyle) });
+      texts.push({
+        text,
+        x,
+        y,
+        font: self.font,
+        fillStyle: String(self.fillStyle),
+      });
     },
     strokeRect() {},
     beginPath() {},
@@ -312,6 +324,58 @@ function wakeBandModel() {
 }
 
 describe("drawTaskDetailCanvas render input", () => {
+  it("keeps the first scheduling-delay duration clear of the spawn label", () => {
+    const delayNs = 400_000;
+    const model = buildTaskDetailRenderModel({
+      data: {
+        taskId: 42,
+        polls: [
+          {
+            start: 1_400_000,
+            end: 1_500_000,
+            taskId: 42,
+            spawnLocId: "L",
+            spawnLoc: null,
+          },
+        ],
+        wakes: [],
+        pollWakes: [null],
+        pollCount: 1,
+        wakeCount: 0,
+        spawnLocation: null,
+        isInstrumented: true,
+        spawnTs: 1_000_000,
+        terminateTs: null,
+        hasTerminate: false,
+        lifetimeNs: null,
+        taskDumps: [],
+        workerIdCount: 1,
+        hasPolls: true,
+      },
+      viewStart: 0,
+      viewEnd: 10_000_000,
+      drawW: 1000,
+    });
+    const { ctx, texts } = recordingCtx();
+
+    drawTaskDetailCanvas(
+      ctx,
+      model,
+      null,
+      1000,
+      160,
+      COMPLETE_TASK_DETAIL_WINDOW,
+    );
+
+    const spawnLabel = texts.find((t) => t.text === "spawn▸");
+    const delayLabel = texts.find(
+      (t) => t.text === formatHumanDuration(delayNs),
+    );
+    expect(spawnLabel?.y).toBeLessThan(BAND_TOP);
+    expect(delayLabel?.y).toBeGreaterThan(BAND_TOP);
+    expect(delayLabel?.y).toBeLessThan(BAND_TOP + 30);
+  });
+
   it("draws a high spawn-to-first-poll delay in scheduling red", () => {
     const model = buildTaskDetailRenderModel({
       data: {
