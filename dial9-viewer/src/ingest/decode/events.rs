@@ -20,6 +20,7 @@ use super::clock::ClockOffset;
 const BASE_SPAN_FIELDS: &[&str] = &[
     "timestamp_ns",
     "worker_id",
+    "task_id",
     "span_id",
     "span_instance_id",
     "tid",
@@ -140,15 +141,17 @@ pub(crate) struct SymbolEntry {
 
 /// Legacy span enter event from old producers.
 ///
-/// `worker_id` is on the wire but intentionally unused: spans are paired
-/// enter↔exit by `span_id` alone, because a task can migrate workers between
-/// enter and exit (see `resolve_legacy_spans`).
+/// Current producers write `task_id`; legacy producers wrote `worker_id`.
+/// Spans are paired enter↔exit by `span_id` alone because a task can migrate
+/// workers between enter and exit (see `resolve_legacy_spans`).
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct LegacySpanEnterEvent {
     pub(crate) timestamp_ns: u64,
     #[serde(default)]
-    pub(crate) worker_id: u64,
+    pub(crate) worker_id: Option<u64>,
+    #[serde(default)]
+    pub(crate) task_id: Option<u64>,
     #[serde(default)]
     pub(crate) span_id: u64,
     #[serde(default)]
@@ -170,7 +173,9 @@ pub(crate) struct LegacySpanEnterEvent {
 pub(crate) struct LegacySpanExitEvent {
     pub(crate) timestamp_ns: u64,
     #[serde(default)]
-    pub(crate) worker_id: u64,
+    pub(crate) worker_id: Option<u64>,
+    #[serde(default)]
+    pub(crate) task_id: Option<u64>,
     #[serde(default)]
     pub(crate) span_id: u64,
     #[serde(default)]

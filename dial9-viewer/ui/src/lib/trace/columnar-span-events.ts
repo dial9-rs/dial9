@@ -51,6 +51,7 @@ function isBaseEnterField(k: string): boolean {
   return (
     k === "span_id" ||
     k === "worker_id" ||
+    k === "task_id" ||
     k === "parent_span_id" ||
     k === "span_name" ||
     k === "span_instance_id" ||
@@ -61,6 +62,7 @@ function isBaseExitField(k: string): boolean {
   return (
     k === "span_id" ||
     k === "worker_id" ||
+    k === "task_id" ||
     k === "span_name" ||
     k === "span_instance_id" ||
     k === "tid"
@@ -75,6 +77,9 @@ export class ColumnarSpanEvents {
   /** Number(fields.worker_id); NaN when absent (-> stays NaN, Number.isFinite
    * guards downstream, matching the fat Number(undefined) === NaN path). */
   workerId: Float64Array;
+  /** Number(fields.task_id); NaN when absent. Current producers populate this
+   * directly; workerId remains only for legacy correlation. */
+  taskId: Float64Array;
   /** index into `strings` (interned span_id); -1 = absent (-> "undefined"). */
   spanIdIdx: Int32Array;
   /** index into `strings` (interned parent_span_id); -1 = null. */
@@ -121,6 +126,7 @@ export class ColumnarSpanEvents {
     this.kind = new Uint8Array(cap);
     this.ts = new Float64Array(cap);
     this.workerId = new Float64Array(cap);
+    this.taskId = new Float64Array(cap);
     this.spanIdIdx = new Int32Array(cap);
     this.parentIdx = new Int32Array(cap);
     this.spanNameIdx = new Int32Array(cap);
@@ -226,6 +232,7 @@ export class ColumnarSpanEvents {
     this.kind = g(this.kind, Uint8Array);
     this.ts = g(this.ts, Float64Array);
     this.workerId = g(this.workerId, Float64Array);
+    this.taskId = g(this.taskId, Float64Array);
     this.spanIdIdx = g(this.spanIdIdx, Int32Array);
     this.parentIdx = g(this.parentIdx, Int32Array);
     this.spanNameIdx = g(this.spanNameIdx, Int32Array);
@@ -246,8 +253,10 @@ export class ColumnarSpanEvents {
     const i = this._len++;
     this.kind[i] = kind;
     this.ts[i] = timestamp;
-    // Number(undefined) === NaN, matching the fat path's Number(v.worker_id).
+    // Missing legacy/new correlation fields remain NaN so downstream can
+    // distinguish absence from worker/task zero.
     this.workerId[i] = v.worker_id != null ? Number(v.worker_id) : NaN;
+    this.taskId[i] = v.task_id != null ? Number(v.task_id) : NaN;
     // span_id / parent_span_id are already strings on the wire, so skip the
     // String() round-trip in the common case (it was allocating a new identical
     // string 176k times on the demo trace); fall back only for the rare

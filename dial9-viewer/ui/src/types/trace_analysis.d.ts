@@ -346,7 +346,7 @@ declare module "*/trace_analysis.js" {
     end: number;
     spanId: string;
     spanName: string;
-    /** User-defined span fields (base worker/span fields excluded). */
+    /** User-defined span fields (base worker/task/span fields excluded). */
     fields: Record<string, DecodedFieldValue>;
     /** Only set for explicit parents; null for most #[instrument] spans. */
     parentSpanId: string | null;
@@ -355,9 +355,9 @@ declare module "*/trace_analysis.js" {
     /** 0 for roots, +1 per ancestor (computed from the parent chain). */
     depth: number;
     /**
-     * The owning task, resolved from the poll covering the first segment's
-     * (worker, start). null when buildSpanData was called without workerSpans
-     * or no poll covers the enter.
+     * The owning task, read directly from current span events or, for legacy
+     * traces, resolved from the poll covering the first segment's
+     * (worker, start). null when neither source can identify a task.
      */
     taskId: number | null;
   }

@@ -11,7 +11,7 @@ import { parseTraceBuffer } from "./load.js";
 import { buildSpanData, buildWorkerSpans } from "./analysis.js";
 import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
-import { ColumnarSpanEvents } from "./columnar-span-events.js";
+import { ColumnarSpanEvents, SPAN_KIND } from "./columnar-span-events.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
 
 let raw: Uint8Array;
@@ -68,5 +68,40 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     }
 
     expect([...col.childrenByParent.entries()].sort()).toEqual([...fat.childrenByParent.entries()].sort());
+  });
+
+  it("uses direct task_id without requiring a span worker_id", () => {
+    const workerSpans = {
+      0: { polls: [{ start: 900, end: 1100, taskId: 99 }], parks: [], actives: [] },
+      1: {
+        polls: [
+          { start: 900, end: 1100, taskId: 42 },
+          { start: 4000, end: 4100, taskId: 42 },
+        ],
+        parks: [],
+        actives: [],
+      },
+    } as never;
+    const spanEvents = new ColumnarSpanEvents();
+    spanEvents.push(SPAN_KIND.Enter, 1000, {
+      task_id: 42,
+      span_id: 1,
+      parent_span_id: null,
+      span_name: "request",
+    });
+    spanEvents.push(SPAN_KIND.Exit, 5000, { task_id: 42, span_id: 1, span_name: "request" });
+    spanEvents.push(SPAN_KIND.Close, 5100, { span_id: 1 });
+
+    const result = buildSpanDataColumnar(
+      spanEvents,
+      ColumnarWorkerSpans.fromWorkerSpans(workerSpans),
+    );
+    const span = result.columnarSpans!.at(0);
+    expect(span.taskId).toBe(42);
+    expect(span.segments).toEqual([
+      { start: 1000, end: 1100, workerId: 1 },
+      { start: 4000, end: 4100, workerId: 1 },
+    ]);
+    expect(span.fields.task_id).toBeUndefined();
   });
 });

@@ -46,6 +46,7 @@ describe("push base-field split", () => {
     const s = new ColumnarSpanEvents();
     s.push(SPAN_KIND.Enter, 100, {
       worker_id: 3,
+      task_id: 42,
       span_id: "s1",
       parent_span_id: "s0",
       span_name: "handle",
@@ -54,6 +55,7 @@ describe("push base-field split", () => {
     });
     expect(spanId(s, 0)).toBe("s1");
     expect(parentId(s, 0)).toBe("s0");
+    expect(s.taskId[0]).toBe(42);
     expect(extrasOf(s, 0)).toEqual({ request_id: "r1", route: "/api" });
   });
 

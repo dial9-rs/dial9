@@ -22,6 +22,7 @@ interface SpanRec {
   spanName: string;
   fields: Fields;
   parentSpanId: string | null;
+  taskId: number | null;
   segments: Seg[];
 }
 
@@ -62,8 +63,9 @@ export function buildSpanDataColumnar(
   spanEvents: ColumnarSpanEvents,
   store: ColumnarWorkerSpans
 ): SpanData {
-  // spanId -> {timestamp, workerId} of the currently-open enter.
-  const openEnters = new Map<string, { timestamp: number; workerId: number }>();
+  // spanId -> correlation data of the currently-open enter. New traces carry
+  // taskId directly; workerId remains for the old-trace fallback.
+  const openEnters = new Map<string, { timestamp: number; workerId: number; taskId: number | null }>();
   // Live span records keyed by spanId; streamed to the builder on Close / EOT.
   const spanMap = new Map<string, SpanRec>();
   // Lightweight spanId -> parentSpanId (strings only), for the depth walk -
@@ -84,7 +86,11 @@ export function buildSpanDataColumnar(
       const start = rec.segments[0]!.start;
       const end = rec.segments[rec.segments.length - 1]!.end;
       const seg0 = rec.segments[0]!;
-      const taskId = store.resolveSpanTaskAt(seg0.workerId, seg0.start);
+      const taskId =
+        rec.taskId ??
+        (Number.isFinite(seg0.workerId)
+          ? store.resolveSpanTaskAt(seg0.workerId, seg0.start)
+          : null);
       const slot = taskId != null ? csr.slotOf.get(taskId) : undefined;
       const segments = slot !== undefined ? reconstructSpanSegments(rec.segments, csr, slot) : rec.segments;
       let activeNs = 0;
@@ -102,16 +108,18 @@ export function buildSpanDataColumnar(
     const ts = spanEvents.ts[i]!;
 
     if (kind === SPAN_KIND.Enter) {
-      const workerId = spanEvents.workerId[i]!; // Number(v.worker_id); NaN if absent
+      const workerId = spanEvents.workerId[i]!; // NaN on current traces
+      const rawTaskId = spanEvents.taskId[i]!;
+      const taskId = Number.isFinite(rawTaskId) && rawTaskId !== 0 ? rawTaskId : null;
       const spanId = spanEvents.spanIdAt(i); // String(v.span_id)
       const parentSpanId = spanEvents.parentAt(i);
       const spanName = spanEvents.spanNameAt(i);
       const fields = spanEvents.extraFieldsAt(i);
       // Skip a duplicate enter (already open on another worker) to keep the first.
       if (openEnters.has(spanId)) continue;
-      openEnters.set(spanId, { timestamp: ts, workerId });
+      openEnters.set(spanId, { timestamp: ts, workerId, taskId });
       if (!spanMap.has(spanId)) {
-        spanMap.set(spanId, { spanName, fields, parentSpanId, segments: [] });
+        spanMap.set(spanId, { spanName, fields, parentSpanId, taskId, segments: [] });
       }
       parentBySpanId.set(spanId, parentSpanId);
     } else if (kind === SPAN_KIND.Exit) {
@@ -122,11 +130,11 @@ export function buildSpanDataColumnar(
         const exitFields = spanEvents.extraFieldsAt(i);
         let rec = spanMap.get(spanId);
         if (!rec) {
-          rec = { spanName: spanEvents.spanNameAt(i), fields: {}, parentSpanId: null, segments: [] };
+          rec = { spanName: spanEvents.spanNameAt(i), fields: {}, parentSpanId: null, taskId: enter.taskId, segments: [] };
           spanMap.set(spanId, rec);
         }
         if (Object.keys(exitFields).length > 0) rec.fields = exitFields;
-        // Pair the segment with the ENTER worker/timestamp (task can migrate).
+        // Retain the ENTER worker for the legacy poll-overlap fallback.
         rec.segments.push({ start: enter.timestamp, end: ts, workerId: enter.workerId });
       }
     } else {

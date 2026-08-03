@@ -1226,6 +1226,42 @@ describe("buildSpanData", () => {
     expect(idle, `Expected idle=7700, got ${idle}`).toBe(7700);
   });
 
+  it("prefers an on-wire task_id over legacy worker correlation", () => {
+    const workerSpans = {
+      // If the reader incorrectly falls back through worker 0, it will pick 99.
+      0: { polls: [{ start: 900, end: 1100, taskId: 99 }] },
+      1: { polls: [
+        { start: 900, end: 1100, taskId: 42 },
+        { start: 4000, end: 4100, taskId: 42 },
+      ] },
+    };
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { task_id: 42, span_id: 1, parent_span_id: null, span_name: "request" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 5000, fields: { task_id: 42, span_id: 1, span_name: "request" } },
+    ];
+
+    const { allSpans } = buildSpanData(customEvents, workerSpans);
+    const span = allSpans[0];
+    expect(span.taskId).toBe(42);
+    expect(span.segments).toEqual([
+      { start: 1000, end: 1100, workerId: 1 },
+      { start: 4000, end: 4100, workerId: 1 },
+    ]);
+    expect(span.fields.task_id).toBeUndefined();
+  });
+
+  it("preserves a direct task_id when poll data is unavailable", () => {
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { task_id: 42, span_id: 1, parent_span_id: null, span_name: "request" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 1500, fields: { task_id: 42, span_id: 1, span_name: "request" } },
+    ];
+
+    const { allSpans } = buildSpanData(customEvents);
+    expect(allSpans[0].taskId).toBe(42);
+    expect(allSpans[0].segments).toHaveLength(1);
+    expect(Number.isNaN(allSpans[0].segments[0].workerId)).toBe(true);
+  });
+
   it("without workerSpans keeps raw segments (backwards compatible)", () => {
     // Without workerSpans, behavior is unchanged: raw on-wire segment, no taskId.
     const customEvents = [
