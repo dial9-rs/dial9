@@ -324,7 +324,7 @@ function wakeBandModel() {
 }
 
 describe("drawTaskDetailCanvas render input", () => {
-  it("keeps the first scheduling-delay duration clear of the spawn label", () => {
+  it("keeps the first scheduling-delay duration above the band and clear of the spawn label", () => {
     const delayNs = 400_000;
     const model = buildTaskDetailRenderModel({
       data: {
@@ -371,9 +371,12 @@ describe("drawTaskDetailCanvas render input", () => {
     const delayLabel = texts.find(
       (t) => t.text === formatHumanDuration(delayNs),
     );
-    expect(spawnLabel?.y).toBeLessThan(BAND_TOP);
-    expect(delayLabel?.y).toBeGreaterThan(BAND_TOP);
-    expect(delayLabel?.y).toBeLessThan(BAND_TOP + 30);
+    if (spawnLabel === undefined || delayLabel === undefined) {
+      throw new Error("expected spawn and scheduling-delay labels");
+    }
+    expect(spawnLabel.y).toBeLessThan(BAND_TOP);
+    expect(delayLabel.y).toBeLessThan(BAND_TOP);
+    expect(delayLabel.y - spawnLabel.y).toBeGreaterThanOrEqual(10);
   });
 
   it("draws a high spawn-to-first-poll delay in scheduling red", () => {
