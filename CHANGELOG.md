@@ -7,38 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0-rc1.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc1...dial9-v0.5.0-rc1.1) - 2026-08-03
+## [0.5.0-rc2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc1...dial9-v0.5.0-rc2) - 2026-08-03
 
-### Added
+Two crates split out from dial9. `dial9-metrique` records
+[metrique](https://docs.rs/metrique) unit-of-work entries into the trace, and
+`dial9-destinations-s3` owns S3 upload, now reachable as `dial9::s3`. Both arrive
+through `dial9` features (`metrique-sink`, `worker-s3`), so there is nothing new
+to depend on.
 
-- dynamic field chart panels ([#741](https://github.com/dial9-rs/dial9/pull/741))
-- *(metrique)* single-event span format (packed end + span.duration role) ([#736](https://github.com/dial9-rs/dial9/pull/736))
-- *(tokio)* attach a runtime from a shared Dial9Handle ([#732](https://github.com/dial9-rs/dial9/pull/732))
-- re-export dial9-trace-format's event-authoring and decode surface ([#734](https://github.com/dial9-rs/dial9/pull/734))
-- *(viewer)* add virtual trace simulator ([#738](https://github.com/dial9-rs/dial9/pull/738))
-- [**breaking**] metrique → dial9 sink ([#723](https://github.com/dial9-rs/dial9/pull/723))
-- *(s3)* Enable async S3 client construction ([#702](https://github.com/dial9-rs/dial9/pull/702))
-- *(viewer)* Tokio Stats "Scheduling Delay" rollup + focus deep-link ([#715](https://github.com/dial9-rs/dial9/pull/715))
-- *(viewer)* add privacy-preserving session measurement ([#726](https://github.com/dial9-rs/dial9/pull/726))
+Tokio attach moved from `Recorder` to `Dial9Handle`, so several threads can clone
+one handle and each build and attach their own runtime. `dial9` also re-exports
+the event-authoring and decode surface from `dial9-trace-format`, so custom
+events no longer need a second dependency.
 
-### Fixed
+### Breaking
 
-- *(docs)* point manual attach at dial9::block_on ([#739](https://github.com/dial9-rs/dial9/pull/739))
-- *(core)* implement Debug for Recorder, FlushContext, and perf ([#727](https://github.com/dial9-rs/dial9/pull/727))
-- *(release)* build the dial9 bin with its feature, fix Windows paths ([#717](https://github.com/dial9-rs/dial9/pull/717))
+- Tokio attach moved to `Dial9Handle`. `RecorderTokioExt` and its `Recorder::attach_tokio_runtime` / `attach_tokio_runtime_with` are gone; `Dial9HandleTokioExt::attach_tokio_runtime(builder, options)` is the only way to attach ([#732](https://github.com/dial9-rs/dial9/pull/732)).
 
-### Other
+  Attach borrows the handle instead of consuming the recorder, so services can clone one handle and let each thread build and attach its own runtime. You now build the Tokio builder yourself, which also means calling `enable_all()` (previously implicit) and picking the flavor.
 
-- *(metrique)* drop version from tokio-telemetry dev-dep ([#750](https://github.com/dial9-rs/dial9/pull/750))
-- *(s3)* [**breaking**] extract the S3 uploader into a dial9-s3 crate ([#742](https://github.com/dial9-rs/dial9/pull/742))
-- document segment metadata configuration ([#731](https://github.com/dial9-rs/dial9/pull/731))
-- *(trace-format)* identity fast path for repeated dynamic Schema handles ([#729](https://github.com/dial9-rs/dial9/pull/729))
-- add dial9-utils readme ([#747](https://github.com/dial9-rs/dial9/pull/747))
-- Add Axum integrations to dial9-util ([#696](https://github.com/dial9-rs/dial9/pull/696))
+  ```rust
+  let recorder = dial9::recorder(writer).build();
 
-### Changed
+  let mut builder = tokio::runtime::Builder::new_multi_thread();
+  builder.enable_all().worker_threads(4);
+  let runtime = recorder.handle().attach_tokio_runtime(
+      builder,
+      TokioAttachOptions::builder().runtime_name("api").build(),
+  )?;
+  ```
 
-- S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-destinations-s3` crate. The `worker-s3` feature is unchanged.
+  Attaching after `graceful_shutdown` returns an error, and surviving handles go inert: `is_enabled` reports false and `enable` is a no-op.
+- `dial9-core`: `ThreadLocalEncoder::write_event` returns `io::Result<()>` instead of panicking the calling thread on a validation failure; the event is dropped and callers own reporting ([#723](https://github.com/dial9-rs/dial9/pull/723)).
+- `dial9-core`: `Dial9Handle::is_enabled` now reports whether recording currently does anything (connected AND not paused), not just connectedness ([#723](https://github.com/dial9-rs/dial9/pull/723)).
 
 ### Added
 
@@ -77,27 +78,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   let mut m = RequestMetrics { operation: "GetPet", latency_ms: 0 }
       .append_on_drop_dial9(ServiceMetrics::sink());
   ```
+- *(metrique)* single-event span format (packed end + span.duration role) ([#736](https://github.com/dial9-rs/dial9/pull/736))
+- re-export dial9-trace-format's event-authoring and decode surface ([#734](https://github.com/dial9-rs/dial9/pull/734))
+- Axum integrations for `dial9-utils` ([#696](https://github.com/dial9-rs/dial9/pull/696))
+- *(s3)* enable async S3 client construction ([#702](https://github.com/dial9-rs/dial9/pull/702))
+- *(viewer)* dynamic field chart panels ([#741](https://github.com/dial9-rs/dial9/pull/741))
+- *(viewer)* add virtual trace simulator ([#738](https://github.com/dial9-rs/dial9/pull/738))
+- *(viewer)* Tokio Stats "Scheduling Delay" rollup + focus deep-link ([#715](https://github.com/dial9-rs/dial9/pull/715))
+- *(viewer)* add privacy-preserving session measurement ([#726](https://github.com/dial9-rs/dial9/pull/726))
 
-### Breaking
+### Changed
 
-- Tokio attach moved to `Dial9Handle`. `RecorderTokioExt` and its `Recorder::attach_tokio_runtime` / `attach_tokio_runtime_with` are gone; `Dial9HandleTokioExt::attach_tokio_runtime(builder, options)` is the only way to attach ([#732](https://github.com/dial9-rs/dial9/pull/732)).
+- S3 upload lives at `dial9::s3` (was `dial9::core::pipeline::s3`), from a new `dial9-destinations-s3` crate. The `worker-s3` feature is unchanged ([#742](https://github.com/dial9-rs/dial9/pull/742)).
 
-  Attach borrows the handle instead of consuming the recorder, so a thread-per-core service can clone one handle and let each thread build and attach its own runtime. You now build the Tokio builder yourself, which also means calling `enable_all()` (previously implicit) and picking the flavor directly rather than reassigning `*t`.
+### Fixed
 
-  ```rust
-  let recorder = dial9::recorder(writer).build();
+- *(docs)* point manual attach at dial9::block_on ([#739](https://github.com/dial9-rs/dial9/pull/739))
+- *(core)* implement Debug for Recorder, FlushContext, and perf ([#727](https://github.com/dial9-rs/dial9/pull/727))
+- *(release)* build the dial9 bin with its feature, fix Windows paths ([#717](https://github.com/dial9-rs/dial9/pull/717))
 
-  let mut builder = tokio::runtime::Builder::new_multi_thread();
-  builder.enable_all().worker_threads(4);
-  let runtime = recorder.handle().attach_tokio_runtime(
-      builder,
-      TokioAttachOptions::builder().runtime_name("api").build(),
-  )?;
-  ```
+### Other
 
-  Since a handle can now outlive its recorder, attach after `graceful_shutdown` returns an error, and surviving handles go inert: `is_enabled` reports false and `enable` is a no-op.
-- `dial9-core`: `ThreadLocalEncoder::write_event` returns `io::Result<()>` instead of panicking the calling thread on a validation failure; the event is dropped and callers own reporting ([#723](https://github.com/dial9-rs/dial9/pull/723)).
-- `dial9-core`: `Dial9Handle::is_enabled` now reports whether recording currently does anything (connected AND not paused), not just connectedness. Use `handle.shared().is_some()` to ask only whether the handle is connected ([#723](https://github.com/dial9-rs/dial9/pull/723)).
+- *(trace-format)* identity fast path for repeated dynamic Schema handles ([#729](https://github.com/dial9-rs/dial9/pull/729))
+- document segment metadata configuration ([#731](https://github.com/dial9-rs/dial9/pull/731))
+- add dial9-utils readme ([#747](https://github.com/dial9-rs/dial9/pull/747))
+- *(metrique)* drop version from tokio-telemetry dev-dep ([#750](https://github.com/dial9-rs/dial9/pull/750))
 
 
 ## [0.5.0-rc1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc0...dial9-v0.5.0-rc1) - 2026-07-24
