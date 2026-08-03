@@ -118,22 +118,6 @@ describe("single-event span schema compilation", () => {
     expect(result.spanType).toBe("single-event");
   });
 
-  it("compiles an explicit span.end field", () => {
-    const result = compileSingleEventSpanSchema(
-      schema(
-        "producer:ExplicitEnd",
-        [
-          ["start", VARINT],
-          ["finish", VARINT],
-        ],
-        [ann(0, ROLE, "span.start"), ann(1, ROLE, "span.end")],
-      ),
-    );
-    expect(result.kind).toBe("layout");
-    expect(result.timing.start).toEqual({ field: "start", multiplier: 1 });
-    expect(result.timing.end).toEqual({ field: "finish", multiplier: 1 });
-  });
-
   it("accepts start + duration with no packed end timestamp", () => {
     // Two explicit quantities are enough even when nothing packs an end.
     const result = compileSingleEventSpanSchema(
@@ -275,7 +259,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: 120 }, 500)).toEqual({
@@ -290,7 +273,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: 999 }, 100)).toEqual({
@@ -303,7 +285,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: 0 }, 700)).toEqual({
@@ -316,24 +297,9 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: field("begin"),
       duration: null,
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { begin: 300 }, 450)).toEqual({
-      start: 300,
-      end: 450,
-    });
-  });
-
-  it("prefers an explicit span.end field over the packed timestamp", () => {
-    const timing = {
-      start: field("begin"),
-      duration: null,
-      end: field("finish"),
-      packedEnd: true,
-    };
-    // Packed end is 9999 and must be ignored in favor of the field.
-    expect(resolveSpanTiming(timing, { begin: 300, finish: 450 }, 9999)).toEqual({
       start: 300,
       end: 450,
     });
@@ -343,7 +309,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: field("begin"),
       duration: field("dur"),
-      end: null,
       packedEnd: false,
     };
     expect(resolveSpanTiming(timing, { begin: 300, dur: 25 }, null)).toEqual({
@@ -356,7 +321,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur", 1_000_000), // ms
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: 2 }, 10_000_000)).toEqual({
@@ -369,7 +333,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: field("begin"),
       duration: null,
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { begin: 900 }, 100)).toBeNull();
@@ -379,7 +342,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: -5 }, 500)).toBeNull();
@@ -389,7 +351,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: "banana" }, 500)).toBeNull();
@@ -400,19 +361,13 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, {}, 500)).toBeNull();
   });
 
   it("returns null when no end is available at runtime", () => {
-    const timing = {
-      start: null,
-      duration: field("dur"),
-      end: field("finish"),
-      packedEnd: false,
-    };
+    const timing = { start: null, duration: field("dur"), packedEnd: false };
     expect(resolveSpanTiming(timing, { dur: 10 }, null)).toBeNull();
   });
 
@@ -421,7 +376,6 @@ describe("single-event span timing resolution", () => {
     const timing = {
       start: null,
       duration: field("dur"),
-      end: null,
       packedEnd: true,
     };
     expect(resolveSpanTiming(timing, { dur: 120n }, 500)).toEqual({

@@ -207,7 +207,6 @@ pub(crate) struct SingleEventSpanEvent {
 enum StructuralRole {
     SpanStart,
     SpanDuration,
-    SpanEnd,
     SpanName,
     ThreadId,
     TokioTaskId,
@@ -219,7 +218,6 @@ impl StructuralRole {
         match value {
             roles::SPAN_START => Some(Self::SpanStart),
             roles::SPAN_DURATION => Some(Self::SpanDuration),
-            roles::SPAN_END => Some(Self::SpanEnd),
             roles::SPAN_NAME => Some(Self::SpanName),
             roles::THREAD_ID => Some(Self::ThreadId),
             roles::TOKIO_TASK_ID => Some(Self::TokioTaskId),
@@ -239,14 +237,13 @@ struct TimingField {
 
 /// The span's timing quantities. A span is `[start, end)`; the three
 /// quantities relate by `end = start + duration`. Any two suffice — the third
-/// is derived. `end` also comes from the packed event timestamp (in ns) when
-/// no explicit `span.end` field is present. The compiler guarantees at least
+/// is derived. The end always comes from the packed event timestamp (in ns), so
+/// a schema declares one of start or duration. The compiler guarantees at least
 /// two are resolvable; the decoder derives the rest.
 #[derive(Debug, Clone, Copy)]
 struct TimingLayout {
     start: Option<TimingField>,
     duration: Option<TimingField>,
-    end: Option<TimingField>,
     /// The packed event timestamp is available as the end (in ns).
     packed_end: bool,
 }
@@ -274,7 +271,6 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
     let mut field_roles = vec![None; schema.fields().len()];
     let mut start_index = None;
     let mut duration_index = None;
-    let mut end_index = None;
     let mut name_index = None;
     let mut thread_id_index = None;
     let mut task_id_index = None;
@@ -292,7 +288,7 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
         };
         saw_timing |= matches!(
             role,
-            StructuralRole::SpanStart | StructuralRole::SpanDuration | StructuralRole::SpanEnd
+            StructuralRole::SpanStart | StructuralRole::SpanDuration
         );
         let index = usize::from(annotation.field_index());
         if index >= schema.fields().len() {
@@ -319,7 +315,6 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
         let slot = match role {
             StructuralRole::SpanStart => &mut start_index,
             StructuralRole::SpanDuration => &mut duration_index,
-            StructuralRole::SpanEnd => &mut end_index,
             StructuralRole::SpanName => &mut name_index,
             StructuralRole::ThreadId => &mut thread_id_index,
             StructuralRole::TokioTaskId => &mut task_id_index,
@@ -370,25 +365,15 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
         },
         None => None,
     };
-    let end = match end_index {
-        Some(index) => match timing_field(index, roles::SPAN_END) {
-            Ok(field) => Some(field),
-            Err(error) => return CompiledSingleEventSpan::Invalid(error),
-        },
-        None => None,
-    };
-
-    // A span is placed from any two of {start, duration, end}. The packed
-    // event timestamp counts as an end. Verify at least two are available.
+    // A span is placed from any two of {start, duration, end}. The end is the
+    // packed event timestamp, so verify at least two are available.
     let packed_end = schema.has_timestamp();
-    let ends_available = usize::from(end.is_some()) + usize::from(packed_end);
-    let quantities = usize::from(start.is_some())
-        + usize::from(duration.is_some())
-        + usize::from(ends_available > 0);
+    let quantities =
+        usize::from(start.is_some()) + usize::from(duration.is_some()) + usize::from(packed_end);
     if quantities < 2 {
         return CompiledSingleEventSpan::Invalid(
-            "single-event span schema needs any two of span.start, span.duration, and \
-             span.end (the packed event timestamp counts as an end)"
+            "single-event span schema needs two of span.start, span.duration, and the packed \
+             event timestamp (the span end)"
                 .to_string(),
         );
     }
@@ -396,7 +381,6 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
     let timing = TimingLayout {
         start,
         duration,
-        end,
         packed_end,
     };
 
@@ -425,7 +409,6 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
     // (producers put it on the start/duration field).
     let span_type_index = start
         .or(duration)
-        .or(end)
         .map(|f| f.index)
         .expect("at least one timing field exists");
     let span_type =
@@ -526,10 +509,10 @@ impl TimingLayout {
             .map(Some)
     }
 
-    /// Resolve `(start_ns, end_ns)` from any two of start, duration, and end.
-    /// The packed event timestamp is an available end. The compiler has
-    /// already guaranteed at least two quantities are present in the schema;
-    /// this handles a value being absent at runtime (optional field) and the
+    /// Resolve `(start_ns, end_ns)` from any two of start, duration, and end,
+    /// where the end is the packed event timestamp. The compiler has already
+    /// guaranteed at least two quantities are present in the schema; this
+    /// handles a value being absent at runtime (optional field) and the
     /// arithmetic.
     fn resolve(&self, ev: &RawEvent<'_, '_>) -> Result<(u64, u64), &'static str> {
         let start = match self.start {
@@ -540,16 +523,11 @@ impl TimingLayout {
             Some(field) => Self::read(field, ev)?,
             None => None,
         };
-        // Prefer an explicit span.end field; fall back to the packed timestamp.
-        let end = match self.end {
-            Some(field) => Self::read(field, ev)?,
-            None => None,
-        }
-        .or(if self.packed_end {
+        let end = if self.packed_end {
             ev.timestamp_ns
         } else {
             None
-        });
+        };
 
         match (start, duration, end) {
             // Start + end (the common metrique-style case uses end + duration
@@ -1108,38 +1086,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_span_end_field_overrides_packed_timestamp() {
-        // start + explicit span.end, both as fields; packed ts differs and is
-        // not used for timing.
-        let schema = Schema::from_entry(schema(
-            "producer:ExplicitEnd",
-            [("start", FieldType::Varint), ("finish", FieldType::Varint)],
-            [
-                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
-                FieldAnnotation::new(1, schema_extensions::ROLE_KEY, roles::SPAN_END),
-            ],
-        ));
-        let mut encoder = Encoder::new();
-        encoder
-            .write_event(
-                &schema,
-                &[
-                    FieldValue::Varint(9_999),
-                    FieldValue::Varint(300),
-                    FieldValue::Varint(450),
-                ],
-            )
-            .unwrap();
-        let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
-        assert_eq!(decoded.single_event_spans.len(), 1);
-        let span = &decoded.single_event_spans[0];
-        assert_eq!(span.start_ns, 300);
-        assert_eq!(span.end_ns, 450);
-    }
-
-    #[test]
     fn single_timing_quantity_without_packed_end_is_invalid() {
-        // Only a duration and no end (packed or explicit) cannot place a span.
+        // A duration with no packed end cannot place a span.
         let schema = schema(
             "producer:OnlyDuration",
             [("dur", FieldType::Varint)],

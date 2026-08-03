@@ -753,7 +753,6 @@
     const SINGLE_EVENT_ROLES = Object.freeze({
         start: "span.start",
         duration: "span.duration",
-        end: "span.end",
         name: "span.name",
         threadId: "thread_id",
         taskId: "tokio.task_id",
@@ -783,8 +782,7 @@
             if (role == null) continue;
             if (
                 role === SINGLE_EVENT_ROLES.start ||
-                role === SINGLE_EVENT_ROLES.duration ||
-                role === SINGLE_EVENT_ROLES.end
+                role === SINGLE_EVENT_ROLES.duration
             ) {
                 sawTiming = true;
             }
@@ -864,26 +862,23 @@
 
             const start = timingField(SINGLE_EVENT_ROLES.start);
             const duration = timingField(SINGLE_EVENT_ROLES.duration);
-            const end = timingField(SINGLE_EVENT_ROLES.end);
-            for (const t of [start, duration, end]) {
+            for (const t of [start, duration]) {
                 if (t.error) return { kind: "invalid", error: t.error };
             }
 
-            // A span is placed from any two of {start, duration, end}; the
-            // packed event timestamp counts as an end.
+            // A span is placed from any two of {start, duration, end}; the end
+            // is the packed event timestamp.
             const packedEnd = !!schema.hasTimestamp;
-            const endsAvailable = (end.present ? 1 : 0) + (packedEnd ? 1 : 0);
             const quantities =
                 (start.present ? 1 : 0) +
                 (duration.present ? 1 : 0) +
-                (endsAvailable > 0 ? 1 : 0);
+                (packedEnd ? 1 : 0);
             if (quantities < 2) {
                 return {
                     kind: "invalid",
                     error:
-                        "single-event span schema needs any two of span.start, " +
-                        "span.duration, and span.end (the packed event timestamp " +
-                        "counts as an end)",
+                        "single-event span schema needs two of span.start, " +
+                        "span.duration, and the packed event timestamp (the span end)",
                 };
             }
 
@@ -919,8 +914,7 @@
             }
 
             // Span type rides on whichever timing field is present.
-            const spanTypeIndex = [start, duration, end].find((t) => t.present)
-                .index;
+            const spanTypeIndex = [start, duration].find((t) => t.present).index;
             const spanType = annotationValue(spanTypeIndex, DIAL9_SPAN_TYPE_KEY);
             if (spanType.error) return { kind: "invalid", error: spanType.error };
 
@@ -937,9 +931,6 @@
                         : null,
                     duration: duration.present
                         ? { field: duration.field, multiplier: duration.multiplier }
-                        : null,
-                    end: end.present
-                        ? { field: end.field, multiplier: end.multiplier }
                         : null,
                     packedEnd,
                 },
@@ -964,10 +955,10 @@
     }
 
     /**
-     * Resolve (start, end) in ns from any two of start, duration, and end.
-     * `packedEnd` is the event's packed timestamp (ns) or null. Returns null
-     * if fewer than two quantities are present at runtime or the arithmetic is
-     * invalid.
+     * Resolve (start, end) in ns from any two of start, duration, and end,
+     * where the end is the event's packed timestamp (`packedEnd`, ns, or null).
+     * Returns null if fewer than two quantities are present at runtime or the
+     * arithmetic is invalid.
      */
     function resolveSpanTiming(timing, values, packedEnd) {
         const read = (t) => {
@@ -979,8 +970,7 @@
         };
         const start = read(timing.start);
         const duration = read(timing.duration);
-        let end = read(timing.end);
-        if (end == null && timing.packedEnd) end = packedEnd;
+        const end = timing.packedEnd ? packedEnd : null;
 
         // A read that produced NaN is a malformed value, not an absent one.
         if ([start, duration, end].some((v) => Number.isNaN(v))) return null;

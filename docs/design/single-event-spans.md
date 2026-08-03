@@ -17,12 +17,10 @@ The trace format is self-describing and already carries arbitrary per-field
 annotations for metadata such as units. Span semantics belong in those
 annotations rather than in event or field-name matching.
 
-A completed span is emitted when the work closes. For a Dial9-owned producer
-its packed event timestamp therefore represents the span end. Encoding the
-start as the packed timestamp would move the delta-encoded timestamp stream
-backwards at close time, forcing timestamp resets and destroying emission-order
-locality. A foreign producer that already packs something else can instead
-carry its end in an explicit `span.end` field.
+A completed span is emitted when the work closes. Its packed event timestamp
+therefore represents the span end. Encoding the start as the packed timestamp
+would move the delta-encoded timestamp stream backwards at close time, forcing
+timestamp resets and destroying emission-order locality.
 
 The second timing quantity a span needs (start or duration) rides in a normal
 annotated field. Duration is preferred there: it is a small elapsed count
@@ -37,18 +35,15 @@ A span has three timing quantities — start, duration, and end — related by
 third:
 
 ```text
-dial9.role = span.start      # start
-dial9.role = span.duration   # duration
-dial9.role = span.end        # end; overrides the packed event timestamp
+dial9.role = span.start      # start; duration = end - start
+dial9.role = span.duration   # duration; start = end - duration
 ```
 
-The packed event timestamp supplies the end unless a `span.end` field is
-present (see Motivation for why Dial9's own producers pack the end), so a
-producer that packs its end declares just one of `span.start` or
-`span.duration`. A schema is a single-event span schema when at least one
-timing role is present, and it is valid when **two** quantities are resolvable
-— counting the packed timestamp as an end. Each timing role may appear at most
-once.
+The packed event timestamp always supplies the end (see Motivation), so a
+schema declares one of the other two. A schema is a single-event span schema
+when at least one timing role is present, and it is valid when **two**
+quantities are resolvable — counting the packed timestamp as an end. Each
+timing role may appear at most once.
 
 Timing values are unsigned; start and end are monotonic-clock values, duration
 is an elapsed count. A timing field's `unit` annotation declares its scale; v1
@@ -88,8 +83,7 @@ A timing field may additionally carry:
 dial9.span.type = <producer family>
 ```
 
-Decoders read it from the first timing field present, in the order start,
-duration, end.
+Decoders read it from the timing field that is present.
 
 For metrique the value is `metrique`. This is the producer/instrumentation
 family, corresponding to the decoded span kind. The schema name remains the
@@ -133,8 +127,8 @@ that expose typed attributes also preserve their unit annotations.
 Schema validation happens once per wire schema:
 
 - no timing role at all: ordinary custom event;
-- fewer than two resolvable timing quantities (counting the packed event
-  timestamp as an end): invalid span schema;
+- fewer than two resolvable timing quantities (the packed event timestamp
+  counts as an end): invalid span schema;
 - a duplicate timing, name, or context role: invalid span schema;
 - unsupported timing/name/context wire type, or an unsupported `unit` on a
   timing field: invalid span schema;

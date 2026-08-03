@@ -25,15 +25,9 @@ pub mod roles {
     pub const SPAN_START: &str = "span.start";
 
     /// Duration of a completed single-event span. A decoder needs any two of
-    /// start, duration, and end to place the span; the third is derived. The
-    /// packed event timestamp supplies the end unless a [`SPAN_END`] field
-    /// overrides it.
+    /// start, duration, and end (the packed event timestamp) to place the
+    /// span; the third is derived.
     pub const SPAN_DURATION: &str = "span.duration";
-
-    /// Explicit end timestamp of a completed single-event span, for producers
-    /// that do not pack the end into the event timestamp. When absent, the
-    /// packed event timestamp is the end.
-    pub const SPAN_END: &str = "span.end";
 
     /// Dynamic display name of a completed single-event span.
     pub const SPAN_NAME: &str = "span.name";
