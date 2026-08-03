@@ -35,6 +35,8 @@ dial9-trace-format = { version = "0.5.0-rc0", path = "dial9-trace-format" }
 dial9-trace-format-derive = { version = "0.5.0-rc0", path = "dial9-trace-format-derive" }
 dial9-macro = { version = "0.5.0-rc0", path = "dial9-macro" }
 dial9-metrique = { version = "0.5.0-rc0", path = "dial9-metrique" }
+dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "dial9-tokio-telemetry" }
+dial9-viewer = { version = "0.5.0-rc1", path = "dial9-viewer" }
 assert2 = "0.4"
 
 [profile.release]
