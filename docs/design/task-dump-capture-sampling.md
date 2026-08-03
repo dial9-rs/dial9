@@ -638,26 +638,27 @@ sampling noise. Task scope is the correct first interface.
    sampling-active segment metadata.
 7. Group sibling callchains and implement deterministic representative-stack
    selection with an explicit ambiguous-wait fallback.
-8. Extend the
-   [telemetry integration test application](telemetry-integration-test-app.md)
-   and both conformance adapters with the sampled task-dump contract. This is a
-   prerequisite for mixed-flamegraph implementation.
-9. Add task-scoped mixed-flamegraph sample construction using CPU frequency
-   metadata and inverse-probability task-dump weights.
+8. Land the minimal
+   [telemetry integration test application](telemetry-integration-test-app.md),
+   proving that CPU samples, spans, and task dumps from one real trace reach
+   both parsing paths.
+9. Extend that application only with the cases needed while adding task-scoped
+   mixed-flamegraph construction using CPU frequency metadata and
+   inverse-probability task-dump weights.
 10. Keep old traces on their current unweighted task-dump rendering path.
 
 ## Telemetry Integration Test Prerequisite
 
-The reusable
+The minimal
 [telemetry integration test application](telemetry-integration-test-app.md)
-owns the runnable workload, trace-contained contract, local/aggregate
-conformance adapters, and CI workflow. It covers CPU profiling, spans, and task
-dumps rather than being specific to this feature.
+provides one runnable workload and one local/aggregate integration test. It
+covers CPU profiling, spans, and task dumps without attempting to model every
+task-dump case up front.
 
-The app and both adapters must land before task-dump mixed flamegraphs. This
-design extends its task-dump scenario with inclusion probabilities,
-representative-stack categories, and inverse-probability wait estimates. No
-sidecar manifest or task-dump-specific test application should be introduced.
+That tracer bullet must land before task-dump mixed flamegraphs. Flamegraph
+work should extend the same app with only the weighted-wait and branch cases it
+needs. No sidecar manifest or task-dump-specific test application should be
+introduced.
 
 ## Test Plan
 
@@ -691,30 +692,15 @@ sidecar manifest or task-dump-specific test application should be introduced.
 
 ### Integration conformance
 
-Extend the telemetry integration fixture and run its trace through both the
-local JavaScript and aggregate Rust production paths. In addition to the
-shared contract checks defined by that design, assert:
+The prerequisite application initially asserts only that CPU profiles, spans,
+and task dumps from one task survive both parsing paths. As part of
+mixed-flamegraph implementation, extend that same trace with the smallest
+weighted CPU/wait scenario needed to prove:
 
-- both instrumented tasks produce task dumps and retain their distinct stack
-  distributions;
-- every worker that observes eligible transitions participates in calibration
-  and sampling;
-- the observed capture count is consistent with
-  `sum(min(worker_pending_rate, configured_worker_rate))`; for the saturated
-  test workload this reduces to
-  `workers * captures_per_second_per_worker`;
-- inverse-probability weighted async time and frequency-weighted CPU time fall
-  within declared statistical tolerances of each task's by-construction
-  percentages;
-- the lock-wait and timer-await symbols remain distinct;
-- the timeout, cancellation, peer-select, standalone-timer, and
-  standalone-notification scenarios resolve to their specified representative
-  stacks;
-- the uninstrumented CPU and off-CPU threads do not appear in either
-  task-scoped mixed graph; and
-- changing the capture rate changes sample count and variance, but not the
-  estimated percentages outside the declared tolerance.
+- frequency and inverse-probability weights are applied;
+- the expected CPU and async-idle symbols appear in the mixed graph; and
+- local and aggregate parsing agree on those symbols.
 
-Keep this as an end-to-end statistical test with explicit confidence bounds,
-not exact sample-count assertions. The dedicated canonical telemetry fixture
-is separate from the viewer demo trace.
+Keep timeout, cancellation, ambiguous-peer selection, sampler convergence, and
+worker coverage in the focused tests above unless an end-to-end regression
+demonstrates that the app also needs one of those cases.
