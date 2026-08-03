@@ -57,6 +57,36 @@ function lanePolls(lane: ReturnType<typeof deriveLaneData>): PollSpan[] {
   return polls;
 }
 
+function firstOwnedSpan(
+  lane: ReturnType<typeof deriveLaneData>,
+): { spanId: string; start: number; end: number; taskId: number } {
+  const span = lane.allSpans.find((candidate) => candidate.taskId != null);
+  if (span?.taskId != null) {
+    return {
+      spanId: span.spanId,
+      start: span.start,
+      end: span.end,
+      taskId: span.taskId,
+    };
+  }
+
+  const columnar = lane.columnarSpans;
+  if (columnar !== null) {
+    for (let row = 0; row < columnar.length; row++) {
+      const taskId = columnar.taskIdAt(row);
+      if (taskId != null) {
+        return {
+          spanId: columnar.spanIdAt(row),
+          start: columnar.startAt(row),
+          end: columnar.endAt(row),
+          taskId,
+        };
+      }
+    }
+  }
+  throw new Error("demo trace has no task-owned span");
+}
+
 function normalizedProjection(
   state: Parameters<typeof projectViewerState>[0],
 ): { query: [string, string][]; hash: string } {
@@ -85,6 +115,31 @@ describe("viewer deep-link reconstruction", () => {
     reconstruction.applyLoadedTrace(settledTrace, "source");
 
     expect(store.getState().selection.selectedTaskId).toBe(task.taskId);
+  });
+
+  it("does not infer a span from an unnamed task exemplar focus", () => {
+    const lane = deriveLaneData(settledTrace);
+    const overlappingSpan = firstOwnedSpan(lane);
+    const task = taskIndexFor(settledTrace).rows.find(
+      (row) => row.pollCount > 0 && row.taskId !== overlappingSpan.taskId,
+    )!;
+    const offset = settledTrace.clockOffsetNs ?? 0;
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search:
+        `?focus_start=${overlappingSpan.start + offset}` +
+        `&focus_end=${overlappingSpan.end + offset}` +
+        `&focus_task=${task.taskId}`,
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(settledTrace, "source");
+
+    expect(store.getState().selection).toMatchObject({
+      selectedTaskId: task.taskId,
+      spanFocus: null,
+      focusedSpanId: null,
+    });
   });
 
   it("reconstructs every URL-owned analytical value after the trace loads", () => {
