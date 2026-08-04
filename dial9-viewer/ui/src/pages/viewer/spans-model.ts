@@ -39,15 +39,6 @@ import type { SelectionSlice } from "../../types/state.js";
 
 // ── Trace-invariant span data ────────────────────────────────────────────
 
-/** Per-span-name metadata carried out of buildSpanData. */
-export interface SpanNameMeta {
-  spanName: string;
-  fields: Record<string, unknown>;
-  spanType?: string;
-  units?: Record<string, string> | null;
-  parentSpanId: string | null;
-}
-
 /**
  * Everything about a trace's tracing spans that does NOT depend on the viewport,
  * filter, or selection - computed once per trace load and cached in a store

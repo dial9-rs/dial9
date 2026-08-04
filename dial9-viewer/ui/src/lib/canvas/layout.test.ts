@@ -7,7 +7,6 @@ import {
   LABEL_W,
   timePanelLayout,
   panelGeometry,
-  laneStackGeometry,
   laneRowLayout,
   workerAtLaneY,
   headerAtLaneY,
@@ -116,21 +115,6 @@ describe("panelGeometry", () => {
     expect(g.dpr).toBe(2);
     expect(g.time.drawW).toBe(1083);
     expect(g.time.nsToPanelX(0)).toBe(LABEL_W);
-  });
-});
-
-describe("laneStackGeometry", () => {
-  it("stacks lanes in workerIds order at y = index * laneHeight", () => {
-    const lanes = laneStackGeometry([3, 0, 7], 60);
-    expect(lanes).toEqual([
-      { workerId: 3, index: 0, y: 0, height: 60 },
-      { workerId: 0, index: 1, y: 60, height: 60 },
-      { workerId: 7, index: 2, y: 120, height: 60 },
-    ]);
-  });
-
-  it("empty worker set -> empty stack", () => {
-    expect(laneStackGeometry([], 60)).toEqual([]);
   });
 });
 

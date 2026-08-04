@@ -295,11 +295,9 @@ export type { EncodeScopeOptions, EncodedScope, TraceScope } from "./trace_scope
 // full/partial/none fallback signal. (Both endpoints stream over SSE now, so
 // the old client-side fetch/refine loop is gone.)
 export {
-  SPAN_STATS_ENDPOINT,
   TOKIO_STATS_ENDPOINT,
   coverageSignal,
   isCoverageFrozen,
-  spanStatsUrl,
   tokioStatsUrl,
 } from "./aggregates.js";
 export type {
@@ -321,7 +319,6 @@ export type {
   SchedulingDelayKind,
   ScopeEcho,
   SpanDurationBucket,
-  SpanStatsQuery,
   SpanStatsResponse,
   SpanTypeStats,
   SpawnLocStats,

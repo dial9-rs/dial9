@@ -73,10 +73,6 @@ static RAW_SPAN_STATS_DECODE_LIMIT: Semaphore = Semaphore::const_new(MAX_CONCURR
 #[derive(Deserialize)]
 pub struct SpanStatsParams {
     pub service: Option<String>,
-    #[allow(dead_code)]
-    pub from: Option<String>,
-    #[allow(dead_code)]
-    pub to: Option<String>,
     #[serde(default)]
     pub host: Vec<String>,
     pub start_ns: Option<i64>,
