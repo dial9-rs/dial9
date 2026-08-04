@@ -478,33 +478,6 @@ Without liveset tracking, the profiler adds negligible overhead. With liveset tr
 
 `dial9::recorder_from_env` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
 
-### Tracing span events (opt-in)
-
-**Enable the standalone `tracing-layer` feature, plus `tokio` when using dial9's Tokio runtime integration:**
-```toml
-[dependencies]
-dial9 = { version = "0.5", features = ["tokio", "tracing-layer"] }
-```
-
-**Use tracing_subscriber to connect the `Dial9TracingLayer`:**
-```rust
-use dial9::tracing_layer::Dial9TracingLayer;
-use tracing_subscriber::prelude::*;
-
-tracing_subscriber::registry()
-    .with(tracing_subscriber::fmt::layer())
-    .with(
-        Dial9TracingLayer::new().with_filter(
-            tracing_subscriber::filter::Targets::new()
-                .with_target("my_app", tracing::Level::TRACE)
-                .with_default(tracing::Level::ERROR),
-        ),
-    )
-    .init();
-```
-
-Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs roughly 650-800ns total on a modern server core, most of which is dial9 encoding (the same span through a bare `tracing` registry costs ~100-200ns).
-
 ### Metrique metrics (opt-in)
 
 If your service publishes unit-of-work metrics with [metrique](https://docs.rs/metrique), dial9 can record every entry into the trace as a peer of your existing EMF/JSON pipeline. Each event is pinned to the thread and task that served the request, with start and end timestamps, so per-request metrics land on the same timeline as polls, wakes, and spans.

@@ -73,6 +73,7 @@ axum-08 = [
 ]
 
 [dev-dependencies]
+dial9 = { path = "../dial9", features = ["tokio"] }
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-tokio-telemetry = { path = "../dial9-tokio-telemetry" }
 dial9-utils = { path = ".", features = ["tracing-layer"] }
@@ -96,4 +97,8 @@ required-features = ["tracing-layer"]
 [[bench]]
 name = "tracing_layer_iai"
 harness = false
+required-features = ["tracing-layer"]
+
+[[example]]
+name = "tracing_sleep"
 required-features = ["tracing-layer"]

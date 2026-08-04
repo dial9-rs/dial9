@@ -145,10 +145,6 @@ pub mod socket {
     pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
 }
 
-// Tracing-subscriber layer.
-#[cfg(feature = "tracing-layer")]
-pub use dial9_utils::tracing_layer;
-
 // Metrique unit-of-work entry sink.
 #[cfg(feature = "metrique-sink")]
 pub use dial9_metrique as metrique_sink;

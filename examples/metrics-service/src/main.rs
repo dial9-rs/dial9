@@ -13,10 +13,10 @@ use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
 use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
 use dial9::socket::SocketAcceptQueuesConfig;
-use dial9::tracing_layer::Dial9TracingLayer;
 use dial9::{Dial9HandleTokioExt, RecorderPerfExt, RecorderPipelineExt};
 use dial9::{Dial9TokioHandle, TaskDumpConfig, TokioAttachOptions};
 use dial9::{DiskBuffer, recorder};
+use dial9_utils::tracing_layer::Dial9TracingLayer;
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;

@@ -43,7 +43,6 @@ dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetr
 dial9-destinations-s3 = { workspace = true, optional = true }
 dial9-macro = { workspace = true, optional = true }
 dial9-metrique = { workspace = true, optional = true }
-dial9-utils = { workspace = true, optional = true }
 
 dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
@@ -113,9 +112,6 @@ process-resource = [
 ## Removes `#[non_exhaustive]` from profiling event structs. Unstable.
 unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 
-## Tracing-subscriber layer emitting span events into dial9 traces.
-tracing-layer = ["dep:dial9-utils", "dial9-utils/tracing-layer"]
-
 ## Metrique sink recording unit-of-work metric entries into dial9 traces.
 ## Standalone; combine with the `tokio` feature to capture task ids.
 metrique-sink = ["dep:dial9-metrique"]
@@ -149,7 +145,6 @@ dial9 = { path = ".", features = [
     "memory-profiling",
     "process-resource",
     "linux-socket",
-    "tracing-layer",
     "metrique-sink",
     "unstable-events",
     "worker-s3",
@@ -190,7 +185,6 @@ dial9 = { path = ".", features = [
     "worker-s3",
     "analysis",
     "taskdump",
-    "tracing-layer",
     "linux-socket",
 ] }
 
@@ -265,10 +259,6 @@ required-features = ["analysis"]
 [[example]]
 name = "s3_stress_test"
 required-features = ["worker-s3"]
-
-[[example]]
-name = "tracing_sleep"
-required-features = ["tokio", "tracing-layer"]
 
 [[example]]
 name = "metrique_metrics"

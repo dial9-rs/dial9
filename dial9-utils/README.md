@@ -14,14 +14,42 @@ the dial9 Tokio runtime integration.
 and HTTP/2 tasks through a dial9 executor so per-connection work lands in the
 trace.
 
-The tracing layer is also re-exported as `dial9::tracing_layer`. Add this crate
-directly when using an integration such as Axum that is not re-exported by the
-facade:
+Unlike dial9's other sibling crates this one is not re-exported by the facade.
+Add it alongside `dial9` and enable only the integrations you need (none are on
+by default):
 
 ```toml
 dial9 = { version = "0.5", features = ["tokio"] }
-dial9-utils = { version = "0.5", features = ["axum-08"] }
+dial9-utils = { version = "0.5", features = ["tracing-layer", "axum-08"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 ```
+
+## Tracing span events
+
+Connect `Dial9TracingLayer` to a `tracing_subscriber` registry:
+
+```rust
+use dial9_utils::tracing_layer::Dial9TracingLayer;
+use tracing_subscriber::prelude::*;
+
+tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(
+        Dial9TracingLayer::new().with_filter(
+            tracing_subscriber::filter::Targets::new()
+                .with_target("my_app", tracing::Level::TRACE)
+                .with_default(tracing::Level::ERROR),
+        ),
+    )
+    .init();
+```
+
+Careful filtering is strongly recommended. Libraries like the AWS SDK emit
+many internal spans that can produce over 100K events per second. The example
+above captures only spans from `my_app`. Each span enter+exit costs roughly
+650-800ns total on a modern server core, most of which is dial9 encoding (the
+same span through a bare `tracing` registry costs roughly 100-200ns).
 
 ## License
 
