@@ -194,13 +194,20 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
+  // Re-measured after the demo trace gained a second ("io") runtime: workers 2/3
+  // now contribute ~1.4k of the ~10.2k worker CPU samples, with stack shapes
+  // unrelated to the main runtime's request path. Every main-runtime query is
+  // therefore diluted — poll/tokio fall from 100% to 60.6% (they still dominate
+  // the main runtime, they just no longer span every worker), and main-only
+  // frames like framebuf fall hardest. Code regression ruled out first: the
+  // previous anchors reproduce exactly against the pre-regen bytes.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 145, "100.0"],
-    ["tokio", 214, "100.0"],
-    ["axum", 19, "82.2"],
-    ["dispatcher", 29, "68.9"],
-    ["framebuf", 11, "47.8"],
-    ["spawn", 2, "100.0"],
+    ["poll", 66, "60.6"],
+    ["tokio", 83, "60.6"],
+    ["axum", 23, "50.0"],
+    ["dispatcher", 15, "51.5"],
+    ["framebuf", 3, "1.5"],
+    ["spawn", 2, "60.6"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {
