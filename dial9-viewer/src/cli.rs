@@ -13,6 +13,7 @@ mod skills {
 #[derive(Parser, Debug)]
 #[command(
     name = "dial9",
+    version,
     about = "Trace browser and viewer for dial9-tokio-telemetry"
 )]
 pub struct Cli {
