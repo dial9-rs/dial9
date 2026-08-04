@@ -239,14 +239,6 @@ export default defineConfig({
     // for whoever committed afterwards. Stale artifacts are not a concern: every
     // entry + static-copy target is rewritten on each build.
     emptyOutDir: false,
-    // Do NOT wipe dist/ on build. `dist/.gitkeep` is COMMITTED (ui/.gitignore
-    // ignores `dist/*` but re-includes it) because rust-embed embeds `ui/dist/`
-    // and needs the folder to exist for a cargo-only checkout to compile — see
-    // dial9-viewer/src/server/mod.rs. Vite's default emptyOutDir deleted it, so
-    // any `npm run build` left a staged deletion that silently broke that build
-    // for anyone who committed afterwards. Stale artifacts are not a concern:
-    // every entry + static-copy target is rewritten on each build.
-    emptyOutDir: false,
     // Rollup's CJS interop only covers node_modules by default, but
     // the frozen core is CJS-guard .js at the ui ROOT (ADR-0004 section
     // 6), consumed via named ESM imports from lib/trace + lib/canvas.
