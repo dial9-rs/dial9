@@ -22,7 +22,10 @@ these rules for all public APIs:
 
 The trace format uses a self-describing schema: each event type's schema is
 written to the wire before any events of that type. Decoders use the schema on
-the wire (not a compiled-in schema) to decode events.
+the wire (not a compiled-in schema) to decode events. A schema's *classifying*
+annotations (e.g. the `dial9.role` annotations that mark a single-event span)
+are likewise written before any event of that schema, so decoders classify in a
+single pass without buffering — see `docs/design/single-event-spans.md`.
 
 **Rules:**
 

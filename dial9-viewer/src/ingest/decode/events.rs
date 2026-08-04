@@ -808,6 +808,13 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
     let mut single_event_decode_errors: u64 = 0;
     let mut single_event_layouts: FxHashMap<WireTypeId, (SchemaEntry, CompiledSingleEventSpan)> =
         FxHashMap::default();
+    // Single-pass span classification. This is correct because span-role
+    // annotations are required to precede any event of their schema (see
+    // docs/design/single-event-spans.md, "Annotation ordering"): `ev.schema` is
+    // already complete when the first event of a type is compiled, so a later
+    // frame can never turn an already-decoded event into a span. The JS decoder
+    // relies on the same guarantee; neither side re-resolves spans after the
+    // fact.
     decoder
         .for_each_event(|ev| {
             let needs_compile = single_event_layouts

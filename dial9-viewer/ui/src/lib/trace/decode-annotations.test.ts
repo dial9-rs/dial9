@@ -147,7 +147,13 @@ describe("TraceDecoder schema annotations", () => {
     });
   });
 
-  it("reclassifies earlier events when trailing annotations define a span", async () => {
+  it("does NOT reclassify an event when its span-role annotation trails the event", async () => {
+    // The wire format requires span-role (`dial9.role`) annotations to precede
+    // any event of their type (docs/design/single-event-spans.md). A role frame
+    // that arrives AFTER the event is a malformed trace: the decoder classifies
+    // spans in a single pass at decode time and does not re-resolve later, so
+    // the event stays an ordinary custom event. (Metadata annotations like
+    // unit/kind may still trail — that is exercised separately above.)
     const bytes = Uint8Array.from([
       0x54, 0x52, 0x43, 0x00, 1,
       ...durationSpanSchemaFrame(),
@@ -161,41 +167,32 @@ describe("TraceDecoder schema annotations", () => {
 
     const trace = await parseTrace(bytes);
     expect(trace.customEvents).toHaveLength(1);
-    expect(trace.customEvents[0]!.singleEventSpan).toEqual({
-      start: 6,
-      end: 10,
-      name: "Metric",
-      spanType: "single-event",
-      threadId: null,
-      taskId: null,
-      workerId: null,
-      fields: {},
-      units: null,
-    });
+    expect(trace.customEvents[0]!.singleEventSpan).toBeNull();
+    // The trailing metadata annotation still attaches (metadata may follow).
+    expect(trace.customEvents[0]).toMatchObject({ units: { duration: "ns" } });
 
-    const projected: Array<{ timestamp: number; span: unknown }> = [];
+    // Columnar path: with no span recognized at decode time, nothing routes to
+    // the sink and the event stays fat.
+    const projected: unknown[] = [];
     const spanEventSink = {
       pushIfSpan(
         _name: string,
-        timestamp: number,
+        _timestamp: number,
         _fields: Record<string, unknown>,
         span: unknown,
       ): boolean {
         if (span == null) return false;
-        projected.push({ timestamp, span });
+        projected.push(span);
         return true;
       },
     };
     const columnarTrace = await parseTrace(bytes, { spanEventSink });
-
-    expect(columnarTrace.customEvents).toHaveLength(0);
-    expect(projected).toEqual([{
-      timestamp: 10,
-      span: trace.customEvents[0]!.singleEventSpan,
-    }]);
+    expect(columnarTrace.customEvents).toHaveLength(1);
+    expect(projected).toEqual([]);
   });
 
   it("routes a timestamp-less span using its projected end", async () => {
+    // Annotations precede the event, as the format requires.
     const bytes = Uint8Array.from([
       0x54, 0x52, 0x43, 0x00, 1,
       ...timestampLessSpanSchemaFrame(),

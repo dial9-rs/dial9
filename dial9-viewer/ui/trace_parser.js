@@ -1568,52 +1568,20 @@
                 ? cpuSamplesSink.samples
                 : cpuSamplesSink;
 
-        // Annotation frames may follow events. Resolve against the exact schema
-        // active for each event now that every frame has been consumed, then let
-        // the temporary parallel array die with the parse state.
-        let retainedCustomEventCount = 0;
+        // Metadata annotations (unit/kind) may legally follow the event they
+        // describe, so resolve them against the exact schema active for each
+        // event now that every frame has been consumed. Span *classification*,
+        // by contrast, is not recomputed here: span-role annotations
+        // (`dial9.role`) are required by the wire format to precede any event of
+        // their type (see docs/design/single-event-spans.md), so the decode-time
+        // projection in processFrame is already final. Both decoders classify in
+        // a single pass; neither re-resolves spans after the fact.
         for (let i = 0; i < customEvents.length; i++) {
             const event = customEvents[i];
             const schema = customEventSchemas[i];
             event.units = schema?.units || null;
             event.fieldKinds = schema?.fieldKinds || null;
-
-            // Structural annotations may legally follow the event they
-            // describe. Recompile and project now that the whole stream has
-            // been consumed, then route newly recognized spans to the optional
-            // columnar sink.
-            const layout =
-                schema?.annotations?.length > 0
-                    ? compileSingleEventSpanSchema(schema)
-                    : { kind: "not-span" };
-            event.singleEventSpan =
-                layout.kind === "layout"
-                    ? decodeSingleEventSpan(
-                          layout,
-                          schema,
-                          event.fields,
-                          event.timestamp,
-                      )
-                    : null;
-            if (
-                event.singleEventSpan != null &&
-                spanEventSink &&
-                spanEventSink.pushIfSpan(
-                    event.name,
-                    event.singleEventSpan.end,
-                    event.fields,
-                    event.singleEventSpan,
-                )
-            ) {
-                continue;
-            }
-
-            customEvents[retainedCustomEventCount] = event;
-            customEventSchemas[retainedCustomEventCount] = schema;
-            retainedCustomEventCount++;
         }
-        customEvents.length = retainedCustomEventCount;
-        customEventSchemas.length = retainedCustomEventCount;
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
         // time + earliest monotonic event timestamp. This is best-effort only.

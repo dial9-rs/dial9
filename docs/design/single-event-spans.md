@@ -131,6 +131,27 @@ attributes with their original names, values, and units. Decoders may project
 the field shapes supported by their existing span-attribute model; decoders
 that expose typed attributes also preserve their unit annotations.
 
+### Annotation ordering
+
+A schema's span-role annotations (`dial9.role`, and the `dial9.span.type` /
+`unit` annotations that qualify them) **must be written to the wire before any
+event of that schema**. Equivalently: an event is a single-event span if and
+only if the annotations already seen for its schema classify it as one at the
+moment the event is decoded.
+
+This lets both decoders classify spans in a single pass over the stream, with no
+buffering or after-the-fact re-resolution — the two implementations therefore
+cannot drift on ordering. The producing `Encoder` guarantees the rule: it emits
+a schema's annotation frame immediately after the schema frame and before any
+event, and there is no API to add a span-defining annotation after events have
+been written.
+
+A `dial9.role` annotation that arrives *after* an event of its schema is a
+malformed trace. Decoders are not required to reclassify the earlier event; it
+remains an ordinary custom event. (Non-classifying metadata annotations — e.g.
+a field's `unit` or `kind` used purely for display — may still trail their
+events; only span *classification* is order-sensitive.)
+
 ## Validation
 
 Schema validation happens once per wire schema:
