@@ -6,7 +6,6 @@
     unreachable_pub
 )]
 #![deny(unused_must_use, unsafe_op_in_unsafe_fn)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// Background worker pipeline for processing sealed trace segments.
 pub mod background_task;
