@@ -38,6 +38,8 @@ import {
 import { pollColor } from "../../../lib/canvas/palette.js";
 import { laneRowLayout } from "../../../lib/canvas/layout.js";
 import type { LaneRowLayout } from "../../../lib/canvas/layout.js";
+import type { RuntimeMetrics } from "../../../lib/trace/runtime-metrics-model.js";
+import { drawRuntimeMetricsLane } from "./runtime-metrics-lane.js";
 import { findSpanAt, type SpanList } from "../../../lib/trace/query.js";
 import {
   isColumnarLane,
@@ -77,6 +79,9 @@ export interface LanesRenderInput {
   workerIds: readonly number[];
   /** Reconstructed spans per worker (buildWorkerSpans + attachCpuSamples). */
   workerSpans: Readonly<Record<number, LaneSpans>>;
+  /** Per-runtime scheduler metrics, drawn into each runtime's pinned summary
+   *  lane. Empty for pre-RuntimeMetrics traces (no summary lanes emitted). */
+  runtimeMetrics: RuntimeMetrics;
   /** Per-worker local-queue samples, sorted by t. */
   workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
   /** Wake events indexed by target worker. */
@@ -265,6 +270,14 @@ export function renderLanes(
 
     if (r.kind === "header") {
       drawRuntimeHeader(ctx, r, drawW, top);
+      continue;
+    }
+
+    if (r.kind === "runtime-metrics") {
+      // The inferred default group is labelled "main" but its metrics are keyed
+      // under the empty runtime name (the unnamed default runtime on the wire).
+      const series = input.runtimeMetrics.byRuntime.get(r.inferred ? "" : r.name);
+      drawRuntimeMetricsLane(ctx, series, viewStart, viewEnd, drawW, top, r.height);
       continue;
     }
 

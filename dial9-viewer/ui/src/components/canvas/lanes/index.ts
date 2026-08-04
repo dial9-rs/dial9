@@ -133,6 +133,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       LANE_ROW_H,
       RUNTIME_HEADER_H,
       state.uiPrefs.collapsedRuntimes,
+      data.metricsRuntimes,
     );
     // Size the inner spacer so the box scrolls exactly the overflow past the
     // window (the sticky canvas occupies the first `viewportH` of flow).
@@ -161,6 +162,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const input: LanesRenderInput = {
       workerIds: data.workerIds,
       workerSpans: data.workerSpans,
+      runtimeMetrics: data.runtimeMetrics,
       workerQueueSamples: data.workerQueueSamples,
       wakesByWorker: data.wakesByWorker,
       spansById: data.spansById,
@@ -293,7 +295,13 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
         effective = { ...collapsed, [owning.name]: false };
         store.update("uiPrefs", { collapsedRuntimes: effective });
       }
-      const { rows } = laneRowLayout(data.runtimeGroups, LANE_ROW_H, RUNTIME_HEADER_H, effective);
+      const { rows } = laneRowLayout(
+        data.runtimeGroups,
+        LANE_ROW_H,
+        RUNTIME_HEADER_H,
+        effective,
+        data.metricsRuntimes,
+      );
       const row = rows.find((r) => r.kind === "worker" && r.workerId === workerId);
       if (row === undefined) return false;
 

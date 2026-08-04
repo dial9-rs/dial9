@@ -9,10 +9,12 @@
 
 import {
   deriveRuntimeGroups,
+  deriveRuntimeMetrics,
   deriveWorkerIds,
   sharedSpanData,
   sharedWorkerSpans,
 } from "../../../lib/trace/derived.js";
+import type { RuntimeMetrics } from "../../../lib/trace/runtime-metrics-model.js";
 import { spansById as buildSpanByIdSingle } from "../../../lib/trace/index.js";
 import { LazySpansById, LazySpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { ColumnarSpans, SpanByIdMulti, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
@@ -31,6 +33,11 @@ export interface LaneData {
   /** The runtime groups in render order. One group (single-runtime) is the
    *  common case; the renderer draws headers only when there is more than one. */
   runtimeGroups: RuntimeGroup[];
+  /** Per-runtime scheduler metrics, drawn in each runtime's pinned summary
+   *  lane. Empty for pre-RuntimeMetrics traces. */
+  runtimeMetrics: RuntimeMetrics;
+  /** Runtime names that have a metric series (so a summary lane is emitted). */
+  metricsRuntimes: ReadonlySet<string>;
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, LaneSpans>;
   /** Per-worker local-queue samples, sorted by t. */
@@ -65,6 +72,16 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
   const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
 
+  // A group gets a pinned summary lane iff its runtime has a metric series. The
+  // inferred default group ("main") maps to the empty wire name. Keyed by GROUP
+  // name so it matches laneRowLayout's per-group check.
+  const runtimeMetrics = deriveRuntimeMetrics(trace);
+  const metricsRuntimes = new Set<string>();
+  for (const g of runtimeGroups) {
+    const series = runtimeMetrics.byRuntime.get(g.inferred ? "" : g.name);
+    if (series !== undefined && series.samples.length > 0) metricsRuntimes.add(g.name);
+  }
+
   // Span-id index: id -> every instance (recycled ids highlight every
   // instance, but O(1) lookup instead of a full allSpans scan). On the columnar
   // path these are lazy adapters over the store (no 982K view maps built).
@@ -89,6 +106,8 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
   return {
     workerIds,
     runtimeGroups,
+    runtimeMetrics,
+    metricsRuntimes,
     workerSpans,
     workerQueueSamples: spanResult.workerQueueSamples,
     wakesByWorker: spanResult.wakesByWorker,

@@ -190,6 +190,7 @@ fn event_timestamp(ev: &Dial9Event) -> Option<u64> {
         Dial9Event::WorkerParkEvent(e) => Some(e.timestamp_ns),
         Dial9Event::WorkerUnparkEvent(e) => Some(e.timestamp_ns),
         Dial9Event::QueueSampleEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::RuntimeMetricsEvent(e) => Some(e.timestamp_ns),
         Dial9Event::TaskSpawnEvent(e) => Some(e.timestamp_ns),
         Dial9Event::TaskTerminateEvent(e) => Some(e.timestamp_ns),
         Dial9Event::CpuSampleEvent(e) => Some(e.timestamp_ns),
@@ -206,17 +207,26 @@ fn event_timestamp(ev: &Dial9Event) -> Option<u64> {
     }
 }
 
-/// Build a sorted list of (timestamp, global_queue_depth) from QueueSample events.
+/// Build a sorted list of (timestamp, global_queue_depth) from queue-sample
+/// events. Reads both the legacy [`QueueSampleEvent`](Dial9Event::QueueSampleEvent)
+/// (already summed across runtimes) and the newer
+/// [`RuntimeMetricsEvent`](Dial9Event::RuntimeMetricsEvent) (one per runtime);
+/// per-runtime samples sharing a cycle timestamp are summed so the timeline
+/// remains a single process-wide series.
 fn build_global_queue_timeline(events: &[Dial9Event]) -> Vec<(u64, usize)> {
-    let mut timeline: Vec<(u64, usize)> = events
-        .iter()
-        .filter_map(|e| match e {
-            Dial9Event::QueueSampleEvent(q) => Some((q.timestamp_ns, q.global_queue as usize)),
-            _ => None,
-        })
-        .collect();
-    timeline.sort_by_key(|&(ts, _)| ts);
-    timeline
+    let mut by_ts: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+    for e in events {
+        match e {
+            Dial9Event::QueueSampleEvent(q) => {
+                *by_ts.entry(q.timestamp_ns).or_default() += q.global_queue as usize;
+            }
+            Dial9Event::RuntimeMetricsEvent(m) => {
+                *by_ts.entry(m.timestamp_ns).or_default() += m.global_queue_depth as usize;
+            }
+            _ => {}
+        }
+    }
+    by_ts.into_iter().collect()
 }
 
 /// Look up the most recent global queue depth at or before the given timestamp.
@@ -235,9 +245,6 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
     let mut poll_starts: HashMap<WorkerId, u64> = HashMap::new();
     let mut poll_start_locs: HashMap<WorkerId, String> = HashMap::new();
     let mut spawn_location_stats: HashMap<String, SpawnLocationStats> = HashMap::new();
-    let mut max_global_queue = 0;
-    let mut global_queue_sum = 0u64;
-    let mut global_queue_count = 0u64;
 
     let Some(start_time) = events.first().and_then(event_timestamp) else {
         return TraceAnalysis::default();
@@ -246,14 +253,21 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
         return TraceAnalysis::default();
     };
 
+    // Global queue depth is reported per-runtime (`RuntimeMetricsEvent`) in
+    // current traces and as a pre-summed single sample (`QueueSampleEvent`) in
+    // older ones. Sum per-cycle (per-timestamp) so the max/avg describe the
+    // whole process regardless of which event kind the trace carries.
+    let queue_timeline = build_global_queue_timeline(events);
+    let max_global_queue = queue_timeline.iter().map(|&(_, d)| d).max().unwrap_or(0);
+    let avg_global_queue = if queue_timeline.is_empty() {
+        0.0
+    } else {
+        queue_timeline.iter().map(|&(_, d)| d as u64).sum::<u64>() as f64
+            / queue_timeline.len() as f64
+    };
+
     for event in events {
         match event {
-            Dial9Event::QueueSampleEvent(q) => {
-                let depth = q.global_queue as usize;
-                max_global_queue = max_global_queue.max(depth);
-                global_queue_sum += depth as u64;
-                global_queue_count += 1;
-            }
             Dial9Event::PollStartEvent(e) => {
                 let wid = e.worker_id;
                 let stats = worker_stats.entry(wid).or_default();
@@ -310,11 +324,7 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
         duration_ns: end_time.saturating_sub(start_time),
         worker_stats,
         max_global_queue,
-        avg_global_queue: if global_queue_count > 0 {
-            global_queue_sum as f64 / global_queue_count as f64
-        } else {
-            0.0
-        },
+        avg_global_queue,
         spawn_location_stats,
     }
 }
@@ -838,6 +848,38 @@ mod tests {
         assert_eq!(analysis.max_global_queue, 42);
         assert_eq!(analysis.total_events, 3);
         assert!((analysis.avg_global_queue - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_global_queue_from_runtime_metrics_events() {
+        // Two runtimes report at the same cycle timestamp; the process-wide
+        // depth for that cycle is their sum (5 + 3 = 8). A later cycle reports
+        // a single runtime at depth 2.
+        let events = vec![
+            Dial9Event::RuntimeMetricsEvent(RuntimeMetricsEvent {
+                timestamp_ns: 1_000_000,
+                runtime_name: "main".to_string(),
+                global_queue_depth: 5,
+                alive_tasks: 20,
+            }),
+            Dial9Event::RuntimeMetricsEvent(RuntimeMetricsEvent {
+                timestamp_ns: 1_000_000,
+                runtime_name: "io".to_string(),
+                global_queue_depth: 3,
+                alive_tasks: 4,
+            }),
+            Dial9Event::RuntimeMetricsEvent(RuntimeMetricsEvent {
+                timestamp_ns: 2_000_000,
+                runtime_name: "main".to_string(),
+                global_queue_depth: 2,
+                alive_tasks: 1,
+            }),
+        ];
+        let analysis = analyze_trace(&events);
+        // max cycle depth is 8 (the summed first cycle), not 5.
+        assert_eq!(analysis.max_global_queue, 8);
+        // avg over the two cycles: (8 + 2) / 2 == 5.0.
+        assert!((analysis.avg_global_queue - 5.0).abs() < f64::EPSILON);
     }
 
     #[test]

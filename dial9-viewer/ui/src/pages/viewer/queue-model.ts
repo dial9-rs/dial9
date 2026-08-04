@@ -16,7 +16,11 @@
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
 import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
-import { deriveWorkerIds, sharedWorkerSpans } from "../../lib/trace/derived.js";
+import {
+  deriveRuntimeMetrics,
+  deriveWorkerIds,
+  sharedWorkerSpans,
+} from "../../lib/trace/derived.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
 
@@ -87,10 +91,17 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
   if (trace === null || trace.maxTs === null) return EMPTY_QUEUE_DATA;
   const workerIds = deriveWorkerIds(trace);
   const spanResult = sharedWorkerSpans(trace);
+  const runtimeMetrics = deriveRuntimeMetrics(trace);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,
   );
+  // The global-queue series comes from per-runtime RuntimeMetrics (summed per
+  // cycle) when the trace has them; otherwise fall back to the legacy
+  // pre-summed QueueSample series that buildWorkerSpans extracts.
+  const queueSamples = runtimeMetrics.present
+    ? runtimeMetrics.summedGlobalQueue
+    : spanResult.queueSamples;
 
   // Merge every worker's local-queue series into one t-sorted timeline, built
   // ONCE here so the per-frame render never re-merges.
@@ -104,7 +115,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
 
   return {
     workerIds,
-    queueSamples: spanResult.queueSamples,
+    queueSamples,
     mergedLocalSamples: merged,
     activeTaskSamples: timeline.activeTaskSamples,
     taskFirstPoll: timeline.taskFirstPoll,

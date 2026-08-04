@@ -4,7 +4,7 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
-    PollEndEvent, PollStartEvent, QueueSampleEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent,
+    PollEndEvent, PollStartEvent, RuntimeMetricsEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent,
     WorkerUnparkEvent,
 };
 use crate::telemetry::task_metadata::TaskId;
@@ -158,10 +158,12 @@ pub(crate) type RuntimeContextRegistry = Arc<Mutex<Vec<Arc<RuntimeContext>>>>;
 /// runtime->worker segment metadata.
 pub(crate) struct TokioRuntimesSource {
     contexts: RuntimeContextRegistry,
-    /// Metrics for each attached runtime, handed over once the caller has built
-    /// it. The flush thread has no runtime context of its own, so it cannot ask
-    /// Tokio for these itself. Dropped with the source at recorder teardown.
-    runtime_metrics: Vec<RuntimeMetrics>,
+    /// Metrics for each attached runtime, paired with the runtime's name, handed
+    /// over once the caller has built it. The flush thread has no runtime context
+    /// of its own, so it cannot ask Tokio for these itself. The name is carried
+    /// alongside so each runtime's sample can be tagged with its identity.
+    /// Dropped with the source at recorder teardown.
+    runtime_metrics: Vec<(Option<String>, RuntimeMetrics)>,
     last_sample: Instant,
     sample_interval: Duration,
     /// Fingerprint of the metadata emitted on the last `segment_metadata` call,
@@ -193,22 +195,27 @@ impl TokioRuntimesSource {
     }
 }
 
-/// Give the source the metrics of a freshly built runtime, so the flush thread
-/// can sample its global queue depth.
+/// Give the source the metrics of a freshly built runtime (paired with its
+/// name), so the flush thread can sample this runtime's scheduler metrics and
+/// tag the sample with the runtime's identity.
 ///
 /// Called once per attach, after the caller's runtime exists.
-pub(crate) fn register_runtime_metrics(shared: &SharedState, metrics: RuntimeMetrics) {
-    let mut metrics = Some(metrics);
+pub(crate) fn register_runtime_metrics(
+    shared: &SharedState,
+    runtime_name: Option<String>,
+    metrics: RuntimeMetrics,
+) {
+    let mut entry = Some((runtime_name, metrics));
     shared.with_sources_mut(|sources| {
         for source in sources.iter_mut() {
             let any: &mut dyn std::any::Any = &mut **source;
             if let Some(source) = any.downcast_mut::<TokioRuntimesSource>() {
-                source.runtime_metrics.extend(metrics.take());
+                source.runtime_metrics.extend(entry.take());
                 return;
             }
         }
     });
-    if metrics.is_some() {
+    if entry.is_some() {
         tracing::warn!("Tokio source missing; queue depth will not be sampled");
     }
 }
@@ -222,21 +229,21 @@ impl Source for TokioRuntimesSource {
         if self.runtime_metrics.is_empty() {
             return;
         }
-        let total_global_queue: usize = self
-            .runtime_metrics
-            .iter()
-            .map(|m| m.global_queue_depth())
-            .sum();
-        let total_active_tasks: usize = self
-            .runtime_metrics
-            .iter()
-            .map(|m| m.num_alive_tasks())
-            .sum();
-        ctx.record_event(&QueueSampleEvent {
-            timestamp_ns: clock_monotonic_ns(),
-            global_queue: total_global_queue as u8,
-            active_tasks: total_active_tasks as u64,
-        });
+        // One sample per runtime, tagged with its identity, so a consumer can
+        // attribute a backlog to a specific runtime rather than a summed total.
+        // Share one timestamp across the cycle so consumers can group a cycle's
+        // per-runtime samples (e.g. to sum them back into a process-wide total).
+        // The name is interned lazily in `RuntimeMetricsSample::encode`, so each
+        // event costs one `u32` handle rather than a fresh `String`.
+        let timestamp_ns = clock_monotonic_ns();
+        for (runtime_name, metrics) in &self.runtime_metrics {
+            ctx.record_event(&RuntimeMetricsSample {
+                timestamp_ns,
+                runtime_name: runtime_name.as_deref().unwrap_or(""),
+                global_queue_depth: metrics.global_queue_depth() as u32,
+                alive_tasks: metrics.num_alive_tasks() as u32,
+            });
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -393,6 +400,29 @@ pub fn current_worker_id() -> WorkerId {
 }
 
 // ── Event construction helpers ───────────────────────────────────────────────
+
+/// Tokio-side intermediate for a `RuntimeMetricsEvent`. Holds the runtime name
+/// as a borrowed `&str` so interning happens lazily inside
+/// [`Encodable::encode`], against the thread-local encoder's string pool. This
+/// lets the flush loop emit each cycle without cloning the name.
+pub(super) struct RuntimeMetricsSample<'a> {
+    pub timestamp_ns: u64,
+    pub runtime_name: &'a str,
+    pub global_queue_depth: u32,
+    pub alive_tasks: u32,
+}
+
+impl Encodable for RuntimeMetricsSample<'_> {
+    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+        let runtime_name = enc.intern_string(self.runtime_name);
+        enc.encode(&RuntimeMetricsEvent {
+            timestamp_ns: self.timestamp_ns,
+            runtime_name,
+            global_queue_depth: self.global_queue_depth,
+            alive_tasks: self.alive_tasks,
+        });
+    }
+}
 
 /// Tokio-side intermediate for a `PollStartEvent`. Holds the raw
 /// `&'static Location` so that interning happens lazily inside

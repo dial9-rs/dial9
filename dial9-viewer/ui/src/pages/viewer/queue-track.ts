@@ -94,6 +94,10 @@ export interface QueueTrackController {
 
 export function createQueueTrack(store: ViewerStore): QueueTrackController {
   // Trace-invariant queue series: recomputed only when the trace slice changes.
+  // The global line is the process-wide queue depth (per-runtime RuntimeMetrics
+  // summed per cycle, or the legacy pre-summed QueueSample series). Per-runtime
+  // queue/task detail lives in the lanes track (a pinned lane per runtime), not
+  // here.
   const queueData = store.derived(["trace"], (s) => computeQueueData(s.trace.trace));
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
@@ -157,9 +161,9 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     const canvasH = Math.max(0, trackHeight - LEGEND_H);
     const ctx = sizer.ensure(drawW, canvasH, dpr);
     const s = state();
+    const window = deriveQueueWindow(s);
     const data = queueData();
     const model = renderModel(data, viewStart, viewEnd, drawW);
-    const window = deriveQueueWindow(s);
     drawQueueCanvas(ctx, model, window, drawW, canvasH);
     lastPaint = { canvas, drawW, canvasH, dpr, viewStart, viewEnd, model, window };
     // If a drag is in flight (a store tick landed mid-drag), re-overlay the band.

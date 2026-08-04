@@ -129,6 +129,20 @@ export type LaneRow =
       collapsed: boolean;
       y: number;
       height: number;
+    }
+  | {
+      /** A pinned per-runtime summary lane (global queue + active tasks for the
+       *  runtime), rendered as the group's first lane above its workers and
+       *  folded away with the runtime. Emitted only for groups whose name is in
+       *  the `metricsRuntimes` set passed to `laneRowLayout`. */
+      kind: "runtime-metrics";
+      /** Group name, used to look up the runtime's metric series. */
+      name: string;
+      /** True for the inferred default ("main") runtime (its metrics are keyed
+       *  under the empty wire name). */
+      inferred: boolean;
+      y: number;
+      height: number;
     };
 
 export interface LaneRowLayout {
@@ -156,6 +170,7 @@ export function laneRowLayout(
   rowH: number,
   headerH: number,
   collapsed: Readonly<Record<string, boolean>> = {},
+  metricsRuntimes: ReadonlySet<string> = EMPTY_METRICS_RUNTIMES,
 ): LaneRowLayout {
   const rows: LaneRow[] = [];
   const showHeaders = groups.length > 1;
@@ -176,6 +191,12 @@ export function laneRowLayout(
       y += headerH;
     }
     if (isCollapsed) continue;
+    // Pinned per-runtime summary lane, above the runtime's workers, folded away
+    // with the runtime. Only for groups that actually have a metric series.
+    if (metricsRuntimes.has(g.name)) {
+      rows.push({ kind: "runtime-metrics", name: g.name, inferred: g.inferred, y, height: rowH });
+      y += rowH;
+    }
     for (const workerId of g.workerIds) {
       rows.push({ kind: "worker", workerId, index, y, height: rowH });
       y += rowH;
@@ -184,6 +205,8 @@ export function laneRowLayout(
   }
   return { rows, contentHeight: y };
 }
+
+const EMPTY_METRICS_RUNTIMES: ReadonlySet<string> = new Set();
 
 /**
  * Resolve a lanes-local y (client y minus the viewport top PLUS the box

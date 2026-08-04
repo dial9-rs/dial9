@@ -138,6 +138,7 @@ export function mountLaneInteraction(
       LANE_ROW_H,
       RUNTIME_HEADER_H,
       store.getState().uiPrefs.collapsedRuntimes,
+      data.metricsRuntimes,
     );
     return { layout, localY };
   }

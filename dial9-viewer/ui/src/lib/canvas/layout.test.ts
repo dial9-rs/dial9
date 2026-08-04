@@ -146,6 +146,46 @@ describe("laneRowLayout", () => {
     expect(contentHeight).toBe(228);
   });
 
+  it("emits a pinned runtime-metrics lane as each metric runtime's first lane", () => {
+    const { rows, contentHeight } = laneRowLayout(
+      [group("a", [0, 1]), group("b", [2])],
+      60,
+      24,
+      {},
+      new Set(["a"]), // only runtime "a" has a metric series
+    );
+    expect(rows).toEqual([
+      { kind: "header", name: "a", inferred: false, workerCount: 2, collapsed: false, y: 0, height: 24 },
+      // "a" gets its summary lane above its workers.
+      { kind: "runtime-metrics", name: "a", inferred: false, y: 24, height: 60 },
+      { kind: "worker", workerId: 0, index: 0, y: 84, height: 60 },
+      { kind: "worker", workerId: 1, index: 1, y: 144, height: 60 },
+      // "b" has no metric series -> no summary lane.
+      { kind: "header", name: "b", inferred: false, workerCount: 1, collapsed: false, y: 204, height: 24 },
+      { kind: "worker", workerId: 2, index: 2, y: 228, height: 60 },
+    ]);
+    // 2 headers (24) + 1 metrics lane (60) + 3 workers (60) = 228 + 60 = 288.
+    expect(contentHeight).toBe(288);
+  });
+
+  it("folds the runtime-metrics lane away with its collapsed runtime", () => {
+    const { rows } = laneRowLayout(
+      [group("a", [0, 1]), group("b", [2])],
+      60,
+      24,
+      { a: true },
+      new Set(["a", "b"]),
+    );
+    // "a" is collapsed: neither its metrics lane nor its workers emit. "b" is
+    // open, so its metrics lane leads its worker.
+    expect(rows).toEqual([
+      { kind: "header", name: "a", inferred: false, workerCount: 2, collapsed: true, y: 0, height: 24 },
+      { kind: "header", name: "b", inferred: false, workerCount: 1, collapsed: false, y: 24, height: 24 },
+      { kind: "runtime-metrics", name: "b", inferred: false, y: 48, height: 60 },
+      { kind: "worker", workerId: 2, index: 0, y: 108, height: 60 },
+    ]);
+  });
+
   it("a collapsed group keeps its header but drops its worker rows", () => {
     const { rows, contentHeight } = laneRowLayout(
       [group("a", [0, 1]), group("b", [2])],

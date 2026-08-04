@@ -12,6 +12,7 @@
 import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
 import {
   deriveRuntimeGroups,
+  deriveRuntimeMetrics,
   sharedSpanData,
   sharedWorkerSpans,
 } from "../../lib/trace/derived.js";
@@ -30,6 +31,9 @@ export interface OverlayData {
   workerIds: number[];
   /** Runtime groups in render order (for the fixed-height + header y-mapping). */
   runtimeGroups: RuntimeGroup[];
+  /** Runtime names with a pinned summary lane (so hit-test y-mapping matches
+   *  the rendered stack, which inserts a lane per such runtime). */
+  metricsRuntimes: ReadonlySet<string>;
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, LaneSpans>;
   /** All completed spans, start-sorted (span detail + span-in-poll count).
@@ -61,6 +65,15 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
   const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
 
+  // Runtimes with a metric series get a pinned summary lane; the hit-test must
+  // account for it (keyed by group name, matching laneRowLayout).
+  const runtimeMetrics = deriveRuntimeMetrics(trace);
+  const metricsRuntimes = new Set<string>();
+  for (const g of runtimeGroups) {
+    const series = runtimeMetrics.byRuntime.get(g.inferred ? "" : g.name);
+    if (series !== undefined && series.samples.length > 0) metricsRuntimes.add(g.name);
+  }
+
   const spanData = sharedSpanData(trace);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
@@ -70,6 +83,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
   return {
     workerIds,
     runtimeGroups,
+    metricsRuntimes,
     workerSpans,
     allSpans: spanData.allSpans,
     columnarSpans: spanData.columnarSpans,

@@ -11,6 +11,7 @@ import {
   type LanesRenderInput,
 } from "./render.js";
 import { laneRowLayout } from "../../../lib/canvas/layout.js";
+import { EMPTY_RUNTIME_METRICS } from "../../../lib/trace/runtime-metrics-model.js";
 import { resolveLaneClick } from "./click.js";
 import { assembleLaneHover } from "./hover.js";
 import type { PollSpan, TracingSpan, WorkerLane } from "../../../types/trace.js";
@@ -91,6 +92,7 @@ function baseInput(over: Partial<LanesRenderInput>): LanesRenderInput {
   return {
     workerIds: [0],
     workerSpans: { 0: emptyLane() },
+    runtimeMetrics: EMPTY_RUNTIME_METRICS,
     workerQueueSamples: {},
     wakesByWorker: {},
     spansById: new Map(),
@@ -273,6 +275,48 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     expect(rec.fillTexts).toContain("runtime: b");
     expect(rec.fillTexts).toContain("2 workers");
     expect(rec.fillTexts).toContain("1 worker");
+  });
+
+  it("draws a pinned runtime-metrics lane with per-runtime queue/task peaks", () => {
+    // Layout with a metrics lane for the inferred "main" group.
+    const rows = laneRowLayout(
+      [{ name: "main", inferred: true, workerIds: [0] }],
+      LANE_ROW_H,
+      RUNTIME_HEADER_H,
+      {},
+      new Set(["main"]),
+    );
+    const mk = (t: number, q: number, tasks: number) => ({
+      t,
+      runtimeName: "",
+      globalQueue: q,
+      aliveTasks: tasks,
+    });
+    const runtimeMetrics = {
+      present: true,
+      summedGlobalQueue: [],
+      byRuntime: new Map([
+        [
+          "",
+          {
+            samples: [mk(100, 5, 190), mk(500, 7, 194)],
+            latestAliveTasks: 194,
+            maxAliveTasks: 194,
+            maxGlobalQueue: 7,
+          },
+        ],
+      ]),
+    };
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, { ...workersInput([0]), runtimeMetrics }, {
+      time: layout(0, 1000, 300),
+      height: 300,
+      rowLayout: rows,
+      scrollTop: 0,
+    });
+    expect(rec.fillTexts).toContain("runtime metrics");
+    expect(rec.fillTexts).toContain("queue max 7");
+    expect(rec.fillTexts).toContain("tasks max 194");
   });
 });
 

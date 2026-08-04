@@ -108,13 +108,31 @@ describe("basic", () => {
     expect(trace.events.length, "No events found").toBeGreaterThan(0);
   });
 
-  // One check per known event type: every type must appear in the trace.
+  // One check per known event type that lives in `trace.events`. QueueSample
+  // and RuntimeMetrics are handled separately below: QueueSample was superseded
+  // by the per-runtime RuntimeMetrics, and RuntimeMetrics is decoded into the
+  // `runtimeMetrics` side-channel rather than the columnar event stream.
   for (const [name, type] of Object.entries(EVENT_TYPES)) {
+    if (name === "QueueSample" || name === "RuntimeMetrics") continue;
     it(`has ${name} events`, () => {
       const count = trace.events.filter((e) => e.eventType === type).length;
       expect(count, `No ${name} events found`).toBeGreaterThan(0);
     });
   }
+
+  // Scheduler-metrics coverage: a current-format trace carries per-runtime
+  // RuntimeMetrics samples (in the side-channel); an old trace carries summed
+  // QueueSample events. Require exactly one of the pair.
+  it("has runtime queue/task metrics (RuntimeMetrics or legacy QueueSample)", () => {
+    const queueSamples = trace.events.filter(
+      (e) => e.eventType === EVENT_TYPES["QueueSample"],
+    ).length;
+    const runtimeMetrics = trace.runtimeMetrics.length;
+    expect(
+      queueSamples + runtimeMetrics,
+      "No RuntimeMetrics side-channel samples or legacy QueueSample events found",
+    ).toBeGreaterThan(0);
+  });
 
   it("multiple workers", () => {
     const workerIds = getWorkerIds();

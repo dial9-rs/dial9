@@ -89,6 +89,7 @@ function workerAtClientY(
     LANE_ROW_H,
     RUNTIME_HEADER_H,
     collapsedRuntimes,
+    data.metricsRuntimes,
   );
   return workerAtLaneY(rowLayout, localY);
 }
