@@ -25,7 +25,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
 
-## Tracing span events
+## Tracing span events (opt-in)
 
 Connect `Dial9TracingLayer` to a `tracing_subscriber` registry:
 

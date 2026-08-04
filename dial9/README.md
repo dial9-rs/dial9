@@ -212,7 +212,6 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 - [Socket accept queues](#socket-accept-queues-linux-only): dial9 can sample pending TCP listener connections and backlog limits on Linux
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
-- [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
 - [Metrique metrics](#metrique-metrics-opt-in): dial9 can record metrique unit-of-work metric entries alongside your EMF/JSON pipeline
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace

@@ -45,8 +45,10 @@
 //! allows you to understand scheduling delay of the tasks you are running.
 //!
 //! #### Tracing
-//! Dial9 can capture Tracing spans via the `TracingLayer`. On the scale of tracing, this is fairly low overhead, however, if you have a large amount of deeply nested spans, this can produce a huge amount
-//! of data. We recommend using a very fine-grained filter.
+//! Dial9 can capture tracing spans through
+//! `dial9_utils::tracing_layer::Dial9TracingLayer`. On the scale of tracing,
+//! this is fairly low overhead, but deeply nested spans can produce a huge
+//! amount of data. We recommend using a very fine-grained filter.
 //!
 //! ### Metrics
 //!
