@@ -96,8 +96,8 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   // Trace-invariant queue series: recomputed only when the trace slice changes.
   // The global line is the process-wide queue depth (per-runtime RuntimeMetrics
   // summed per cycle, or the legacy pre-summed QueueSample series). Per-runtime
-  // queue/task detail lives in the lanes track (a pinned lane per runtime), not
-  // here.
+  // queue/task detail lives in the lanes track (a summary lane closing each
+  // runtime's group), not here.
   const queueData = store.derived(["trace"], (s) => computeQueueData(s.trace.trace));
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace

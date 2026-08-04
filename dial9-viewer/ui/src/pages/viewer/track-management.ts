@@ -199,6 +199,20 @@ export function toggleRuntimeCollapsed(store: ViewerStore, name: string): void {
   });
 }
 
+/**
+ * Toggle a runtime's SUMMARY-LANE fold by NAME (a click on its metrics lane in
+ * the lanes track). Folding shrinks the lane to its one-line strip - the
+ * headline numbers stay, the chart's height is reclaimed - leaving the runtime's
+ * worker rows untouched. Persists via the uiPrefs -> trackPrefs subscriber, like
+ * {@link toggleRuntimeCollapsed}.
+ */
+export function toggleRuntimeMetricsCollapsed(store: ViewerStore, name: string): void {
+  const cur = store.getState().uiPrefs.collapsedRuntimeMetrics;
+  store.update("uiPrefs", {
+    collapsedRuntimeMetrics: { ...cur, [name]: !(cur[name] === true) },
+  });
+}
+
 // ── localStorage persistence (survives reload) ─────────────────────────────
 //
 // A try/catch around localStorage with an in-memory fallback map, so a
@@ -209,20 +223,22 @@ export function toggleRuntimeCollapsed(store: ViewerStore, name: string): void {
 /** localStorage key for the serialized track prefs. */
 export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
 
-/** The persisted shape: the manageable order + the collapse map + the per-runtime
- *  fold map + the lanes box height. `lanesHeight` and `collapsedRuntimes` are
- *  optional so prefs written before they existed still parse (the store keeps its
- *  default when absent). */
+/** The persisted shape: the manageable order + the collapse map + the two
+ *  per-runtime fold maps (runtime, summary lane) + the lanes box height. Every
+ *  field but `trackOrder`/`collapsed` is optional so prefs written before it
+ *  existed still parse (the store keeps its default when absent). */
 export interface TrackPrefs {
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
   collapsedRuntimes?: Readonly<Record<string, boolean>>;
+  collapsedRuntimeMetrics?: Readonly<Record<string, boolean>>;
   lanesHeight?: number;
 }
 
 /** Coerce an unknown value into a `Record<string, boolean>`, keeping only the
  *  boolean-valued entries. A non-object yields an empty map. Shared by the
- *  `collapsed` (track) + `collapsedRuntimes` (runtime) fold maps. */
+ *  `collapsed` (track) + `collapsedRuntimes` / `collapsedRuntimeMetrics`
+ *  (runtime) fold maps. */
 function parseBoolMap(value: unknown): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   if (value !== null && typeof value === "object") {
@@ -276,12 +292,15 @@ export function loadTrackPrefs(): TrackPrefs | null {
     );
     const cr = (obj as { collapsedRuntimes?: unknown }).collapsedRuntimes;
     const collapsedRuntimes = cr !== undefined ? parseBoolMap(cr) : undefined;
+    const crm = (obj as { collapsedRuntimeMetrics?: unknown }).collapsedRuntimeMetrics;
+    const collapsedRuntimeMetrics = crm !== undefined ? parseBoolMap(crm) : undefined;
     const lh = (obj as { lanesHeight?: unknown }).lanesHeight;
     const lanesHeight = typeof lh === "number" && Number.isFinite(lh) && lh > 0 ? lh : undefined;
     return {
       trackOrder,
       collapsed,
       ...(collapsedRuntimes !== undefined ? { collapsedRuntimes } : {}),
+      ...(collapsedRuntimeMetrics !== undefined ? { collapsedRuntimeMetrics } : {}),
       ...(lanesHeight !== undefined ? { lanesHeight } : {}),
     };
   } catch {
@@ -289,8 +308,8 @@ export function loadTrackPrefs(): TrackPrefs | null {
   }
 }
 
-/** Persist track prefs (order + collapse map + runtime fold map + lanes box
- *  height) to localStorage. */
+/** Persist track prefs (order + collapse map + the two runtime fold maps + lanes
+ *  box height) to localStorage. */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
   const trackOrder = prefs.trackOrder.filter((id) => !isFieldChartTrackId(id));
   const collapsed = Object.fromEntries(
@@ -305,6 +324,9 @@ export function saveTrackPrefs(prefs: TrackPrefs): void {
       collapsed,
       ...(prefs.collapsedRuntimes !== undefined
         ? { collapsedRuntimes: prefs.collapsedRuntimes }
+        : {}),
+      ...(prefs.collapsedRuntimeMetrics !== undefined
+        ? { collapsedRuntimeMetrics: prefs.collapsedRuntimeMetrics }
         : {}),
       ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
     }),
@@ -328,6 +350,9 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
     ...(prefs.collapsedRuntimes !== undefined
       ? { collapsedRuntimes: prefs.collapsedRuntimes }
       : {}),
+    ...(prefs.collapsedRuntimeMetrics !== undefined
+      ? { collapsedRuntimeMetrics: prefs.collapsedRuntimeMetrics }
+      : {}),
     ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
   });
 }
@@ -341,7 +366,19 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
  */
 export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
   return store.subscribe(["uiPrefs"], (state) => {
-    const { trackOrder, collapsed, collapsedRuntimes, lanesViewportHeight } = state.uiPrefs;
-    saveTrackPrefs({ trackOrder, collapsed, collapsedRuntimes, lanesHeight: lanesViewportHeight });
+    const {
+      trackOrder,
+      collapsed,
+      collapsedRuntimes,
+      collapsedRuntimeMetrics,
+      lanesViewportHeight,
+    } = state.uiPrefs;
+    saveTrackPrefs({
+      trackOrder,
+      collapsed,
+      collapsedRuntimes,
+      collapsedRuntimeMetrics,
+      lanesHeight: lanesViewportHeight,
+    });
   });
 }

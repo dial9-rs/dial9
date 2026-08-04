@@ -60,6 +60,7 @@ function initialViewerState(): StoreState {
       trackOrder: [],
       collapsed: {},
       collapsedRuntimes: {},
+      collapsedRuntimeMetrics: {},
       sidebarWidth: 320,
       lanesViewportHeight: 200,
       lanesScrollTop: 0,

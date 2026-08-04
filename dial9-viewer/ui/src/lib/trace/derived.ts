@@ -89,8 +89,8 @@ export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
 
 const runtimeMetricsCache = new WeakMap<ParsedTrace, RuntimeMetrics>();
 
-/** Per-runtime scheduler metrics (alive-task count + global-queue sparkline per
- *  runtime, plus the summed process-wide global-queue timeline), derived once
+/** Per-runtime scheduler metrics (each runtime's alive-task + global-queue
+ *  series, plus the summed process-wide global-queue timeline), derived once
  *  from the trace's `runtimeMetrics` side-channel. */
 export function deriveRuntimeMetrics(trace: ParsedTrace): RuntimeMetrics {
   const cached = runtimeMetricsCache.get(trace);

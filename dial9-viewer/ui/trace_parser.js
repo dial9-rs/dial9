@@ -411,28 +411,18 @@
         QueueSample: 4,
         WakeEvent: 9,
         // Per-runtime scheduler metrics (queue depth + alive tasks), one per
-        // runtime per sample. Supersedes QueueSample; both are still parsed so
-        // old traces keep working. Like QueueSample it carries no worker, so it
-        // must be excluded everywhere QueueSample is when grouping by worker.
+        // runtime per sample; supersedes QueueSample, and both are still parsed
+        // so old traces keep working.
+        //
+        // RESERVED, not observed: these events decode into the `runtimeMetrics`
+        // SIDE-CHANNEL and are never pushed into `trace.events`, so no event
+        // ever carries this discriminant. It is listed to reserve the number and
+        // to document that absence — consumers that group `trace.events` by
+        // worker (e.g. lifecycleWorkerIds) therefore need not exclude it, the way
+        // they must exclude the worker-less QueueSample and WakeEvent. Routing
+        // these into `trace.events` later would mean revisiting every such site.
         RuntimeMetrics: 10,
     };
-
-    // Event types that carry no worker: their `workerId` field is a placeholder
-    // (0), not a real worker. Grouping these by worker corrupts worker 0's
-    // stream, so every "group events by worker" site must skip them. Single
-    // source of truth — see `hasWorker`.
-    const WORKER_LESS_EVENT_TYPES = new Set([
-        EVENT_TYPES.QueueSample,
-        EVENT_TYPES.RuntimeMetrics,
-        EVENT_TYPES.WakeEvent,
-    ]);
-
-    /** True if this event is attributable to a specific worker (i.e. its
-     * `workerId` is real). Callers that build per-worker structures must gate on
-     * this so worker-less samples never leak into a worker's data. */
-    function hasWorker(event) {
-        return !WORKER_LESS_EVENT_TYPES.has(event.eventType);
-    }
 
     /**
      * Sentinel `workerId` used for CPU samples that cannot be confidently

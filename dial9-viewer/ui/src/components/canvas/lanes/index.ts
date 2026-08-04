@@ -34,6 +34,8 @@ import {
   sharedVisibleMaxQueue,
 } from "./render.js";
 import { ensureLanesLegend, mountLanesLegend } from "./legend.js";
+import { renderLaneLabels } from "./labels.js";
+import { LABEL_W } from "../../../lib/canvas/layout.js";
 
 const LANES_TRACK_ID: TrackId = "lanes";
 
@@ -79,11 +81,18 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
 
   let sizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
   let sizerCanvas: HTMLCanvasElement | null = null;
+  // The label gutter's own sizer: a second canvas, same DPR discipline.
+  let labelSizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
+  let labelSizerCanvas: HTMLCanvasElement | null = null;
 
   function laneCanvas(): HTMLCanvasElement | null {
     return trackColumn.querySelector<HTMLCanvasElement>(
       `canvas[data-track-canvas="${LANES_TRACK_ID}"]`,
     );
+  }
+
+  function labelCanvas(): HTMLCanvasElement | null {
+    return trackColumn.querySelector<HTMLCanvasElement>(".d9-lanes-label-canvas");
   }
 
   function lanesBox(): HTMLElement | null {
@@ -133,7 +142,10 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       LANE_ROW_H,
       RUNTIME_HEADER_H,
       state.uiPrefs.collapsedRuntimes,
-      data.metricsRuntimes,
+      {
+        runtimes: data.metricsRuntimes,
+        collapsed: state.uiPrefs.collapsedRuntimeMetrics,
+      },
     );
     // Size the inner spacer so the box scrolls exactly the overflow past the
     // window (the sticky canvas occupies the first `viewportH` of flow).
@@ -163,6 +175,8 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       workerIds: data.workerIds,
       workerSpans: data.workerSpans,
       runtimeMetrics: data.runtimeMetrics,
+      laneIdentity: data.laneIdentity,
+      runtimeAccents: data.runtimeAccents,
       workerQueueSamples: data.workerQueueSamples,
       wakesByWorker: data.wakesByWorker,
       spansById: data.spansById,
@@ -183,6 +197,48 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       height: viewportH,
       rowLayout,
       scrollTop,
+    });
+
+    // The label gutter, painted from the SAME rowLayout + scrollTop in the SAME
+    // frame, so a row's name can never drift from the row it names.
+    drawLabels(rowLayout, scrollTop, viewportH, dpr, data);
+  }
+
+  /**
+   * Paint the per-row label gutter. Sized to the VISIBLE box height (the gutter
+   * clips it), matching the virtualized lanes canvas: both cull to the same
+   * scroll window from the same row stack.
+   *
+   * The gutter is outside the scrolling box, so it needs no sticky positioning —
+   * repainting it from `scrollTop` is what keeps it in step, which is exactly how
+   * the lanes canvas already works.
+   */
+  function drawLabels(
+    rowLayout: LaneRowLayout,
+    scrollTop: number,
+    viewportH: number,
+    dpr: number,
+    data: LaneData,
+  ): void {
+    const canvas = labelCanvas();
+    if (!canvas) return;
+    if (labelSizer === null || labelSizerCanvas !== canvas) {
+      labelSizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
+      labelSizerCanvas = canvas;
+    }
+    // The gutter canvas spans the full box height: its row 0 must start at the
+    // same y as the lanes canvas's row 0, so the gutter carries no padding and no
+    // leading track-name line (CSS makes that name sr-only). Any inset here would
+    // shift every label relative to the lane it names.
+    const labelH = viewportH;
+    const ctx = labelSizer.ensure(LABEL_W, labelH, dpr);
+    renderLaneLabels(ctx, {
+      rowLayout,
+      scrollTop,
+      labelW: LABEL_W,
+      height: labelH,
+      runtimeAccents: data.runtimeAccents,
+      workerRuntime: data.workerRuntime,
     });
   }
 
@@ -300,7 +356,10 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
         LANE_ROW_H,
         RUNTIME_HEADER_H,
         effective,
-        data.metricsRuntimes,
+        {
+          runtimes: data.metricsRuntimes,
+          collapsed: store.getState().uiPrefs.collapsedRuntimeMetrics,
+        },
       );
       const row = rows.find((r) => r.kind === "worker" && r.workerId === workerId);
       if (row === undefined) return false;
@@ -340,6 +399,8 @@ export { deriveLaneData } from "./data.js";
 export type { LaneData } from "./data.js";
 export { renderLanes, sharedVisibleMaxQueue } from "./render.js";
 export type { LanesRenderInput, LanesLayout } from "./render.js";
+export { buildLaneIdentities, runtimeAccent, RUNTIME_ACCENTS } from "./chrome.js";
+export type { LaneIdentities, LaneIdentity } from "./chrome.js";
 export { resolveLaneClick } from "./click.js";
 export type { LaneClickResult } from "./click.js";
 export { assembleLaneHover } from "./hover.js";

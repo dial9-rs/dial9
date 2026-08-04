@@ -14,7 +14,14 @@
 // opens for that range is the region panel's. A lane click on a poll with
 // samples returns openStackFor, which drives the inspector's Poll Detail.
 
-import { LABEL_W, headerAtLaneY, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
+import {
+  LABEL_W,
+  headerAtLaneY,
+  laneRowLayout,
+  metricsLaneAtLaneY,
+  timePanelLayout,
+  workerAtLaneY,
+} from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../../components/canvas/lanes/render.js";
 import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
@@ -30,7 +37,7 @@ import { deriveLaneData, resolveLaneClick } from "../../components/canvas/lanes/
 import type { LaneData } from "../../components/canvas/lanes/index.js";
 import { createViewportActions } from "./viewport-actions.js";
 import type { ViewportActions } from "./viewport-actions.js";
-import { toggleRuntimeCollapsed } from "./track-management.js";
+import { toggleRuntimeCollapsed, toggleRuntimeMetricsCollapsed } from "./track-management.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -121,6 +128,14 @@ export function mountLaneInteraction(
     return rowLayout === null ? null : headerAtLaneY(rowLayout.layout, rowLayout.localY);
   }
 
+  /** Runtime-group name whose SUMMARY lane is under `clientY`, or null. A click
+   *  there folds/unfolds that lane's chart rather than selecting a worker. */
+  function metricsLaneAtClientY(clientY: number, data: LaneData): string | null {
+    if (data.metricsRuntimes.size === 0) return null; // no summary lanes to hit
+    const rowLayout = laneRowAt(clientY, data);
+    return rowLayout === null ? null : metricsLaneAtLaneY(rowLayout.layout, rowLayout.localY);
+  }
+
   /** Shared lanes-box hit geometry: the collapse-aware row layout + the box-local
    *  y, or null when the point is off the lanes box. Built from the SAME collapse
    *  state the renderer drew from, so click resolves to what is on screen. */
@@ -133,12 +148,13 @@ export function mountLaneInteraction(
     const rect = box.getBoundingClientRect();
     if (clientY < rect.top || clientY >= rect.bottom || rect.height <= 0) return null;
     const localY = clientY - rect.top + box.scrollTop;
+    const prefs = store.getState().uiPrefs;
     const layout = laneRowLayout(
       data.runtimeGroups,
       LANE_ROW_H,
       RUNTIME_HEADER_H,
-      store.getState().uiPrefs.collapsedRuntimes,
-      data.metricsRuntimes,
+      prefs.collapsedRuntimes,
+      { runtimes: data.metricsRuntimes, collapsed: prefs.collapsedRuntimeMetrics },
     );
     return { layout, localY };
   }
@@ -273,6 +289,13 @@ export function mountLaneInteraction(
     const headerName = runtimeHeaderAtClientY(e.clientY, data);
     if (headerName !== null) {
       toggleRuntimeCollapsed(store, headerName);
+      return;
+    }
+    // A click on a runtime's SUMMARY lane folds/unfolds its chart - likewise
+    // never a worker select and never a selection clear.
+    const metricsName = metricsLaneAtClientY(e.clientY, data);
+    if (metricsName !== null) {
+      toggleRuntimeMetricsCollapsed(store, metricsName);
       return;
     }
     const ns = geom.layout.panelXToNs(mouseXCol);

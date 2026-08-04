@@ -1,8 +1,8 @@
 // Per-runtime scheduler-metrics model: turns the flat `trace.runtimeMetrics`
 // side-channel (one `RuntimeMetricsSample` per runtime per flush cycle) into
-// (a) a per-runtime series the lanes header draws (latest alive-task count + a
-// global-queue sparkline), and (b) the summed process-wide global-queue
-// timeline the queue track plots.
+// (a) a per-runtime series the lanes' summary lane plots (global-queue depth as
+// a filled step area, alive tasks as a step line), and (b) the summed
+// process-wide global-queue timeline the queue track plots.
 //
 // Pure: no store, no DOM, no canvas — built once per trace and cached
 // (derived.ts), never per frame.
@@ -14,11 +14,9 @@ import type { ParsedTrace, RuntimeMetricsSample } from "../../types/trace.js";
 export interface RuntimeSeries {
   /** Samples for this runtime, in wire (time) order. */
   samples: RuntimeMetricsSample[];
-  /** Alive-task count from the last sample (0 if none). The headline number. */
-  latestAliveTasks: number;
   /** Peak alive-task count across the trace. */
   maxAliveTasks: number;
-  /** Peak global-queue depth across the trace (sparkline autoscale). */
+  /** Peak global-queue depth across the trace (the chart's y autoscale). */
   maxGlobalQueue: number;
 }
 
@@ -59,14 +57,12 @@ export function computeRuntimeMetrics(trace: ParsedTrace | null): RuntimeMetrics
     if (series === undefined) {
       series = {
         samples: [],
-        latestAliveTasks: 0,
         maxAliveTasks: 0,
         maxGlobalQueue: 0,
       };
       byRuntime.set(s.runtimeName, series);
     }
     series.samples.push(s);
-    series.latestAliveTasks = s.aliveTasks;
     if (s.aliveTasks > series.maxAliveTasks) series.maxAliveTasks = s.aliveTasks;
     if (s.globalQueue > series.maxGlobalQueue) series.maxGlobalQueue = s.globalQueue;
     summedByTs.set(s.t, (summedByTs.get(s.t) ?? 0) + s.globalQueue);
@@ -77,4 +73,26 @@ export function computeRuntimeMetrics(trace: ParsedTrace | null): RuntimeMetrics
     .sort((a, b) => a.t - b.t);
 
   return { byRuntime, summedGlobalQueue, present: true };
+}
+
+/**
+ * The runtime-GROUP names that have a metric series, so a summary lane is
+ * emitted for them. Keyed by group name (not wire name) because that is what
+ * `laneRowLayout` checks; the inferred default group ("main") maps to the empty
+ * wire name the unnamed default runtime uses.
+ *
+ * Shared by every consumer that must agree on the lane stack — the renderer's
+ * data and both hit-test data paths (lanes, overlay) — so a summary lane can
+ * never exist for the draw but not the click.
+ */
+export function metricsRuntimeNames(
+  groups: readonly { name: string; inferred: boolean }[],
+  metrics: RuntimeMetrics,
+): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const g of groups) {
+    const series = metrics.byRuntime.get(g.inferred ? "" : g.name);
+    if (series !== undefined && series.samples.length > 0) names.add(g.name);
+  }
+  return names;
 }

@@ -16,7 +16,7 @@ describe("computeRuntimeMetrics", () => {
     expect(computeRuntimeMetrics(null)).toBe(EMPTY_RUNTIME_METRICS);
   });
 
-  it("groups samples by runtime and tracks latest/peak per runtime", () => {
+  it("groups samples by runtime and tracks the peak per runtime", () => {
     const m = computeRuntimeMetrics(
       traceWith([
         { t: 10, runtimeName: "", globalQueue: 5, aliveTasks: 100 },
@@ -29,12 +29,11 @@ describe("computeRuntimeMetrics", () => {
 
     const main = m.byRuntime.get("")!;
     expect(main.samples.length).toBe(2);
-    expect(main.latestAliveTasks).toBe(194); // from the last sample
     expect(main.maxAliveTasks).toBe(194);
     expect(main.maxGlobalQueue).toBe(5);
 
     const io = m.byRuntime.get("io")!;
-    expect(io.latestAliveTasks).toBe(2);
+    expect(io.maxAliveTasks).toBe(4);
     expect(io.maxGlobalQueue).toBe(6);
   });
 

@@ -4,9 +4,10 @@
 //
 // Issue #282: a 0-valued global-queue area rendered as a 1px stroke fused to
 // the axis, indistinguishable from "no data" (invisible at zero). `queueScaleY`
-// reserves ZERO_BASELINE_PX below the lowest data so a 0-valued series maps to
-// a VISIBLE flat line a fixed distance above the axis. The underlying numbers
-// are unchanged - only the y-mapping does.
+// (lib/canvas/zero-baseline.ts, re-exported below) reserves ZERO_BASELINE_PX
+// below the lowest data so a 0-valued series maps to a VISIBLE flat line a fixed
+// distance above the axis. The underlying numbers are unchanged - only the
+// y-mapping does.
 //
 // The three series (global injection queue, max per-worker local queue,
 // active-task count) share ONE explicit zero baseline even though the
@@ -134,48 +135,16 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
  */
 
 // ── The scale function ───────────────────────────────────────────────────
+//
+// Lives in lib/canvas/zero-baseline.ts, shared with the lanes' per-runtime
+// summary lane (which plots the same kind of series and must agree on where zero
+// is). Re-exported here so this module stays the queue track's one model import.
 
-/**
- * Pixels reserved between the chart's true bottom (the axis) and the y a value
- * of 0 maps to, so a 0-valued series renders as a VISIBLE flat line this far
- * above the axis instead of a stroke fused to it. Small enough to cost almost
- * no vertical range, large enough to read as a distinct line.
- */
-export const ZERO_BASELINE_PX = 3;
-
-/**
- * Map a queue-series value in [0, max] to a y coordinate inside the chart band
- * [chartTop, chartTop + chartH]. The bottom ZERO_BASELINE_PX is reserved so
- * value 0 lands a visible distance ABOVE the axis (the explicit zero baseline):
- * `queueScaleY(0, ...)` is strictly less than `chartTop + chartH`. `max` <= 0
- * pins everything to that baseline. The result is clamped into the band.
- *
- * This is the single scale every series (global, max-local, active-task) runs
- * through, so a 0-valued global renders a visible flat line.
- */
-export function queueScaleY(
-  value: number,
-  max: number,
-  chartTop: number,
-  chartH: number,
-  baselinePx: number = ZERO_BASELINE_PX,
-): number {
-  const reserve = Math.min(Math.max(0, baselinePx), chartH);
-  const usableH = chartH - reserve;
-  const baselineY = chartTop + chartH - reserve;
-  if (!(max > 0) || usableH <= 0) return baselineY;
-  const norm = value <= 0 ? 0 : value >= max ? 1 : value / max;
-  return baselineY - norm * usableH;
-}
-
-/** The y a value of 0 maps to (the visible zero baseline). */
-export function queueBaselineY(
-  chartTop: number,
-  chartH: number,
-  baselinePx: number = ZERO_BASELINE_PX,
-): number {
-  return chartTop + chartH - Math.min(Math.max(0, baselinePx), chartH);
-}
+export {
+  ZERO_BASELINE_PX,
+  queueBaselineY,
+  queueScaleY,
+} from "../../lib/canvas/zero-baseline.js";
 
 // ── Per-frame render model (bucketing) ───────────────────────────────────
 

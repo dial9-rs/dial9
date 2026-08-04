@@ -79,6 +79,7 @@ function workerAtClientY(
   clientY: number,
   data: OverlayData,
   collapsedRuntimes: Readonly<Record<string, boolean>>,
+  collapsedRuntimeMetrics: Readonly<Record<string, boolean>>,
 ): number | null {
   if (data.workerIds.length === 0) return null;
   const rect = box.getBoundingClientRect();
@@ -89,7 +90,7 @@ function workerAtClientY(
     LANE_ROW_H,
     RUNTIME_HEADER_H,
     collapsedRuntimes,
-    data.metricsRuntimes,
+    { runtimes: data.metricsRuntimes, collapsed: collapsedRuntimeMetrics },
   );
   return workerAtLaneY(rowLayout, localY);
 }
@@ -251,7 +252,13 @@ export function mountOverlay(
     const ns = geom.layout.panelXToNs(mouseX);
     const lanesBox = trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
     const workerId = lanesBox
-      ? workerAtClientY(lanesBox, e.clientY, data, state.uiPrefs.collapsedRuntimes)
+      ? workerAtClientY(
+          lanesBox,
+          e.clientY,
+          data,
+          state.uiPrefs.collapsedRuntimes,
+          state.uiPrefs.collapsedRuntimeMetrics,
+        )
       : null;
 
     const readout = computeAtCursorReadout(

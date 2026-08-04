@@ -16,6 +16,7 @@ import {
   sharedSpanData,
   sharedWorkerSpans,
 } from "../../lib/trace/derived.js";
+import { metricsRuntimeNames } from "../../lib/trace/runtime-metrics-model.js";
 import type {
   BlockInPlaceGap,
   ParsedTrace,
@@ -31,8 +32,8 @@ export interface OverlayData {
   workerIds: number[];
   /** Runtime groups in render order (for the fixed-height + header y-mapping). */
   runtimeGroups: RuntimeGroup[];
-  /** Runtime names with a pinned summary lane (so hit-test y-mapping matches
-   *  the rendered stack, which inserts a lane per such runtime). */
+  /** Runtime names with a summary lane (so hit-test y-mapping matches the
+   *  rendered stack, which appends a lane per such runtime). */
   metricsRuntimes: ReadonlySet<string>;
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, LaneSpans>;
@@ -65,14 +66,10 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
   const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
 
-  // Runtimes with a metric series get a pinned summary lane; the hit-test must
-  // account for it (keyed by group name, matching laneRowLayout).
-  const runtimeMetrics = deriveRuntimeMetrics(trace);
-  const metricsRuntimes = new Set<string>();
-  for (const g of runtimeGroups) {
-    const series = runtimeMetrics.byRuntime.get(g.inferred ? "" : g.name);
-    if (series !== undefined && series.samples.length > 0) metricsRuntimes.add(g.name);
-  }
+  // Runtimes with a metric series get a summary lane; the hit-test must account
+  // for it (same derivation the renderer's data uses, so hover can never drift
+  // from the drawn stack).
+  const metricsRuntimes = metricsRuntimeNames(runtimeGroups, deriveRuntimeMetrics(trace));
 
   const spanData = sharedSpanData(trace);
   const timeline = buildActiveTaskTimeline(

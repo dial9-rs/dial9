@@ -70,6 +70,16 @@ interface ParsedTrace {
   clockOffsetNs: number | null;
   customEvents: CustomEvent[];
   tidBindings: Map<number, Array<{ timestamp: number; workerId: number }>>;
+  /** Per-runtime scheduler-metrics side-channel (one sample per runtime per
+   *  flush cycle). Empty for traces that predate RuntimeMetricsEvent. */
+  runtimeMetrics: RuntimeMetricsSample[];
+}
+
+interface RuntimeMetricsSample {
+  t: number;
+  runtimeName: string;
+  globalQueue: number;
+  aliveTasks: number;
 }
 
 const { parseTrace, EVENT_TYPES } = require("../../trace_parser.js") as {
