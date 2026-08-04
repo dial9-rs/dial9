@@ -62,7 +62,7 @@ Field names still matter for the wire schema: two fields that emit the same post
 
 One schema is emitted per distinct descriptor-id sequence, named `metrique:<EntryName>` (a `#<layout hash>` suffix disambiguates canonical-name collisions). The implicit packed event timestamp is the monotonic close time. This preserves emission order in the delta-encoded timestamp stream even when entries close in a different order than they started.
 
-The structural schema fields are `dial9.span.start_ns`, `dial9.thread_id`, and optional `dial9.tokio.task_id`. Their `dial9.role` annotations are authoritative; `dial9.span.start_ns` also carries `unit=ns` and `dial9.span.type=metrique`. `dial9.wall_clock_ns` remains optional metadata from `#[metrics(timestamp)]`. A scalar string field flagged `SpanName` carries `dial9.role=span.name`; without one, consumers use the schema name. See `docs/design/single-event-spans.md` for the producer-independent contract.
+The structural schema fields are `dial9.span.duration_ns`, `dial9.thread_id`, and optional `dial9.tokio.task_id`. Their `dial9.role` annotations are authoritative; `dial9.span.duration_ns` also carries `unit=ns` and `dial9.span.type=metrique`. `dial9.wall_clock_ns` remains optional metadata from `#[metrics(timestamp)]`. A scalar string field flagged `SpanName` carries `dial9.role=span.name`; without one, consumers use the schema name. See `docs/design/single-event-spans.md` for the producer-independent contract.
 
 The internal `Dial9Context` fields and generated wire fields remain `dial9.`-prefixed. `WithoutDial9Fields` can therefore remove the context fields from peer EMF/JSON sinks, and generated structural fields cannot accidentally shadow ordinary application fields.
 

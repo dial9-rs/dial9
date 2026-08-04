@@ -10,23 +10,29 @@ mod spans_reader;
 #[cfg(test)]
 use spans_reader::parse_map_column;
 use spans_reader::{
-    ExemplarOnlyConfig, ExemplarOnlySummary, SpanStatsInput, SpanStatsRow, SpansBatchReader,
+    ExemplarOnlyConfig, ExemplarOnlySummary, RowComposition, SpanStatsInput, SpanStatsRow,
+    SpansBatchReader,
 };
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::Read;
 
 #[cfg(test)]
 use arrow::array::Array;
-use axum::Extension;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::{Extension, Json};
 use axum_extra::extract::Query as QueryExtra;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use crate::ingest::aggregate::{self, AggContext, Coverage, FoldLimits, Scope};
+use crate::ingest::decode::{self, ResolvedSpan};
 use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
@@ -54,6 +60,15 @@ const MAX_EXEMPLARS: usize = 5;
 const MAX_ATTRIBUTE_VALUES: usize = 10;
 /// Maximum distinct attribute keys tracked per span type.
 const MAX_ATTRIBUTE_KEYS: usize = 50;
+/// Maximum raw trace bytes accepted by the one-shot Span Explorer endpoint.
+pub(crate) const RAW_SPAN_STATS_BODY_LIMIT: usize = 256 * 1024 * 1024;
+/// Maximum number of raw traces buffered and decoded concurrently.
+pub(crate) const MAX_CONCURRENT_RAW_SPAN_STATS: usize = 2;
+/// Bound gzip expansion independently from the compressed request body.
+const RAW_SPAN_STATS_DECOMPRESSED_LIMIT: usize = 512 * 1024 * 1024;
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+const TRACE_MAGIC: [u8; 4] = [0x54, 0x52, 0x43, 0x00];
+static RAW_SPAN_STATS_DECODE_LIMIT: Semaphore = Semaphore::const_new(MAX_CONCURRENT_RAW_SPAN_STATS);
 
 #[derive(Deserialize)]
 pub struct SpanStatsParams {
@@ -374,6 +389,80 @@ pub struct SpanStatsResponse {
     /// tracking cap (MAX_SPAN_TYPES) was reached. Non-zero means
     /// `total_span_types_tracked` is a lower bound.
     pub types_overflow_instances: u64,
+}
+
+/// Handler for `POST /api/span-stats`: decode one raw trace body with the same
+/// Rust pipeline used by demand-driven aggregation and return one final catalog.
+pub async fn post_raw_span_stats(
+    body: Bytes,
+) -> Result<Json<SpanStatsResponse>, (StatusCode, String)> {
+    let permit = RAW_SPAN_STATS_DECODE_LIMIT
+        .acquire()
+        .await
+        .expect("raw span-stats semaphore is never closed");
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        raw_span_stats_response(&body)
+    })
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("raw span-stats worker failed: {error}"),
+        )
+    })?
+    .map_err(|error| (StatusCode::BAD_REQUEST, format!("{error:#}")))?;
+    Ok(Json(snapshot))
+}
+
+fn raw_span_stats_response(body: &[u8]) -> anyhow::Result<SpanStatsResponse> {
+    let trace = raw_trace_bytes(
+        body,
+        RAW_SPAN_STATS_BODY_LIMIT,
+        RAW_SPAN_STATS_DECOMPRESSED_LIMIT,
+    )?;
+
+    let (_, _, _, spans) = decode::decode_samples(&trace, "raw-trace")?;
+    let mut accum = SpanStatsAccum::new(None, None);
+    for span in spans {
+        accum.merge_resolved_span(span)?;
+    }
+    Ok(accum.snapshot())
+}
+
+fn raw_trace_bytes(
+    body: &[u8],
+    body_limit: usize,
+    decompressed_limit: usize,
+) -> anyhow::Result<Cow<'_, [u8]>> {
+    anyhow::ensure!(!body.is_empty(), "empty trace body");
+    anyhow::ensure!(
+        body.len() <= body_limit,
+        "trace body exceeds {} byte limit",
+        body_limit
+    );
+
+    let trace = if body.starts_with(&GZIP_MAGIC) {
+        let mut decompressed = Vec::new();
+        let decoder = flate2::read::GzDecoder::new(body);
+        decoder
+            .take(decompressed_limit as u64 + 1)
+            .read_to_end(&mut decompressed)
+            .map_err(|error| anyhow::anyhow!("decompress gzip trace: {error}"))?;
+        anyhow::ensure!(
+            decompressed.len() <= decompressed_limit,
+            "decompressed trace exceeds {} byte limit",
+            decompressed_limit
+        );
+        Cow::Owned(decompressed)
+    } else {
+        Cow::Borrowed(body)
+    };
+    anyhow::ensure!(
+        trace.starts_with(&TRACE_MAGIC),
+        "body is not a trace: expected gzip or 'TRC\\0' magic"
+    );
+    Ok(trace)
 }
 
 /// Handler for GET /api/span-stats — a Server-Sent Events stream.
@@ -922,6 +1011,7 @@ impl SpanStatsAccum {
             SpanStatsInput::Row(row) => staged.merge_row(*row),
             SpanStatsInput::ExemplarOnlySummary(summary) => {
                 staged.merge_exemplar_only_summary(summary);
+                Ok(())
             }
         });
         if result.is_ok() {
@@ -955,7 +1045,7 @@ impl SpanStatsAccum {
         }
     }
 
-    fn merge_row(&mut self, row: SpanStatsRow) {
+    fn merge_row(&mut self, row: SpanStatsRow) -> anyhow::Result<()> {
         let SpanStatsRow {
             span_type_uid,
             kind,
@@ -972,7 +1062,7 @@ impl SpanStatsAccum {
         // Attribute filters narrow the entire aggregate: a non-matching row
         // contributes to no counts, histograms, composition, or exemplars.
         if !self.attrs_match(&attributes) {
-            return;
+            return Ok(());
         }
         let has_exemplar_bounds = self.exemplar_min_ns.is_some() || self.exemplar_max_ns.is_some();
         let matches_exemplar_bounds = self.exemplar_matches(elapsed_ns);
@@ -981,7 +1071,7 @@ impl SpanStatsAccum {
         // Cardinality bound: don't create new types beyond the cap.
         if !self.types.contains_key(&span_type_uid) && self.types.len() >= MAX_SPAN_TYPES {
             self.types_overflow_instances += 1;
-            return;
+            return Ok(());
         }
 
         let exemplars_only = self.exemplars_only;
@@ -997,7 +1087,7 @@ impl SpanStatsAccum {
         if exemplars_only {
             entry.count += 1;
             entry.record_exemplar(exemplar);
-            return;
+            return Ok(());
         }
         entry.record(elapsed_ns, exemplar);
 
@@ -1006,33 +1096,91 @@ impl SpanStatsAccum {
         }
 
         if let Some(composition) = composition {
+            let checked_sum = |field: &str, values: &[i64]| -> anyhow::Result<i64> {
+                values.iter().try_fold(0i64, |total, value| {
+                    total.checked_add(*value).ok_or_else(|| {
+                        anyhow::anyhow!("{field} exceeds i64 range while aggregating spans")
+                    })
+                })
+            };
+            let checked_add = |field: &str, total: &mut i64, value: i64| {
+                *total = total.checked_add(value).ok_or_else(|| {
+                    anyhow::anyhow!("{field} exceeds i64 range while aggregating spans")
+                })?;
+                Ok::<_, anyhow::Error>(())
+            };
+            let classified_total = checked_sum(
+                "classified time",
+                &[
+                    composition.on_cpu_ns,
+                    composition.blocked_ns,
+                    composition.async_wait_ns,
+                    composition.scheduler_delay_ns,
+                    composition.unknown_ns,
+                ],
+            )?;
+
             entry.has_composition = true;
-            entry.unknown_ns_sum += composition.unknown_ns;
-            entry.on_cpu_ns_sum += composition.on_cpu_ns;
-            entry.blocked_ns_sum += composition.blocked_ns;
-            entry.async_wait_ns_sum += composition.async_wait_ns;
-            entry.scheduler_delay_ns_sum += composition.scheduler_delay_ns;
+            checked_add(
+                "unknown_ns_sum",
+                &mut entry.unknown_ns_sum,
+                composition.unknown_ns,
+            )?;
+            checked_add(
+                "on_cpu_ns_sum",
+                &mut entry.on_cpu_ns_sum,
+                composition.on_cpu_ns,
+            )?;
+            checked_add(
+                "blocked_ns_sum",
+                &mut entry.blocked_ns_sum,
+                composition.blocked_ns,
+            )?;
+            checked_add(
+                "async_wait_ns_sum",
+                &mut entry.async_wait_ns_sum,
+                composition.async_wait_ns,
+            )?;
+            checked_add(
+                "scheduler_delay_ns_sum",
+                &mut entry.scheduler_delay_ns_sum,
+                composition.scheduler_delay_ns,
+            )?;
 
             // Per-instance fractions for equal-weighted composition. Dividing by
             // this instance's own classified total (not elapsed_ns) keeps the
             // five fractions summing to 1 even when unknown_ns already absorbs
             // any elapsed-vs-classified slack (see span_builder's five-way
             // invariant). A zero-total instance contributes nothing.
-            let classified_total = composition.on_cpu_ns
-                + composition.blocked_ns
-                + composition.async_wait_ns
-                + composition.scheduler_delay_ns
-                + composition.unknown_ns;
-
             let bucket = entry
                 .composition_by_bucket
                 .entry(hist_bucket_key(elapsed_ns))
                 .or_default();
-            bucket.unknown_ns += composition.unknown_ns;
-            bucket.on_cpu_ns += composition.on_cpu_ns;
-            bucket.blocked_ns += composition.blocked_ns;
-            bucket.async_wait_ns += composition.async_wait_ns;
-            bucket.scheduler_delay_ns += composition.scheduler_delay_ns;
+            checked_add(
+                "bucket unknown_ns",
+                &mut bucket.unknown_ns,
+                composition.unknown_ns,
+            )?;
+            checked_add(
+                "bucket on_cpu_ns",
+                &mut bucket.on_cpu_ns,
+                composition.on_cpu_ns,
+            )?;
+            checked_add(
+                "bucket blocked_ns",
+                &mut bucket.blocked_ns,
+                composition.blocked_ns,
+            )?;
+            checked_add(
+                "bucket async_wait_ns",
+                &mut bucket.async_wait_ns,
+                composition.async_wait_ns,
+            )?;
+            checked_add(
+                "bucket scheduler_delay_ns",
+                &mut bucket.scheduler_delay_ns,
+                composition.scheduler_delay_ns,
+            )?;
 
             if classified_total > 0 {
                 let total = classified_total as f64;
@@ -1052,6 +1200,86 @@ impl SpanStatsAccum {
                 entry.partial_count += 1;
             }
         }
+        Ok(())
+    }
+
+    fn merge_resolved_span(&mut self, span: ResolvedSpan) -> anyhow::Result<()> {
+        let to_i64 = |field: &str, value: u64| {
+            i64::try_from(value)
+                .map_err(|_| anyhow::anyhow!("{field} value {value} exceeds i64::MAX"))
+        };
+        let elapsed_ns = to_i64("elapsed_ns", span.elapsed_ns)?;
+        let start_ns = to_i64("start_ns", span.start_ns)?;
+        let end_ns = to_i64("end_ns", span.end_ns)?;
+        let composition = RowComposition {
+            // Missing estimates semantically contribute zero to the documented
+            // five-way accounting invariant; unknown_ns carries the remainder.
+            on_cpu_ns: span
+                .on_cpu_ns_est
+                .map(|value| to_i64("on_cpu_ns_est", value))
+                .transpose()?
+                .unwrap_or(0),
+            blocked_ns: span
+                .blocked_ns_est
+                .map(|value| to_i64("blocked_ns_est", value))
+                .transpose()?
+                .unwrap_or(0),
+            async_wait_ns: span
+                .async_wait_ns
+                .map(|value| to_i64("async_wait_ns", value))
+                .transpose()?
+                .unwrap_or(0),
+            scheduler_delay_ns: span
+                .scheduler_delay_ns
+                .map(|value| to_i64("scheduler_delay_ns", value))
+                .transpose()?
+                .unwrap_or(0),
+            unknown_ns: to_i64("unknown_ns", span.unknown_ns)?,
+        };
+        let exemplar = Exemplar {
+            elapsed_ns,
+            span_uid: hex::encode(span.span_uid),
+            callsite_file: span.callsite_file.clone(),
+            callsite_line: span.callsite_line,
+            host: span.host.clone(),
+            start_ns,
+            end_ns,
+            source_key: span.source_key.clone(),
+            composition: Some(TimeComposition {
+                on_cpu_ns: composition.on_cpu_ns,
+                blocked_ns: composition.blocked_ns,
+                async_wait_ns: composition.async_wait_ns,
+                scheduler_delay_ns: composition.scheduler_delay_ns,
+                unknown_ns: composition.unknown_ns,
+                instance_count: 0,
+                on_cpu_frac_sum: 0.0,
+                blocked_frac_sum: 0.0,
+                async_wait_frac_sum: 0.0,
+                scheduler_delay_frac_sum: 0.0,
+                unknown_frac_sum: 0.0,
+            }),
+            attributes: span
+                .attributes
+                .iter()
+                .map(|(key, value)| ExemplarAttribute {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        };
+        self.merge_row(SpanStatsRow {
+            span_type_uid: span.span_type_uid,
+            kind: span.kind,
+            name: span.name,
+            target: Some(span.target),
+            callsite_file: span.callsite_file,
+            callsite_line: span.callsite_line,
+            elapsed_ns,
+            exemplar: Some(exemplar),
+            attributes: span.attributes,
+            composition: Some(composition),
+            details_complete: Some(span.details_complete),
+        })
     }
 
     /// Total instances across all types (for coverage reporting).
@@ -1256,6 +1484,82 @@ fn span_stats_stream(
 mod tests {
     use super::*;
 
+    #[test]
+    fn raw_gzip_trace_rejects_expansion_past_limit() {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[0; 64]).unwrap();
+        let body = encoder.finish().unwrap();
+
+        let error = raw_trace_bytes(&body, body.len(), 32).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("decompressed trace exceeds 32 byte limit")
+        );
+    }
+
+    #[test]
+    fn raw_demo_span_stats_preserve_single_event_kind_and_elapsed_duration() {
+        use std::path::Path;
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/public/demo-trace.bin");
+        let bytes = std::fs::read(path).expect("read demo trace");
+        let snapshot = raw_span_stats_response(&bytes).expect("aggregate raw span stats");
+
+        for name in ["RecordMetric", "QueryMetric"] {
+            let stats = snapshot
+                .span_types
+                .iter()
+                .find(|stats| stats.name == name)
+                .unwrap_or_else(|| panic!("missing {name} span type"));
+            assert_eq!(stats.kind, "metrique");
+            assert!(stats.count > 0);
+            assert!(stats.p50_ns.is_some_and(|duration| duration > 0));
+            assert!(stats.p95_ns.is_some_and(|duration| duration > 0));
+            assert!(stats.p99_ns.is_some_and(|duration| duration > 0));
+            assert!(stats.max_ns.is_some_and(|duration| duration > 0));
+            assert!(stats.exemplars.iter().all(|exemplar| {
+                exemplar
+                    .attributes
+                    .iter()
+                    .all(|attribute| attribute.key != "dial9.wall_clock_ns")
+            }));
+        }
+    }
+
+    #[test]
+    fn row_composition_aggregate_overflow_is_rejected() {
+        let row = |unknown_ns| SpanStatsRow {
+            span_type_uid: [7; 16],
+            kind: "test".to_string(),
+            name: "work".to_string(),
+            target: None,
+            callsite_file: None,
+            callsite_line: None,
+            elapsed_ns: unknown_ns,
+            exemplar: None,
+            attributes: Vec::new(),
+            composition: Some(RowComposition {
+                on_cpu_ns: 0,
+                blocked_ns: 0,
+                async_wait_ns: 0,
+                scheduler_delay_ns: 0,
+                unknown_ns,
+            }),
+            details_complete: None,
+        };
+        let mut accum = SpanStatsAccum::new(None, None);
+        accum.merge_row(row(i64::MAX)).unwrap();
+        let error = accum.merge_row(row(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown_ns_sum exceeds i64 range")
+        );
+    }
+
     fn make_spans_parquet(spans: &[(i64, i64, i64, &str, &str, bool)]) -> Vec<u8> {
         make_spans_parquet_with_attrs(
             &spans
@@ -1290,7 +1594,7 @@ mod tests {
                         uid[15] = name.as_bytes().first().copied().unwrap_or(0);
                         uid
                     },
-                    kind: "tracing",
+                    kind: "tracing".to_string(),
                     name: name.to_string(),
                     target: "test".to_string(),
                     callsite_file: Some("src/main.rs".to_string()),
@@ -1371,7 +1675,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test".to_string(),
             target: "test".to_string(),
             callsite_file: None,
@@ -1489,7 +1793,7 @@ mod tests {
                         uid
                     },
                     span_type_uid: type_uid,
-                    kind: "tracing",
+                    kind: "tracing".to_string(),
                     name: format!("span_{i}"),
                     target: "test".to_string(),
                     callsite_file: None,
@@ -1564,7 +1868,7 @@ mod tests {
                         uid
                     },
                     span_type_uid: type_uid,
-                    kind: "tracing",
+                    kind: "tracing".to_string(),
                     name: format!("span_{i}"),
                     target: "test".to_string(),
                     callsite_file: None,
@@ -1651,7 +1955,7 @@ mod tests {
         let mk = |elapsed: u64, on_cpu: u64, wait: u64| ResolvedSpan {
             span_uid: [0u8; 16],
             span_type_uid: [7u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "op".to_string(),
             target: "t".to_string(),
             callsite_file: None,
@@ -1774,7 +2078,7 @@ mod tests {
                     uid
                 },
                 span_type_uid: type_uid,
-                kind: "tracing",
+                kind: "tracing".to_string(),
                 name: "same_type".to_string(),
                 target: "test".to_string(),
                 callsite_file: Some("src/main.rs".to_string()),
@@ -2355,7 +2659,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test_span".to_string(),
             target: "my_crate".to_string(),
             callsite_file: Some("src/main.rs".to_string()),
@@ -2580,7 +2884,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test".to_string(),
             target: "test".to_string(),
             callsite_file: None,

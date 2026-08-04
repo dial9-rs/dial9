@@ -48,7 +48,7 @@ export interface ExemplarTableCtx {
   scope: ExemplarLinkScope;
   attrFilters: readonly AttrFilter[];
   overrides: ColumnOverrides;
-  /** Raw-trace mode: no backend, so no deep links and no attribute filtering. */
+  /** Raw-trace mode cannot re-query server aggregates for attribute filters. */
   rawMode: boolean;
   onToggleFilter: (key: string, value: string) => void;
   onSetOverride: (id: string, value: boolean | undefined) => void;
@@ -150,7 +150,7 @@ function buildColumns(exemplars: readonly Exemplar[], ctx: ExemplarTableCtx): Co
       th: "",
       hideable: false,
       cell: (ex) => {
-        const url = ctx.rawMode ? "" : exemplarViewerUrl(ex, ctx.scope);
+        const url = exemplarViewerUrl(ex, ctx.scope);
         return html`<td class="jump-cell">
           ${url
             ? html`<button

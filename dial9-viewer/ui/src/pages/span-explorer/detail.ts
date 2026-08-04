@@ -45,6 +45,10 @@ export interface DetailModel {
   exemplarPreviewAvailable: boolean;
   /** Scope for the flamegraph deep links (null in raw mode). */
   linkState: SpanExplorerState | null;
+  /** Original trace URL used for raw-mode exemplar jumps. */
+  rawTrace: string | null;
+  /** Region used to fetch the raw trace, retained in viewer deep links. */
+  rawRegion: string | null;
   onBand: (band: DurationBand) => void;
   onClearBand: () => void;
   onToggleFilter: (key: string, value: string) => void;
@@ -55,8 +59,9 @@ export interface DetailModel {
 /** The link scope: page identity plus the type's name for `focus_span_name`. */
 function linkScope(m: DetailModel): ExemplarLinkScope {
   return {
+    trace: m.rawTrace,
     bucket: m.linkState?.bucket ?? null,
-    region: m.linkState?.region ?? null,
+    region: m.linkState?.region ?? m.rawRegion,
     service: m.linkState?.service ?? null,
     spanName: m.spanType?.name ?? null,
   };
@@ -67,8 +72,7 @@ function headerTemplate(st: SpanTypeStats, m: DetailModel, slowest: Exemplar | n
   // link when no band is active - an in-band exemplar's duration may differ from
   // the displayed maximum.
   const hasBand = m.band.min_ns != null || m.band.max_ns != null;
-  const maxJumpUrl =
-    !hasBand && slowest && !m.rawMode ? exemplarViewerUrl(slowest, linkScope(m)) : "";
+  const maxJumpUrl = !hasBand && slowest ? exemplarViewerUrl(slowest, linkScope(m)) : "";
   return html`<div class="detail-header">
     <h2>${spanTypeLabel(st)}</h2>
     <span class="meta"
@@ -79,6 +83,7 @@ function headerTemplate(st: SpanTypeStats, m: DetailModel, slowest: Exemplar | n
             class="max-jump"
             href=${maxJumpUrl}
             target="_blank"
+            @click=${openWithSession}
             title="Jump to the slowest instance of this span in the viewer"
             >${fmtNs(st.max_ns)}</a
           >`

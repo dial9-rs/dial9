@@ -847,6 +847,143 @@ describe("buildSpanData", () => {
     expect(allSpans[0].start <= allSpans[1].start, "Spans not sorted by start time").toBe(true);
   });
 
+  it("turns a normalized single event into a complete span", () => {
+    const workerSpans = {
+      0: { polls: [{ start: 900, end: 1100, taskId: 42 }] },
+      1: { polls: [{ start: 4000, end: 4100, taskId: 42 }] },
+    };
+    const customEvents = [{
+      name: "any-producer:RequestMetrics",
+      timestamp: 9000,
+      fields: { arbitrary: "wire fields are not interpreted here" },
+      singleEventSpan: {
+        start: 1000,
+        end: 9000,
+        name: "QueryMetric",
+        spanType: "any-producer",
+        threadId: 77,
+        taskId: 42,
+        workerId: null,
+        fields: { Operation: "QueryMetric", Success: true },
+        units: { Success: "count" },
+      },
+    }];
+
+    const { allSpans, unmatchedSpans } = buildSpanData(
+      customEvents,
+      workerSpans,
+      new Map([[77, [{ timestamp: 500, workerId: 0 }]]]),
+    );
+    expect(allSpans).toHaveLength(1);
+    expect(unmatchedSpans).toHaveLength(0);
+    const span = allSpans[0];
+    expect(span.spanId).toBe("single-event:0");
+    expect(span.spanName).toBe("QueryMetric");
+    expect(span.start).toBe(1000);
+    expect(span.end).toBe(9000);
+    expect(span.taskId).toBe(42);
+    expect(span.parentSpanId).toBeNull();
+    expect(span.fields).toEqual({ Operation: "QueryMetric", Success: true });
+    expect(span.spanType).toBe("any-producer");
+    expect(span.units).toEqual({ Success: "count" });
+    expect(span.segments).toEqual([
+      { start: 1000, end: 1100, workerId: 0 },
+      { start: 4000, end: 4100, workerId: 1 },
+    ]);
+    expect(span.activeNs).toBe(200);
+
+    // A direct caller may not have built worker spans. The captured task id
+    // must not make that path dereference a missing poll index.
+    const withoutPolls = buildSpanData(customEvents).allSpans[0];
+    expect(withoutPolls.taskId).toBe(42);
+    expect(withoutPolls.segments).toEqual([]);
+    expect(withoutPolls.activeNs).toBe(0);
+  });
+
+  it("resolves a remapped thread at the single-event span start", () => {
+    const workerSpans = {
+      0: { polls: [{ start: 100, end: 200, taskId: 1 }] },
+      1: { polls: [{ start: 300, end: 400, taskId: 2 }] },
+    };
+    const customEvents = [{
+      name: "producer:Work",
+      timestamp: 390,
+      fields: {},
+      singleEventSpan: {
+        start: 310,
+        end: 390,
+        name: "work",
+        spanType: "producer",
+        threadId: 77,
+        taskId: null,
+        workerId: null,
+        fields: {},
+        units: null,
+      },
+    }];
+    const bindings = new Map([[
+      77,
+      [
+        { timestamp: 50, workerId: 0 },
+        { timestamp: 250, workerId: 1 },
+      ],
+    ]]);
+
+    expect(buildSpanData(customEvents, workerSpans, bindings).allSpans[0].taskId)
+      .toBe(2);
+  });
+
+  it("does not derive a task from a thread inside a block-in-place handoff gap", () => {
+    const workerSpans = {
+      0: { polls: [{ start: 100, end: 200, taskId: 1 }] },
+    };
+    // `any` at the boundary (see the file header): the second half of this test
+    // reassigns workerId, which a literal `null` would otherwise pin to `null`.
+    const customEvents: any[] = [{
+      name: "producer:Work",
+      timestamp: 170,
+      fields: {},
+      singleEventSpan: {
+        start: 110,
+        end: 170,
+        name: "work",
+        spanType: "producer",
+        threadId: 77,
+        taskId: null,
+        workerId: null,
+        fields: {},
+        units: null,
+      },
+    }];
+    const bindings = new Map([[77, [{ timestamp: 50, workerId: 0 }]]]);
+    const gaps = [{
+      workerId: 0,
+      fromTid: 77,
+      toTid: 88,
+      startNs: 50,
+      endNs: 200,
+    }];
+
+    const span = buildSpanData(customEvents, workerSpans, bindings, gaps).allSpans[0];
+    expect(span.taskId).toBeNull();
+    expect(span.segments).toEqual([]);
+    expect(span.activeNs).toBe(0);
+
+    customEvents[0]!.singleEventSpan.workerId = 0;
+    const directlyAnnotated = buildSpanData(customEvents, workerSpans, bindings, gaps)
+      .allSpans[0];
+    expect(directlyAnnotated.taskId).toBeNull();
+    expect(directlyAnnotated.segments).toEqual([]);
+  });
+
+  it("does not infer spans from metrique schema names", () => {
+    expect(buildSpanData([{
+      name: "metrique:Unannotated",
+      timestamp: 1000,
+      fields: { Operation: "not a span" },
+    }]).allSpans).toHaveLength(0);
+  });
+
   it("parent span IDs preserved", () => {
     const customEvents = [
       { name: "SpanEnterEvent", timestamp: 1000, fields: { worker_id: 0, span_id: 10, parent_span_id: null, span_name: "root", fields: {} } },

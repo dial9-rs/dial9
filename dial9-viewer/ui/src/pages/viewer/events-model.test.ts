@@ -55,6 +55,22 @@ describe("computeEventTrackData", () => {
       ev("SpanExitEvent", 6), // exact -> excluded
       ev("alpha", 20),
       ev("SpanCloseEvent", 7), // exact -> excluded
+      ev("SpanEnter__Derived", 8), // derived prefix -> excluded
+      ev("SpanClose__Derived", 9), // derived prefix -> excluded
+      {
+        ...ev("producer:RequestMetrics", 10),
+        singleEventSpan: {
+          start: 1,
+          end: 10,
+          name: "request",
+          spanType: "producer",
+          threadId: null,
+          taskId: null,
+          workerId: null,
+          fields: {},
+          units: null,
+        },
+      },
     ]);
     expect(data.events.map((e) => e.timestamp)).toEqual([10, 20, 30]);
     expect(data.events.map((e) => e.name)).toEqual(["alpha", "alpha", "beta"]);
@@ -64,6 +80,11 @@ describe("computeEventTrackData", () => {
   it("returns the shared empty data for null / span-only input", () => {
     expect(computeEventTrackData(null).events).toHaveLength(0);
     expect(computeEventTrackData([ev("SpanEnter:x", 1)]).events).toHaveLength(0);
+  });
+
+  it("keeps unannotated metrique-named events", () => {
+    expect(computeEventTrackData([ev("metrique:RequestMetrics", 10)]).events)
+      .toHaveLength(1);
   });
 });
 

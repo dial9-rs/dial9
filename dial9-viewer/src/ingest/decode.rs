@@ -13,7 +13,7 @@
 //!   checked conversion boundary. All mono→wall conversions go through here.
 //! - [`events`]: one-pass wire decoding and malformed-event accounting.
 //! - [`polls`]: worker/tid correlation, poll reconstruction, and attribution.
-//! - [`spans`]: exact-key interval pairing, modern/legacy adapters, and the
+//! - [`spans`]: tracing/single-event adapters, interval pairing, and the
 //!   common `ResolvedSpan` finalizer with its five-way accounting invariant.
 //! - [`attribution`]: sweep-line sample-to-span membership over entered
 //!   intervals (never lifecycle envelopes).
@@ -33,7 +33,7 @@ use events::*;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use spans::span_builder;
-use spans::{interval_pairing, legacy};
+use spans::{interval_pairing, legacy, single_event};
 
 pub(crate) use types::{
     DecodeResult, DecodeStats, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan,
@@ -112,14 +112,17 @@ pub(crate) fn decode_samples_with_stats(
         mut addr_to_keys,
         mut events,
         mut clock_offset,
+        mut first_clock_sync_mono,
         segment_metadata_boot_id,
         legacy_enters,
         legacy_exits,
         legacy_closes,
+        single_event_spans,
     } = events::decode_trace(data, source_key)?;
     stats.wire_decode = t_wire.elapsed();
     stats.span_events_decoded =
-        (legacy_enters.len() + legacy_exits.len() + legacy_closes.len()) as u64;
+        (legacy_enters.len() + legacy_exits.len() + legacy_closes.len() + single_event_spans.len())
+            as u64;
     // Span events are collected separately and never enter the sorted event stream.
     stats.events_decoded = events.len() as u64 + stats.span_events_decoded;
 
@@ -129,6 +132,11 @@ pub(crate) fn decode_samples_with_stats(
         .chain(legacy_enters.iter().map(|(_, event)| event.timestamp_ns))
         .chain(legacy_exits.iter().map(|(_, event)| event.timestamp_ns))
         .chain(legacy_closes.iter().map(|event| event.timestamp_ns))
+        .chain(
+            single_event_spans
+                .iter()
+                .flat_map(|event| [event.start_ns, event.end_ns]),
+        )
         .fold(None, |bounds: Option<(u64, u64)>, timestamp| {
             Some(match bounds {
                 Some((min, max)) => (min.min(timestamp), max.max(timestamp)),
@@ -148,6 +156,7 @@ pub(crate) fn decode_samples_with_stats(
             );
         });
         clock_offset = None;
+        first_clock_sync_mono = None;
     }
     tracing::info!("sorting {} events", events.len());
     // Sort events by timestamp for correct worker_id inference.
@@ -252,19 +261,20 @@ pub(crate) fn decode_samples_with_stats(
         poll_timeline.resolved(clock_offset, &parsed_host, &parsed_service, &parsed_date);
     stats.sample_resolve = t_samples.elapsed();
 
-    // ── Stage 2: Reconstruct tracing spans from enter/exit/close events ──────
+    // ── Stage 2: Resolve tracing and single-event spans ─────────────────────
     //
     // Decode the authoritative boot_id from SegmentMetadata when available.
     // The boot_id directory is written into segment metadata by the namespace
     // isolation layer. When absent (old traces, non-namespaced writers), fall
     // back to extracting it from the source_key path. `boot_id` namespaces the
     // per-span identity across processes.
-    let boot_id: String = match segment_metadata_boot_id {
-        Some(meta_bid) => meta_bid,
-        None => extract_boot_id_from_path_qualified(source_key)
-            .0
-            .to_string(),
-    };
+    let (path_boot_id, path_is_namespaced) = extract_boot_id_from_path_qualified(source_key);
+    let (boot_id, single_event_identity_quality): (String, &'static str) =
+        match segment_metadata_boot_id {
+            Some(meta_bid) => (meta_bid, "metadata"),
+            None if path_is_namespaced => (path_boot_id.to_string(), "path"),
+            None => (path_boot_id.to_string(), "flat"),
+        };
 
     // Reconstruct spans from the old-producer enter/exit/close events:
     //   SpanEnter:{target}::{name}:{file}:{line} → worker_id, span_id, parent_span_id, span_name, ...
@@ -283,7 +293,7 @@ pub(crate) fn decode_samples_with_stats(
     // - identity_quality = "legacy"; all elapsed remains unknown (no
     //   producer-reported active_ns).
     let mut resolved_spans: Vec<ResolvedSpan> = Vec::new();
-    let mut legacy_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>> =
+    let mut span_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>> =
         FxHashMap::default();
 
     let t_spans = Instant::now();
@@ -300,8 +310,24 @@ pub(crate) fn decode_samples_with_stats(
             &parsed_service,
             &parsed_date,
         );
-        legacy_intervals = legacy_resolution.instance_intervals;
+        span_intervals.extend(legacy_resolution.instance_intervals);
         resolved_spans.extend(legacy_resolution.spans);
+    }
+    if !single_event_spans.is_empty() {
+        let single_event_resolution = single_event::resolve_single_event_spans(
+            &single_event_spans,
+            &poll_timeline,
+            source_key,
+            &boot_id,
+            clock_offset,
+            first_clock_sync_mono,
+            single_event_identity_quality,
+            &parsed_host,
+            &parsed_service,
+            &parsed_date,
+        );
+        span_intervals.extend(single_event_resolution.instance_intervals);
+        resolved_spans.extend(single_event_resolution.spans);
     }
     stats.span_resolve = t_spans.elapsed();
 
@@ -319,7 +345,7 @@ pub(crate) fn decode_samples_with_stats(
     attribution::attribute_samples_to_spans(
         &mut samples,
         &mut resolved_spans,
-        &legacy_intervals,
+        &span_intervals,
         &boot_id,
         clock_offset,
     );
@@ -1120,18 +1146,30 @@ mod tests {
         )
         .unwrap();
 
-        // The demo trace has 27,524 SpanCloseEvents (old format), so we should
-        // get legacy span rows.
+        let legacy_spans: Vec<_> = spans.iter().filter(|span| span.kind == "tracing").collect();
+        let metrique_spans: Vec<_> = spans
+            .iter()
+            .filter(|span| span.kind == "metrique")
+            .collect();
+
+        // The demo trace has old-format SpanCloseEvents and metrique request
+        // metrics, so both adapters should produce rows.
         assert!(
-            !spans.is_empty(),
+            !legacy_spans.is_empty(),
             "expected legacy span rows from demo trace, got 0"
         );
+        for operation in ["RecordMetric", "QueryMetric"] {
+            assert!(
+                metrique_spans.iter().any(|span| span.name == operation),
+                "expected {operation} metrique spans from demo trace"
+            );
+        }
 
-        // All spans should have identity_quality = "legacy"
-        for span in &spans {
+        // Old tracing spans retain legacy identity/completeness semantics.
+        for span in &legacy_spans {
             assert_eq!(
                 span.identity_quality, "legacy",
-                "demo trace spans must have identity_quality='legacy'"
+                "demo trace tracing spans must have identity_quality='legacy'"
             );
             assert!(
                 !span.details_complete,
@@ -1140,17 +1178,21 @@ mod tests {
         }
 
         // Check that known span types are present.
-        let record_metric_spans: Vec<_> = spans
+        let record_metric_spans: Vec<_> = legacy_spans
             .iter()
-            .filter(|s| s.name == "record_metric" && s.target.contains("routes"))
+            .copied()
+            .filter(|span| span.name == "record_metric" && span.target.contains("routes"))
             .collect();
         assert!(
             !record_metric_spans.is_empty(),
             "expected record_metric spans from demo trace"
         );
 
-        let query_metric_spans: Vec<_> =
-            spans.iter().filter(|s| s.name == "query_metric").collect();
+        let query_metric_spans: Vec<_> = legacy_spans
+            .iter()
+            .copied()
+            .filter(|span| span.name == "query_metric")
+            .collect();
         assert!(
             !query_metric_spans.is_empty(),
             "expected query_metric spans from demo trace"
@@ -1173,16 +1215,19 @@ mod tests {
         );
 
         // Verify elapsed_ns is reasonable (> 0 for spans that have both enter and close).
-        let spans_with_elapsed: Vec<_> = spans.iter().filter(|s| s.elapsed_ns > 0).collect();
+        let spans_with_elapsed: Vec<_> = legacy_spans
+            .iter()
+            .filter(|span| span.elapsed_ns > 0)
+            .collect();
         assert!(
             !spans_with_elapsed.is_empty(),
             "expected some spans with non-zero elapsed_ns"
         );
 
         // Verify some spans have observed_active_wall_ns > 0 (balanced enter/exit pairs).
-        let spans_with_active: Vec<_> = spans
+        let spans_with_active: Vec<_> = legacy_spans
             .iter()
-            .filter(|s| s.observed_active_wall_ns > 0)
+            .filter(|span| span.observed_active_wall_ns > 0)
             .collect();
         assert!(
             !spans_with_active.is_empty(),
@@ -1190,9 +1235,16 @@ mod tests {
         );
 
         // Verify sample attribution works with legacy spans.
+        let legacy_uids: rustc_hash::FxHashSet<_> =
+            legacy_spans.iter().map(|span| span.span_uid).collect();
         let samples_with_spans = samples
             .iter()
-            .filter(|s| !s.enclosing_spans.is_empty())
+            .filter(|sample| {
+                sample
+                    .enclosing_spans
+                    .iter()
+                    .any(|span| legacy_uids.contains(&span.span_uid))
+            })
             .count();
         // With ~9000 CPU samples and ~86k enter/exit pairs, some should be attributed.
         assert!(
@@ -1202,11 +1254,204 @@ mod tests {
 
         eprintln!(
             "decoded {} legacy spans ({} record_metric, {} query_metric), {} samples with span attribution",
-            spans.len(),
+            legacy_spans.len(),
             record_metric_spans.len(),
             query_metric_spans.len(),
             samples_with_spans,
         );
+    }
+
+    #[test]
+    fn test_annotated_event_resolves_as_complete_span() {
+        use dial9_core::schema_extensions::{self, roles};
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::{FieldAnnotation, FieldDef, SchemaEntry};
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        let unpark_schema = Schema::new(
+            "WorkerUnparkEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let poll_start_schema = Schema::new(
+            "PollStartEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("task_id", FieldType::Varint),
+            ],
+        );
+        let poll_end_schema = Schema::new(
+            "PollEndEvent",
+            vec![FieldDef::new("worker_id", FieldType::Varint)],
+        );
+        let sample_schema = Schema::new(
+            "CpuSampleEvent",
+            vec![
+                FieldDef::new("tid", FieldType::Varint),
+                FieldDef::new("source", FieldType::Varint),
+                FieldDef::new("callchain", FieldType::StackFrames),
+            ],
+        );
+        let single_event_schema = Schema::from_entry(SchemaEntry::with_annotations(
+            "producer:RequestMetrics",
+            true,
+            vec![
+                FieldDef::new("started", FieldType::OptionalVarint),
+                FieldDef::new("os_thread", FieldType::OptionalVarint),
+                FieldDef::new("runtime_task", FieldType::OptionalVarint),
+                FieldDef::new("operation", FieldType::String),
+                FieldDef::new("Route", FieldType::String),
+                FieldDef::new("StatusCode", FieldType::Varint),
+                FieldDef::new("Success", FieldType::Bool),
+            ],
+            [
+                FieldAnnotation::new(0, schema_extensions::ROLE_KEY, roles::SPAN_START),
+                FieldAnnotation::new(0, "unit", "ns"),
+                FieldAnnotation::new(0, schema_extensions::SPAN_TYPE_KEY, "test-producer"),
+                FieldAnnotation::new(1, schema_extensions::ROLE_KEY, roles::THREAD_ID),
+                FieldAnnotation::new(2, schema_extensions::ROLE_KEY, roles::TOKIO_TASK_ID),
+                FieldAnnotation::new(3, schema_extensions::ROLE_KEY, roles::SPAN_NAME),
+            ],
+        ));
+
+        let wall_base = 1_700_000_000_000_000_000;
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: wall_base + 10,
+        })
+        .unwrap();
+        enc.write_event(
+            &unpark_schema,
+            &[
+                FieldValue::Varint(50),
+                FieldValue::Varint(3),
+                FieldValue::Varint(500),
+            ],
+        )
+        .unwrap();
+
+        // Task 77 is active for [90, 120) and [180, 220).
+        for (start, end) in [(90, 120), (180, 220)] {
+            enc.write_event(
+                &poll_start_schema,
+                &[
+                    FieldValue::Varint(start),
+                    FieldValue::Varint(3),
+                    FieldValue::Varint(77),
+                ],
+            )
+            .unwrap();
+            enc.write_event(
+                &poll_end_schema,
+                &[FieldValue::Varint(end), FieldValue::Varint(3)],
+            )
+            .unwrap();
+        }
+
+        // One sample lands in an active poll interval; one lands in the async
+        // gap and must not be attributed to the single-event span.
+        for timestamp in [110, 150] {
+            enc.write_event(
+                &sample_schema,
+                &[
+                    FieldValue::Varint(timestamp),
+                    FieldValue::Varint(500),
+                    FieldValue::Varint(SOURCE_CPU_PROFILE as u64),
+                    FieldValue::StackFrames(vec![0xabc].into()),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Lifecycle [100, 250): 60ns overlaps task polls and 90ns is async wait.
+        // The packed timestamp is the close; the start remains an annotated
+        // field so the delta-encoded timestamp stream stays in emission order.
+        enc.write_event(
+            &single_event_schema,
+            &[
+                FieldValue::Varint(250),
+                FieldValue::Varint(100),
+                FieldValue::Varint(500),
+                FieldValue::Varint(77),
+                FieldValue::String("GET /pets".to_string()),
+                FieldValue::String("/pets".to_string()),
+                FieldValue::Varint(200),
+                FieldValue::Bool(true),
+            ],
+        )
+        .unwrap();
+
+        // An event missing the annotated start remains an ordinary custom event
+        // and cannot be projected as a span.
+        enc.write_event(
+            &single_event_schema,
+            &[
+                FieldValue::Varint(300),
+                FieldValue::None,
+                FieldValue::None,
+                FieldValue::None,
+                FieldValue::String("ignored".to_string()),
+                FieldValue::String("/ignored".to_string()),
+                FieldValue::Varint(204),
+                FieldValue::Bool(true),
+            ],
+        )
+        .unwrap();
+
+        let source_key = "2026-07-28/1200/svc/host/abcd-123/0.bin";
+        let (samples, _stacks, _polls, spans) =
+            decode_samples(&enc.into_inner(), source_key).unwrap();
+
+        assert_eq!(spans.len(), 1, "missing-start event must be skipped");
+        let span = &spans[0];
+        assert_eq!(span.kind, "test-producer");
+        assert_eq!(span.name, "GET /pets");
+        assert_eq!(span.target, "");
+        assert_eq!(span.start_ns, wall_base + 100);
+        assert_eq!(span.end_ns, wall_base + 250);
+        assert_eq!(span.elapsed_ns, 150);
+        assert_eq!(span.observed_active_wall_ns, 60);
+        assert_eq!(span.active_ns, Some(60));
+        assert_eq!(span.on_cpu_ns_est, Some(60));
+        assert_eq!(span.async_wait_ns, Some(90));
+        assert_eq!(span.unknown_ns, 0);
+        assert_eq!(span.attribution_flags & 0b0100, 0);
+        assert_eq!(span.identity_quality, "path");
+        assert!(span.details_complete);
+        assert_eq!(span.parent_span_uid, None);
+        assert_eq!(
+            span.attributes,
+            vec![
+                ("operation".to_string(), "GET /pets".to_string()),
+                ("Route".to_string(), "/pets".to_string()),
+                ("StatusCode".to_string(), "200".to_string()),
+                ("Success".to_string(), "true".to_string()),
+            ]
+        );
+
+        let active_sample = samples
+            .iter()
+            .find(|sample| sample.timestamp_ns == wall_base + 110)
+            .unwrap();
+        assert_eq!(active_sample.enclosing_spans.len(), 1);
+        assert_eq!(active_sample.enclosing_spans[0].span_uid, span.span_uid);
+        let waiting_sample = samples
+            .iter()
+            .find(|sample| sample.timestamp_ns == wall_base + 150)
+            .unwrap();
+        assert!(waiting_sample.enclosing_spans.is_empty());
+        assert_eq!(span.cpu_sample_count, 1);
     }
 
     /// Synthetic test: verify legacy span reconstruction from minimal old-format events.
