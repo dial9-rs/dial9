@@ -194,13 +194,24 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
-  // Re-measured after the demo trace gained a second ("io") runtime: workers 2/3
-  // now contribute ~1.4k of the ~10.2k worker CPU samples, with stack shapes
-  // unrelated to the main runtime's request path. Every main-runtime query is
-  // therefore diluted — poll/tokio fall from 100% to 60.6% (they still dominate
-  // the main runtime, they just no longer span every worker), and main-only
-  // frames like framebuf fall hardest. Code regression ruled out first: the
-  // previous anchors reproduce exactly against the pre-regen bytes.
+  // Re-measured after the demo-trace regen. Read this before trusting the
+  // numbers: the regen was captured on a host whose glibc lacks frame pointers
+  // in most functions, so samples landing in libc (__malloc, __strlen_sse2) or
+  // vendored assembly truncate at depth 1-2 instead of unwinding to a thread
+  // root. The tree these anchors measure is CPU-profile samples only
+  // (`source !== 1`, 66 of them — NOT the ~10k sched-wait samples), and only 36
+  // of those reach depth >= 16. The "60.6%" values are therefore closer to the
+  // unwind-success rate than to a property of the search path, and framebuf's
+  // fall to 1.5% is FrameBuf::capture being absent from this capture's symbol
+  // table, not a share shift.
+  //
+  // A code regression was ruled out — the previous anchors reproduce exactly
+  // against the pre-regen bytes — so these are honest measurements of a thin
+  // capture, not of broken code. But they guard less than the pre-regen set
+  // did, and framebuf at 1 sample will flip on any regen. The fix is a heavier
+  // or longer demo run: this regen collected 25.6k polls against the previous
+  // 59.8k, which is why the fixed malloc/strlen noise grew from 9% to 29% of the
+  // sample set. Re-measure and re-tighten these when that lands.
   const ANCHORS: Array<[string, number, string]> = [
     ["poll", 66, "60.6"],
     ["tokio", 83, "60.6"],

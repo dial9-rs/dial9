@@ -258,7 +258,15 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
     // older ones. Sum per-cycle (per-timestamp) so the max/avg describe the
     // whole process regardless of which event kind the trace carries.
     let queue_timeline = build_global_queue_timeline(events);
-    let max_global_queue = queue_timeline.iter().map(|&(_, d)| d).max().unwrap_or(0);
+    // An empty timeline means the trace carried no queue samples at all, so both
+    // stats report an explicit "no samples" zero via the same `is_empty` branch
+    // (rather than one of them laundering the empty case through `unwrap_or`).
+    let max_global_queue = if queue_timeline.is_empty() {
+        0
+    } else {
+        // Non-empty, so `max()` is Some; fold from 0 to say so without unwrapping.
+        queue_timeline.iter().map(|&(_, d)| d).fold(0, usize::max)
+    };
     let avg_global_queue = if queue_timeline.is_empty() {
         0.0
     } else {
