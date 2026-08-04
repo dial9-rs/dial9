@@ -16,13 +16,9 @@
 // MUST precede the trace_analysis.js import: its factory reads the
 // TraceParser browser global in bundled entries (see core-globals.ts).
 import "./core-globals.js";
-import { makeBarCoalescer } from "../../../trace_analysis.js";
 
 export {
   makeBarCoalescer,
   pixelCoverage,
   pixelDownsampleSpans,
 } from "../../../trace_analysis.js";
-
-/** The coalescer handle makeBarCoalescer returns (push per bar + flush). */
-export type BarCoalescer = ReturnType<typeof makeBarCoalescer>;

@@ -58,10 +58,6 @@ const MAX_ATTRIBUTE_KEYS: usize = 50;
 #[derive(Deserialize)]
 pub struct SpanStatsParams {
     pub service: Option<String>,
-    #[allow(dead_code)]
-    pub from: Option<String>,
-    #[allow(dead_code)]
-    pub to: Option<String>,
     #[serde(default)]
     pub host: Vec<String>,
     pub start_ns: Option<i64>,

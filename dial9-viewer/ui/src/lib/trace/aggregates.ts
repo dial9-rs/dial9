@@ -492,42 +492,9 @@ export interface SpanStatsResponse {
   types_overflow_instances: number;
 }
 
-/** Query params for GET /api/span-stats (SpanStatsParams). */
-export interface SpanStatsQuery extends AggregateScope {
-  max_files?: number;
-  /** Local-directory source (the local equivalent of a bucket). */
-  data_dir?: string;
-  /** Region for a deep-linked scope read with ambient credentials. */
-  aws_region?: string;
-  /** Restrict exemplars (NOT catalog statistics) to this duration band. */
-  min_span_ns?: number;
-  max_span_ns?: number;
-  /** Select one span type — required for exemplars and composition detail. */
-  span_type_uid?: string;
-  /** Repeated `key=value` attribute filters, ANDed. */
-  attr?: readonly string[];
-  /** Refresh only the selected type's exemplars, reusing cached statistics. */
-  exemplars_only?: boolean;
-}
-
-export const SPAN_STATS_ENDPOINT = "/api/span-stats";
-
-/** Build the GET /api/span-stats URL (path + query string). */
-export function spanStatsUrl(query: SpanStatsQuery): string {
-  const search = new URLSearchParams();
-  appendScope(search, query);
-  if (query.data_dir !== undefined) search.set("data_dir", query.data_dir);
-  if (query.aws_region !== undefined) search.set("aws_region", query.aws_region);
-  if (query.max_files !== undefined) search.set("max_files", String(query.max_files));
-  if (query.span_type_uid !== undefined) search.set("span_type_uid", query.span_type_uid);
-  if (query.min_span_ns !== undefined) search.set("min_span_ns", String(query.min_span_ns));
-  if (query.max_span_ns !== undefined) search.set("max_span_ns", String(query.max_span_ns));
-  for (const a of query.attr ?? []) search.append("attr", a);
-  if (query.exemplars_only) search.set("exemplars_only", "true");
-  if (query.refine) search.set("refine", "true");
-  const qs = search.toString();
-  return qs ? `${SPAN_STATS_ENDPOINT}?${qs}` : SPAN_STATS_ENDPOINT;
-}
+// The /api/span-stats request URL is built by the Span Explorer itself
+// (pages/span-explorer/scope.ts buildApiUrl), which owns the per-stream-mode
+// param set; there is deliberately no shared builder for it here.
 
 /** Query params for GET /api/flamegraph (FlamegraphParams). */
 export const TOKIO_STATS_ENDPOINT = "/api/tokio-stats";

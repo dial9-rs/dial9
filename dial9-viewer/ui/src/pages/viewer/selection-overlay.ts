@@ -143,10 +143,11 @@ export function mountSelectionOverlay(
 
   // Subscribe-only, like the lanes canvas and the crosshair overlay: the first
   // paint comes from the first store notification tick (the viewport update
-  // that initViewportFromTrace dispatches on trace load), NOT a synchronous
-  // render at mount. A direct render() here runs outside the scheduler tick,
-  // which violates the "renders via subscriptions only" contract and trips the
-  // dev assertion at boot. Nothing is drawable before that first tick anyway
+  // that viewer-reconstruction's fitTrace dispatches on trace load), NOT a
+  // synchronous render at mount. A direct render() here runs outside the
+  // scheduler tick, which violates the "renders via subscriptions only"
+  // contract and trips the dev assertion at boot. Nothing is drawable before
+  // that first tick anyway
   // (no trace, no selection => the box is hidden).
   const unsubscribe = store.subscribe(["transient", "viewport", "selection"], () => render());
 

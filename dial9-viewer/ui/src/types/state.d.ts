@@ -598,17 +598,6 @@ export type StoreSliceName = keyof StoreState;
 /** Re-export of the frozen core's time-panel layout (ns<->x mapping). */
 export type { TimePanelLayout } from "../../panel_layout.js";
 
-/** Geometry of one worker lane row within the lanes stack. */
-export interface LaneGeometry {
-  workerId: number;
-  /** Row index within the lanes stack (top = 0). */
-  index: number;
-  /** Top edge in CSS px, lanes-local (before scroll offset). */
-  y: number;
-  /** Row height in CSS px. */
-  height: number;
-}
-
 /**
  * Geometry handed to a canvas panel's `render(ctx, state, layout)`:
  * the shared time mapping plus this panel's box. Wraps the

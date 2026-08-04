@@ -305,11 +305,6 @@ export class ColumnarSpansBuilder {
   }
 }
 
-/** True when `x` is the columnar store (dispatch guard for consumers). */
-export function isColumnarSpans(x: unknown): x is ColumnarSpans {
-  return x instanceof ColumnarSpans;
-}
-
 /** The Map-subset the spanByIdSingle / spansById consumers actually use, so a
  * columnar-backed adapter drops in for the fat `Map<string, ...>` unchanged. */
 export interface SpanByIdSingle {
