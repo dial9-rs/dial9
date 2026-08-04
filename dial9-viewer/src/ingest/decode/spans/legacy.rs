@@ -685,9 +685,8 @@ mod tests {
     }
 
     #[test]
-    fn direct_task_id_bypasses_worker_timestamp_correlation() {
+    fn direct_task_id_takes_precedence_over_worker_correlation() {
         let mut direct = enter(100, 0, 1, 1, None, "direct");
-        direct.1.worker_id = None;
         direct.1.task_id = Some(22);
         let polls = vec![
             PollRecord {

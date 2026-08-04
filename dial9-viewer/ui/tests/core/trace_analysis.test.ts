@@ -1236,8 +1236,8 @@ describe("buildSpanData", () => {
       ] },
     };
     const customEvents = [
-      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { task_id: 42, span_id: 1, parent_span_id: null, span_name: "request" } },
-      { name: "SpanExit:app::req:req.rs:1", timestamp: 5000, fields: { task_id: 42, span_id: 1, span_name: "request" } },
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { worker_id: 0, task_id: 42, span_id: 1, parent_span_id: null, span_name: "request" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 5000, fields: { worker_id: 0, task_id: 42, span_id: 1, span_name: "request" } },
     ];
 
     const { allSpans } = buildSpanData(customEvents, workerSpans);
