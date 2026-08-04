@@ -180,8 +180,7 @@ export type LaneWorkerSpans = Omit<WorkerSpansResult, "workerSpans"> & {
   workerSpans: Record<number, LaneSpans>;
 };
 
-/** True when `lane` is columnar-backed (dispatch guard for render + hit-test),
- * mirroring isColumnarSpans in columnar-spans.ts. */
+/** True when `lane` is columnar-backed (dispatch guard for render + hit-test). */
 export function isColumnarLane(lane: LaneSpans): lane is WorkerLaneView {
   return (lane as Partial<WorkerLaneView>).store !== undefined;
 }

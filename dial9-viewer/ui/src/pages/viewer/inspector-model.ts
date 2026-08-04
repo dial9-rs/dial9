@@ -27,7 +27,6 @@ import type {
   SymbolFrame,
   TaskDump,
   TracingSpan,
-  WorkerLane,
 } from "../../lib/trace/index.js";
 import type {
   PinnedCustomEvent,
@@ -685,12 +684,4 @@ export function hasNoSelection(sel: SelectionSlice): boolean {
     sel.spawnedTasksRange === null &&
     sel.sidebarRange === null
   );
-}
-
-// ── Worker-lane bundle for task resolution ──
-
-/** The trace-invariant lanes the Related task resolver reads. */
-export interface InspectorLaneData {
-  lanes: Record<number, WorkerLane>;
-  workerIds: readonly number[];
 }
