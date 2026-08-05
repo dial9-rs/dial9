@@ -16,6 +16,8 @@ declare module "*/trace_analysis.js" {
     AllocEvent,
     FreeEvent,
     MemoryOverflowEvent,
+    ParsedTrace,
+    RuntimeMetricsSample,
   } from "*/trace_parser.js";
   import type { DecodedFieldValue } from "*/decode.js";
 
@@ -115,6 +117,25 @@ declare module "*/trace_analysis.js" {
     maxTs: number,
     blockInPlaceGaps?: readonly BlockInPlaceGap[] | null
   ): WorkerSpansResult;
+
+  /**
+   * Sum per-runtime global-queue depth into one process-wide timeline, grouping
+   * by the flush-cycle timestamp every runtime's sample shares. Sorted by t.
+   */
+  export function sumGlobalQueueByCycle(
+    runtimeMetrics: readonly RuntimeMetricsSample[]
+  ): { t: number; global: number }[];
+
+  /**
+   * The process-wide global injection-queue timeline, from whichever event
+   * generation the trace carries: per-runtime `RuntimeMetricsEvent`s summed per
+   * cycle, else the legacy pre-summed `queueSamples` from `buildWorkerSpans`.
+   * THE one place that fallback is decided.
+   */
+  export function globalQueueSeries(
+    trace: Pick<ParsedTrace, "runtimeMetrics">,
+    workerSpansResult: Pick<WorkerSpansResult, "queueSamples">
+  ): { t: number; global: number }[];
 
   /**
    * Attach CPU samples to the poll spans they fall within. Mutates poll

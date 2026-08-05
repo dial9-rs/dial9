@@ -8,6 +8,7 @@
 // (derived.ts), never per frame.
 
 import type { ParsedTrace, RuntimeMetricsSample } from "../../types/trace.js";
+import { sumGlobalQueueByCycle } from "./analysis.js";
 
 /** One runtime's metrics series, keyed in `RuntimeMetrics.byRuntime` by the
  *  runtime name (empty string for the unnamed default runtime). */
@@ -47,11 +48,6 @@ export function computeRuntimeMetrics(trace: ParsedTrace | null): RuntimeMetrics
   if (!samples || samples.length === 0) return EMPTY_RUNTIME_METRICS;
 
   const byRuntime = new Map<string, RuntimeSeries>();
-  // Sum global-queue depth per cycle timestamp. Every runtime in a cycle shares
-  // one timestamp (the recorder stamps them together), so grouping by t
-  // reconstructs the process-wide depth.
-  const summedByTs = new Map<number, number>();
-
   for (const s of samples) {
     let series = byRuntime.get(s.runtimeName);
     if (series === undefined) {
@@ -65,12 +61,12 @@ export function computeRuntimeMetrics(trace: ParsedTrace | null): RuntimeMetrics
     series.samples.push(s);
     if (s.aliveTasks > series.maxAliveTasks) series.maxAliveTasks = s.aliveTasks;
     if (s.globalQueue > series.maxGlobalQueue) series.maxGlobalQueue = s.globalQueue;
-    summedByTs.set(s.t, (summedByTs.get(s.t) ?? 0) + s.globalQueue);
   }
 
-  const summedGlobalQueue = [...summedByTs.entries()]
-    .map(([t, global]) => ({ t, global }))
-    .sort((a, b) => a.t - b.t);
+  // The process-wide global-queue timeline is the per-cycle sum across runtimes,
+  // computed by the shared frozen-core helper so the viewer and the skill
+  // scripts derive the identical series.
+  const summedGlobalQueue = sumGlobalQueueByCycle(samples);
 
   return { byRuntime, summedGlobalQueue, present: true };
 }
