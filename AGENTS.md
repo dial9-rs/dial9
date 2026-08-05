@@ -74,6 +74,51 @@ rate_limited!(Duration::from_secs(60), {
 ```
 Unguarded logging in loops causes log spam that degrades observability and can itself become a performance problem. One-time paths (startup, shutdown, per-thread init) are exempt.
 
+## Viewer deep links (`/api/object` and `source_key`)
+
+When building a viewer/flamegraph deep link in the UI that loads a specific
+trace file, the `trace=/api/object?bucket=…&key=…` component's `key` must be a
+**bucket-relative** key (e.g. `2026-07-15/1715/svc/host/boot/epoch-seg.bin.gz`),
+NOT a fully-qualified `s3://{bucket}/{key}` URI. `/api/object` treats the `key`
+verbatim, so passing an `s3://…` URI yields a **404**.
+
+Beware: the folded backend stores a span/sample's `source_key` as the
+fully-qualified `s3://{bucket}/{key}` form (that is the `full_key`
+`decode_samples` was handed). So any UI code that turns a `source_key` into an
+`/api/object` link must split off the `s3://{bucket}/` prefix first (parse the
+bucket from the URI, keep the remainder as the key). See
+`exemplarViewerUrl` in `dial9-viewer/ui/span_explorer.js`.
+
+Diagnosing a broken deep link: a **404 is almost always a wrong key/endpoint**,
+not missing credentials. Credentials (BYOC) live in `sessionStorage`, which the
+browser copies to a tab opened via a normal same-origin link or `window.open`,
+so a new viewer tab inherits them. Before blaming creds, print the exact
+`/api/object?bucket=&key=` the link produces and `curl` it against the running
+server — compare the `s3://…` key vs the bucket-relative key.
+
+## Query-param bools: send `true`/`false`, not `1`/`0`
+
+The server parses query strings with `serde` (via `serde_urlencoded`), and its
+bool deserializer accepts ONLY the literal strings `true` and `false`. A UI that
+sends `?flag=1` yields a **400** with body `Failed to deserialize query string:
+<field>: provided string was not 'true' or 'false'` — the request is rejected
+during param parsing (fast, ~50µs) before any handler work runs. This has bitten
+us repeatedly (e.g. `exemplars_only`).
+
+Rules when adding a `bool` query param to any `#[derive(Deserialize)]` params
+struct (`SpanStatsParams`, flamegraph params, etc.):
+
+- **In the UI, set the value to `"true"` / `"false"`** — never `"1"`/`"0"`.
+  Grep for the param name after wiring it to confirm no `=1` literal slipped in.
+- If a param must accept `1`/`0`/`yes`/absent (e.g. an external caller you don't
+  control), don't type it as `bool`. Deserialize it as `Option<String>` and
+  interpret it yourself, or add a lenient `#[serde(deserialize_with = …)]`.
+- **Diagnosing:** a **400 within microseconds** on an endpoint that otherwise
+  streams is almost always a query-string deserialize failure, not a logic bug.
+  `curl` the exact URL the UI builds and read the response body — it names the
+  offending field. Verify the fix with `curl` (expect the param to parse: you
+  may then get a legitimate 404/200, just not the 400).
+
 ## Testing
 
 ### Local viewer server

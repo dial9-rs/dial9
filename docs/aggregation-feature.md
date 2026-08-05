@@ -30,8 +30,8 @@ sampling**, driven by the query itself:
 | | Batch (original design) | Demand-driven (shipped) |
 |---|---|---|
 | When aggregation happens | Ahead of time, whole window | At query time, streamed file-by-file |
-| How much | Everything | A representative sample, capped (~5%) |
-| First result | After the whole batch | The already-folded snapshot, immediately |
+| How much | Everything | All matching cache plus a capped representative prefix of new folds |
+| First result | After the whole batch | After the first bounded cached batch; remaining cached state streams cumulatively |
 | Completeness signal | None | `coverage` on every SSE event |
 | `samples` table | Same schema — one row per CPU sample, drilled into at query time. Now populated *incrementally and partially* instead of batch-filled. |
 
@@ -67,35 +67,40 @@ Each `GET /api/flamegraph` request (a Server-Sent Events stream):
 
 1. **Resolve** (once) — lists the source scope, filters to the [scope]'s
    service / host-set / time (interval-overlap on the filename `epoch`, padded
-   by the segment duration), sorts by the order key, takes the first *sampling
-   cap* files, and lists the output `samples/` tree (the record of what's already
-   folded).
-2. **Prime + emit** — reads the already-folded part-files into an in-memory
-   accumulator and emits the first SSE event (the instant snapshot).
-3. **Fold + stream** — folds the not-yet-folded capped files concurrently under
-   the process-global `FoldLimits`; as each file lands, merges its part-file into
+   by the segment duration), sorts by the order key, retains the full matched set
+   for cached reads, takes the first *sampling cap* files as the bounded new-work
+   prefix, and lists the output `samples/` tree.
+2. **Prime + emit** — reads every already-folded matching part-file in bounded
+   batches into an in-memory accumulator and emits a cumulative SSE snapshot
+   after each batch.
+3. **Fold + stream** — folds missing files inside the capped prefix concurrently
+   under the process-global `FoldLimits`; as each file lands, merges its part-file into
    the accumulator (sum `stack_id` counts, merge dicts) and emits a fresh
-   flamegraph tree + `coverage` block. Closes the stream at the cap.
+   flamegraph tree + `coverage` block. The stream closes after cached
+   reconstruction and the bounded new-work list both drain.
 
 Folding runs only while the request is open — the fold `JoinSet` is dropped
 (cancelling in-flight folds) when the client disconnects — there is no background
 task or coordination, and re-folding is safe by idempotency. `coverage` climbs
-monotonically until the server closes the stream at the cap.
+monotonically until the work-list drains; matching cache can make it start or
+finish above the new-work cap.
 
 ### 4. Coverage & the cap
 Every demand-driven response carries:
 
 ```json
-"coverage": { "files_matched": 480, "files_folded": 12, "samples_folded": 41203, "total_bytes": 1788000000, "hosts_matched": 40, "hosts_folded": 8 }
+"coverage": { "files_matched": 480, "files_folded": 12, "fold_work_cap": 24, "samples_folded": 41203, "total_bytes": 1788000000, "hosts_matched": 40, "hosts_folded": 8 }
 ```
 
 rendered as e.g. `12 / 480 files (2.5%) · 8 / 40 hosts · 41,203 samples` (the
 host fraction shows how much of the scope's fleet breadth the sample spans, and
-is dropped for single-host scopes). Folding plateaus at
-the **sampling cap** = `min(max(5% × files_matched, baseline 4), 100 files)` —
-the fraction keeps small scopes sensible; the absolute ceiling (100) stops a
-fleet-day scope from chasing 5% of tens of thousands of files. A "Fetch more"
-button raises the ceiling for a scope on demand (`max_files`).
+is dropped for single-host scopes). Every matching cached part contributes to
+coverage, so a warm overlapping scope may start above the request's sampling
+cap. New folding is bounded to the deterministic prefix of
+`min(max(5% × files_matched, baseline 4), 100 files)` — the fraction keeps small
+scopes sensible; the absolute ceiling (100) bounds source decode and write work.
+A "Fetch more" button raises that new-work prefix for a scope on demand
+(`max_files`).
 
 Coverage v1 is *file coverage*. Per-node statistical confidence intervals (the
 literal "how accurate is this sample") are a planned later addition.
@@ -118,7 +123,7 @@ Two independent version knobs, deliberately in opposite places:
 - **`ORDER_VERSION`** (= 1) lives *only* in the order-key hash input. Bump it to
   change the fetch-order permutation; persisted samples are order-independent
   and survive untouched.
-- **`SAMPLES_FORMAT_VERSION`** (= 3) lives *only* in the output path. Bump it
+- **`SAMPLES_FORMAT_VERSION`** (= 5) lives *only* in the output path. Bump it
   when changing *what* we persist; reads/writes then target a fresh empty tree
   that repopulates lazily on demand — no backfill job. The old tree is abandoned
   and GC'd out-of-band.
@@ -160,8 +165,9 @@ The S3 browser's 🔥 **Flamegraph** button:
 - **Demand-driven mode** (`aggregation_enabled`): builds a scope from the
   heatmap selection's host set + `[t0, t1]` and opens `flamegraph.html?api=1&…`,
   which opens the `/api/flamegraph` SSE stream, renders the coverage badge,
-  refines in place on each event, marks the view "refined" when the server closes
-  the stream at the cap, and offers "Fetch more" (reopens with a higher cap).
+  refines in place on each event, marks the view "refined" when cached reconstruction
+  and the bounded work-list drain, and offers "Fetch more" (reopens with a higher
+  new-work cap).
 - **Exact mode** (no aggregation): the original path — streams the selected raw
   traces and decodes them client-side. This path is preserved and still backs
   the trace-viewer pop-out (which flamegraphs a specific already-loaded trace).
@@ -189,8 +195,9 @@ Set `--agg-output-bucket` to retain the existing persistent S3-backed cache.
 filter.
 
 **Demo:** `./scripts/demo-aggregation.sh` seeds synthetic segments across hosts
-and minutes, starts the server in demand-driven mode, and prints coverage
-climbing from the baseline to the cap. `--serve` leaves it up for the browser.
+and minutes, starts the server in demand-driven mode, and prints cached coverage
+plus progress through the bounded new-work prefix. `--serve` leaves it up for the
+browser.
 *(Currently untracked — a working demonstration, not yet committed.)*
 
 ## Where the code lives
@@ -215,10 +222,10 @@ dial9-viewer/tests/aggregate_test.rs   ← end-to-end SSE flow over simulated S3
 
 `tests/aggregate_test.rs` drives the real HTTP SSE endpoints against a simulated
 S3 (s3s), proving:
-- one stream emits an already-folded snapshot first, then a real tree, folding to
-  the baseline K=4;
-- coverage climbs monotonically across SSE events and **stops at the cap below
-  100%**;
+- cached state arrives in bounded cumulative snapshots before newly folded files,
+  then folding reaches the baseline K=4;
+- matching cached coverage can exceed the new-work cap while new source folding
+  remains bounded to the deterministic prefix;
 - re-folding is idempotent (no duplicate part-files; stable counts);
 - "Fetch more" raises the cap;
 - scope filtering by host and time selects the right files;
