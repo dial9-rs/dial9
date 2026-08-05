@@ -263,7 +263,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `span-pct` | `50` \| `90` \| `95` \| `99` | Span percentile floor. |
 | `span-names` | `v1:` + TAB-joined names | Enabled span legend chips. |
 | `event-names` | same | Enabled custom-event legend chips. |
-| `rail` | `issues` \| `tasks` | Visible rail tab. |
+| `rail` | `issues` \| `tasks` \| `metadata` | Visible rail tab. |
 | `task-sort` | `<id\|loc\|polls\|total\|longest\|lifetime>,<asc\|desc>` | Tasks ordering. |
 | `task-index` | non-negative integer | Current Tasks cursor. |
 | `runtime-collapsed` | `v1:` + TAB-joined names | Folded runtime groups. |

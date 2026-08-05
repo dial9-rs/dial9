@@ -91,4 +91,16 @@ describe("issues-rail n/p stepping", () => {
     expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(false);
     expect(binding(rail.keyBindings, "p").onKey(FAKE_KEY)).toBe(false);
   });
+
+  it("declines n/p on the non-navigable Metadata tab", () => {
+    const store = loadedStore();
+    store.update("poi", { railTab: "metadata" });
+    const rail = createIssuesRail(store);
+    const before = store.getState();
+
+    expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(false);
+    expect(binding(rail.keyBindings, "p").onKey(FAKE_KEY)).toBe(false);
+    expect(store.getState().viewport).toBe(before.viewport);
+    expect(store.getState().poi).toBe(before.poi);
+  });
 });

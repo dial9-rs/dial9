@@ -14,6 +14,7 @@ import type {
   StoreState,
   StoreSliceName,
   PoiSortKey,
+  RailTab,
   TaskSortKey,
   InspectorTab,
   RegionAnalysisMode,
@@ -460,7 +461,7 @@ export interface ViewerUrlState {
   spanPct?: number;
   spanNames?: string[];
   eventNames?: string[];
-  railTab?: "issues" | "tasks";
+  railTab?: RailTab;
   taskSort?: { key: TaskSortKey; dir: "asc" | "desc" };
   taskIndex?: number;
   collapsedRuntimes?: string[];
@@ -677,7 +678,9 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (eventNames != null) out.eventNames = eventNames;
 
   const rail = p.get(P_RAIL_TAB);
-  if (rail === "issues" || rail === "tasks") out.railTab = rail;
+  if (rail === "issues" || rail === "tasks" || rail === "metadata") {
+    out.railTab = rail;
+  }
   const taskSort = sortPair<TaskSortKey>(p.get(P_TASK_SORT), TASK_SORT_KEYS);
   if (taskSort !== null) out.taskSort = taskSort;
   const taskIndex = nonNegativeInt(p.get(P_TASK_INDEX));

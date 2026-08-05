@@ -187,8 +187,8 @@ export interface SelectionSlice {
  */
 export type PoiSortKey = "worker" | "kind" | "time" | "duration";
 
-/** The rail's active tab: the POI issues list or the task index. */
-export type RailTab = "issues" | "tasks";
+/** The rail's active tab: issues, tasks, or trace-wide segment metadata. */
+export type RailTab = "issues" | "tasks" | "metadata";
 
 /** Tasks-tab sort column. */
 export type TaskSortKey = "id" | "loc" | "polls" | "total" | "longest" | "lifetime";

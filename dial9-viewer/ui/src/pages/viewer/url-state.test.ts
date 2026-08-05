@@ -127,6 +127,13 @@ describe("viewer URL state: issues-rail (poi)", () => {
     expect(out.poiFilter).toBeUndefined();
     expect(out.poiSort).toBeUndefined();
   });
+
+  it("round-trips the Metadata tab and rejects unknown rail values", () => {
+    const { params, out } = roundTrip(mkState({ poi: { railTab: "metadata" } }));
+    expect(params.get("rail")).toBe("metadata");
+    expect(out.railTab).toBe("metadata");
+    expect(readViewerUrlState("?rail=unknown").railTab).toBeUndefined();
+  });
 });
 
 describe("viewer URL state: span filters", () => {
