@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 10777,
+  "total_samples": 10692,
   "by_source": {
-    "0": 104,
-    "1": 10673
+    "0": 101,
+    "1": 10591
   },
   "on_off_all": {
-    "on_runtime": 10769,
-    "off_runtime": 8
+    "on_runtime": 10686,
+    "off_runtime": 6
   },
   "on_off_by_source": {
     "0": {
-      "on": 96,
-      "off": 8
+      "on": 95,
+      "off": 6
     },
     "1": {
-      "on": 10673,
+      "on": 10591,
       "off": 0
     }
   },
@@ -24,52 +24,52 @@
     1
   ],
   "cpu_profile": {
-    "count": 104,
-    "distinct_stacks": 91,
-    "stack_sig_digest": "2f7a364392f98d34",
-    "ts_count": 104,
-    "ts_span_ns": 3207001835,
-    "ts_delta_digest": "b39c93cf60c19d14",
+    "count": 101,
+    "distinct_stacks": 97,
+    "stack_sig_digest": "697559de3b3971a9",
+    "ts_count": 101,
+    "ts_span_ns": 3648998960,
+    "ts_delta_digest": "900c2300f5393e73",
     "top_stacks": [
       {
         "count": 3,
-        "depth": 113,
-        "leaf": "[unknown] 0xffffacf0de48"
+        "depth": 106,
+        "leaf": "[unknown] 0xffffad46d200"
       },
       {
         "count": 3,
-        "depth": 107,
-        "leaf": "[unknown] 0xffffacd3d200"
-      },
-      {
-        "count": 3,
-        "depth": 107,
+        "depth": 89,
         "leaf": "_Unwind_Find_FDE"
       },
       {
-        "count": 3,
-        "depth": 106,
-        "leaf": "[unknown] 0xffffacf0de8c"
+        "count": 1,
+        "depth": 144,
+        "leaf": "[unknown] 0xffffad63ca28"
       },
       {
-        "count": 2,
-        "depth": 106,
-        "leaf": "[unknown] 0xffffacf0c9c0"
+        "count": 1,
+        "depth": 94,
+        "leaf": "futures_channel::mpsc::BoundedSenderInner<T>::poll_unparked"
       },
       {
-        "count": 2,
-        "depth": 114,
-        "leaf": "[unknown] 0xffffacf43724"
+        "count": 1,
+        "depth": 126,
+        "leaf": "tracing::instrument::_::<impl core::ops::drop::Drop for tracing::instrument::Instrumented<T>>::drop"
       },
       {
-        "count": 2,
+        "count": 1,
+        "depth": 132,
+        "leaf": "http::header::name::HeaderName::from_bytes"
+      },
+      {
+        "count": 1,
+        "depth": 62,
+        "leaf": "tokio::runtime::task::harness::Harness<T,S>::poll"
+      },
+      {
+        "count": 1,
         "depth": 113,
-        "leaf": "_Unwind_Find_FDE"
-      },
-      {
-        "count": 2,
-        "depth": 61,
-        "leaf": "0xffffacf7d2f8"
+        "leaf": "[unknown] 0xffffad63de60"
       }
     ]
   }

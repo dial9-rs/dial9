@@ -60,7 +60,7 @@ describe("push base-field split", () => {
     const s = new ColumnarSpanEvents();
     s.push(SPAN_KIND.Enter, 100, {
       worker_id: 3,
-      task_id: 42,
+      task_id: "application-task",
       span_id: "s1",
       parent_span_id: "s0",
       span_name: "handle",
@@ -69,8 +69,26 @@ describe("push base-field split", () => {
     });
     expect(spanId(s, 0)).toBe("s1");
     expect(parentId(s, 0)).toBe("s0");
+    expect(Number.isNaN(s.taskId[0])).toBe(true);
+    expect(extrasOf(s, 0)).toEqual({
+      task_id: "application-task",
+      request_id: "r1",
+      route: "/api",
+    });
+  });
+
+  it("uses the namespaced task ID without consuming an application task_id", () => {
+    const s = new ColumnarSpanEvents();
+    s.push(SPAN_KIND.Enter, 100, {
+      worker_id: 3,
+      "dial9.tokio.task_id": 42,
+      task_id: "application-task",
+      span_id: "s1",
+      parent_span_id: "s0",
+      span_name: "handle",
+    });
     expect(s.taskId[0]).toBe(42);
-    expect(extrasOf(s, 0)).toEqual({ request_id: "r1", route: "/api" });
+    expect(extrasOf(s, 0)).toEqual({ task_id: "application-task" });
   });
 
   it("treats parent_span_id as a NON-base field on an Exit event", () => {

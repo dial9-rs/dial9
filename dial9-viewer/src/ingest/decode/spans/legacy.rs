@@ -1,9 +1,9 @@
 //! Legacy span adapter: reconstructs spans from old-producer format events
 //! into [`SpanCandidate`]s via the unified interval pairer.
 //!
-//! Old producers emit:
-//! - `SpanEnter:{target}::{name}:{file}:{line}` with fields: task_id (current)
-//!   or worker_id (legacy), span_id, span_name, ...
+//! Tracing-layer producers emit:
+//! - `SpanEnter:{target}::{name}:{file}:{line}` with fields:
+//!   dial9.tokio.task_id (current) or worker_id (legacy), span_id, span_name, ...
 //! - `SpanExit:{target}::{name}:{file}:{line}` with the corresponding fields
 //! - `SpanCloseEvent` with only: span_id
 //!
@@ -22,8 +22,8 @@
 //! - Parse target/name/file/line from the SpanEnter schema name.
 //! - Lifecycle start = first observed enter (conservative).
 //! - details_complete = false, identity_quality = "legacy".
-//! - Prefer the producer-recorded task_id. For old traces, resolve the owning
-//!   Tokio task from the poll on the enter worker covering the enter timestamp.
+//! - Prefer the producer-recorded Tokio task ID. For old traces, resolve the
+//!   owning task from the poll on the enter worker covering the enter timestamp.
 //!   Then split entered wall time into estimated on-CPU (poll overlap) vs async
 //!   wait (in-task gaps between polls).
 

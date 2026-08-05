@@ -124,7 +124,8 @@ export function buildSpanDataColumnar(
   blockInPlaceGaps?: readonly BlockInPlaceGap[],
 ): SpanData {
   // spanId -> correlation data of the currently-open enter. New traces carry
-  // taskId directly; workerId remains for the old-trace fallback.
+  // taskId directly from the namespaced field; workerId remains for the
+  // old-trace fallback.
   const openEnters = new Map<string, { timestamp: number; workerId: number; taskId: number | null }>();
   // Live span records keyed by spanId; streamed to the builder on Close / EOT.
   const spanMap = new Map<string, SpanRec>();

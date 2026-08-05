@@ -70,7 +70,7 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     expect([...col.childrenByParent.entries()].sort()).toEqual([...fat.childrenByParent.entries()].sort());
   });
 
-  it("prefers direct task_id over legacy worker correlation", () => {
+  it("prefers the namespaced task ID and preserves an application task_id", () => {
     const workerSpans = {
       0: { polls: [{ start: 900, end: 1100, taskId: 99 }], parks: [], actives: [] },
       1: {
@@ -85,12 +85,19 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     const spanEvents = new ColumnarSpanEvents();
     spanEvents.push(SPAN_KIND.Enter, 1000, {
       worker_id: 0,
-      task_id: 42,
+      "dial9.tokio.task_id": 42,
+      task_id: "application-task",
       span_id: 1,
       parent_span_id: null,
       span_name: "request",
     });
-    spanEvents.push(SPAN_KIND.Exit, 5000, { worker_id: 0, task_id: 42, span_id: 1, span_name: "request" });
+    spanEvents.push(SPAN_KIND.Exit, 5000, {
+      worker_id: 0,
+      "dial9.tokio.task_id": 42,
+      task_id: "application-task",
+      span_id: 1,
+      span_name: "request",
+    });
     spanEvents.push(SPAN_KIND.Close, 5100, { span_id: 1 });
 
     const result = buildSpanDataColumnar(
@@ -103,7 +110,7 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
       { start: 1000, end: 1100, workerId: 1 },
       { start: 4000, end: 4100, workerId: 1 },
     ]);
-    expect(span.fields.task_id).toBeUndefined();
+    expect(span.fields.task_id).toBe("application-task");
   });
 
   it("keeps single-event lifecycle timing without inventing active segments", () => {

@@ -1248,12 +1248,12 @@
    * SpanCloseEvent finalizes a span and enables span ID recycling. Annotated
    * single-event spans already carry both lifecycle endpoints.
    *
-   * New producers write the owning `task_id` directly on span events. Legacy
-   * producers only wrote `worker_id`; for those, the owning task is inferred
-   * from the poll covering the first enter. When `workerSpans` is supplied,
-   * each span's active segments are reconstructed from that task's poll
-   * timeline instead of trusting the raw on-wire SpanEnter/SpanExit segments
-   * (see `reconstructSpanSegments`).
+   * New producers write the owning `dial9.tokio.task_id` directly on span
+   * events. Legacy producers wrote `worker_id`; for those, the owning task is
+   * inferred from the poll covering the first enter. When `workerSpans` is
+   * supplied, each span's active segments are reconstructed from that task's
+   * poll timeline instead of trusting the raw on-wire SpanEnter/SpanExit
+   * segments (see `reconstructSpanSegments`).
    * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
    * @param {Object} [workerSpans] per-worker `{polls}` from {@link buildWorkerSpans};
    *   when present, enables poll-based active/idle reconstruction.
@@ -1282,8 +1282,9 @@
     const closedSpans = []; // finalized span records (after SpanClose or end-of-trace)
     const spanMeta = new Map();
 
-    const BASE_ENTER_FIELDS = new Set(["worker_id", "task_id", "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
-    const BASE_EXIT_FIELDS = new Set(["worker_id", "task_id", "span_id", "span_instance_id", "tid", "span_name"]);
+    const TOKIO_TASK_ID_FIELD = "dial9.tokio.task_id";
+    const BASE_ENTER_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
+    const BASE_EXIT_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "span_name"]);
     let singleEventOrdinal = 0;
     const handoffGapsByTid = new Map();
     for (const gap of blockInPlaceGaps || []) {
@@ -1368,7 +1369,9 @@
         // `worker_id` is absent on current producers. Keep it only for the
         // legacy task-correlation fallback and unmatched-span rendering.
         const workerId = v.worker_id != null ? Number(v.worker_id) : NaN;
-        const rawTaskId = v.task_id != null ? Number(v.task_id) : null;
+        const rawTaskId = v[TOKIO_TASK_ID_FIELD] != null
+          ? Number(v[TOKIO_TASK_ID_FIELD])
+          : null;
         const taskId = rawTaskId != null && Number.isFinite(rawTaskId) && rawTaskId !== 0
           ? rawTaskId
           : null;
@@ -1412,7 +1415,8 @@
           }
           if (Object.keys(exitFields).length > 0) rec.fields = exitFields;
           // Retain the ENTER worker for old traces whose task id still needs the
-          // poll-overlap fallback. Current traces reconstruct lanes from task_id.
+          // poll-overlap fallback. Current traces reconstruct lanes from the
+          // namespaced Tokio task ID.
           rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId: enter.workerId });
         }
       } else if (ev.name.startsWith("SpanClose__") || ev.name === "SpanCloseEvent") {

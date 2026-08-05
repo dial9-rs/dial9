@@ -15,6 +15,8 @@ use serde::Deserialize;
 use super::clock::{ClockOffset, MonoNs};
 use dial9_core::schema_extensions::{self, roles};
 
+const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
+
 /// Span enter/exit fields that describe the span's identity or lifecycle rather
 /// than user-attached metadata. These are consumed structurally elsewhere and
 /// are NOT surfaced as attributes. Mirrors the viewer's `BASE_ENTER_FIELDS` /
@@ -23,7 +25,7 @@ use dial9_core::schema_extensions::{self, roles};
 const BASE_SPAN_FIELDS: &[&str] = &[
     "timestamp_ns",
     "worker_id",
-    "task_id",
+    TOKIO_TASK_ID_FIELD,
     "span_id",
     "span_instance_id",
     "tid",
@@ -151,7 +153,8 @@ pub(crate) struct SymbolEntry {
 
 /// Legacy span enter event from old producers.
 ///
-/// Current producers write `task_id`; legacy producers wrote `worker_id`.
+/// Current producers write `dial9.tokio.task_id`; earlier producers wrote
+/// `worker_id`.
 /// Spans are paired enter↔exit by `span_id` alone because a task can migrate
 /// workers between enter and exit (see `resolve_legacy_spans`).
 #[derive(Debug, Deserialize)]
@@ -160,7 +163,7 @@ pub(crate) struct LegacySpanEnterEvent {
     pub(crate) timestamp_ns: u64,
     #[serde(default)]
     pub(crate) worker_id: Option<u64>,
-    #[serde(default)]
+    #[serde(default, rename = "dial9.tokio.task_id")]
     pub(crate) task_id: Option<u64>,
     #[serde(default)]
     pub(crate) span_id: u64,
@@ -184,7 +187,7 @@ pub(crate) struct LegacySpanExitEvent {
     pub(crate) timestamp_ns: u64,
     #[serde(default)]
     pub(crate) worker_id: Option<u64>,
-    #[serde(default)]
+    #[serde(default, rename = "dial9.tokio.task_id")]
     pub(crate) task_id: Option<u64>,
     #[serde(default)]
     pub(crate) span_id: u64,
@@ -798,10 +801,10 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
     // wire decode order. Used to break timestamp ties deterministically.
     let mut span_decode_sequence: u64 = 0;
 
-    // Span events: SpanEnter/Exit with span_id plus task_id (current) or
-    // worker_id (legacy), and SpanCloseEvent.
-    // with only span_id. These are reconstructed into ResolvedSpan rows using
-    // local context (`resolve_legacy_spans`).
+    // Span events: SpanEnter/Exit with span_id plus dial9.tokio.task_id
+    // (current) or worker_id (legacy), and SpanCloseEvent with only span_id.
+    // These are reconstructed into ResolvedSpan rows using local context
+    // (`resolve_legacy_spans`).
     let mut legacy_enters: Vec<(String, LegacySpanEnterEvent)> = Vec::new(); // (schema_name, event)
     let mut legacy_exits: Vec<(String, LegacySpanExitEvent)> = Vec::new();
     let mut legacy_closes: Vec<LegacySpanCloseEvent> = Vec::new();
@@ -1044,6 +1047,86 @@ mod tests {
                 .map(|(name, field_type)| FieldDef::new(name, field_type)),
             annotations,
         )
+    }
+
+    #[test]
+    fn tracing_span_task_id_is_namespaced() {
+        let current_schema = Schema::new(
+            "SpanEnter:current::request:src/main.rs:10",
+            vec![
+                FieldDef::new(TOKIO_TASK_ID_FIELD, FieldType::OptionalVarint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::PooledString),
+                FieldDef::new("task_id", FieldType::OptionalPooledString),
+            ],
+        );
+        let legacy_schema = Schema::new(
+            "SpanEnter:legacy::request:src/main.rs:20",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::PooledString),
+                FieldDef::new("task_id", FieldType::OptionalPooledString),
+            ],
+        );
+
+        let mut encoder = Encoder::new();
+        let current_name = encoder.intern_string("current").unwrap();
+        let current_application_task_id = encoder.intern_string("current-application").unwrap();
+        let legacy_name = encoder.intern_string("legacy").unwrap();
+        let legacy_application_task_id = encoder.intern_string("legacy-application").unwrap();
+        encoder
+            .write_event(
+                &current_schema,
+                &[
+                    FieldValue::Varint(100),
+                    FieldValue::Varint(42),
+                    FieldValue::Varint(1),
+                    FieldValue::None,
+                    FieldValue::PooledString(current_name),
+                    FieldValue::PooledString(current_application_task_id),
+                ],
+            )
+            .unwrap();
+        encoder
+            .write_event(
+                &legacy_schema,
+                &[
+                    FieldValue::Varint(200),
+                    FieldValue::Varint(7),
+                    FieldValue::Varint(2),
+                    FieldValue::None,
+                    FieldValue::PooledString(legacy_name),
+                    FieldValue::PooledString(legacy_application_task_id),
+                ],
+            )
+            .unwrap();
+
+        let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
+        let current = decoded
+            .legacy_enters
+            .iter()
+            .find(|(name, _)| name.contains(":current::"))
+            .unwrap();
+        assert_eq!(current.1.task_id, Some(42));
+        assert_eq!(
+            current.1.attributes,
+            vec![("task_id".to_string(), "current-application".to_string())]
+        );
+
+        let legacy = decoded
+            .legacy_enters
+            .iter()
+            .find(|(name, _)| name.contains(":legacy::"))
+            .unwrap();
+        assert_eq!(legacy.1.task_id, None);
+        assert_eq!(legacy.1.worker_id, Some(7));
+        assert_eq!(
+            legacy.1.attributes,
+            vec![("task_id".to_string(), "legacy-application".to_string())]
+        );
     }
 
     #[test]

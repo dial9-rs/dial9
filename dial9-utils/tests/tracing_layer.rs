@@ -14,6 +14,8 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
+const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
+
 fn attach(
     recorder: &Recorder,
     workers: usize,
@@ -121,7 +123,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                     {
                         result.saw_parent_span_id = true;
                     }
-                    if field_def.name() == "task_id" {
+                    if field_def.name() == TOKIO_TASK_ID_FIELD {
                         match field_val {
                             FieldValueRef::Varint(task_id) if *task_id != 0 => {
                                 result.enter_task_ids.insert(*task_id);
@@ -131,8 +133,13 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                         }
                     }
                     // User-defined fields are optional pooled strings
-                    if !["task_id", "span_id", "parent_span_id", "span_name"]
-                        .contains(&field_def.name())
+                    if ![
+                        TOKIO_TASK_ID_FIELD,
+                        "span_id",
+                        "parent_span_id",
+                        "span_name",
+                    ]
+                    .contains(&field_def.name())
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(v) = ev.string_pool.get(*id)
                     {
@@ -144,7 +151,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
             } else if ev.name.starts_with("SpanExit:") {
                 result.exit_count += 1;
                 for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
-                    if field_def.name() == "task_id" {
+                    if field_def.name() == TOKIO_TASK_ID_FIELD {
                         match field_val {
                             FieldValueRef::Varint(task_id) if *task_id != 0 => {
                                 result.exit_task_ids.insert(*task_id);
@@ -153,7 +160,7 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                             _ => {}
                         }
                     }
-                    if !["task_id", "span_id", "span_name"].contains(&field_def.name())
+                    if ![TOKIO_TASK_ID_FIELD, "span_id", "span_name"].contains(&field_def.name())
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(v) = ev.string_pool.get(*id)
                     {
@@ -195,7 +202,11 @@ fn span_events_appear_in_trace() {
     runtime.block_on(async {
         // Test on_record: span with an empty field filled in later
         async fn late_record_span() {
-            let span = tracing::info_span!("late_fields", answer = tracing::field::Empty);
+            let span = tracing::info_span!(
+                "late_fields",
+                answer = tracing::field::Empty,
+                task_id = "application-task"
+            );
             span.record("answer", 42);
             let _enter = span.enter();
         }
@@ -309,6 +320,20 @@ fn span_events_appear_in_trace() {
             .iter()
             .any(|(k, v)| k == "user_id" && v == "42"),
         "missing user_id=42 field on exit"
+    );
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "task_id" && v == "application-task"),
+        "application task_id field collided with dial9's Tokio task ID"
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "task_id" && v == "application-task"),
+        "application task_id field collided with dial9's Tokio task ID on exit"
     );
 
     // Fields from on_record (late recording)

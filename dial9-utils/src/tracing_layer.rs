@@ -74,6 +74,8 @@ use tracing::callsite::Identifier;
 use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
+const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
+
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
 struct SpanCloseEvent {
@@ -101,13 +103,13 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
 
     // Base fields present on all span events
     let mut enter_fields = vec![
-        FieldDef::new("task_id", FieldType::OptionalVarint),
+        FieldDef::new(TOKIO_TASK_ID_FIELD, FieldType::OptionalVarint),
         FieldDef::new("span_id", FieldType::Varint),
         FieldDef::new("parent_span_id", FieldType::OptionalVarint),
         FieldDef::new("span_name", FieldType::PooledString),
     ];
     let mut exit_fields = vec![
-        FieldDef::new("task_id", FieldType::OptionalVarint),
+        FieldDef::new(TOKIO_TASK_ID_FIELD, FieldType::OptionalVarint),
         FieldDef::new("span_id", FieldType::Varint),
         FieldDef::new("span_name", FieldType::PooledString),
     ];

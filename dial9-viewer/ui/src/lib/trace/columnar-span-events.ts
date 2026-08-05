@@ -16,6 +16,8 @@ import type { DecodedFieldValue } from "../../../decode.js";
 /** Span-event kind, replacing the frozen buildSpanData name classification. */
 export const SPAN_KIND = { Enter: 0, Exit: 1, Close: 2, Complete: 3 } as const;
 
+const TOKIO_TASK_ID_FIELD = "dial9.tokio.task_id";
+
 /** Classify a custom-event name as a span event kind, or null if not one.
  * Mirrors buildSpanData's name matching (trace_analysis.js) EXACTLY. */
 export function spanKindOf(name: string): number | null {
@@ -51,7 +53,7 @@ function isBaseEnterField(k: string): boolean {
   return (
     k === "span_id" ||
     k === "worker_id" ||
-    k === "task_id" ||
+    k === TOKIO_TASK_ID_FIELD ||
     k === "parent_span_id" ||
     k === "span_name" ||
     k === "span_instance_id" ||
@@ -62,7 +64,7 @@ function isBaseExitField(k: string): boolean {
   return (
     k === "span_id" ||
     k === "worker_id" ||
-    k === "task_id" ||
+    k === TOKIO_TASK_ID_FIELD ||
     k === "span_name" ||
     k === "span_instance_id" ||
     k === "tid"
@@ -88,8 +90,8 @@ export class ColumnarSpanEvents {
   /** Number(fields.worker_id); NaN when absent (-> stays NaN, Number.isFinite
    * guards downstream, matching the fat Number(undefined) === NaN path). */
   workerId: Float64Array;
-  /** Number(fields.task_id); NaN when absent. Current producers populate this
-   * directly; workerId remains only for legacy correlation. */
+  /** Number(fields["dial9.tokio.task_id"]); NaN when absent. workerId remains
+   * only for legacy correlation. */
   taskId: Float64Array;
   /** index into `strings` (interned span_id); -1 = absent (-> "undefined"). */
   spanIdIdx: Int32Array;
@@ -353,7 +355,9 @@ export class ColumnarSpanEvents {
     // Missing legacy/new correlation fields remain NaN so downstream can
     // distinguish absence from worker/task zero.
     this.workerId[i] = v.worker_id != null ? Number(v.worker_id) : NaN;
-    this.taskId[i] = v.task_id != null ? Number(v.task_id) : NaN;
+    this.taskId[i] = v[TOKIO_TASK_ID_FIELD] != null
+      ? Number(v[TOKIO_TASK_ID_FIELD])
+      : NaN;
     // span_id / parent_span_id are already strings on the wire, so skip the
     // String() round-trip in the common case (it was allocating a new identical
     // string 176k times on the demo trace); fall back only for the rare

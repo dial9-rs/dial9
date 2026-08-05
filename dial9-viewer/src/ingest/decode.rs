@@ -277,8 +277,8 @@ pub(crate) fn decode_samples_with_stats(
         };
 
     // Reconstruct spans from the old-producer enter/exit/close events:
-    //   SpanEnter:{target}::{name}:{file}:{line} → task_id (current) or worker_id
-    //     (legacy), span_id, parent_span_id, span_name, ...
+    //   SpanEnter:{target}::{name}:{file}:{line} → dial9.tokio.task_id
+    //     (current) or worker_id (legacy), span_id, parent_span_id, span_name, ...
     //   SpanExit:{target}::{name}:{file}:{line}  → the corresponding fields
     //   SpanCloseEvent                           → span_id (only)
     //

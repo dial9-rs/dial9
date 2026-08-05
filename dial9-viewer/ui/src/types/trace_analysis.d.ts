@@ -346,7 +346,7 @@ declare module "*/trace_analysis.js" {
     end: number;
     spanId: string;
     spanName: string;
-    /** User-defined span fields (base worker/task/span fields excluded). */
+    /** User-defined span fields (structural runtime/span fields excluded). */
     fields: Record<string, DecodedFieldValue>;
     /** Producer/instrumentation family for annotated single-event spans. */
     spanType?: string | undefined;
