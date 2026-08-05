@@ -8,7 +8,6 @@ export {
   LABEL_W,
   clampX,
   laneRowLayout,
-  laneStackGeometry,
   nsToDrawX,
   panelGeometry,
   timePanelLayout,
@@ -51,7 +50,6 @@ export {
   pixelCoverage,
   pixelDownsampleSpans,
 } from "./downsample.js";
-export type { BarCoalescer } from "./downsample.js";
 
 export {
   SPAN_COLORS,

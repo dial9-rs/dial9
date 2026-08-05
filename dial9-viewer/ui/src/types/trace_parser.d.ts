@@ -102,6 +102,26 @@ declare module "*/trace_parser.js" {
    */
   export type CallframeSymbols = Map<string, SymbolFrame | SymbolFrame[]>;
 
+  /** A completed span projected from one annotated event schema. */
+  export interface SingleEventSpan {
+    start: number;
+    end: number;
+    name: string;
+    spanType: string;
+    threadId: number | null;
+    taskId: number | null;
+    workerId: number | null;
+    /** Event fields excluding recognized structural-role fields. */
+    fields: Record<string, import("*/decode.js").DecodedFieldValue>;
+    /** Units for projected attribute fields. */
+    units: Record<string, string> | null;
+  }
+
+  export interface TidWorkerBinding {
+    timestamp: number;
+    workerId: number;
+  }
+
   /** An event type the parser doesn't recognize, captured verbatim. */
   export interface CustomTraceEvent {
     /** Schema name, e.g. "SpanEnter:{target}::{name}:{file}:{line}". */
@@ -115,6 +135,10 @@ declare module "*/trace_parser.js" {
     fields: Record<string, import("*/decode.js").DecodedFieldValue>;
     /** field name -> unit annotation ("ns", "bytes", ...), if any. */
     units: Record<string, string> | null;
+    /** field name -> chart interpretation annotation, if any. */
+    fieldKinds: Record<string, string> | null;
+    /** Present when schema annotations project this event as a completed span. */
+    singleEventSpan?: SingleEventSpan | null;
   }
 
   export interface AllocEvent {
@@ -198,17 +222,21 @@ declare module "*/trace_parser.js" {
     threadNames: Map<number, string>;
     /** tid -> worker id (derived from park/unpark events). */
     tidToWorker: Map<number, number>;
+    /** Historical TID bindings, ordered by monotonic timestamp. */
+    tidBindings?: Map<number, TidWorkerBinding[]>;
+    /** TIDs that mapped to exactly one worker throughout the parsed trace. */
+    stableTidToWorker?: Map<number, number>;
     /** runtime name -> worker ids. */
     runtimeWorkers: Map<string, number[]>;
     /** Latest segment-metadata key -> value. */
     segmentMetadata: Map<string, string>;
     customEvents: CustomTraceEvent[];
     /**
-     * Columnar SPAN custom events (SpanEnter/Exit/Close), present only on the
-     * main-thread columnar load path (spanEventSink). When set, span events are
-     * NOT in `customEvents` (which then holds only non-span custom events) and
+     * Columnar span-producing custom events (SpanEnter/Exit/Close and annotated
+     * single-event spans), present only on the main-thread columnar load path
+     * (spanEventSink). When set, these events are NOT in `customEvents` and
      * buildSpanDataColumnar reads them. Undefined on the fat/worker path, where
-     * span events remain inside `customEvents`.
+     * they remain inside `customEvents`.
      */
     spanEvents?: import("../lib/trace/columnar-span-events.js").ColumnarSpanEvents;
     /** task id -> async stack captures, sorted by timestamp. */
@@ -265,14 +293,15 @@ declare module "*/trace_parser.js" {
 
   /**
    * The span-event contract a `ParseOptions.spanEventSink` must satisfy.
-   * Returns true when the event was a span event and the sink consumed it, so
+   * Returns true when the event produces a span and the sink consumed it, so
    * the parser knows to keep it out of the fat customEvents array.
    */
   export interface SpanEventSink {
     pushIfSpan(
       name: string,
       timestamp: number,
-      fields: Record<string, import("*/decode.js").DecodedFieldValue>
+      fields: Record<string, import("*/decode.js").DecodedFieldValue>,
+      singleEventSpan: SingleEventSpan | null
     ): boolean;
   }
 
@@ -301,11 +330,13 @@ declare module "*/trace_parser.js" {
      */
     cpuSampleSink?: CpuSampleSink;
     /**
-     * Optional columnar sink for SPAN custom events (src/lib/trace/
-     * columnar-span-events.ts ColumnarSpanEvents). Its `.pushIfSpan(name, ts, v)`
-     * routes SpanEnter/Exit/Close events into typed columns (the ~2.3 GB of fat
-     * span-event objects on a heavily-instrumented trace); non-span custom events
-     * stay in the fat customEvents array. buildSpanDataColumnar reads the columns.
+     * Optional columnar sink for span-producing custom events (src/lib/trace/
+     * columnar-span-events.ts ColumnarSpanEvents). Its
+     * `.pushIfSpan(name, ts, v, singleEventSpan)`
+     * routes SpanEnter/Exit/Close and annotated single-event spans into typed columns
+     * (the ~2.3 GB of fat span-event objects on a heavily-instrumented trace);
+     * other custom events stay in the fat customEvents array.
+     * buildSpanDataColumnar reads the columns.
      */
     spanEventSink?: SpanEventSink;
     /** Directory parsing only (Node). */

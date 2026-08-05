@@ -14,25 +14,31 @@ pub struct ProcessResourceUsageEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     /// Cumulative user CPU time used by this process.
-    #[traceevent(unit = "ns")]
+    #[traceevent(unit = "ns", kind = "counter")]
     pub user_cpu_ns: u64,
     /// Cumulative system CPU time used by this process.
-    #[traceevent(unit = "ns")]
+    #[traceevent(unit = "ns", kind = "counter")]
     pub system_cpu_ns: u64,
     /// Maximum resident set size in bytes.
-    #[traceevent(unit = "bytes")]
+    #[traceevent(unit = "bytes", kind = "gauge")]
     pub max_rss_bytes: u64,
     /// Page faults serviced without disk I/O.
+    #[traceevent(kind = "counter")]
     pub minor_faults: u64,
     /// Page faults serviced with disk I/O.
+    #[traceevent(kind = "counter")]
     pub major_faults: u64,
     /// Block input operations performed by the process.
+    #[traceevent(kind = "counter")]
     pub block_input_ops: u64,
     /// Block output operations performed by the process.
+    #[traceevent(kind = "counter")]
     pub block_output_ops: u64,
     /// Voluntary context switches performed by the process.
+    #[traceevent(kind = "counter")]
     pub voluntary_context_switches: u64,
     /// Involuntary context switches performed by the process.
+    #[traceevent(kind = "counter")]
     pub involuntary_context_switches: u64,
 }
 
@@ -331,21 +337,42 @@ mod tests {
     }
 
     #[test]
-    fn process_resource_usage_unit_annotations() {
+    fn process_resource_usage_annotations() {
         use dial9_trace_format::TraceEvent;
         let entry = ProcessResourceUsageEvent::schema_entry();
-        let units: Vec<(&str, &str)> = entry
-            .annotations()
-            .iter()
-            .filter(|a| a.key() == "unit")
-            .map(|a| (entry.fields()[a.field_index() as usize].name(), a.value()))
-            .collect();
+        let annotations = |key| {
+            entry
+                .annotations()
+                .iter()
+                .filter(|annotation| annotation.key() == key)
+                .map(|annotation| {
+                    (
+                        entry.fields()[annotation.field_index() as usize].name(),
+                        annotation.value(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            units,
+            annotations("unit"),
             vec![
                 ("user_cpu_ns", "ns"),
                 ("system_cpu_ns", "ns"),
                 ("max_rss_bytes", "bytes"),
+            ]
+        );
+        assert_eq!(
+            annotations("kind"),
+            vec![
+                ("user_cpu_ns", "counter"),
+                ("system_cpu_ns", "counter"),
+                ("max_rss_bytes", "gauge"),
+                ("minor_faults", "counter"),
+                ("major_faults", "counter"),
+                ("block_input_ops", "counter"),
+                ("block_output_ops", "counter"),
+                ("voluntary_context_switches", "counter"),
+                ("involuntary_context_switches", "counter"),
             ]
         );
     }

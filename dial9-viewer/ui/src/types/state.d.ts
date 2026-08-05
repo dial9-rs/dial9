@@ -254,20 +254,20 @@ export interface UiPrefsSlice {
   panelCollapsed: Readonly<Record<FoldablePanelKind, boolean>>;
   /**
    * Track order for the unified column. The user drag-reorders the
-   * manageable analysis tracks (cpu/queue/spans/events) by the track-label
-   * grip; this is their resulting id order. Empty = the catalogue order
+   * manageable built-in and dynamic analysis tracks by the track-label grip;
+   * this is their resulting id order. Empty = the catalogue order
    * (track-layout.ts TRACKS). Resolution is robust to unknown or missing ids,
    * so an order stored before a new track was added still resolves (the new
-   * track appears in its catalogue slot). Persisted to localStorage
-   * (dial9.viewer.trackPrefs) so it survives reload.
+   * track appears in its catalogue slot). The full order is URL state; only
+   * built-in ids persist in localStorage (`dial9.viewer.trackPrefs`).
    */
   trackOrder: readonly string[];
   /**
    * Per-track collapsed state. Track id -> true when the user collapsed it to
    * label-only height via the track-label caret. Absent or false = expanded
-   * (analysis surfaces visible by default). Only the manageable analysis
-   * tracks (cpu/queue/spans/events) are collapsible. localStorage-backed
-   * (dial9.viewer.trackPrefs).
+   * (analysis surfaces visible by default). Built-in and dynamic analysis
+   * tracks are collapsible. The full map is URL state; only built-in ids
+   * persist in localStorage (`dial9.viewer.trackPrefs`).
    */
   collapsed: Readonly<Record<string, boolean>>;
   /**
@@ -337,6 +337,20 @@ export interface UiPrefsSlice {
 export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
 /** Region analysis selected for a retained range. */
 export type RegionAnalysisMode = "cpu" | "blocking" | "heap";
+/** Rendering semantics for a custom-event numeric field chart. */
+export type FieldChartKind = "gauge" | "counter" | "updown-counter";
+/**
+ * One URL-defined custom-event field chart. The id also keys track order and
+ * collapse state; event + field names resolve against the loaded trace.
+ */
+export interface FieldChartSpec {
+  readonly id: string;
+  /** Non-empty custom-event name; commas are not supported by the URL tuple. */
+  readonly eventName: string;
+  /** Non-empty numeric field name; commas are not supported by the URL tuple. */
+  readonly fieldName: string;
+  readonly kind: FieldChartKind;
+}
 /** One Related-section expansion counter. */
 export interface RelatedExpansion {
   before: number;
@@ -350,6 +364,8 @@ export interface RelatedExpansion {
  * construct the same view without replaying pointer/keyboard actions.
  */
 export interface ViewerViewSlice {
+  /** Dynamic numeric-field tracks, persisted only through URL state. */
+  fieldCharts: readonly FieldChartSpec[];
   inspectorTab: InspectorTab;
   /** Poll sample groups expanded in list mode (`cpu-N` / `sched-N`). */
   expandedPollGroups: ReadonlySet<string>;
@@ -581,17 +597,6 @@ export type StoreSliceName = keyof StoreState;
 
 /** Re-export of the frozen core's time-panel layout (ns<->x mapping). */
 export type { TimePanelLayout } from "../../panel_layout.js";
-
-/** Geometry of one worker lane row within the lanes stack. */
-export interface LaneGeometry {
-  workerId: number;
-  /** Row index within the lanes stack (top = 0). */
-  index: number;
-  /** Top edge in CSS px, lanes-local (before scroll offset). */
-  y: number;
-  /** Row height in CSS px. */
-  height: number;
-}
 
 /**
  * Geometry handed to a canvas panel's `render(ctx, state, layout)`:

@@ -177,6 +177,11 @@ pub fn write_polls<W: Write + Send>(writer: W, polls: &[ResolvedPoll]) -> anyhow
     let mut worker_id_builder = UInt32Builder::with_capacity(n);
     let mut task_id_builder = UInt64Builder::with_capacity(n);
     let mut spawn_loc_builder = StringBuilder::with_capacity(n, 64 * n);
+    let mut ready_at_builder = arrow::array::Int64Builder::with_capacity(n);
+    let mut scheduling_delay_builder = arrow::array::Int64Builder::with_capacity(n);
+    let mut scheduling_kind_builder = UInt8Builder::with_capacity(n);
+    let mut waker_task_id_builder = UInt64Builder::with_capacity(n);
+    let mut task_instrumented_builder = arrow::array::BooleanBuilder::with_capacity(n);
     let mut cpu_count_builder = UInt32Builder::with_capacity(n);
     let mut sched_count_builder = UInt32Builder::with_capacity(n);
     let mut host_builder = StringBuilder::with_capacity(n, 64 * n);
@@ -190,6 +195,11 @@ pub fn write_polls<W: Write + Send>(writer: W, polls: &[ResolvedPoll]) -> anyhow
         worker_id_builder.append_value(poll.worker_id);
         task_id_builder.append_value(poll.task_id);
         spawn_loc_builder.append_option(poll.spawn_loc.as_deref());
+        ready_at_builder.append_option(poll.ready_at_ns.map(|value| value as i64));
+        scheduling_delay_builder.append_option(poll.scheduling_delay_ns.map(|value| value as i64));
+        scheduling_kind_builder.append_option(poll.scheduling_delay_kind.map(|kind| kind as u8));
+        waker_task_id_builder.append_option(poll.waker_task_id);
+        task_instrumented_builder.append_option(poll.task_instrumented);
         cpu_count_builder.append_value(poll.cpu_sample_count);
         sched_count_builder.append_value(poll.sched_sample_count);
         host_builder.append_value(&poll.host);
@@ -206,6 +216,11 @@ pub fn write_polls<W: Write + Send>(writer: W, polls: &[ResolvedPoll]) -> anyhow
             Arc::new(worker_id_builder.finish()) as ArrayRef,
             Arc::new(task_id_builder.finish()) as ArrayRef,
             Arc::new(spawn_loc_builder.finish()) as ArrayRef,
+            Arc::new(ready_at_builder.finish()) as ArrayRef,
+            Arc::new(scheduling_delay_builder.finish()) as ArrayRef,
+            Arc::new(scheduling_kind_builder.finish()) as ArrayRef,
+            Arc::new(waker_task_id_builder.finish()) as ArrayRef,
+            Arc::new(task_instrumented_builder.finish()) as ArrayRef,
             Arc::new(cpu_count_builder.finish()) as ArrayRef,
             Arc::new(sched_count_builder.finish()) as ArrayRef,
             Arc::new(host_builder.finish()) as ArrayRef,
@@ -285,6 +300,12 @@ fn polls_schema() -> Arc<Schema> {
         Field::new("worker_id", DataType::UInt32, false),
         Field::new("task_id", DataType::UInt64, false),
         Field::new("spawn_loc", DataType::Utf8, true),
+        // Nullable means the segment had no safe readiness evidence for this poll.
+        Field::new("ready_at_ns", DataType::Int64, true),
+        Field::new("scheduling_delay_ns", DataType::Int64, true),
+        Field::new("scheduling_delay_kind", DataType::UInt8, true),
+        Field::new("waker_task_id", DataType::UInt64, true),
+        Field::new("task_instrumented", DataType::Boolean, true),
         Field::new("cpu_sample_count", DataType::UInt32, false),
         Field::new("sched_sample_count", DataType::UInt32, false),
         Field::new("host", DataType::Utf8, false),
@@ -447,7 +468,7 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
     for span in spans {
         span_uid_builder.append_value(span.span_uid)?;
         span_type_uid_builder.append_value(span.span_type_uid)?;
-        kind_builder.append_value(span.kind);
+        kind_builder.append_value(&span.kind);
         name_builder.append_value(&span.name);
         target_builder.append_value(&span.target);
         callsite_file_builder.append_option(span.callsite_file.as_deref());
@@ -623,6 +644,85 @@ mod tests {
     }
 
     #[test]
+    fn test_write_and_read_polls_with_scheduling_evidence() {
+        use crate::ingest::decode::SchedulingDelayKind;
+        use arrow::array::Array;
+
+        let polls = vec![
+            ResolvedPoll {
+                start_ns: 1_500,
+                end_ns: 1_600,
+                duration_ns: 100,
+                worker_id: 2,
+                task_id: 42,
+                spawn_loc: Some("src/main.rs:10".to_string()),
+                cpu_sample_count: 1,
+                sched_sample_count: 0,
+                host: "host-a".to_string(),
+                service: "svc".to_string(),
+                date: "2026-07-21".to_string(),
+                ready_at_ns: Some(1_000),
+                scheduling_delay_ns: Some(500),
+                scheduling_delay_kind: Some(SchedulingDelayKind::Wake),
+                waker_task_id: Some(7),
+                task_instrumented: Some(true),
+            },
+            ResolvedPoll {
+                start_ns: 2_000,
+                end_ns: 2_100,
+                duration_ns: 100,
+                worker_id: 2,
+                task_id: 42,
+                spawn_loc: None,
+                cpu_sample_count: 0,
+                sched_sample_count: 0,
+                host: "host-a".to_string(),
+                service: "svc".to_string(),
+                date: "2026-07-21".to_string(),
+                ready_at_ns: None,
+                scheduling_delay_ns: None,
+                scheduling_delay_kind: None,
+                waker_task_id: None,
+                task_instrumented: None,
+            },
+        ];
+
+        let mut buf = Vec::new();
+        write_polls(&mut buf, &polls).unwrap();
+        let mut reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
+            bytes::Bytes::from(buf),
+            1024,
+        )
+        .unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        let delay = batch
+            .column_by_name("scheduling_delay_ns")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        let kind = batch
+            .column_by_name("scheduling_delay_kind")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::UInt8Array>()
+            .unwrap();
+        let instrumented = batch
+            .column_by_name("task_instrumented")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+
+        assert_eq!(delay.value(0), 500);
+        assert_eq!(kind.value(0), SchedulingDelayKind::Wake as u8);
+        assert!(instrumented.value(0));
+        assert!(delay.is_null(1));
+        assert!(kind.is_null(1));
+        assert!(instrumented.is_null(1));
+    }
+
+    #[test]
     fn test_write_and_read_stacks() {
         let mut stacks: HashMap<[u8; 16], Vec<String>> = HashMap::new();
         stacks.insert(
@@ -650,7 +750,7 @@ mod tests {
         let span = ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "handle_request".to_string(),
             target: "my_crate".to_string(),
             callsite_file: Some("src/main.rs".to_string()),
@@ -713,7 +813,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [3u8; 16],
             span_type_uid: [4u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "non_default_span".to_string(),
             target: "my_target".to_string(),
             callsite_file: Some("src/lib.rs".to_string()),

@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.5.0-rc1"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -39,12 +39,12 @@ missing_debug_implementations = "warn"
 dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
-dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry", optional = true }
+dial9-tokio-telemetry = { workspace = true, optional = true }
 dial9-destinations-s3 = { workspace = true, optional = true }
 dial9-macro = { workspace = true, optional = true }
 dial9-metrique = { workspace = true, optional = true }
 
-dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true, default-features = false }
+dial9-viewer = { workspace = true, optional = true, default-features = false }
 anyhow = { version = "1", optional = true }
 
 tokio = { version = "1.52.0", optional = true, default-features = false, features = [

@@ -51,6 +51,7 @@ function ev(
     timestamp,
     fields: fields as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 
@@ -181,7 +182,10 @@ describe("buildEventDetail", () => {
     const id = v.rows.find((r) => r.key === "id")!;
     expect(path.corrVal).toBe("/a"); // shared -> correlation offered
     expect(id.corrVal).toBeNull(); // unique -> no correlation
+    expect(path.chart).toBe(false);
+    expect(id.chart).toBe(true);
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100");
+    expect(v.rows.find((r) => r.key === "@")!.chart).toBe(false);
     expect(v.rows.find((r) => r.key === "Task")!.value).toBe("0x2a (selected)");
   });
 
@@ -202,6 +206,26 @@ describe("buildEventDetail", () => {
     expect(v.rows.find((r) => r.key === "Cluster")!.value).toBe("2 events");
     expect(v.rows.find((r) => r.key === "@")!.value).toBe("t100 – t300");
     expect(v.rows.every((r) => r.corrVal === null)).toBe(true);
+  });
+
+  it("does not offer charts for comma-delimited event or field names", () => {
+    const commaEvent = ev("Req,Finished", 100, { value: 42 });
+    const commaField = ev("Req", 200, { "value,total": 42 });
+
+    expect(
+      buildEventDetail(
+        pinnedSingle(commaEvent, null),
+        [commaEvent],
+        fmtTs,
+      ).rows.find((row) => row.key === "value")?.chart,
+    ).toBe(false);
+    expect(
+      buildEventDetail(
+        pinnedSingle(commaField, null),
+        [commaField],
+        fmtTs,
+      ).rows.find((row) => row.key === "value,total")?.chart,
+    ).toBe(false);
   });
 });
 

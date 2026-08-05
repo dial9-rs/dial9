@@ -41,6 +41,7 @@ import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
+import { mountFieldChartDialog } from "./field-chart-dialog.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
 // <head> auto-boot is a no-op on this off-root new-UI path.
@@ -99,6 +100,7 @@ function boot(): void {
     getIndex: () => searchIndex(),
     onPick: (r) => navigateToSearchResult(r),
   });
+  const fieldChartDialog = mountFieldChartDialog(document, store, esc);
   function navigateToSearchResult(r: SearchResult): void {
     const vp = store.getState().viewport;
     if (r.nav.kind === "poi") {
@@ -149,10 +151,12 @@ function boot(): void {
     // toolbar reconciles it against the trace-embedded metadata.
     keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
     onNewFile: () => loadChrome?.requestNewFile(),
+    onOpenFieldCharts: () => fieldChartDialog.openCatalog(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     // Set Range: re-parse the loaded trace filtered to the current view, off
     // the main thread; the reparsed trace's extent becomes the new bounds
-    // (initViewportFromTrace refits). Clear Range: re-parse the full trace.
+    // (viewer-reconstruction's fitTrace refits). Clear Range: re-parse the
+    // full trace.
     onSetRange: (range) => loadChrome?.reparseToRange(range),
     onClearRange: () => loadChrome?.reparseToRange(null),
   });
@@ -200,6 +204,8 @@ function boot(): void {
   const inspector = mountInspector(shell.inspectorRegion, store, {
     esc,
     regionPanel,
+    chartField: (eventName, fieldName) =>
+      fieldChartDialog.open(eventName, fieldName),
     preserveInitialTab: urlView.inspectorTab !== undefined,
     preserveInitialPollView:
       urlView.poll !== undefined &&
@@ -335,6 +341,7 @@ function boot(): void {
   window.addEventListener("beforeunload", () => {
     urlBinding?.dispose();
     search.dispose();
+    fieldChartDialog.dispose();
     disposeTrackPrefs();
     loadChrome?.dispose();
     statusBar.dispose();

@@ -19,7 +19,7 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   recordMinTs: number|null,      // earliest sliceable timestamped record (ns), null if none
   recordMaxTs: number|null,      // latest sliceable timestamped record (ns), null if none
   cpuSamples: CpuSample[],      // Periodic stack traces from perf/eBPF
-  customEvents: CustomEvent[],   // SpanEnter/SpanExit events from tracing layer (requires dial9-tokio-telemetry tracing-layer feature)
+  customEvents: CustomEvent[],   // Custom events; also spans when no spanEventSink is configured
   spawnLocations: Map<string, string>,    // spawn location ID → source location
   taskSpawnLocs: Map<number, string|null>,// task ID → spawn location (null if unknown)
   taskSpawnTimes: Map<number, number>,    // task ID → spawn timestamp (ns)
@@ -44,8 +44,27 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   memoryOverflows: [{timestamp, droppedAllocs, droppedFrees}], // Ring buffer overflow events (dropped samples per flush period)
   blockInPlaceGaps: [{workerId, fromTid, toTid, startNs, endNs}], // Detected block_in_place handoff intervals (worker attribution unknowable during gap)
   tidToWorker: Map<number, number>,  // thread ID → worker ID mapping (derived from park/unpark events)
+  tidBindings: Map<number, [{timestamp, workerId}]>, // historical bindings for time-local context resolution
+  stableTidToWorker: Map<number, number>, // TIDs bound to exactly one worker across the trace
 }
 ```
+
+Without a `spanEventSink`, an annotated completed span remains a custom event
+and carries a normalized `singleEventSpan` projection. The primary viewer
+configures a sink, so legacy and single-event spans are instead stored in the
+optional `spanEvents` columns and are absent from `customEvents`. The normalized
+projection contains `start`, `end`, `name`, `spanType`, `threadId`, `taskId`,
+`workerId`, `fields`, and `units`; structural-role fields are excluded from
+`fields`, except that the `span.name` field remains an attribute. Consumers
+should read both storage paths through the shared span-data builder rather than
+matching schema or physical field names.
+
+Span timing uses any two of `start`, `duration`, and `end`. A packed event
+timestamp supplies `end` when present; fields carrying
+`dial9.role=span.start` or `dial9.role=span.duration` supply the other timing
+quantities using their `unit` annotations. Timestamp-less schemas must provide
+both timing fields. See `docs/design/single-event-spans.md` for the schema
+convention.
 
 ## Event types
 

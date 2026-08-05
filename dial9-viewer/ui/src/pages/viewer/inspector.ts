@@ -37,7 +37,11 @@ import { ESC_PRIORITY } from "./esc-cascade.js";
 import type { EscCascade } from "./esc-cascade.js";
 import type { RegionAnalysisController } from "./region-analysis.js";
 import type { ViewerStore } from "../../store/store.js";
-import type { AtCursorReadout, SelectionSlice, StoreState } from "../../types/state.js";
+import type {
+  AtCursorReadout,
+  SelectionSlice,
+  StoreState,
+} from "../../types/state.js";
 import {
   INSPECTOR_TABS,
   buildEventDetail,
@@ -88,6 +92,8 @@ export interface InspectorDeps {
    * region panel owns what opens.
    */
   regionPanel: RegionAnalysisController;
+  /** Create directly when metadata is unambiguous, or prompt otherwise. */
+  chartField(eventName: string, fieldName: string): void;
   /** True when the URL explicitly selected the initial inspector tab. */
   preserveInitialTab?: boolean;
   /** True when poll disclosure/section/zoom came explicitly from the URL. */
@@ -793,16 +799,21 @@ export function mountInspector(
     }
     const { fmtTs } = formatters();
     const view = buildEventDetail(pinned, data().customEvents, fmtTs);
+    const eventName = pinned.detailEvent?.name ?? pinned.name;
     return html`
       <div class="d9-event-detail">
         <div class="d9-event-title">${view.title}</div>
-        ${view.rows.map((r) => eventRow(r.key, r.value, r.corrVal))}
+        ${view.rows.map((row) => eventRow(row, eventName))}
       </div>
     `;
   }
 
-  function eventRow(key: string, value: string, corrVal: string | null): TemplateResult {
-    return html`<div class="d9-kv-row">
+  function eventRow(
+    row: ReturnType<typeof buildEventDetail>["rows"][number],
+    eventName: string,
+  ): TemplateResult {
+    const { key, value, corrVal, chart } = row;
+    return html`<div class="d9-kv-row d9-event-row">
       <span class="k">${key}</span><span class="v">${value}</span>
       ${corrVal !== null
         ? html`<button
@@ -813,6 +824,29 @@ export function mountInspector(
             @click=${() => correlate(key, corrVal)}
           >
             ↔
+          </button>`
+        : nothing}
+      ${chart
+        ? html`<button
+            type="button"
+            class="d9-kv-chart"
+            title="Chart numeric field"
+            aria-label="Chart ${key}"
+            @click=${() => deps.chartField(eventName, key)}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <path d="M2.5 2.5v11h11"></path>
+              <path d="m4 10 2.5-3 2.2 1.8L12.5 4"></path>
+            </svg>
           </button>`
         : nothing}
       <button

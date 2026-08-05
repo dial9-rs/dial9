@@ -352,13 +352,15 @@ class TraceDecoder {
     // parsed (to keep the stream aligned) but not attached.
     const schema = this.schemas.get(typeId);
     if (schema) {
-      schema.annotations = annotations;
-      const units = {};
+      schema.annotations ??= [];
+      schema.units ??= {};
+      schema.fieldKinds ??= {};
+      schema.annotations.push(...annotations);
       for (const a of annotations) {
         const field = schema.fields[a.fieldIndex];
-        if (a.key === 'unit' && field) units[field.name] = a.value;
+        if (a.key === 'unit' && field) schema.units[field.name] = a.value;
+        if (a.key === 'kind' && field) schema.fieldKinds[field.name] = a.value;
       }
-      schema.units = units;
     }
     return { type: 'schema_annotations', typeId, annotations };
   }

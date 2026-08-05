@@ -135,7 +135,7 @@ async fn main() {
 | Name | Default | Meaning |
 | --- | --- | --- |
 | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
-| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
+| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. Each process writes into its own `{boot_id}/` subdirectory, where `boot_id` is `{4-alpha}-{pid}`. |
 | `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
 | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
 | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
@@ -623,6 +623,7 @@ struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
+    #[traceevent(unit = "us", kind = "gauge")]
     latency_us: u64,
     /// Optional fields use 1 byte on the wire when absent.
     error_message: Option<String>,
