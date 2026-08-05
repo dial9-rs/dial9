@@ -773,8 +773,17 @@ fn feature_enabled(features: SimulatorFeatures, schema: &ShapeSchema, event: &Sh
             }
         }
         "WorkerParkEvent" | "WorkerUnparkEvent" => features.scheduling,
-        "PollStartEvent" | "PollEndEvent" | "QueueSampleEvent" | "TaskSpawnEvent"
-        | "TaskTerminateEvent" | "WakeEventEvent" | "TaskDumpEvent" => features.tasks,
+        // `RuntimeMetricsEvent` supersedes `QueueSampleEvent`; both are gated by
+        // `tasks` so shaping either producer generation drops the queue/alive-task
+        // series together instead of letting the newer one through as a custom event.
+        "PollStartEvent"
+        | "PollEndEvent"
+        | "QueueSampleEvent"
+        | "RuntimeMetricsEvent"
+        | "TaskSpawnEvent"
+        | "TaskTerminateEvent"
+        | "WakeEventEvent"
+        | "TaskDumpEvent" => features.tasks,
         "SpanCloseEvent" => features.spans,
         "AllocEvent" | "FreeEvent" | "MemoryProfileOverflowEvent" => features.memory,
         "ProcessResourceUsageEvent" | "TcpAcceptQueueEvent" => features.resources,
@@ -1611,8 +1620,13 @@ mod tests {
                         cpu += 1;
                     }
                 }
-                "WorkerParkEvent" | "WorkerUnparkEvent" | "PollStartEvent" | "PollEndEvent"
-                | "SpanCloseEvent" => forbidden.push(event.name.to_string()),
+                "WorkerParkEvent"
+                | "WorkerUnparkEvent"
+                | "PollStartEvent"
+                | "PollEndEvent"
+                | "SpanCloseEvent"
+                | "QueueSampleEvent"
+                | "RuntimeMetricsEvent" => forbidden.push(event.name.to_string()),
                 name if name.starts_with("SpanEnter:") || name.starts_with("SpanExit:") => {
                     forbidden.push(name.to_string())
                 }
@@ -1621,6 +1635,53 @@ mod tests {
             .unwrap();
         assert!(cpu > 0);
         assert!(forbidden.is_empty(), "unexpected events: {forbidden:?}");
+    }
+
+    #[tokio::test]
+    async fn synthetic_runtime_metrics_are_gated_by_tasks_not_custom_events() {
+        // `RuntimeMetricsEvent` must be filtered by the `tasks` feature, exactly
+        // like the `QueueSampleEvent` it supersedes. This config is the one that
+        // discriminates: with `custom_events` ON but `tasks` OFF, a
+        // `RuntimeMetricsEvent` not named in `feature_enabled` would fall through
+        // to the catch-all `custom_events` arm and survive. Both queue-series
+        // events must be dropped together.
+        let demo = load_bundled_demo_trace().unwrap();
+        let features = SimulatorFeatures::builder()
+            .cpu(true)
+            .scheduling(true)
+            .tasks(false)
+            .spans(true)
+            .memory(true)
+            .resources(true)
+            .custom_events(true)
+            .build();
+        let config = SimulatorConfig::builder()
+            .features(features)
+            .hosts(1)
+            .build();
+        let backend = SimulatorBackend::new(config, &demo).unwrap();
+        let page = backend
+            .list_objects(DEFAULT_BUCKET, "traces/2026-07-28/0000/", 1)
+            .await
+            .unwrap();
+        let gz = backend
+            .get_object(DEFAULT_BUCKET, &page.objects[0].key)
+            .await
+            .unwrap();
+        let raw = decode_trace_file(&gz).unwrap();
+        let mut decoder = Decoder::new(&raw).unwrap();
+        let mut queue_series_events = Vec::new();
+        decoder
+            .for_each_event(|event| {
+                if matches!(event.name, "RuntimeMetricsEvent" | "QueueSampleEvent") {
+                    queue_series_events.push(event.name.to_string());
+                }
+            })
+            .unwrap();
+        assert!(
+            queue_series_events.is_empty(),
+            "tasks-disabled shaping leaked queue-series events: {queue_series_events:?}"
+        );
     }
 
     #[tokio::test]

@@ -10,6 +10,8 @@ import {
   laneRowLayout,
   workerAtLaneY,
   headerAtLaneY,
+  metricsLaneAtLaneY,
+  METRICS_LANE_COLLAPSED_H,
 } from "./layout.js";
 import type { RuntimeGroup } from "../../types/trace.js";
 
@@ -146,6 +148,70 @@ describe("laneRowLayout", () => {
     expect(contentHeight).toBe(228);
   });
 
+  it("emits a runtime-metrics lane as each metric runtime's FOOTER", () => {
+    const { rows, contentHeight } = laneRowLayout(
+      [group("a", [0, 1]), group("b", [2])],
+      60,
+      24,
+      {},
+      { runtimes: new Set(["a"]) }, // only runtime "a" has a metric series
+    );
+    expect(rows).toEqual([
+      { kind: "header", name: "a", inferred: false, workerCount: 2, collapsed: false, y: 0, height: 24 },
+      { kind: "worker", workerId: 0, index: 0, y: 24, height: 60 },
+      { kind: "worker", workerId: 1, index: 1, y: 84, height: 60 },
+      // "a"'s summary lane closes the group, UNDER its workers.
+      { kind: "runtime-metrics", name: "a", inferred: false, collapsed: false, y: 144, height: 60 },
+      // "b" has no metric series -> no summary lane.
+      { kind: "header", name: "b", inferred: false, workerCount: 1, collapsed: false, y: 204, height: 24 },
+      { kind: "worker", workerId: 2, index: 2, y: 228, height: 60 },
+    ]);
+    // 2 headers (24) + 1 metrics lane (60) + 3 workers (60) = 228 + 60 = 288.
+    expect(contentHeight).toBe(288);
+  });
+
+  it("folds the runtime-metrics lane away with its collapsed runtime", () => {
+    const { rows } = laneRowLayout(
+      [group("a", [0, 1]), group("b", [2])],
+      60,
+      24,
+      { a: true },
+      { runtimes: new Set(["a", "b"]) },
+    );
+    // "a" is collapsed: neither its workers nor its metrics lane emit. "b" is
+    // open, so its metrics lane closes its group.
+    expect(rows).toEqual([
+      { kind: "header", name: "a", inferred: false, workerCount: 2, collapsed: true, y: 0, height: 24 },
+      { kind: "header", name: "b", inferred: false, workerCount: 1, collapsed: false, y: 24, height: 24 },
+      { kind: "worker", workerId: 2, index: 0, y: 48, height: 60 },
+      { kind: "runtime-metrics", name: "b", inferred: false, collapsed: false, y: 108, height: 60 },
+    ]);
+  });
+
+  it("shrinks a summary lane the user folded to its one-line strip", () => {
+    const { rows, contentHeight } = laneRowLayout(
+      [group("main", [0], true)],
+      60,
+      24,
+      {},
+      { runtimes: new Set(["main"]), collapsed: { main: true } },
+    );
+    // Single runtime -> no header. The folded lane keeps its row (its numbers
+    // stay readable) at the strip height, not the full chart height.
+    expect(rows).toEqual([
+      { kind: "worker", workerId: 0, index: 0, y: 0, height: 60 },
+      {
+        kind: "runtime-metrics",
+        name: "main",
+        inferred: true,
+        collapsed: true,
+        y: 60,
+        height: METRICS_LANE_COLLAPSED_H,
+      },
+    ]);
+    expect(contentHeight).toBe(60 + METRICS_LANE_COLLAPSED_H);
+  });
+
   it("a collapsed group keeps its header but drops its worker rows", () => {
     const { rows, contentHeight } = laneRowLayout(
       [group("a", [0, 1]), group("b", [2])],
@@ -218,5 +284,33 @@ describe("headerAtLaneY", () => {
     expect(headerAtLaneY(folded, 10)).toBe("a"); // folded header a [0,24)
     expect(headerAtLaneY(folded, 30)).toBe("b"); // header b now at [24,48)
     expect(workerAtLaneY(folded, 60)).toBe(2); // b's only worker at [48,108)
+  });
+});
+
+describe("metricsLaneAtLaneY", () => {
+  // One runtime, one worker, its summary lane closing the group. No header
+  // (single group), so rows are: worker [0,60), summary lane [60,120).
+  const withSummary = laneRowLayout([group("main", [0], true)], 60, 24, {}, {
+    runtimes: new Set(["main"]),
+  });
+
+  it("resolves the runtime whose summary lane contains the y, else null", () => {
+    expect(metricsLaneAtLaneY(withSummary, 70)).toBe("main");
+    expect(metricsLaneAtLaneY(withSummary, 10)).toBeNull(); // the worker row
+    expect(metricsLaneAtLaneY(withSummary, 10_000)).toBeNull(); // past the content
+    expect(metricsLaneAtLaneY(withSummary, -1)).toBeNull(); // above the content
+  });
+
+  it("a point resolves to exactly one of worker / header / summary lane", () => {
+    // The whole point of three resolvers over ONE geometry: a click can fold a
+    // runtime, fold a summary lane, or select a worker - never two at once.
+    for (const y of [10, 70]) {
+      const hits = [
+        workerAtLaneY(withSummary, y),
+        headerAtLaneY(withSummary, y),
+        metricsLaneAtLaneY(withSummary, y),
+      ].filter((h) => h !== null);
+      expect(hits.length).toBe(1);
+    }
   });
 });

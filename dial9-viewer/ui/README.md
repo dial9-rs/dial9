@@ -267,6 +267,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `task-sort` | `<id\|loc\|polls\|total\|longest\|lifetime>,<asc\|desc>` | Tasks ordering. |
 | `task-index` | non-negative integer | Current Tasks cursor. |
 | `runtime-collapsed` | `v1:` + TAB-joined names | Folded runtime groups. |
+| `runtime-metrics-collapsed` | `v1:` + TAB-joined names | Runtimes whose summary lane is folded to its one-line strip. |
 | `inspector-width` | positive CSS pixels | Inspector width. |
 | `lanes-height` | positive CSS pixels | Worker-lanes viewport height. |
 | `lanes-scroll` | non-negative CSS pixels | Worker-lanes vertical position. |

@@ -489,6 +489,34 @@ body {
     transition: none;
 }
 .d9-lanes-head { display: flex; align-items: stretch; }
+/* The lanes label gutter: a per-row label canvas the lanes mount paints from the
+   SAME row layout + scrollTop as the lanes canvas. The canvas is sized to the
+   visible box height (not the stacked content) and the gutter clips it,
+   mirroring the virtualized lanes canvas — so the two always agree about which
+   rows are on screen.
+
+   The gutter drops ALL padding so the canvas's row 0 starts at exactly the same
+   y as the lanes canvas's row 0; any inset here would shift every label relative
+   to the lane it names. For the same reason the "Workers" track name is
+   sr-only rather than occupying the first line: the per-row labels (W0, W1,
+   "main runtime metrics", ...) say more than it did, and it is still the
+   aria-labelledby target for the lanes canvas. */
+.d9-lanes-label {
+    padding: 0;
+    overflow: hidden;
+}
+.d9-lanes-label .d9-track-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+.d9-lanes-label-canvas { display: block; }
 .d9-track--lanes .d9-track-canvas-wrap {
     display: block;
     position: relative;

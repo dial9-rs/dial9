@@ -6,8 +6,11 @@
 
 export {
   LABEL_W,
+  METRICS_LANE_COLLAPSED_H,
   clampX,
+  headerAtLaneY,
   laneRowLayout,
+  metricsLaneAtLaneY,
   nsToDrawX,
   panelGeometry,
   timePanelLayout,
@@ -16,10 +19,17 @@ export {
 export type {
   LaneRow,
   LaneRowLayout,
+  MetricsLaneOpts,
   PanelGeometryOpts,
   TimePanelLayout,
   TimePanelLayoutOpts,
 } from "./layout.js";
+
+export {
+  ZERO_BASELINE_PX,
+  queueBaselineY,
+  queueScaleY,
+} from "./zero-baseline.js";
 
 export { createCanvasSizer, planBackingStore } from "./dpr.js";
 export type {

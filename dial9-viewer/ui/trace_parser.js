@@ -410,6 +410,18 @@
         WorkerUnpark: 3,
         QueueSample: 4,
         WakeEvent: 9,
+        // Per-runtime scheduler metrics (queue depth + alive tasks), one per
+        // runtime per sample; supersedes QueueSample, and both are still parsed
+        // so old traces keep working.
+        //
+        // RESERVED, not observed: these events decode into the `runtimeMetrics`
+        // SIDE-CHANNEL and are never pushed into `trace.events`, so no event
+        // ever carries this discriminant. It is listed to reserve the number and
+        // to document that absence — consumers that group `trace.events` by
+        // worker (e.g. lifecycleWorkerIds) therefore need not exclude it, the way
+        // they must exclude the worker-less QueueSample and WakeEvent. Routing
+        // these into `trace.events` later would mean revisiting every such site.
+        RuntimeMetrics: 10,
     };
 
     /**
@@ -699,6 +711,11 @@
             ambiguousTids: new Set(),
             runtimeWorkers: new Map(), // runtime name → [workerId, ...]
             segmentMetadata: new Map(), // latest segment metadata key → value
+            // Per-runtime scheduler-metrics samples (one per runtime per flush
+            // cycle): { t, runtimeName, globalQueue, aliveTasks }. Low-volume
+            // (a handful per 10ms), so kept as a plain side-channel array rather
+            // than routed through the columnar scheduler-event store.
+            runtimeMetrics: [],
             taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
             customEvents: [], // unrecognized event types: {name, timestamp, fields}
             // Schema active when each custom event was decoded. Kept parallel to
@@ -1170,6 +1187,7 @@
         const threadNames = state.threadNames;
         const runtimeWorkers = state.runtimeWorkers;
         const segmentMetadata = state.segmentMetadata;
+        const runtimeMetrics = state.runtimeMetrics;
         const taskDumps = state.taskDumps;
         const customEvents = state.customEvents;
         const spanEventSink = state.spanEventSink;
@@ -1321,6 +1339,21 @@
                     taskId: 0,
                     spawnLocId: null,
                     spawnLoc: null,
+                });
+                break;
+            case "RuntimeMetricsEvent":
+                // Per-runtime scheduler metrics. Low-volume, so recorded in a
+                // side-channel array rather than the columnar event store.
+                // `runtime_name` is empty for the unnamed default runtime.
+                // `global_queue_depth`/`alive_tasks` were added together, so old
+                // traces (which have neither) never reach this case — they emit
+                // QueueSampleEvent instead.
+                runtimeMetrics.push({
+                    t: ts,
+                    runtimeName:
+                        v.runtime_name != null ? String(v.runtime_name) : "",
+                    globalQueue: num(v.global_queue_depth),
+                    aliveTasks: num(v.alive_tasks),
                 });
                 break;
             case "TaskSpawnEvent": {
@@ -1548,6 +1581,7 @@
             stableTidToWorker,
             runtimeWorkers,
             segmentMetadata,
+            runtimeMetrics,
             taskDumps,
             customEvents,
             customEventSchemas,
@@ -1699,6 +1733,7 @@
             taskTerminateTimes,
             runtimeWorkers,
             segmentMetadata,
+            runtimeMetrics,
             customEvents,
             taskDumps,
             clockSyncAnchors,
