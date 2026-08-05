@@ -7,8 +7,8 @@ Opt-in integrations for [dial9](https://crates.io/crates/dial9).
 
 The `tracing-layer` feature provides `Dial9TracingLayer`, a
 `tracing_subscriber` layer that records span enter/exit events. Span events
-carry the current Tokio task ID when one is available, without depending on
-the dial9 Tokio runtime integration.
+carry the current Tokio task ID when one is available; `dial9-utils` obtains
+that ID directly from Tokio rather than depending on `dial9-tokio-telemetry`.
 
 `dial9_axum` provides traced replacements for `axum::serve`, spawning connection
 and HTTP/2 tasks through a dial9 executor so per-connection work lands in the
@@ -56,6 +56,28 @@ many internal spans that can produce over 100K events per second. The example
 above captures only spans from `my_app`. Each span enter+exit costs roughly
 650-800ns total on a modern server core, most of which is dial9 encoding (the
 same span through a bare `tracing` registry costs roughly 100-200ns).
+
+To opt in individual spans instead of entire targets, mark them with a
+`dial9 = true` field and filter the layer by the presence of that field:
+
+```rust
+use dial9_utils::tracing_layer::Dial9TracingLayer;
+use tracing_subscriber::prelude::*;
+
+let dial9_spans = tracing_subscriber::filter::filter_fn(|metadata| {
+    metadata.is_span() && metadata.fields().field("dial9").is_some()
+});
+
+tracing_subscriber::registry()
+    .with(Dial9TracingLayer::new().with_filter(dial9_spans))
+    .init();
+
+let span = tracing::info_span!("handle_request", dial9 = true);
+let _entered = span.enter();
+```
+
+The field is a marker: the filter selects spans that declare `dial9`, so use
+`dial9 = true` consistently rather than expecting its value to be inspected.
 
 ## License
 
