@@ -6,6 +6,7 @@ import {
   resolveScope,
   type TraceScope,
 } from "../../lib/trace/trace_scope.js";
+import { applyToCreds, makeSourceScope } from "../../lib/trace/source-scope.js";
 import { initialUrlLabel } from "./load-controller.js";
 import type { ReparseRange } from "../../lib/trace/index.js";
 
@@ -16,8 +17,9 @@ export interface ScopeLoadTarget {
 }
 
 export interface ScopeBootCredentials {
-  get(): { region?: string | undefined } | null;
+  get(): { kind?: string; region?: string | undefined } | null;
   setRegion(region: string): unknown;
+  setRoleArn(roleArn: string, opts?: { region?: string }): unknown;
   has(): boolean;
   headers(): Record<string, string>;
 }
@@ -81,14 +83,16 @@ async function loadFromScope(
   creds: ScopeBootCredentials,
   dataRange?: ReparseRange,
 ): Promise<void> {
-  // Fold the scope's pinned region into the creds store so /api/browse and the
-  // subsequent /api/object fetches sign for the bucket's actual region.
-  if (scope.region) {
-    const stored = creds.get();
-    if (stored !== null && stored.region !== scope.region) {
-      creds.setRegion(scope.region);
-    }
-  }
+  // Restore the scope's reader-role ARN (and region) into the creds store so
+  // this tab has an identity to read the bucket with. Without this, a link
+  // opened in a fresh session (no stored creds) carries a bucket+region but no
+  // role, and every /api/browse 401s — the exact "open it from the home page"
+  // failure. The role is folded in as a HEADER (via Dial9Creds); resolveScope's
+  // /api/browse request never re-emits it as a query param, so the two-transport
+  // ConflictingCredentials 400 can't happen. Region rides along so the assumed-
+  // role client signs the right regional endpoint. See lib/trace/source-scope.ts
+  // for why region and the role are not symmetric.
+  applyToCreds(makeSourceScope(scope.bucket, scope.region, scope.roleArn), creds);
 
   const isCurrent = loadChrome.scopeLoading("Loading trace selection…");
   try {

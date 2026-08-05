@@ -290,6 +290,21 @@ export {
 } from "./trace_scope.js";
 export type { EncodeScopeOptions, EncodedScope, TraceScope } from "./trace_scope.js";
 
+// source-scope.ts - the single owner of the bucket+region+role identity a
+// shareable link carries, and the header-vs-query transport rules that keep the
+// role header-only (server ConflictingCredentials 400) while region rides both.
+export {
+  EMPTY_SOURCE_SCOPE,
+  applyToCreds,
+  makeSourceScope,
+  readNamespacedSourceScope,
+  readPlainSourceScope,
+  writeNamespacedParams,
+  writeRequestParams,
+  writeShareableParams,
+} from "./source-scope.js";
+export type { SourceScope, SourceScopeCredentials } from "./source-scope.js";
+
 // aggregates.ts - server aggregate wire types (/api/flamegraph +
 // /api/tokio-stats), the tokio-stats URL builder, and the coverage
 // full/partial/none fallback signal. (Both endpoints stream over SSE now, so

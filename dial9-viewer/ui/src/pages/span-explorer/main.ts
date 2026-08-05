@@ -17,6 +17,7 @@ import {
   Dial9Creds,
   Dial9Session,
   addAttrFilter,
+  applyToCreds,
   classifyExemplarSnapshot,
   completeExemplarRefresh,
   exemplarRequestMatches,
@@ -51,6 +52,7 @@ import {
   exemplarScopeKey,
   isAggregateMode,
   readScope,
+  sourceScope,
   type ViewState,
 } from "./scope.js";
 import {
@@ -68,6 +70,13 @@ const params = new URLSearchParams(window.location.search);
 const scope = readScope(params);
 const aggregate = isAggregateMode(params, scope);
 const rawMode = scope.trace != null;
+
+// Restore the link's reader-role (and region) into the creds store so this tab
+// has an identity to read the bucket with. The role then rides as a HEADER on
+// every /api/span-stats request; buildApiUrl deliberately omits aws_role_arn
+// from the request URL (a role on both header and query is the server's
+// ConflictingCredentials 400). Region rides both transports (see SourceScope).
+applyToCreds(sourceScope(scope), Dial9Creds);
 
 // ── Mutable page state ──
 

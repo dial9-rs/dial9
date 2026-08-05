@@ -8,9 +8,11 @@
 import {
   Dial9Creds,
   Dial9Session,
+  applyToCreds,
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
+  makeSourceScope,
   nextMaxFiles,
   nsToPickerUtc,
   openSse,
@@ -107,6 +109,17 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const scopeBucket = params.get("bucket");
   const scopePrefix = params.get("prefix");
 
+  // Source identity from the incoming (possibly shared) link. The role is
+  // restored into the creds store now so it rides as a HEADER on every
+  // /api/flamegraph request; buildApiUrl deliberately omits aws_role_arn from
+  // the request URL (a role on both header and query is the server's
+  // ConflictingCredentials 400). Region rides both transports (see SourceScope):
+  // kept in queryState below so the request URL carries aws_region for the
+  // ambient cross-region read, and folded into creds here for a role/BYOC read.
+  const scopeRegion = params.get("aws_region");
+  const scopeRoleArn = params.get("aws_role_arn");
+  applyToCreds(makeSourceScope(scopeBucket, scopeRegion, scopeRoleArn), Dial9Creds);
+
   // Span-type filter from a Span Explorer deep link. Fixed for the life of the
   // view (no toolbar control), so read once alongside the other scope params.
   const scopeSpanTypeUid = params.get("span_type_uid");
@@ -123,6 +136,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     return {
       dataDir,
       bucket: scopeBucket,
+      region: scopeRegion,
+      roleArn: scopeRoleArn,
       prefix: scopePrefix,
       service: scopeService,
       hosts,

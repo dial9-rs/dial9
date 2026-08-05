@@ -6,6 +6,7 @@
 import {
   Dial9Creds,
   Dial9Session,
+  applyToCreds,
   nextMaxFiles,
   openSse,
   tokioStatsUrl,
@@ -28,6 +29,7 @@ import type { WorkerSortKey } from "./stats.js";
 import {
   readScope,
   scopeFromParams,
+  sourceScope,
   parseInitialPeriods,
   buildSyncQuery,
   shouldAutoLoad,
@@ -61,6 +63,14 @@ const scope = readScope(originalParams);
 // Diff mode (?diff=1&a=<b64>&b=<b64>): two sides, each its own independent scope.
 const diffParsed = parseDiff(originalParams);
 const diffMode = diffParsed !== null;
+
+// Restore the link's reader-role (and region) into the creds store so this tab
+// has an identity to read the bucket with. The role then rides as a HEADER on
+// every /api/tokio-stats request; the request query below carries aws_region
+// but NOT aws_role_arn (a role on both header and query is the server's
+// ConflictingCredentials 400). In diff mode each side carries its own scope in
+// the b64 payload, but the shared identity is the page scope's.
+applyToCreds(sourceScope(scope), Dial9Creds);
 
 /** The scope a period streams against: its own (diff side) or the page scope. */
 function effectiveScope(period: Period): ScopeParams {
@@ -290,6 +300,10 @@ async function loadPeriod(period: Period): Promise<void> {
   const es = effectiveScope(period);
   const query: TokioStatsQuery = { host: es.host };
   if (es.bucket) query.bucket = es.bucket;
+  // Region on the request URL: the server reads it from `aws_region` for the
+  // ambient cross-region read. The role is NOT set here — it rides as the
+  // header restored by applyToCreds at boot (server rejects both transports).
+  if (es.region) query.aws_region = es.region;
   if (es.prefix) query.prefix = es.prefix;
   if (es.service) query.service = es.service;
   if (period.startNs) query.start_ns = period.startNs;

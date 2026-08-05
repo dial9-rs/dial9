@@ -14,20 +14,32 @@ import {
 } from "./url.js";
 
 describe("readScope", () => {
-  it("reads bucket/prefix/service (single) and host (repeatable)", () => {
+  it("reads bucket/region/prefix/service (single) and host (repeatable)", () => {
     const p = new URLSearchParams(
-      "?bucket=b&prefix=pre&service=svc&host=h1&host=h2",
+      "?bucket=b&aws_region=us-west-2&prefix=pre&service=svc&host=h1&host=h2",
     );
     expect(readScope(p)).toEqual({
       bucket: "b",
+      region: "us-west-2",
+      roleArn: null,
       prefix: "pre",
       service: "svc",
       host: ["h1", "h2"],
     });
   });
+  it("reads the reader-role ARN when present", () => {
+    const p = new URLSearchParams(
+      "?bucket=b&aws_role_arn=arn:aws:iam::123456789012:role/Dial9TraceReader",
+    );
+    expect(readScope(p).roleArn).toBe(
+      "arn:aws:iam::123456789012:role/Dial9TraceReader",
+    );
+  });
   it("absent params are null / empty host list", () => {
     expect(readScope(new URLSearchParams(""))).toEqual({
       bucket: null,
+      region: null,
+      roleArn: null,
       prefix: null,
       service: null,
       host: [],
@@ -42,6 +54,8 @@ describe("scopeFromParams (per-side diff scope)", () => {
     const side = new URLSearchParams("bucket=B&prefix=p2&service=svc-b&host=hb&start_ns=9");
     expect(scopeFromParams(side)).toEqual({
       bucket: "B",
+      region: null,
+      roleArn: null,
       prefix: "p2",
       service: "svc-b",
       host: ["hb"],
@@ -77,7 +91,14 @@ describe("parseInitialPeriods", () => {
 
 describe("buildSyncQuery", () => {
   it("keeps the full scope incl. repeatable host and writes per-period bounds", () => {
-    const scope = { bucket: "b", prefix: "pre", service: "svc", host: ["h1", "h2"] };
+    const scope = {
+      bucket: "b",
+      region: null,
+      roleArn: null,
+      prefix: "pre",
+      service: "svc",
+      host: ["h1", "h2"],
+    };
     const periods = [
       { startNs: "100", endNs: "200" },
       { startNs: "300", endNs: null },
@@ -91,13 +112,47 @@ describe("buildSyncQuery", () => {
   it("omits unset scope keys and unset bounds", () => {
     expect(
       buildSyncQuery(
-        { bucket: null, prefix: null, service: null, host: [] },
+        { bucket: null, region: null, roleArn: null, prefix: null, service: null, host: [] },
         [{ startNs: null, endNs: null }],
       ),
     ).toBe("");
   });
+
+  // The shareable sync link carries the source identity: region on both
+  // transports, and the reader-role (aws_role_arn) here so a tab opened from the
+  // link restores it at boot. The role is never on the /api/tokio-stats REQUEST
+  // URL (built in main.ts, which omits it — a role on both header and query is
+  // the server's ConflictingCredentials 400).
+  it("carries BOTH region and the role in the shareable link", () => {
+    const scope = {
+      bucket: "b",
+      region: "us-west-2",
+      roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
+      prefix: null,
+      service: null,
+      host: [],
+    };
+    const p = new URLSearchParams("?" + buildSyncQuery(scope, [{ startNs: "5", endNs: null }]));
+    expect(p.get("aws_region")).toBe("us-west-2");
+    expect(p.get("aws_role_arn")).toBe(
+      "arn:aws:iam::123456789012:role/Dial9TraceReader",
+    );
+    // And it round-trips back through readScope so a fresh session recovers it.
+    expect(readScope(p).region).toBe("us-west-2");
+    expect(readScope(p).roleArn).toBe(
+      "arn:aws:iam::123456789012:role/Dial9TraceReader",
+    );
+  });
+
   it("round-trips: parse(sync) recovers the same scope + periods", () => {
-    const scope = { bucket: "b", prefix: "pre", service: "svc", host: ["h1", "h2"] };
+    const scope = {
+      bucket: "b",
+      region: null,
+      roleArn: null,
+      prefix: "pre",
+      service: "svc",
+      host: ["h1", "h2"],
+    };
     const periods = [
       { startNs: "100", endNs: "200" },
       { startNs: "300", endNs: null },

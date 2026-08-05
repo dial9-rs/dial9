@@ -27,6 +27,7 @@ import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
 import { Dial9Session } from "../../lib/trace/session.js";
+import { applyToCreds, makeSourceScope } from "../../lib/trace/source-scope.js";
 
 // Dual-UI switch: render the "Switch to legacy UI" control. The
 // ui-switch.js <head> auto-boot is a no-op on this off-root path.
@@ -100,35 +101,32 @@ function boot(): void {
   actions.mirrorPrefix();
   if (urlState.tab === "raw") actions.switchTab("raw");
 
-  // A shared link can carry an assume-role ARN (aws_role_arn): "read these
-  // traces as this role". Fold it into the store as the assume-role transport
-  // so every /api/* request carries the role-arn header and the server assumes
-  // it with its own identity. A role ARN grants nothing on its own, which is
-  // why it's safe in a link; an invalid one throws (setRoleArn validates the
-  // shape) - surface it rather than silently falling back to the server's
-  // identity. Restored before the region below so setRegion patches the ARN.
-  if (urlState.roleArn && window.Dial9Creds) {
+  // A shared link can carry the bucket's source + credential identity: an
+  // assume-role ARN (aws_role_arn) and/or the bucket's region (aws_region).
+  // applyToCreds folds them into the store exactly as every other page's boot
+  // does: a role becomes the active assume-role credential (so every /api/*
+  // request carries the role-arn HEADER and the server assumes it with its own
+  // identity — never re-emitted as a query param, which would be the server's
+  // ConflictingCredentials 400); a region is patched onto whatever credential
+  // is stored. A role ARN grants nothing on its own, which is why it's safe in
+  // a link; an invalid one throws (setRoleArn validates the shape), so surface
+  // it rather than silently falling back to the server's identity. The panel's
+  // region field is prefilled separately below so a region-only link (no creds
+  // to attach it to yet) is still visible and rides subsequent requests.
+  if (window.Dial9Creds) {
+    if (urlState.region && !els.credsRegion.value) {
+      els.credsRegion.value = urlState.region;
+    }
     try {
-      window.Dial9Creds.setRoleArn(urlState.roleArn, { region: urlState.region });
+      applyToCreds(
+        makeSourceScope(urlState.bucket, urlState.region, urlState.roleArn),
+        window.Dial9Creds,
+      );
     } catch (e) {
       console.warn(
         "ignoring invalid aws_role_arn in URL:",
         e instanceof Error ? e.message : e,
       );
-    }
-  }
-
-  // A shared link can pin the bucket's region (aws_region). Fold it into
-  // the stored credentials so every subsequent request carries it as the
-  // region header - this is what lets a cross-region bucket link load
-  // without a fresh detection round trip. Prefill the panel field too so
-  // it's visible. setRegion keeps the active transport's kind (a no-op when
-  // nothing is stored, and when the ARN branch above already pinned it).
-  if (urlState.region && window.Dial9Creds) {
-    if (!els.credsRegion.value) els.credsRegion.value = urlState.region;
-    const stored = window.Dial9Creds.get();
-    if (stored && stored.region !== urlState.region) {
-      window.Dial9Creds.setRegion(urlState.region);
     }
   }
 

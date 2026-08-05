@@ -21,6 +21,12 @@ declare module "*/trace_scope.js" {
     bucket: string;
     /** AWS region the bucket lives in ("" when unknown/default). */
     region: string;
+    /**
+     * Reader-role ARN to assume for this bucket ("" when the identity isn't a
+     * role). Carried so a link opened in a fresh session still has an identity;
+     * not a secret (the server must be separately allowed to assume it).
+     */
+    roleArn: string;
     prefix: string;
     /** Single service; "" when the selection spans more than one. */
     service: string;
@@ -75,7 +81,8 @@ declare module "*/trace_scope.js" {
     keys: readonly string[],
     t0: number | null,
     t1: number | null,
-    region?: string
+    region?: string,
+    roleArn?: string
   ): TraceScope | null;
 
   /**

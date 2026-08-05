@@ -21,10 +21,13 @@ const AGG_SCOPE: PageScope = {
   dataDir: null,
   bucket: "traces",
   region: "us-west-2",
+  roleArn: null,
   prefix: "svc/",
   service: "metrics",
   hosts: ["host-a", "host-b"],
 };
+
+const ROLE = "arn:aws:iam::123456789012:role/Dial9TraceReader";
 
 const EMPTY_VIEW: ViewState = {
   startNs: null,
@@ -132,9 +135,31 @@ describe("buildApiUrl", () => {
     // The value may itself contain '='; only the FIRST one separates.
     expect(p.getAll("attr")).toEqual(["status_code=500", "route=/a=b"]);
   });
+
+  // The single-transport rule: the role is header-only (restored via
+  // applyToCreds at boot), so the /api/span-stats request URL must NOT carry
+  // aws_role_arn — a role on both header and query is the server's
+  // ConflictingCredentials 400. Region is safe on the request URL and stays.
+  it("carries region but NEVER the role on the request URL", () => {
+    const p = q(
+      buildApiUrl("replace", { ...AGG_SCOPE, roleArn: ROLE }, EMPTY_VIEW, ORIGIN),
+    );
+    expect(p.get("aws_region")).toBe("us-west-2");
+    expect(p.has("aws_role_arn")).toBe(false);
+  });
 });
 
 describe("buildBrowserQuery", () => {
+  // The shareable link is where the role lives (aws_role_arn): the tab it opens
+  // restores it at boot. Region rides here too.
+  it("the shareable link carries BOTH region and the role", () => {
+    const p = new URLSearchParams(
+      buildBrowserQuery({ ...AGG_SCOPE, roleArn: ROLE }, EMPTY_VIEW),
+    );
+    expect(p.get("aws_region")).toBe("us-west-2");
+    expect(p.get("aws_role_arn")).toBe(ROLE);
+  });
+
   it("aggregate mode pins api=1", () => {
     const p = new URLSearchParams(buildBrowserQuery(AGG_SCOPE, EMPTY_VIEW));
     expect(p.get("api")).toBe("1");

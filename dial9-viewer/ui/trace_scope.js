@@ -34,6 +34,7 @@
   const P = {
     bucket: "s_bucket",
     region: "s_region", // AWS region the bucket lives in (see scopeFromKeys)
+    roleArn: "s_role_arn", // reader role to assume for this bucket (see scopeFromKeys)
     prefix: "s_prefix",
     service: "s_svc",
     host: "s_host", // repeatable
@@ -132,7 +133,15 @@
   // endpoint without relying on the tab having inherited a region-detection
   // result from the page that opened it. Optional and trailing so existing
   // callers keep working; falsy region simply isn't carried.
-  function scopeFromKeys(bucket, keys, t0, t1, region) {
+  //
+  // `roleArn` is the same story for the *assume-role* read path: when the bucket
+  // is read by assuming a role (the `aws_role_arn` credential), that ARN must
+  // ride in the scope too, or a link opened in a fresh session (no stored creds)
+  // has a bucket+region but no identity and every /api/browse 401s. The ARN is
+  // not a secret (it grants nothing on its own — the server must be allowed to
+  // assume it), so it is safe to carry in a shareable URL, exactly as the home
+  // page already carries `aws_role_arn`. Optional and trailing; falsy isn't carried.
+  function scopeFromKeys(bucket, keys, t0, t1, region, roleArn) {
     if (!keys || !keys.length) return null;
     const parsed = keys.map(parseKey);
     const services = [...new Set(parsed.map((p) => p.service).filter(Boolean))];
@@ -153,6 +162,7 @@
     return {
       bucket: bucket || "",
       region: region || "",
+      roleArn: roleArn || "",
       prefix: extractPrefix(keys[0]),
       service: services.length === 1 ? services[0] : "",
       hosts,
@@ -181,6 +191,7 @@
     const base = new URLSearchParams(baseParams ? baseParams.toString() : "");
     if (scope.bucket) base.set(P.bucket, scope.bucket);
     if (scope.region) base.set(P.region, scope.region);
+    if (scope.roleArn) base.set(P.roleArn, scope.roleArn);
     if (scope.prefix) base.set(P.prefix, scope.prefix);
     if (scope.service) base.set(P.service, scope.service);
     if (scope.from != null) base.set(P.from, String(scope.from));
@@ -219,6 +230,10 @@
     // for the bucket's region (credentials::QUERY_REGION), so a scope link that
     // points straight at /api/flamegraph or /api/tokio-stats is self-contained.
     if (scope.region) base.set("aws_region", scope.region);
+    // Likewise the bare `aws_role_arn` (credentials::QUERY_ROLE_ARN): a scope
+    // read via an assumed role must carry it so the server assumes the same role,
+    // else the endpoint has no identity for the bucket and 401s.
+    if (scope.roleArn) base.set("aws_role_arn", scope.roleArn);
     if (scope.prefix) base.set("prefix", scope.prefix);
     if (scope.service) base.set("service", scope.service);
     if (scope.from != null) base.set("start_ns", String(Math.round(scope.from * 1e9)));
@@ -244,6 +259,7 @@
     return {
       bucket: params.get(P.bucket) || "",
       region: params.get(P.region) || "",
+      roleArn: params.get(P.roleArn) || "",
       prefix: params.get(P.prefix) || "",
       service: params.get(P.service) || "",
       hosts: params.getAll(P.host),

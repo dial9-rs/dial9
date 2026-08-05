@@ -7,8 +7,14 @@
 //   - AGGREGATE (`?api=1` / `?bucket=` / `?data_dir=`): /api/span-stats streams
 //     server-computed statistics over SSE.
 
-import { formatAttrFilterParams, setMaxFilesParam } from "../../lib/trace/index.js";
-import type { AttrFilter, StreamMode } from "../../lib/trace/index.js";
+import {
+  formatAttrFilterParams,
+  makeSourceScope,
+  setMaxFilesParam,
+  writeRequestParams,
+  writeShareableParams,
+} from "../../lib/trace/index.js";
+import type { AttrFilter, SourceScope, StreamMode } from "../../lib/trace/index.js";
 
 /** The load scope, fixed for the page's lifetime (read once at boot). */
 export interface PageScope {
@@ -17,6 +23,8 @@ export interface PageScope {
   dataDir: string | null;
   bucket: string | null;
   region: string | null;
+  /** Assume-role ARN to read the bucket as; null when not a role read. */
+  roleArn: string | null;
   prefix: string | null;
   service: string | null;
   hosts: string[];
@@ -39,6 +47,7 @@ export function readScope(params: URLSearchParams): PageScope {
     dataDir: params.get("data_dir"),
     bucket: params.get("bucket"),
     region: params.get("aws_region"),
+    roleArn: params.get("aws_role_arn"),
     prefix: params.get("prefix"),
     service: params.get("service"),
     hosts: params.getAll("host"),
@@ -54,11 +63,20 @@ export function isAggregateMode(params: URLSearchParams, scope: PageScope): bool
   return params.get("api") === "1" || scope.bucket != null || scope.dataDir != null;
 }
 
-/** Append the fixed scope params shared by every request and link. */
-function appendScope(p: URLSearchParams, scope: PageScope): void {
+/** This scope's source+credential identity as a SourceScope. */
+export function sourceScope(scope: PageScope): SourceScope {
+  return makeSourceScope(scope.bucket, scope.region, scope.roleArn);
+}
+
+/**
+ * The data params every request and link carries (data_dir/prefix/service/host).
+ * The bucket+region+role identity is layered on separately by the two callers,
+ * because it differs by destination: a request URL omits the role (it rides as
+ * the header the page restored at boot — the server rejects a role on both
+ * header and query), a shareable link carries it.
+ */
+function appendDataParams(p: URLSearchParams, scope: PageScope): void {
   if (scope.dataDir) p.set("data_dir", scope.dataDir);
-  if (scope.bucket) p.set("bucket", scope.bucket);
-  if (scope.region) p.set("aws_region", scope.region);
   if (scope.prefix) p.set("prefix", scope.prefix);
   if (scope.service) p.set("service", scope.service);
   for (const h of scope.hosts) p.append("host", h);
@@ -81,7 +99,11 @@ export function buildApiUrl(
   origin: string,
 ): string {
   const u = new URL("/api/span-stats", origin);
-  appendScope(u.searchParams, scope);
+  // Request URL: bucket+region only. The role is header-only (restored into
+  // creds at boot), so it must NOT appear here — a role on both header and
+  // query is the server's ConflictingCredentials 400.
+  writeRequestParams(u.searchParams, sourceScope(scope));
+  appendDataParams(u.searchParams, scope);
   if (view.startNs) u.searchParams.set("start_ns", view.startNs);
   if (view.endNs) u.searchParams.set("end_ns", view.endNs);
   if (view.bandMinNs != null) u.searchParams.set("min_span_ns", String(view.bandMinNs));
@@ -106,7 +128,11 @@ export function buildBrowserQuery(scope: PageScope, view: ViewState): string {
   const p = new URLSearchParams();
   if (scope.trace != null) p.set("trace", scope.trace);
   else p.set("api", "1");
-  appendScope(p, scope);
+  // Address-bar link: carries the role (aws_role_arn) so a fresh tab opened
+  // from it restores the identity at boot; it is never re-emitted onto a
+  // request URL from there (writeRequestParams above).
+  writeShareableParams(p, sourceScope(scope));
+  appendDataParams(p, scope);
   if (view.startNs) p.set("start_ns", view.startNs);
   if (view.endNs) p.set("end_ns", view.endNs);
   if (view.selectedUid) p.set("span_type_uid", view.selectedUid);

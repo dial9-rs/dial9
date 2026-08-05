@@ -76,6 +76,7 @@ test("encodeScope/readScope round-trips a scope", () => {
   const s = {
     bucket: "cell1-prod-pdx-dial9-traces",
     region: "us-west-2",
+    roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
     prefix: "traces",
     service: "shale",
     hosts: ["ip-10-2-1-1", "ip-10-2-1-2"],
@@ -83,17 +84,25 @@ test("encodeScope/readScope round-trips a scope", () => {
     to: 1782760800,
   };
   const { query } = scope.encodeScope(new URLSearchParams(), s);
+  // The role ARN rides in the scope so a link opened in a fresh session still
+  // has an identity to read the bucket with.
+  assert.strictEqual(
+    new URLSearchParams(query).get("s_role_arn"),
+    s.roleArn,
+    "role ARN serialized",
+  );
   const got = scope.readScope(new URLSearchParams(query));
   assert.deepStrictEqual(got, s);
 });
 
-test("encodeScope/readScope round-trips an empty region as ''", () => {
-  // A region-less scope (bucket in the server's default region, or unknown)
-  // must still round-trip cleanly: encodeScope omits s_region, readScope
-  // normalizes the absence back to "".
+test("encodeScope/readScope round-trips an empty region/role as ''", () => {
+  // A region- and role-less scope (bucket in the server's default region, read
+  // with the tab's own creds) must still round-trip cleanly: encodeScope omits
+  // s_region/s_role_arn, readScope normalizes the absence back to "".
   const s = {
     bucket: "b",
     region: "",
+    roleArn: "",
     prefix: "traces",
     service: "shale",
     hosts: ["h1"],
@@ -102,6 +111,7 @@ test("encodeScope/readScope round-trips an empty region as ''", () => {
   };
   const { query } = scope.encodeScope(new URLSearchParams(), s);
   assert.strictEqual(new URLSearchParams(query).get("s_region"), null, "empty region not serialized");
+  assert.strictEqual(new URLSearchParams(query).get("s_role_arn"), null, "empty role not serialized");
   assert.deepStrictEqual(scope.readScope(new URLSearchParams(query)), s);
 });
 
@@ -244,6 +254,29 @@ test("scopeFromKeys region survives an aggregation round-trip", () => {
   base.set("api", "1");
   const { query } = scope.encodeAggregationParams(base, s);
   assert.strictEqual(new URLSearchParams(query).get("aws_region"), "us-west-2");
+});
+
+test("scopeFromKeys carries the role ARN when supplied, else ''", () => {
+  const keys = [key("h1", 1782760100, 1)];
+  const arn = "arn:aws:iam::123456789012:role/Dial9TraceReader";
+  assert.strictEqual(
+    scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800, "us-west-2", arn).roleArn,
+    arn,
+    "role ARN threaded through",
+  );
+  // Trailing/optional: existing 5-arg callers get an empty roleArn, not undefined.
+  assert.strictEqual(scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800, "us-west-2").roleArn, "");
+});
+
+test("scopeFromKeys role ARN survives an aggregation round-trip", () => {
+  // End-to-end: an assume-role selection produces an /api/flamegraph link that
+  // carries the bare aws_role_arn, so a link opened in a fresh session assumes
+  // the same role rather than 401ing with no identity.
+  const keys = [key("h1", 1782760100, 1)];
+  const arn = "arn:aws:iam::123456789012:role/Dial9TraceReader";
+  const s = scope.scopeFromKeys("cell1-prod-pdx-dial9-traces", keys, 1782760000, 1782760800, "us-west-2", arn);
+  const { query } = scope.encodeAggregationParams(new URLSearchParams(), s);
+  assert.strictEqual(new URLSearchParams(query).get("aws_role_arn"), arn);
 });
 
 test("scopeFromKeys derives the window from key epochs when none is supplied", () => {

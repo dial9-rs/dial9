@@ -19,6 +19,8 @@ function state(over: Partial<ApiQueryState> = {}): ApiQueryState {
   return {
     dataDir: null,
     bucket: "demo-traces",
+    region: null,
+    roleArn: null,
     prefix: "traces",
     service: null,
     hosts: [],
@@ -191,5 +193,33 @@ describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
       "api=1&bucket=demo-traces&prefix=traces&service=svc-a&host=h1" +
         "&source=sched&thread_class=worker&start_ns=1&end_ns=2",
     );
+  });
+});
+
+// The unified SourceScope transport rule, and the region+role gap this refactor
+// closes: flamegraph used to carry NEITHER region nor the role in its query
+// state, so a fresh-session aggregate deep link into a cross-region / assume-
+// role bucket 401'd. Now region+role ride the link; the role is header-only.
+describe("SourceScope region+role transport (gap closed)", () => {
+  const ROLE = "arn:aws:iam::123456789012:role/Dial9TraceReader";
+
+  it("the shareable browser link carries BOTH region and the role", () => {
+    const p = new URLSearchParams(
+      buildBrowserQuery(state({ region: "us-west-2", roleArn: ROLE })),
+    );
+    expect(p.get("aws_region")).toBe("us-west-2");
+    expect(p.get("aws_role_arn")).toBe(ROLE);
+  });
+
+  it("the /api/flamegraph request URL carries region but NEVER the role", () => {
+    // The role rides as a header (restored via applyToCreds at boot); emitting
+    // aws_role_arn here too would be a role on both header and query — the
+    // server's ConflictingCredentials 400. Region is safe on the request URL
+    // and required for the ambient cross-region read.
+    const p = new URL(
+      buildApiUrl(state({ region: "us-west-2", roleArn: ROLE }), ORIGIN),
+    ).searchParams;
+    expect(p.get("aws_region")).toBe("us-west-2");
+    expect(p.has("aws_role_arn")).toBe(false);
   });
 });
