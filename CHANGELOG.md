@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`
+  feature. The `dial9` crate keeps its empty default feature set, while `cli`
+  retains the existing S3-enabled binary. For a local-only viewer without S3
+  or the AWS SDK, use `dial9-viewer` directly with its default features
+  disabled ([#722](https://github.com/dial9-rs/dial9/pull/722)).
+
 ## [0.5.0-rc2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc1...dial9-v0.5.0-rc2) - 2026-08-03
 
 Two crates split out from dial9. `dial9-metrique` records

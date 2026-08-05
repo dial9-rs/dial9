@@ -3,13 +3,22 @@
 [![Crates.io](https://img.shields.io/crates/v/dial9-viewer.svg)](https://crates.io/crates/dial9-viewer)
 ![License](https://img.shields.io/crates/l/dial9-viewer.svg)
 
-Library crate backing the [`dial9`](https://crates.io/crates/dial9) CLI. Install and use via the `dial9` crate:
+Library crate backing the [`dial9`](https://crates.io/crates/dial9) CLI. Install
+the S3-capable CLI through the `dial9` crate:
 
 ```bash
-cargo install --locked dial9
+cargo install --locked dial9 --features cli
 ```
 
-See the [`dial9` README](https://crates.io/crates/dial9) for usage documentation.
+For a local-filesystem-only viewer without S3 or the AWS SDK, install this
+crate directly with its default features disabled:
+
+```bash
+cargo install --locked dial9-viewer --no-default-features
+```
+
+See the [`dial9` README](https://crates.io/crates/dial9) for usage
+documentation.
 
 ## Simulator mode
 
@@ -42,6 +51,22 @@ temporary directory and removed when the server exits. Run `dial9 serve
 names remain anonymous placeholders by default; `--simulator-symbols
 realistic` emits deterministic Rust-like names for more representative
 flamegraphs.
+
+## Cargo features
+
+S3 storage, bring-your-own AWS credentials, and assume-role support are enabled
+by the default `s3` feature. Local-only embedders can omit the AWS SDK
+dependency graph:
+
+```toml
+dial9-viewer = { version = "0.5", default-features = false }
+```
+
+Without `s3`, construct `ViewerConfig` with `local_dir` or `agg_source_dir`.
+S3-backed configuration (`bucket`, `agg`, and `agg_output_bucket`) is rejected,
+and S3-specific APIs such as `storage::S3Backend`,
+`server::AppState::from_bucket`, and the credential types under
+`server::credentials` require the `s3` feature.
 
 ## `trace-shape` — Trace Structural Fingerprints
 
