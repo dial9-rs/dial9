@@ -27,7 +27,13 @@ tracing-subscriber = "0.3"
 
 ## Tracing span events (opt-in)
 
-Connect `Dial9TracingLayer` to a `tracing_subscriber` registry:
+**Enable the `tracing-layer` feature:**
+```toml
+[dependencies]
+dial9-utils = { version = "0.5", features = ["tracing-layer"] }
+```
+
+**Use tracing_subscriber to connect the `Dial9TracingLayer`:**
 
 ```rust
 use dial9_utils::tracing_layer::Dial9TracingLayer;
