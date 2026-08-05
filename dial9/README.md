@@ -857,6 +857,9 @@ Pre-built binaries are available from [GitHub Releases](https://github.com/dial9
 # From source via crates.io (the viewer/CLI is behind the `cli` feature)
 cargo install --locked dial9 --features cli
 
+# Or install the local-filesystem-only viewer without S3 or the AWS SDK
+cargo install --locked dial9-viewer --no-default-features
+
 # Or with cargo-binstall (downloads a pre-built binary, faster)
 cargo binstall dial9
 ```

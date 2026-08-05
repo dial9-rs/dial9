@@ -47,8 +47,9 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             "flat"
         },
         // Assume-role is available only when an assumer was wired (S3 source
-        // with an ambient identity); see `AppState::role_assumer`.
-        supports_assume_role: state.role_assumer.is_some(),
+        // with an ambient identity); the local-only implementation always
+        // reports false.
+        supports_assume_role: state.supports_assume_role(),
         bucket_filter: state.bucket_filter.clone(),
     })
 }

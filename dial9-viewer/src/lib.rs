@@ -1,6 +1,11 @@
 pub mod cli;
 pub mod ingest;
 pub mod report_serve;
+#[cfg(feature = "s3")]
+mod s3;
+#[cfg(not(feature = "s3"))]
+#[path = "s3_disabled.rs"]
+mod s3;
 pub mod server;
 pub mod simulator;
 pub mod storage;
@@ -46,11 +51,8 @@ pub(crate) fn resolve_dev_ui_dir(dev: bool) -> anyhow::Result<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
-async fn detect_bucket_region(bucket: &str) -> Option<String> {
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = aws_sdk_s3::Client::new(&config);
-    server::region_from_head_bucket(&client, bucket).await
-}
+#[cfg(feature = "s3")]
+pub(crate) use s3::backend_for as s3_backend_for;
 
 /// Configuration for [`build_app`]. Construct it directly in code, or map it
 /// from CLI args (see [`cli::run`]).
@@ -105,22 +107,6 @@ impl Default for ViewerConfig {
     }
 }
 
-/// Build an [`S3Backend`] for `bucket`, pinned to the bucket's region when it
-/// can be detected (so cross-region buckets work), else the default chain.
-pub(crate) async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
-    if let Some(region) = detect_bucket_region(bucket).await {
-        tracing::info!(%region, %bucket, "detected bucket region");
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_sdk_s3::config::Region::new(region))
-            .load()
-            .await;
-        storage::S3Backend::from_client(aws_sdk_s3::Client::new(&config))
-    } else {
-        tracing::warn!(%bucket, "could not detect bucket region, using default");
-        storage::S3Backend::from_env().await
-    }
-}
-
 /// Initialize the process-global tracing subscriber: JSON logs by default (so
 /// they render cleanly in CloudWatch), human-readable under `local`. Call once,
 /// before serving. Logging is the binary's concern, so it is separate from
@@ -169,18 +155,20 @@ pub async fn build_app(
         enable_upload,
     }: ViewerConfig,
 ) -> anyhow::Result<axum::Router> {
+    s3::validate_config(
+        bucket.as_deref(),
+        agg,
+        agg_output_bucket.as_deref(),
+        local_dir.as_deref(),
+        agg_source_dir.as_deref(),
+    )?;
+
     // Build one aggregate-output destination shared by the configured
     // aggregation context and all BYOC requests. An explicit output bucket
     // retains the persistent S3 behavior; otherwise output uses a process-local
     // temporary directory that is removed when the server drops it.
     use crate::ingest::aggregate::AggContext;
-    use crate::server::AggOutput;
-    let agg_output = if let Some(out_bucket) = &agg_output_bucket {
-        let backend = std::sync::Arc::new(s3_backend_for(out_bucket).await);
-        AggOutput::s3(out_bucket.clone(), backend).with_prefix(agg_output_prefix.clone())
-    } else {
-        AggOutput::temporary().with_prefix(agg_output_prefix.clone())
-    };
+    let agg_output = s3::aggregate_output(agg_output_bucket.as_deref(), &agg_output_prefix).await?;
     tracing::info!(
         output = %agg_output.location(),
         "aggregate output destination (writes go here, never the source)"
@@ -211,27 +199,13 @@ pub async fn build_app(
             segment_duration_secs: agg_segment_secs,
         })
     } else if agg {
-        let Some(src_bucket) = bucket.clone() else {
-            anyhow::bail!("--agg requires --bucket (the S3 source of raw traces)");
-        };
-        let source = std::sync::Arc::new(s3_backend_for(&src_bucket).await);
-        tracing::info!(
-            source_bucket = %src_bucket,
-            output = %agg_output.location(),
-            output_prefix = %agg_output.prefix(),
-            "demand-driven aggregation enabled (S3 source)"
-        );
-        Some(AggContext {
-            source,
-            output: agg_output.backend(),
-            output_bucket: agg_output.output_bucket_for(&src_bucket),
-            source_bucket: src_bucket,
-            source_is_local: false,
-            output_prefix: agg_output.prefix().to_string(),
-            // The served `prefix` (if any) scopes the raw-segment listing.
-            source_prefixes: vec![prefix.clone().unwrap_or_default()],
-            segment_duration_secs: agg_segment_secs,
-        })
+        s3::aggregate_context(
+            bucket.as_deref(),
+            prefix.as_deref(),
+            &agg_output,
+            agg_segment_secs,
+        )
+        .await?
     } else {
         None
     };
@@ -266,30 +240,8 @@ pub async fn build_app(
             prefix.clone(),
         );
         (state, false)
-    } else if let Some(bucket_name) = &bucket {
-        if let Some(region) = detect_bucket_region(bucket_name).await {
-            tracing::info!(%region, bucket = %bucket_name, "detected bucket region");
-            let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .region(aws_sdk_s3::config::Region::new(region))
-                .load()
-                .await;
-            let client = aws_sdk_s3::Client::new(&config);
-            let backend = storage::S3Backend::from_client(client);
-            let state =
-                server::AppState::new(std::sync::Arc::new(backend), bucket.clone(), prefix.clone());
-            (state, true)
-        } else {
-            tracing::warn!(bucket = %bucket_name, "could not detect bucket region, using default");
-            let backend = storage::S3Backend::from_env().await;
-            let state =
-                server::AppState::new(std::sync::Arc::new(backend), bucket.clone(), prefix.clone());
-            (state, true)
-        }
     } else {
-        let backend = storage::S3Backend::from_env().await;
-        let state =
-            server::AppState::new(std::sync::Arc::new(backend), bucket.clone(), prefix.clone());
-        (state, true)
+        s3::app_state(bucket.as_deref(), prefix.as_deref()).await?
     };
 
     // Hand the same output destination to BYOC aggregation. With an explicit
@@ -305,10 +257,7 @@ pub async fn build_app(
     // STS. Same gate as BYOC — both require an S3 source; this additionally
     // relies on the server having an ambient identity allowed to assume the
     // target role. A local-dir source has no S3 and gets neither.
-    if source_is_s3 {
-        let assumer = server::credentials::StsRoleAssumer::from_env().await;
-        app_state = app_state.with_role_assumer(std::sync::Arc::new(assumer));
-    }
+    app_state = s3::with_role_assumer(app_state, source_is_s3).await;
     if let Some(d) = dev_ui_dir {
         app_state = app_state.with_dev_ui_dir(d);
     }
@@ -331,4 +280,72 @@ pub async fn shutdown_signal() {
         .await
         .expect("failed to install CTRL+C handler");
     tracing::info!("shutting down");
+}
+
+#[cfg(all(test, not(feature = "s3")))]
+mod no_s3_tests {
+    use super::{ViewerConfig, build_app};
+
+    #[tokio::test]
+    async fn local_app_builds_without_s3() {
+        let traces = tempfile::tempdir().unwrap();
+        let app = build_app(ViewerConfig {
+            local_dir: Some(traces.path().to_path_buf()),
+            ..ViewerConfig::default()
+        })
+        .await;
+        assert!(app.is_ok(), "{app:?}");
+    }
+
+    #[tokio::test]
+    async fn bucket_configuration_is_rejected_without_s3() {
+        let result = build_app(ViewerConfig {
+            bucket: Some("trace-bucket".to_string()),
+            ..ViewerConfig::default()
+        })
+        .await;
+        let error = result.expect_err("S3 configuration must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("`bucket` (`--bucket`)"), "{message}");
+        assert!(message.contains("`local_dir` (`--local-dir`)"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn s3_aggregation_is_rejected_without_s3() {
+        let traces = tempfile::tempdir().unwrap();
+        let result = build_app(ViewerConfig {
+            local_dir: Some(traces.path().to_path_buf()),
+            agg: true,
+            ..ViewerConfig::default()
+        })
+        .await;
+        let error = result.expect_err("S3 aggregation must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("`agg` (`--agg`)"), "{message}");
+        assert!(
+            message.contains("`agg_source_dir` (`--agg-source-dir`)"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_aggregate_output_is_rejected_without_s3() {
+        let traces = tempfile::tempdir().unwrap();
+        let result = build_app(ViewerConfig {
+            local_dir: Some(traces.path().to_path_buf()),
+            agg_output_bucket: Some("aggregate-bucket".to_string()),
+            ..ViewerConfig::default()
+        })
+        .await;
+        let error = result.expect_err("S3 aggregate output must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("`agg_output_bucket` (`--agg-output-bucket`)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`agg_output_dir` (`--agg-output-dir`)"),
+            "{message}"
+        );
+    }
 }
