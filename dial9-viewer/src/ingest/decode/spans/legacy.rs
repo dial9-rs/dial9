@@ -460,7 +460,7 @@ pub(crate) fn resolve_legacy_spans(
         let candidate = SpanCandidate {
             boot_id: boot_id.to_string(),
             instance_id,
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name,
             type_name,
             target,

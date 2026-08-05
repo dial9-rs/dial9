@@ -25,6 +25,8 @@ export interface SpanView {
   spanId: string;
   spanName: string;
   fields: Fields;
+  spanType?: string | undefined;
+  units?: Record<string, string> | null | undefined;
   parentSpanId: string | null;
   segments: Seg[];
   activeNs: number;
@@ -42,6 +44,8 @@ export class ColumnarSpans {
   taskIdRaw: Float64Array;
   /** index into spanNames. */
   spanNameId: Int32Array;
+  /** index into spanTypes; -1 when no producer type is attached. */
+  spanTypeId: Int32Array;
   /** row index of the parent span, or -1 for a root / unresolved parent. */
   parentRow: Int32Array;
 
@@ -50,6 +54,7 @@ export class ColumnarSpans {
   /** spanId -> row (external lookups: highlight, inspector, url, search). */
   readonly spanIdToRow: Map<string, number>;
   readonly spanNames: string[];
+  readonly spanTypes: string[];
 
   // segments CSR: row r owns segStart/segEnd/segWorker[segOff[r], segOff[r+1]).
   segOff: Int32Array;
@@ -62,8 +67,10 @@ export class ColumnarSpans {
   fieldOff: Int32Array;
   fieldKeyId: Int32Array;
   fieldValId: Int32Array;
+  fieldUnitId: Int32Array;
   readonly fieldKeys: string[];
   readonly fieldVals: DecodedFieldValue[];
+  readonly fieldUnits: string[];
 
   readonly n: number;
 
@@ -76,19 +83,23 @@ export class ColumnarSpans {
 
   constructor(cols: {
     start: Float64Array; end: Float64Array; activeNs: Float64Array;
-    depth: Uint16Array; taskIdRaw: Float64Array; spanNameId: Int32Array; parentRow: Int32Array;
-    spanIds: string[]; spanIdToRow: Map<string, number>; spanNames: string[];
+    depth: Uint16Array; taskIdRaw: Float64Array; spanNameId: Int32Array;
+    spanTypeId: Int32Array; parentRow: Int32Array;
+    spanIds: string[]; spanIdToRow: Map<string, number>; spanNames: string[]; spanTypes: string[];
     segOff: Int32Array; segStart: Float64Array; segEnd: Float64Array; segWorker: Int32Array;
-    fieldOff: Int32Array; fieldKeyId: Int32Array; fieldValId: Int32Array;
-    fieldKeys: string[]; fieldVals: DecodedFieldValue[];
+    fieldOff: Int32Array; fieldKeyId: Int32Array; fieldValId: Int32Array; fieldUnitId: Int32Array;
+    fieldKeys: string[]; fieldVals: DecodedFieldValue[]; fieldUnits: string[];
   }) {
     this.start = cols.start; this.end = cols.end; this.activeNs = cols.activeNs;
     this.depth = cols.depth; this.taskIdRaw = cols.taskIdRaw; this.spanNameId = cols.spanNameId;
+    this.spanTypeId = cols.spanTypeId;
     this.parentRow = cols.parentRow;
-    this.spanIds = cols.spanIds; this.spanIdToRow = cols.spanIdToRow; this.spanNames = cols.spanNames;
+    this.spanIds = cols.spanIds; this.spanIdToRow = cols.spanIdToRow;
+    this.spanNames = cols.spanNames; this.spanTypes = cols.spanTypes;
     this.segOff = cols.segOff; this.segStart = cols.segStart; this.segEnd = cols.segEnd; this.segWorker = cols.segWorker;
     this.fieldOff = cols.fieldOff; this.fieldKeyId = cols.fieldKeyId; this.fieldValId = cols.fieldValId;
-    this.fieldKeys = cols.fieldKeys; this.fieldVals = cols.fieldVals;
+    this.fieldUnitId = cols.fieldUnitId;
+    this.fieldKeys = cols.fieldKeys; this.fieldVals = cols.fieldVals; this.fieldUnits = cols.fieldUnits;
     this.n = cols.start.length;
     let md = 0;
     for (let i = 0; i < this.n; i++) { const d = cols.end[i]! - cols.start[i]!; if (d > md) md = d; }
@@ -104,6 +115,10 @@ export class ColumnarSpans {
   endAt(r: number): number { return this.end[r]!; }
   spanIdAt(r: number): string { return this.spanIds[r]!; }
   spanNameAt(r: number): string { return this.spanNames[this.spanNameId[r]!]!; }
+  spanTypeAt(r: number): string | undefined {
+    const id = this.spanTypeId[r]!;
+    return id < 0 ? undefined : this.spanTypes[id]!;
+  }
   depthAt(r: number): number { return this.depth[r]!; }
   taskIdAt(r: number): number | null { const t = this.taskIdRaw[r]!; return Number.isNaN(t) ? null : t; }
   activeNsAt(r: number): number { return this.activeNs[r]!; }
@@ -149,6 +164,18 @@ export class ColumnarSpans {
     }
     return out;
   }
+  /** Fresh field-unit map for row r, or null when no fields declare units. */
+  unitsAt(r: number): Record<string, string> | null {
+    const lo = this.fieldOff[r]!, hi = this.fieldOff[r + 1]!;
+    const out: Record<string, string> = {};
+    for (let j = lo; j < hi; j++) {
+      const unitId = this.fieldUnitId[j]!;
+      if (unitId >= 0) {
+        out[this.fieldKeys[this.fieldKeyId[j]!]!] = this.fieldUnits[unitId]!;
+      }
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  }
 
   /** Materialize row r as a fresh TracingSpan-shaped view (safe to retain). */
   at(r: number): SpanView {
@@ -156,6 +183,8 @@ export class ColumnarSpans {
       start: this.start[r]!, end: this.end[r]!,
       spanId: this.spanIds[r]!, spanName: this.spanNames[this.spanNameId[r]!]!,
       fields: this.fieldsAt(r),
+      spanType: this.spanTypeAt(r),
+      units: this.unitsAt(r),
       parentSpanId: this.parentSpanIdAt(r),
       segments: this.segmentsAt(r),
       activeNs: this.activeNs[r]!,
@@ -192,14 +221,18 @@ export class ColumnarSpansBuilder {
   // the 982K fat SpanRec objects never accumulate). finish() sorts by start.
   private start: number[] = []; private end: number[] = []; private activeNs: number[] = [];
   private taskIdRaw: number[] = []; private spanNameId: number[] = [];
+  private spanTypeId: number[] = [];
   private spanIds: string[] = []; private parentIds: (string | null)[] = [];
   private spanNames: string[] = []; private nameIntern = new Map<string, number>();
+  private spanTypes: string[] = []; private typeIntern = new Map<string, number>();
 
   private segOff: number[] = [0]; private segStart: number[] = []; private segEnd: number[] = []; private segWorker: number[] = [];
 
   private fieldOff: number[] = [0]; private fieldKeyId: number[] = []; private fieldValId: number[] = [];
+  private fieldUnitId: number[] = [];
   private fieldKeys: string[] = []; private keyIntern = new Map<string, number>();
   private fieldVals: DecodedFieldValue[] = []; private valIntern = new Map<unknown, number>();
+  private fieldUnits: string[] = []; private unitIntern = new Map<string, number>();
 
   private internName(s: string): number {
     let i = this.nameIntern.get(s);
@@ -209,6 +242,16 @@ export class ColumnarSpansBuilder {
   private internKey(k: string): number {
     let i = this.keyIntern.get(k);
     if (i === undefined) { i = this.fieldKeys.length; this.fieldKeys.push(k); this.keyIntern.set(k, i); }
+    return i;
+  }
+  private internType(s: string): number {
+    let i = this.typeIntern.get(s);
+    if (i === undefined) { i = this.spanTypes.length; this.spanTypes.push(s); this.typeIntern.set(s, i); }
+    return i;
+  }
+  private internUnit(s: string): number {
+    let i = this.unitIntern.get(s);
+    if (i === undefined) { i = this.fieldUnits.length; this.fieldUnits.push(s); this.unitIntern.set(s, i); }
     return i;
   }
   private internVal(v: DecodedFieldValue): number {
@@ -223,15 +266,21 @@ export class ColumnarSpansBuilder {
    * row in finish() once all rows exist. */
   push(
     start: number, end: number, spanId: string, spanName: string, parentSpanId: string | null,
-    taskId: number | null, activeNs: number, segments: readonly Seg[], fields: Fields
+    taskId: number | null, activeNs: number, segments: readonly Seg[], fields: Fields,
+    spanType: string | null = null, units: Record<string, string> | null = null
   ): void {
     this.start.push(start); this.end.push(end); this.activeNs.push(activeNs);
     this.taskIdRaw.push(taskId == null ? NaN : taskId);
     this.spanNameId.push(this.internName(spanName));
+    this.spanTypeId.push(spanType == null ? -1 : this.internType(spanType));
     this.spanIds.push(spanId); this.parentIds.push(parentSpanId);
     for (const s of segments) { this.segStart.push(s.start); this.segEnd.push(s.end); this.segWorker.push(s.workerId); }
     this.segOff.push(this.segStart.length);
-    for (const k in fields) { this.fieldKeyId.push(this.internKey(k)); this.fieldValId.push(this.internVal(fields[k]!)); }
+    for (const k in fields) {
+      this.fieldKeyId.push(this.internKey(k));
+      this.fieldValId.push(this.internVal(fields[k]!));
+      this.fieldUnitId.push(units?.[k] == null ? -1 : this.internUnit(units[k]!));
+    }
     this.fieldOff.push(this.fieldKeyId.length);
   }
 
@@ -251,12 +300,15 @@ export class ColumnarSpansBuilder {
     for (let r = 0; r < N; r++) spanIdToRow.set(this.spanIds[perm[r]!]!, r);
 
     const start = new Float64Array(N), end = new Float64Array(N), activeNs = new Float64Array(N);
-    const taskIdRaw = new Float64Array(N), spanNameId = new Int32Array(N), parentRow = new Int32Array(N);
+    const taskIdRaw = new Float64Array(N), spanNameId = new Int32Array(N);
+    const spanTypeId = new Int32Array(N); spanTypeId.fill(-1);
+    const parentRow = new Int32Array(N);
     const spanIds = new Array<string>(N);
     for (let r = 0; r < N; r++) {
       const o = perm[r]!;
       start[r] = this.start[o]!; end[r] = this.end[o]!; activeNs[r] = this.activeNs[o]!;
       taskIdRaw[r] = this.taskIdRaw[o]!; spanNameId[r] = this.spanNameId[o]!;
+      spanTypeId[r] = this.spanTypeId[o]!;
       spanIds[r] = this.spanIds[o]!;
       const pid = this.parentIds[o];
       parentRow[r] = pid != null ? (spanIdToRow.get(pid) ?? -1) : -1;
@@ -290,24 +342,26 @@ export class ColumnarSpansBuilder {
     const fieldOff = new Int32Array(N + 1);
     for (let r = 0; r < N; r++) { const o = perm[r]!; fieldOff[r + 1] = fieldOff[r]! + (this.fieldOff[o + 1]! - this.fieldOff[o]!); }
     const fieldKeyId = new Int32Array(fieldOff[N]!), fieldValId = new Int32Array(fieldOff[N]!);
+    const fieldUnitId = new Int32Array(fieldOff[N]!); fieldUnitId.fill(-1);
     for (let r = 0; r < N; r++) {
       const o = perm[r]!; let w = fieldOff[r]!;
-      for (let j = this.fieldOff[o]!; j < this.fieldOff[o + 1]!; j++) { fieldKeyId[w] = this.fieldKeyId[j]!; fieldValId[w] = this.fieldValId[j]!; w++; }
+      for (let j = this.fieldOff[o]!; j < this.fieldOff[o + 1]!; j++) {
+        fieldKeyId[w] = this.fieldKeyId[j]!;
+        fieldValId[w] = this.fieldValId[j]!;
+        fieldUnitId[w] = this.fieldUnitId[j]!;
+        w++;
+      }
     }
 
     const store = new ColumnarSpans({
-      start, end, activeNs, depth, taskIdRaw, spanNameId, parentRow,
-      spanIds, spanIdToRow, spanNames: this.spanNames,
+      start, end, activeNs, depth, taskIdRaw, spanNameId, spanTypeId, parentRow,
+      spanIds, spanIdToRow, spanNames: this.spanNames, spanTypes: this.spanTypes,
       segOff, segStart, segEnd, segWorker,
-      fieldOff, fieldKeyId, fieldValId, fieldKeys: this.fieldKeys, fieldVals: this.fieldVals,
+      fieldOff, fieldKeyId, fieldValId, fieldUnitId,
+      fieldKeys: this.fieldKeys, fieldVals: this.fieldVals, fieldUnits: this.fieldUnits,
     });
     return { store, maxDepth };
   }
-}
-
-/** True when `x` is the columnar store (dispatch guard for consumers). */
-export function isColumnarSpans(x: unknown): x is ColumnarSpans {
-  return x instanceof ColumnarSpans;
 }
 
 /** The Map-subset the spanByIdSingle / spansById consumers actually use, so a

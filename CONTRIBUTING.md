@@ -8,7 +8,7 @@ Please read through this document before submitting any issues or pull requests 
 
 We welcome you to use the GitHub issue tracker to report bugs or suggest features.
 
-When filing an issue, please check [existing open](https://github.com/dial9-rs/dial9-tokio-telemetry/issues), or [recently closed](https://github.com/dial9-rs/dial9-tokio-telemetry/issues?utf8=%E2%9C%93&q=is%3Aissue%20is%3Aclosed%20), issues to make sure somebody else hasn't already reported the issue. Please try to include as much information as you can. Details like these are incredibly useful:
+When filing an issue, please check [existing open](https://github.com/dial9-rs/dial9/issues), or [recently closed](https://github.com/dial9-rs/dial9/issues?utf8=%E2%9C%93&q=is%3Aissue%20is%3Aclosed%20), issues to make sure somebody else hasn't already reported the issue. Please try to include as much information as you can. Details like these are incredibly useful:
 
 * A reproducible test case or series of steps
 * The version of our code being used
@@ -36,7 +36,7 @@ GitHub provides additional document on [forking a repository](https://help.githu
 
 ## Finding contributions to work on
 
-Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any ['help wanted'](https://github.com/dial9-rs/dial9-tokio-telemetry/labels/help%20wanted) issues is a great place to start.
+Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any ['help wanted'](https://github.com/dial9-rs/dial9/labels/help%20wanted) issues is a great place to start.
 
 ## Dependencies on crates within the workspace
 
@@ -176,7 +176,7 @@ You can freely merge breaking changes to `main`. The release PR will accumulate 
 trusted publishing is unable to publish new crates. If you want to add a new crate to the dial9 family, you should:
 
 1. create a branch that contains the crate you are publishing (it should be in the root `Cargo.toml`'s `workspace.members`, and in a publishable state).
-2. add the package name to the `changelog_include` list in the `[[package]] name = "dial9-tokio-telemetry"` entry in `release-plz.toml`.
+2. add the package name to the `changelog_include` list in the `[[package]] name = "dial9"` entry in `release-plz.toml`.
 3. run `cargo publish -p <package> --dry-run`
 4. get a temporary crates.io token just for the publishing
 5. run `cargo login` with that token
@@ -185,7 +185,7 @@ trusted publishing is unable to publish new crates. If you want to add a new cra
 
    ```
    Publisher: Github
-   Repository: dial9-rs/dial9-tokio-telemetry
+   Repository: dial9-rs/dial9
    Workflow: release.yml
    Environment: release
    ```
@@ -196,4 +196,4 @@ Further publishing should happen via release-plz, without needing to manually wo
 
 ## Licensing
 
-See the [LICENSE](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/LICENSE) file for our project's licensing.
+See the [LICENSE](https://github.com/dial9-rs/dial9/blob/main/LICENSE) file for our project's licensing.

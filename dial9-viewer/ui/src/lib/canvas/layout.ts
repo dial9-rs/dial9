@@ -15,11 +15,7 @@
 
 import { makeTimePanelLayout } from "../../../panel_layout.js";
 import type { TimePanelLayout } from "../../../panel_layout.js";
-import type {
-  LaneGeometry,
-  PanelGeometry,
-  PanelKind,
-} from "../../types/state.js";
+import type { PanelGeometry, PanelKind } from "../../types/state.js";
 import type { RuntimeGroup } from "../../types/trace.js";
 
 export type { TimePanelLayout };
@@ -109,23 +105,6 @@ export function panelGeometry(opts: PanelGeometryOpts): PanelGeometry {
     height: opts.height,
     dpr: opts.dpr,
   };
-}
-
-/**
- * Geometry of the worker-lane rows as a vertical stack: row `i` sits at
- * y = i * laneHeight, in the order `workerIds` is given. `y` is
- * lanes-local (before scroll offset).
- */
-export function laneStackGeometry(
-  workerIds: readonly number[],
-  laneHeight: number,
-): LaneGeometry[] {
-  return workerIds.map((workerId, index) => ({
-    workerId,
-    index,
-    y: index * laneHeight,
-    height: laneHeight,
-  }));
 }
 
 /** A row in the vertical lanes stack: a fixed-height worker row, or a runtime

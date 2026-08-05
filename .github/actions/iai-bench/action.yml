@@ -48,7 +48,7 @@ runs:
     - name: Install iai-callgrind-runner (prebuilt via binstall)
       if: steps.runner_cache.outputs.cache-hit != 'true'
       shell: bash
-      run: cargo binstall iai-callgrind-runner --version ${{ inputs.iai-callgrind-version }} --no-confirm --locked
+      run: cargo binstall iai-callgrind-runner --version ${{ inputs.iai-callgrind-version }} --no-confirm --locked --force
 
     - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
 
