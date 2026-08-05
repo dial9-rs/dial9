@@ -187,6 +187,7 @@ const initialState: StoreState = {
     trackOrder: ["queue", "cpu", "spans", "events"],
     collapsed: { cpu: true, queue: false },
     collapsedRuntimes: { "blocking pool": true },
+    collapsedRuntimeMetrics: { main: true },
     sidebarWidth: 400,
     lanesViewportHeight: 220,
     lanesScrollTop: 40,

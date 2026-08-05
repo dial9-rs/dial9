@@ -1,75 +1,77 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 12134,
+  "total_samples": 10201,
   "by_source": {
-    "0": 100,
-    "1": 12034
+    "0": 72,
+    "1": 10129
   },
   "on_off_all": {
-    "on_runtime": 12124,
-    "off_runtime": 10
+    "on_runtime": 10195,
+    "off_runtime": 6
   },
   "on_off_by_source": {
     "0": {
-      "on": 90,
-      "off": 10
+      "on": 66,
+      "off": 6
     },
     "1": {
-      "on": 12034,
+      "on": 10129,
       "off": 0
     }
   },
   "worker_set": [
     0,
-    1
+    1,
+    2,
+    3
   ],
   "cpu_profile": {
-    "count": 100,
-    "distinct_stacks": 91,
-    "stack_sig_digest": "daf091d3af017c50",
-    "ts_count": 100,
-    "ts_span_ns": 3402001126,
-    "ts_delta_digest": "c544cc9eeb1231f6",
+    "count": 72,
+    "distinct_stacks": 67,
+    "stack_sig_digest": "14d7f6013692c912",
+    "ts_count": 72,
+    "ts_span_ns": 4176883969,
+    "ts_delta_digest": "63422dcbe89d1414",
     "top_stacks": [
       {
         "count": 3,
-        "depth": 113,
-        "leaf": "[unknown] 0xffffadc9de8c"
-      },
-      {
-        "count": 3,
-        "depth": 113,
-        "leaf": "_Unwind_Find_FDE"
+        "depth": 1,
+        "leaf": "[unknown] 0x7f39dfaf13ef"
       },
       {
         "count": 2,
-        "depth": 106,
-        "leaf": "_Unwind_Find_FDE"
+        "depth": 1,
+        "leaf": "__malloc"
       },
       {
         "count": 2,
-        "depth": 107,
-        "leaf": "[unknown] 0xffffadacd200"
+        "depth": 1,
+        "leaf": "__libc_write"
       },
       {
         "count": 2,
-        "depth": 32,
-        "leaf": "write"
-      },
-      {
-        "count": 2,
-        "depth": 94,
-        "leaf": "<hyper::proto::h1::role::Server as hyper::proto::h1::Http1Transaction>::parse"
-      },
-      {
-        "count": 2,
-        "depth": 89,
-        "leaf": "_Unwind_Find_FDE"
+        "depth": 1,
+        "leaf": "__strlen_sse2"
       },
       {
         "count": 1,
-        "depth": 144,
-        "leaf": "hashbrown::map::HashMap<K,V,S,A>::insert"
+        "depth": 12,
+        "leaf": "jent_keccakp_pi"
+      },
+      {
+        "count": 1,
+        "depth": 10,
+        "leaf": "jent_keccakp_pi"
+      },
+      {
+        "count": 1,
+        "depth": 11,
+        "leaf": "rol64"
+      },
+      {
+        "count": 1,
+        "depth": 133,
+        "leaf": "scc::hash_index::HashIndex<K,V,H>::entry"
       }
     ]
   }

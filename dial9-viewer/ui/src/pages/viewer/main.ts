@@ -156,7 +156,8 @@ function boot(): void {
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     // Set Range: re-parse the loaded trace filtered to the current view, off
     // the main thread; the reparsed trace's extent becomes the new bounds
-    // (initViewportFromTrace refits). Clear Range: re-parse the full trace.
+    // (viewer-reconstruction's fitTrace refits). Clear Range: re-parse the
+    // full trace.
     onSetRange: (range) => loadChrome?.reparseToRange(range),
     onClearRange: () => loadChrome?.reparseToRange(null),
   });

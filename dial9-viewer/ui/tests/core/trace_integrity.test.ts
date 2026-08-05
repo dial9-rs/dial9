@@ -46,6 +46,17 @@ interface CustomEvent {
   fields: Record<string, unknown>;
   units: Record<string, string> | null;
   fieldKinds: Record<string, string> | null;
+  singleEventSpan?: {
+    start: number;
+    end: number;
+    name: string;
+    spanType: string;
+    threadId: number | null;
+    taskId: number | null;
+    workerId: number | null;
+    fields: Record<string, unknown>;
+    units: Record<string, string> | null;
+  } | null;
 }
 
 interface ParsedTrace {
@@ -58,10 +69,24 @@ interface ParsedTrace {
   clockSyncAnchors: ClockSyncAnchor[];
   clockOffsetNs: number | null;
   customEvents: CustomEvent[];
+  tidBindings: Map<number, Array<{ timestamp: number; workerId: number }>>;
+  /** Per-runtime scheduler-metrics side-channel (one sample per runtime per
+   *  flush cycle). Empty for traces that predate RuntimeMetricsEvent. */
+  runtimeMetrics: RuntimeMetricsSample[];
+}
+
+interface RuntimeMetricsSample {
+  t: number;
+  runtimeName: string;
+  globalQueue: number;
+  aliveTasks: number;
 }
 
 const { parseTrace, EVENT_TYPES } = require("../../trace_parser.js") as {
-  parseTrace: (buf: Buffer) => Promise<ParsedTrace>;
+  parseTrace: (
+    buf: Buffer,
+    opts?: { spanEventSink?: { pushIfSpan: (...args: unknown[]) => boolean } },
+  ) => Promise<ParsedTrace>;
   EVENT_TYPES: Record<string, number>;
 };
 
@@ -93,13 +118,31 @@ describe("basic", () => {
     expect(trace.events.length, "No events found").toBeGreaterThan(0);
   });
 
-  // One check per known event type: every type must appear in the trace.
+  // One check per known event type that lives in `trace.events`. QueueSample
+  // and RuntimeMetrics are handled separately below: QueueSample was superseded
+  // by the per-runtime RuntimeMetrics, and RuntimeMetrics is decoded into the
+  // `runtimeMetrics` side-channel rather than the columnar event stream.
   for (const [name, type] of Object.entries(EVENT_TYPES)) {
+    if (name === "QueueSample" || name === "RuntimeMetrics") continue;
     it(`has ${name} events`, () => {
       const count = trace.events.filter((e) => e.eventType === type).length;
       expect(count, `No ${name} events found`).toBeGreaterThan(0);
     });
   }
+
+  // Scheduler-metrics coverage: a current-format trace carries per-runtime
+  // RuntimeMetrics samples (in the side-channel); an old trace carries summed
+  // QueueSample events. Require exactly one of the pair.
+  it("has runtime queue/task metrics (RuntimeMetrics or legacy QueueSample)", () => {
+    const queueSamples = trace.events.filter(
+      (e) => e.eventType === EVENT_TYPES["QueueSample"],
+    ).length;
+    const runtimeMetrics = trace.runtimeMetrics.length;
+    expect(
+      queueSamples + runtimeMetrics,
+      "No RuntimeMetrics side-channel samples or legacy QueueSample events found",
+    ).toBeGreaterThan(0);
+  });
 
   it("multiple workers", () => {
     const workerIds = getWorkerIds();
@@ -111,6 +154,17 @@ describe("basic", () => {
 
   it("not truncated", () => {
     expect(trace.truncated, "Trace was truncated at event cap").toBe(false);
+  });
+
+  it("keeps historical TID bindings sorted and coalesced", () => {
+    for (const bindings of trace.tidBindings.values()) {
+      for (let i = 1; i < bindings.length; i++) {
+        expect(bindings[i]!.timestamp).toBeGreaterThanOrEqual(
+          bindings[i - 1]!.timestamp,
+        );
+        expect(bindings[i]!.workerId).not.toBe(bindings[i - 1]!.workerId);
+      }
+    }
   });
 });
 
@@ -399,6 +453,17 @@ describe("metrique events", () => {
     expect(requestMetrics().length, "No metrique:RequestMetrics events found").toBeGreaterThan(0);
   });
 
+  it("keeps spans as custom events when a columnar sink declines them", async () => {
+    const declined = await parseTrace(readFileSync(tracePath), {
+      spanEventSink: { pushIfSpan: () => false },
+    });
+    expect(
+      declined.customEvents.filter((event) => event.singleEventSpan != null).length,
+    ).toBe(
+      trace.customEvents.filter((event) => event.singleEventSpan != null).length,
+    );
+  });
+
   it("metrique events carry context and payload fields", () => {
     for (const ev of requestMetrics()) {
       const f = ev.fields;
@@ -416,6 +481,20 @@ describe("metrique events", () => {
       ).toBe("ns");
       expect(f["Operation"], `Operation missing on ${ev.name}`).toBeTruthy();
       expect(f["MetricName"], `MetricName missing on ${ev.name}`).toBeTruthy();
+      const span = ev.singleEventSpan;
+      expect(span, `single-event projection missing on ${ev.name}`).not.toBeNull();
+      // The packed timestamp is the end; the span start is end - duration.
+      expect(span?.end).toBe(ev.timestamp);
+      expect(span?.start).toBe(ev.timestamp - duration);
+      expect(span?.name).toBe(f["Operation"]);
+      expect(span?.spanType).toBe("metrique");
+      // Timing/context fields are not projected as attributes. span.name is
+      // retained so callers can search and group by the original field.
+      expect(span?.fields["dial9.span.duration_ns"]).toBeUndefined();
+      expect(span?.fields["thread_id"]).toBeUndefined();
+      expect(span?.fields["Operation"]).toBe(f["Operation"]);
+      expect(span?.fields["dial9.wall_clock_ns"]).toBeUndefined();
+      expect(span?.fields["MetricName"]).toBe(f["MetricName"]);
     }
   });
 

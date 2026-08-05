@@ -35,6 +35,7 @@ export type {
   MemoryOverflowEvent,
   TaskDump,
   ClockSyncAnchor,
+  RuntimeMetricsSample,
   BlockInPlaceGap,
   SymbolFrame,
   CallframeSymbols,

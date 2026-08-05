@@ -1,4 +1,6 @@
-node_modules/
+# No trailing slash: `node_modules/` matches only a directory, so a symlinked
+# node_modules (as worktrees often use) slipped past it and got committed.
+node_modules
 dist/*
 !dist/.gitkeep
 # parity tool reports (generated)

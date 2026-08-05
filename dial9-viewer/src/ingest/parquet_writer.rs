@@ -468,7 +468,7 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
     for span in spans {
         span_uid_builder.append_value(span.span_uid)?;
         span_type_uid_builder.append_value(span.span_type_uid)?;
-        kind_builder.append_value(span.kind);
+        kind_builder.append_value(&span.kind);
         name_builder.append_value(&span.name);
         target_builder.append_value(&span.target);
         callsite_file_builder.append_option(span.callsite_file.as_deref());
@@ -750,7 +750,7 @@ mod tests {
         let span = ResolvedSpan {
             span_uid: [1u8; 16],
             span_type_uid: [2u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "handle_request".to_string(),
             target: "my_crate".to_string(),
             callsite_file: Some("src/main.rs".to_string()),
@@ -813,7 +813,7 @@ mod tests {
         let spans = vec![ResolvedSpan {
             span_uid: [3u8; 16],
             span_type_uid: [4u8; 16],
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "non_default_span".to_string(),
             target: "my_target".to_string(),
             callsite_file: Some("src/lib.rs".to_string()),

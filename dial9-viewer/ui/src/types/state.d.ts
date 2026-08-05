@@ -278,6 +278,16 @@ export interface UiPrefsSlice {
    * backed (dial9.viewer.trackPrefs), so a fold survives reload.
    */
   collapsedRuntimes: Readonly<Record<string, boolean>>;
+  /**
+   * Per-runtime SUMMARY-LANE collapsed state: runtime-group name -> true when the
+   * user folded that runtime's metrics summary lane (queue depth + alive tasks)
+   * down to its one-line strip by clicking it. Independent of
+   * {@link collapsedRuntimes}, which folds the whole runtime: a reader can keep
+   * the worker lanes while reclaiming the chart's height. Absent or false = the
+   * full chart. localStorage-backed (dial9.viewer.trackPrefs), so a fold survives
+   * reload.
+   */
+  collapsedRuntimeMetrics: Readonly<Record<string, boolean>>;
   /** Stack-sidebar width in CSS px (drag-resizable). */
   sidebarWidth: number;
   /**
@@ -597,17 +607,6 @@ export type StoreSliceName = keyof StoreState;
 
 /** Re-export of the frozen core's time-panel layout (ns<->x mapping). */
 export type { TimePanelLayout } from "../../panel_layout.js";
-
-/** Geometry of one worker lane row within the lanes stack. */
-export interface LaneGeometry {
-  workerId: number;
-  /** Row index within the lanes stack (top = 0). */
-  index: number;
-  /** Top edge in CSS px, lanes-local (before scroll offset). */
-  y: number;
-  /** Row height in CSS px. */
-  height: number;
-}
 
 /**
  * Geometry handed to a canvas panel's `render(ctx, state, layout)`:

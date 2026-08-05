@@ -40,6 +40,7 @@ function mkState(over: {
       trackOrder: [],
       collapsed: {},
       collapsedRuntimes: {},
+      collapsedRuntimeMetrics: {},
       sidebarWidth: 360,
       lanesViewportHeight: 360,
       lanesScrollTop: 0,

@@ -31,7 +31,13 @@ import type { PinnedCustomEvent, SelectionSlice } from "../../types/state.js";
 
 /** Span lifecycle events, excluded from the custom-events track (they drive
  *  the spans track, not the events markers). */
-const SPAN_EVENT_PREFIXES: readonly string[] = ["SpanEnter:", "SpanExit:"];
+const SPAN_EVENT_PREFIXES: readonly string[] = [
+  "SpanEnter:",
+  "SpanExit:",
+  "SpanEnter__",
+  "SpanExit__",
+  "SpanClose__",
+];
 const SPAN_EVENT_EXACT: ReadonlySet<string> = new Set([
   "SpanEnterEvent",
   "SpanExitEvent",
@@ -81,7 +87,7 @@ export function computeEventTrackData(
   const events: CustomTraceEvent[] = [];
   const names = new Set<string>();
   for (const ev of customEvents) {
-    if (isSpanEvent(ev.name)) continue;
+    if (ev.singleEventSpan != null || isSpanEvent(ev.name)) continue;
     events.push(ev);
     names.add(ev.name);
   }

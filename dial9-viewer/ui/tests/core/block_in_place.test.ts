@@ -49,7 +49,10 @@ const { EVENT_TYPES, OFF_WORKER_WORKER_ID, deriveBlockInPlaceGaps, parseTrace } 
     EVENT_TYPES: Record<string, number>;
     OFF_WORKER_WORKER_ID: number;
     deriveBlockInPlaceGaps: (events: ParkEvent[], samples: SampleEvent[]) => Gap[];
-    parseTrace: (buf: Buffer) => Promise<{ blockInPlaceGaps: Gap[] }>;
+    parseTrace: (
+      buf: Buffer,
+      options?: { startTime?: number; endTime?: number },
+    ) => Promise<{ blockInPlaceGaps: Gap[] }>;
   };
 
 // Helpers to build synthetic events.
@@ -307,5 +310,17 @@ describe("deriveBlockInPlaceGaps", () => {
         `gap endNs > startNs (${g.endNs} > ${g.startNs})`,
       ).toBeGreaterThan(g.startNs);
     }
+  });
+
+  it("keeps handoff history from before a filtered range", async () => {
+    const bytes = readFileSync(fixturePath);
+    const full = await parseTrace(bytes);
+    const gap = full.blockInPlaceGaps[0]!;
+    const filtered = await parseTrace(bytes, {
+      startTime: gap.startNs + 1,
+      endTime: gap.endNs,
+    });
+
+    expect(filtered.blockInPlaceGaps).toContainEqual(gap);
   });
 });

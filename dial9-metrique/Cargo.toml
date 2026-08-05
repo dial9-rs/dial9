@@ -1,6 +1,6 @@
 [package]
 name = "dial9-metrique"
-version = "0.5.0-rc0"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -25,7 +25,7 @@ tokio = ["dep:tokio"]
 [dev-dependencies]
 dial9-core = { workspace = true, features = ["test-util"] }
 dial9-metrique = { path = ".", features = ["tokio"] }
-dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry" }
+dial9-tokio-telemetry = { path = "../dial9-tokio-telemetry" }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 criterion = { version = "0.7", default-features = false }
 metrique-writer = { version = "0.1.25", features = ["test-util"] }

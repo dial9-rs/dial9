@@ -129,6 +129,7 @@ const BUILTIN_SCHEMAS: &[&str] = &[
     "WorkerParkEvent",
     "WorkerUnparkEvent",
     "QueueSampleEvent",
+    "RuntimeMetricsEvent",
     "TaskSpawnEvent",
     "TaskTerminateEvent",
     "WakeEventEvent",
@@ -243,6 +244,18 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
             &[("global_queue", V), ("active_tasks", V)],
             &[("global_queue", U8)],
             &[("global_queue", V)],
+        ]),
+        "RuntimeMetricsEvent" => Some(&[
+            &[
+                ("runtime_name", PS),
+                ("global_queue_depth", U32),
+                ("alive_tasks", U32),
+            ],
+            &[
+                ("runtime_name", PS),
+                ("global_queue_depth", V),
+                ("alive_tasks", V),
+            ],
         ]),
         "TaskSpawnEvent" => Some(&[
             &[("task_id", V), ("spawn_loc", PS), ("instrumented", B)],

@@ -1,7 +1,7 @@
 //! Common ResolvedSpan construction and accounting.
 //!
-//! Both modern and legacy span adapters produce the same output type
-//! ([`ResolvedSpan`]) but differ in how they supply evidence. This module
+//! All span adapters produce the same output type ([`ResolvedSpan`]) but differ
+//! in how they supply evidence. This module
 //! provides [`SpanCandidate`] — a builder-like evidence struct that adapters
 //! populate — and [`SpanCandidate::finalize`] which produces the final
 //! [`ResolvedSpan`] with checked accounting and consistent quality/completeness
@@ -24,7 +24,7 @@ pub(crate) struct SpanCandidate {
     // ── Identity ─────────────────────────────────────────────────────────
     pub(crate) boot_id: String,
     pub(crate) instance_id: u64,
-    pub(crate) kind: &'static str,
+    pub(crate) kind: String,
     /// Display/runtime name written to the public row.
     pub(crate) name: String,
     /// Optional schema-level discriminator used only for span_type_uid. This
@@ -94,7 +94,7 @@ impl SpanCandidate {
         let span_uid = compute_span_uid(&self.boot_id, self.instance_id);
         let span_type_uid = match self.type_name.as_deref() {
             Some(schema_name) => compute_span_type_uid_with_schema_name(
-                self.kind,
+                &self.kind,
                 &self.target,
                 &self.name,
                 Some(schema_name),
@@ -102,7 +102,7 @@ impl SpanCandidate {
                 self.callsite_line,
             ),
             None => compute_span_type_uid(
-                self.kind,
+                &self.kind,
                 &self.target,
                 &self.name,
                 self.callsite_file.as_deref(),
@@ -337,7 +337,7 @@ mod tests {
         let candidate = SpanCandidate {
             boot_id: "boot-test".to_string(),
             instance_id: 1,
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "test_span".to_string(),
             type_name: None,
             target: "test_target".to_string(),
@@ -380,7 +380,7 @@ mod tests {
         let candidate = SpanCandidate {
             boot_id: "boot-test".to_string(),
             instance_id: 1,
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "overflow".to_string(),
             type_name: None,
             target: "t".to_string(),
@@ -422,7 +422,7 @@ mod tests {
         let candidate = SpanCandidate {
             boot_id: "boot-test".to_string(),
             instance_id: 1,
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "huge".to_string(),
             type_name: None,
             target: "t".to_string(),
@@ -461,7 +461,7 @@ mod tests {
         let candidate = SpanCandidate {
             boot_id: "boot-test".to_string(),
             instance_id: 99,
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name: "legacy_op".to_string(),
             type_name: None,
             target: "my_crate".to_string(),

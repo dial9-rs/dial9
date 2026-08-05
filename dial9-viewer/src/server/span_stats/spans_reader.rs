@@ -139,7 +139,7 @@ impl SpansBatchReader {
     pub(super) fn read(
         &self,
         data: Vec<u8>,
-        mut consume: impl FnMut(SpanStatsInput),
+        mut consume: impl FnMut(SpanStatsInput) -> anyhow::Result<()>,
     ) -> (SpanStatsPhaseDurations, anyhow::Result<()>) {
         use std::time::Instant;
 
@@ -196,7 +196,10 @@ impl SpansBatchReader {
             // ── Query: feed rows into the caller's accumulator ───────────────
             let query_started = Instant::now();
             for row in rows {
-                consume(row);
+                if let Err(error) = consume(row) {
+                    phases.query += query_started.elapsed();
+                    return (phases, Err(error));
+                }
             }
             phases.query += query_started.elapsed();
         }

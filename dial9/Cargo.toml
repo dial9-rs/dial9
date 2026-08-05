@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.5.0-rc1"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -39,12 +39,12 @@ missing_debug_implementations = "warn"
 dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
-dial9-tokio-telemetry = { version = "0.5.0-rc1", path = "../dial9-tokio-telemetry", optional = true }
+dial9-tokio-telemetry = { workspace = true, optional = true }
 dial9-destinations-s3 = { workspace = true, optional = true }
 dial9-macro = { workspace = true, optional = true }
 dial9-metrique = { workspace = true, optional = true }
 
-dial9-viewer = { version = "0.5.0-rc1", path = "../dial9-viewer", optional = true }
+dial9-viewer = { workspace = true, optional = true, default-features = false }
 anyhow = { version = "1", optional = true }
 
 tokio = { version = "1.52.0", optional = true, default-features = false, features = [
@@ -57,8 +57,11 @@ tracing = { version = "0.1.44", optional = true }
 [features]
 default = []
 
-## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
-cli = ["dep:dial9-viewer", "dep:anyhow"]
+## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`) with S3.
+## This preserves the existing `cargo install dial9 --features cli` behavior.
+## For a local-only viewer without the AWS SDK, use the `dial9-viewer` crate
+## directly with its default features disabled.
+cli = ["dep:dial9-viewer", "dep:anyhow", "dial9-viewer/s3"]
 
 ## Opt-in self-instrumentation for the `dial9` CLI.
 ## Activate recording with `DIAL9_ENABLED=true`.

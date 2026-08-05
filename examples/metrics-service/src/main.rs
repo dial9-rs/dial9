@@ -265,6 +265,42 @@ fn main() -> std::io::Result<()> {
             .build(),
     )?;
 
+    // In demo mode, attach a second named runtime ("io") sharing the same trace
+    // session and run a small background workload on it. This makes the demo
+    // trace exercise per-runtime grouping in the viewer (issue #697): the
+    // primary runtime's workers show as the inferred "main" group and these show
+    // as "io". Kept alive for the run and dropped just before shutdown.
+    let demo_io_runtime = if args.demo {
+        let mut io_builder = tokio::runtime::Builder::new_multi_thread();
+        io_builder.enable_all().worker_threads(2);
+        let io_runtime = recorder.handle().attach_tokio_runtime(
+            io_builder,
+            TokioAttachOptions::builder()
+                .runtime_name("io")
+                .task_tracking_enabled(true)
+                .build(),
+        )?;
+        // A periodic background-I/O style workload: light CPU + async sleeps, so
+        // the "io" lanes have polls, parks, and queue activity to look at.
+        for task in 0..4u64 {
+            io_runtime.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(15));
+                loop {
+                    tick.tick().await;
+                    let mut acc = 0u64;
+                    for i in 0..50_000u64 {
+                        acc = acc.wrapping_add(i.wrapping_mul(task + 1));
+                    }
+                    std::hint::black_box(acc);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+        }
+        Some(io_runtime)
+    } else {
+        None
+    };
+
     // Per-request metrique entries (routes::RequestMetrics) flow into the
     // dial9 trace AND a conventional metrics stream, the way a production
     // service tees dial9 alongside its EMF pipeline. `Dial9Stream::tee`
@@ -394,6 +430,7 @@ fn main() -> std::io::Result<()> {
     // trace.
     drop(metrics_join);
     drop(runtime);
+    drop(demo_io_runtime);
     recorder.graceful_shutdown(Duration::from_secs(5));
 
     Ok(())
