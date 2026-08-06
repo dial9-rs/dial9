@@ -427,7 +427,7 @@ impl<W: Write> Encoder<W> {
 
     /// Write a derived TraceEvent. Auto-registers the schema on first call for this type.
     /// Handles timestamp encoding: emits TimestampReset if needed, packs u24 delta in header.
-    pub fn write<T: TraceEvent + 'static>(&mut self, event: &T) -> io::Result<()> {
+    pub fn write<T: TraceEvent>(&mut self, event: &T) -> io::Result<()> {
         let slot = T::type_slot();
         let tid = if slot != 0 && slot < crate::STATIC_WIRE_ID_LIMIT {
             let word = (slot >> 6) as usize;
@@ -458,11 +458,8 @@ impl<W: Write> Encoder<W> {
     /// hashmap (registering the schema if needed) and populate the slot cache
     /// so the next call for the same type takes the fast path.
     #[cold]
-    fn resolve_dynamic_wire_id<T: TraceEvent + 'static>(
-        &mut self,
-        slot: usize,
-    ) -> io::Result<WireTypeId> {
-        let key = SchemaKey::RustType(TypeId::of::<T>());
+    fn resolve_dynamic_wire_id<T: TraceEvent>(&mut self, slot: usize) -> io::Result<WireTypeId> {
+        let key = SchemaKey::RustType(TypeId::of::<T::Id>());
         let tid = if let Some(&existing) = self.schema_ids.get(&key) {
             existing
         } else {
@@ -483,7 +480,7 @@ impl<W: Write> Encoder<W> {
     /// First write of a slot in `1..STATIC_WIRE_ID_LIMIT`: emit the schema frame
     /// at the slot `id` and mark the bitset, so later writes skip registration.
     #[cold]
-    fn register_fast_id<T: TraceEvent + 'static>(&mut self, id: u16) -> io::Result<()> {
+    fn register_fast_id<T: TraceEvent>(&mut self, id: u16) -> io::Result<()> {
         let entry = T::schema_entry();
         let wire = WireTypeId(id);
         codec::encode_schema(wire, &entry, &mut self.state.writer)?;
@@ -600,7 +597,7 @@ impl<W: Write> RawEncoder<W> {
 }
 
 impl Encoder<Vec<u8>> {
-    pub fn write_infallible<T: TraceEvent + 'static>(&mut self, event: &T) {
+    pub fn write_infallible<T: TraceEvent>(&mut self, event: &T) {
         self.write(event).expect("writing to Vec<u8> is infallible")
     }
 
@@ -1071,6 +1068,7 @@ mod tests {
         ts: u64,
     }
     impl TraceEvent for FastSlot {
+        type Id = Self;
         fn type_slot() -> u16 {
             5
         }

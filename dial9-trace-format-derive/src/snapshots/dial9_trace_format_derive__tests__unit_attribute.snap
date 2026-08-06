@@ -3,6 +3,7 @@ source: dial9-trace-format-derive/src/lib.rs
 expression: "expand_to_string(quote!\n{\n    struct ResourceUsage\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, #[traceevent(unit = \"ns\")]\n        user_cpu_ns: u64, minor_faults: u64, #[traceevent(unit = \"bytes\")]\n        max_rss_bytes: u64,\n    }\n})"
 ---
 impl ::dial9_trace_format::TraceEvent for ResourceUsage {
+    type Id = Self;
     fn event_name() -> &'static str {
         "ResourceUsage"
     }

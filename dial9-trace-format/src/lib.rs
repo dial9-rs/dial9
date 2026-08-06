@@ -52,6 +52,14 @@ pub static __NEXT_TYPE_SLOT: std::sync::atomic::AtomicU16 = std::sync::atomic::A
 
 /// Trait implemented by `#[derive(TraceEvent)]` for compile-time event types.
 pub trait TraceEvent {
+    /// A `'static` type used as a schema cache key via `TypeId::of::<Self::Id>()`.
+    ///
+    /// For owned (`'static`) event structs, this defaults to `Self`. For
+    /// borrowed event structs like `Event<'a>`, the derive sets this to
+    /// `Event<'static>` so that all lifetime instantiations share one cache
+    /// entry — the schema is lifetime-independent.
+    type Id: 'static;
+
     /// Per-type wire-ID slot. Default 0 means no slot (dynamic path);
     /// `#[traceevent(wire_slot)]` overrides it to claim a fast-path slot.
     fn type_slot() -> u16 {

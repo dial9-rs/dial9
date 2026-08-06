@@ -3,6 +3,7 @@ source: dial9-trace-format-derive/src/lib.rs
 expression: "expand_to_string(quote!\n{\n    struct PollStart\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, worker_id: u64, task_id:\n        u64,\n    }\n})"
 ---
 impl ::dial9_trace_format::TraceEvent for PollStart {
+    type Id = Self;
     fn event_name() -> &'static str {
         "PollStart"
     }
