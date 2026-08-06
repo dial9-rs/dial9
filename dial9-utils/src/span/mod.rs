@@ -73,6 +73,7 @@ mod future;
 pub(crate) mod wire;
 
 pub use future::{Instrument, Instrumented};
+pub use wire::SpanId;
 
 use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::handle::Dial9Handle;
@@ -85,7 +86,7 @@ use std::sync::{Arc, OnceLock};
 /// Not a stable API.
 #[doc(hidden)]
 pub mod __rt {
-    pub use super::wire::next_span_id;
+    pub use super::wire::{SpanId, next_span_id};
     pub use super::{Slot, Span, current_worker_id, emit_close};
     pub use dial9_core::clock::clock_monotonic_ns;
     pub use dial9_core::handle::Dial9Handle;
@@ -108,11 +109,11 @@ pub mod __rt {
 pub trait Span: Sized {
     /// This span's process-unique id, for explicit parenting via
     /// [`with_parent_id`](Self::with_parent_id).
-    fn id(&self) -> u64;
+    fn id(&self) -> SpanId;
 
     /// Set the parent span id. Implementation detail of the parenting setters.
     #[doc(hidden)]
-    fn __set_parent(&mut self, parent_span_id: u64);
+    fn __set_parent(&mut self, parent_span_id: SpanId);
 
     /// Emit the enter event on `handle`. Implementation detail of
     /// [`enter`](Self::enter) and [`Instrumented`].
@@ -137,7 +138,7 @@ pub trait Span: Sized {
     /// Set this span's parent explicitly. The viewer nests the child under the
     /// parent; without a parent it infers nesting from timestamp containment.
     #[must_use]
-    fn with_parent_id(mut self, parent_span_id: u64) -> Self {
+    fn with_parent_id(mut self, parent_span_id: SpanId) -> Self {
         self.__set_parent(parent_span_id);
         self
     }
@@ -220,7 +221,7 @@ pub fn current_worker_id() -> Option<u64> {
 /// Record a span's `SpanCloseEvent`. No-op off a dial9 runtime. Used by the
 /// [`dial9_span!`](crate::dial9_span) expansion; not a stable API.
 #[doc(hidden)]
-pub fn emit_close(span_id: u64) {
+pub fn emit_close(span_id: SpanId) {
     let handle = Dial9Handle::current();
     if !handle.is_enabled() {
         return;
@@ -241,8 +242,8 @@ pub fn emit_close(span_id: u64) {
 /// [`Dial9SpanLayer`](crate::tower::Dial9SpanLayer) `make_span` closure. All
 /// name-only spans share one wire schema (`adhoc::runtime`).
 pub struct Dial9Span {
-    span_id: u64,
-    parent_span_id: Option<u64>,
+    span_id: SpanId,
+    parent_span_id: Option<SpanId>,
     name: String,
 }
 
@@ -252,7 +253,7 @@ struct RuntimeEnter {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     worker_id: Option<u64>,
-    span_id: u64,
+    span_id: SpanId,
     parent_span_id: Option<u64>,
     #[traceevent(role = "span.name")]
     span_name: InternedString,
@@ -264,7 +265,7 @@ struct RuntimeExit {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     worker_id: Option<u64>,
-    span_id: u64,
+    span_id: SpanId,
     #[traceevent(role = "span.name")]
     span_name: InternedString,
     #[traceevent(unit = "ns")]
@@ -300,11 +301,11 @@ impl fmt::Debug for Dial9Span {
 }
 
 impl Span for Dial9Span {
-    fn id(&self) -> u64 {
+    fn id(&self) -> SpanId {
         self.span_id
     }
 
-    fn __set_parent(&mut self, parent_span_id: u64) {
+    fn __set_parent(&mut self, parent_span_id: SpanId) {
         self.parent_span_id = Some(parent_span_id);
     }
 
@@ -315,7 +316,10 @@ impl Span for Dial9Span {
                 timestamp_ns: clock_monotonic_ns(),
                 worker_id: current_worker_id(),
                 span_id: self.span_id,
-                parent_span_id: self.parent_span_id,
+                // `Option<SpanId>` is not a `TraceField` (the blanket optional
+                // impl is internal to dial9-trace-format), so the parent rides
+                // the wire as the raw id it already was.
+                parent_span_id: self.parent_span_id.map(SpanId::as_u64),
                 span_name,
             });
         });
@@ -520,7 +524,7 @@ macro_rules! __dial9_span_build {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
-            span_id: u64,
+            span_id: $crate::span::__rt::SpanId,
             parent_span_id: ::core::option::Option<u64>,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
@@ -536,7 +540,7 @@ macro_rules! __dial9_span_build {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
-            span_id: u64,
+            span_id: $crate::span::__rt::SpanId,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             #[traceevent(unit = "ns")]
@@ -550,8 +554,8 @@ macro_rules! __dial9_span_build {
 
         #[allow(non_camel_case_types, non_snake_case)]
         struct __Dial9Span<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
-            span_id: u64,
-            parent_span_id: ::core::option::Option<u64>,
+            span_id: $crate::span::__rt::SpanId,
+            parent_span_id: ::core::option::Option<$crate::span::__rt::SpanId>,
             $( $key: $key, )*
         }
 
@@ -559,11 +563,11 @@ macro_rules! __dial9_span_build {
         impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
             $crate::span::__rt::Span for __Dial9Span<$($key),*>
         {
-            fn id(&self) -> u64 {
+            fn id(&self) -> $crate::span::__rt::SpanId {
                 self.span_id
             }
 
-            fn __set_parent(&mut self, parent_span_id: u64) {
+            fn __set_parent(&mut self, parent_span_id: $crate::span::__rt::SpanId) {
                 self.parent_span_id = ::core::option::Option::Some(parent_span_id);
             }
 
@@ -574,7 +578,10 @@ macro_rules! __dial9_span_build {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
                         worker_id: $crate::span::__rt::current_worker_id(),
                         span_id: self.span_id,
-                        parent_span_id: self.parent_span_id,
+                        parent_span_id: ::core::option::Option::map(
+                            self.parent_span_id,
+                            $crate::span::__rt::SpanId::as_u64,
+                        ),
                         span_name: __name,
                         $( $key: ::core::clone::Clone::clone(&self.$key), )*
                     });
@@ -649,7 +656,7 @@ macro_rules! __dial9_span_build_late {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
-            span_id: u64,
+            span_id: $crate::span::__rt::SpanId,
             parent_span_id: ::core::option::Option<u64>,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
@@ -666,7 +673,7 @@ macro_rules! __dial9_span_build_late {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
-            span_id: u64,
+            span_id: $crate::span::__rt::SpanId,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             #[traceevent(unit = "ns")]
@@ -681,8 +688,8 @@ macro_rules! __dial9_span_build_late {
 
         #[allow(non_camel_case_types, non_snake_case)]
         struct __Dial9Span<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
-            span_id: u64,
-            parent_span_id: ::core::option::Option<u64>,
+            span_id: $crate::span::__rt::SpanId,
+            parent_span_id: ::core::option::Option<$crate::span::__rt::SpanId>,
             $( $key: $key, )*
             $( $lkey: $crate::span::__rt::Arc<$crate::span::__rt::OnceLock<$lty>>, )+
         }
@@ -691,11 +698,11 @@ macro_rules! __dial9_span_build_late {
         impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
             $crate::span::__rt::Span for __Dial9Span<$($key),*>
         {
-            fn id(&self) -> u64 {
+            fn id(&self) -> $crate::span::__rt::SpanId {
                 self.span_id
             }
 
-            fn __set_parent(&mut self, parent_span_id: u64) {
+            fn __set_parent(&mut self, parent_span_id: $crate::span::__rt::SpanId) {
                 self.parent_span_id = ::core::option::Option::Some(parent_span_id);
             }
 
@@ -706,7 +713,10 @@ macro_rules! __dial9_span_build_late {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
                         worker_id: $crate::span::__rt::current_worker_id(),
                         span_id: self.span_id,
-                        parent_span_id: self.parent_span_id,
+                        parent_span_id: ::core::option::Option::map(
+                            self.parent_span_id,
+                            $crate::span::__rt::SpanId::as_u64,
+                        ),
                         span_name: __name,
                         $( $key: ::core::clone::Clone::clone(&self.$key), )*
                     });

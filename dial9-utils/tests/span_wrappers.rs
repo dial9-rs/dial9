@@ -389,7 +389,7 @@ fn explicit_parent_across_spawn() {
         // Drive the parent too so it appears in the trace.
         async {}.instrument(parent).await;
 
-        assert!(parent_id & ADHOC_ID_BIT != 0);
+        assert!(parent_id.as_u64() & ADHOC_ID_BIT != 0);
     });
 
     assert!(events.enter_names.contains(&"audit.emit".to_string()));

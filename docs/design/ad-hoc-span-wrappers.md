@@ -152,8 +152,8 @@ small `tower-service` / `tower-layer` trait crates, not `tower` itself).
 dial9_span!("db.load", order_id = id, retries = n, path = %p, cfg = ?c) -> impl Span;
 
 pub trait Span: Sized {
-    fn id(&self) -> u64;                                 // for explicit parenting
-    fn with_parent_id(self, parent_span_id: u64) -> Self;
+    fn id(&self) -> SpanId;                              // for explicit parenting
+    fn with_parent_id(self, parent_span_id: SpanId) -> Self;
     fn with_parent(self, parent: &impl Span) -> Self;
     fn enter(&self) -> Entered<'_, Self>;               // sync RAII guard
     // + hidden __set_parent / __emit_enter / __emit_exit (macro-generated)
