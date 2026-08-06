@@ -66,6 +66,7 @@ describe("encodeScope large-selection compaction (#589)", () => {
     const s: TraceScope = {
       bucket: "b",
       region: "",
+      roleArn: "",
       prefix: "traces",
       service: "shale",
       hosts,
@@ -113,6 +114,7 @@ describe("encodeAggregationParams region in deep-links (#621)", () => {
     const s: TraceScope = {
       bucket: "b",
       region: "us-west-2",
+      roleArn: "",
       prefix: "traces",
       service: "shale",
       hosts,

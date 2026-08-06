@@ -110,7 +110,7 @@ describe("scope boot", () => {
         region = next;
       },
       setRoleArn(arn, opts) {
-        roleCalls.push({ arn, region: opts?.region });
+        roleCalls.push(opts?.region === undefined ? { arn } : { arn, region: opts.region });
         if (opts?.region) region = opts.region;
       },
       has: () => false, // fresh session: no stored creds

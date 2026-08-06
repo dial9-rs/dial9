@@ -98,7 +98,7 @@ describe("applyToCreds", () => {
       get: () => stored,
       setRoleArn(arn, opts) {
         calls.push(`setRoleArn:${arn}:${opts?.region ?? ""}`);
-        stored = { region: opts?.region };
+        stored = opts?.region === undefined ? {} : { region: opts.region };
         return stored;
       },
       setRegion(region) {
