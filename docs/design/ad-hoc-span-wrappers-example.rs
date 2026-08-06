@@ -20,9 +20,9 @@
 use std::time::Duration;
 
 use axum::{Router, extract::Path, routing::post};
-// Runtime setup (buffer/recorder/attach) comes from the tokio telemetry crate;
-// the spans themselves live in `dial9-utils`.
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderTokioExt, recorder};
+// Runtime setup (buffer/recorder/attach) comes from the `dial9` facade; the
+// spans themselves live in `dial9-utils`.
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 
 // The entire span surface. The macro + core wrappers are unconditional;
 // `Dial9SpanLayer` is behind the `tower` cargo feature.
@@ -34,10 +34,11 @@ use dial9_utils::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
 fn main() {
     let writer = DiskBuffer::single_file("/tmp/checkout-traces/trace.bin").unwrap();
     let recorder = recorder(writer).build();
-    let (recorder, runtime) = recorder
-        .attach_tokio_runtime(|t| {
-            t.enable_all();
-        })
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
 
     runtime.block_on(serve());
