@@ -92,7 +92,7 @@ async fn settlement_worker() {
 
 #[cfg(feature = "tower")]
 async fn tower_demo() {
-    use dial9_utils::span::Dial9SpanLayerWithResponse;
+    use dial9_utils::tower::Dial9SpanLayerWithResponse;
     use std::convert::Infallible;
     use tower_layer::Layer;
     use tower_service::Service;

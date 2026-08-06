@@ -65,22 +65,14 @@
 //!
 //! # Tower middleware
 //!
-//! With the `tower` feature, [`Dial9SpanLayer`] wraps a
+//! With the `tower` feature, [`Dial9SpanLayer`](crate::tower::Dial9SpanLayer) wraps a
 //! [`tower`](https://docs.rs/tower) service so each request future is
 //! instrumented automatically.
 
 mod future;
-#[cfg(feature = "tower")]
-mod tower;
 pub(crate) mod wire;
 
 pub use future::{Instrument, Instrumented};
-#[cfg(feature = "tower")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
-pub use tower::{
-    Dial9SpanLayer, Dial9SpanLayerWithResponse, Dial9SpanService, Dial9SpanServiceWithResponse,
-    OnResponse,
-};
 
 use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::handle::Dial9Handle;
@@ -251,9 +243,9 @@ pub fn emit_close(span_id: u64) {
 ///
 /// When the fields are known at the call site, prefer the
 /// [`dial9_span!`](crate::dial9_span) macro (typed fields, zero-cost). This type
-/// is for names assembled at runtime, e.g. by
-/// [`Dial9SpanLayer::named`](crate::span::Dial9SpanLayer::named). All name-only
-/// spans share one wire schema (`adhoc::runtime`).
+/// is for names assembled at runtime, e.g. inside a
+/// [`Dial9SpanLayer`](crate::tower::Dial9SpanLayer) `make_span` closure. All
+/// name-only spans share one wire schema (`adhoc::runtime`).
 pub struct Dial9Span {
     span_id: u64,
     parent_span_id: Option<u64>,

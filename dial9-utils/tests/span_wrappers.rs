@@ -463,7 +463,7 @@ fn typed_and_display_fields_roundtrip() {
 #[cfg(feature = "tower")]
 #[test]
 fn tower_layer_wraps_request() {
-    use dial9_utils::span::Dial9SpanLayer;
+    use dial9_utils::tower::Dial9SpanLayer;
     use std::convert::Infallible;
     use std::pin::Pin;
     use tower_service::Service;
@@ -528,7 +528,7 @@ fn tower_layer_wraps_request() {
 #[cfg(feature = "tower")]
 #[test]
 fn tower_response_layer_records_late_field() {
-    use dial9_utils::span::Dial9SpanLayerWithResponse;
+    use dial9_utils::tower::Dial9SpanLayerWithResponse;
     use std::convert::Infallible;
     use std::pin::Pin;
     use tower_service::Service;

@@ -3,7 +3,7 @@
 //!
 //! Requires the `tower` feature.
 
-use super::{Instrument as _, Instrumented, Span};
+use crate::span::{Instrument as _, Instrumented, Span};
 use pin_project_lite::pin_project;
 use std::fmt;
 use std::future::Future;
@@ -20,7 +20,7 @@ use tower_service::Service;
 /// request-derived fields — or ignore it for a fixed name.
 ///
 /// ```no_run
-/// # use dial9_utils::span::Dial9SpanLayer;
+/// # use dial9_utils::tower::Dial9SpanLayer;
 /// # use dial9_utils::dial9_span;
 /// // Per-request fields:
 /// let layer = Dial9SpanLayer::new(|req: &u64| dial9_span!("rpc", id = *req));
@@ -43,7 +43,7 @@ impl<F> Dial9SpanLayer<F> {
     /// which receives the request so it can attach request-derived fields:
     ///
     /// ```no_run
-    /// # use dial9_utils::span::Dial9SpanLayer;
+    /// # use dial9_utils::tower::Dial9SpanLayer;
     /// # use dial9_utils::dial9_span;
     /// # struct Request; impl Request { fn path(&self) -> &str { "/" } }
     /// let layer = Dial9SpanLayer::new(|req: &Request| {
@@ -127,7 +127,7 @@ where
 /// captures it never has to be — so no type annotations are required.
 ///
 /// ```no_run
-/// # use dial9_utils::span::Dial9SpanLayerWithResponse;
+/// # use dial9_utils::tower::Dial9SpanLayerWithResponse;
 /// # use dial9_utils::dial9_span;
 /// # struct Req; struct Resp; impl Resp { fn status(&self) -> u16 { 200 } }
 /// let layer = Dial9SpanLayerWithResponse::new(|_req: &Req| {

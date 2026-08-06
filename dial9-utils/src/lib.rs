@@ -17,3 +17,10 @@ pub mod dial9_axum;
 /// compile `dial9-trace-format`/`pin-project-lite`.
 #[cfg(feature = "span")]
 pub mod span;
+
+/// [`tower`](https://docs.rs/tower) middleware that records a span per request,
+/// built on the [`span`] module.
+///
+/// Behind the `tower` cargo feature.
+#[cfg(feature = "tower")]
+pub mod tower;
