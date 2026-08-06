@@ -11,9 +11,50 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// with the viewer's `formatFieldValue` (dial9-viewer/ui/format.js).
 const SUPPORTED_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes"];
 
+/// Annotation key for `#[traceevent(role = "...")]`. Mirrors
+/// `dial9_core::schema_extensions::ROLE_KEY`, which this crate cannot depend on.
+const ROLE_ANNOTATION_KEY: &str = "dial9.role";
+
+/// The `#[traceevent(...)]` keys a field may carry.
+#[derive(Default)]
+struct FieldAttrs {
+    /// `timestamp`: this field is the event timestamp (header, not a column).
+    timestamp: bool,
+    /// `unit = "..."`: rendering unit for this field.
+    unit: Option<syn::LitStr>,
+    /// `role = "..."`: structural role for this field (`dial9.role`).
+    role: Option<syn::LitStr>,
+}
+
+/// Parse one field's `#[traceevent(...)]` keys. Malformed or unknown keys are
+/// compile errors rather than being silently ignored.
+fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
+    let mut parsed = FieldAttrs::default();
+    for attr in &field.attrs {
+        if !attr.path().is_ident("traceevent") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("timestamp") {
+                parsed.timestamp = true;
+            } else if meta.path.is_ident("unit") {
+                parsed.unit = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else if meta.path.is_ident("role") {
+                parsed.role = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else {
+                return Err(meta.error(
+                    "unrecognized `traceevent` field attribute; expected `timestamp`, \
+                     `unit = \"...\"` or `role = \"...\"`",
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(parsed)
+}
+
 fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     let name = &input.ident;
-    let name_str = name.to_string();
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -23,33 +64,58 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         _ => panic!("TraceEvent can only be derived for structs"),
     };
 
-    // Parse struct-level #[traceevent(wire_slot)]: opt this type into the
-    // encoder's inline fast path (a global slot doubling as wire id). Off by
-    // default.
+    // Parse struct-level attributes:
+    // - `wire_slot`: opt this type into the encoder's inline fast path (a global
+    //   slot doubling as wire id). Off by default.
+    // - `name = <expr>`: override the wire event name (defaults to the struct
+    //   name). Accepts any `&'static str` expression, not just a string literal,
+    //   so callers can build a per-call-site-unique name, e.g.
+    //   `concat!("SpanEnter:", file!(), ":", line!())`. Used to give generated
+    //   structs a name the viewer recognizes (e.g. `"SpanEnter:..."`).
     let mut wire_slot = false;
+    let mut name_override: Option<syn::Expr> = None;
     for attr in &input.attrs {
         if attr.path().is_ident("traceevent") {
-            let _ = attr.parse_nested_meta(|meta| {
+            // Propagated, not swallowed: a malformed attribute (e.g. `name`
+            // without a value) must be a compile error, not silently ignored.
+            attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("wire_slot") {
                     wire_slot = true;
+                } else if meta.path.is_ident("name") {
+                    name_override = Some(meta.value()?.parse::<syn::Expr>()?);
+                } else {
+                    return Err(meta.error(
+                        "unrecognized `traceevent` attribute; expected `wire_slot` or `name = ...`",
+                    ));
                 }
                 Ok(())
-            });
+            })?;
         }
     }
+    // The wire event name expression returned by `event_name()`: either the
+    // `name = ...` override (evaluated at the override's call site, so builtins
+    // like `file!()`/`line!()` resolve there) or the struct name as a literal.
+    let event_name_expr = match &name_override {
+        Some(expr) => quote! { #expr },
+        None => {
+            let name_str = name.to_string();
+            quote! { #name_str }
+        }
+    };
+
+    // Every key of a field's `#[traceevent(...)]` is parsed in one pass: the
+    // callback must consume each key's value, so a pass that recognized only
+    // some keys would choke on the ones it skipped.
+    let field_attrs = fields
+        .iter()
+        .map(parse_field_attrs)
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
-    for field in fields.iter() {
-        for attr in &field.attrs {
-            if attr.path().is_ident("traceevent") {
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("timestamp") {
-                        timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
-                    }
-                    Ok(())
-                });
-            }
+    for (field, attrs) in fields.iter().zip(&field_attrs) {
+        if attrs.timestamp {
+            timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
         }
     }
 
@@ -57,23 +123,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     let mut encode_tokens = Vec::new();
     let mut annotation_tokens = Vec::new();
 
-    for field in fields.iter() {
+    for (field, attrs) in fields.iter().zip(&field_attrs) {
         let field_name = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        // Parse #[traceevent(unit = "...")]: emitted as a "unit"
-        // schema annotation so viewers can render the field in that unit.
-        let mut unit: Option<syn::LitStr> = None;
-        for attr in &field.attrs {
-            if attr.path().is_ident("traceevent") {
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("unit") {
-                        unit = Some(meta.value()?.parse::<syn::LitStr>()?);
-                    }
-                    Ok(())
-                });
-            }
-        }
+        // `unit = "..."` is emitted as a "unit" schema annotation so viewers can
+        // render the field in that unit.
+        let unit = attrs.unit.clone();
 
         // Skip the timestamp field in schema/encode — it's in the event header
         if timestamp_field_name.as_ref() == Some(field_name) {
@@ -82,6 +138,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                     &unit,
                     "the timestamp field cannot carry a unit annotation: it is encoded in the \
                      event header (always nanoseconds), not as a schema field",
+                ));
+            }
+            if let Some(role) = &attrs.role {
+                return Err(syn::Error::new_spanned(
+                    role,
+                    "the timestamp field cannot carry a role annotation: it is encoded in the \
+                     event header, not as a schema field",
                 ));
             }
             continue;
@@ -102,6 +165,16 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
                 ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "unit", #unit)
+            });
+        }
+        if let Some(role) = &attrs.role {
+            let idx = field_def_tokens.len() as u16;
+            annotation_tokens.push(quote! {
+                ::dial9_trace_format::schema::FieldAnnotation::new(
+                    #idx,
+                    #ROLE_ANNOTATION_KEY,
+                    #role,
+                )
             });
         }
 
@@ -170,9 +243,26 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         }
     };
 
+    // Propagate any generics/lifetimes on the struct onto the impl, so the
+    // derive works on generic event structs (e.g. an event that borrows
+    // typed, generically-parameterized fields).
+    //
+    // Caveat for type parameters: `event_name()` is per *type*, not per
+    // monomorphization, so all instantiations of a generic event share one wire
+    // schema. That is sound only when a name maps to a single set of field
+    // types, which is how `dial9_span!` uses it: each call site declares its
+    // own struct with a call-site-unique `name = ...`, so it is instantiated
+    // exactly once. Two instantiations with different field types under one
+    // name would register conflicting schemas for that name.
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
     Ok(quote! {
-        impl ::dial9_trace_format::TraceEvent for #name {
-            fn event_name() -> &'static str { #name_str }
+        // The generic params may be named after user fields (e.g. the ad-hoc
+        // span macro uses the field ident as its type param), so silence the
+        // casing lints on the generated impl.
+        #[allow(non_camel_case_types, non_snake_case)]
+        impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
+            fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
@@ -196,11 +286,32 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   header, not as a regular field.
 /// - `#[traceevent(wire_slot)]` (struct): opts the type into the encoder's
 ///   inline fast path by claiming a static wire-ID slot.
+/// - `#[traceevent(name = <expr>)]` (struct): overrides the wire event name
+///   (defaults to the struct name). Accepts any `&'static str` expression, not
+///   just a string literal, so callers can build a per-call-site-unique name —
+///   e.g. `concat!("SpanEnter:", file!(), ":", line!())`. Useful for generated
+///   structs that need a name the viewer recognizes (e.g. `"SpanEnter:..."`),
+///   which cannot be a valid Rust identifier.
 /// - `#[traceevent(unit = "...")]` (field): attaches a `unit` schema
 ///   annotation so viewers render the field in that unit. Supported values:
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile
 ///   error, as is placing `unit` on the timestamp field (the timestamp is
 ///   encoded in the event header and is always nanoseconds).
+///
+/// - `#[traceevent(role = "...")]` (field): attaches a `dial9.role` schema
+///   annotation, telling consumers what the field *is* structurally (e.g.
+///   `"span.name"`). The vocabulary lives in
+///   `dial9_core::schema_extensions::roles`.
+///
+/// A malformed or unrecognized `traceevent` key is a compile error.
+///
+/// # Generic event structs
+///
+/// Lifetimes and type parameters are carried onto the generated impl. Note that
+/// the wire event name is per type, not per monomorphization: a generic event
+/// must therefore have a single instantiation per `name`, as generated
+/// per-call-site structs do. Instantiating one generic event with different
+/// field types under the same name registers conflicting schemas for that name.
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
@@ -328,6 +439,20 @@ mod tests {
     }
 
     #[test]
+    fn role_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct SpanEnter {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(role = "span.name")]
+                span_name: InternedString,
+                #[traceevent(unit = "ns")]
+                active_ns: u64,
+            }
+        }));
+    }
+
+    #[test]
     fn invalid_unit_rejected() {
         let err = expand_err(quote! {
             struct BadUnit {
@@ -371,6 +496,68 @@ mod tests {
             }
         });
         assert!(err.to_string().contains("unsupported unit \"µs\""));
+    }
+
+    /// A generic event carries its params onto the impl; the schema name comes
+    /// from the per-instantiation `name = ...`, not from the type parameters.
+    #[test]
+    fn generic_event() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(name = concat!("SpanEnter:", file!(), ":", line!()))]
+            struct GenericEvent<'a, T: TraceField + Clone + 'static> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                name: &'a str,
+                value: T,
+            }
+        }));
+    }
+
+    #[test]
+    fn malformed_name_rejected() {
+        let err = expand_err(quote! {
+            #[traceevent(name)]
+            struct MalformedName {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
+        });
+        assert!(
+            err.to_string().contains("expected `=`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_struct_attribute_rejected() {
+        let err = expand_err(quote! {
+            #[traceevent(wire_slots)]
+            struct Typo {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unrecognized `traceevent` attribute; expected `wire_slot` or `name = ...`"
+        );
+    }
+
+    #[test]
+    fn unknown_field_attribute_rejected() {
+        let err = expand_err(quote! {
+            struct Typo {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(units = "ns")]
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unrecognized `traceevent` field attribute; expected `timestamp`, `unit = \"...\"` \
+             or `role = \"...\"`"
+        );
     }
 
     #[test]

@@ -1220,6 +1220,15 @@ impl TraceField for String {
     }
 }
 
+impl TraceField for &str {
+    fn field_type() -> FieldType {
+        FieldType::String
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_string(self)
+    }
+}
+
 impl TraceField for Vec<u8> {
     fn field_type() -> FieldType {
         FieldType::Bytes
