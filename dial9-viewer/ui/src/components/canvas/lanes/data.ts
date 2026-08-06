@@ -9,10 +9,16 @@
 
 import {
   deriveRuntimeGroups,
+  deriveRuntimeMetrics,
   deriveWorkerIds,
   sharedSpanData,
   sharedWorkerSpans,
 } from "../../../lib/trace/derived.js";
+import {
+  metricsRuntimeNames,
+  type RuntimeMetrics,
+} from "../../../lib/trace/runtime-metrics-model.js";
+import { buildLaneIdentities, type LaneIdentity } from "./chrome.js";
 import { spansById as buildSpanByIdSingle } from "../../../lib/trace/index.js";
 import { LazySpansById, LazySpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { ColumnarSpans, SpanByIdMulti, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
@@ -31,6 +37,20 @@ export interface LaneData {
   /** The runtime groups in render order. One group (single-runtime) is the
    *  common case; the renderer draws headers only when there is more than one. */
   runtimeGroups: RuntimeGroup[];
+  /** Per-runtime scheduler metrics, drawn in each runtime's summary lane. Empty
+   *  for pre-RuntimeMetrics traces. */
+  runtimeMetrics: RuntimeMetrics;
+  /** Runtime names that have a metric series (so a summary lane is emitted).
+   *  Pair with the store's fold map to build `laneRowLayout`'s metrics opts. */
+  metricsRuntimes: ReadonlySet<string>;
+  /** worker id -> its owning runtime's accent, painted as the lane's left rail
+   *  so a lane's runtime is readable without the group header on screen. */
+  laneIdentity: ReadonlyMap<number, LaneIdentity>;
+  /** Runtime-group name -> its accent (the same colour its lanes' rails carry). */
+  runtimeAccents: ReadonlyMap<string, string>;
+  /** worker id -> its owning runtime-group name, so the label gutter can resolve
+   *  a worker row's accent from the row alone. */
+  workerRuntime: ReadonlyMap<number, string>;
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, LaneSpans>;
   /** Per-worker local-queue samples, sorted by t. */
@@ -66,6 +86,15 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
   const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
 
+  // A group gets a summary lane iff its runtime has a metric series. The
+  // inferred default group ("main") maps to the empty wire name. Keyed by GROUP
+  // name so it matches laneRowLayout's per-group check.
+  const runtimeMetrics = deriveRuntimeMetrics(trace);
+  const metricsRuntimes = metricsRuntimeNames(runtimeGroups, runtimeMetrics);
+
+  // Lane identity: each worker's runtime accent + group name, by group order.
+  const identities = buildLaneIdentities(runtimeGroups);
+
   // Span-id index: id -> every instance (recycled ids highlight every
   // instance, but O(1) lookup instead of a full allSpans scan). On the columnar
   // path these are lazy adapters over the store (no 982K view maps built).
@@ -90,6 +119,11 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
   return {
     workerIds,
     runtimeGroups,
+    runtimeMetrics,
+    metricsRuntimes,
+    laneIdentity: identities.byWorker,
+    runtimeAccents: identities.byRuntime,
+    workerRuntime: identities.workerRuntime,
     workerSpans,
     workerQueueSamples: spanResult.workerQueueSamples,
     wakesByWorker: spanResult.wakesByWorker,

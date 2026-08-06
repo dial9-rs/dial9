@@ -17,7 +17,7 @@ function resolve(name) {
 
 const { parseTrace, EVENT_TYPES, deduplicateSamples } = require(resolve('trace_parser.js'));
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, buildSpanData } = require(resolve('trace_analysis.js'));
+        computeSchedulingDelays, buildSpanData, globalQueueSeries } = require(resolve('trace_analysis.js'));
 
 async function redFlagScan(tracePath) {
   for await (const trace of parseTrace(tracePath)) {
@@ -96,9 +96,10 @@ async function redFlagScan(tracePath) {
     }
 
     // 5. Global queue buildup
-    const highQueue = spans.queueSamples.filter(s => s.global > 100);
+    const queueSamples = globalQueueSeries(trace, spans);
+    const highQueue = queueSamples.filter(s => s.global > 100);
     if (highQueue.length > 0) {
-      const maxQueue = spans.queueSamples.reduce((m, s) => Math.max(m, s.global), -Infinity);
+      const maxQueue = queueSamples.reduce((m, s) => Math.max(m, s.global), -Infinity);
       findings.push({
         severity: maxQueue > 1000 ? 'critical' : 'warning',
         check: 'queue-depth',

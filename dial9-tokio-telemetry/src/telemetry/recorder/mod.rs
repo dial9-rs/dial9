@@ -470,6 +470,7 @@ mod tests {
                     | crate::telemetry::analysis_events::Dial9Event::WorkerParkEvent(..)
                     | crate::telemetry::analysis_events::Dial9Event::WorkerUnparkEvent(..)
                     | crate::telemetry::analysis_events::Dial9Event::QueueSampleEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::RuntimeMetricsEvent(..)
                     | crate::telemetry::analysis_events::Dial9Event::TaskSpawnEvent(..)
                     | crate::telemetry::analysis_events::Dial9Event::TaskTerminateEvent(..)
                     | crate::telemetry::analysis_events::Dial9Event::WakeEvent(..)

@@ -25,6 +25,7 @@ export {
   SEGMENT_SERVICE_KEY,
   readKeyDerivedIdentity,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
 } from "./segment-metadata.js";
 export type { IdentityField, ReconciledIdentity } from "./segment-metadata.js";
@@ -42,6 +43,7 @@ export {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
+  fetchTraceBytes,
   formatFrame,
   loadTrace,
   loadTraceBuffered,
@@ -69,8 +71,10 @@ export type {
   ParseProgress,
   ParsedTrace,
   SampleGroup,
+  SingleEventSpan,
   SymbolFrame,
   TaskDump,
+  TidWorkerBinding,
   TraceEvent,
   TraceSliceStore,
   WorkerLoadOptions,
@@ -193,8 +197,10 @@ export {
   filterPointsOfInterest,
   flattenFlamegraph,
   getTraceTimeRange,
+  globalQueueSeries,
   hasCpuProfileSamples,
   selectSpanRenderSet,
+  sumGlobalQueueByCycle,
 } from "./analysis.js";
 export type {
   ActiveSpan,
@@ -292,11 +298,9 @@ export type { EncodeScopeOptions, EncodedScope, TraceScope } from "./trace_scope
 // full/partial/none fallback signal. (Both endpoints stream over SSE now, so
 // the old client-side fetch/refine loop is gone.)
 export {
-  SPAN_STATS_ENDPOINT,
   TOKIO_STATS_ENDPOINT,
   coverageSignal,
   isCoverageFrozen,
-  spanStatsUrl,
   tokioStatsUrl,
 } from "./aggregates.js";
 export type {
@@ -318,7 +322,6 @@ export type {
   SchedulingDelayKind,
   ScopeEcho,
   SpanDurationBucket,
-  SpanStatsQuery,
   SpanStatsResponse,
   SpanTypeStats,
   SpawnLocStats,
@@ -330,14 +333,11 @@ export type {
 
 // span_explorer.ts - the frozen Span Explorer helpers: catalog sorting, the
 // log-duration histogram geometry + percentile estimation, the five-way time
-// composition, attribute filters, and the flamegraph/viewer deep links. Shared
-// with the raw-trace path so a client-built catalog matches the aggregated one.
+// composition, attribute filters, and the flamegraph/viewer deep links.
 export {
   TIME_CATEGORIES,
   addAttrFilter,
   bandComposition,
-  buildLogHistogram,
-  buildSpanCatalog,
   classifyExemplarSnapshot,
   collectExemplarAttributeKeys,
   columnIsDegenerate,
@@ -359,7 +359,6 @@ export {
   mergeSelectedExemplarSnapshot,
   normalizeSpanHistogram,
   parseAttrFilterParams,
-  parseSpanEventName,
   percentileForDuration,
   removeAttrFilter,
   sameSpanCatalogStatistics,
@@ -381,7 +380,6 @@ export type {
   DurationBand,
   ExemplarLinkScope,
   HistogramBarLike,
-  ParsedSpanEventName,
   SpanExplorerState,
   SpanHistogramBar,
   SpanHistogramColumn,

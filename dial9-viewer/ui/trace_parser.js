@@ -410,6 +410,18 @@
         WorkerUnpark: 3,
         QueueSample: 4,
         WakeEvent: 9,
+        // Per-runtime scheduler metrics (queue depth + alive tasks), one per
+        // runtime per sample; supersedes QueueSample, and both are still parsed
+        // so old traces keep working.
+        //
+        // RESERVED, not observed: these events decode into the `runtimeMetrics`
+        // SIDE-CHANNEL and are never pushed into `trace.events`, so no event
+        // ever carries this discriminant. It is listed to reserve the number and
+        // to document that absence — consumers that group `trace.events` by
+        // worker (e.g. lifecycleWorkerIds) therefore need not exclude it, the way
+        // they must exclude the worker-less QueueSample and WakeEvent. Routing
+        // these into `trace.events` later would mean revisiting every such site.
+        RuntimeMetrics: 10,
     };
 
     /**
@@ -686,9 +698,24 @@
             freeEvents: [],
             memoryOverflows: [],
             threadNames: new Map(),
-            tidToWorker: new Map(), // tid → workerId (stable mapping from park/unpark events)
+            // Last-seen mapping retained for sample/allocation attribution.
+            tidToWorker: new Map(),
+            // Per-TID historical bindings for context resolution at span start.
+            tidBindings: new Map(),
+            // Unfiltered park/unpark history used to derive block-in-place
+            // handoff gaps that cross a requested time-range boundary.
+            parkUnparkHistory: [],
+            // Historical fallback consumers must only use TIDs that remained
+            // bound to one worker for the entire segment.
+            stableTidToWorker: new Map(),
+            ambiguousTids: new Set(),
             runtimeWorkers: new Map(), // runtime name → [workerId, ...]
             segmentMetadata: new Map(), // latest segment metadata key → value
+            // Per-runtime scheduler-metrics samples (one per runtime per flush
+            // cycle): { t, runtimeName, globalQueue, aliveTasks }. Low-volume
+            // (a handful per 10ms), so kept as a plain side-channel array rather
+            // than routed through the columnar scheduler-event store.
+            runtimeMetrics: [],
             taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
             customEvents: [], // unrecognized event types: {name, timestamp, fields}
             // Schema active when each custom event was decoded. Kept parallel to
@@ -710,6 +737,341 @@
             minMonoTs: null,
             recordMinTs: Infinity,
             recordMaxTs: -Infinity,
+            singleEventMinTs: Infinity,
+            singleEventMaxTs: -Infinity,
+            singleEventDecodeErrors: 0,
+        };
+    }
+
+    /**
+     * Record both the last-seen TID binding and the subset that stayed stable
+     * across the entire input. This runs before event caps and time filtering
+     * because historical single-event span placement must not ignore an
+     * out-of-window remap.
+     */
+    function recordTidBinding(state, values, timestamp) {
+        if (values.tid == null || timestamp == null) return;
+        const tid = num(values.tid);
+        const workerId = num(values.worker_id);
+        state.tidToWorker.set(tid, workerId);
+        let bindings = state.tidBindings.get(tid);
+        if (bindings === undefined) {
+            bindings = [];
+            state.tidBindings.set(tid, bindings);
+        }
+        // Cross-worker frames are not globally timestamp ordered. Retain every
+        // binding here; finalizeParse sorts and coalesces them chronologically.
+        bindings.push({ timestamp, workerId });
+        const previousWorker = state.stableTidToWorker.get(tid);
+        if (!state.ambiguousTids.has(tid) && previousWorker === undefined) {
+            state.stableTidToWorker.set(tid, workerId);
+        } else if (previousWorker !== undefined && previousWorker !== workerId) {
+            state.stableTidToWorker.delete(tid);
+            state.ambiguousTids.add(tid);
+        }
+    }
+
+    const DIAL9_ROLE_KEY = "dial9.role";
+    const DIAL9_SPAN_TYPE_KEY = "dial9.span.type";
+    const DEFAULT_SINGLE_EVENT_SPAN_TYPE = "single-event";
+    const SINGLE_EVENT_ROLES = Object.freeze({
+        start: "span.start",
+        duration: "span.duration",
+        name: "span.name",
+        threadId: "thread_id",
+        taskId: "tokio.task_id",
+        workerId: "tokio.worker_id",
+    });
+    const INTEGER_FIELD_TYPES = new Set([1, 9, 11, 12, 13]);
+    const STRING_FIELD_TYPES = new Set([4, 7]);
+
+    function innerFieldType(fieldType) {
+        return fieldType & 0x7f;
+    }
+
+    function compileSingleEventSpanSchema(schema) {
+        const annotations = schema.annotations || [];
+        const cached = schema._singleEventSpanLayout;
+        if (
+            cached &&
+            cached.annotations === annotations &&
+            cached.annotationCount === annotations.length
+        ) {
+            return cached.result;
+        }
+
+        const roleByField = new Array(schema.fields.length).fill(null);
+        const roleIndices = new Map();
+        let error = null;
+        let sawTiming = false;
+        for (const annotation of annotations) {
+            if (annotation.key !== DIAL9_ROLE_KEY) continue;
+            const role = Object.values(SINGLE_EVENT_ROLES).includes(annotation.value)
+                ? annotation.value
+                : null;
+            if (role == null) continue;
+            if (
+                role === SINGLE_EVENT_ROLES.start ||
+                role === SINGLE_EVENT_ROLES.duration
+            ) {
+                sawTiming = true;
+            }
+            const index = annotation.fieldIndex;
+            if (index < 0 || index >= schema.fields.length) {
+                error ||= `${DIAL9_ROLE_KEY} references missing field ${index}`;
+                continue;
+            }
+            const existingFieldRole = roleByField[index];
+            if (existingFieldRole === role) continue;
+            if (existingFieldRole != null) {
+                error ||= `field ${index} has conflicting structural roles`;
+                continue;
+            }
+            roleByField[index] = role;
+            if (roleIndices.has(role)) {
+                error ||= `duplicate ${role} role`;
+            } else {
+                roleIndices.set(role, index);
+            }
+        }
+
+        // Resolve the layout, or an error/not-span sentinel. Written as an IIFE
+        // so the many validation exits read as early returns.
+        const multipliers = {
+            ns: 1,
+            us: 1_000,
+            ms: 1_000_000,
+            s: 1_000_000_000,
+        };
+        const result = (() => {
+            // Not a span at all unless it carries some timing role.
+            if (!sawTiming) return { kind: "not-span" };
+            if (error != null) return { kind: "invalid", error };
+
+            const annotationValue = (fieldIndex, key) => {
+                let value = null;
+                for (const annotation of annotations) {
+                    if (
+                        annotation.fieldIndex !== fieldIndex ||
+                        annotation.key !== key
+                    ) {
+                        continue;
+                    }
+                    if (value != null && value !== annotation.value) {
+                        return { error: `conflicting ${key} annotations` };
+                    }
+                    value = annotation.value;
+                }
+                return { value };
+            };
+
+            // A timing field: validate integer type + resolve unit multiplier.
+            // Per spec, an absent unit defaults to ns.
+            const timingField = (role) => {
+                const index = roleIndices.get(role);
+                if (index == null) return { present: false };
+                if (
+                    !INTEGER_FIELD_TYPES.has(
+                        innerFieldType(schema.fields[index].fieldType),
+                    )
+                ) {
+                    return { error: `${role} field must have an integer wire type` };
+                }
+                const unit = annotationValue(index, "unit");
+                if (unit.error) return { error: unit.error };
+                if (unit.value != null && !Object.prototype.hasOwnProperty.call(multipliers, unit.value)) {
+                    return { error: `unsupported ${role} unit ${JSON.stringify(unit.value)}` };
+                }
+                return {
+                    present: true,
+                    field: schema.fields[index].name,
+                    multiplier: unit.value == null ? 1 : multipliers[unit.value],
+                    index,
+                };
+            };
+
+            const start = timingField(SINGLE_EVENT_ROLES.start);
+            const duration = timingField(SINGLE_EVENT_ROLES.duration);
+            for (const t of [start, duration]) {
+                if (t.error) return { kind: "invalid", error: t.error };
+            }
+
+            // A span is placed from any two of {start, duration, end}; the end
+            // is the packed event timestamp.
+            const packedEnd = !!schema.hasTimestamp;
+            const quantities =
+                (start.present ? 1 : 0) +
+                (duration.present ? 1 : 0) +
+                (packedEnd ? 1 : 0);
+            if (quantities < 2) {
+                return {
+                    kind: "invalid",
+                    error:
+                        "single-event span schema needs two of span.start, " +
+                        "span.duration, and the packed event timestamp (the span end)",
+                };
+            }
+
+            const nameIndex = roleIndices.get(SINGLE_EVENT_ROLES.name);
+            if (
+                nameIndex != null &&
+                !STRING_FIELD_TYPES.has(
+                    innerFieldType(schema.fields[nameIndex].fieldType),
+                )
+            ) {
+                return {
+                    kind: "invalid",
+                    error: "span.name field must have a string wire type",
+                };
+            }
+            const contextIndices = [
+                roleIndices.get(SINGLE_EVENT_ROLES.threadId),
+                roleIndices.get(SINGLE_EVENT_ROLES.taskId),
+                roleIndices.get(SINGLE_EVENT_ROLES.workerId),
+            ].filter((index) => index != null);
+            if (
+                contextIndices.some(
+                    (index) =>
+                        !INTEGER_FIELD_TYPES.has(
+                            innerFieldType(schema.fields[index].fieldType),
+                        ),
+                )
+            ) {
+                return {
+                    kind: "invalid",
+                    error: "execution-context field must have an integer wire type",
+                };
+            }
+
+            // Span type rides on whichever timing field is present.
+            const spanTypeIndex = [start, duration].find((t) => t.present).index;
+            const spanType = annotationValue(spanTypeIndex, DIAL9_SPAN_TYPE_KEY);
+            if (spanType.error) return { kind: "invalid", error: spanType.error };
+
+            const fieldName = (role) => {
+                const index = roleIndices.get(role);
+                return index == null ? null : schema.fields[index].name;
+            };
+            return {
+                kind: "layout",
+                schemaName: schema.name,
+                timing: {
+                    start: start.present
+                        ? { field: start.field, multiplier: start.multiplier }
+                        : null,
+                    duration: duration.present
+                        ? { field: duration.field, multiplier: duration.multiplier }
+                        : null,
+                    packedEnd,
+                },
+                nameField: fieldName(SINGLE_EVENT_ROLES.name),
+                threadIdField: fieldName(SINGLE_EVENT_ROLES.threadId),
+                taskIdField: fieldName(SINGLE_EVENT_ROLES.taskId),
+                workerIdField: fieldName(SINGLE_EVENT_ROLES.workerId),
+                spanType: spanType.value || DEFAULT_SINGLE_EVENT_SPAN_TYPE,
+                attributeFields: schema.fields
+                    .filter(
+                        (_, index) =>
+                            roleByField[index] == null ||
+                            roleByField[index] === SINGLE_EVENT_ROLES.name,
+                    )
+                    .map((field) => field.name),
+            };
+        })();
+
+        schema._singleEventSpanLayout = {
+            annotations,
+            annotationCount: annotations.length,
+            result,
+        };
+        if (result.kind === "invalid") {
+            console.warn(
+                `Ignoring invalid single-event span schema ${JSON.stringify(schema.name)}: ${result.error}`,
+            );
+        }
+        return result;
+    }
+
+    /**
+     * Resolve (start, end) in ns from any two of start, duration, and end,
+     * where the end is the event's packed timestamp (`packedEnd`, ns, or null).
+     * Returns null if fewer than two quantities are present at runtime or the
+     * arithmetic is invalid.
+     */
+    function resolveSpanTiming(timing, values, packedEnd) {
+        const read = (t) => {
+            if (t == null) return null;
+            const raw = values[t.field];
+            if (raw == null) return null;
+            const value = Number(raw) * t.multiplier;
+            return Number.isFinite(value) && value >= 0 ? value : NaN;
+        };
+        const start = read(timing.start);
+        const duration = read(timing.duration);
+        const end = timing.packedEnd ? packedEnd : null;
+
+        // A read that produced NaN is a malformed value, not an absent one.
+        if ([start, duration, end].some((v) => Number.isNaN(v))) return null;
+
+        if (start != null && end != null) {
+            return start > end ? null : { start, end };
+        }
+        if (duration != null && end != null) {
+            // Duration is unsigned; a start after end is unrepresentable.
+            return { start: Math.max(0, end - duration), end };
+        }
+        if (start != null && duration != null) {
+            return { start, end: start + duration };
+        }
+        return null;
+    }
+
+    function decodeSingleEventSpan(layout, schema, values, packedEnd) {
+        const resolved = resolveSpanTiming(layout.timing, values, packedEnd);
+        if (resolved == null) return null;
+        const { start, end } = resolved;
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+        const context = (field, positiveOnly) => {
+            if (field == null || values[field] == null) {
+                return { valid: true, value: null };
+            }
+            const value = Number(values[field]);
+            if (!Number.isFinite(value) || value < 0) {
+                return { valid: false, value: null };
+            }
+            return {
+                valid: true,
+                value: positiveOnly && value === 0 ? null : value,
+            };
+        };
+        const threadId = context(layout.threadIdField, false);
+        const taskId = context(layout.taskIdField, true);
+        const workerId = context(layout.workerIdField, false);
+        if (!threadId.valid || !taskId.valid || !workerId.valid) return null;
+        const rawName =
+            layout.nameField == null ? null : values[layout.nameField];
+        const dynamicName = rawName == null ? "" : String(rawName);
+        const fields = {};
+        const units = {};
+        for (const field of layout.attributeFields) {
+            // Optional wire fields decode as null. They are absent values, not
+            // span attributes; match the Rust decoder's FieldValueRef::None path.
+            if (values[field] == null) continue;
+            fields[field] = values[field];
+            if (schema.units?.[field] != null) {
+                units[field] = schema.units[field];
+            }
+        }
+        return {
+            start,
+            end,
+            name: dynamicName.trim() ? dynamicName : layout.schemaName,
+            spanType: layout.spanType,
+            threadId: threadId.value,
+            taskId: taskId.value,
+            workerId: workerId.value,
+            fields,
+            units: Object.keys(units).length > 0 ? units : null,
         };
     }
 
@@ -722,7 +1084,8 @@
         const { startTime, endTime } = state;
         if (frame.type !== "event") return;
         const v = frame.values;
-        const ts = num(frame.timestamp_ns);
+        const ts =
+            frame.timestamp_ns == null ? null : num(frame.timestamp_ns);
         // Track smallest monotonic ts for legacy anchor synthesis.
         // Skip SegmentMetadata (legacy wall clock) and SymbolTableEntry.
         if (
@@ -734,17 +1097,79 @@
             state.minMonoTs = ts;
         }
 
+        if (frame.name === "WorkerParkEvent" || frame.name === "WorkerUnparkEvent") {
+            recordTidBinding(state, v, ts);
+            if (ts != null) {
+                state.parkUnparkHistory.push({
+                    eventType:
+                        frame.name === "WorkerParkEvent"
+                            ? EVENT_TYPES.WorkerPark
+                            : EVENT_TYPES.WorkerUnpark,
+                    timestamp: ts,
+                    workerId: num(v.worker_id),
+                    tid: v.tid != null ? num(v.tid) : undefined,
+                });
+            }
+        }
+
         const capped = state.events.length >= state.maxEvents;
         if (capped && !UNCAPPED_FRAMES.has(frame.name)) return;
 
+        const schema = dec.schemas.get(frame.typeId);
+        const singleEventLayout =
+            schema && schema.annotations && schema.annotations.length > 0
+                ? compileSingleEventSpanSchema(schema)
+                : { kind: "not-span" };
+        const isSingleEventSchema = singleEventLayout.kind !== "not-span";
+        const singleEventSpan =
+            singleEventLayout.kind === "layout"
+                ? decodeSingleEventSpan(singleEventLayout, schema, v, ts)
+                : null;
+        if (singleEventLayout.kind === "layout" && singleEventSpan == null) {
+            state.singleEventDecodeErrors++;
+        }
+
         // Time range filtering: skip events outside the requested range
         // (uncapped frames like symbols/metadata are always processed)
-        const inTimeRange = ts >= startTime && ts <= endTime;
-        if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) return;
-        if (inTimeRange && !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)) {
-            if (ts != null) {
-                if (ts < state.recordMinTs) state.recordMinTs = ts;
-                if (ts > state.recordMaxTs) state.recordMaxTs = ts;
+        const inTimeRange =
+            ts != null && ts >= startTime && ts <= endTime;
+        const spanInTimeRange =
+            singleEventSpan != null &&
+            singleEventSpan.start <= endTime &&
+            singleEventSpan.end > startTime;
+        const recordInTimeRange =
+            singleEventSpan != null ? spanInTimeRange : inTimeRange;
+        const uncappedRuntimeFrame =
+            !isSingleEventSchema && UNCAPPED_FRAMES.has(frame.name);
+        if (
+            !recordInTimeRange &&
+            !uncappedRuntimeFrame
+        ) {
+            return;
+        }
+        if (
+            recordInTimeRange &&
+            !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)
+        ) {
+            const boundStart = spanInTimeRange
+                ? Math.max(singleEventSpan.start, startTime)
+                : ts;
+            const boundEnd = spanInTimeRange
+                ? Math.min(singleEventSpan.end, endTime)
+                : ts;
+            if (boundStart != null && boundStart < state.recordMinTs) {
+                state.recordMinTs = boundStart;
+            }
+            if (boundEnd != null && boundEnd > state.recordMaxTs) {
+                state.recordMaxTs = boundEnd;
+            }
+            if (spanInTimeRange) {
+                if (boundStart < state.singleEventMinTs) {
+                    state.singleEventMinTs = boundStart;
+                }
+                if (boundEnd > state.singleEventMaxTs) {
+                    state.singleEventMaxTs = boundEnd;
+                }
             }
         }
 
@@ -760,13 +1185,52 @@
         const freeEvents = state.freeEvents;
         const memoryOverflows = state.memoryOverflows;
         const threadNames = state.threadNames;
-        const tidToWorker = state.tidToWorker;
         const runtimeWorkers = state.runtimeWorkers;
         const segmentMetadata = state.segmentMetadata;
+        const runtimeMetrics = state.runtimeMetrics;
         const taskDumps = state.taskDumps;
         const customEvents = state.customEvents;
         const spanEventSink = state.spanEventSink;
         const clockSyncAnchors = state.clockSyncAnchors;
+        if (singleEventSpan != null) {
+            const storedInSink =
+                spanEventSink &&
+                spanEventSink.pushIfSpan(
+                    frame.name,
+                    singleEventSpan.end,
+                    v,
+                    singleEventSpan,
+                );
+            if (!storedInSink) {
+                // units/fieldKinds resolved in finalizeParse (see below).
+                customEvents.push({
+                    name: frame.name,
+                    timestamp: ts,
+                    fields: v,
+                    units: null,
+                    fieldKinds: null,
+                    singleEventSpan,
+                });
+                state.customEventSchemas.push(schema);
+            }
+        } else if (isSingleEventSchema && ts != null) {
+            // Invalid schemas and per-event projection failures remain visible
+            // as ordinary custom events, but must not mutate runtime state based
+            // only on a colliding schema name.
+            customEvents.push({
+                name: frame.name,
+                timestamp: ts,
+                fields: v,
+                units: null,
+                fieldKinds: null,
+                singleEventSpan: null,
+            });
+            state.customEventSchemas.push(schema);
+        }
+        if (isSingleEventSchema) {
+            return;
+        }
+        if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) return;
 
         switch (frame.name) {
             case "PollStartEvent": {
@@ -813,8 +1277,6 @@
                 });
                 break;
             case "WorkerParkEvent":
-                if (v.tid != null)
-                    tidToWorker.set(num(v.tid), num(v.worker_id));
                 if (events.pushEvent) {
                     events.pushEvent(2, ts, num(v.worker_id), num(v.local_queue), 0, num(v.cpu_time_ns), 0, 0, null, v.tid != null ? num(v.tid) : undefined, undefined, undefined);
                     break;
@@ -836,8 +1298,6 @@
                 });
                 break;
             case "WorkerUnparkEvent":
-                if (v.tid != null)
-                    tidToWorker.set(num(v.tid), num(v.worker_id));
                 if (events.pushEvent) {
                     events.pushEvent(3, ts, num(v.worker_id), num(v.local_queue), 0, num(v.cpu_time_ns), v.sched_wait_ns == null ? null : num(v.sched_wait_ns), 0, null, v.tid != null ? num(v.tid) : undefined, undefined, undefined);
                     break;
@@ -879,6 +1339,21 @@
                     taskId: 0,
                     spawnLocId: null,
                     spawnLoc: null,
+                });
+                break;
+            case "RuntimeMetricsEvent":
+                // Per-runtime scheduler metrics. Low-volume, so recorded in a
+                // side-channel array rather than the columnar event store.
+                // `runtime_name` is empty for the unnamed default runtime.
+                // `global_queue_depth`/`alive_tasks` were added together, so old
+                // traces (which have neither) never reach this case — they emit
+                // QueueSampleEvent instead.
+                runtimeMetrics.push({
+                    t: ts,
+                    runtimeName:
+                        v.runtime_name != null ? String(v.runtime_name) : "",
+                    globalQueue: num(v.global_queue_depth),
+                    aliveTasks: num(v.alive_tasks),
                 });
                 break;
             case "TaskSpawnEvent": {
@@ -1051,20 +1526,27 @@
                 break;
             }
             default: {
-                // Unrecognized event type: capture as a custom event. Span
-                // events (SpanEnter/Exit/Close) route to the columnar
-                // spanEventSink when present; everything else stays fat.
+                // Unrecognized event type: capture as a custom event. Events
+                // that produce spans route to the columnar spanEventSink when
+                // present; everything else stays fat.
                 if (ts != null) {
-                    if (!(spanEventSink && spanEventSink.pushIfSpan(frame.name, ts, v))) {
-                        const schema = dec.schemas.get(frame.typeId);
-                        const event = {
+                    if (
+                        !(
+                            spanEventSink &&
+                            spanEventSink.pushIfSpan(frame.name, ts, v, null)
+                        )
+                    ) {
+                        // units/fieldKinds are resolved in finalizeParse from
+                        // the parallel customEventSchemas array (trailing
+                        // annotation frames may still update the schema).
+                        customEvents.push({
                             name: frame.name,
                             timestamp: ts,
                             fields: v,
                             units: null,
                             fieldKinds: null,
-                        };
-                        customEvents.push(event);
+                            singleEventSpan: null,
+                        });
                         state.customEventSchemas.push(schema);
                     }
                 }
@@ -1094,11 +1576,16 @@
             memoryOverflows,
             threadNames,
             tidToWorker,
+            tidBindings,
+            parkUnparkHistory,
+            stableTidToWorker,
             runtimeWorkers,
             segmentMetadata,
+            runtimeMetrics,
             taskDumps,
             customEvents,
             customEventSchemas,
+            spanEventSink,
             clockSyncAnchors,
             maxEvents,
             startTime,
@@ -1115,13 +1602,19 @@
                 ? cpuSamplesSink.samples
                 : cpuSamplesSink;
 
-        // Annotation frames may follow events. Resolve against the exact schema
-        // active for each event now that every frame has been consumed, then let
-        // the temporary parallel array die with the parse state.
+        // Metadata annotations (unit/kind) may legally follow the event they
+        // describe, so resolve them against the exact schema active for each
+        // event now that every frame has been consumed. Span *classification*,
+        // by contrast, is not recomputed here: span-role annotations
+        // (`dial9.role`) are required by the wire format to precede any event of
+        // their type (see docs/design/single-event-spans.md), so the decode-time
+        // projection in processFrame is already final. Both decoders classify in
+        // a single pass; neither re-resolves spans after the fact.
         for (let i = 0; i < customEvents.length; i++) {
+            const event = customEvents[i];
             const schema = customEventSchemas[i];
-            customEvents[i].units = schema?.units || null;
-            customEvents[i].fieldKinds = schema?.fieldKinds || null;
+            event.units = schema?.units || null;
+            event.fieldKinds = schema?.fieldKinds || null;
         }
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
@@ -1147,13 +1640,31 @@
         for (const arr of taskDumps.values()) {
             arr.sort((a, b) => a.timestamp - b.timestamp);
         }
+        for (const [tid, bindings] of tidBindings) {
+            bindings.sort((a, b) => a.timestamp - b.timestamp);
+            const coalesced = [];
+            for (const binding of bindings) {
+                if (
+                    coalesced.length === 0 ||
+                    coalesced[coalesced.length - 1].workerId !== binding.workerId
+                ) {
+                    coalesced.push(binding);
+                }
+            }
+            tidBindings.set(tid, coalesced);
+        }
+        if (state.singleEventDecodeErrors > 0) {
+            console.warn(
+                `Ignored ${state.singleEventDecodeErrors} invalid single-event span event(s)`,
+            );
+        }
 
         let clockOffsetNs = null;
         if (clockSyncAnchors.length > 0) {
             const a0 = clockSyncAnchors[0];
             clockOffsetNs = a0.realtimeNs - a0.monotonicNs;
         }
-        // Keep the historical event-only bounds for runtime analysis consumers.
+        // Runtime events and completed single-event spans both contribute bounds.
         let evMinTs = Infinity,
             evMaxTs = -Infinity;
         if (typeof events.minTs === "number" && typeof events.maxTs === "number") {
@@ -1169,6 +1680,8 @@
                 if (t > evMaxTs) evMaxTs = t;
             }
         }
+        evMinTs = Math.min(evMinTs, state.singleEventMinTs);
+        evMaxTs = Math.max(evMaxTs, state.singleEventMaxTs);
 
         // Second pass: derive worker attribution from WorkerPark/WorkerUnpark
         // tid fields, detect block-in-place gaps, and rewrite cpuSamples.workerId.
@@ -1182,14 +1695,17 @@
             const w = tidToWorker.get(sample.tid);
             if (w !== undefined) sample.workerId = w;
         }
-        const blockInPlaceGaps = deriveBlockInPlaceGaps(events, cpuSamples);
+        const blockInPlaceGaps = deriveBlockInPlaceGaps(
+            parkUnparkHistory,
+            cpuSamples,
+        );
 
         return {
             magic: "D9TF",
             version,
             events,
-            minTs: events.length > 0 ? evMinTs : null,
-            maxTs: events.length > 0 ? evMaxTs : null,
+            minTs: Number.isFinite(evMinTs) ? evMinTs : null,
+            maxTs: Number.isFinite(evMaxTs) ? evMaxTs : null,
             recordMinTs:
                 state.recordMinTs < Infinity ? state.recordMinTs : null,
             recordMaxTs:
@@ -1218,9 +1734,12 @@
             callframeSymbols,
             threadNames,
             tidToWorker,
+            tidBindings,
+            stableTidToWorker,
             taskTerminateTimes,
             runtimeWorkers,
             segmentMetadata,
+            runtimeMetrics,
             customEvents,
             taskDumps,
             clockSyncAnchors,
@@ -1947,6 +2466,10 @@
             symbolizeChain,
             deduplicateSamples,
             deriveBlockInPlaceGaps,
+            // Exported for unit tests: the single-event span schema compiler
+            // and its runtime timing resolution. Not part of the browser API.
+            compileSingleEventSpanSchema,
+            resolveSpanTiming,
         };
     } else {
         exports.TraceParser = {

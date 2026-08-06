@@ -171,6 +171,26 @@ jobs:
           --exclude metrics-service
           --exclude simple-local
           --exclude-features _shuttle
+      - name: Test viewer without S3
+        run: cargo test -p dial9-viewer --no-default-features --lib
+      - name: Check local-only viewer excludes AWS dependencies
+        run: |
+          cargo tree -p dial9-viewer --no-default-features \
+            --target all --edges normal --prefix none --format '{p}' \
+            > /tmp/dial9-viewer-local-tree.txt
+          if grep -E '^(aws-|s3s)' /tmp/dial9-viewer-local-tree.txt; then
+            echo "AWS SDK/S3 dependencies found in the local-only viewer graph"
+            exit 1
+          fi
+      - name: Check S3 CLI includes the AWS SDK
+        run: |
+          cargo tree -p dial9 --no-default-features --features cli \
+            --target all --edges normal --prefix none --format '{p}' \
+            > /tmp/dial9-cli-s3-tree.txt
+          if ! grep -qE '^aws-sdk-s3 ' /tmp/dial9-cli-s3-tree.txt; then
+            echo "S3 CLI no longer includes aws-sdk-s3"
+            exit 1
+          fi
 
   no-tokio-unstable:
     name: Build without tokio_unstable

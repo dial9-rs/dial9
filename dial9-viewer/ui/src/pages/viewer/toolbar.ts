@@ -20,6 +20,7 @@ import {
   formatHumanDuration,
   hasCpuProfileSamples,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
   type IdentityField,
   type ReconciledIdentity,
@@ -365,6 +366,11 @@ function infoMenu(
   sourceLabel: string,
   uninstrumented: number,
 ): TemplateResult {
+  const metadata = readSegmentMetadataEntries(trace);
+  const infoTitle =
+    metadata.length > 0
+      ? "Trace details and segment metadata"
+      : "Trace and load details (parse performance, uninstrumented tasks)";
   const workers = new Set(trace.tidToWorker.values()).size;
   const duration =
     trace.minTs !== null && trace.maxTs !== null
@@ -374,12 +380,18 @@ function infoMenu(
     <details class="d9-info-menu" data-info-menu>
       <summary
         class="d9-toolbar-btn d9-info-summary"
-        title="Trace and load details (parse performance, uninstrumented tasks)"
-        aria-label="Trace and load details"
+        title=${infoTitle}
+        aria-label=${infoTitle}
       >
         ⓘ
       </summary>
-      <div class="d9-info-menu-body" role="group" aria-label="Trace details">
+      <div
+        class=${metadata.length > 0
+          ? "d9-info-menu-body d9-info-menu-body-wide"
+          : "d9-info-menu-body"}
+        role="group"
+        aria-label="Trace details"
+      >
         <div class="d9-info-heading">Load &amp; trace</div>
         <div class="d9-info-row"><span>source</span><span>${sourceLabel}</span></div>
         <div class="d9-info-row"><span>events</span><span>${trace.events.length.toLocaleString()}</span></div>
@@ -408,6 +420,29 @@ function infoMenu(
                 Spawned via raw <code>tokio::spawn</code> (no wake tracking).
                 Use <code>TelemetryHandle::spawn</code> for full data.
               </div>`
+          : ""}
+        ${metadata.length > 0
+          ? html`<div class="d9-info-heading" id="d9-segment-metadata-heading">
+                Segment metadata
+              </div>
+              <table
+                class="d9-info-metadata-table"
+                aria-labelledby="d9-segment-metadata-heading"
+              >
+                <thead>
+                  <tr><th scope="col">Key</th><th scope="col">Value</th></tr>
+                </thead>
+                <tbody>
+                  ${metadata.map(
+                    ([key, value]) => html`
+                      <tr>
+                        <td><code title=${key}>${key}</code></td>
+                        <td><code title=${value}>${value}</code></td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>`
           : ""}
       </div>
     </details>

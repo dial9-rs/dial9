@@ -1,10 +1,8 @@
 // The Span Explorer page entry.
 //
 // Two sources feed the same catalog:
-//   RAW  (`?trace=`)  - the trace is fetched and parsed in the browser, and the
-//                       catalog is built client-side. No exemplars, no
-//                       flamegraph links, no attribute filtering: all three need
-//                       the aggregation backend.
+//   RAW  (`?trace=`)  - the browser fetches the trace, then POSTs its bytes to
+//                       /api/span-stats for one server-side Rust decode.
 //   AGGREGATE (`?api=1` / `?bucket=` / `?data_dir=`) - /api/span-stats streams
 //                       server-computed statistics over SSE.
 //
@@ -19,14 +17,11 @@ import {
   Dial9Creds,
   Dial9Session,
   addAttrFilter,
-  buildSpanCatalog,
   classifyExemplarSnapshot,
   completeExemplarRefresh,
-  buildSpanData,
   exemplarRequestMatches,
   formatCoverageBadge,
   hasAttrFilter,
-  loadTrace,
   mergeSelectedExemplarSnapshot,
   nextMaxFiles,
   nsToPickerUtc,
@@ -64,6 +59,7 @@ import {
   setOverride,
   type ColumnOverrides,
 } from "./columns.js";
+import { fetchRawTraceBytes, rawStatsSummary, requestRawSpanStats } from "./raw.js";
 
 const els = pageEls();
 
@@ -164,6 +160,8 @@ function renderDetailNow(): void {
     exemplarRefreshPending,
     exemplarPreviewAvailable,
     linkState: linkState(),
+    rawTrace: scope.trace,
+    rawRegion: scope.region,
     onBand: applyBand,
     onClearBand: () => applyBand({ min_ns: null, max_ns: null }),
     onToggleFilter: toggleAttrFilter,
@@ -455,16 +453,15 @@ if (rawMode && scope.trace != null) {
   els.stats.textContent = "📂 Raw trace mode — loading…";
   void (async () => {
     try {
-      const { trace } = await loadTrace(scope.trace as string, {
-        headers: Dial9Session.headers(Dial9Creds.headers()),
-      });
-      const { allSpans } = buildSpanData(trace.customEvents);
-      spanTypes = buildSpanCatalog(allSpans, trace.customEvents) as SpanTypeStats[];
+      const traceBytes = await fetchRawTraceBytes(
+        scope.trace as string,
+        window.location.origin,
+        Dial9Session.headers(Dial9Creds.headers()),
+      );
+      const response = await requestRawSpanStats(traceBytes, window.location.origin);
+      spanTypes = response.span_types;
       els.loading.classList.add("hidden");
-      const total = spanTypes.reduce((s, t) => s + t.count, 0);
-      els.stats.textContent =
-        `📂 Raw trace mode · ${spanTypes.length} span types · ` +
-        `${total.toLocaleString()} instances`;
+      els.stats.textContent = `📂 Server-decoded raw trace · ${rawStatsSummary(response)}`;
       renderCatalogNow();
       renderDetailNow();
     } catch (e) {

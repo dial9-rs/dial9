@@ -55,6 +55,7 @@ const LIFESPAN_BORDER = "rgba(129,199,132,0.3)";
 const LIFESPAN_EDGE = "#81c784";
 const LEGEND_LABEL = "#aaa";
 const CROSSHATCH = "rgba(140,120,255,0.35)";
+const LIFESPAN_LABEL_Y = BAND_TOP - 18;
 
 /**
  * The store-cached task-detail derivation. Keyed on ["trace", "selection"] so a
@@ -419,7 +420,7 @@ export function drawTaskDetailCanvas(
       ctx.fillStyle = LIFESPAN_EDGE;
       ctx.font = "8px monospace";
       ctx.textAlign = "left";
-      ctx.fillText("spawn▸", l.x1 + 2, BAND_TOP - 8);
+      ctx.fillText("spawn▸", l.x1 + 2, LIFESPAN_LABEL_Y);
     }
     if (l.showDone) {
       ctx.strokeStyle = LIFESPAN_EDGE;
@@ -430,7 +431,7 @@ export function drawTaskDetailCanvas(
       ctx.fillStyle = LIFESPAN_EDGE;
       ctx.font = "8px monospace";
       ctx.textAlign = "right";
-      ctx.fillText("◂done", l.x2 - 2, BAND_TOP - 8);
+      ctx.fillText("◂done", l.x2 - 2, LIFESPAN_LABEL_Y);
     }
     ctx.font = "9px monospace";
   }

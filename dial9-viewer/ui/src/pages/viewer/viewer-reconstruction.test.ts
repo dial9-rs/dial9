@@ -206,6 +206,7 @@ describe("viewer deep-link reconstruction", () => {
       trackOrder: ["events", "spans", "cpu"],
       collapsed: { queue: true },
       collapsedRuntimes: { runtime_a: true },
+      collapsedRuntimeMetrics: { runtime_b: true },
       sidebarWidth: 444,
       lanesViewportHeight: 280,
       lanesScrollTop: 96,

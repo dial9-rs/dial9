@@ -12,9 +12,11 @@
 import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
 import {
   deriveRuntimeGroups,
+  deriveRuntimeMetrics,
   sharedSpanData,
   sharedWorkerSpans,
 } from "../../lib/trace/derived.js";
+import { metricsRuntimeNames } from "../../lib/trace/runtime-metrics-model.js";
 import type {
   BlockInPlaceGap,
   ParsedTrace,
@@ -30,6 +32,9 @@ export interface OverlayData {
   workerIds: number[];
   /** Runtime groups in render order (for the fixed-height + header y-mapping). */
   runtimeGroups: RuntimeGroup[];
+  /** Runtime names with a summary lane (so hit-test y-mapping matches the
+   *  rendered stack, which appends a lane per such runtime). */
+  metricsRuntimes: ReadonlySet<string>;
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, LaneSpans>;
   /** All completed spans, start-sorted (span detail + span-in-poll count).
@@ -62,6 +67,11 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
   const spanResult = sharedWorkerSpans(trace);
   const workerSpans = spanResult.workerSpans;
 
+  // Runtimes with a metric series get a summary lane; the hit-test must account
+  // for it (same derivation the renderer's data uses, so hover can never drift
+  // from the drawn stack).
+  const metricsRuntimes = metricsRuntimeNames(runtimeGroups, deriveRuntimeMetrics(trace));
+
   const spanData = sharedSpanData(trace);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
@@ -71,6 +81,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
   return {
     workerIds,
     runtimeGroups,
+    metricsRuntimes,
     workerSpans,
     allSpans: spanData.allSpans,
     columnarSpans: spanData.columnarSpans,
