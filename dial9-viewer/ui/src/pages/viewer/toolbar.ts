@@ -27,7 +27,6 @@ import {
 } from "../../lib/trace/index.js";
 import { poiSourceFor, kindLabel, redFlagCounts } from "./poi.js";
 import type { PointOfInterestType } from "../../types/trace.js";
-import { ESC_PRIORITY, type EscCascade } from "./esc-cascade.js";
 
 /** Which whole-trace analysis an analysis button opens. */
 export type AnalysisKind = "cpu" | "blocking" | "heap";
@@ -36,8 +35,6 @@ export type AnalysisKind = "cpu" | "blocking" | "heap";
 export interface ToolbarDeps {
   /** Open the trace-wide catalogue of graphable custom-event fields. */
   onOpenFieldCharts(): void;
-  /** Page-wide Escape cascade used by the metadata popover. */
-  esc: EscCascade;
   /** Open a whole-trace analysis in the inspector. */
   onOpenAnalysis(kind: AnalysisKind): void;
   /** Set a time-range filter from the current viewport (reparse). */
@@ -150,28 +147,6 @@ export function createToolbar(
     deps.onSetRange({ startNs: vp.viewStart, endNs: vp.viewEnd });
   }
 
-  function openMetadataMenu(): HTMLDetailsElement | null {
-    return document.querySelector<HTMLDetailsElement>(
-      "[data-segment-metadata-menu][open]",
-    );
-  }
-  function onDocumentPointerDown(e: PointerEvent): void {
-    const menu = openMetadataMenu();
-    if (menu !== null && !e.composedPath().includes(menu)) menu.open = false;
-  }
-  document.addEventListener("pointerdown", onDocumentPointerDown);
-  const unregisterMetadataEsc = deps.esc.register({
-    name: "segment metadata",
-    priority: ESC_PRIORITY.popup,
-    isOpen: () => openMetadataMenu() !== null,
-    close: () => {
-      const menu = openMetadataMenu();
-      if (menu === null) return;
-      menu.open = false;
-      menu.querySelector<HTMLElement>("summary")?.focus();
-    },
-  });
-
   const keyBindings: readonly KeyBinding[] = [
     {
       // `g`: focus the goto-time input. Declines (falls through) when the input
@@ -197,8 +172,7 @@ export function createToolbar(
       timeTemplate(state, { toggleTimeMode, toggleTz, onGotoKey, setRange, onClearRange: deps.onClearRange }),
     keyBindings,
     dispose(): void {
-      document.removeEventListener("pointerdown", onDocumentPointerDown);
-      unregisterMetadataEsc();
+      /* no live listeners: templates own their handlers */
     },
   };
 }
@@ -215,7 +189,6 @@ function fileInfoTemplate(
   return html`
     <span class="d9-file-name" title=${sourceLabel}>${sourceLabel}</span>
     ${identityTemplate(identity)}
-    ${metadataTemplate(readSegmentMetadataEntries(trace))}
     <span class="d9-file-meta" data-file-meta id="toolbar-row-data"
       >${fileMetaText(trace)}</span
     >
@@ -248,35 +221,6 @@ function identityChip(
   return html`<span class="d9-file-identity-item" data-identity=${field} title=${title}
     ><span class="d9-file-identity-key">${field}</span>${info.value}</span
   >`;
-}
-
-function metadataTemplate(entries: [string, string][]): TemplateResult | string {
-  if (entries.length === 0) return "";
-  return html`
-    <details class="d9-metadata-menu" data-segment-metadata-menu>
-      <summary
-        class="d9-file-identity-item d9-metadata-summary"
-        title="Inspect all segment metadata"
-      >
-        Metadata · ${entries.length}
-      </summary>
-      <div class="d9-metadata-menu-body">
-        <table class="d9-metadata-table">
-          <caption>Segment metadata</caption>
-          <thead>
-            <tr><th scope="col">Key</th><th scope="col">Value</th></tr>
-          </thead>
-          <tbody>
-            ${entries.map(
-              ([key, value]) => html`
-                <tr><td><code>${key}</code></td><td><code>${value}</code></td></tr>
-              `,
-            )}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  `;
 }
 
 /** The stats line: events, workers, duration, plus truncation/filter notes. */
@@ -422,6 +366,11 @@ function infoMenu(
   sourceLabel: string,
   uninstrumented: number,
 ): TemplateResult {
+  const metadata = readSegmentMetadataEntries(trace);
+  const infoTitle =
+    metadata.length > 0
+      ? "Trace details and segment metadata"
+      : "Trace and load details (parse performance, uninstrumented tasks)";
   const workers = new Set(trace.tidToWorker.values()).size;
   const duration =
     trace.minTs !== null && trace.maxTs !== null
@@ -431,12 +380,18 @@ function infoMenu(
     <details class="d9-info-menu" data-info-menu>
       <summary
         class="d9-toolbar-btn d9-info-summary"
-        title="Trace and load details (parse performance, uninstrumented tasks)"
-        aria-label="Trace and load details"
+        title=${infoTitle}
+        aria-label=${infoTitle}
       >
         ⓘ
       </summary>
-      <div class="d9-info-menu-body" role="group" aria-label="Trace details">
+      <div
+        class=${metadata.length > 0
+          ? "d9-info-menu-body d9-info-menu-body-wide"
+          : "d9-info-menu-body"}
+        role="group"
+        aria-label="Trace details"
+      >
         <div class="d9-info-heading">Load &amp; trace</div>
         <div class="d9-info-row"><span>source</span><span>${sourceLabel}</span></div>
         <div class="d9-info-row"><span>events</span><span>${trace.events.length.toLocaleString()}</span></div>
@@ -456,6 +411,29 @@ function infoMenu(
                 Spawned via raw <code>tokio::spawn</code> (no wake tracking).
                 Use <code>TelemetryHandle::spawn</code> for full data.
               </div>`
+          : ""}
+        ${metadata.length > 0
+          ? html`<div class="d9-info-heading" id="d9-segment-metadata-heading">
+                Segment metadata
+              </div>
+              <table
+                class="d9-info-metadata-table"
+                aria-labelledby="d9-segment-metadata-heading"
+              >
+                <thead>
+                  <tr><th scope="col">Key</th><th scope="col">Value</th></tr>
+                </thead>
+                <tbody>
+                  ${metadata.map(
+                    ([key, value]) => html`
+                      <tr>
+                        <td><code title=${key}>${key}</code></td>
+                        <td><code title=${value}>${value}</code></td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>`
           : ""}
       </div>
     </details>
