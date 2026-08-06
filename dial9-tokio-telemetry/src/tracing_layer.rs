@@ -59,7 +59,17 @@
 //! with nesting depth, so the layer is suitable for production use with
 //! appropriate span filtering.
 
+use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::TraceEvent;
+use dial9_trace_format::encoder::Schema;
+use dial9_trace_format::schema::FieldDef;
+use dial9_trace_format::types::{FieldType, FieldValue};
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Mutex;
+use tracing::callsite::Identifier;
+use tracing::span;
+use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 /// Emitted once when a span closes, so the viewer can recycle its id. Mirrors
 /// the `SpanCloseEvent` the ad-hoc span wrappers emit (same schema, distinct
@@ -71,16 +81,6 @@ struct SpanCloseEvent {
     timestamp_ns: u64,
     span_id: u64,
 }
-use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
-use dial9_trace_format::encoder::Schema;
-use dial9_trace_format::schema::FieldDef;
-use dial9_trace_format::types::{FieldType, FieldValue};
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::Mutex;
-use tracing::callsite::Identifier;
-use tracing::span;
-use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 // ── Per-callsite schema cache ───────────────────────────────────────────────
 
