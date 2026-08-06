@@ -25,9 +25,10 @@ use axum::{Router, extract::Path, routing::post};
 use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 
 // The entire span surface. The macro + core wrappers are unconditional;
-// `Dial9SpanLayer` is behind the `tower` cargo feature.
+// `dial9_utils::tower` is behind the `tower` cargo feature.
 use dial9_utils::dial9_span;
-use dial9_utils::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
+use dial9_utils::span::{Dial9Span, Instrument as _, Span as _};
+use dial9_utils::tower::Dial9SpanLayer;
 
 fn main() {
     let writer = DiskBuffer::single_file("/tmp/checkout-traces/trace.bin").unwrap();
