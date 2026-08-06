@@ -260,6 +260,7 @@ struct RuntimeEnter {
     worker_id: u64,
     span_id: u64,
     parent_span_id: Option<u64>,
+    #[traceevent(role = "span.name")]
     span_name: InternedString,
 }
 
@@ -270,6 +271,7 @@ struct RuntimeExit {
     timestamp_ns: u64,
     worker_id: u64,
     span_id: u64,
+    #[traceevent(role = "span.name")]
     span_name: InternedString,
     #[traceevent(unit = "ns")]
     active_ns: u64,
@@ -526,6 +528,7 @@ macro_rules! __dial9_span_build {
             worker_id: u64,
             span_id: u64,
             parent_span_id: ::core::option::Option<u64>,
+            #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             $( $key: $key, )*
         }
@@ -540,6 +543,7 @@ macro_rules! __dial9_span_build {
             timestamp_ns: u64,
             worker_id: u64,
             span_id: u64,
+            #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             #[traceevent(unit = "ns")]
             active_ns: u64,
@@ -653,6 +657,7 @@ macro_rules! __dial9_span_build_late {
             worker_id: u64,
             span_id: u64,
             parent_span_id: ::core::option::Option<u64>,
+            #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             $( $key: $key, )*
         }
@@ -668,6 +673,7 @@ macro_rules! __dial9_span_build_late {
             timestamp_ns: u64,
             worker_id: u64,
             span_id: u64,
+            #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             #[traceevent(unit = "ns")]
             active_ns: u64,

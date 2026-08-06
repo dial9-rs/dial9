@@ -11,6 +11,10 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// with the viewer's `formatFieldValue` (dial9-viewer/ui/format.js).
 const SUPPORTED_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes"];
 
+/// Annotation key for `#[traceevent(role = "...")]`. Mirrors
+/// `dial9_core::schema_extensions::ROLE_KEY`, which this crate cannot depend on.
+const ROLE_ANNOTATION_KEY: &str = "dial9.role";
+
 /// The `#[traceevent(...)]` keys a field may carry.
 #[derive(Default)]
 struct FieldAttrs {
@@ -18,6 +22,8 @@ struct FieldAttrs {
     timestamp: bool,
     /// `unit = "..."`: rendering unit for this field.
     unit: Option<syn::LitStr>,
+    /// `role = "..."`: structural role for this field (`dial9.role`).
+    role: Option<syn::LitStr>,
 }
 
 /// Parse one field's `#[traceevent(...)]` keys. Malformed or unknown keys are
@@ -33,10 +39,12 @@ fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
                 parsed.timestamp = true;
             } else if meta.path.is_ident("unit") {
                 parsed.unit = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else if meta.path.is_ident("role") {
+                parsed.role = Some(meta.value()?.parse::<syn::LitStr>()?);
             } else {
                 return Err(meta.error(
-                    "unrecognized `traceevent` field attribute; expected `timestamp` or \
-                     `unit = \"...\"`",
+                    "unrecognized `traceevent` field attribute; expected `timestamp`, \
+                     `unit = \"...\"` or `role = \"...\"`",
                 ));
             }
             Ok(())
@@ -132,6 +140,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                      event header (always nanoseconds), not as a schema field",
                 ));
             }
+            if let Some(role) = &attrs.role {
+                return Err(syn::Error::new_spanned(
+                    role,
+                    "the timestamp field cannot carry a role annotation: it is encoded in the \
+                     event header, not as a schema field",
+                ));
+            }
             continue;
         }
         if let Some(unit) = unit {
@@ -150,6 +165,16 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
                 ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "unit", #unit)
+            });
+        }
+        if let Some(role) = &attrs.role {
+            let idx = field_def_tokens.len() as u16;
+            annotation_tokens.push(quote! {
+                ::dial9_trace_format::schema::FieldAnnotation::new(
+                    #idx,
+                    #ROLE_ANNOTATION_KEY,
+                    #role,
+                )
             });
         }
 
@@ -272,6 +297,11 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile
 ///   error, as is placing `unit` on the timestamp field (the timestamp is
 ///   encoded in the event header and is always nanoseconds).
+///
+/// - `#[traceevent(role = "...")]` (field): attaches a `dial9.role` schema
+///   annotation, telling consumers what the field *is* structurally (e.g.
+///   `"span.name"`). The vocabulary lives in
+///   `dial9_core::schema_extensions::roles`.
 ///
 /// A malformed or unrecognized `traceevent` key is a compile error.
 ///
@@ -409,6 +439,20 @@ mod tests {
     }
 
     #[test]
+    fn role_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct SpanEnter {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(role = "span.name")]
+                span_name: InternedString,
+                #[traceevent(unit = "ns")]
+                active_ns: u64,
+            }
+        }));
+    }
+
+    #[test]
     fn invalid_unit_rejected() {
         let err = expand_err(quote! {
             struct BadUnit {
@@ -511,7 +555,8 @@ mod tests {
         });
         assert_eq!(
             err.to_string(),
-            "unrecognized `traceevent` field attribute; expected `timestamp` or `unit = \"...\"`"
+            "unrecognized `traceevent` field attribute; expected `timestamp`, `unit = \"...\"` \
+             or `role = \"...\"`"
         );
     }
 
