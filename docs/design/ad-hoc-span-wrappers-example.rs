@@ -42,7 +42,11 @@ fn main() {
         .unwrap();
 
     runtime.block_on(serve());
-    drop(recorder);
+
+    // Shutdown order matters: drop the runtime first so its workers flush their
+    // thread-local buffers, then drain the final segment with a deadline.
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 }
 
 async fn serve() {
@@ -62,7 +66,14 @@ async fn serve() {
         .layer(span_layer);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // Return from `serve` on Ctrl-C so `main` reaches the shutdown drain below,
+    // instead of the process dying with a segment still buffered.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await
+        .unwrap();
 }
 
 async fn checkout(Path(order_id): Path<u64>) -> String {
