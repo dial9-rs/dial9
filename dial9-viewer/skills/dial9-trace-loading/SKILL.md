@@ -30,6 +30,7 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   clockSyncAnchors: [{monotonicNs, realtimeNs}],
   runtimeWorkers: Map<string, number[]>, // runtime name → worker IDs
   segmentMetadata: Map<string, string>,  // latest segment metadata key → value
+  runtimeMetrics: [{t, runtimeName, globalQueue, aliveTasks}], // per-runtime scheduler samples (empty on pre-RuntimeMetrics traces)
   truncated: boolean,
   timeFiltered: boolean,
   filterStartTime: number|null,          // start of time range filter (ns), null if unfiltered

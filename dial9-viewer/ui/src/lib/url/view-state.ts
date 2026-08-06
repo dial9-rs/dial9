@@ -126,6 +126,8 @@ export interface ViewState {
   taskIndex?: number;
   /** Runtime groups hidden in the worker lanes. */
   collapsedRuntimes?: readonly string[];
+  /** Runtimes whose summary lane is folded to its one-line strip. */
+  collapsedRuntimeMetrics?: readonly string[];
   /** Shareable layout geometry and vertical lane position. */
   inspectorWidth?: number;
   lanesHeight?: number;

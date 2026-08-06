@@ -360,6 +360,10 @@ impl Dial9HandleTokioExt for Dial9Handle {
         };
 
         let task_dump_config = options.task_dump_config;
+        // Capture the runtime name before `options.runtime_name` is moved into
+        // `register_runtime_hooks`, so the metrics registration can tag this
+        // runtime's samples with its identity.
+        let runtime_name = options.runtime_name.clone();
         let ctx = register_runtime_hooks(
             shared,
             &mut builder,
@@ -385,7 +389,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if let Some(config) = task_dump_config {
             crate::task_dumped::set_taskdump_config(config);
         }
-        register_runtime_metrics(shared, runtime.handle().metrics());
+        register_runtime_metrics(shared, runtime_name, runtime.handle().metrics());
         Ok(runtime)
     }
 }

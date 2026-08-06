@@ -57,6 +57,7 @@ const P_RAIL_TAB = "rail";
 const P_TASK_SORT = "task-sort";
 const P_TASK_INDEX = "task-index";
 const P_RUNTIME_COLLAPSED = "runtime-collapsed";
+const P_RUNTIME_METRICS_COLLAPSED = "runtime-metrics-collapsed";
 const P_INSPECTOR_WIDTH = "inspector-width";
 const P_LANES_HEIGHT = "lanes-height";
 const P_LANES_SCROLL = "lanes-scroll";
@@ -145,6 +146,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     trackOrder: url(P_TRACK_ORDER),
     collapsed: url(P_COLLAPSED),
     collapsedRuntimes: url(P_RUNTIME_COLLAPSED),
+    collapsedRuntimeMetrics: url(P_RUNTIME_METRICS_COLLAPSED),
     sidebarWidth: url(P_INSPECTOR_WIDTH),
     lanesViewportHeight: url(P_LANES_HEIGHT),
     lanesScrollTop: url(P_LANES_SCROLL),
@@ -279,6 +281,12 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
     .filter((name) => state.uiPrefs.collapsedRuntimes[name] === true)
     .sort();
   if (runtimeCollapsed.length > 0) vs.collapsedRuntimes = runtimeCollapsed;
+  const runtimeMetricsCollapsed = Object.keys(state.uiPrefs.collapsedRuntimeMetrics)
+    .filter((name) => state.uiPrefs.collapsedRuntimeMetrics[name] === true)
+    .sort();
+  if (runtimeMetricsCollapsed.length > 0) {
+    vs.collapsedRuntimeMetrics = runtimeMetricsCollapsed;
+  }
   if (state.uiPrefs.sidebarWidth !== DEFAULT_INSPECTOR_WIDTH) {
     vs.inspectorWidth = state.uiPrefs.sidebarWidth;
   }
@@ -374,6 +382,7 @@ export function mirrorViewerToQuery(
   set(params, P_TASK_SORT, vs.taskSort ?? null);
   set(params, P_TASK_INDEX, finiteString(vs.taskIndex));
   set(params, P_RUNTIME_COLLAPSED, encodeList(vs.collapsedRuntimes));
+  set(params, P_RUNTIME_METRICS_COLLAPSED, encodeList(vs.collapsedRuntimeMetrics));
   set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
   set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
   set(params, P_LANES_SCROLL, finiteString(vs.lanesScrollTop));
@@ -455,6 +464,7 @@ export interface ViewerUrlState {
   taskSort?: { key: TaskSortKey; dir: "asc" | "desc" };
   taskIndex?: number;
   collapsedRuntimes?: string[];
+  collapsedRuntimeMetrics?: string[];
   inspectorWidth?: number;
   lanesHeight?: number;
   lanesScrollTop?: number;
@@ -507,6 +517,11 @@ export function hydrateViewerStore(
   if (urlView.collapsedRuntimes !== undefined) {
     uiPrefs.collapsedRuntimes = Object.fromEntries(
       urlView.collapsedRuntimes.map((name) => [name, true]),
+    );
+  }
+  if (urlView.collapsedRuntimeMetrics !== undefined) {
+    uiPrefs.collapsedRuntimeMetrics = Object.fromEntries(
+      urlView.collapsedRuntimeMetrics.map((name) => [name, true]),
     );
   }
   if (urlView.inspectorWidth !== undefined) {
@@ -669,6 +684,10 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (taskIndex !== null) out.taskIndex = taskIndex;
   const collapsedRuntimes = decodeList(p.get(P_RUNTIME_COLLAPSED));
   if (collapsedRuntimes !== null) out.collapsedRuntimes = collapsedRuntimes;
+  const collapsedRuntimeMetrics = decodeList(p.get(P_RUNTIME_METRICS_COLLAPSED));
+  if (collapsedRuntimeMetrics !== null) {
+    out.collapsedRuntimeMetrics = collapsedRuntimeMetrics;
+  }
   const inspectorWidth = positiveInt(p.get(P_INSPECTOR_WIDTH));
   if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
   const lanesHeight = positiveInt(p.get(P_LANES_HEIGHT));

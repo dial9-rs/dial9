@@ -626,6 +626,48 @@
   }
 
   /**
+   * Sum per-runtime global-queue depth into one process-wide timeline.
+   *
+   * Every runtime attached to the session emits one RuntimeMetricsEvent per
+   * flush cycle and the recorder stamps them with the cycle's timestamp, so
+   * grouping by `t` reconstructs the process-wide depth.
+   *
+   * @param {import('./trace_parser.js').RuntimeMetricsSample[]} runtimeMetrics
+   * @returns {Array<{t: number, global: number}>} sorted by t
+   */
+  function sumGlobalQueueByCycle(runtimeMetrics) {
+    const byTs = new Map();
+    for (const s of runtimeMetrics) {
+      byTs.set(s.t, (byTs.get(s.t) ?? 0) + s.globalQueue);
+    }
+    return [...byTs.entries()]
+      .map(([t, global]) => ({ t, global }))
+      .sort((a, b) => a.t - b.t);
+  }
+
+  /**
+   * The process-wide global injection-queue timeline for a trace, from whichever
+   * event generation the trace carries. THE one place that decision is made, so
+   * every consumer (viewer queue track, skill scripts) reads the same series:
+   *
+   * - Current traces carry per-runtime `RuntimeMetricsEvent`s, summed per cycle.
+   * - Traces predating them carry a single pre-summed `QueueSampleEvent` series,
+   *   which `buildWorkerSpans` extracts as `queueSamples`.
+   *
+   * @param {import('./trace_parser.js').ParsedTrace} trace
+   * @param {{queueSamples: Array<{t: number, global: number}>}} workerSpansResult
+   *   the `buildWorkerSpans` result for the same trace (the legacy fallback)
+   * @returns {Array<{t: number, global: number}>} sorted by t
+   */
+  function globalQueueSeries(trace, workerSpansResult) {
+    const runtimeMetrics = trace.runtimeMetrics;
+    if (runtimeMetrics && runtimeMetrics.length > 0) {
+      return sumGlobalQueueByCycle(runtimeMetrics);
+    }
+    return workerSpansResult.queueSamples;
+  }
+
+  /**
    * Attach CPU samples to the poll spans they fall within using binary search.
    * Mutates workerSpans poll objects (adds .cpuSamples[], .schedSamples[])
    * and sample objects (sets .spawnLoc and .inPoll).
@@ -1903,6 +1945,8 @@
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
+    globalQueueSeries,
+    sumGlobalQueueByCycle,
     computeRuntimeGroups,
     buildRuntimeFilterData,
     attachCpuSamples,

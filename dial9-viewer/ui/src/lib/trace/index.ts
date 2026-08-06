@@ -196,8 +196,10 @@ export {
   filterPointsOfInterest,
   flattenFlamegraph,
   getTraceTimeRange,
+  globalQueueSeries,
   hasCpuProfileSamples,
   selectSpanRenderSet,
+  sumGlobalQueueByCycle,
 } from "./analysis.js";
 export type {
   ActiveSpan,

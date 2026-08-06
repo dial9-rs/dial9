@@ -194,19 +194,23 @@ function innerRow(
 
 /**
  * The worker-lanes row: a fixed-height scroll box the user can drag-resize. The
- * "Workers" label sits in the LABEL_W gutter; the box (`.d9-lanes-viewport`)
- * holds the sticky lanes canvas over a `.d9-lanes-spacer` whose height (set by
- * the lanes mount) makes the box scroll when the stacked rows exceed the box.
- * The `.d9-track-canvas-wrap` wrapper is the legend's overlay anchor (kept so
- * the legend pins to the box bottom, not the scrolling content), and the bottom
- * `.d9-lanes-resize` gutter is the drag target the lanes mount wires.
+ * "Workers" label sits in the LABEL_W gutter, above a PER-ROW label canvas the
+ * lanes mount paints from the same row layout + scrollTop as the lanes canvas
+ * (so every lane is named in the gutter instead of in the data area). The box
+ * (`.d9-lanes-viewport`) holds the sticky lanes canvas over a
+ * `.d9-lanes-spacer` whose height (set by the lanes mount) makes the box scroll
+ * when the stacked rows exceed the box. The `.d9-track-canvas-wrap` wrapper is
+ * the legend's overlay anchor (kept so the legend pins to the box bottom, not
+ * the scrolling content), and the bottom `.d9-lanes-resize` gutter is the drag
+ * target the lanes mount wires.
  */
 function lanesTrackRow(t: TrackSpec, viewportHeight: number): TemplateResult {
   return html`
     <div class="d9-track d9-track--lanes" data-track-id=${t.id}>
       <div class="d9-lanes-head">
-        <div class="d9-track-label" id="d9-track-label-lanes">
+        <div class="d9-track-label d9-lanes-label" id="d9-track-label-lanes">
           <span class="d9-track-name">${t.label}</span>
+          <canvas class="d9-lanes-label-canvas" aria-hidden="true"></canvas>
         </div>
         <div class="d9-track-canvas-wrap">
           <div class="d9-lanes-viewport" style="height:${viewportHeight}px">

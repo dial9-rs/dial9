@@ -231,6 +231,29 @@ export default defineConfig({
   build: {
     target: "es2022",
     sourcemap: false,
+    // Do NOT wipe dist/ on build. `dist/.gitkeep` is COMMITTED (ui/.gitignore
+    // ignores `dist/*` but re-includes it) because rust-embed embeds `ui/dist/`
+    // and needs the folder to exist for a cargo-only checkout to compile — see
+    // dial9-viewer/src/server/mod.rs. Vite's default emptyOutDir deleted it, so
+    // any `npm run build` left a staged deletion that silently broke that build
+    // for whoever committed afterwards.
+    //
+    // Trade-off, stated honestly: content-hashed assets DO accumulate. A no-op
+    // rebuild reuses the same hashes, but any content change emits a new
+    // `assets/<name>-<hash>.js` and the previous one is never reclaimed, so a
+    // long-lived working tree grows one orphan per change. That is local-only
+    // clutter: release CI and the binary workflows both `npm ci && npm run
+    // build` in a FRESH checkout where dist/ holds just `.gitkeep`, so no stale
+    // asset can be embedded into a published crate or binary, and .gitignore
+    // keeps orphans out of git. `npx vite build --emptyOutDir` cleans up a tree
+    // that has drifted.
+    //
+    // The cleaner fix is to gitignore dist/ entirely and create it from
+    // dial9-viewer/build.rs (which already runs and declares
+    // rerun-if-changed=ui), which would let Vite keep its default. Deferred:
+    // that moves a Rust build dependency and wants verifying against a genuine
+    // cargo-only checkout, which is more than this fix needs to be.
+    emptyOutDir: false,
     // Rollup's CJS interop only covers node_modules by default, but
     // the frozen core is CJS-guard .js at the ui ROOT (ADR-0004 section
     // 6), consumed via named ESM imports from lib/trace + lib/canvas.

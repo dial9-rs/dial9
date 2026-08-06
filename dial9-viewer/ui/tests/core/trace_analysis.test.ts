@@ -25,6 +25,8 @@ const { EVENT_TYPES, parseTrace } = require("../../trace_parser.js") as {
 };
 const {
   buildWorkerSpans,
+  globalQueueSeries,
+  sumGlobalQueueByCycle,
   attachCpuSamples,
   buildActiveTaskTimeline,
   computeSchedulingDelays,
@@ -310,7 +312,75 @@ describe("buildWorkerSpans", () => {
   });
 
   it("queue samples exist", () => {
-    expect(queueSamples.length, "No queue samples").toBeGreaterThan(0);
+    // The current demo trace reports queue depth per-runtime via the
+    // RuntimeMetrics side-channel, so buildWorkerSpans' legacy
+    // QueueSample-derived `queueSamples` is empty. Accept either source: a
+    // legacy trace populates `queueSamples`, a current one populates
+    // `trace.runtimeMetrics`.
+    const total = queueSamples.length + trace.runtimeMetrics.length;
+    expect(total, "No queue samples (QueueSample or RuntimeMetrics)").toBeGreaterThan(0);
+  });
+});
+
+// ── globalQueueSeries / sumGlobalQueueByCycle ──
+// THE shared fallback both the viewer queue track and the skill scripts read,
+// so a multi-runtime (RuntimeMetrics) trace and a legacy (QueueSample) trace
+// yield one comparable global-queue timeline.
+
+describe("sumGlobalQueueByCycle", () => {
+  it("sums per-runtime depth per cycle timestamp and sorts by t", () => {
+    const summed = sumGlobalQueueByCycle([
+      { t: 20, runtimeName: "", globalQueue: 2, aliveTasks: 0 },
+      { t: 10, runtimeName: "", globalQueue: 5, aliveTasks: 0 },
+      { t: 10, runtimeName: "io", globalQueue: 3, aliveTasks: 0 },
+    ]);
+    expect(summed).toEqual([
+      { t: 10, global: 8 },
+      { t: 20, global: 2 },
+    ]);
+  });
+
+  it("is empty for no samples", () => {
+    expect(sumGlobalQueueByCycle([])).toEqual([]);
+  });
+});
+
+describe("globalQueueSeries", () => {
+  it("prefers summed RuntimeMetrics over the legacy queueSamples", () => {
+    const trace = {
+      runtimeMetrics: [
+        { t: 10, runtimeName: "", globalQueue: 5, aliveTasks: 0 },
+        { t: 10, runtimeName: "io", globalQueue: 3, aliveTasks: 0 },
+      ],
+    };
+    // A legacy series is present too; RuntimeMetrics must win.
+    const series = globalQueueSeries(trace, {
+      queueSamples: [{ t: 10, global: 999 }],
+    });
+    expect(series).toEqual([{ t: 10, global: 8 }]);
+  });
+
+  it("falls back to legacy queueSamples when the trace has no RuntimeMetrics", () => {
+    const legacy = [
+      { t: 1, global: 4 },
+      { t: 2, global: 7 },
+    ];
+    expect(globalQueueSeries({ runtimeMetrics: [] }, { queueSamples: legacy })).toBe(legacy);
+    expect(globalQueueSeries({}, { queueSamples: legacy })).toBe(legacy);
+  });
+
+  it("recovers a non-empty global-queue series on the demo trace", () => {
+    // Regression guard for the multi-runtime change: the current demo emits
+    // RuntimeMetrics, not QueueSample, so buildWorkerSpans' `queueSamples` is
+    // empty and only the summed path yields data (see #697).
+    const spans = buildWorkerSpans(trace.events, workerIds, trace.maxTs);
+    const series = globalQueueSeries(trace, spans);
+    if (trace.runtimeMetrics.length > 0) {
+      expect(spans.queueSamples.length).toBe(0);
+      expect(series.length).toBeGreaterThan(0);
+    } else {
+      expect(series).toBe(spans.queueSamples);
+    }
   });
 });
 

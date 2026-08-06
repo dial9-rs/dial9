@@ -21,7 +21,8 @@ function resolve(name) {
 
 const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require(resolve('trace_parser.js'));
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations } = require(resolve('trace_analysis.js'));
+        computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations,
+        globalQueueSeries } = require(resolve('trace_analysis.js'));
 const { diagnoseSetup } = require(resolve('diagnose_setup.js'));
 
 // ── Helpers ──
@@ -221,7 +222,7 @@ function accumulateTrace(acc, trace, sourceFile) {
   }
 
   // Queue depth
-  for (const q of spans.queueSamples) {
+  for (const q of globalQueueSeries(trace, spans)) {
     if (q.global > acc.queueMax) acc.queueMax = q.global;
     acc.queueSum += q.global;
     acc.queueCount++;
@@ -935,6 +936,10 @@ async function parseWorkerMain(traceFile, cachePath) {
     taskDumps: mapToEntries(trace.taskDumps),
     clockSyncAnchors: trace.clockSyncAnchors, clockOffsetNs: trace.clockOffsetNs,
     blockInPlaceGaps: trace.blockInPlaceGaps || [],
+    // Per-runtime scheduler samples: the global-queue series comes from these on
+    // current traces (buildWorkerSpans' queueSamples is empty once producers
+    // emit RuntimeMetricsEvent instead of QueueSampleEvent).
+    runtimeMetrics: trace.runtimeMetrics || [],
   }});
   for (const e of trace.events) writeLine({ t: 'e', d: e });
   for (const s of trace.cpuSamples) writeLine({ t: 'c', d: s });
@@ -976,6 +981,7 @@ function loadCacheFile(cachePath) {
   }
   raw.events = events; raw.cpuSamples = cpuSamples; raw.customEvents = customEvents;
   if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
+  if (!raw.runtimeMetrics) raw.runtimeMetrics = []; // pre-RuntimeMetrics cache files
   raw.allocEvents = allocEvents; raw.freeEvents = freeEvents;
   return raw;
 }
@@ -1036,7 +1042,7 @@ function analyzeWorkerMain(cachePath) {
   }
   partial.longPolls.sort((a, b) => b.dur - a.dur);
   partial.longPolls.length = Math.min(partial.longPolls.length, 100);
-  for (const q of spans.queueSamples) { if (q.global > partial.queueMax) partial.queueMax = q.global; partial.queueSum += q.global; partial.queueCount++; }
+  for (const q of globalQueueSeries(trace, spans)) { if (q.global > partial.queueMax) partial.queueMax = q.global; partial.queueSum += q.global; partial.queueCount++; }
   for (const sd of schedDelays) { if (sd.delay > 1e6) { partial.schedDelayHighCount++; partial.schedDelayWorst.push(sd); } }
   partial.schedDelayWorst.sort((a, b) => b.delay - a.delay);
   partial.schedDelayWorst.length = Math.min(partial.schedDelayWorst.length, 100);

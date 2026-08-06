@@ -177,6 +177,22 @@ declare module "*/trace_parser.js" {
   }
 
   /**
+   * One per-runtime scheduler-metrics sample, decoded from a
+   * `RuntimeMetricsEvent`. Every runtime attached to the session emits one per
+   * flush cycle, all sharing the cycle's timestamp `t`.
+   */
+  export interface RuntimeMetricsSample {
+    /** Monotonic sample timestamp (ns). Shared by all runtimes in one cycle. */
+    t: number;
+    /** Runtime name; empty string for the unnamed default runtime. */
+    runtimeName: string;
+    /** Tasks pending in this runtime's global (injection) queue. */
+    globalQueue: number;
+    /** Tasks alive (spawned, not yet completed) in this runtime. */
+    aliveTasks: number;
+  }
+
+  /**
    * A detected block-in-place handoff interval. Worker attribution inside
    * [startNs, endNs) is unknowable: samples in the gap have workerId
    * rewritten to OFF_WORKER_WORKER_ID, and active spans crossing a gap are
@@ -230,6 +246,13 @@ declare module "*/trace_parser.js" {
     runtimeWorkers: Map<string, number[]>;
     /** Latest segment-metadata key -> value. */
     segmentMetadata: Map<string, string>;
+    /**
+     * Per-runtime scheduler-metrics samples (one per runtime per flush cycle),
+     * in wire order. Low-volume, so kept as a plain array rather than routed
+     * through the columnar event store. Empty for old traces that predate
+     * `RuntimeMetricsEvent` (those carry a summed `QueueSample` instead).
+     */
+    runtimeMetrics: RuntimeMetricsSample[];
     customEvents: CustomTraceEvent[];
     /**
      * Columnar span-producing custom events (SpanEnter/Exit/Close and annotated

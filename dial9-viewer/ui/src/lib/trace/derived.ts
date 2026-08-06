@@ -31,6 +31,10 @@ import {
   type LaneWorkerSpans,
 } from "./columnar-worker-spans.js";
 import type { ParsedTrace, RuntimeGroup, SchedDelay } from "../../types/trace.js";
+import {
+  computeRuntimeMetrics,
+  type RuntimeMetrics,
+} from "./runtime-metrics-model.js";
 
 /** The distinct worker ids in a trace, in runtime-group render order: scan
  *  non-queue/non-wake events for the worker set, then reorder to match the
@@ -81,6 +85,19 @@ export function deriveRuntimeGroups(trace: ParsedTrace): RuntimeGroup[] {
   const groups = computeRuntimeGroups(lifecycleWorkerIds(trace), trace.runtimeWorkers);
   runtimeGroupsCache.set(trace, groups);
   return groups;
+}
+
+const runtimeMetricsCache = new WeakMap<ParsedTrace, RuntimeMetrics>();
+
+/** Per-runtime scheduler metrics (each runtime's alive-task + global-queue
+ *  series, plus the summed process-wide global-queue timeline), derived once
+ *  from the trace's `runtimeMetrics` side-channel. */
+export function deriveRuntimeMetrics(trace: ParsedTrace): RuntimeMetrics {
+  const cached = runtimeMetricsCache.get(trace);
+  if (cached !== undefined) return cached;
+  const metrics = computeRuntimeMetrics(trace);
+  runtimeMetricsCache.set(trace, metrics);
+  return metrics;
 }
 
 /** The inputs every POI detector needs, derived once per trace. */
