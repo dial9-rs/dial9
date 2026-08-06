@@ -11,6 +11,40 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// with the viewer's `formatFieldValue` (dial9-viewer/ui/format.js).
 const SUPPORTED_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes"];
 
+/// The `#[traceevent(...)]` keys a field may carry.
+#[derive(Default)]
+struct FieldAttrs {
+    /// `timestamp`: this field is the event timestamp (header, not a column).
+    timestamp: bool,
+    /// `unit = "..."`: rendering unit for this field.
+    unit: Option<syn::LitStr>,
+}
+
+/// Parse one field's `#[traceevent(...)]` keys. Malformed or unknown keys are
+/// compile errors rather than being silently ignored.
+fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
+    let mut parsed = FieldAttrs::default();
+    for attr in &field.attrs {
+        if !attr.path().is_ident("traceevent") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("timestamp") {
+                parsed.timestamp = true;
+            } else if meta.path.is_ident("unit") {
+                parsed.unit = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else {
+                return Err(meta.error(
+                    "unrecognized `traceevent` field attribute; expected `timestamp` or \
+                     `unit = \"...\"`",
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(parsed)
+}
+
 fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     let name = &input.ident;
 
@@ -34,14 +68,20 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     let mut name_override: Option<syn::Expr> = None;
     for attr in &input.attrs {
         if attr.path().is_ident("traceevent") {
-            let _ = attr.parse_nested_meta(|meta| {
+            // Propagated, not swallowed: a malformed attribute (e.g. `name`
+            // without a value) must be a compile error, not silently ignored.
+            attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("wire_slot") {
                     wire_slot = true;
                 } else if meta.path.is_ident("name") {
                     name_override = Some(meta.value()?.parse::<syn::Expr>()?);
+                } else {
+                    return Err(meta.error(
+                        "unrecognized `traceevent` attribute; expected `wire_slot` or `name = ...`",
+                    ));
                 }
                 Ok(())
-            });
+            })?;
         }
     }
     // The wire event name expression returned by `event_name()`: either the
@@ -55,18 +95,19 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         }
     };
 
+    // Every key of a field's `#[traceevent(...)]` is parsed in one pass: the
+    // callback must consume each key's value, so a pass that recognized only
+    // some keys would choke on the ones it skipped.
+    let field_attrs = fields
+        .iter()
+        .map(parse_field_attrs)
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
-    for field in fields.iter() {
-        for attr in &field.attrs {
-            if attr.path().is_ident("traceevent") {
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("timestamp") {
-                        timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
-                    }
-                    Ok(())
-                });
-            }
+    for (field, attrs) in fields.iter().zip(&field_attrs) {
+        if attrs.timestamp {
+            timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
         }
     }
 
@@ -74,23 +115,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     let mut encode_tokens = Vec::new();
     let mut annotation_tokens = Vec::new();
 
-    for field in fields.iter() {
+    for (field, attrs) in fields.iter().zip(&field_attrs) {
         let field_name = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        // Parse #[traceevent(unit = "...")]: emitted as a "unit"
-        // schema annotation so viewers can render the field in that unit.
-        let mut unit: Option<syn::LitStr> = None;
-        for attr in &field.attrs {
-            if attr.path().is_ident("traceevent") {
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("unit") {
-                        unit = Some(meta.value()?.parse::<syn::LitStr>()?);
-                    }
-                    Ok(())
-                });
-            }
-        }
+        // `unit = "..."` is emitted as a "unit" schema annotation so viewers can
+        // render the field in that unit.
+        let unit = attrs.unit.clone();
 
         // Skip the timestamp field in schema/encode — it's in the event header
         if timestamp_field_name.as_ref() == Some(field_name) {
@@ -233,6 +264,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile
 ///   error, as is placing `unit` on the timestamp field (the timestamp is
 ///   encoded in the event header and is always nanoseconds).
+///
+/// A malformed or unrecognized `traceevent` key is a compile error.
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
@@ -403,6 +436,52 @@ mod tests {
             }
         });
         assert!(err.to_string().contains("unsupported unit \"µs\""));
+    }
+
+    #[test]
+    fn malformed_name_rejected() {
+        let err = expand_err(quote! {
+            #[traceevent(name)]
+            struct MalformedName {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
+        });
+        assert!(
+            err.to_string().contains("expected `=`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_struct_attribute_rejected() {
+        let err = expand_err(quote! {
+            #[traceevent(wire_slots)]
+            struct Typo {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unrecognized `traceevent` attribute; expected `wire_slot` or `name = ...`"
+        );
+    }
+
+    #[test]
+    fn unknown_field_attribute_rejected() {
+        let err = expand_err(quote! {
+            struct Typo {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(units = "ns")]
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unrecognized `traceevent` field attribute; expected `timestamp` or `unit = \"...\"`"
+        );
     }
 
     #[test]
