@@ -221,6 +221,14 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     // Propagate any generics/lifetimes on the struct onto the impl, so the
     // derive works on generic event structs (e.g. an event that borrows
     // typed, generically-parameterized fields).
+    //
+    // Caveat for type parameters: `event_name()` is per *type*, not per
+    // monomorphization, so all instantiations of a generic event share one wire
+    // schema. That is sound only when a name maps to a single set of field
+    // types, which is how `dial9_span!` uses it: each call site declares its
+    // own struct with a call-site-unique `name = ...`, so it is instantiated
+    // exactly once. Two instantiations with different field types under one
+    // name would register conflicting schemas for that name.
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     Ok(quote! {
@@ -266,6 +274,14 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   encoded in the event header and is always nanoseconds).
 ///
 /// A malformed or unrecognized `traceevent` key is a compile error.
+///
+/// # Generic event structs
+///
+/// Lifetimes and type parameters are carried onto the generated impl. Note that
+/// the wire event name is per type, not per monomorphization: a generic event
+/// must therefore have a single instantiation per `name`, as generated
+/// per-call-site structs do. Instantiating one generic event with different
+/// field types under the same name registers conflicting schemas for that name.
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
@@ -436,6 +452,21 @@ mod tests {
             }
         });
         assert!(err.to_string().contains("unsupported unit \"µs\""));
+    }
+
+    /// A generic event carries its params onto the impl; the schema name comes
+    /// from the per-instantiation `name = ...`, not from the type parameters.
+    #[test]
+    fn generic_event() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(name = concat!("SpanEnter:", file!(), ":", line!()))]
+            struct GenericEvent<'a, T: TraceField + Clone + 'static> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                name: &'a str,
+                value: T,
+            }
+        }));
     }
 
     #[test]
