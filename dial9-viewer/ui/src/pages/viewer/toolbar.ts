@@ -20,12 +20,14 @@ import {
   formatHumanDuration,
   hasCpuProfileSamples,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
   type IdentityField,
   type ReconciledIdentity,
 } from "../../lib/trace/index.js";
 import { poiSourceFor, kindLabel, redFlagCounts } from "./poi.js";
 import type { PointOfInterestType } from "../../types/trace.js";
+import { ESC_PRIORITY, type EscCascade } from "./esc-cascade.js";
 
 /** Which whole-trace analysis an analysis button opens. */
 export type AnalysisKind = "cpu" | "blocking" | "heap";
@@ -34,6 +36,8 @@ export type AnalysisKind = "cpu" | "blocking" | "heap";
 export interface ToolbarDeps {
   /** Open the trace-wide catalogue of graphable custom-event fields. */
   onOpenFieldCharts(): void;
+  /** Page-wide Escape cascade used by the metadata popover. */
+  esc: EscCascade;
   /** Open a whole-trace analysis in the inspector. */
   onOpenAnalysis(kind: AnalysisKind): void;
   /** Set a time-range filter from the current viewport (reparse). */
@@ -146,6 +150,28 @@ export function createToolbar(
     deps.onSetRange({ startNs: vp.viewStart, endNs: vp.viewEnd });
   }
 
+  function openMetadataMenu(): HTMLDetailsElement | null {
+    return document.querySelector<HTMLDetailsElement>(
+      "[data-segment-metadata-menu][open]",
+    );
+  }
+  function onDocumentPointerDown(e: PointerEvent): void {
+    const menu = openMetadataMenu();
+    if (menu !== null && !e.composedPath().includes(menu)) menu.open = false;
+  }
+  document.addEventListener("pointerdown", onDocumentPointerDown);
+  const unregisterMetadataEsc = deps.esc.register({
+    name: "segment metadata",
+    priority: ESC_PRIORITY.popup,
+    isOpen: () => openMetadataMenu() !== null,
+    close: () => {
+      const menu = openMetadataMenu();
+      if (menu === null) return;
+      menu.open = false;
+      menu.querySelector<HTMLElement>("summary")?.focus();
+    },
+  });
+
   const keyBindings: readonly KeyBinding[] = [
     {
       // `g`: focus the goto-time input. Declines (falls through) when the input
@@ -171,7 +197,8 @@ export function createToolbar(
       timeTemplate(state, { toggleTimeMode, toggleTz, onGotoKey, setRange, onClearRange: deps.onClearRange }),
     keyBindings,
     dispose(): void {
-      /* no live listeners: templates own their handlers */
+      document.removeEventListener("pointerdown", onDocumentPointerDown);
+      unregisterMetadataEsc();
     },
   };
 }
@@ -188,6 +215,7 @@ function fileInfoTemplate(
   return html`
     <span class="d9-file-name" title=${sourceLabel}>${sourceLabel}</span>
     ${identityTemplate(identity)}
+    ${metadataTemplate(readSegmentMetadataEntries(trace))}
     <span class="d9-file-meta" data-file-meta id="toolbar-row-data"
       >${fileMetaText(trace)}</span
     >
@@ -220,6 +248,35 @@ function identityChip(
   return html`<span class="d9-file-identity-item" data-identity=${field} title=${title}
     ><span class="d9-file-identity-key">${field}</span>${info.value}</span
   >`;
+}
+
+function metadataTemplate(entries: [string, string][]): TemplateResult | string {
+  if (entries.length === 0) return "";
+  return html`
+    <details class="d9-metadata-menu" data-segment-metadata-menu>
+      <summary
+        class="d9-file-identity-item d9-metadata-summary"
+        title="Inspect all segment metadata"
+      >
+        Metadata · ${entries.length}
+      </summary>
+      <div class="d9-metadata-menu-body">
+        <table class="d9-metadata-table">
+          <caption>Segment metadata</caption>
+          <thead>
+            <tr><th scope="col">Key</th><th scope="col">Value</th></tr>
+          </thead>
+          <tbody>
+            ${entries.map(
+              ([key, value]) => html`
+                <tr><td><code>${key}</code></td><td><code>${value}</code></td></tr>
+              `,
+            )}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
 }
 
 /** The stats line: events, workers, duration, plus truncation/filter notes. */

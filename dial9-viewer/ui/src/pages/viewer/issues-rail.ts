@@ -1,8 +1,8 @@
-// The left rail: ranked issues, a task index, and trace-wide segment metadata.
-// A store-wired controller (createIssuesRail) is created once so its sort memos
-// live across renders; it exposes a lit-html `template(state)` and `n`/`p` key
-// bindings for the two navigable tabs. Every handler dispatches store actions
-// only - it never renders; the shell's store subscription repaints.
+// The issues rail: a ranked, keyboard-navigable, sortable list of points of
+// interest. A store-wired controller (createIssuesRail) created once so its
+// sort memo lives across renders; it exposes a lit-html `template(state)` and
+// `n`/`p` key bindings. Every handler dispatches store actions only - it never
+// renders; the shell's store subscription repaints.
 //
 // The rail reads the derived POI model (poi.ts). Row click and `n`/`p` center
 // the viewport on the POI and select its task; the filter dropdown and
@@ -16,7 +16,6 @@ import type { StoreState } from "../../types/state.js";
 import type { PoiSortKey, RailTab, TaskSortKey } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
-import { readSegmentMetadataEntries } from "../../lib/trace/index.js";
 import {
   POI_FILTERS,
   derivePoiViewModel,
@@ -177,7 +176,6 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
    *  retained/sorted list, which is what the index addresses. */
   function step(dir: 1 | -1): boolean {
     const state = store.getState();
-    if (state.poi.railTab === "metadata") return false;
     if (state.poi.railTab === "tasks") {
       const vm = taskViewModel(state);
       const next = stepIndex(vm.total, state.poi.taskIndex, dir);
@@ -243,9 +241,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
         tab === "issues" ? viewModel(state) : derivePoiViewModel(null, state.poi, 0);
       const taskVm =
         tab === "tasks" ? taskViewModel(state) : deriveTaskViewModel(null, state.poi);
-      const metadataEntries =
-        tab === "metadata" ? readSegmentMetadataEntries(state.trace.trace) : [];
-      return railTemplate(tab, poiVm, taskVm, metadataEntries, {
+      return railTemplate(tab, poiVm, taskVm, {
         setTab,
         setFilter,
         sortByColumn,
@@ -303,7 +299,7 @@ interface RailHandlers {
   jumpToTask(index: number): void;
 }
 
-/** The tab strip switching Issues, Tasks, and Metadata. */
+/** The tab strip switching Issues vs Tasks. */
 function railTabs(active: RailTab, h: RailHandlers): TemplateResult {
   const tab = (id: RailTab, label: string): TemplateResult => html`<button
     type="button"
@@ -315,7 +311,7 @@ function railTabs(active: RailTab, h: RailHandlers): TemplateResult {
     ${label}
   </button>`;
   return html`<div class="d9-rail-tabs" role="tablist" aria-label="Rail view">
-    ${tab("issues", "Issues")}${tab("tasks", "Tasks")}${tab("metadata", "Metadata")}
+    ${tab("issues", "Issues")}${tab("tasks", "Tasks")}
   </div>`;
 }
 
@@ -324,22 +320,19 @@ function railTemplate(
   tab: RailTab,
   vm: PoiViewModel,
   taskVm: TaskViewModel,
-  metadataEntries: [string, string][],
   h: RailHandlers,
 ): TemplateResult {
   return html`
-    <aside class="d9-rail" role="region" aria-label="Issues, tasks, and metadata">
+    <aside class="d9-rail" role="region" aria-label="Issues and tasks">
       ${railTabs(tab, h)}
-      ${tab === "metadata"
-        ? metadataTable(metadataEntries)
-        : html`${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
-            ${tab === "tasks"
-              ? taskVm.total === 0
-                ? html`<p class="d9-rail-empty">No tasks in this trace.</p>`
-                : taskTable(taskVm, h)
-              : vm.total === 0
-                ? html`<p class="d9-rail-empty">No issues match this filter.</p>`
-                : railTable(vm, h)}`}
+      ${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
+      ${tab === "tasks"
+        ? taskVm.total === 0
+          ? html`<p class="d9-rail-empty">No tasks in this trace.</p>`
+          : taskTable(taskVm, h)
+        : vm.total === 0
+          ? html`<p class="d9-rail-empty">No issues match this filter.</p>`
+          : railTable(vm, h)}
     </aside>
   `;
 }
@@ -412,28 +405,6 @@ function tasksHead(vm: TaskViewModel): TemplateResult {
           ><kbd>n</kbd>/<kbd>p</kbd> step</span
         >
       </div>
-    </div>
-  `;
-}
-
-function metadataTable(entries: [string, string][]): TemplateResult {
-  if (entries.length === 0) {
-    return html`<p class="d9-rail-empty">No segment metadata in this trace.</p>`;
-  }
-  return html`
-    <div class="d9-rail-list">
-      <table class="d9-rail-table d9-metadata-table" aria-label="Segment metadata">
-        <thead>
-          <tr><th scope="col">Key</th><th scope="col">Value</th></tr>
-        </thead>
-        <tbody>
-          ${entries.map(
-            ([key, value]) => html`
-              <tr><td><code>${key}</code></td><td><code>${value}</code></td></tr>
-            `,
-          )}
-        </tbody>
-      </table>
     </div>
   `;
 }

@@ -74,6 +74,69 @@ body {
     white-space: nowrap;
 }
 .d9-file-identity-key { color: var(--d9-fg-muted); }
+.d9-metadata-menu { position: relative; flex-shrink: 0; }
+.d9-metadata-summary {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+}
+.d9-metadata-summary::-webkit-details-marker { display: none; }
+.d9-metadata-summary:hover { background: #23233f; }
+.d9-metadata-summary:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-metadata-menu-body {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 220;
+    width: min(640px, calc(100vw - 24px));
+    max-height: min(60vh, 420px);
+    overflow: auto;
+    background: rgba(13, 13, 26, 0.98);
+    border: 1px solid #444;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.d9-metadata-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 0.78em;
+}
+.d9-metadata-table caption {
+    padding: 9px 10px 7px;
+    color: var(--d9-accent);
+    font-weight: 600;
+    text-align: left;
+}
+.d9-metadata-table th {
+    position: sticky;
+    top: 0;
+    padding: 5px 10px;
+    background: #17172c;
+    color: var(--d9-fg-muted);
+    text-align: left;
+}
+.d9-metadata-table th:first-child { width: 42%; }
+.d9-metadata-table td {
+    padding: 5px 10px;
+    border-top: 1px solid var(--d9-border);
+    vertical-align: top;
+}
+.d9-metadata-table code {
+    color: var(--d9-fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+@media (max-width: 900px) {
+    .d9-metadata-menu-body {
+        position: fixed;
+        inset: 50% 12px auto;
+        width: auto;
+        max-height: 70vh;
+        transform: translateY(-50%);
+    }
+}
 .d9-toolbar-spacer { flex: 1; }
 .d9-toolbar-slot {
     display: inline-flex;
@@ -214,7 +277,7 @@ body {
     background: #151530;
     border-right: 1px solid var(--d9-border);
 }
-/* Issues/Tasks/Metadata tab strip: pinned above the per-tab content. */
+/* Issues/Tasks tab strip: pinned above the per-tab head. */
 .d9-rail-tabs {
     flex-shrink: 0;
     display: flex;
@@ -289,25 +352,6 @@ body {
     text-align: left;
     border-bottom: 1px solid var(--d9-border);
     z-index: 1;
-}
-.d9-metadata-table { table-layout: fixed; }
-.d9-metadata-table thead th {
-    padding: 4px 6px;
-    color: var(--d9-fg-muted);
-}
-.d9-metadata-table thead th:first-child { width: 42%; }
-.d9-metadata-table tbody tr {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-}
-.d9-metadata-table td {
-    padding: 5px 6px;
-    vertical-align: top;
-}
-.d9-metadata-table code {
-    color: var(--d9-fg);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
 }
 .d9-rail-sort {
     width: 100%;
