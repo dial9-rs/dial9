@@ -67,6 +67,10 @@ span = ["dep:dial9-trace-format", "dep:tokio"]
 tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
 [dev-dependencies]
+# The `adhoc_spans` example sets its runtime up through the `dial9` facade, the
+# way a user would. Nothing in the `dial9` tree depends on `dial9-utils`, so
+# this is not a cycle.
+dial9 = { version = "0.5.0-rc1", path = "../dial9", features = ["tokio"] }
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 criterion = "0.5"

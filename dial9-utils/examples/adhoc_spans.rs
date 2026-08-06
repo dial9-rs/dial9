@@ -9,9 +9,7 @@
 //! ```sh
 //! cargo run -p dial9-utils --example adhoc_spans --features tower
 //! ```
-use dial9_core::buffer::DiskBuffer;
-use dial9_core::handle::set_tl_handle;
-use dial9_core::recorder::recorder;
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use dial9_utils::dial9_span;
 use dial9_utils::span::{Instrument as _, Span as _};
 use std::time::Duration;
@@ -140,16 +138,13 @@ fn main() {
     let writer = DiskBuffer::single_file("adhoc_spans_trace.bin").unwrap();
     let recorder = recorder(writer).build();
 
-    // Install the recorder handle on the block_on thread and each worker. The
-    // ad-hoc spans need only dial9-core, so recording is set up without the
-    // dial9-tokio-telemetry runtime integration.
-    set_tl_handle(recorder.handle().clone());
-    let worker_handle = recorder.handle().clone();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .on_thread_start(move || set_tl_handle(worker_handle.clone()))
-        .build()
+    // Attaching the runtime installs the recorder handle on every worker, so
+    // spans emit no matter which thread polls them.
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .unwrap();
 
     runtime.block_on(async {
