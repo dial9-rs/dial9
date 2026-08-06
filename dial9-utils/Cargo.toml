@@ -15,7 +15,9 @@ dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
 pin-project-lite = "0.2"
 # `rt` is needed for `tokio::runtime::worker_index()` (the span `worker_id`).
-tokio = { version = "1", features = ["rt"], default-features = false }
+tokio = { version = "1", features = [
+    "rt",
+], default-features = false, optional = true }
 tracing = "0.1.44"
 axum-0-7 = { package = "axum", version = "0.7", optional = true }
 axum-core-0-4 = { package = "axum-core", version = "0.4", optional = true }
@@ -60,7 +62,7 @@ axum-08 = [
 ]
 ## Ad-hoc span wrappers (`span` module: the `dial9_span!` macro, the future
 ## combinator, and the sync guard). Independent of any async runtime.
-span = ["dep:dial9-trace-format"]
+span = ["dep:dial9-trace-format", "dep:tokio"]
 ## Tower middleware for ad-hoc spans (`span::Dial9SpanLayer`). Implies `span`.
 tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
