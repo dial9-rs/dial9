@@ -1,8 +1,7 @@
-//! Ad-hoc span wrappers: spans in a dial9 trace with no `tracing` subscriber.
+//! dial9 spans record spans directly to the trace file without using `tracing`
+//! as a bridge.
 //!
-//! Note what is absent: no `tracing_subscriber::registry()`, no
-//! `Dial9TracingLayer`. Each span emits its events directly, and they render in
-//! the viewer's span lanes exactly like tracing-layer spans.
+//! They render in the viewer's span lanes exactly like tracing-layer spans.
 //!
 //! Run with the `tower` feature to include the middleware section:
 //!
