@@ -392,26 +392,28 @@ function infoMenu(
         role="group"
         aria-label="Trace details"
       >
-        <div class="d9-info-heading">Load &amp; trace</div>
-        <div class="d9-info-row"><span>source</span><span>${sourceLabel}</span></div>
-        <div class="d9-info-row"><span>events</span><span>${trace.events.length.toLocaleString()}</span></div>
-        <div class="d9-info-row"><span>workers</span><span>${workers}</span></div>
-        <div class="d9-info-row"><span>duration</span><span>${duration}</span></div>
-        <div class="d9-info-row"><span>truncated</span><span>${trace.truncated ? "yes" : "no"}</span></div>
-        <div class="d9-info-note">
-          Detailed fetch/parse timing (Parse perf) is recorded by the load
-          pipeline.
+        <div class="d9-info-grid">
+          <div class="d9-info-heading">Load &amp; trace</div>
+          <div class="d9-info-row"><span>source</span><span>${sourceLabel}</span></div>
+          <div class="d9-info-row"><span>events</span><span>${trace.events.length.toLocaleString()}</span></div>
+          <div class="d9-info-row"><span>workers</span><span>${workers}</span></div>
+          <div class="d9-info-row"><span>duration</span><span>${duration}</span></div>
+          <div class="d9-info-row"><span>truncated</span><span>${trace.truncated ? "yes" : "no"}</span></div>
+          <div class="d9-info-note">
+            Detailed fetch/parse timing (Parse perf) is recorded by the load
+            pipeline.
+          </div>
+          ${uninstrumented > 0
+            ? html`<div class="d9-info-heading">Uninstrumented</div>
+                <div class="d9-info-row">
+                  <span>tasks</span><span>${uninstrumented}</span>
+                </div>
+                <div class="d9-info-note">
+                  Spawned via raw <code>tokio::spawn</code> (no wake tracking).
+                  Use <code>TelemetryHandle::spawn</code> for full data.
+                </div>`
+            : ""}
         </div>
-        ${uninstrumented > 0
-          ? html`<div class="d9-info-heading">Uninstrumented</div>
-              <div class="d9-info-row">
-                <span>tasks</span><span>${uninstrumented}</span>
-              </div>
-              <div class="d9-info-note">
-                Spawned via raw <code>tokio::spawn</code> (no wake tracking).
-                Use <code>TelemetryHandle::spawn</code> for full data.
-              </div>`
-          : ""}
         ${metadata.length > 0
           ? html`<div class="d9-info-heading" id="d9-segment-metadata-heading">
                 Segment metadata
