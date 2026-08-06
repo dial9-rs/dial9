@@ -181,6 +181,12 @@ body {
     border-radius: 6px;
     font-size: 0.78em;
 }
+.d9-info-menu-body-wide {
+    box-sizing: border-box;
+    width: min(640px, calc(100vw - 24px));
+    max-height: min(60vh, 420px);
+    overflow: auto;
+}
 .d9-info-heading {
     color: var(--d9-accent);
     font-size: 0.9em;
@@ -201,6 +207,40 @@ body {
     padding: 0 3px;
     border-radius: 2px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.d9-info-metadata-table {
+    width: 100%;
+    border-collapse: collapse;
+    color: var(--d9-fg);
+}
+.d9-info-metadata-table th {
+    padding: 3px 6px;
+    color: var(--d9-fg-muted);
+    text-align: left;
+}
+.d9-info-metadata-table th:first-child { width: 1%; }
+.d9-info-metadata-table td {
+    padding: 4px 6px;
+    border-top: 1px solid var(--d9-border);
+}
+.d9-info-metadata-table code {
+    display: block;
+    max-width: min(320px, 45vw);
+    overflow: hidden;
+    color: var(--d9-fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-info-metadata-table td:first-child code { max-width: min(280px, 40vw); }
+@media (max-width: 700px) {
+    .d9-info-menu-body-wide {
+        position: fixed;
+        inset: 50% 12px auto;
+        width: auto;
+        max-height: 70vh;
+        transform: translateY(-50%);
+    }
 }
 
 /* ── Issues rail (concept-2, replaces the "0/74" stepper) ────────────── */
