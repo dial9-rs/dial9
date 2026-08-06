@@ -130,10 +130,9 @@ where
     let recorder = recorder(writer).build();
 
     // Install the recorder handle on the block_on thread and every worker, so
-    // spans emit no matter which thread polls them. The spans need only
-    // dial9-core, so the tests set up recording without the
-    // dial9-tokio-telemetry runtime attach (which is unpublishable as a
-    // dev-dependency and broke `cargo package`).
+    // spans emit no matter which thread polls them. Done by hand rather than
+    // through `attach_tokio_runtime`, which keeps these tests on dial9-core
+    // alone — all the spans themselves need.
     set_tl_handle(recorder.handle().clone());
     let worker_handle = recorder.handle().clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
