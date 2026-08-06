@@ -155,6 +155,30 @@ where
     decode(&dir.path().join("trace.0.bin"))
 }
 
+/// Both span flavors record the source location they were created at, so a span
+/// in the viewer points back at the code that opened it.
+#[test]
+fn spans_record_their_call_site() {
+    let events = run_traced(1, || async {
+        async {}.instrument(dial9_span!("macro.located")).await;
+        async {}.instrument(Dial9Span::new("runtime.located")).await;
+    });
+
+    let locations: Vec<_> = events
+        .enter_fields
+        .iter()
+        .filter(|(k, _)| k == "location")
+        .map(|(_, v)| v.clone())
+        .collect();
+    assert_eq!(locations.len(), 2, "one location per enter: {locations:?}");
+    assert!(
+        locations
+            .iter()
+            .all(|l| l.starts_with("dial9-utils/tests/span_wrappers.rs:")),
+        "locations should point at this file: {locations:?}"
+    );
+}
+
 /// A span opened off any Tokio runtime carries no `worker_id`: the field is
 /// optional, so it is absent on the wire rather than holding a sentinel.
 #[test]

@@ -245,6 +245,9 @@ pub struct Dial9Span {
     span_id: SpanId,
     parent_span_id: Option<SpanId>,
     name: String,
+    /// `file:line` of the `Dial9Span::new` call, formatted once so re-emitting
+    /// the enter event on every poll stays allocation-free.
+    location: String,
 }
 
 #[derive(TraceEvent)]
@@ -257,6 +260,8 @@ struct RuntimeEnter {
     parent_span_id: Option<u64>,
     #[traceevent(role = "span.name")]
     span_name: InternedString,
+    /// Source location the span was created at, as `file:line`.
+    location: InternedString,
 }
 
 #[derive(TraceEvent)]
@@ -280,12 +285,15 @@ struct RuntimeExit {
 }
 
 impl Dial9Span {
-    /// Create a name-only span.
+    /// Create a name-only span, recorded with the caller's source location.
+    #[track_caller]
     pub fn new(name: impl Into<String>) -> Self {
+        let caller = std::panic::Location::caller();
         Self {
             span_id: wire::next_span_id(),
             parent_span_id: None,
             name: name.into(),
+            location: format!("{}:{}", caller.file(), caller.line()),
         }
     }
 }
@@ -312,6 +320,7 @@ impl Span for Dial9Span {
     fn __emit_enter(&self, handle: &Dial9Handle) {
         handle.with_encoder(|enc| {
             let span_name = enc.intern_string(&self.name);
+            let location = enc.intern_string(&self.location);
             enc.encode(&RuntimeEnter {
                 timestamp_ns: clock_monotonic_ns(),
                 worker_id: current_worker_id(),
@@ -321,6 +330,7 @@ impl Span for Dial9Span {
                 // the wire as the raw id it already was.
                 parent_span_id: self.parent_span_id.map(SpanId::as_u64),
                 span_name,
+                location,
             });
         });
     }
@@ -509,6 +519,10 @@ macro_rules! __dial9_span_build {
         // The span name must be a `&'static str` so it is baked into the
         // generated code rather than stored — a runtime name needs `Dial9Span`.
         const __DIAL9_NAME: &str = $name;
+        // The call site, so a span in the viewer points back at the code that
+        // opened it (the schema name is per call site too, but is not shown).
+        const __DIAL9_LOCATION: &str =
+            ::core::concat!(::core::file!(), ":", ::core::line!());
 
         // Each field's identifier doubles as its own type parameter (fields and
         // type params live in separate namespaces), so the field keeps its
@@ -528,6 +542,7 @@ macro_rules! __dial9_span_build {
             parent_span_id: ::core::option::Option<u64>,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
+            location: $crate::span::__rt::InternedString,
             $( $key: $key, )*
         }
 
@@ -574,6 +589,7 @@ macro_rules! __dial9_span_build {
             fn __emit_enter(&self, __h: &$crate::span::__rt::Dial9Handle) {
                 __h.with_encoder(|__enc| {
                     let __name = __enc.intern_string(__DIAL9_NAME);
+                    let __loc = __enc.intern_string(__DIAL9_LOCATION);
                     __enc.encode(&__Dial9Enter {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
                         worker_id: $crate::span::__rt::current_worker_id(),
@@ -583,6 +599,7 @@ macro_rules! __dial9_span_build {
                             $crate::span::__rt::SpanId::as_u64,
                         ),
                         span_name: __name,
+                        location: __loc,
                         $( $key: ::core::clone::Clone::clone(&self.$key), )*
                     });
                 });
@@ -645,6 +662,10 @@ macro_rules! __dial9_span_build_late {
         [$( ($lkey:ident : $lty:ty) )+]
     ) => {{
         const __DIAL9_NAME: &str = $name;
+        // The call site, so a span in the viewer points back at the code that
+        // opened it (the schema name is per call site too, but is not shown).
+        const __DIAL9_LOCATION: &str =
+            ::core::concat!(::core::file!(), ":", ::core::line!());
 
         // Enter: eager fields only (late fields have no value yet).
         #[derive($crate::span::__rt::TraceEvent)]
@@ -660,6 +681,7 @@ macro_rules! __dial9_span_build_late {
             parent_span_id: ::core::option::Option<u64>,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
+            location: $crate::span::__rt::InternedString,
             $( $key: $key, )*
         }
 
@@ -709,6 +731,7 @@ macro_rules! __dial9_span_build_late {
             fn __emit_enter(&self, __h: &$crate::span::__rt::Dial9Handle) {
                 __h.with_encoder(|__enc| {
                     let __name = __enc.intern_string(__DIAL9_NAME);
+                    let __loc = __enc.intern_string(__DIAL9_LOCATION);
                     __enc.encode(&__Dial9Enter {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
                         worker_id: $crate::span::__rt::current_worker_id(),
@@ -718,6 +741,7 @@ macro_rules! __dial9_span_build_late {
                             $crate::span::__rt::SpanId::as_u64,
                         ),
                         span_name: __name,
+                        location: __loc,
                         $( $key: ::core::clone::Clone::clone(&self.$key), )*
                     });
                 });
