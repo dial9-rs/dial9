@@ -25,6 +25,9 @@ struct SpanEvents {
     enter_names: Vec<String>,
     enter_fields: Vec<(String, String)>,
     exit_fields: Vec<(String, String)>,
+    /// One entry per `SpanEnter:*`: the `worker_id` it carried, `None` when the
+    /// optional field was absent (span not on a Tokio worker).
+    enter_worker_ids: Vec<Option<u64>>,
     parent_span_ids: HashSet<u64>,
     entered_span_ids: HashSet<u64>,
     closed_span_ids: HashSet<u64>,
@@ -65,6 +68,12 @@ fn decode(path: &std::path::Path) -> SpanEvents {
                             if let Some(n) = field_string(ev.string_pool, fv) {
                                 r.enter_names.push(n);
                             }
+                        }
+                        ("worker_id", FieldValueRef::Varint(v)) => {
+                            r.enter_worker_ids.push(Some(*v));
+                        }
+                        ("worker_id", FieldValueRef::None) => {
+                            r.enter_worker_ids.push(None);
                         }
                         ("span_id", FieldValueRef::Varint(v)) => {
                             r.entered_span_ids.insert(*v);
@@ -145,6 +154,31 @@ where
     recorder.graceful_shutdown(Duration::ZERO);
 
     decode(&dir.path().join("trace.0.bin"))
+}
+
+/// A span opened off any Tokio runtime carries no `worker_id`: the field is
+/// optional, so it is absent on the wire rather than holding a sentinel.
+#[test]
+fn span_off_runtime_omits_worker_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
+    let recorder = recorder(writer).build();
+    set_tl_handle(recorder.handle().clone());
+
+    {
+        let span = dial9_span!("offline.work");
+        let _entered = span.enter();
+    }
+
+    recorder.graceful_shutdown(Duration::ZERO);
+    let events = decode(&dir.path().join("trace.0.bin"));
+
+    assert_eq!(events.enter_count, 1, "one enter");
+    assert_eq!(
+        events.enter_worker_ids,
+        vec![None],
+        "no worker_id off a runtime"
+    );
 }
 
 /// The sync guard emits exactly one enter/exit pair plus one close, with the

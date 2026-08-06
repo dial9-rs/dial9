@@ -86,7 +86,7 @@ use std::sync::{Arc, OnceLock};
 #[doc(hidden)]
 pub mod __rt {
     pub use super::wire::next_span_id;
-    pub use super::{Slot, Span, current_worker_id_u64, emit_close};
+    pub use super::{Slot, Span, current_worker_id, emit_close};
     pub use dial9_core::clock::clock_monotonic_ns;
     pub use dial9_core::handle::Dial9Handle;
     pub use dial9_trace_format::{InternedString, TraceEvent, TraceField};
@@ -206,21 +206,15 @@ impl<S: Span> Drop for Entered<'_, S> {
 
 // ── Shared emit helpers (used by macro-generated spans and `Dial9Span`) ───────
 
-/// Sentinel `worker_id` for a thread that isn't a known Tokio worker (or when
-/// the `tokio` feature is off). Matches the tracing layer's "unknown" id.
-const WORKER_ID_UNKNOWN: u64 = u64::MAX;
-
-/// The current Tokio worker index as a raw `u64`, for the `worker_id` wire
-/// field. Used by the [`dial9_span!`](crate::dial9_span) expansion.
+/// The current Tokio worker index, for the `worker_id` wire field. Used by the
+/// [`dial9_span!`](crate::dial9_span) expansion.
 ///
-/// Reads [`tokio::runtime::worker_index`]; off a runtime (e.g. a plain thread,
-/// or code not running under Tokio) it is [`WORKER_ID_UNKNOWN`], so spans work
-/// regardless of whether Tokio is in use.
+/// Reads [`tokio::runtime::worker_index`]; off a runtime (a plain thread, or
+/// code not running under Tokio) there is no worker, so this is `None` and the
+/// field is absent on the wire rather than carrying a sentinel.
 #[doc(hidden)]
-pub fn current_worker_id_u64() -> u64 {
-    tokio::runtime::worker_index()
-        .map(|i| i as u64)
-        .unwrap_or(WORKER_ID_UNKNOWN)
+pub fn current_worker_id() -> Option<u64> {
+    tokio::runtime::worker_index().map(|i| i as u64)
 }
 
 /// Record a span's `SpanCloseEvent`. No-op off a dial9 runtime. Used by the
@@ -257,7 +251,7 @@ pub struct Dial9Span {
 struct RuntimeEnter {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
-    worker_id: u64,
+    worker_id: Option<u64>,
     span_id: u64,
     parent_span_id: Option<u64>,
     #[traceevent(role = "span.name")]
@@ -269,7 +263,7 @@ struct RuntimeEnter {
 struct RuntimeExit {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
-    worker_id: u64,
+    worker_id: Option<u64>,
     span_id: u64,
     #[traceevent(role = "span.name")]
     span_name: InternedString,
@@ -319,7 +313,7 @@ impl Span for Dial9Span {
             let span_name = enc.intern_string(&self.name);
             enc.encode(&RuntimeEnter {
                 timestamp_ns: clock_monotonic_ns(),
-                worker_id: current_worker_id_u64(),
+                worker_id: current_worker_id(),
                 span_id: self.span_id,
                 parent_span_id: self.parent_span_id,
                 span_name,
@@ -339,7 +333,7 @@ impl Span for Dial9Span {
             let span_name = enc.intern_string(&self.name);
             enc.encode(&RuntimeExit {
                 timestamp_ns: clock_monotonic_ns(),
-                worker_id: current_worker_id_u64(),
+                worker_id: current_worker_id(),
                 span_id: self.span_id,
                 span_name,
                 active_ns,
@@ -525,7 +519,7 @@ macro_rules! __dial9_span_build {
         struct __Dial9Enter<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
-            worker_id: u64,
+            worker_id: ::core::option::Option<u64>,
             span_id: u64,
             parent_span_id: ::core::option::Option<u64>,
             #[traceevent(role = "span.name")]
@@ -541,7 +535,7 @@ macro_rules! __dial9_span_build {
         struct __Dial9Exit<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
-            worker_id: u64,
+            worker_id: ::core::option::Option<u64>,
             span_id: u64,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
@@ -578,7 +572,7 @@ macro_rules! __dial9_span_build {
                     let __name = __enc.intern_string(__DIAL9_NAME);
                     __enc.encode(&__Dial9Enter {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
-                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        worker_id: $crate::span::__rt::current_worker_id(),
                         span_id: self.span_id,
                         parent_span_id: self.parent_span_id,
                         span_name: __name,
@@ -599,7 +593,7 @@ macro_rules! __dial9_span_build {
                     let __name = __enc.intern_string(__DIAL9_NAME);
                     __enc.encode(&__Dial9Exit {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
-                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        worker_id: $crate::span::__rt::current_worker_id(),
                         span_id: self.span_id,
                         span_name: __name,
                         active_ns,
@@ -654,7 +648,7 @@ macro_rules! __dial9_span_build_late {
         struct __Dial9Enter<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
-            worker_id: u64,
+            worker_id: ::core::option::Option<u64>,
             span_id: u64,
             parent_span_id: ::core::option::Option<u64>,
             #[traceevent(role = "span.name")]
@@ -671,7 +665,7 @@ macro_rules! __dial9_span_build_late {
         struct __Dial9Exit<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
-            worker_id: u64,
+            worker_id: ::core::option::Option<u64>,
             span_id: u64,
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
@@ -710,7 +704,7 @@ macro_rules! __dial9_span_build_late {
                     let __name = __enc.intern_string(__DIAL9_NAME);
                     __enc.encode(&__Dial9Enter {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
-                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        worker_id: $crate::span::__rt::current_worker_id(),
                         span_id: self.span_id,
                         parent_span_id: self.parent_span_id,
                         span_name: __name,
@@ -731,7 +725,7 @@ macro_rules! __dial9_span_build_late {
                     let __name = __enc.intern_string(__DIAL9_NAME);
                     __enc.encode(&__Dial9Exit {
                         timestamp_ns: $crate::span::__rt::clock_monotonic_ns(),
-                        worker_id: $crate::span::__rt::current_worker_id_u64(),
+                        worker_id: $crate::span::__rt::current_worker_id(),
                         span_id: self.span_id,
                         span_name: __name,
                         active_ns,
