@@ -29,8 +29,6 @@ use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
 use dial9_utils::dial9_span;
 use dial9_utils::span::{Dial9Span, Dial9SpanLayer, Instrument as _, Span as _};
 
-// Note what is absent here: no tracing_subscriber::registry(), no
-// Dial9TracingLayer, no `tracing` dependency at all.
 fn main() {
     let writer = DiskBuffer::single_file("/tmp/checkout-traces/trace.bin").unwrap();
     let recorder = recorder(writer).build();
