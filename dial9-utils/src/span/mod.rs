@@ -276,6 +276,9 @@ struct RuntimeExit {
     #[traceevent(unit = "ns")]
     idle_ns: u64,
     poll_count: u64,
+    /// Whether the span ended cleanly: `true` when the instrumented future ran
+    /// to completion (or a sync scope's guard was dropped normally), `false`
+    /// when the future was dropped before finishing, i.e. cancelled.
     completed: bool,
 }
 
