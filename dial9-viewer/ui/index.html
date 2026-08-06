@@ -260,28 +260,38 @@
             <span class="spacer"></span>
             <button id="creds-close" title="Close">✕</button>
         </div>
-        <div class="creds-row" style="align-items:flex-start">
-            <label style="padding-top:6px">Paste JSON</label>
-            <textarea id="creds-paste" rows="2" spellcheck="false" autocomplete="off"
-                placeholder="Paste an STS / Isengard credentials JSON blob here to fill the fields below"
-                style="flex:1;min-width:320px;resize:vertical;background:#2a2a4a;border:1px solid #444;color:#e0e0e0;padding:6px 10px;border-radius:4px;font-size:0.8em;font-family:ui-monospace,Menlo,monospace"></textarea>
-            <button id="creds-paste-fill" title="Extract credentials from the pasted JSON">Fill fields</button>
+        <div class="creds-row" id="creds-mode-row">
+            <span id="creds-mode-summary"></span>
+            <span class="spacer"></span>
+            <button id="creds-use-literal" type="button">Use literal credentials instead</button>
+        </div>
+        <!-- Kept mounted while hidden because the private userscript fills these IDs. -->
+        <div id="creds-literal-fields">
+            <div class="creds-row" style="align-items:flex-start">
+                <label style="padding-top:6px">Paste JSON</label>
+                <textarea id="creds-paste" rows="2" spellcheck="false" autocomplete="off"
+                    placeholder="Paste an STS / Isengard credentials JSON blob here to fill the fields below"
+                    style="flex:1;min-width:320px;resize:vertical;background:#2a2a4a;border:1px solid #444;color:#e0e0e0;padding:6px 10px;border-radius:4px;font-size:0.8em;font-family:ui-monospace,Menlo,monospace"></textarea>
+                <button id="creds-paste-fill" title="Extract credentials from the pasted JSON">Fill fields</button>
+            </div>
+            <div class="creds-row">
+                <label>Access key ID</label>
+                <input type="text" id="creds-akid" autocomplete="off" spellcheck="false" style="width:200px" />
+                <label>Secret access key</label>
+                <input type="password" id="creds-secret" autocomplete="off" style="width:220px" />
+            </div>
+            <div class="creds-row">
+                <label>Session token</label>
+                <input type="password" id="creds-token" autocomplete="off" placeholder="(for temporary creds)" style="width:320px" />
+            </div>
+            <div class="creds-row">
+                <button class="primary" id="creds-apply">Apply</button>
+            </div>
         </div>
         <div class="creds-row">
-            <label>Access key ID</label>
-            <input type="text" id="creds-akid" autocomplete="off" spellcheck="false" style="width:200px" />
-            <label>Secret access key</label>
-            <input type="password" id="creds-secret" autocomplete="off" style="width:220px" />
-        </div>
-        <div class="creds-row">
-            <label>Session token</label>
-            <input type="password" id="creds-token" autocomplete="off" placeholder="(for temporary creds)" style="width:320px" />
             <label>Region</label>
             <input type="text" id="creds-region" autocomplete="off" placeholder="auto-detect" style="width:120px" />
-        </div>
-        <div class="creds-row">
-            <button class="primary" id="creds-apply">Apply</button>
-            <button id="creds-clear">Clear</button>
+            <button id="creds-clear">Use ambient credentials</button>
             <span id="creds-status" class="creds-status"></span>
         </div>
         <!-- Bucket picker, populated from GET /api/buckets after Apply. -->
@@ -525,7 +535,7 @@
     // Wrapper around fetch that attaches the bring-your-own-credentials headers
     // (if any are set) to every /api/* request. No-op when no creds are stored.
     function apiFetch(url, opts = {}) {
-        const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+        const credHeaders = window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {};
         return Dial9Session.fetch(url, {
             ...opts,
             headers: { ...(opts.headers || {}), ...credHeaders },
@@ -534,7 +544,7 @@
 
     // ── Bring-your-own-credentials panel ──
     // Only wired up when the server reports support (S3 backends). The panel and
-    // the scripting API (window.Dial9Creds.set) share this exact apply path, so
+    // the public scripting API (window.Dial9Creds.set) share this exact apply path, so
     // an injected userscript and a human exercise identical logic.
     function initCredsUi() {
         const btn = document.getElementById('creds-btn');
@@ -545,6 +555,9 @@
         const token = document.getElementById('creds-token');
         const region = document.getElementById('creds-region');
         const statusEl = document.getElementById('creds-status');
+        const modeSummary = document.getElementById('creds-mode-summary');
+        const literalFields = document.getElementById('creds-literal-fields');
+        const useLiteral = document.getElementById('creds-use-literal');
 
         btn.style.display = '';
 
@@ -555,16 +568,30 @@
 
         // Reflect stored-credential state in the header button and panel inputs.
         function refresh() {
-            const stored = Dial9Creds.get();
-            const active = Dial9Creds.has();
+            const stored = __Dial9CredentialStore.get();
+            const active = __Dial9CredentialStore.has();
+            const literal = stored.kind === 'literal';
             btn.classList.toggle('active', active);
-            btnLabel.textContent = active ? 'AWS Credentials ✓' : 'AWS Credentials';
-            if (stored) {
+            btnLabel.textContent = stored.kind === 'ambient'
+                ? 'AWS Credentials · Ambient'
+                : stored.kind === 'role'
+                    ? 'AWS Credentials · Role ✓'
+                    : active ? 'AWS Credentials · Literal ✓' : 'AWS Credentials · Literal';
+            literalFields.style.display = literal ? '' : 'none';
+            useLiteral.style.display = literal ? 'none' : '';
+            modeSummary.textContent = stored.kind === 'ambient'
+                ? "Using the backend's ambient AWS identity."
+                : stored.kind === 'role'
+                    ? `Backend assumes ${stored.roleArn}`
+                    : active
+                        ? 'Using literal temporary AWS credentials.'
+                        : 'Enter literal temporary AWS credentials.';
+            if (literal) {
                 akid.value = stored.accessKeyId || '';
                 secret.value = stored.secretAccessKey || '';
                 token.value = stored.sessionToken || '';
-                region.value = stored.region || '';
             }
+            region.value = stored.region || region.value || '';
         }
 
         function togglePanel(show) {
@@ -573,6 +600,13 @@
 
         btn.addEventListener('click', () => togglePanel());
         document.getElementById('creds-close').addEventListener('click', () => togglePanel(false));
+        useLiteral.addEventListener('click', () => {
+            __Dial9CredentialStore.setLiteralMode();
+            refresh();
+            syncUrl();
+            setStatus('Enter literal temporary credentials');
+            akid.focus();
+        });
 
         // Paste box: extract credentials from an STS / Isengard JSON blob into
         // the individual fields, then let the user review and click Apply.
@@ -582,7 +616,7 @@
             if (!text) { setStatus('Paste a credentials JSON blob first', 'error'); return; }
             let parsed;
             try {
-                parsed = Dial9Creds.parse(text);
+                parsed = __Dial9CredentialStore.parse(text);
             } catch (e) {
                 setStatus('Could not parse: ' + e.message, 'error');
                 return;
@@ -678,14 +712,14 @@
             syncUrl();
             if (bucket.region) {
                 region.value = bucket.region;
-                Dial9Creds.setRegion(bucket.region);
+                __Dial9CredentialStore.setRegion(bucket.region);
                 syncUrl();
                 setStatus(`Using ${name} · region ${bucket.region}`, 'ok');
                 discoverPrefixes().then(discoverServices);
                 return;
             }
             setStatus(`Detecting region for ${name}…`, null);
-            const result = await Dial9Creds.check(name);
+            const result = await __Dial9CredentialStore.check(name);
             if (result.ok) {
                 if (result.region) {
                     region.value = result.region;
@@ -693,7 +727,7 @@
                     // active (static keys or an assumed role), then mirror it
                     // into the URL (aws_region) so a shared link reproduces the
                     // cross-region bucket.
-                    Dial9Creds.setRegion(result.region);
+                    __Dial9CredentialStore.setRegion(result.region);
                     syncUrl();
                 }
                 setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ''}`, 'ok');
@@ -716,7 +750,7 @@
             // Store the credentials (no region detection yet — we don't have a
             // bucket). Then list the buckets these credentials can see; this both
             // validates the credentials and powers the picker.
-            await Dial9Creds.set({
+            await __Dial9CredentialStore.set({
                 accessKeyId: akid.value,
                 secretAccessKey: secret.value,
                 sessionToken: token.value,
@@ -731,7 +765,7 @@
         async function loadBuckets() {
             setStatus('Listing buckets…', null);
             try {
-                const buckets = await Dial9Creds.listBuckets();
+                const buckets = await __Dial9CredentialStore.listBuckets();
                 setStatus(`${buckets.length} bucket(s) — pick one below`, 'ok');
                 renderBucketPicker(buckets);
             } catch (e) {
@@ -741,7 +775,7 @@
         }
 
         document.getElementById('creds-clear').addEventListener('click', () => {
-            Dial9Creds.clear();
+            __Dial9CredentialStore.clear();
             akid.value = secret.value = token.value = region.value = '';
             // The selected bucket belonged to the now-removed identity; drop it
             // so a later search can't query a foreign bucket as the server's
@@ -757,11 +791,11 @@
         });
 
         // React to programmatic changes (e.g. an injected userscript calling
-        // Dial9Creds.set). Reload an active service; with an already-picked
+        // __Dial9CredentialStore.set). Reload an active service; with an already-picked
         // bucket, otherwise run only lightweight service discovery.
         window.addEventListener('dial9:credentials-changed', () => {
             refresh();
-            if (!Dial9Creds.has()) return;
+            if (!__Dial9CredentialStore.has()) return;
             if (canReRunCurrentSearch()) {
                 reRunCurrentSearch();
             } else if (bucketInput.value.trim()) {
@@ -776,7 +810,7 @@
         // buckets in the background so the picker is ready when they open it
         // (the stored bucket, if any, belongs to a different identity and isn't
         // trusted here).
-        if (Dial9Creds.has()) {
+        if (__Dial9CredentialStore.has()) {
             loadBuckets();
         }
     }
@@ -832,14 +866,12 @@
         // bucket is reproducible from a shared link. The credentials store is the
         // source of truth — it's where region detection lands — and the secret
         // keys themselves are header-only, never serialized here.
-        const storedCreds = window.Dial9Creds ? Dial9Creds.get() : null;
+        const storedCreds = __Dial9CredentialStore.get();
         const state = {
             bucket: bucketInput.value.trim(),
-            region: (storedCreds && storedCreds.region) || '',
-            // Keep the assume-role ARN in the URL so the read stays shareable
-            // (it's not a secret; static BYOC keys are never serialized). The
-            // store is the source of truth — echo whatever it holds.
-            roleArn: (storedCreds && storedCreds.roleArn) || '',
+            region: storedCreds.region || '',
+            credentialMode: storedCreds.kind,
+            roleArn: storedCreds.kind === 'role' ? storedCreds.roleArn : undefined,
             prefix: prefixInput.value.trim(),
             service: serviceInput.value.trim(),
             tab: currentTab,
@@ -874,18 +906,25 @@
     if (urlState.q) rawSearchInput.value = urlState.q;
     if (urlState.tab === 'raw') switchTab('raw');
 
-    // A shared link can carry an assume-role ARN (aws_role_arn): "read these
-    // traces as this role". Fold it into the credentials store as the
-    // assume-role transport, so every subsequent /api/* request carries the
-    // x-dial9-aws-role-arn header and the server assumes it with its own
-    // identity. A role ARN grants nothing on its own, which is why it is safe in
-    // a link. An invalid ARN throws (Dial9Creds.setRoleArn validates the shape);
-    // surface it rather than silently falling back to the server's identity.
-    if (urlState.roleArn && window.Dial9Creds) {
+    // Explicit URL mode overrides stale tab credentials. Missing mode keeps the
+    // pre-mode compatibility rule: role ARN implies role; stored literal keys
+    // remain usable; otherwise the server ambient identity is selected.
+    if (window.__Dial9CredentialStore) {
+        const mode = urlState.credentialMode || (urlState.roleArn ? 'role' : null);
         try {
-            Dial9Creds.setRoleArn(urlState.roleArn, { region: urlState.region });
+            if (mode === 'ambient') {
+                __Dial9CredentialStore.setAmbient();
+            } else if (mode === 'literal') {
+                if (__Dial9CredentialStore.get().kind !== 'literal') {
+                    __Dial9CredentialStore.setLiteralMode();
+                }
+            } else if (mode === 'role' && urlState.roleArn) {
+                __Dial9CredentialStore.setRoleArn(urlState.roleArn, { region: urlState.region });
+            } else if (__Dial9CredentialStore.get().kind !== 'literal') {
+                __Dial9CredentialStore.setAmbient();
+            }
         } catch (e) {
-            console.warn('ignoring invalid aws_role_arn in URL:', e && e.message || e);
+            console.warn('ignoring invalid source credentials in URL:', e && e.message || e);
         }
     }
 
@@ -898,12 +937,12 @@
     // either transport via setRegion (a no-op when nothing is stored, and when
     // the assume-role branch above already stored this same region alongside the
     // ARN).
-    if (urlState.region && window.Dial9Creds) {
+    if (urlState.region && window.__Dial9CredentialStore) {
         const regionField = document.getElementById('creds-region');
         if (regionField && !regionField.value) regionField.value = urlState.region;
-        const stored = Dial9Creds.get();
+        const stored = __Dial9CredentialStore.get();
         if (stored && stored.region !== urlState.region) {
-            Dial9Creds.setRegion(urlState.region);
+            __Dial9CredentialStore.setRegion(urlState.region);
         }
     }
 
@@ -933,7 +972,7 @@
         // The server's default bucket belongs to the server's identity. Don't
         // prefill it when the user has brought their own credentials — that
         // bucket isn't theirs; they pick from their own buckets instead.
-        const usingByoCreds = window.Dial9Creds && Dial9Creds.has();
+        const usingByoCreds = window.__Dial9CredentialStore && __Dial9CredentialStore.has();
         if (!bucketInput.value && config.default_bucket && !usingByoCreds) {
             bucketInput.value = config.default_bucket;
         }
@@ -1001,17 +1040,17 @@
     // No-op without credentials: the ambient path uses the server's own
     // configured region, and the check endpoint requires credentials anyway.
     async function detectRegionForBucket(bucket) {
-        if (!bucket || !window.Dial9Creds || !Dial9Creds.has()) return;
+        if (!bucket || !window.__Dial9CredentialStore || !__Dial9CredentialStore.has()) return;
         try {
-            const result = await Dial9Creds.check(bucket);
+            const result = await __Dial9CredentialStore.check(bucket);
             if (result.ok && result.region) {
-                const stored = Dial9Creds.get();
+                const stored = __Dial9CredentialStore.get();
                 if (stored && stored.region !== result.region) {
                     // Persist without a second round trip (region is known now).
                     // setRegion keeps the active transport's kind, so this works
                     // for an assumed-role credential too — a static-only set()
                     // would throw here for the role path.
-                    Dial9Creds.setRegion(result.region);
+                    __Dial9CredentialStore.setRegion(result.region);
                     const regionField = document.getElementById('creds-region');
                     if (regionField) regionField.value = result.region;
                     syncUrl();
@@ -2043,10 +2082,25 @@
     // pick); the panel's region field is the fallback. Empty string when unknown
     // (the server then uses its default region).
     function currentRegion() {
-        const stored = window.Dial9Creds ? Dial9Creds.get() : null;
-        if (stored && stored.region) return stored.region;
+        const stored = __Dial9CredentialStore.get();
+        if (stored.region) return stored.region;
         const field = document.getElementById('creds-region');
         return (field && field.value.trim()) || '';
+    }
+
+    function currentSource(bucket) {
+        const stored = __Dial9CredentialStore.get();
+        const credentials = stored.kind === 'role'
+            ? { kind: 'role', roleArn: stored.roleArn }
+            : stored.kind === 'literal'
+                ? {
+                    kind: 'literal',
+                    accessKeyId: stored.accessKeyId,
+                    secretAccessKey: stored.secretAccessKey,
+                    sessionToken: stored.sessionToken,
+                }
+                : { kind: 'ambient' };
+        return { bucket: bucket || '', region: currentRegion(), credentials };
     }
 
     // Build the aggregate SCOPE (bucket/prefix/service/host-set/time window) for
@@ -2067,7 +2121,7 @@
         // wrap the query back into the URLSearchParams the diff tray works with,
         // and warn if the host set was too large to name in the link (the capture
         // then covers all hosts in the window).
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(currentSource(bucket), heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1);
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         return new URLSearchParams(query);
@@ -2116,7 +2170,7 @@
             // (A box spanning >1 service sends no service filter — all services
             // in the box — matching exact mode, rather than the old "first
             // service wins" which silently dropped the others.)
-            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
+            const scope = Dial9TraceScope.scopeFromKeys(currentSource(bucket), keys, selection.t0, selection.t1);
             const base = new URLSearchParams();
             base.set('api', '1');
             const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
@@ -2132,7 +2186,7 @@
         // can't overflow CloudFront's 8192-byte request-URI cap and 414 the tab)
         // and stateless (so a shared deep link re-resolves in any browser).
         const fgParams = traceTitleParams(keys);
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(currentSource(bucket), keys, selection.t0, selection.t1);
         const { query, hostsDropped } = Dial9TraceScope.encodeScope(fgParams, scope);
         if (hostsDropped) warnHostsDropped();
         window.open('flamegraph.html?' + query, '_blank');
@@ -2160,7 +2214,7 @@
         const keys = selection.keys;
         // Same scope the aggregation flamegraph uses, same param vocabulary —
         // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(currentSource(bucket), keys, selection.t0, selection.t1);
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         window.open('tokio_stats.html?' + query, '_blank');
@@ -2172,7 +2226,7 @@
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
         const keys = selection.keys;
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, selection.t0, selection.t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(currentSource(bucket), keys, selection.t0, selection.t1);
         const base = new URLSearchParams();
         base.set('api', '1');
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
@@ -2533,7 +2587,7 @@
         const titleParams = traceTitleParams(keys);
         const t0 = heatmapSelection ? heatmapSelection.t0 : null;
         const t1 = heatmapSelection ? heatmapSelection.t1 : null;
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1, currentRegion());
+        const scope = Dial9TraceScope.scopeFromKeys(currentSource(bucket), keys, t0, t1);
         // Raw mode passes no window, so scopeFromKeys derives it from the keys'
         // epochs. It returns null when none parse (an unrecognized key layout);
         // there is no window to build a scope from, so tell the user rather than

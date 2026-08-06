@@ -2,32 +2,19 @@
 // round-trip (parse -> sync) is Node-testable.
 
 import {
-  makeSourceScope,
-  writeShareableParams,
+  EMPTY_SOURCE_SCOPE,
+  readPlainSourceScope,
+  writeUrlParams,
 } from "../../lib/trace/index.js";
 import type { SourceScope } from "../../lib/trace/index.js";
 
 /** Scope params, read once from the URL and never edited in-page. */
 export interface ScopeParams {
-  bucket: string | null;
-  /** AWS region the bucket lives in; carried on the request URL + shared link. */
-  region: string | null;
-  /**
-   * Assume-role ARN to read the bucket as. Carried on the SHARED link only —
-   * restored into the creds store at boot and sent as a HEADER thereafter. The
-   * /api/tokio-stats REQUEST URL never carries it (a role on both header and
-   * query is the server's ConflictingCredentials 400).
-   */
-  roleArn: string | null;
+  source: SourceScope;
   prefix: string | null;
   service: string | null;
   /** Repeatable `host` param, in order (getAll semantics). */
   host: string[];
-}
-
-/** This scope's source+credential identity as a SourceScope. */
-export function sourceScope(scope: ScopeParams): SourceScope {
-  return makeSourceScope(scope.bucket, scope.region, scope.roleArn);
 }
 
 /** One period's bounds as epoch-ns strings (null = unset bound). */
@@ -37,11 +24,12 @@ export interface PeriodBounds {
 }
 
 /** Pull the scope dimensions out of a query params bag (page scope, or a diff side). */
-export function scopeFromParams(params: URLSearchParams): ScopeParams {
+export function scopeFromParams(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): ScopeParams {
   return {
-    bucket: params.get("bucket"),
-    region: params.get("aws_region"),
-    roleArn: params.get("aws_role_arn"),
+    source: readPlainSourceScope(params, fallback),
     prefix: params.get("prefix"),
     service: params.get("service"),
     host: params.getAll("host"),
@@ -49,8 +37,11 @@ export function scopeFromParams(params: URLSearchParams): ScopeParams {
 }
 
 /** Read the page scope params once. Values are preserved verbatim by sync. */
-export function readScope(params: URLSearchParams): ScopeParams {
-  return scopeFromParams(params);
+export function readScope(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): ScopeParams {
+  return scopeFromParams(params, fallback);
 }
 
 /**
@@ -95,7 +86,7 @@ export function buildSyncQuery(
   // from it restores the identity at boot. The role rides only here, never on
   // the /api/tokio-stats request URL (writeShareableParams vs the request built
   // in main.ts, which omits the role).
-  writeShareableParams(u, sourceScope(scope));
+  writeUrlParams(u, scope.source);
   if (scope.prefix) u.set("prefix", scope.prefix);
   if (scope.service) u.set("service", scope.service);
   for (const h of scope.host) u.append("host", h);

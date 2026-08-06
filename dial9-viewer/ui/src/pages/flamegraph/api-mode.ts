@@ -12,13 +12,15 @@ import {
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
-  makeSourceScope,
+  isSourceShareable,
   nextMaxFiles,
   nsToPickerUtc,
   openSse,
   pickerUtcToNs,
+  readPlainSourceScope,
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
+  sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import type {
   ApiFlamegraphNode,
@@ -43,11 +45,16 @@ interface AvailFacet {
 
 export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const { loadingEl, errorEl, containerEl, titleEl, statsEl } = els;
+  const source = readPlainSourceScope(
+    params,
+    sourceScopeFromStored("", Dial9Creds.get()),
+  );
+  applyToCreds(source, Dial9Creds);
 
-  // No beforeCopy flush here: the URL is already current (Apply/facet changes
-  // pushState synchronously, and canvas zoom is deliberately not URL-synced in
-  // this mode).
-  mountCopyLink(els.headerEl);
+  // Literal credential URLs are useful for same-tab reloads but are not safe
+  // built-in share targets. The private account-ID userscript owns that flow.
+  const copyLink = mountCopyLink(els.headerEl);
+  copyLink.el.style.display = isSourceShareable(source) ? "" : "none";
 
   // Filter toolbar. The facet controls are built from the backend's reported
   // metadata facets (see renderFacets), so only dimensions with data appear;
@@ -106,19 +113,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // (the box's service; hosts live alongside facetState above).
   const dataDir = params.get("data_dir");
   const scopeService = params.get("service");
-  const scopeBucket = params.get("bucket");
+  const scopeBucket = source.bucket || params.get("bucket");
   const scopePrefix = params.get("prefix");
-
-  // Source identity from the incoming (possibly shared) link. The role is
-  // restored into the creds store now so it rides as a HEADER on every
-  // /api/flamegraph request; buildApiUrl deliberately omits aws_role_arn from
-  // the request URL (a role on both header and query is the server's
-  // ConflictingCredentials 400). Region rides both transports (see SourceScope):
-  // kept in queryState below so the request URL carries aws_region for the
-  // ambient cross-region read, and folded into creds here for a role/BYOC read.
-  const scopeRegion = params.get("aws_region");
-  const scopeRoleArn = params.get("aws_role_arn");
-  applyToCreds(makeSourceScope(scopeBucket, scopeRegion, scopeRoleArn), Dial9Creds);
 
   // Span-type filter from a Span Explorer deep link. Fixed for the life of the
   // view (no toolbar control), so read once alongside the other scope params.
@@ -135,9 +131,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     const band = minimap?.band() ?? { minPollNs: null, maxPollNs: null };
     return {
       dataDir,
-      bucket: scopeBucket,
-      region: scopeRegion,
-      roleArn: scopeRoleArn,
+      source: { ...source, bucket: scopeBucket || source.bucket },
       prefix: scopePrefix,
       service: scopeService,
       hosts,

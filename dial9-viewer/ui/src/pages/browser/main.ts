@@ -26,8 +26,13 @@ import { mountServiceTabs } from "./service-tabs.js";
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
+import { Dial9Creds } from "../../lib/trace/creds.js";
 import { Dial9Session } from "../../lib/trace/session.js";
-import { applyToCreds, makeSourceScope } from "../../lib/trace/source-scope.js";
+import {
+  applyToCreds,
+  readPlainSourceScope,
+  sourceScopeFromStored,
+} from "../../lib/trace/source-scope.js";
 
 // Dual-UI switch: render the "Switch to legacy UI" control. The
 // ui-switch.js <head> auto-boot is a no-op on this off-root path.
@@ -88,46 +93,36 @@ function boot(): void {
   // state here. syncUrl() is suppressed while restoring, then run once at
   // the end.
   const urlState = window.Dial9UrlState.parse(window.location.search);
+  const source = readPlainSourceScope(
+    new URLSearchParams(window.location.search),
+    sourceScopeFromStored("", Dial9Creds.get()),
+  );
+  store.update("source", source);
   actions.setRestoring(true);
   // Timezone first: the range pickers format in the active TZ, so it must
   // be set before any date is written below.
   if (urlState.tz === "local") {
     store.update("ui", { useLocalTz: true });
   }
-  if (urlState.bucket) els.bucketInput.value = urlState.bucket;
+  if (source.bucket) els.bucketInput.value = source.bucket;
   if (urlState.prefix) els.prefixInput.value = urlState.prefix;
   if (urlState.service) els.serviceInput.value = urlState.service;
   if (urlState.q) els.rawSearchInput.value = urlState.q;
   actions.mirrorPrefix();
   if (urlState.tab === "raw") actions.switchTab("raw");
 
-  // A shared link can carry the bucket's source + credential identity: an
-  // assume-role ARN (aws_role_arn) and/or the bucket's region (aws_region).
-  // applyToCreds folds them into the store exactly as every other page's boot
-  // does: a role becomes the active assume-role credential (so every /api/*
-  // request carries the role-arn HEADER and the server assumes it with its own
-  // identity — never re-emitted as a query param, which would be the server's
-  // ConflictingCredentials 400); a region is patched onto whatever credential
-  // is stored. A role ARN grants nothing on its own, which is why it's safe in
-  // a link; an invalid one throws (setRoleArn validates the shape), so surface
-  // it rather than silently falling back to the server's identity. The panel's
-  // region field is prefilled separately below so a region-only link (no creds
-  // to attach it to yet) is still visible and rides subsequent requests.
-  if (window.Dial9Creds) {
-    if (urlState.region && !els.credsRegion.value) {
-      els.credsRegion.value = urlState.region;
-    }
-    try {
-      applyToCreds(
-        makeSourceScope(urlState.bucket, urlState.region, urlState.roleArn),
-        window.Dial9Creds,
-      );
-    } catch (e) {
-      console.warn(
-        "ignoring invalid aws_role_arn in URL:",
-        e instanceof Error ? e.message : e,
-      );
-    }
+  // Make the credential store's active transport match the canonical source.
+  // Explicit ambient clears stale tab credentials; literal keeps stored keys (or
+  // opens unconfigured literal mode); role stores the ARN so API requests carry
+  // it only as a header. Region remains visible in the source and request URL.
+  if (source.region) els.credsRegion.value = source.region;
+  try {
+    applyToCreds(source, Dial9Creds);
+  } catch (e) {
+    console.warn(
+      "ignoring invalid source credentials in URL:",
+      e instanceof Error ? e.message : e,
+    );
   }
 
   // Restore the time range. A relative `last=N` re-anchors to now (so a
@@ -166,7 +161,12 @@ function boot(): void {
       // The server's default bucket belongs to the server's identity. Don't
       // prefill it when the user has brought their own credentials - that
       // bucket isn't theirs; they pick from their own buckets instead.
-      const usingByoCreds = !!(window.Dial9Creds && window.Dial9Creds.has());
+      const credentials = store.getState().source.credentials;
+      const usingByoCreds =
+        credentials.kind === "role" ||
+        (credentials.kind === "literal" &&
+          credentials.accessKeyId !== "" &&
+          credentials.secretAccessKey !== "");
       if (!els.bucketInput.value && config.default_bucket && !usingByoCreds) {
         els.bucketInput.value = config.default_bucket;
       }
@@ -223,6 +223,7 @@ function boot(): void {
 /** Run every subscriber once so the first frame renders the initial state. */
 function primeRenders(store: ReturnType<typeof createBrowserStore>): void {
   const slices: (keyof BrowserState)[] = [
+    "source",
     "ui",
     "config",
     "form",

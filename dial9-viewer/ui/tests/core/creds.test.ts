@@ -1,5 +1,5 @@
-// Tests for creds.js - the bring-your-own-credentials store and its stable
-// scripting API (window.Dial9Creds.set/get/clear/headers). Runs in Node with an
+// Tests for creds.js: explicit ambient/literal/role internal state plus the
+// narrow browser userscript facade (set/check/setRegion). Runs in Node with an
 // injected fake storage backend.
 //
 // Migrated from test_creds.js (T10): test_harness.js test/testAsync/assert
@@ -9,6 +9,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 
 const require = createRequire(import.meta.url);
 
@@ -40,10 +42,15 @@ const { Dial9Creds } = require("../../creds.js") as {
   Dial9Creds: {
     _setStorage: (s: StorageLike) => void;
     has: () => boolean;
-    get: () => (StoredCreds & { kind?: string; roleArn?: string }) | null;
-    set: (creds: Partial<StoredCreds>) => Promise<SetResult>;
+    get: () => (StoredCreds & { kind: string; roleArn?: string });
+    set: (
+      creds: Partial<StoredCreds> & { bucket?: string; autoDetectRegion?: boolean },
+    ) => Promise<SetResult>;
+    check: (bucket?: string) => Promise<SetResult>;
+    setAmbient: () => { kind: "ambient" };
+    setLiteralMode: () => StoredCreds & { kind: "literal" };
     setRoleArn: (arn: string, opts?: { region?: string }) => void;
-    setRegion: (region: string) => SetResult | null;
+    setRegion: (region: string) => unknown;
     isValidRoleArn: (arn: string) => boolean;
     clear: () => void;
     headers: () => Record<string, string>;
@@ -75,11 +82,25 @@ const H_ROLE_ARN = "x-dial9-aws-role-arn";
 const VALID_ARN = "arn:aws:iam::123456789012:role/dial9-reader";
 
 describe("Dial9Creds", () => {
-  it("no credentials -> empty headers and has()=false", () => {
+  it("no credentials -> explicit ambient, empty headers and has()=false", () => {
     freshStore();
     expect(Dial9Creds.has()).toBe(false);
     expect(Dial9Creds.headers()).toEqual({});
-    expect(Dial9Creds.get()).toBeNull();
+    expect(Dial9Creds.get()).toEqual({ kind: "ambient" });
+  });
+
+  it("browser global exposes exactly set/check/setRegion", () => {
+    const windowObject: Record<string, unknown> = {};
+    runInNewContext(readFileSync(new URL("../../creds.js", import.meta.url), "utf8"), {
+      window: windowObject,
+      console,
+    });
+    expect(Object.keys(windowObject["Dial9Creds"] as object).sort()).toEqual([
+      "check",
+      "set",
+      "setRegion",
+    ]);
+    expect(windowObject["__Dial9CredentialStore"]).toBeDefined();
   });
 
   it("set() then headers() round-trips all fields", async () => {
@@ -168,7 +189,7 @@ describe("Dial9Creds", () => {
     expect(Dial9Creds.has()).toBe(false);
   });
 
-  it("get(): a bag carrying both transports resolves to a single static kind", () => {
+  it("get(): a bag carrying both transports resolves to a single literal kind", () => {
     // The server rejects a request carrying both transports (ConflictingCredentials),
     // so the store must resolve to exactly one. classify() is the single place that
     // invariant lives: a full key set is the more specific intent, so it wins and the
@@ -181,12 +202,12 @@ describe("Dial9Creds", () => {
       JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", roleArn: VALID_ARN }),
     );
     const c = Dial9Creds.get();
-    expect(c!.kind).toBe("static");
-    expect("roleArn" in c!, "role ARN dropped when static keys present").toBe(false);
+    expect(c!.kind).toBe("literal");
+    expect("roleArn" in c!, "role ARN dropped when literal keys present").toBe(false);
     const h = Dial9Creds.headers();
     expect(h[H_AKID]).toBe("AK");
     expect(h[H_SECRET]).toBe("SK");
-    expect(H_ROLE_ARN in h, "role-arn header omitted when static keys present").toBe(
+    expect(H_ROLE_ARN in h, "role-arn header omitted when literal keys present").toBe(
       false,
     );
   });
@@ -201,7 +222,7 @@ describe("Dial9Creds", () => {
       "dial9.aws-credentials",
       JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", region: "us-east-1" }),
     );
-    expect(Dial9Creds.get()!.kind).toBe("static");
+    expect(Dial9Creds.get()!.kind).toBe("literal");
     expect(Dial9Creds.headers()).toEqual({
       [H_AKID]: "AK",
       [H_SECRET]: "SK",
@@ -215,7 +236,7 @@ describe("Dial9Creds", () => {
 
   // -- setRegion(): shape-agnostic region patch (both transports) --
 
-  it("setRegion() pins the region on a static credential, preserving the keys", async () => {
+  it("setRegion() pins the region on a literal credential, preserving the keys", async () => {
     freshStore();
     await Dial9Creds.set({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "TK" });
     Dial9Creds.setRegion("us-west-2");
@@ -229,7 +250,7 @@ describe("Dial9Creds", () => {
 
   it("setRegion() pins the region on an assumed-role credential (the role path)", () => {
     // Region auto-detection persists the resolved region via setRegion. With a role
-    // credential active this must keep the role transport - the old static-only
+    // credential active this must keep the role transport - the old literal-only
     // set({...stored, region}) would have thrown here.
     freshStore();
     Dial9Creds.setRoleArn(VALID_ARN);
@@ -238,13 +259,14 @@ describe("Dial9Creds", () => {
       [H_ROLE_ARN]: VALID_ARN,
       [H_REGION]: "eu-central-1",
     });
-    // Still a role credential - no static keys crept in.
+    // Still a role credential - no literal keys crept in.
     expect(Dial9Creds.get()!.kind).toBe("role");
   });
 
-  it("setRegion() is a no-op when nothing is stored (ambient path)", () => {
+  it("setRegion() preserves explicit ambient when nothing is stored", () => {
     freshStore();
-    expect(Dial9Creds.setRegion("us-east-1")).toBeNull();
+    expect(Dial9Creds.setRegion("us-east-1")).toEqual({ kind: "ambient" });
+    expect(Dial9Creds.get()).toEqual({ kind: "ambient" });
     expect(Dial9Creds.has()).toBe(false);
     expect(Dial9Creds.headers()).toEqual({});
   });
@@ -337,6 +359,46 @@ describe("Dial9Creds", () => {
     expect(() =>
       Dial9Creds.parse(JSON.stringify({ credentials: { expiration: 1 } })),
     ).toThrow(/could not find/);
+  });
+
+  it("supports the deep-link userscript set/check/setRegion retry flow", async () => {
+    freshStore();
+    let attempts = 0;
+    vi.stubGlobal("fetch", async () => {
+      attempts += 1;
+      return attempts === 1
+        ? {
+            ok: false,
+            status: 403,
+            async text() { return "credentials propagating"; },
+          }
+        : {
+            ok: true,
+            status: 200,
+            async json() { return { ok: true, region: "us-west-2", error: null }; },
+          };
+    });
+    try {
+      const first = await Dial9Creds.set({
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        sessionToken: "TK",
+        bucket: "trace-bucket",
+        autoDetectRegion: true,
+      });
+      expect(first.ok).toBe(false);
+      const retry = await Dial9Creds.check("trace-bucket");
+      expect(retry).toEqual({ ok: true, region: "us-west-2", error: null });
+      if (retry.region) Dial9Creds.setRegion(retry.region);
+      expect(Dial9Creds.get()).toMatchObject({
+        kind: "literal",
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        region: "us-west-2",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("listBuckets() returns each bucket's ListBuckets region", async () => {

@@ -13,6 +13,7 @@ import {
   encodeScope,
   scopeFromKeys,
 } from "../../lib/trace/trace_scope.js";
+import type { SourceScope } from "../../lib/trace/source-scope.js";
 import type { BrowserEls } from "./dom.js";
 import type {
   BrowseSlice,
@@ -20,26 +21,15 @@ import type {
   HeatmapSelection,
 } from "./state.js";
 
-// The bucket's region, stamped onto every link this page opens so the
-// opened tab's URL is self-contained (signs the right regional S3 endpoint
-// without inheriting a detected region). Source of truth is the credentials
-// store; the panel's region field is the fallback. "" when unknown (the
-// server then uses its default region).
-function currentRegion(els: BrowserEls): string {
-  const stored = window.Dial9Creds ? window.Dial9Creds.get() : null;
-  if (stored && stored.region) return stored.region;
-  return els.credsRegion.value.trim() || "";
-}
-
-// The reader-role ARN in effect, stamped onto every link this page opens so a
-// tab opened from the link in a FRESH session (no stored creds) still has an
-// identity to read the bucket with. Only the assume-role credential kind
-// carries an ARN; static keys are header-only and never linkable. "" when the
-// current identity isn't a role (the opened tab then falls back to its own
-// creds / the server default), mirroring currentRegion's "" contract.
-function currentRoleArn(): string {
-  const stored = window.Dial9Creds ? window.Dial9Creds.get() : null;
-  return stored && stored.kind === "role" ? stored.roleArn : "";
+// The canonical source state with live bucket/region inputs folded in. Literal
+// values stay in memory/session storage; scope codecs receive only their mode.
+function currentSource(store: BrowserStore, els: BrowserEls): SourceScope {
+  const source = store.getState().source;
+  return {
+    ...source,
+    bucket: els.bucketInput.value.trim() || source.bucket,
+    region: els.credsRegion.value.trim() || source.region,
+  };
 }
 
 // The selection spanned too many hosts to name them all in the URL, so the
@@ -82,7 +72,7 @@ export function selectionScope(
   if (!sel || !sel.keys.length) return null;
   const bucket = els.bucketInput.value.trim();
   if (!bucket) return null;
-  const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion(els), currentRoleArn());
+  const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
   if (!scope) return null;
   const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
   if (hostsDropped) warnHostsDropped();
@@ -138,12 +128,10 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
     const titleParams = traceTitleParams(keys, { localTz: localTz() });
     const sel = store.getState().browse.selection;
     const scope = scopeFromKeys(
-      bucket,
+      currentSource(store, els),
       keys,
       sel ? sel.t0 : null,
       sel ? sel.t1 : null,
-      currentRegion(els),
-      currentRoleArn(),
     );
     // Raw mode passes no window, so scopeFromKeys derives it from the keys'
     // epochs; null means an unrecognized layout with nothing to scope.
@@ -177,7 +165,7 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       alert("Bucket is required");
       return;
     }
-    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion(els), currentRoleArn());
+    const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
     if (!scope) return; // a box selection always carries a window, so unreachable
 
     if (s.config.aggregationEnabled) {
@@ -212,7 +200,7 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       alert("Bucket is required");
       return;
     }
-    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion(els), currentRoleArn());
+    const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
     if (!scope) return; // window always present for a box selection
     const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
     if (hostsDropped) warnHostsDropped();
@@ -230,7 +218,7 @@ export function createOpenLinks(deps: OpenLinksDeps): OpenLinks {
       alert("Bucket is required");
       return;
     }
-    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion(els), currentRoleArn());
+    const scope = scopeFromKeys(currentSource(store, els), sel.keys, sel.t0, sel.t1);
     if (!scope) return; // window always present for a box selection
     const base = new URLSearchParams();
     base.set("api", "1");

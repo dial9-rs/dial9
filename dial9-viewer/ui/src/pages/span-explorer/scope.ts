@@ -8,11 +8,12 @@
 //     server-computed statistics over SSE.
 
 import {
+  EMPTY_SOURCE_SCOPE,
   formatAttrFilterParams,
-  makeSourceScope,
+  readPlainSourceScope,
   setMaxFilesParam,
   writeRequestParams,
-  writeShareableParams,
+  writeUrlParams,
 } from "../../lib/trace/index.js";
 import type { AttrFilter, SourceScope, StreamMode } from "../../lib/trace/index.js";
 
@@ -21,10 +22,7 @@ export interface PageScope {
   /** Raw-trace source URL; null in aggregate mode. */
   trace: string | null;
   dataDir: string | null;
-  bucket: string | null;
-  region: string | null;
-  /** Assume-role ARN to read the bucket as; null when not a role read. */
-  roleArn: string | null;
+  source: SourceScope;
   prefix: string | null;
   service: string | null;
   hosts: string[];
@@ -41,13 +39,14 @@ export interface ViewState {
   maxFiles: number | null;
 }
 
-export function readScope(params: URLSearchParams): PageScope {
+export function readScope(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): PageScope {
   return {
     trace: params.get("trace"),
     dataDir: params.get("data_dir"),
-    bucket: params.get("bucket"),
-    region: params.get("aws_region"),
-    roleArn: params.get("aws_role_arn"),
+    source: readPlainSourceScope(params, fallback),
     prefix: params.get("prefix"),
     service: params.get("service"),
     hosts: params.getAll("host"),
@@ -60,12 +59,7 @@ export function readScope(params: URLSearchParams): PageScope {
  */
 export function isAggregateMode(params: URLSearchParams, scope: PageScope): boolean {
   if (scope.trace != null) return false;
-  return params.get("api") === "1" || scope.bucket != null || scope.dataDir != null;
-}
-
-/** This scope's source+credential identity as a SourceScope. */
-export function sourceScope(scope: PageScope): SourceScope {
-  return makeSourceScope(scope.bucket, scope.region, scope.roleArn);
+  return params.get("api") === "1" || scope.source.bucket !== "" || scope.dataDir != null;
 }
 
 /**
@@ -102,7 +96,7 @@ export function buildApiUrl(
   // Request URL: bucket+region only. The role is header-only (restored into
   // creds at boot), so it must NOT appear here — a role on both header and
   // query is the server's ConflictingCredentials 400.
-  writeRequestParams(u.searchParams, sourceScope(scope));
+  writeRequestParams(u.searchParams, scope.source);
   appendDataParams(u.searchParams, scope);
   if (view.startNs) u.searchParams.set("start_ns", view.startNs);
   if (view.endNs) u.searchParams.set("end_ns", view.endNs);
@@ -131,7 +125,7 @@ export function buildBrowserQuery(scope: PageScope, view: ViewState): string {
   // Address-bar link: carries the role (aws_role_arn) so a fresh tab opened
   // from it restores the identity at boot; it is never re-emitted onto a
   // request URL from there (writeRequestParams above).
-  writeShareableParams(p, sourceScope(scope));
+  writeUrlParams(p, scope.source);
   appendDataParams(p, scope);
   if (view.startNs) p.set("start_ns", view.startNs);
   if (view.endNs) p.set("end_ns", view.endNs);

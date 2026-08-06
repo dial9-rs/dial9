@@ -18,9 +18,11 @@ const ORIGIN = "http://localhost:3051";
 function state(over: Partial<ApiQueryState> = {}): ApiQueryState {
   return {
     dataDir: null,
-    bucket: "demo-traces",
-    region: null,
-    roleArn: null,
+    source: {
+      bucket: "demo-traces",
+      region: "",
+      credentials: { kind: "ambient" },
+    },
     prefix: "traces",
     service: null,
     hosts: [],
@@ -132,14 +134,18 @@ describe("buildApiUrl (legacy buildApiUrl parity)", () => {
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu&min_poll_ns=1000000`,
     );
     expect(buildBrowserQuery(state({ maxPollNs: "2000000" }))).toBe(
-      "api=1&bucket=demo-traces&prefix=traces&source=cpu&max_poll_ns=2000000",
+      "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&source=cpu&max_poll_ns=2000000",
     );
   });
   it("data_dir passthrough, empty facets skipped, later facet keys ride in insertion order", () => {
     const u = buildApiUrl(
       state({
         dataDir: "/var/traces",
-        bucket: null,
+        source: {
+          bucket: "",
+          region: "",
+          credentials: { kind: "ambient" },
+        },
         prefix: null,
         facets: { source: "cpu", thread_class: "", spawn_location: "", host_group: "blue" },
       }),
@@ -157,12 +163,12 @@ describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
   // silently resetting to the backend default.
   it("api=1 leads; max_files persists; no ui param", () => {
     expect(buildBrowserQuery(state({ maxFiles: 640 }))).toBe(
-      "api=1&bucket=demo-traces&prefix=traces&source=cpu&max_files=640",
+      "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&source=cpu&max_files=640",
     );
   });
   it("an unset depth adds no max_files", () => {
     expect(buildBrowserQuery(state())).toBe(
-      "api=1&bucket=demo-traces&prefix=traces&source=cpu",
+      "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&source=cpu",
     );
   });
 
@@ -174,7 +180,7 @@ describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
         state({ spanTypeUid: "abc123", minSpanNs: "1000", maxSpanNs: "5000" }),
       ),
     ).toBe(
-      "api=1&bucket=demo-traces&prefix=traces&source=cpu" +
+      "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&source=cpu" +
         "&span_type_uid=abc123&min_span_ns=1000&max_span_ns=5000",
     );
   });
@@ -190,7 +196,7 @@ describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
         }),
       ),
     ).toBe(
-      "api=1&bucket=demo-traces&prefix=traces&service=svc-a&host=h1" +
+      "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&service=svc-a&host=h1" +
         "&source=sched&thread_class=worker&start_ns=1&end_ns=2",
     );
   });
@@ -205,7 +211,13 @@ describe("SourceScope region+role transport (gap closed)", () => {
 
   it("the shareable browser link carries BOTH region and the role", () => {
     const p = new URLSearchParams(
-      buildBrowserQuery(state({ region: "us-west-2", roleArn: ROLE })),
+      buildBrowserQuery(state({
+        source: {
+          bucket: "demo-traces",
+          region: "us-west-2",
+          credentials: { kind: "role", roleArn: ROLE },
+        },
+      })),
     );
     expect(p.get("aws_region")).toBe("us-west-2");
     expect(p.get("aws_role_arn")).toBe(ROLE);
@@ -217,7 +229,13 @@ describe("SourceScope region+role transport (gap closed)", () => {
     // server's ConflictingCredentials 400. Region is safe on the request URL
     // and required for the ambient cross-region read.
     const p = new URL(
-      buildApiUrl(state({ region: "us-west-2", roleArn: ROLE }), ORIGIN),
+      buildApiUrl(state({
+        source: {
+          bucket: "demo-traces",
+          region: "us-west-2",
+          credentials: { kind: "role", roleArn: ROLE },
+        },
+      }), ORIGIN),
     ).searchParams;
     expect(p.get("aws_region")).toBe("us-west-2");
     expect(p.has("aws_role_arn")).toBe(false);

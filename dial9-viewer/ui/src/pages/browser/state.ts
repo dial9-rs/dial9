@@ -12,6 +12,10 @@
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
 import type { BucketInfo } from "../../lib/trace/creds.js";
+import {
+  EMPTY_SOURCE_SCOPE,
+  type SourceScope,
+} from "../../lib/trace/source-scope.js";
 import { DEFAULT_BUCKET_FILTER } from "./bucket-filter.js";
 import type { RawSort } from "./raw-rows.js";
 
@@ -193,6 +197,7 @@ export interface TransientSlice {
 }
 
 export interface BrowserState {
+  source: SourceScope;
   ui: UiSlice;
   config: ConfigSlice;
   form: FormSlice;
@@ -209,6 +214,10 @@ export type BrowserStore = Store<BrowserState>;
 /** Initial state, matching the static HTML the entry ships. */
 export function initialBrowserState(): BrowserState {
   return {
+    source: {
+      ...EMPTY_SOURCE_SCOPE,
+      credentials: { ...EMPTY_SOURCE_SCOPE.credentials },
+    },
     ui: { tab: "browse", useLocalTz: false },
     config: {
       aggregationEnabled: false,

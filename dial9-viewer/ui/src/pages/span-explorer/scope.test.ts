@@ -4,6 +4,7 @@
 // the raw-mode `trace` preservation the legacy page got wrong.
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   buildApiUrl,
   buildBrowserQuery,
@@ -19,9 +20,11 @@ const ORIGIN = "https://viewer.example";
 const AGG_SCOPE: PageScope = {
   trace: null,
   dataDir: null,
-  bucket: "traces",
-  region: "us-west-2",
-  roleArn: null,
+  source: {
+    bucket: "traces",
+    region: "us-west-2",
+    credentials: { kind: "ambient" },
+  },
   prefix: "svc/",
   service: "metrics",
   hosts: ["host-a", "host-b"],
@@ -40,6 +43,16 @@ const EMPTY_VIEW: ViewState = {
 };
 
 const q = (url: string): URLSearchParams => new URL(url).searchParams;
+
+describe("userscript page marker", () => {
+  it("retains #btn-copylink in static markup", () => {
+    const html = readFileSync(
+      new URL("../../../span_explorer.html", import.meta.url),
+      "utf8",
+    );
+    expect(html).toContain('id="btn-copylink"');
+  });
+});
 
 describe("readScope / isAggregateMode", () => {
   it("raw mode wins outright, even alongside aggregate selectors", () => {
@@ -142,7 +155,13 @@ describe("buildApiUrl", () => {
   // ConflictingCredentials 400. Region is safe on the request URL and stays.
   it("carries region but NEVER the role on the request URL", () => {
     const p = q(
-      buildApiUrl("replace", { ...AGG_SCOPE, roleArn: ROLE }, EMPTY_VIEW, ORIGIN),
+      buildApiUrl("replace", {
+        ...AGG_SCOPE,
+        source: {
+          ...AGG_SCOPE.source,
+          credentials: { kind: "role", roleArn: ROLE },
+        },
+      }, EMPTY_VIEW, ORIGIN),
     );
     expect(p.get("aws_region")).toBe("us-west-2");
     expect(p.has("aws_role_arn")).toBe(false);
@@ -154,7 +173,13 @@ describe("buildBrowserQuery", () => {
   // restores it at boot. Region rides here too.
   it("the shareable link carries BOTH region and the role", () => {
     const p = new URLSearchParams(
-      buildBrowserQuery({ ...AGG_SCOPE, roleArn: ROLE }, EMPTY_VIEW),
+      buildBrowserQuery({
+        ...AGG_SCOPE,
+        source: {
+          ...AGG_SCOPE.source,
+          credentials: { kind: "role", roleArn: ROLE },
+        },
+      }, EMPTY_VIEW),
     );
     expect(p.get("aws_region")).toBe("us-west-2");
     expect(p.get("aws_role_arn")).toBe(ROLE);
@@ -170,7 +195,11 @@ describe("buildBrowserQuery", () => {
   // dropping `trace` - so reloading or sharing that URL landed in aggregate
   // mode with no scope at all.
   it("raw mode keeps its trace and never gains api=1", () => {
-    const raw: PageScope = { ...AGG_SCOPE, trace: "demo-trace.bin", bucket: null };
+    const raw: PageScope = {
+      ...AGG_SCOPE,
+      trace: "demo-trace.bin",
+      source: { ...AGG_SCOPE.source, bucket: "" },
+    };
     const p = new URLSearchParams(
       buildBrowserQuery(raw, { ...EMPTY_VIEW, selectedUid: "uid-1" }),
     );

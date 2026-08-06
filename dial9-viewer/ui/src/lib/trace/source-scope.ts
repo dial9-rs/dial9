@@ -1,172 +1,324 @@
-// The source + credential identity a shareable dial9 link carries: which
-// bucket to read, in which region, and (for the assume-role path) which role to
-// assume. Every viewer surface — the S3 browser's deep links, the trace viewer,
-// the flamegraph, tokio-stats, and the span explorer — used to re-implement
-// "which of these ride in the URL, and how", and they drifted (some carried
-// region, some the role, some neither). This module is the single owner of that
-// decision so every page agrees.
+// The source + credential identity for every viewer surface: which bucket to
+// read, in which region, and which ONE credential transport to use. Keeping
+// these together makes the invalid "literal keys plus a role ARN" state
+// unrepresentable and stops each page from independently reconstructing source
+// identity.
 //
-// The one rule worth understanding — and the reason region and the role are NOT
-// symmetric — comes straight from the server's credential parser
-// (dial9-viewer/src/server/credentials.rs, `parse_cred_inputs`):
+// The transport rule comes from the server credential parser:
 //
-//   • A role ARN may arrive via the `x-dial9-aws-role-arn` HEADER *or* the
-//     `aws_role_arn` query param, but NOT BOTH — both together is a hard
-//     `CredError::ConflictingCredentials` (HTTP 400). So the role travels on
-//     exactly ONE transport per request. We choose the header: at boot a page
-//     folds the incoming role into its credentials store (`applyToCreds`), and
-//     thereafter it rides as the header on every `/api/*` request. The role
-//     therefore appears in SHAREABLE URLs only (address bar / links that open a
-//     fresh tab), NEVER on an `/api/*` request URL — see `writeRequestParams`
-//     vs `writeShareableParams`.
+//   • Literal credentials and role credentials travel as x-dial9-aws-* headers.
+//   • A role ARN may arrive in a header OR the aws_role_arn query parameter, but
+//     never both. Runtime API URLs therefore omit the role; browser/share URLs
+//     carry it so a fresh tab can restore the identity before making requests.
+//   • Region remains on API URLs because ambient cross-region reads have no
+//     credential object to carry an x-dial9-aws-region header.
 //
-//   • Region is the opposite: the server tolerates it on both transports (the
-//     header wins when both are set), AND the only place an *ambient*-identity
-//     (no stored creds) cross-region read learns the bucket's region is the
-//     `aws_region` query param — `resolve_with_region`'s `CredSource::Default`
-//     arm reads it there and nowhere else. And `Dial9Creds.setRegion` is a
-//     no-op when nothing is stored (there is no "region-only" credential). So
-//     region CANNOT be header-only: it must ride the request URL too, or an
-//     ambient cross-region page never reaches the right endpoint. Region is
-//     carried on both request and shareable URLs, and also folded into creds so
-//     a role/BYOC read signs the right regional endpoint.
+// Browser URLs always carry an explicit credential mode. Literal values never
+// do: a literal URL marker means "use this tab's stored literal credentials" or
+// "show the literal credential form" when no usable keys are stored.
 
-/** The bucket + region + reader-role identity a shareable link carries. */
-export interface SourceScope {
-  /** S3 bucket; "" when absent (a same-page selection with no explicit bucket). */
-  bucket: string;
-  /** AWS region the bucket lives in; "" when unknown / the server default. */
-  region: string;
-  /**
-   * Reader-role ARN to assume for this bucket; "" when the identity is not a
-   * role (static BYOC keys, or the server's ambient identity). Not a secret —
-   * the ARN grants nothing on its own; the server must be separately allowed to
-   * assume it — which is why it is safe to carry in a shareable URL.
-   */
+export interface AmbientCredentials {
+  kind: "ambient";
+}
+
+export interface LiteralCredentials {
+  kind: "literal";
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string | undefined;
+}
+
+export interface RoleCredentials {
+  kind: "role";
   roleArn: string;
 }
 
-/** The empty identity (no bucket / region / role). */
-export const EMPTY_SOURCE_SCOPE: SourceScope = { bucket: "", region: "", roleArn: "" };
+export type SourceCredentials =
+  | AmbientCredentials
+  | LiteralCredentials
+  | RoleCredentials;
 
-/** Build a SourceScope from possibly-absent fields, normalizing to "". */
+export interface SourceScope {
+  /** S3 bucket; "" when absent (for example local/demo sources). */
+  bucket: string;
+  /** AWS region the bucket lives in; "" when unknown/server-default. */
+  region: string;
+  /** Exactly one credential mode. */
+  credentials: SourceCredentials;
+}
+
+export type UrlCredentials =
+  | AmbientCredentials
+  | { kind: "literal" }
+  | RoleCredentials;
+
+export interface UrlSourceScope {
+  bucket: string;
+  region: string;
+  credentials: UrlCredentials;
+}
+
+export type ShareableCredentials = AmbientCredentials | RoleCredentials;
+
+export interface ShareableSourceScope {
+  bucket: string;
+  region: string;
+  credentials: ShareableCredentials;
+}
+
+export type Shareability =
+  | { kind: "shareable"; scope: ShareableSourceScope }
+  | { kind: "literal-credentials" };
+
+export const AMBIENT_CREDENTIALS: AmbientCredentials = { kind: "ambient" };
+export const EMPTY_LITERAL_CREDENTIALS: LiteralCredentials = {
+  kind: "literal",
+  accessKeyId: "",
+  secretAccessKey: "",
+};
+export const EMPTY_SOURCE_SCOPE: SourceScope = {
+  bucket: "",
+  region: "",
+  credentials: AMBIENT_CREDENTIALS,
+};
+
+export type StoredSourceCredentials = SourceCredentials & {
+  region?: string | undefined;
+};
+
+/** Build a normalized source scope from explicit credential state. */
 export function makeSourceScope(
   bucket: string | null | undefined,
   region: string | null | undefined,
-  roleArn: string | null | undefined,
+  credentials: SourceCredentials = AMBIENT_CREDENTIALS,
 ): SourceScope {
-  return { bucket: bucket || "", region: region || "", roleArn: roleArn || "" };
+  return {
+    bucket: bucket || "",
+    region: region || "",
+    credentials,
+  };
 }
 
-// The two vocabularies. `NAMESPACED` (`s_*`) is the trace viewer's scope-link
-// dialect (kept distinct from the viewer's own `host`/`from`/`start` params);
-// `PLAIN` is what the server endpoints and the S3-browser landing page read.
-// These names mirror trace_scope.js's `P` table and the server's
-// credentials::{QUERY_ROLE_ARN, QUERY_REGION} constants exactly, so a scope
-// this module writes round-trips through the frozen full-scope codec unchanged.
-const NAMESPACED = { bucket: "s_bucket", region: "s_region", roleArn: "s_role_arn" } as const;
-const PLAIN = { bucket: "bucket", region: "aws_region", roleArn: "aws_role_arn" } as const;
+/** Build the source fallback represented by the tab-scoped credential store. */
+export function sourceScopeFromStored(
+  bucket: string | null | undefined,
+  stored: StoredSourceCredentials,
+): SourceScope {
+  const { region = "", ...credentials } = stored;
+  return makeSourceScope(bucket, region, credentials as SourceCredentials);
+}
 
-/** Read the identity from the namespaced `s_*` vocabulary (viewer scope links). */
-export function readNamespacedSourceScope(params: URLSearchParams): SourceScope {
-  return makeSourceScope(
-    params.get(NAMESPACED.bucket),
-    params.get(NAMESPACED.region),
-    params.get(NAMESPACED.roleArn),
+export function credentialMode(scope: SourceScope): SourceCredentials["kind"] {
+  return scope.credentials.kind;
+}
+
+export function isLiteralConfigured(credentials: SourceCredentials): boolean {
+  return (
+    credentials.kind === "literal" &&
+    credentials.accessKeyId.trim() !== "" &&
+    credentials.secretAccessKey.trim() !== ""
   );
 }
 
-/** Read the identity from the plain vocabulary (aggregate pages / landing page). */
-export function readPlainSourceScope(params: URLSearchParams): SourceScope {
-  return makeSourceScope(
-    params.get(PLAIN.bucket),
-    params.get(PLAIN.region),
-    params.get(PLAIN.roleArn),
-  );
+/** URL-safe projection. Literal mode deliberately drops every secret value. */
+export function toUrlSourceScope(scope: SourceScope): UrlSourceScope {
+  switch (scope.credentials.kind) {
+    case "ambient":
+      return { bucket: scope.bucket, region: scope.region, credentials: AMBIENT_CREDENTIALS };
+    case "literal":
+      return { bucket: scope.bucket, region: scope.region, credentials: { kind: "literal" } };
+    case "role":
+      return {
+        bucket: scope.bucket,
+        region: scope.region,
+        credentials: { kind: "role", roleArn: scope.credentials.roleArn },
+      };
+  }
+}
+
+/** Built-in sharing is intentionally unavailable for literal credentials. */
+export function toShareableSourceScope(scope: SourceScope): Shareability {
+  if (scope.credentials.kind === "literal") return { kind: "literal-credentials" };
+  return {
+    kind: "shareable",
+    scope: {
+      bucket: scope.bucket,
+      region: scope.region,
+      credentials: scope.credentials,
+    },
+  };
+}
+
+export function isSourceShareable(scope: SourceScope): boolean {
+  return scope.credentials.kind !== "literal";
+}
+
+// `s_*` is the trace viewer's compact-scope vocabulary. Plain names are used
+// by the browser and aggregate pages. `credential_mode` is frontend-only; API
+// request writers intentionally never emit it.
+const NAMESPACED = {
+  bucket: "s_bucket",
+  region: "s_region",
+  roleArn: "s_role_arn",
+  credentialMode: "s_credential_mode",
+} as const;
+const PLAIN = {
+  bucket: "bucket",
+  region: "aws_region",
+  roleArn: "aws_role_arn",
+  credentialMode: "credential_mode",
+} as const;
+
+type ParamNames = typeof NAMESPACED | typeof PLAIN;
+
+function parseCredentialMode(value: string | null): SourceCredentials["kind"] | null {
+  return value === "ambient" || value === "literal" || value === "role" ? value : null;
+}
+
+function readSourceScope(
+  params: URLSearchParams,
+  names: ParamNames,
+  fallback: SourceScope,
+): SourceScope {
+  const bucket = params.get(names.bucket) || fallback.bucket;
+  const region = params.get(names.region) || fallback.region;
+  const roleArn = params.get(names.roleArn) || "";
+  const explicitMode = parseCredentialMode(params.get(names.credentialMode));
+
+  if (explicitMode === "ambient") return makeSourceScope(bucket, region, AMBIENT_CREDENTIALS);
+  if (explicitMode === "role") {
+    return roleArn
+      ? makeSourceScope(bucket, region, { kind: "role", roleArn })
+      : makeSourceScope(bucket, region, AMBIENT_CREDENTIALS);
+  }
+  if (explicitMode === "literal") {
+    return makeSourceScope(
+      bucket,
+      region,
+      fallback.credentials.kind === "literal"
+        ? fallback.credentials
+        : EMPTY_LITERAL_CREDENTIALS,
+    );
+  }
+
+  // Backward compatibility: legacy links represented role mode only by the ARN.
+  if (roleArn) return makeSourceScope(bucket, region, { kind: "role", roleArn });
+  // A pre-mode URL opened in the same tab as literal credentials keeps working.
+  if (fallback.credentials.kind === "literal") {
+    return makeSourceScope(bucket, region, fallback.credentials);
+  }
+  return makeSourceScope(bucket, region, AMBIENT_CREDENTIALS);
+}
+
+export function readNamespacedSourceScope(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): SourceScope {
+  return readSourceScope(params, NAMESPACED, fallback);
+}
+
+export function readPlainSourceScope(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): SourceScope {
+  return readSourceScope(params, PLAIN, fallback);
+}
+
+function writeUrlSourceScope(
+  params: URLSearchParams,
+  scope: UrlSourceScope,
+  names: ParamNames,
+): void {
+  if (scope.bucket) params.set(names.bucket, scope.bucket);
+  if (scope.region) params.set(names.region, scope.region);
+  params.set(names.credentialMode, scope.credentials.kind);
+  if (scope.credentials.kind === "role") {
+    params.set(names.roleArn, scope.credentials.roleArn);
+  }
+}
+
+/** Write safe browser/address-bar source state, including literal mode marker. */
+export function writeUrlParams(params: URLSearchParams, scope: SourceScope): void {
+  writeUrlSourceScope(params, toUrlSourceScope(scope), PLAIN);
+}
+
+/** Write safe namespaced browser scope state. */
+export function writeNamespacedUrlParams(params: URLSearchParams, scope: SourceScope): void {
+  writeUrlSourceScope(params, toUrlSourceScope(scope), NAMESPACED);
+}
+
+/** Share-only writer: the type excludes literal credentials. */
+export function writeShareableParams(
+  params: URLSearchParams,
+  scope: ShareableSourceScope,
+): void {
+  writeUrlSourceScope(params, scope, PLAIN);
+}
+
+/** Namespaced share-only writer: the type excludes literal credentials. */
+export function writeNamespacedParams(
+  params: URLSearchParams,
+  scope: ShareableSourceScope,
+): void {
+  writeUrlSourceScope(params, scope, NAMESPACED);
 }
 
 /**
- * Write the identity for an `/api/*` REQUEST URL: `bucket` + `aws_region`, and
- * deliberately NOT `aws_role_arn`. The role rides as the header (via
- * `applyToCreds`); emitting it here too would be a role in both header and
- * query — the server's `ConflictingCredentials` 400. This is the single-
- * transport rule the whole module exists to enforce. Region is safe on the
- * request URL (header wins if both are set) and is required for the ambient
- * cross-region read, so it stays.
+ * Write an `/api/*` request URL. Credential mode and role are header-only;
+ * region remains in the query for ambient cross-region reads.
  */
 export function writeRequestParams(params: URLSearchParams, scope: SourceScope): void {
   if (scope.bucket) params.set(PLAIN.bucket, scope.bucket);
   if (scope.region) params.set(PLAIN.region, scope.region);
-  // No roleArn: header-only. See the module header + writeShareableParams.
 }
 
-/**
- * Write the identity for a SHAREABLE link that opens a fresh tab on an
- * aggregate page (address-bar sync, or a "open in flamegraph" link): `bucket` +
- * `aws_region` + `aws_role_arn`. The role is safe here because the opened page
- * reads it once at boot, folds it into its creds store (`applyToCreds`), and
- * from then on only ever sends it as the header — so no single `/api/*` request
- * ever carries the role on two transports.
- */
-export function writeShareableParams(params: URLSearchParams, scope: SourceScope): void {
-  if (scope.bucket) params.set(PLAIN.bucket, scope.bucket);
-  if (scope.region) params.set(PLAIN.region, scope.region);
-  if (scope.roleArn) params.set(PLAIN.roleArn, scope.roleArn);
+/** Build the existing backend credential headers from one canonical scope. */
+export function credentialHeadersForSource(scope: SourceScope): Record<string, string> {
+  const h: Record<string, string> = {};
+  switch (scope.credentials.kind) {
+    case "ambient":
+      return h;
+    case "literal":
+      if (!isLiteralConfigured(scope.credentials)) return h;
+      h["x-dial9-aws-access-key-id"] = scope.credentials.accessKeyId;
+      h["x-dial9-aws-secret-access-key"] = scope.credentials.secretAccessKey;
+      if (scope.credentials.sessionToken) {
+        h["x-dial9-aws-session-token"] = scope.credentials.sessionToken;
+      }
+      break;
+    case "role":
+      h["x-dial9-aws-role-arn"] = scope.credentials.roleArn;
+      break;
+  }
+  if (scope.region) h["x-dial9-aws-region"] = scope.region;
+  return h;
 }
 
-/**
- * Write the identity in the namespaced `s_*` vocabulary (the viewer's scope
- * links). Like `writeShareableParams` this is a shareable link, so the role
- * (`s_role_arn`) is carried; the viewer restores it via `applyToCreds` at boot
- * and never re-emits it on its own `/api/*` requests. (The S3 browser builds
- * full viewer scope links through trace_scope.js, which writes these same
- * names; this exists for pages/tests that carry only the identity subset.)
- */
-export function writeNamespacedParams(params: URLSearchParams, scope: SourceScope): void {
-  if (scope.bucket) params.set(NAMESPACED.bucket, scope.bucket);
-  if (scope.region) params.set(NAMESPACED.region, scope.region);
-  if (scope.roleArn) params.set(NAMESPACED.roleArn, scope.roleArn);
-}
-
-/**
- * The minimal credentials-store surface `applyToCreds` needs. Structurally
- * satisfied by `Dial9Creds` and by the viewer scope-boot test double.
- */
+/** Internal store operations needed to activate source state at page boot. */
 export interface SourceScopeCredentials {
-  /** The active credential (or null if none is stored). */
-  get(): { region?: string | undefined } | null;
-  /** Store an assume-role ARN as the active credential (optionally its region). */
+  get(): StoredSourceCredentials;
+  setAmbient(): unknown;
+  setLiteralMode(): unknown;
   setRoleArn(roleArn: string, opts?: { region?: string }): unknown;
-  /** Patch the region onto whatever credential is stored; no-op if none is. */
   setRegion(region: string): unknown;
 }
 
-/**
- * Fold the incoming identity into the credentials store at boot, so the role
- * (and region) travel as HEADERS on subsequent `/api/*` requests rather than as
- * query params. This is what lets a shared link opened in a FRESH session (no
- * stored creds) read the bucket at all.
- *
- * The asymmetry, restated where it bites:
- *  - A role always CAN be stored (it becomes the active credential), so a
- *    present role is folded in unconditionally, carrying its region along so the
- *    assumed-role client signs the right regional endpoint.
- *  - Region alone CANNOT be stored — `setRegion` is a no-op on an empty store
- *    (there is no region-only credential). So we patch the region only onto an
- *    already-stored credential (a role we just set, or BYOC keys). When nothing
- *    is stored and there is no role, the region cannot be a header; it rides the
- *    request URL instead (see `writeRequestParams`), which is exactly how an
- *    ambient cross-region read reaches the server.
- */
+/** Make the credential store's active transport match an incoming source URL. */
 export function applyToCreds(scope: SourceScope, creds: SourceScopeCredentials): void {
-  if (scope.roleArn) {
-    creds.setRoleArn(scope.roleArn, scope.region ? { region: scope.region } : undefined);
-    return;
-  }
-  if (scope.region) {
-    const stored = creds.get();
-    if (stored !== null && stored.region !== scope.region) {
-      creds.setRegion(scope.region);
+  switch (scope.credentials.kind) {
+    case "ambient":
+      creds.setAmbient();
+      return;
+    case "literal": {
+      const stored = creds.get();
+      if (stored.kind !== "literal") creds.setLiteralMode();
+      if (scope.region && stored.region !== scope.region) creds.setRegion(scope.region);
+      return;
     }
+    case "role":
+      creds.setRoleArn(
+        scope.credentials.roleArn,
+        scope.region ? { region: scope.region } : undefined,
+      );
   }
 }

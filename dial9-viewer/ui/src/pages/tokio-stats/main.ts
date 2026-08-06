@@ -9,6 +9,7 @@ import {
   applyToCreds,
   nextMaxFiles,
   openSse,
+  sourceScopeFromStored,
   tokioStatsUrl,
 } from "../../lib/trace/index.js";
 import type { TokioStatsQuery, TokioStatsResponse } from "../../lib/trace/index.js";
@@ -29,7 +30,6 @@ import type { WorkerSortKey } from "./stats.js";
 import {
   readScope,
   scopeFromParams,
-  sourceScope,
   parseInitialPeriods,
   buildSyncQuery,
   shouldAutoLoad,
@@ -59,9 +59,10 @@ if (window.D9UiSwitch) {
 // URL params are read ONCE: the scope is fixed for the page's lifetime, and
 // auto-load checks the ORIGINAL query before syncUrl rewrites it.
 const originalParams = new URLSearchParams(window.location.search);
-const scope = readScope(originalParams);
 // Diff mode (?diff=1&a=<b64>&b=<b64>): two sides, each its own independent scope.
 const diffParsed = parseDiff(originalParams);
+const fallbackSource = sourceScopeFromStored("", Dial9Creds.get());
+const scope = readScope(diffParsed?.a ?? originalParams, fallbackSource);
 const diffMode = diffParsed !== null;
 
 // Restore the link's reader-role (and region) into the creds store so this tab
@@ -70,7 +71,7 @@ const diffMode = diffParsed !== null;
 // but NOT aws_role_arn (a role on both header and query is the server's
 // ConflictingCredentials 400). In diff mode each side carries its own scope in
 // the b64 payload, but the shared identity is the page scope's.
-applyToCreds(sourceScope(scope), Dial9Creds);
+applyToCreds(scope.source, Dial9Creds);
 
 /** The scope a period streams against: its own (diff side) or the page scope. */
 function effectiveScope(period: Period): ScopeParams {
@@ -259,7 +260,7 @@ function renderFromCache(): void {
       s,
       data,
       threshNs,
-      scope.bucket,
+      scope.source.bucket,
       openExemplar,
       limits,
       workers,
@@ -277,7 +278,7 @@ function renderFromCache(): void {
       s,
       withData.data,
       threshNs,
-      scope.bucket,
+      scope.source.bucket,
       openExemplar,
       limits,
       workers,
@@ -299,11 +300,10 @@ async function loadPeriod(period: Period): Promise<void> {
   // owns the fold loop.
   const es = effectiveScope(period);
   const query: TokioStatsQuery = { host: es.host };
-  if (es.bucket) query.bucket = es.bucket;
-  // Region on the request URL: the server reads it from `aws_region` for the
-  // ambient cross-region read. The role is NOT set here — it rides as the
-  // header restored by applyToCreds at boot (server rejects both transports).
-  if (es.region) query.aws_region = es.region;
+  if (es.source.bucket) query.bucket = es.source.bucket;
+  // Region on the request URL is required for ambient cross-region reads. Role
+  // and literal credentials remain header-only.
+  if (es.source.region) query.aws_region = es.source.region;
   if (es.prefix) query.prefix = es.prefix;
   if (es.service) query.service = es.service;
   if (period.startNs) query.start_ns = period.startNs;

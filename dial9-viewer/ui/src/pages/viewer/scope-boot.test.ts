@@ -43,7 +43,14 @@ describe("scope boot", () => {
       },
     };
     const creds: ScopeBootCredentials = {
-      get: () => ({ region }),
+      get: () => ({
+        kind: "literal",
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        region,
+      }),
+      setAmbient() {},
+      setLiteralMode() {},
       setRegion(next) {
         region = next;
       },
@@ -105,7 +112,9 @@ describe("scope boot", () => {
     const roleCalls: Array<{ arn: string; region?: string }> = [];
     let region = "";
     const creds: ScopeBootCredentials = {
-      get: () => ({ region }),
+      get: () => ({ kind: "ambient" }),
+      setAmbient() {},
+      setLiteralMode() {},
       setRegion(next) {
         region = next;
       },

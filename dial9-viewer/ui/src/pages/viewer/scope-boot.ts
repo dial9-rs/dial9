@@ -6,7 +6,12 @@ import {
   resolveScope,
   type TraceScope,
 } from "../../lib/trace/trace_scope.js";
-import { applyToCreds, makeSourceScope } from "../../lib/trace/source-scope.js";
+import {
+  applyToCreds,
+  readNamespacedSourceScope,
+  sourceScopeFromStored,
+  type SourceScope,
+} from "../../lib/trace/source-scope.js";
 import { initialUrlLabel } from "./load-controller.js";
 import type { ReparseRange } from "../../lib/trace/index.js";
 
@@ -17,7 +22,9 @@ export interface ScopeLoadTarget {
 }
 
 export interface ScopeBootCredentials {
-  get(): { kind?: string; region?: string | undefined } | null;
+  get(): import("../../lib/trace/source-scope.js").StoredSourceCredentials;
+  setAmbient(): unknown;
+  setLiteralMode(): unknown;
   setRegion(region: string): unknown;
   setRoleArn(roleArn: string, opts?: { region?: string }): unknown;
   has(): boolean;
@@ -51,12 +58,17 @@ export async function bootScopeFromSearch(
   if (scope === null) return false;
 
   const creds = options.creds ?? Dial9Creds;
+  const source = readNamespacedSourceScope(
+    params,
+    sourceScopeFromStored("", creds.get()),
+  );
   const fetchJson =
     options.fetchJson ??
     ((url: string) => fetchJsonWithCreds(url, creds));
   await loadFromScope(
     options.loadChrome,
     scope,
+    source,
     options.onError,
     fetchJson,
     creds,
@@ -78,6 +90,7 @@ export async function bootScopeFromSearch(
 async function loadFromScope(
   loadChrome: ScopeLoadTarget,
   scope: TraceScope,
+  source: SourceScope,
   onError: (message: string) => void,
   fetchJson: (url: string) => Promise<unknown>,
   creds: ScopeBootCredentials,
@@ -92,7 +105,7 @@ async function loadFromScope(
   // ConflictingCredentials 400 can't happen. Region rides along so the assumed-
   // role client signs the right regional endpoint. See lib/trace/source-scope.ts
   // for why region and the role are not symmetric.
-  applyToCreds(makeSourceScope(scope.bucket, scope.region, scope.roleArn), creds);
+  applyToCreds(source, creds);
 
   const isCurrent = loadChrome.scopeLoading("Loading trace selection…");
   try {
