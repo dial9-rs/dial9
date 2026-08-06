@@ -19,6 +19,7 @@ all-features = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(shuttle)",
     "cfg(iai_enabled)",
+    "cfg(tokio_unstable)",
 ] }
 missing_debug_implementations = "warn"
 

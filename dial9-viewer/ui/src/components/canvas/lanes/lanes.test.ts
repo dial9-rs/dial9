@@ -403,6 +403,7 @@ describe("assembleLaneHover", () => {
       hasCpuTime: true,
       hasSchedWait: true,
       hasTaskTracking: true,
+      hasLocalQueueDepth: true,
     });
     expect(data.state).toBe("polling");
     expect(data.poll?.taskId).toBe(0x1a);
@@ -412,6 +413,32 @@ describe("assembleLaneHover", () => {
     expect(data.globalQueue).toBe(3);
     expect(data.localQueue).toBe(1);
     expect(data.activeTaskCount).toBe(5);
+  });
+
+  // Task ids and queue depth are independent capabilities: a reduced-fidelity
+  // trace still carries task ids on its poll spans.
+  it("keeps the task id when only queue depth is unavailable", () => {
+    const p = poll(0, 100, 0x2b);
+    const lane: WorkerLane = { ...emptyLane(), polls: [p] };
+    const data = assembleLaneHover({
+      workerId: 1,
+      ns: 50,
+      spans: lane,
+      allSpans: [],
+      queueSamples: [{ t: 40, global: 3 }],
+      localQueueSamples: [{ t: 40, local: 0 }],
+      activeTaskSamples: [],
+      blockInPlaceGaps: [],
+      hasCpuTime: true,
+      hasSchedWait: true,
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    });
+    expect(data.poll?.taskId).toBe(0x2b);
+    // The 0 on the wire is a sentinel, not a measurement.
+    expect(data.localQueue).toBeNull();
+    // Global queue has a stable source, so it survives.
+    expect(data.globalQueue).toBe(3);
   });
 
   it("reports parked state with kernel sched delay", () => {
@@ -431,6 +458,7 @@ describe("assembleLaneHover", () => {
       hasCpuTime: false,
       hasSchedWait: true,
       hasTaskTracking: false,
+      hasLocalQueueDepth: false,
     });
     expect(data.state).toBe("parked");
     expect(data.parkDurationNs).toBe(500);

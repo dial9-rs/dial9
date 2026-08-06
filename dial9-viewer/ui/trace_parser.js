@@ -1201,6 +1201,12 @@
             hasCpuTime: true,
             hasSchedWait: true,
             hasTaskTracking: true,
+            // `tokio.unstable=false`: no tokio poll or task hooks, so poll
+            // events cover only dial9-spawned tasks, there are no task
+            // spawn/terminate events, and per-worker queue depth records a
+            // sentinel 0. Traces predating the key all had the hooks.
+            hasFullTaskCoverage: segmentMetadata.get("tokio.unstable") !== "false",
+            hasLocalQueueDepth: segmentMetadata.get("tokio.unstable") !== "false",
             spawnLocations,
             taskSpawnLocs,
             taskSpawnTimes,

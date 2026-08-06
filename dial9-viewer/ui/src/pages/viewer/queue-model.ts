@@ -63,6 +63,7 @@ export interface QueueData {
   spawnLocations: ReadonlyMap<string, string>;
   /** True when the trace carries the active-task timeline. */
   hasTaskTracking: boolean;
+  hasLocalQueueDepth: boolean;
 }
 
 /** The empty (no-trace) queue data. */
@@ -75,6 +76,7 @@ export const EMPTY_QUEUE_DATA: QueueData = {
   taskSpawnLocs: new Map(),
   spawnLocations: new Map(),
   hasTaskTracking: false,
+  hasLocalQueueDepth: false,
 };
 
 /**
@@ -111,6 +113,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,
     hasTaskTracking: trace.hasTaskTracking,
+    hasLocalQueueDepth: trace.hasLocalQueueDepth,
   };
 }
 
@@ -187,7 +190,10 @@ export interface QueueRenderModel {
   numBuckets: number;
   /** Plotted global value per pixel column (carry-forward step). */
   global: readonly number[];
-  /** Plotted max-local value per pixel column (carry-forward step). */
+  /**
+   * Plotted max-local value per pixel column (carry-forward step). Empty when
+   * the trace has no per-worker queue depth.
+   */
   local: readonly number[];
   /** Shared magnitude for the global + local series (>= 1). */
   maxQ: number;
@@ -326,7 +332,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   const viewDur = viewEnd - viewStart;
 
   if (numBuckets === 0 || viewDur <= 0) {
-    return { numBuckets, global, local, maxQ: 1, activeTask: null, hasData: false };
+    return {
+      numBuckets,
+      global,
+      local: data.hasLocalQueueDepth ? local : [],
+      maxQ: 1,
+      activeTask: null,
+      hasData: false,
+    };
   }
 
   let hasData = false;
@@ -394,7 +407,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   const activeTask = buildActiveTaskModel(data, viewStart, viewEnd, viewDur, drawW);
   if (activeTask !== null) hasData = true;
 
-  return { numBuckets, global, local, maxQ, activeTask, hasData };
+  return {
+    numBuckets,
+    global,
+    local: data.hasLocalQueueDepth ? local : [],
+    maxQ,
+    activeTask,
+    hasData,
+  };
 }
 
 /**

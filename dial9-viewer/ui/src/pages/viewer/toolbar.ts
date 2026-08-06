@@ -390,6 +390,15 @@ function infoMenu(
           Detailed fetch/parse timing (Parse perf) is recorded by the load
           pipeline.
         </div>
+        ${!trace.hasFullTaskCoverage
+          ? html`<div class="d9-info-heading">Reduced fidelity</div>
+              <div class="d9-info-note">
+                Recorded without <code>--cfg tokio_unstable</code>. Poll events
+                cover only tasks spawned through <code>dial9::spawn</code>, and
+                the task list and blocking-call analysis are built from them.
+                Task lifetimes and per-worker queue depth are unavailable.
+              </div>`
+          : ""}
         ${uninstrumented > 0
           ? html`<div class="d9-info-heading">Uninstrumented</div>
               <div class="d9-info-row">

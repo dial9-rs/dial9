@@ -114,6 +114,20 @@ describe("deriveTaskViewModel", () => {
     expect(vm.rows).toEqual([]);
   });
 
+  // The empty state must tell "this trace has no tasks" apart from "coverage
+  // is partial", so it reads coverage rather than whether task data exists.
+  it("carries task coverage, not task-data existence", () => {
+    expect(deriveTaskViewModel(trace, POI).hasFullTaskCoverage).toBe(
+      trace.hasFullTaskCoverage,
+    );
+
+    const partial = {
+      ...trace,
+      hasFullTaskCoverage: false,
+    } as unknown as typeof trace;
+    expect(deriveTaskViewModel(partial, POI).hasFullTaskCoverage).toBe(false);
+  });
+
   it("reports the full task count and formats at most a window of rows", () => {
     const vm = deriveTaskViewModel(trace, POI);
     expect(vm.total).toBe(taskIndexFor(trace).rows.length);

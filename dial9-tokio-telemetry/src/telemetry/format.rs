@@ -165,6 +165,7 @@ pub struct TaskSpawnEvent {
 
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(tokio_unstable), allow(dead_code))]
 pub(crate) struct TaskTerminateEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,

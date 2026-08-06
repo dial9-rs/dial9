@@ -328,7 +328,14 @@ function railTemplate(
       ${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
       ${tab === "tasks"
         ? taskVm.total === 0
-          ? html`<p class="d9-rail-empty">No tasks in this trace.</p>`
+          ? taskVm.hasFullTaskCoverage
+            ? html`<p class="d9-rail-empty">No tasks in this trace.</p>`
+            : html`<p class="d9-rail-empty">
+                No tasks recorded. This trace was built without
+                <code>--cfg tokio_unstable</code>, so only tasks spawned
+                through dial9's own helpers are tracked, and this trace has
+                none.
+              </p>`
           : taskTable(taskVm, h)
         : vm.total === 0
           ? html`<p class="d9-rail-empty">No issues match this filter.</p>`

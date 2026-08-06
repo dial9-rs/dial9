@@ -2,6 +2,9 @@ use crate::primitives::sync::Arc;
 use smallvec::SmallVec;
 
 type NoArgCb = Arc<dyn Fn() + Send + Sync>;
+/// `tokio::runtime::TaskMeta` is `tokio_unstable`-only, and so are the four
+/// hooks that take it.
+#[cfg(tokio_unstable)]
 type TaskMetaCb = Arc<dyn Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync>;
 
 /// A collection of stacked callbacks for a single Tokio runtime hook.
@@ -39,6 +42,7 @@ impl TokioHook<NoArgCb> {
     }
 }
 
+#[cfg(tokio_unstable)]
 impl TokioHook<TaskMetaCb> {
     /// Execute all registered task-meta callbacks in registration order.
     #[inline]
@@ -89,9 +93,13 @@ pub struct TokioHooks {
     pub(crate) on_thread_stop: Option<TokioHook<NoArgCb>>,
     pub(crate) on_thread_park: Option<TokioHook<NoArgCb>>,
     pub(crate) on_thread_unpark: Option<TokioHook<NoArgCb>>,
+    #[cfg(tokio_unstable)]
     pub(crate) on_task_spawn: Option<TokioHook<TaskMetaCb>>,
+    #[cfg(tokio_unstable)]
     pub(crate) on_task_terminate: Option<TokioHook<TaskMetaCb>>,
+    #[cfg(tokio_unstable)]
     pub(crate) on_before_task_poll: Option<TokioHook<TaskMetaCb>>,
+    #[cfg(tokio_unstable)]
     pub(crate) on_after_task_poll: Option<TokioHook<TaskMetaCb>>,
 }
 
@@ -143,6 +151,7 @@ impl TokioHooks {
     /// Register a callback to run when a task is spawned.
     ///
     /// Multiple callbacks can be registered; they fire in registration order.
+    #[cfg(tokio_unstable)]
     pub fn on_task_spawn(
         &mut self,
         f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
@@ -157,6 +166,7 @@ impl TokioHooks {
     /// Register a callback to run when a task terminates.
     ///
     /// Multiple callbacks can be registered; they fire in registration order.
+    #[cfg(tokio_unstable)]
     pub fn on_task_terminate(
         &mut self,
         f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
@@ -171,6 +181,7 @@ impl TokioHooks {
     /// Register a callback to run before a task is polled.
     ///
     /// Multiple callbacks can be registered; they fire in registration order.
+    #[cfg(tokio_unstable)]
     pub fn on_before_task_poll(
         &mut self,
         f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
@@ -185,6 +196,7 @@ impl TokioHooks {
     /// Register a callback to run after a task is polled.
     ///
     /// Multiple callbacks can be registered; they fire in registration order.
+    #[cfg(tokio_unstable)]
     pub fn on_after_task_poll(
         &mut self,
         f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
@@ -199,24 +211,10 @@ impl TokioHooks {
 
 impl std::fmt::Debug for TokioHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TokioHooks")
-            .field(
-                "on_thread_start",
-                &self.on_thread_start.as_ref().map(|h| h.len()),
-            )
-            .field(
-                "on_thread_stop",
-                &self.on_thread_stop.as_ref().map(|h| h.len()),
-            )
-            .field(
-                "on_thread_park",
-                &self.on_thread_park.as_ref().map(|h| h.len()),
-            )
-            .field(
-                "on_thread_unpark",
-                &self.on_thread_unpark.as_ref().map(|h| h.len()),
-            )
-            .field(
+        let mut f = f.debug_struct("TokioHooks");
+        #[cfg(tokio_unstable)]
+        {
+            f.field(
                 "on_task_spawn",
                 &self.on_task_spawn.as_ref().map(|h| h.len()),
             )
@@ -231,7 +229,24 @@ impl std::fmt::Debug for TokioHooks {
             .field(
                 "on_after_task_poll",
                 &self.on_after_task_poll.as_ref().map(|h| h.len()),
-            )
-            .finish()
+            );
+        }
+        f.field(
+            "on_thread_start",
+            &self.on_thread_start.as_ref().map(|h| h.len()),
+        )
+        .field(
+            "on_thread_stop",
+            &self.on_thread_stop.as_ref().map(|h| h.len()),
+        )
+        .field(
+            "on_thread_park",
+            &self.on_thread_park.as_ref().map(|h| h.len()),
+        )
+        .field(
+            "on_thread_unpark",
+            &self.on_thread_unpark.as_ref().map(|h| h.len()),
+        )
+        .finish()
     }
 }

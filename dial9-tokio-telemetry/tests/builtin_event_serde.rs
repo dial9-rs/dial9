@@ -6,7 +6,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
-    MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
+    self, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ fn decode_builtin_events_via_serde() {
     rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..10 {
-            handles.push(tokio::spawn(async {
+            handles.push(telemetry::spawn(async {
                 tokio::task::yield_now().await;
             }));
         }
@@ -78,11 +78,14 @@ fn decode_builtin_events_via_serde() {
     );
 
     // Should have task spawn events
-    let spawns: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, Dial9Event::TaskSpawnEvent(_)))
-        .collect();
-    assert!(!spawns.is_empty(), "expected at least one TaskSpawnEvent");
+    #[cfg(tokio_unstable)]
+    {
+        let spawns: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::TaskSpawnEvent(_)))
+            .collect();
+        assert!(!spawns.is_empty(), "expected at least one TaskSpawnEvent");
+    }
 
     // Verify a PollStartEvent has sensible data
     if let Dial9Event::PollStartEvent(ps) = &poll_starts[0] {

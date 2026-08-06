@@ -24,7 +24,9 @@ If you are integrating dial9 into a production service, see the [`production_use
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
-Tokio relies on `tokio_unstable` for Tokio runtime hooks and frame pointers for efficient profiling.
+dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes
+under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime:
+poll spans, task spawn and terminate, and per-worker queue depth.
 
 ```toml
 # .cargo/config.toml
@@ -35,6 +37,9 @@ rustflags = [
   "-C", "force-frame-pointers=yes"
 ]
 ```
+
+The Tokio instrumentation still works without the flag, with narrower task coverage.
+CPU profiling, worker timelines, wake causality, memory and application events are unaffected. What narrows is task visibility: poll events come from dial9's own spawn helpers rather than the runtime, so they cover tasks started with `dial9::spawn`, `spawn_in`, `block_on` or `spawn_with` and miss the rest. Task spawn and terminate events and per-worker queue depth are not accessible without the flag.
 
 ```rust,no_run
 use std::io;

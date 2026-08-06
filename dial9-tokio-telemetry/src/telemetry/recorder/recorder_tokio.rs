@@ -193,6 +193,10 @@ pub struct TokioAttachOptions {
     #[builder(default = true)]
     tokio_instrumentation_enabled: bool,
     /// Record task spawn/terminate events for this runtime. Default `false`.
+    ///
+    /// These come from Tokio's task hooks, which need `--cfg tokio_unstable`.
+    /// Without it no task spawn/terminate events are recorded regardless of what this is
+    /// set to.
     #[builder(default)]
     task_tracking_enabled: bool,
     /// Async-backtrace capture config (requires the `taskdump` feature).
