@@ -20,7 +20,7 @@ missing_debug_implementations = "warn"
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
-tokio = { version = "1", default-features = false }
+tokio = { version = "1.52.0", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
     "registry",
