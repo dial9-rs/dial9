@@ -248,11 +248,16 @@ fn burn_cpu(duration: std::time::Duration) {
 /// - A plain `std::thread` spawned outside the runtime
 /// - A `spawn_blocking` task running on tokio's blocking pool
 ///
-/// Both threads burn CPU for longer than the 250ms flush interval, then exit.
-/// The flush cycle's `drain()` eagerly caches thread names from
-/// `/proc/self/task/<tid>/comm` while the threads are still alive. The final
-/// `ThreadNameDef` emission happens later at write time, after the threads
-/// have exited — proving the eager cache is necessary.
+/// Both threads burn CPU for longer than the source drain interval, then exit.
+/// The drain eagerly caches thread names from `/proc/self/task/<tid>/comm`
+/// while the threads are still alive. The final `ThreadNameDef` emission
+/// happens later at write time, after the threads have exited — proving the
+/// eager cache is necessary.
+///
+/// `BURN` has to outlive a drain, which the flush loop runs every
+/// `SELF_DRAIN_INTERVAL` (200) cycles of 5ms, so once a second. A shorter burn
+/// races: the thread exits first, `/proc` no longer has its `comm`, and the
+/// samples arrive with no name at all.
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -278,18 +283,21 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .attach_tokio_runtime(builder, TokioAttachOptions::default())
         .expect("build tokio runtime");
 
-    // ── std::thread with a known name — exits before flush ───────────────
+    // Long enough to still be running when a drain lands; see the doc above.
+    const BURN: Duration = Duration::from_millis(1500);
+
+    // ── std::thread with a known name — exits before write ───────────────
     let ext_handle = std::thread::Builder::new()
         .name("my-ext-thread".into())
-        .spawn(|| burn_cpu(Duration::from_millis(400)))
+        .spawn(|| burn_cpu(BURN))
         .unwrap();
 
-    // ── spawn_blocking — also exits before flush ─────────────────────────
+    // ── spawn_blocking — also exits before write ─────────────────────────
     let blocking_handle = rt.spawn(async {
-        tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
+        tokio::task::spawn_blocking(|| burn_cpu(BURN));
         tokio::task::spawn_blocking(|| {
             let tid = nix::unistd::gettid().as_raw() as u32;
-            burn_cpu(Duration::from_millis(400));
+            burn_cpu(BURN);
             tid
         })
         .await
