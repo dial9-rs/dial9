@@ -36,6 +36,10 @@ pub(crate) struct RuntimeContext {
     /// Global worker IDs within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
     pub worker_ids: Mutex<BTreeSet<u64>>,
+    /// Whether this runtime records task spawn/terminate events. Reported in
+    /// segment metadata so a consumer can tell "no task lifetimes recorded"
+    /// apart from "these tasks had none".
+    pub task_tracking_enabled: bool,
 }
 
 thread_local! {
@@ -378,6 +382,21 @@ impl Source for TokioRuntimesSource {
             return;
         }
         self.last_fingerprint = fingerprint;
+        // Whether task spawn/terminate events are in the trace. The option is
+        // inert without the flag, since the hooks that honor it are
+        // `tokio_unstable`-only, so the cfg is part of the answer. `all` rather
+        // than `any` across runtimes, so a mix still reports `false` and the
+        // gap gets explained instead of staying silent for one runtime's tasks.
+        // Belongs here rather than with the fixed entries because a runtime
+        // attaching later can change the answer, which also bumps the
+        // fingerprint above.
+        out.push((
+            "tokio.task_events".to_string(),
+            (cfg!(tokio_unstable)
+                && !contexts.is_empty()
+                && contexts.iter().all(|c| c.task_tracking_enabled))
+            .to_string(),
+        ));
         // The writer's merge is additive, so emitting the full current snapshot
         // on each change is correct. A fingerprint bump from an unnamed runtime
         out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
@@ -385,13 +404,18 @@ impl Source for TokioRuntimesSource {
 }
 
 impl RuntimeContext {
-    pub(crate) fn new(runtime_name: Option<String>, session_handle: Dial9Handle) -> Self {
+    pub(crate) fn new(
+        runtime_name: Option<String>,
+        session_handle: Dial9Handle,
+        task_tracking_enabled: bool,
+    ) -> Self {
         Self {
             runtime_name,
             session_handle,
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
+            task_tracking_enabled,
         }
     }
 
@@ -693,6 +717,7 @@ mod tests {
         let ctx = Arc::new(RuntimeContext::new(
             Some(name.to_string()),
             Dial9Handle::disabled(),
+            true,
         ));
         ctx.worker_ids.lock().unwrap().insert(worker_id);
         contexts.lock().unwrap().push(ctx);
@@ -726,7 +751,18 @@ mod tests {
 
         out.clear();
         source.segment_metadata(&mut out);
-        assert_eq!(out, vec![("runtime.main".to_string(), "0".to_string())]);
+        assert_eq!(
+            out,
+            vec![
+                // Inert without the flag: the hooks that honor the option are
+                // `tokio_unstable`-only.
+                (
+                    "tokio.task_events".to_string(),
+                    cfg!(tokio_unstable).to_string()
+                ),
+                ("runtime.main".to_string(), "0".to_string()),
+            ]
+        );
 
         // No further change: the source must not rebuild or append.
         out.clear();
@@ -741,11 +777,12 @@ mod tests {
         assert!(out.contains(&("runtime.main".to_string(), "0".to_string())));
         assert!(out.contains(&("runtime.io".to_string(), "1".to_string())));
         // The fixed entries are emitted exactly once, so later change cycles
-        // never re-emit them.
-        assert!(
-            !out.iter()
-                .any(|(k, _)| k.starts_with("tokio.") || k == "sched.wait_sample_rate")
-        );
+        // never re-emit them. `tokio.task_events` is not fixed: a runtime
+        // attaching later can change it, so it rides every rebuild.
+        assert!(!out.iter().any(|(k, _)| k == "sched.wait_sample_rate"
+            || k == "tokio.poll_coverage"
+            || k == "tokio.local_queue"
+            || k == "tokio.unstable"));
     }
 
     #[test]

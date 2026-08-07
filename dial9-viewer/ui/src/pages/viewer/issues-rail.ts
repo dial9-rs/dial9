@@ -507,13 +507,24 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
       >
         <thead>
           <tr>
-            ${TASK_COLUMNS.map(
-              (col) => html`<th scope="col">
+            ${TASK_COLUMNS.map((col) => {
+              // The lifetime column is blank for every row when the recorder
+              // captured no task spawn/terminate events. Say so in the header
+              // rather than letting it read as "these tasks were instant".
+              const unrecorded = col.key === "lifetime" && !vm.hasTaskLifetimes;
+              const title = unrecorded
+                ? "Task lifetimes were not recorded for this trace"
+                : col.title;
+              return html`<th scope="col">
                 <button
                   type="button"
-                  class=${classMap({ "d9-rail-sort": true, on: vm.sortKey === col.key })}
-                  title=${col.title}
-                  aria-label=${col.title}
+                  class=${classMap({
+                    "d9-rail-sort": true,
+                    on: vm.sortKey === col.key,
+                    "d9-col-unrecorded": unrecorded,
+                  })}
+                  title=${title}
+                  aria-label=${title}
                   @click=${() => h.sortTaskByColumn(col)}
                 >
                   ${col.label}${vm.sortKey === col.key
@@ -522,8 +533,8 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
                       >`
                     : ""}
                 </button>
-              </th>`,
-            )}
+              </th>`;
+            })}
           </tr>
         </thead>
         <tbody>

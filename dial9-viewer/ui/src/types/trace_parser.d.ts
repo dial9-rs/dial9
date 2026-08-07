@@ -231,6 +231,11 @@ declare module "*/trace_parser.js" {
     hasFullTaskCoverage: boolean;
     /** False when per-worker queue depth has no source and records 0. */
     hasLocalQueueDepth: boolean;
+    /**
+     * False when no task spawn/terminate events were recorded, so task
+     * lifetimes are absent rather than zero-length.
+     */
+    hasTaskLifetimes: boolean;
     spawnLocations: Map<string, string>;
     /** task id -> spawn location (null if unknown). */
     taskSpawnLocs: Map<number, string | null>;

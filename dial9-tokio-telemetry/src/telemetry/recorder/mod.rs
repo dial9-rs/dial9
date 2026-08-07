@@ -261,7 +261,11 @@ fn register_runtime_hooks(
     tokio_hooks: TokioHooks,
     taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
 ) -> Arc<RuntimeContext> {
-    let ctx = Arc::new(RuntimeContext::new(runtime_name, handle.clone()));
+    let ctx = Arc::new(RuntimeContext::new(
+        runtime_name,
+        handle.clone(),
+        task_tracking_enabled,
+    ));
     register_hooks(
         builder,
         &ctx,

@@ -1724,6 +1724,10 @@
             // full.
             hasFullTaskCoverage: segmentMetadata.get("tokio.poll_coverage") !== "dial9-spawns-only",
             hasLocalQueueDepth: segmentMetadata.get("tokio.local_queue") !== "false",
+            // False when no task spawn/terminate events were recorded, so an
+            // empty lifetime column means "not captured" rather than "these
+            // tasks had none". Absent on traces predating the key.
+            hasTaskLifetimes: segmentMetadata.get("tokio.task_events") !== "false",
             spawnLocations,
             taskSpawnLocs,
             taskSpawnTimes,

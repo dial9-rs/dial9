@@ -252,6 +252,11 @@ export interface TaskViewModel {
    * state, which then explains why the list may be short.
    */
   hasFullTaskCoverage: boolean;
+  /**
+   * False when no task spawn/terminate events were recorded, so every `life`
+   * cell is blank for want of data rather than because the tasks were instant.
+   */
+  hasTaskLifetimes: boolean;
 }
 
 /**
@@ -274,6 +279,7 @@ export function deriveTaskViewModel(
       sorted: [],
       total: 0,
       hasFullTaskCoverage: true,
+      hasTaskLifetimes: true,
     };
   }
   const sorted = sortTasks(taskIndexFor(trace).rows, poi.taskSort, poi.taskSortDir);
@@ -299,6 +305,7 @@ export function deriveTaskViewModel(
     rows,
     windowStart: start,
     hasFullTaskCoverage: trace.hasFullTaskCoverage,
+    hasTaskLifetimes: trace.hasTaskLifetimes,
     sorted,
     total: sorted.length,
   };

@@ -116,6 +116,19 @@ describe("deriveTaskViewModel", () => {
 
   // The empty state must tell "this trace has no tasks" apart from "coverage
   // is partial", so it reads coverage rather than whether task data exists.
+  // A blank lifetime column means "not recorded", not "instant tasks", so the
+  // model has to carry that apart from coverage.
+  it("carries lifetime availability separately from coverage", () => {
+    const noLifetimes = {
+      ...trace,
+      hasFullTaskCoverage: true,
+      hasTaskLifetimes: false,
+    } as unknown as typeof trace;
+    const vm = deriveTaskViewModel(noLifetimes, POI);
+    expect(vm.hasFullTaskCoverage).toBe(true);
+    expect(vm.hasTaskLifetimes).toBe(false);
+  });
+
   it("carries task coverage, not task-data existence", () => {
     expect(deriveTaskViewModel(trace, POI).hasFullTaskCoverage).toBe(
       trace.hasFullTaskCoverage,
