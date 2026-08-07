@@ -17,7 +17,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
-use std::sync::RwLock;
 use std::time::Duration;
 use tokio::runtime::RuntimeMetrics;
 
@@ -36,7 +35,7 @@ pub(crate) struct RuntimeContext {
     pub worker_id_base: OnceLock<u64>,
     /// Global worker IDs within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
-    pub worker_ids: RwLock<BTreeSet<u64>>,
+    pub worker_ids: Mutex<BTreeSet<u64>>,
 }
 
 thread_local! {
@@ -360,7 +359,7 @@ impl Source for TokioRuntimesSource {
         let fingerprint = contexts.len()
             + contexts
                 .iter()
-                .map(|c| c.worker_ids.read().unwrap().len())
+                .map(|c| c.worker_ids.lock().unwrap().len())
                 .sum::<usize>();
         if fingerprint == self.last_fingerprint {
             return;
@@ -379,7 +378,7 @@ impl RuntimeContext {
             session_handle,
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
-            worker_ids: RwLock::new(BTreeSet::new()),
+            worker_ids: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -387,7 +386,7 @@ impl RuntimeContext {
     /// Returns `None` if unnamed or no workers resolved yet.
     pub(crate) fn metadata_entry(&self) -> Option<(String, String)> {
         let name = self.runtime_name.as_deref()?;
-        let ids = self.worker_ids.read().unwrap();
+        let ids = self.worker_ids.lock().unwrap();
         if ids.is_empty() {
             return None;
         }
@@ -448,7 +447,7 @@ fn enroll_thread(ctx: &RuntimeContext, global_id: u64) {
 fn register_worker_if_needed(ctx: &RuntimeContext, global_id: u64) {
     WORKER_REGISTERED.with(|cell| {
         if cell.get() != Some(global_id) {
-            ctx.worker_ids.write().unwrap().insert(global_id);
+            ctx.worker_ids.lock().unwrap().insert(global_id);
             // Install the recorder handle on this thread. `on_thread_start` also
             // does this for pool threads, but a `current_thread` runtime's driver
             // thread gets no `on_thread_start`, so set it here on first poll.
@@ -682,7 +681,7 @@ mod tests {
             Some(name.to_string()),
             Dial9Handle::disabled(),
         ));
-        ctx.worker_ids.write().unwrap().insert(worker_id);
+        ctx.worker_ids.lock().unwrap().insert(worker_id);
         contexts.lock().unwrap().push(ctx);
     }
 

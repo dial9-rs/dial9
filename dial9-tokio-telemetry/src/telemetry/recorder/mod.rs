@@ -958,7 +958,7 @@ mod tests {
                 registry
                     .iter()
                     .find(|c| c.runtime_name.as_deref() == Some(name))
-                    .map(|c| c.worker_ids.read().unwrap().iter().copied().collect())
+                    .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
                     .unwrap_or_default()
             };
             (block("main"), block("attached"))
@@ -1317,7 +1317,7 @@ mod tests {
                 registry
                     .iter()
                     .find(|c| c.runtime_name.as_deref() == Some(name))
-                    .map(|c| c.worker_ids.read().unwrap().iter().copied().collect())
+                    .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
                     .unwrap_or_default()
             };
             (block("main"), block("io"))
