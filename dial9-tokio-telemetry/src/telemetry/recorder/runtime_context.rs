@@ -1,5 +1,7 @@
 use super::SharedState;
 use super::source::{FlushContext, Source};
+#[cfg(not(tokio_unstable))]
+use crate::primitives::sync::Weak;
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
@@ -44,6 +46,15 @@ thread_local! {
     /// The global worker ID this thread last registered into its runtime's
     /// mapping.
     static WORKER_REGISTERED: Cell<Option<u64>> = const { Cell::new(None) };
+    /// This thread's runtime, so a poll can register the worker ID it claims.
+    /// The park hooks hold the context directly, the `TracedFuture` wrapper
+    /// does not. Installed alongside the thread's `Dial9Handle`.
+    ///
+    /// Weak because the attaching thread gets no `on_thread_stop`, so an
+    /// owning handle here would keep the runtime's `SharedState` alive past
+    /// shutdown.
+    #[cfg(not(tokio_unstable))]
+    static RUNTIME_CTX: RefCell<Option<Weak<RuntimeContext>>> = const { RefCell::new(None) };
     /// Keeps this thread enrolled with the recorder's per-thread sources.
     /// Dropped by the runtime's `on_thread_stop` hook, or by the TLS destructor
     /// for threads that get none (a `current_thread` runtime's driver).
@@ -93,14 +104,38 @@ fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
 /// turn keeps the first.
 #[cfg(not(tokio_unstable))]
 fn claim_thread_worker_id(shared: &SharedState) -> u64 {
-    GLOBAL_WORKER_ID.with(|cell| match cell.get() {
+    let id = GLOBAL_WORKER_ID.with(|cell| match cell.get() {
         Some(id) => id,
         None => {
             let id = shared.reserve_worker_ids(1);
             cell.set(Some(id));
             id
         }
-    })
+    });
+    // A poll is this thread proving it belongs to the runtime, the same as a
+    // park. Already-enrolled threads stop at the thread-local read,
+    // so steady-state polls never touch the `Weak`.
+    if WORKER_REGISTERED.with(|c| c.get()) != Some(id) {
+        RUNTIME_CTX.with(|cell| {
+            if let Some(ctx) = cell.borrow().as_ref().and_then(Weak::upgrade) {
+                enroll_thread(&ctx, id);
+            }
+        });
+    }
+    id
+}
+
+/// Install this thread's runtime context for [`claim_thread_worker_id`].
+#[cfg(not(tokio_unstable))]
+pub(crate) fn set_runtime_ctx(ctx: &Arc<RuntimeContext>) {
+    let weak = Arc::downgrade(ctx);
+    RUNTIME_CTX.with(|cell| *cell.borrow_mut() = Some(weak));
+}
+
+/// Release this thread's runtime context (thread-stop hook).
+#[cfg(not(tokio_unstable))]
+pub(crate) fn clear_runtime_ctx() {
+    let _ = RUNTIME_CTX.try_with(|cell| cell.borrow_mut().take());
 }
 
 /// Local queue depth for the current worker.
@@ -378,9 +413,7 @@ impl RuntimeContext {
         // Always update TLS so current_worker_id() returns the global ID.
         GLOBAL_WORKER_ID.with(|cell| cell.set(Some(global_id)));
 
-        register_worker_if_needed(self, global_id);
-        #[cfg(feature = "cpu-profiling")]
-        start_sched_sampling_if_needed(&self.session_handle);
+        enroll_thread(self, global_id);
 
         Some(WorkerId::from(global_id as usize))
     }
@@ -399,6 +432,13 @@ impl RuntimeContext {
         });
         Some(base + local_index as u64)
     }
+}
+
+/// Everything a thread does the first time it proves it belongs to a runtime.
+fn enroll_thread(ctx: &RuntimeContext, global_id: u64) {
+    register_worker_if_needed(ctx, global_id);
+    #[cfg(feature = "cpu-profiling")]
+    start_sched_sampling_if_needed(&ctx.session_handle);
 }
 
 /// Record global_id in the context's set (once per thread).
@@ -528,67 +568,53 @@ impl Encodable for TaskSpawn {
     }
 }
 
-/// Poll-start event for a task the `TracedFuture` wrapper is about to poll.
+/// The worker id to stamp on an event this thread is about to record.
 ///
-/// Stands in for tokio's `on_before_task_poll` hook when that is unavailable.
-/// Resolves the worker id through [`claim_thread_worker_id`], so a poll that
-/// lands before this thread's first park still gets a real lane.
-#[cfg(not(tokio_unstable))]
-pub(crate) fn make_wrapper_poll_start(
-    shared: &SharedState,
-    task_id: TaskId,
-    location: &'static std::panic::Location<'static>,
-) -> PollStart {
-    PollStart {
-        timestamp_ns: clock_monotonic_ns(),
-        worker_id: WorkerId::from(claim_thread_worker_id(shared) as usize),
-        local_queue: current_local_queue_depth() as u8,
-        task_id,
-        location,
+/// `ctx` is `Some` when the caller is a tokio hook, which closes over its
+/// runtime. It is `None` for the `TracedFuture` wrapper, which only carries the
+/// recorder, and which reaches its runtime through a thread-local instead.
+fn event_worker_id(ctx: Option<&RuntimeContext>, shared: &SharedState) -> WorkerId {
+    match ctx {
+        Some(ctx) => ctx.resolve_worker(shared).unwrap_or(WorkerId::UNKNOWN),
+        #[cfg(not(tokio_unstable))]
+        None => WorkerId::from(claim_thread_worker_id(shared) as usize),
+        #[cfg(tokio_unstable)]
+        None => WorkerId::UNKNOWN,
     }
 }
 
-/// Poll-end counterpart to [`make_wrapper_poll_start`].
-#[cfg(not(tokio_unstable))]
-pub(crate) fn make_wrapper_poll_end(shared: &SharedState) -> PollEndEvent {
-    PollEndEvent {
-        timestamp_ns: clock_monotonic_ns(),
-        worker_id: WorkerId::from(claim_thread_worker_id(shared) as usize),
-    }
-}
-
-#[cfg(tokio_unstable)]
-pub(super) fn make_poll_start(
-    ctx: &RuntimeContext,
+/// Poll-start event, from tokio's `on_before_task_poll` hook when it exists and
+/// from the `TracedFuture` wrapper when it does not.
+pub(crate) fn make_poll_start(
+    ctx: Option<&RuntimeContext>,
     shared: &SharedState,
     location: &'static std::panic::Location<'static>,
     task_id: TaskId,
 ) -> PollStart {
-    let resolved = ctx.resolve_worker(shared);
+    let worker_id = event_worker_id(ctx, shared);
     let worker_local_queue_depth = current_local_queue_depth();
-    let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+    let timestamp_ns = clock_monotonic_ns();
     POLL_START_TS.with(|c| c.set(NonZeroU64::new(timestamp_ns)));
     PollStart {
         timestamp_ns,
-        worker_id: resolved.unwrap_or(WorkerId::UNKNOWN),
+        worker_id,
         local_queue: worker_local_queue_depth as u8,
         task_id,
         location,
     }
 }
 
-#[cfg(tokio_unstable)]
-pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> PollEndEvent {
+/// Poll-end counterpart to [`make_poll_start`].
+pub(crate) fn make_poll_end(ctx: Option<&RuntimeContext>, shared: &SharedState) -> PollEndEvent {
     POLL_START_TS.with(|c| c.set(None));
-    let resolved = ctx.resolve_worker(shared);
     PollEndEvent {
-        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
-        worker_id: resolved.unwrap_or(WorkerId::UNKNOWN),
+        timestamp_ns: clock_monotonic_ns(),
+        worker_id: event_worker_id(ctx, shared),
     }
 }
 
 pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> WorkerParkEvent {
-    let resolved = ctx.resolve_worker(shared);
+    let worker_id = event_worker_id(Some(ctx), shared);
     let worker_local_queue_depth = current_local_queue_depth();
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on 1-in-N parks. The counter and the "sampled this
@@ -611,7 +637,7 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Wo
     SCHED_SAMPLED_THIS_PARK.with(|c| c.set(sampled));
     WorkerParkEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
-        worker_id: resolved.unwrap_or(WorkerId::UNKNOWN),
+        worker_id,
         local_queue: worker_local_queue_depth as u8,
         cpu_time_ns: cpu_time_nanos,
         tid: crate::telemetry::events::current_tid(),
@@ -619,7 +645,7 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Wo
 }
 
 pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> WorkerUnparkEvent {
-    let resolved = ctx.resolve_worker(shared);
+    let worker_id = event_worker_id(Some(ctx), shared);
     let worker_local_queue_depth = current_local_queue_depth();
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on unpark if the matching park sampled it, so the
@@ -638,7 +664,7 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
     };
     WorkerUnparkEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
-        worker_id: resolved.unwrap_or(WorkerId::UNKNOWN),
+        worker_id,
         local_queue: worker_local_queue_depth as u8,
         cpu_time_ns: cpu_time_nanos,
         sched_wait_ns: sched_wait_delta_nanos,

@@ -8,6 +8,8 @@ pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 #[cfg(any(feature = "taskdump", test))]
 pub(crate) use runtime_context::poll_start_ts_monotonic;
+#[cfg(not(tokio_unstable))]
+pub(crate) use runtime_context::set_runtime_ctx;
 
 pub use dial9_core::handle::Dial9Handle;
 pub(crate) use handle::traced_handle;
@@ -36,11 +38,7 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(tokio_unstable)]
 use handle::INSTRUMENTED_SPAWN;
-#[cfg(tokio_unstable)]
-use runtime_context::{make_poll_end, make_poll_start};
-// Stand-ins for tokio's poll hooks, emitted by `TracedFuture` instead.
-#[cfg(not(tokio_unstable))]
-pub(crate) use runtime_context::{make_wrapper_poll_end, make_wrapper_poll_start};
+pub(crate) use runtime_context::{make_poll_end, make_poll_start};
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -134,7 +132,7 @@ fn register_hooks(
             s3.if_enabled(|buf| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                let event = make_poll_start(&c3, &s3, location, task_id);
+                let event = make_poll_start(Some(&c3), &s3, location, task_id);
                 buf.record_encodable_event(&event);
             })
         }
@@ -147,7 +145,7 @@ fn register_hooks(
         tokio_hooks.on_after_task_poll,
         |_meta| {
             s4.if_enabled(|buf| {
-                let event = make_poll_end(&c4, &s4);
+                let event = make_poll_end(Some(&c4), &s4);
                 buf.record_encodable_event(&event);
             })
         }
@@ -203,11 +201,17 @@ fn register_hooks(
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
     let handle_for_tl = handle.clone();
+    #[cfg(not(tokio_unstable))]
+    let ctx_for_tl = ctx.clone();
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
         // Install this thread's Dial9Handle so user code can call
         // `Dial9Handle::current()` from anywhere on this thread.
         set_tl_handle(handle_for_tl.clone());
+        // Same for the runtime context, which a poll needs to register the
+        // worker ID it claims.
+        #[cfg(not(tokio_unstable))]
+        runtime_context::set_runtime_ctx(&ctx_for_tl);
 
         // Install this thread's task-dump config for `TaskDumped` to read.
         #[cfg(feature = "taskdump")]
@@ -229,6 +233,8 @@ fn register_hooks(
 
     register_hook!(builder, on_thread_stop, tokio_hooks.on_thread_stop, {
         clear_tl_handle();
+        #[cfg(not(tokio_unstable))]
+        runtime_context::clear_runtime_ctx();
 
         #[cfg(feature = "taskdump")]
         crate::task_dumped::clear_taskdump_config();

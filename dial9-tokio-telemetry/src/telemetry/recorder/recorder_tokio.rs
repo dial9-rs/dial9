@@ -383,6 +383,8 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // Publish attach state only after a successful build.
         // `TokioRuntimesSource` picks the runtime up from the registry on its
         // next flush.
+        #[cfg(not(tokio_unstable))]
+        crate::telemetry::recorder::set_runtime_ctx(&ctx);
         registry.lock().unwrap().push(ctx);
         // The current-thread driver does not fire `on_thread_start`, so without
         // this the tracing layer and `dial9::spawn` find no handle until the

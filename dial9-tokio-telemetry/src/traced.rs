@@ -307,7 +307,7 @@ impl<F: Future> Future for WakeTraced<F> {
         }
         #[cfg(not(tokio_unstable))]
         {
-            use crate::telemetry::recorder::{make_wrapper_poll_end, make_wrapper_poll_start};
+            use crate::telemetry::recorder::{make_poll_end, make_poll_start};
 
             let outermost = POLL_DEPTH.with(|d| {
                 let n = d.get();
@@ -320,17 +320,18 @@ impl<F: Future> Future for WakeTraced<F> {
             let _guard = PollDepthGuard;
             if outermost {
                 this.waker_data.shared.if_enabled(|buf| {
-                    buf.record_encodable_event(&make_wrapper_poll_start(
+                    buf.record_encodable_event(&make_poll_start(
+                        None,
                         &this.waker_data.shared,
-                        this.waker_data.woken_task_id,
                         this.spawn_loc,
+                        this.waker_data.woken_task_id,
                     ));
                 });
             }
             let out = this.inner.poll(&mut traced_cx);
             if outermost {
                 this.waker_data.shared.if_enabled(|buf| {
-                    buf.record_encodable_event(&make_wrapper_poll_end(&this.waker_data.shared));
+                    buf.record_encodable_event(&make_poll_end(None, &this.waker_data.shared));
                 });
             }
             out
