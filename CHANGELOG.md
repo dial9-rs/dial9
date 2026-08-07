@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc2.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2...dial9-v0.5.0-rc2.1) - 2026-08-07
+
+### Added
+
+- *(viewer)* [**breaking**] make S3 support optional ([#722](https://github.com/dial9-rs/dial9/pull/722))
+- Properly Handle Multi-Runtime Events ([#754](https://github.com/dial9-rs/dial9/pull/754))
+
+### Other
+
+- move tracing layer to dial9-utils ([#752](https://github.com/dial9-rs/dial9/pull/752))
+- minor improvements post 0.5 refactors ([#755](https://github.com/dial9-rs/dial9/pull/755))
+- Decode annotated single-event spans ([#733](https://github.com/dial9-rs/dial9/pull/733))
+- remove dead code ([#756](https://github.com/dial9-rs/dial9/pull/756))
+
 ### Changed
 
 - **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`

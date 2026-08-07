@@ -27,19 +27,19 @@ repository = "https://github.com/dial9-rs/dial9"
 
 [workspace.dependencies]
 libc = "0.2"
-dial9-core = { version = "0.5.0-rc2", path = "dial9-core" }
-dial9-utils = { version = "0.5.0-rc2", path = "dial9-utils" }
-dial9-destinations-s3 = { version = "0.5.0-rc2", path = "dial9-destinations-s3" }
-dial9-perf-self-profile = { version = "0.5.0-rc2", path = "perf-self-profile" }
+dial9-core = { version = "0.5.0-rc2.1", path = "dial9-core" }
+dial9-utils = { version = "0.5.0-rc2.1", path = "dial9-utils" }
+dial9-destinations-s3 = { version = "0.5.0-rc2.1", path = "dial9-destinations-s3" }
+dial9-perf-self-profile = { version = "0.5.0-rc2.1", path = "perf-self-profile" }
 dial9-trace-format = { version = "0.5.0-rc2", path = "dial9-trace-format" }
 dial9-trace-format-derive = { version = "0.5.0-rc2", path = "dial9-trace-format-derive" }
 dial9-macro = { version = "0.5.0-rc2", path = "dial9-macro" }
-dial9-metrique = { version = "0.5.0-rc2", path = "dial9-metrique" }
-dial9-tokio-telemetry = { version = "0.5.0-rc2", path = "dial9-tokio-telemetry" }
+dial9-metrique = { version = "0.5.0-rc2.1", path = "dial9-metrique" }
+dial9-tokio-telemetry = { version = "0.5.0-rc2.1", path = "dial9-tokio-telemetry" }
 # `default-features = false` lives here because a workspace member cannot
 # override an inherited dep's default features. Consumers opt back into S3 by
 # enabling `dial9-viewer/s3` (as `dial9`'s `cli` feature does).
-dial9-viewer = { version = "0.5.0-rc2", path = "dial9-viewer", default-features = false }
+dial9-viewer = { version = "0.5.0-rc2.1", path = "dial9-viewer", default-features = false }
 assert2 = "0.4"
 
 [profile.release]
