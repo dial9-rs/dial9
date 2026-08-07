@@ -151,6 +151,25 @@ impl Dial9TokioHandle {
             None => spawn_fn(future),
         }
     }
+
+    #[track_caller]
+    pub(super) fn spawn_in_join_set<F, T>(
+        &self,
+        set: &mut tokio::task::JoinSet<T>,
+        future: F,
+    ) -> tokio::task::AbortHandle
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match &self.traced {
+            Some(traced) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                set.spawn(TracedFuture::new(future, Some(traced.clone())))
+            }
+            None => set.spawn(future),
+        }
+    }
 }
 
 /// Spawn a traced task on the current tokio runtime.
