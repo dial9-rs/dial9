@@ -1,9 +1,9 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-assertion_line: 365
 expression: "expand_to_string(quote!\n{\n    struct Metrics\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64,\n        #[traceevent(unit = \"ns\", kind = \"counter\")] cpu_time_ns: u64,\n        #[traceevent(kind = \"gauge\")] queue_depth: u64,\n        #[traceevent(kind = \"updown-counter\")] active_requests: i64,\n    }\n})"
 ---
 impl ::dial9_trace_format::TraceEvent for Metrics {
+    type Id = Self;
     fn event_name() -> &'static str {
         "Metrics"
     }
