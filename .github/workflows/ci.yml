@@ -215,7 +215,7 @@ jobs:
       - name: Test dial9-tokio-telemetry
         run: cargo nextest run -p dial9-tokio-telemetry --features __nonlinux_all_features
       - name: Check the facade
-        run: cargo check -p dial9 --features tokio,analysis,cpu-profiling,tracing-layer
+        run: cargo check -p dial9 --features tokio,analysis,cpu-profiling
 
   check-docs:
     name: Check docs.rs
