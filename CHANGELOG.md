@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - dial9 now builds without `--cfg tokio_unstable` ([#364](https://github.com/dial9-rs/dial9/issues/364)).
   With the flag nothing changes. Without it, poll events come from dial9's future wrapper instead of tokio's hooks, so they cover tasks spawned through `dial9::spawn`, `spawn_in`, `block_on` and `spawn_with` rather than every task on the runtime.
   Task spawn/terminate events and per-worker queue depth have no stable source and are unavailable. 
-  Traces carry a `tokio.unstable` metadata key recording which mode produced them, and the viewer reports the reduced coverage.
+  Traces carry `tokio.poll_coverage` and `tokio.local_queue` metadata keys describing what the trace holds, plus `tokio.unstable` for how it was built, and the viewer reports the reduced coverage.
   The `taskdump` feature still requires the flag: it forwards to `tokio/taskdump`, which is a hard compile error without it.
 
 ### Changed

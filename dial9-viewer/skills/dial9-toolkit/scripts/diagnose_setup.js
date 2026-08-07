@@ -35,8 +35,9 @@ async function diagnoseSetup(tracePath) {
   let builtWithoutTokioUnstable = false;
 
   for await (const trace of parseTrace(tracePath)) {
-    // Which tokio hooks the recorder had. Absent on traces written before the
-    // key existed, which all had them.
+    // How the trace was built. The fix for thin poll data is a build flag, so
+    // this check reads the build fact rather than the coverage it implies.
+    // Absent on traces written before the key existed, which all had the hooks.
     if (trace.segmentMetadata?.get('tokio.unstable') === 'false') {
       builtWithoutTokioUnstable = true;
     }

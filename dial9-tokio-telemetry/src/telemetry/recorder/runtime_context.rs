@@ -140,8 +140,8 @@ pub(crate) fn clear_runtime_ctx() {
 /// Local queue depth for the current worker.
 ///
 /// Reports `0` when tokio does not expose per-worker queue depth.
-/// Consumers tell the two apart via the `tokio.unstable` segment-metadata key,
-/// which is `false` exactly when this can only return `0`.
+/// Consumers tell the two apart via the `tokio.local_queue` segment-metadata
+/// key, which is `false` exactly when this can only return `0`.
 fn current_local_queue_depth() -> usize {
     #[cfg(tokio_unstable)]
     {
@@ -244,10 +244,9 @@ pub(crate) struct TokioRuntimesSource {
     /// used to skip the rebuild when nothing changed. See `segment_metadata` for
     /// what it is and why it is sufficient. `0` means "nothing emitted yet".
     last_fingerprint: usize,
-    /// Whether the fixed `sched.wait_sample_rate` and `tokio.unstable` metadata
-    /// entries have been emitted yet. They never change, so they are emitted
-    /// exactly once (the writer keeps them in its merged cache and re-emits
-    /// them on every rotation).
+    /// Whether the process-fixed metadata entries have been emitted yet. They
+    /// never change, so they are emitted exactly once (the writer keeps them in
+    /// its merged cache and re-emits them on every rotation).
     fixed_metadata_emitted: bool,
 }
 
@@ -336,10 +335,24 @@ impl Source for TokioRuntimesSource {
                 "sched.wait_sample_rate".to_string(),
                 sched_wait_sample_rate().to_string(),
             ));
-            // Which tokio hooks were available when this trace was recorded.
-            // `false` means the build had no `--cfg tokio_unstable`, so the
-            // trace carries no poll or task-lifecycle events for tasks spawned
-            // outside dial9's own spawn helpers, and `local_queue` is always 0.
+            // `dial9-spawns-only` means poll events cover just the tasks spawned through dial9's own helpers,
+            // not every task on the runtime.
+            out.push((
+                "tokio.poll_coverage".to_string(),
+                if cfg!(tokio_unstable) {
+                    "all".to_string()
+                } else {
+                    "dial9-spawns-only".to_string()
+                },
+            ));
+            // `false` means `local_queue` on every event is a sentinel 0, not a
+            // measurement.
+            out.push((
+                "tokio.local_queue".to_string(),
+                cfg!(tokio_unstable).to_string(),
+            ));
+            // How the trace was built. Kept for diagnostics: the fix for thin
+            // poll data is a build flag, not a trace setting.
             out.push((
                 "tokio.unstable".to_string(),
                 cfg!(tokio_unstable).to_string(),
@@ -698,7 +711,12 @@ mod tests {
         source.segment_metadata(&mut out);
         assert_eq!(
             out.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["sched.wait_sample_rate", "tokio.unstable"],
+            vec![
+                "sched.wait_sample_rate",
+                "tokio.poll_coverage",
+                "tokio.local_queue",
+                "tokio.unstable"
+            ],
             "first call emits only the fixed entries"
         );
 
@@ -726,7 +744,7 @@ mod tests {
         // never re-emit them.
         assert!(
             !out.iter()
-                .any(|(k, _)| k == "sched.wait_sample_rate" || k == "tokio.unstable")
+                .any(|(k, _)| k.starts_with("tokio.") || k == "sched.wait_sample_rate")
         );
     }
 
