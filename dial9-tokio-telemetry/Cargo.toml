@@ -174,7 +174,6 @@ dial9-tokio-telemetry = { path = ".", features = [
     "memory-profiling",
     "worker-s3",
     "analysis",
-    "taskdump",
     "tracing-layer",
     "linux-socket",
 ] }

@@ -576,7 +576,7 @@ Field units (from `#[metrics(unit = ..)]` or the value type) are carried into th
 
 `dial9` can capture async backtraces at yield points. This is the Tokio equivalent of scheduling events: You can see the stack trace your future was at when it went idle.
 
-> Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64). Enabling it on other targets is a hard compile error from Tokio.
+> Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64) and only under `--cfg tokio_unstable`. Enabling it on another target, or without the flag, is a hard compile error from Tokio.
 
 ```rust,no_run
 use std::io;
