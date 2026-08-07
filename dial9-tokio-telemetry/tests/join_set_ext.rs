@@ -28,6 +28,19 @@ fn build_runtime() -> (Recorder, tokio::runtime::Runtime, Arc<Mutex<Vec<Vec<u8>>
     (recorder, runtime, batches)
 }
 
+fn assert_instrumented_spawn_at(batches: &Mutex<Vec<Vec<u8>>>, call_line: u32) {
+    let events: Vec<Dial9Event> = decode_all(&batches.lock().unwrap());
+    let expected_loc = format!("join_set_ext.rs:{call_line}:");
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            Dial9Event::TaskSpawnEvent(event)
+                if event.instrumented && event.spawn_loc.contains(&expected_loc)
+        )
+    }));
+}
+
 #[test]
 fn join_set_ext_preserves_caller_through_helper() {
     let (recorder, runtime, batches) = build_runtime();
@@ -43,14 +56,20 @@ fn join_set_ext_preserves_caller_through_helper() {
     drop(runtime);
     recorder.graceful_shutdown(Duration::from_secs(1));
 
-    let events: Vec<Dial9Event> = decode_all(&batches.lock().unwrap());
-    let expected_loc = format!("join_set_ext.rs:{call_line}:");
+    assert_instrumented_spawn_at(&batches, call_line);
+}
 
-    assert!(events.iter().any(|event| {
-        matches!(
-            event,
-            Dial9Event::TaskSpawnEvent(event)
-                if event.instrumented && event.spawn_loc.contains(&expected_loc)
-        )
-    }));
+#[test]
+fn join_set_ext_on_preserves_caller_through_helper() {
+    let (recorder, runtime, batches) = build_runtime();
+    let mut set = JoinSet::new();
+
+    let call_line = line!() + 1;
+    join_set_helper::spawn_traced_on(&mut set, async {}, runtime.handle());
+    runtime.block_on(async { set.join_next().await.unwrap().unwrap() });
+
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    assert_instrumented_spawn_at(&batches, call_line);
 }
