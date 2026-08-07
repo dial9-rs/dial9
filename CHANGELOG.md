@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `JoinSetExt` adds dial9-instrumented `spawn_traced` and `spawn_traced_on`
+  methods to Tokio `JoinSet`s while preserving caller locations.
+
 ### Changed
 
 - **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`
