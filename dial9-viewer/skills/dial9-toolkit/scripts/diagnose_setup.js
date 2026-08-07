@@ -161,14 +161,15 @@ use spawn_blocking instead of running on the async runtime.`,
     findings.push({
       severity: 'warning',
       check: 'no-tokio-unstable',
-      message: `This trace was recorded without --cfg tokio_unstable. Poll events cover only tasks spawned through dial9, and task lifetimes and per-worker queue depth are unavailable.`,
+      message: `This trace was recorded without --cfg tokio_unstable. Poll events cover only tasks spawned through dial9's own helpers, and task lifetimes and per-worker queue depth are unavailable.`,
       fix: `Add to .cargo/config.toml:
 
 [build]
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 Then rebuild. Tokio gates its poll and task hooks behind this flag; without it
-dial9 only sees tasks spawned through dial9::spawn.`,
+dial9 only sees tasks spawned through its own helpers (spawn, spawn_in,
+block_on, spawn_with).`,
     });
   }
 
