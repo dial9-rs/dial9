@@ -7,7 +7,7 @@
 //! Multi-thread contention scaling is in `tracing_layer_bench.rs`.
 //!
 //! Usage:
-//!   cargo bench --bench tracing_layer_iai --features tracing-layer
+//!   cargo bench -p dial9-utils --bench tracing_layer_iai --features tracing-layer
 //!
 //! Gated on `--cfg iai_enabled` so plain `cargo test --all-targets`
 //! compiles to a no-op stub `fn main()` instead of spawning
@@ -22,7 +22,7 @@ use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, recorder,
 };
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+use dial9_utils::tracing_layer::Dial9TracingLayer;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
 use tracing::subscriber::DefaultGuard;

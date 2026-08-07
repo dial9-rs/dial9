@@ -1433,6 +1433,44 @@ describe("buildSpanData", () => {
     expect(idle, `Expected idle=7700, got ${idle}`).toBe(7700);
   });
 
+  it("prefers the namespaced task ID and preserves an application task_id", () => {
+    const workerSpans = {
+      // If the reader incorrectly falls back through worker 0, it will pick 99.
+      0: { polls: [{ start: 900, end: 1100, taskId: 99 }] },
+      1: { polls: [
+        { start: 900, end: 1100, taskId: 42 },
+        { start: 4000, end: 4100, taskId: 42 },
+      ] },
+    };
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { worker_id: 0, "dial9.tokio.task_id": 42, task_id: "application-task", span_id: 1, parent_span_id: null, span_name: "request" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 5000, fields: { worker_id: 0, "dial9.tokio.task_id": 42, task_id: "application-task", span_id: 1, span_name: "request" } },
+    ];
+
+    const { allSpans } = buildSpanData(customEvents, workerSpans);
+    const span = allSpans[0];
+    expect(span.taskId).toBe(42);
+    expect(span.segments).toEqual([
+      { start: 1000, end: 1100, workerId: 1 },
+      { start: 4000, end: 4100, workerId: 1 },
+    ]);
+    expect(span.fields.task_id).toBe("application-task");
+  });
+
+  it("treats task_id as application data on legacy worker spans", () => {
+    const workerSpans = {
+      0: { polls: [{ start: 900, end: 1600, taskId: 99 }] },
+    };
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { worker_id: 0, task_id: "42", span_id: 1, parent_span_id: null, span_name: "request" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 1500, fields: { worker_id: 0, task_id: "42", span_id: 1, span_name: "request" } },
+    ];
+
+    const { allSpans } = buildSpanData(customEvents, workerSpans);
+    expect(allSpans[0].taskId).toBe(99);
+    expect(allSpans[0].fields.task_id).toBe("42");
+  });
+
   it("without workerSpans keeps raw segments (backwards compatible)", () => {
     // Without workerSpans, behavior is unchanged: raw on-wire segment, no taskId.
     const customEvents = [

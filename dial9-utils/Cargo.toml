@@ -11,14 +11,20 @@ readme = "README.md"
 all-features = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(shuttle)",
+    "cfg(iai_enabled)",
+] }
 missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
-tokio = { version = "1", default-features = false }
+tokio = { version = "1.52.0", default-features = false }
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+    "registry",
+] }
 axum-0-7 = { package = "axum", version = "0.7", optional = true }
 axum-core-0-4 = { package = "axum-core", version = "0.4", optional = true }
 axum-0-8 = { package = "axum", version = "0.8", optional = true }
@@ -33,6 +39,12 @@ tower = { version = "0.5", optional = true }
 tower-service = { version = "0.3", optional = true }
 
 [features]
+## Tracing-subscriber layer that emits span events into dial9 traces.
+tracing-layer = [
+    "dep:dial9-trace-format",
+    "dep:tracing-subscriber",
+    "tokio/rt",
+]
 ## A traced replacement for `axum::serve` from Axum 0.7.
 axum-07 = [
     "dep:axum-0-7",
@@ -61,7 +73,12 @@ axum-08 = [
 ]
 
 [dev-dependencies]
+dial9 = { path = "../dial9", features = ["tokio"] }
 dial9-core = { workspace = true, features = ["pipeline"] }
+dial9-tokio-telemetry = { path = "../dial9-tokio-telemetry" }
+dial9-utils = { path = ".", features = ["tracing-layer"] }
+criterion = "0.5"
+iai-callgrind = "=0.16.1"
 tempfile = "3"
 tokio = { version = "1.52.0", features = [
     "rt",
@@ -71,3 +88,17 @@ tokio = { version = "1.52.0", features = [
     "sync",
     "time",
 ] }
+
+[[bench]]
+name = "tracing_layer_bench"
+harness = false
+required-features = ["tracing-layer"]
+
+[[bench]]
+name = "tracing_layer_iai"
+harness = false
+required-features = ["tracing-layer"]
+
+[[example]]
+name = "tracing_sleep"
+required-features = ["tracing-layer"]

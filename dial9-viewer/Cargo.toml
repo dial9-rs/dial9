@@ -23,6 +23,7 @@ include = [
     "/skills/**",
     "/README.md",
     "/skill-source.md",
+    "/tracing-layer-skill-source.md",
     "/ui/dist/**",
 ]
 

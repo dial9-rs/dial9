@@ -1031,7 +1031,10 @@ fn classify_field(schema_name: &str, field_name: &str, ft: FieldType) -> FieldRe
 
     if is_varint {
         // Task identity namespace
-        if matches!(field_name, "task_id" | "waker_task_id" | "woken_task_id") {
+        if matches!(
+            field_name,
+            "task_id" | "dial9.tokio.task_id" | "waker_task_id" | "woken_task_id"
+        ) {
             return FieldRepeatMeta {
                 semantics: FieldSemantics::Identity,
                 namespace: Some(NamespaceId::Task),
@@ -1190,7 +1193,7 @@ impl ExtractContext {
 
     /// Sanitize a field name according to C - NAME/ID PRIVACY rules.
     /// On built-in schemas: preserve canonical fields, anonymize non-canonical ones.
-    /// On span schemas: preserve worker_id/span_id/parent_span_id/span_name.
+    /// On span schemas: preserve known runtime and span identity fields.
     /// On custom schemas: anonymize all field names.
     fn sanitize_field_name(
         &mut self,
@@ -1213,7 +1216,12 @@ impl ExtractContext {
             // On span schemas, preserve known identity/structural fields
             if matches!(
                 field_name,
-                "worker_id" | "span_id" | "parent_span_id" | "span_name" | "task_id"
+                "worker_id"
+                    | "span_id"
+                    | "parent_span_id"
+                    | "span_name"
+                    | "task_id"
+                    | "dial9.tokio.task_id"
             ) {
                 return field_name.to_string();
             }
@@ -3793,7 +3801,7 @@ mod tests {
             .register_schema(
                 "SpanEnter:my_secret_handler",
                 vec![
-                    FieldDef::new("worker_id", FieldType::Varint),
+                    FieldDef::new("dial9.tokio.task_id", FieldType::OptionalVarint),
                     FieldDef::new("span_id", FieldType::Varint),
                 ],
             )
@@ -3802,7 +3810,7 @@ mod tests {
             .register_schema(
                 "SpanExit:my_secret_handler",
                 vec![
-                    FieldDef::new("worker_id", FieldType::Varint),
+                    FieldDef::new("dial9.tokio.task_id", FieldType::OptionalVarint),
                     FieldDef::new("span_id", FieldType::Varint),
                 ],
             )
@@ -3812,7 +3820,7 @@ mod tests {
             &enter,
             &[
                 FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0),
+                FieldValue::Varint(7),
                 FieldValue::Varint(999),
             ],
         )
@@ -3821,7 +3829,7 @@ mod tests {
             &exit,
             &[
                 FieldValue::Varint(BASE_TS + 100_000),
-                FieldValue::Varint(0),
+                FieldValue::Varint(7),
                 FieldValue::Varint(999),
             ],
         )
@@ -3911,6 +3919,14 @@ mod tests {
             exit.name.strip_prefix("SpanExit:"),
             "enter/exit callsites not correlated"
         );
+        let task_id = enter
+            .fields
+            .iter()
+            .find(|field| field.name == "dial9.tokio.task_id")
+            .expect("namespaced task ID must remain recognizable in synthetic traces");
+        let repeat_meta = task_id.repeat_meta.as_ref().unwrap();
+        assert_eq!(repeat_meta.semantics, FieldSemantics::Identity);
+        assert_eq!(repeat_meta.namespace, Some(NamespaceId::Task));
     }
 
     #[test]

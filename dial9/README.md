@@ -212,7 +212,6 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 - [Socket accept queues](#socket-accept-queues-linux-only): dial9 can sample pending TCP listener connections and backlog limits on Linux
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
-- [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
 - [Metrique metrics](#metrique-metrics-opt-in): dial9 can record metrique unit-of-work metric entries alongside your EMF/JSON pipeline
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace
@@ -477,33 +476,6 @@ When `track_liveset(true)` is set, dial9 records every deallocation so it can de
 Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
 
 `dial9::recorder_from_env` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
-
-### Tracing span events (opt-in)
-
-**Enable the `tracing-layer` feature:**
-```toml
-[dependencies]
-dial9 = { version = "0.5", features = ["tracing-layer"] }
-```
-
-**Use tracing_subscriber to connect the `Dial9TracingLayer`:**
-```rust
-use dial9::tracing_layer::Dial9TracingLayer;
-use tracing_subscriber::prelude::*;
-
-tracing_subscriber::registry()
-    .with(tracing_subscriber::fmt::layer())
-    .with(
-        Dial9TracingLayer::new().with_filter(
-            tracing_subscriber::filter::Targets::new()
-                .with_target("my_app", tracing::Level::TRACE)
-                .with_default(tracing::Level::ERROR),
-        ),
-    )
-    .init();
-```
-
-Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs roughly 650-800ns total on a modern server core, most of which is dial9 encoding (the same span through a bare `tracing` registry costs ~100-200ns).
 
 ### Metrique metrics (opt-in)
 

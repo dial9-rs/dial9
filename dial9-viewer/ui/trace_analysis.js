@@ -1290,9 +1290,12 @@
    * SpanCloseEvent finalizes a span and enables span ID recycling. Annotated
    * single-event spans already carry both lifecycle endpoints.
    *
-   * When `workerSpans` is supplied, each span's active segments are
-   * reconstructed from its owning task's poll timeline instead of trusting the
-   * raw on-wire SpanEnter/SpanExit segments (see `reconstructSpanSegments`).
+   * New producers write the owning `dial9.tokio.task_id` directly on span
+   * events. Legacy producers wrote `worker_id`; for those, the owning task is
+   * inferred from the poll covering the first enter. When `workerSpans` is
+   * supplied, each span's active segments are reconstructed from that task's
+   * poll timeline instead of trusting the raw on-wire SpanEnter/SpanExit
+   * segments (see `reconstructSpanSegments`).
    * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
    * @param {Object} [workerSpans] per-worker `{polls}` from {@link buildWorkerSpans};
    *   when present, enables poll-based active/idle reconstruction.
@@ -1315,14 +1318,15 @@
     // enter/exit pairs that precede them in wall-clock time.
     customEvents = [...customEvents].sort((a, b) => a.timestamp - b.timestamp);
     // Key by span_id only — a span may be polled on different workers.
-    const openEnters = new Map(); // spanId → {timestamp, workerId}
+    const openEnters = new Map(); // spanId → {timestamp, workerId, taskId}
     // Live span records keyed by spanId. Moved to closedSpans on SpanClose.
-    const spanMap = new Map(); // spanId → {spanName, fields, parentSpanId, segments}
+    const spanMap = new Map(); // spanId → {spanName, fields, parentSpanId, taskId, segments}
     const closedSpans = []; // finalized span records (after SpanClose or end-of-trace)
     const spanMeta = new Map();
 
-    const BASE_ENTER_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
-    const BASE_EXIT_FIELDS = new Set(["worker_id", "span_id", "span_instance_id", "tid", "span_name"]);
+    const TOKIO_TASK_ID_FIELD = "dial9.tokio.task_id";
+    const BASE_ENTER_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "parent_span_id", "span_name"]);
+    const BASE_EXIT_FIELDS = new Set(["worker_id", TOKIO_TASK_ID_FIELD, "span_id", "span_instance_id", "tid", "span_name"]);
     let singleEventOrdinal = 0;
     const handoffGapsByTid = new Map();
     for (const gap of blockInPlaceGaps || []) {
@@ -1404,7 +1408,15 @@
         ev.name === "SpanEnterEvent"
       ) {
         const v = ev.fields;
-        const workerId = Number(v.worker_id);
+        // `worker_id` is absent on current producers. Keep it only for the
+        // legacy task-correlation fallback and unmatched-span rendering.
+        const workerId = v.worker_id != null ? Number(v.worker_id) : NaN;
+        const rawTaskId = v[TOKIO_TASK_ID_FIELD] != null
+          ? Number(v[TOKIO_TASK_ID_FIELD])
+          : null;
+        const taskId = rawTaskId != null && Number.isFinite(rawTaskId) && rawTaskId !== 0
+          ? rawTaskId
+          : null;
         const spanId = String(v.span_id);
         const parentSpanId = v.parent_span_id != null ? String(v.parent_span_id) : null;
         const spanName = v.span_name || "unknown";
@@ -1417,10 +1429,10 @@
         // different worker before exiting), skip to avoid losing the first enter.
         if (openEnters.has(spanId)) continue;
 
-        openEnters.set(spanId, { timestamp: ev.timestamp, workerId });
+        openEnters.set(spanId, { timestamp: ev.timestamp, workerId, taskId });
 
         if (!spanMap.has(spanId)) {
-          spanMap.set(spanId, { spanName, fields, parentSpanId, segments: [] });
+          spanMap.set(spanId, { spanName, fields, parentSpanId, taskId, segments: [] });
         }
         spanMeta.set(spanId, { spanName, fields, parentSpanId });
       } else if (
@@ -1440,14 +1452,13 @@
           }
           let rec = spanMap.get(spanId);
           if (!rec) {
-            rec = { spanName: v.span_name || "unknown", fields: {}, parentSpanId: null, segments: [] };
+            rec = { spanName: v.span_name || "unknown", fields: {}, parentSpanId: null, taskId: enter.taskId, segments: [] };
             spanMap.set(spanId, rec);
           }
           if (Object.keys(exitFields).length > 0) rec.fields = exitFields;
-          // Pair the segment with the ENTER worker, not the exit worker. `start`
-          // is the enter timestamp, and a long-lived span's task can migrate
-          // workers between enter and exit; using the exit worker here makes the
-          // span->task lookup (poll overlap at `start` on this worker) miss.
+          // Retain the ENTER worker for old traces whose task id still needs the
+          // poll-overlap fallback. Current traces reconstruct lanes from the
+          // namespaced Tokio task ID.
           rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId: enter.workerId });
         }
       } else if (ev.name.startsWith("SpanClose__") || ev.name === "SpanCloseEvent") {
@@ -1472,9 +1483,8 @@
       rec.segments.sort((a, b) => a.start - b.start);
       const start = rec.singleEventStart ?? rec.segments[0].start;
       const end = rec.singleEventEnd ?? rec.segments[rec.segments.length - 1].end;
-      // Resolve the owning task from the ENTER of the first segment: the poll
-      // covering (segment.workerId, segment.start). This is the same lookup the
-      // viewer uses to jump to a task on span-click.
+      // Prefer a task id supplied directly by the producer. For legacy spans,
+      // fall back to the poll covering the first segment at span start.
       const taskId = rec.taskId != null
         ? rec.taskId
         : pollsByTask

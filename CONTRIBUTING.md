@@ -62,7 +62,8 @@ Dev-dependencies on workspace crates should *not* include a `version` to avoid c
 
 ```toml
 [dev-dependencies]
-dial9-tokio-telemetry = { path = ".", features = ["analysis", "tracing-layer"] }
+dial9-tokio-telemetry = { path = ".", features = ["analysis"] }
+dial9-utils = { path = "../dial9-utils", features = ["tracing-layer"] }
 ```
 
 ## Running tests
