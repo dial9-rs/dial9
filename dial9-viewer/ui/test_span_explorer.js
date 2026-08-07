@@ -402,6 +402,8 @@ assertEq(
     max_files: 80,
     bucket: "my-bucket",
     region: "us-west-2",
+    credentialMode: "role",
+    roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
     prefix: "traces/",
     service: "my-svc",
     hosts: ["host-a", "host-b"],
@@ -416,6 +418,8 @@ assertEq(
   assertEq(encoded.get("max_files"), "80", "encodeState: refinement depth");
   assertEq(encoded.get("bucket"), "my-bucket", "encodeState: bucket");
   assertEq(encoded.get("aws_region"), "us-west-2", "encodeState: region");
+  assertEq(encoded.get("credential_mode"), "role", "encodeState: credential mode");
+  assertEq(encoded.get("aws_role_arn"), state.roleArn, "encodeState: role ARN");
   assertEq(encoded.get("span_type_uid"), state.span_type_uid, "encodeState: span_type_uid");
   assertEq(encoded.get("min_span_ns"), "1000000", "encodeState: min_span_ns");
   assertEq(encoded.getAll("host").length, 2, "encodeState: hosts repeatable");
@@ -424,6 +428,8 @@ assertEq(
   assertEq(decoded.data_dir, "/tmp/dial9-traces", "decodeState: local data_dir");
   assertEq(decoded.max_files, 80, "decodeState: refinement depth");
   assertEq(decoded.bucket, "my-bucket", "decodeState: bucket");
+  assertEq(decoded.credentialMode, "role", "decodeState: credential mode");
+  assertEq(decoded.roleArn, state.roleArn, "decodeState: role ARN");
   assertEq(decoded.span_type_uid, state.span_type_uid, "decodeState: span_type_uid");
   assertEq(decoded.min_span_ns, 1000000, "decodeState: min_span_ns");
   assertEq(decoded.hosts.length, 2, "decodeState: hosts");
@@ -436,6 +442,7 @@ assertEq(
     max_files: 80,
     bucket: "bkt",
     region: null,
+    credentialMode: "ambient",
     prefix: null,
     service: "svc",
     hosts: ["h1"],
@@ -449,6 +456,7 @@ assertEq(
   assert(cpuUrl.includes("data_dir=%2Ftmp%2Fdial9-traces"), "flamegraphUrl: carries local data_dir");
   assert(cpuUrl.includes("max_files=80"), "flamegraphUrl: carries refinement depth");
   assert(cpuUrl.includes("source=cpu"), "flamegraphUrl: on_cpu → source=cpu");
+  assert(cpuUrl.includes("credential_mode=ambient"), "flamegraphUrl: carries ambient mode");
   assert(cpuUrl.includes("span_type_uid=aabb"), "flamegraphUrl: carries span_type_uid");
   assert(cpuUrl.includes("min_span_ns=1000"), "flamegraphUrl: carries min_span_ns");
   assert(cpuUrl.startsWith("flamegraph.html?"), "flamegraphUrl: points at flamegraph.html");
@@ -459,7 +467,14 @@ assertEq(
 
 // ── exemplarViewerUrl ──
 {
-  const scope = { bucket: "my-bucket", region: "us-west-2", service: "my-svc", spanName: "/jobs/next" };
+  const scope = {
+    bucket: "my-bucket",
+    region: "us-west-2",
+    credentialMode: "role",
+    roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
+    service: "my-svc",
+    spanName: "/jobs/next",
+  };
   const exemplar = {
     elapsed_ns: 5000000,
     span_uid: "deadbeef",
@@ -481,6 +496,8 @@ assertEq(
   assertEq(qs.get("svc"), "my-svc", "exemplarViewerUrl: carries svc");
   assertEq(qs.get("host"), "host-7", "exemplarViewerUrl: uses the exemplar's own host");
   assertEq(qs.get("aws_region"), "us-west-2", "exemplarViewerUrl: carries region");
+  assertEq(qs.get("credential_mode"), "role", "exemplarViewerUrl: carries role mode");
+  assertEq(qs.get("aws_role_arn"), scope.roleArn, "exemplarViewerUrl: carries role ARN");
   assertEq(qs.get("focus_start"), String(exemplar.start_ns), "exemplarViewerUrl: focus_start from start_ns");
   assertEq(qs.get("focus_end"), String(exemplar.end_ns), "exemplarViewerUrl: focus_end from end_ns");
   assertEq(qs.get("focus_span_name"), "/jobs/next", "exemplarViewerUrl: forwards focus_span_name from scope");

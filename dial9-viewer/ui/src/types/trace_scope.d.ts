@@ -21,6 +21,14 @@ declare module "*/trace_scope.js" {
     bucket: string;
     /** AWS region the bucket lives in ("" when unknown/default). */
     region: string;
+    /**
+     * Reader-role ARN to assume for this bucket ("" when the identity isn't a
+     * role). Carried so a link opened in a fresh session still has an identity;
+     * not a secret (the server must be separately allowed to assume it).
+     */
+    roleArn: string;
+    /** Explicit frontend credential mode; empty only for legacy scopes. */
+    credentialMode: "ambient" | "literal" | "role" | "";
     prefix: string;
     /** Single service; "" when the selection spans more than one. */
     service: string;
@@ -71,11 +79,28 @@ declare module "*/trace_scope.js" {
    * (an unrecognized key layout), so callers never build an Infinity window.
    */
   export function scopeFromKeys(
+    source: {
+      bucket: string;
+      region: string;
+      credentials:
+        | { kind: "ambient" }
+        | { kind: "literal"; accessKeyId: string; secretAccessKey: string; sessionToken?: string | undefined }
+        | { kind: "role"; roleArn: string };
+    },
+    keys: readonly string[],
+    t0: number | null,
+    t1: number | null,
+  ): TraceScope | null;
+
+  /** Legacy positional form used by frozen HTML until its next migration. */
+  export function scopeFromKeys(
     bucket: string,
     keys: readonly string[],
     t0: number | null,
     t1: number | null,
-    region?: string
+    region?: string,
+    roleArn?: string,
+    credentialMode?: "ambient" | "literal" | "role",
   ): TraceScope | null;
 
   /**

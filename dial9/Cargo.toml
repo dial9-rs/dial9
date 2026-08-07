@@ -115,9 +115,6 @@ process-resource = [
 ## Removes `#[non_exhaustive]` from profiling event structs. Unstable.
 unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 
-## Tracing-subscriber layer emitting span events into dial9 traces.
-tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
-
 ## Metrique sink recording unit-of-work metric entries into dial9 traces.
 ## Standalone; combine with the `tokio` feature to capture task ids.
 metrique-sink = ["dep:dial9-metrique"]
@@ -151,7 +148,6 @@ dial9 = { path = ".", features = [
     "memory-profiling",
     "process-resource",
     "linux-socket",
-    "tracing-layer",
     "metrique-sink",
     "unstable-events",
     "worker-s3",
@@ -192,7 +188,6 @@ dial9 = { path = ".", features = [
     "worker-s3",
     "analysis",
     "taskdump",
-    "tracing-layer",
     "linux-socket",
 ] }
 
@@ -267,10 +262,6 @@ required-features = ["analysis"]
 [[example]]
 name = "s3_stress_test"
 required-features = ["worker-s3"]
-
-[[example]]
-name = "tracing_sleep"
-required-features = ["tracing-layer"]
 
 [[example]]
 name = "metrique_metrics"

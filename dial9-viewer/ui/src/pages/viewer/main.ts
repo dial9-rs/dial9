@@ -25,7 +25,15 @@ import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
-import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
+import {
+  Dial9Creds,
+  applyToCreds,
+  isSourceShareable,
+  readNamespacedSourceScope,
+  readPlainSourceScope,
+  sourceScopeFromStored,
+  readKeyDerivedIdentity,
+} from "../../lib/trace/index.js";
 import { bootScopeFromSearch } from "./scope-boot.js";
 import {
   bindViewStateToUrl,
@@ -59,6 +67,13 @@ function boot(): void {
   if (root === null) {
     throw new Error("viewer shell: #app mount point missing");
   }
+
+  const params = new URLSearchParams(window.location.search);
+  const fallbackSource = sourceScopeFromStored("", Dial9Creds.get());
+  const credentialSource = params.has("s_bucket") || params.has("s_credential_mode")
+    ? readNamespacedSourceScope(params, fallbackSource)
+    : readPlainSourceScope(params, fallbackSource);
+  applyToCreds(credentialSource, Dial9Creds);
 
   const store = createViewerStore();
 
@@ -231,6 +246,7 @@ function boot(): void {
   // copy-link button, and the key hints. The copy-link copies the live URL,
   // passing a `beforeCopyLink` flush so it reflects live state.
   const statusBar = createStatusBar(shell.statusRegion, store, {
+    copyLinkVisible: isSourceShareable(credentialSource),
     clearSelection: () => {
       store.update("selection", {
         selectedTaskId: null,

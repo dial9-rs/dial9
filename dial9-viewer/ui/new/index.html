@@ -44,28 +44,39 @@
             <span class="spacer"></span>
             <button id="creds-close" title="Close">✕</button>
         </div>
-        <div class="creds-row" style="align-items:flex-start">
-            <label style="padding-top:6px">Paste JSON</label>
-            <textarea id="creds-paste" rows="2" spellcheck="false" autocomplete="off"
-                placeholder="Paste an STS / Isengard credentials JSON blob here to fill the fields below"
-                style="flex:1;min-width:320px;resize:vertical;background:#2a2a4a;border:1px solid #444;color:#e0e0e0;padding:6px 10px;border-radius:4px;font-size:0.8em;font-family:ui-monospace,Menlo,monospace"></textarea>
-            <button id="creds-paste-fill" title="Extract credentials from the pasted JSON">Fill fields</button>
+        <div class="creds-row" id="creds-mode-row">
+            <span id="creds-mode-summary"></span>
+            <span class="spacer"></span>
+            <button id="creds-use-literal" type="button">Use literal credentials instead</button>
+        </div>
+        <!-- Kept mounted even while hidden: the private userscript fills these
+             exact IDs and clicks #creds-apply to switch into literal mode. -->
+        <div id="creds-literal-fields">
+            <div class="creds-row" style="align-items:flex-start">
+                <label style="padding-top:6px">Paste JSON</label>
+                <textarea id="creds-paste" rows="2" spellcheck="false" autocomplete="off"
+                    placeholder="Paste an STS / Isengard credentials JSON blob here to fill the fields below"
+                    style="flex:1;min-width:320px;resize:vertical;background:#2a2a4a;border:1px solid #444;color:#e0e0e0;padding:6px 10px;border-radius:4px;font-size:0.8em;font-family:ui-monospace,Menlo,monospace"></textarea>
+                <button id="creds-paste-fill" title="Extract credentials from the pasted JSON">Fill fields</button>
+            </div>
+            <div class="creds-row">
+                <label>Access key ID</label>
+                <input type="text" id="creds-akid" autocomplete="off" spellcheck="false" style="width:200px" />
+                <label>Secret access key</label>
+                <input type="password" id="creds-secret" autocomplete="off" style="width:220px" />
+            </div>
+            <div class="creds-row">
+                <label>Session token</label>
+                <input type="password" id="creds-token" autocomplete="off" placeholder="(for temporary creds)" style="width:320px" />
+            </div>
+            <div class="creds-row">
+                <button class="primary" id="creds-apply">Apply</button>
+            </div>
         </div>
         <div class="creds-row">
-            <label>Access key ID</label>
-            <input type="text" id="creds-akid" autocomplete="off" spellcheck="false" style="width:200px" />
-            <label>Secret access key</label>
-            <input type="password" id="creds-secret" autocomplete="off" style="width:220px" />
-        </div>
-        <div class="creds-row">
-            <label>Session token</label>
-            <input type="password" id="creds-token" autocomplete="off" placeholder="(for temporary creds)" style="width:320px" />
             <label>Region</label>
             <input type="text" id="creds-region" autocomplete="off" placeholder="auto-detect" style="width:120px" />
-        </div>
-        <div class="creds-row">
-            <button class="primary" id="creds-apply">Apply</button>
-            <button id="creds-clear">Clear</button>
+            <button id="creds-clear">Use ambient credentials</button>
             <span id="creds-status" class="creds-status"></span>
         </div>
         <!-- Bucket picker, populated from GET /api/buckets after Apply. -->

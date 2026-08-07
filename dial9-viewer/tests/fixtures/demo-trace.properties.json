@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 10201,
+  "total_samples": 13090,
   "by_source": {
-    "0": 72,
-    "1": 10129
+    "0": 116,
+    "1": 12974
   },
   "on_off_all": {
-    "on_runtime": 10195,
-    "off_runtime": 6
+    "on_runtime": 13080,
+    "off_runtime": 10
   },
   "on_off_by_source": {
     "0": {
-      "on": 66,
-      "off": 6
+      "on": 106,
+      "off": 10
     },
     "1": {
-      "on": 10129,
+      "on": 12974,
       "off": 0
     }
   },
@@ -26,52 +26,52 @@
     3
   ],
   "cpu_profile": {
-    "count": 72,
-    "distinct_stacks": 67,
-    "stack_sig_digest": "14d7f6013692c912",
-    "ts_count": 72,
-    "ts_span_ns": 4176883969,
-    "ts_delta_digest": "63422dcbe89d1414",
+    "count": 116,
+    "distinct_stacks": 109,
+    "stack_sig_digest": "5205b06ca07fe93d",
+    "ts_count": 116,
+    "ts_span_ns": 3866002419,
+    "ts_delta_digest": "4b3158d4832e70f5",
     "top_stacks": [
       {
-        "count": 3,
-        "depth": 1,
-        "leaf": "[unknown] 0x7f39dfaf13ef"
+        "count": 2,
+        "depth": 99,
+        "leaf": "writev"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "__malloc"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8c24de8c"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "__libc_write"
+        "depth": 107,
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "__strlen_sse2"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8c24de58"
+      },
+      {
+        "count": 2,
+        "depth": 89,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 98,
+        "leaf": "<F as axum::handler::Handler<(M,T1,T2),S>>::call::{{closure}}"
+      },
+      {
+        "count": 2,
+        "depth": 113,
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 1,
-        "depth": 12,
-        "leaf": "jent_keccakp_pi"
-      },
-      {
-        "count": 1,
-        "depth": 10,
-        "leaf": "jent_keccakp_pi"
-      },
-      {
-        "count": 1,
-        "depth": 11,
-        "leaf": "rol64"
-      },
-      {
-        "count": 1,
-        "depth": 133,
-        "leaf": "scc::hash_index::HashIndex<K,V,H>::entry"
+        "depth": 140,
+        "leaf": "<time::offset_date_time::OffsetDateTime as core::ops::arith::Add<core::time::Duration>>::add"
       }
     ]
   }

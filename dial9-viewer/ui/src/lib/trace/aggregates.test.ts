@@ -64,6 +64,14 @@ describe("tokioStatsUrl", () => {
   it("omits refine when absent", () => {
     expect(tokioStatsUrl({ bucket: "b" })).toBe("/api/tokio-stats?bucket=b");
   });
+
+  it("carries aws_region for the ambient cross-region read", () => {
+    // Region rides the request URL (the server reads it from aws_region — the
+    // only place an ambient cross-region read learns it). There is no role
+    // field on AggregateScope: the role is header-only.
+    const u = new URL("http://x" + tokioStatsUrl({ bucket: "b", aws_region: "us-west-2" }));
+    expect(u.searchParams.get("aws_region")).toBe("us-west-2");
+  });
 });
 
 // ─── coverageSignal / isCoverageFrozen units ─────────────────────────────
