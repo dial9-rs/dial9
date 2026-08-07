@@ -123,7 +123,11 @@ function makeDom() {
   return { makeEl, restore, container: makeEl() };
 }
 
-const { createDiffView } = require("./flamegraph_diff_view.js");
+const {
+  createDiffView,
+  browserApi,
+  refinementLifecycleBadge,
+} = require("./flamegraph_diff_view.js");
 
 function scopes() {
   return { a: new URLSearchParams("service=svc-a"), b: new URLSearchParams("service=svc-b") };
@@ -268,6 +272,111 @@ test("a user zoom cancels a not-yet-landed pending restore", () => {
   } finally {
     dom.restore();
   }
+});
+
+test("browser API fallback exposes Refine work-depth and adoption helpers", () => {
+  const root = {
+    formatCoverageBadge() {},
+    foldErrorNotice() {},
+    nextMaxFiles() {},
+    refinementWorkDepth() {},
+    shouldAdoptRefinementSnapshot() {},
+  };
+  const api = browserApi(root);
+  assert.strictEqual(api.refinementWorkDepth, root.refinementWorkDepth,
+    "browser fallback carries refinementWorkDepth");
+  assert.strictEqual(api.shouldAdoptRefinementSnapshot, root.shouldAdoptRefinementSnapshot,
+    "browser fallback carries snapshot adoption helper");
+});
+
+test("Load more keeps each side visible until cached coverage recovers its baseline", () => {
+  const dom = makeDom();
+  sides = [];
+  try {
+    const s = scopes();
+    const view = createDiffView(dom.container, {
+      scopeA: s.a,
+      scopeB: s.b,
+      initialState: { zoom: ["(all)", "runtime"] },
+    });
+    const coverage = (filesFolded, samplesFolded) => ({
+      files_matched: 1000,
+      files_folded: filesFolded,
+      fold_work_cap: 100,
+      samples_folded: samplesFolded,
+      hosts_matched: 10,
+      hosts_folded: 10,
+      fold_errors: 0,
+    });
+    const sideBTree = {
+      name: "(all)", count: 100, self: 0,
+      children: [{ name: "side-b", count: 100, self: 100, children: [] }],
+    };
+    sides.slice(0, 2).forEach((opts, index) => {
+      opts.onEvent({
+        tree: index === 0 ? serverTree() : sideBTree,
+        total_samples: 100,
+        metadata: { hosts: 10 },
+        coverage: coverage(100, 100),
+      });
+      opts.onClose();
+    });
+
+    const breadcrumb = dom.container.children[1];
+    assert.strictEqual(breadcrumb.style.display, "flex", "initial exact zoom is visible");
+    const moreBtn = dom.container.children[0]._q[".fgd-more"];
+    moreBtn.dispatchEvent({ type: "click" });
+    assert.strictEqual(sides.length, 4, "Load more repolls both sides without a browser API error");
+
+    const replacementTree = {
+      name: "(all)", count: 24, self: 0,
+      children: [{ name: "replacement", count: 24, self: 24, children: [] }],
+    };
+    sides[2].onEvent({
+      tree: replacementTree,
+      total_samples: 24,
+      metadata: { hosts: 10 },
+      coverage: coverage(24, 24),
+    });
+    assert.strictEqual(
+      breadcrumb.style.display,
+      "flex",
+      "below-baseline side snapshot leaves the old zoomed tree visible",
+    );
+
+    sides[2].onEvent({
+      tree: replacementTree,
+      total_samples: 120,
+      metadata: { hosts: 10 },
+      coverage: coverage(100, 120),
+    });
+    assert.strictEqual(
+      breadcrumb.style.display,
+      "none",
+      "at-baseline side snapshot is adopted and may replace the old zoom target",
+    );
+    view.destroy();
+  } finally {
+    dom.restore();
+  }
+});
+
+test("diff lifecycle formatter removes stale markers around fold warnings", () => {
+  const warning = "100 / 1000 files · refined · ⚠ 1 fold failed: injected warning";
+  const incomplete = refinementLifecycleBadge(warning, "refinement incomplete");
+  assert.strictEqual(
+    incomplete,
+    "100 / 1000 files · ⚠ 1 fold failed: injected warning · refinement incomplete",
+    "below-baseline close retains the warning and exactly one incomplete marker",
+  );
+  assert.ok(!incomplete.includes(" · refined ·"), "incomplete badge has no stale refined marker");
+
+  const interrupted = refinementLifecycleBadge(incomplete, "refinement interrupted");
+  assert.strictEqual(
+    interrupted,
+    "100 / 1000 files · ⚠ 1 fold failed: injected warning · refinement interrupted",
+    "error replaces incomplete with exactly one interrupted marker",
+  );
 });
 
 // Restore the real SSE fn so requiring this module elsewhere is side-effect free.

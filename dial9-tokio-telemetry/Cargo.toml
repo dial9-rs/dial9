@@ -1,6 +1,6 @@
 [package]
 name = "dial9-tokio-telemetry"
-version = "0.4.0-alpha.1"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,6 +20,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(shuttle)",
     "cfg(iai_enabled)",
 ] }
+missing_debug_implementations = "warn"
 
 [dependencies]
 tokio = { version = "1.52.0", features = [
@@ -49,9 +50,6 @@ dial9-trace-format = { workspace = true, features = [
     "serde-deserialize",
 ] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
-    "registry",
-] }
 hostname = "0.4"
 bon = "3"
 aws-sdk-s3 = { version = "1", default-features = false, optional = true, features = [
@@ -63,21 +61,29 @@ aws-sdk-s3 = { version = "1", default-features = false, optional = true, feature
 aws-config = { version = "1", optional = true, default-features = false }
 flate2 = { version = "1" }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
-metrique-writer = "0.1"
-metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
-dial9-macro = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
 dial9-core = { workspace = true, features = ["pipeline"] }
-dial9-utils = { workspace = true, optional = true }
+dial9-destinations-s3 = { workspace = true, optional = true }
 
 [features]
 analysis = []
-cpu-profiling = ["dep:dial9-perf-self-profile", "dial9-perf-self-profile/dial9-source"]
+cpu-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/cpu-profiling",
+    "dial9-perf-self-profile/symbolize-processor",
+]
+## Process resource usage sampled from `getrusage(RUSAGE_SELF)` (unix). Forwards
+## to the `dial9-perf-self-profile` source.
+process-resource = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/process-resource",
+]
+## TCP listener accept-queue depth via Linux sock_diag. Forwards to the
+## `dial9-perf-self-profile` source.
 linux-socket = [
-    "dep:netlink-packet-core",
-    "dep:netlink-packet-sock-diag",
-    "dep:netlink-sys",
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/linux-socket",
 ]
 _shuttle = [
     "dep:shuttle",
@@ -90,14 +96,13 @@ _shuttle = [
 ## compile on other targets. Enabling this feature on an unsupported target
 ## is a hard compile error from tokio.
 taskdump = ["tokio/taskdump"]
-tracing-layer = ["dep:tracing-subscriber"]
 ## Sampled memory allocation profiling via ring buffers.
 memory-profiling = [
     "dep:dial9-perf-self-profile",
     "dial9-perf-self-profile/memory-profiling",
 ]
 worker-s3 = [
-    "dep:dial9-utils",
+    "dep:dial9-destinations-s3",
     "dep:aws-sdk-s3",
     "dep:aws-config",
     "dep:time",
@@ -110,8 +115,8 @@ __nonlinux_all_features = [
     "analysis",
     "cpu-profiling",
     "memory-profiling",
+    "process-resource",
     "linux-socket",
-    "tracing-layer",
     "worker-s3",
 ]
 
@@ -119,7 +124,8 @@ __nonlinux_all_features = [
 dial9-tokio-telemetry = { path = ".", features = [
     "analysis",
     "memory-profiling",
-    "tracing-layer",
+    "process-resource",
+    "linux-socket",
     "unstable-events",
     "worker-s3",
 ] }
@@ -128,19 +134,19 @@ dial9-tokio-telemetry = { path = ".", features = [
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 dial9-core = { workspace = true, features = ["test-util"] }
 dial9-perf-self-profile = { workspace = true, features = ["test-util"] }
-assert2 = { workspace = true }
 criterion = "0.5"
-clap = { version = "4", features = ["derive", "env"] }
 hdrhistogram = "7"
 metrique-timesource = { version = "0.1", features = [
     "custom-timesource",
     "tokio",
 ] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
+metrique = { version = "0.1.29", features = ["local-format"] }
 tokio = { version = "1.52.0", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dial9-destinations-s3 = { workspace = true }
 s3s = "0.14.1"
 s3s-fs = "0.14.1"
 s3s-aws = "0.14.1"
@@ -162,15 +168,9 @@ dial9-tokio-telemetry = { path = ".", features = [
     "worker-s3",
     "analysis",
     "taskdump",
-    "tracing-layer",
     "linux-socket",
 ] }
 nix = { version = "0.29", features = ["process"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-netlink-packet-core = { version = "0.7", optional = true }
-netlink-packet-sock-diag = { version = "0.4.2", optional = true }
-netlink-sys = { version = "0.8.8", optional = true }
 
 [[bench]]
 name = "overhead_bench"
@@ -189,56 +189,6 @@ required-features = ["memory-profiling"]
 name = "pipeline_heap_bench"
 harness = false
 required-features = ["cpu-profiling"]
-
-[[example]]
-name = "block_in_place_workload"
-required-features = ["cpu-profiling"]
-
-[[example]]
-name = "blocking_sleep"
-required-features = ["cpu-profiling"]
-
-[[example]]
-name = "cpu_profile_workload"
-required-features = ["cpu-profiling", "analysis"]
-
-[[example]]
-name = "s3_stress_test"
-required-features = ["worker-s3"]
-
-[[example]]
-name = "analyze_trace"
-required-features = ["analysis"]
-
-[[example]]
-name = "trace_to_jsonl"
-required-features = ["analysis"]
-
-[[example]]
-name = "kernel_sched_events"
-required-features = ["cpu-profiling", "analysis"]
-
-[[example]]
-name = "generate_diagnostic_traces"
-required-features = ["cpu-profiling"]
-
-[[example]]
-name = "thread_per_core"
-required-features = ["analysis"]
-
-[[example]]
-name = "tracing_sleep"
-required-features = ["tracing-layer"]
-
-[[bench]]
-name = "tracing_layer_bench"
-harness = false
-required-features = ["tracing-layer"]
-
-[[bench]]
-name = "tracing_layer_iai"
-harness = false
-required-features = ["tracing-layer"]
 
 [[bench]]
 name = "writer_encode_iai"

@@ -35,20 +35,10 @@ pub(crate) struct DiskFs {
 }
 
 impl DiskFs {
-    pub(crate) fn from_base_path(base: &Path) -> Self {
-        let dir = base
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
-        let stem = base
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("trace")
-            .to_string();
+    pub(crate) fn new(dir: impl Into<PathBuf>, stem: impl Into<String>) -> Self {
         Self {
-            dir,
-            stem,
+            dir: dir.into(),
+            stem: stem.into(),
             claimed: Mutex::new(HashMap::new()),
             dropped: AtomicU64::new(0),
             writer_done: AtomicBool::new(false),
@@ -374,8 +364,7 @@ mod tests {
         std::fs::write(dir.path().join("trace.0.bin"), b"seg0").unwrap();
         std::fs::write(dir.path().join("trace.1.bin"), b"seg1").unwrap();
 
-        let base = dir.path().join("trace.bin");
-        let fs = Fs::Disk(DiskFs::from_base_path(&base));
+        let fs = Fs::Disk(DiskFs::new(dir.path(), "trace"));
 
         let t1 = fs.take_files();
         check!(t1.segments.len() == 2);
@@ -390,8 +379,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("trace.0.bin");
         std::fs::write(&path, b"seg0").unwrap();
-        let base = dir.path().join("trace.bin");
-        let fs = Fs::Disk(DiskFs::from_base_path(&base));
+        let fs = Fs::Disk(DiskFs::new(dir.path(), "trace"));
 
         let t1 = fs.take_files();
         check!(t1.segments.len() == 1);
@@ -413,8 +401,7 @@ mod tests {
     fn disk_fs_release_claim_redispatches() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("trace.0.bin"), b"seg0").unwrap();
-        let base = dir.path().join("trace.bin");
-        let disk = DiskFs::from_base_path(&base);
+        let disk = DiskFs::new(dir.path(), "trace");
 
         let t1 = disk.take_files();
         check!(t1.segments.len() == 1);
@@ -433,8 +420,7 @@ mod tests {
     fn disk_fs_eviction_bumps_dropped() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("trace.0.bin"), b"data").unwrap();
-        let base = dir.path().join("trace.bin");
-        let fs = Fs::Disk(DiskFs::from_base_path(&base));
+        let fs = Fs::Disk(DiskFs::new(dir.path(), "trace"));
 
         let t = fs.take_files();
         check!(t.segments.len() == 1);
@@ -452,8 +438,7 @@ mod tests {
     fn disk_fs_terminal_does_not_bump_dropped() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("trace.0.bin"), b"data").unwrap();
-        let base = dir.path().join("trace.bin");
-        let fs = Fs::Disk(DiskFs::from_base_path(&base));
+        let fs = Fs::Disk(DiskFs::new(dir.path(), "trace"));
 
         let t = fs.take_files();
         let seg = t.segments.into_iter().next().unwrap().seg_ref;
@@ -465,8 +450,7 @@ mod tests {
     #[test]
     fn discover_existing_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().join("trace.bin");
-        let disk = DiskFs::from_base_path(&base);
+        let disk = DiskFs::new(dir.path(), "trace");
         let d = disk.discover_existing().unwrap();
         check!(d.next_active_index == 0);
         check!(d.closed_files.is_empty());
@@ -478,8 +462,7 @@ mod tests {
         std::fs::write(dir.path().join("trace.0.bin"), vec![0u8; 100]).unwrap();
         std::fs::write(dir.path().join("trace.0.bin.gz"), vec![0u8; 30]).unwrap();
         std::fs::write(dir.path().join("trace.2.bin"), vec![0u8; 50]).unwrap();
-        let base = dir.path().join("trace.bin");
-        let disk = DiskFs::from_base_path(&base);
+        let disk = DiskFs::new(dir.path(), "trace");
         let d = disk.discover_existing().unwrap();
         check!(d.next_active_index == 3, "max(0,2)+1 = 3");
         let by_index: std::collections::HashMap<u32, u64> = d
@@ -496,8 +479,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("trace.7.bin.active");
         std::fs::write(&stale, b"orphan").unwrap();
-        let base = dir.path().join("trace.bin");
-        let disk = DiskFs::from_base_path(&base);
+        let disk = DiskFs::new(dir.path(), "trace");
         let _ = disk.discover_existing().unwrap();
         check!(!stale.exists(), "stale .active must be discarded");
     }
@@ -508,8 +490,7 @@ mod tests {
         std::fs::write(dir.path().join("other.0.bin"), b"x").unwrap();
         std::fs::write(dir.path().join("README"), b"x").unwrap();
         std::fs::write(dir.path().join("trace.0.bin"), b"x").unwrap();
-        let base = dir.path().join("trace.bin");
-        let disk = DiskFs::from_base_path(&base);
+        let disk = DiskFs::new(dir.path(), "trace");
         let d = disk.discover_existing().unwrap();
         check!(d.closed_files.len() == 1);
         check!(d.next_active_index == 1);

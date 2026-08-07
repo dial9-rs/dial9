@@ -1,0 +1,27 @@
+// Type-check the HAND-WRITTEN declarations in src/types/.
+//
+// The main tsconfig sets `skipLibCheck: true`, which is meant to skip the
+// declarations shipped in node_modules -- but it skips ALL .d.ts, including
+// the ~3000 lines under src/types/ that describe the frozen JS core. Those are
+// the most load-bearing types in the repo and were going unchecked: three of
+// them turned out to misdescribe the core (ParkSpan.schedWait and
+// TraceEvent.schedWait were `number` where the parser emits null;
+// PollSpan.spawnLocId was `string | null` where the builder emits 0), each
+// hidden behind a cast until the cast was removed.
+//
+// This config re-checks them with skipLibCheck OFF. It is a SEPARATE pass
+// because turning the flag off in the main config would also check
+// node_modules, which does not compile cleanly and is not ours to fix.
+//
+// probe.ts is included deliberately: it is the only thing exercising these
+// declarations at real call shapes (generic preservation, overload selection,
+// union narrowing). Note what neither it nor this config can do -- prove the
+// declarations MATCH the JS. A confidently-wrong declaration still passes.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "skipLibCheck": false,
+    "noEmit": true
+  },
+  "include": ["src/types"]
+}

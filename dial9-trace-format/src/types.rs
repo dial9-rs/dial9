@@ -8,6 +8,15 @@
 use crate::codec::{MAX_TIMESTAMP_DELTA_NS, TAG_TIMESTAMP_RESET};
 use std::io::{self, Write};
 
+/// Maximum number of elements decoded into an owned dynamic container.
+/// This bounds allocations from untrusted trace bytes while remaining far
+/// above practical event field sizes.
+const MAX_DECODE_CONTAINER_ELEMENTS: usize = 1_000_000;
+
+/// Maximum recursion depth for decoding nested dynamic lists/maps.
+/// Prevents stack overflow from maliciously crafted deeply-nested inputs.
+const MAX_DECODE_RECURSION_DEPTH: usize = 32;
+
 /// Wire type tags for field types.
 ///
 /// The high bit (0x80) is reserved as an "optional" modifier. When set, the
@@ -401,6 +410,18 @@ impl FieldValue {
 
     /// Decode a value of the given type from the buffer. Returns (value, remaining_slice).
     pub fn decode(field_type: FieldType, data: &[u8]) -> Option<(FieldValue, &[u8])> {
+        Self::decode_depth(field_type, data, 0)
+    }
+
+    /// Depth-limited decode. Returns `None` when recursion exceeds budget.
+    fn decode_depth(
+        field_type: FieldType,
+        data: &[u8],
+        depth: usize,
+    ) -> Option<(FieldValue, &[u8])> {
+        if depth > MAX_DECODE_RECURSION_DEPTH {
+            return None;
+        }
         match field_type {
             FieldType::I64 => {
                 let v = i64::from_le_bytes(data.get(..8)?.try_into().ok()?);
@@ -454,6 +475,9 @@ impl FieldValue {
             }
             FieldType::StackFrames => {
                 let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
                 let mut pos = 4;
                 let mut addrs = Vec::with_capacity(count.min(data.len() / 8));
                 for _ in 0..count {
@@ -465,6 +489,9 @@ impl FieldValue {
             }
             FieldType::StringMap => {
                 let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
                 let mut pos = 4;
                 let mut pairs = Vec::with_capacity(count.min(data.len() / 8));
                 for _ in 0..count {
@@ -484,13 +511,16 @@ impl FieldValue {
             }
             FieldType::DynamicList | FieldType::OptionalDynamicList => {
                 let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
                 let mut pos = 4;
                 let mut items = Vec::with_capacity(count.min(data.len() / 2));
                 for _ in 0..count {
                     let tag = *data.get(pos)?;
                     pos += 1;
                     let ft = FieldType::from_tag(tag)?;
-                    let (val, rest) = Self::decode(ft, &data[pos..])?;
+                    let (val, rest) = Self::decode_depth(ft, &data[pos..], depth + 1)?;
                     pos += data.len() - pos - rest.len();
                     items.push(val);
                 }
@@ -498,19 +528,22 @@ impl FieldValue {
             }
             FieldType::DynamicMap | FieldType::OptionalDynamicMap => {
                 let count = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
                 let mut pos = 4;
                 let mut pairs = Vec::with_capacity(count.min(data.len() / 4));
                 for _ in 0..count {
                     let key_tag = *data.get(pos)?;
                     pos += 1;
                     let key_ft = FieldType::from_tag(key_tag)?;
-                    let (key, rest) = Self::decode(key_ft, &data[pos..])?;
+                    let (key, rest) = Self::decode_depth(key_ft, &data[pos..], depth + 1)?;
                     pos += data.len() - pos - rest.len();
 
                     let val_tag = *data.get(pos)?;
                     pos += 1;
                     let val_ft = FieldType::from_tag(val_tag)?;
-                    let (val, rest) = Self::decode(val_ft, &data[pos..])?;
+                    let (val, rest) = Self::decode_depth(val_ft, &data[pos..], depth + 1)?;
                     pos += data.len() - pos - rest.len();
 
                     pairs.push((key, val));
@@ -518,7 +551,7 @@ impl FieldValue {
                 Some((FieldValue::Map(pairs), &data[pos..]))
             }
             // Optional variants: decode using the inner type.
-            _ => Self::decode(field_type.inner(), data),
+            _ => Self::decode_depth(field_type.inner(), data, depth),
         }
     }
 }
@@ -651,7 +684,20 @@ impl<'a> FieldValueRef<'a> {
     /// Decode a value of the given type, borrowing from `data` at `offset`.
     /// Returns (value, bytes_consumed).
     pub fn decode(field_type: FieldType, data: &'a [u8], offset: usize) -> Option<(Self, usize)> {
-        let d = &data[offset..];
+        Self::decode_depth(field_type, data, offset, 0)
+    }
+
+    /// Depth-limited decode. Returns `None` when recursion exceeds budget.
+    fn decode_depth(
+        field_type: FieldType,
+        data: &'a [u8],
+        offset: usize,
+        depth: usize,
+    ) -> Option<(Self, usize)> {
+        if depth > MAX_DECODE_RECURSION_DEPTH {
+            return None;
+        }
+        let d = data.get(offset..)?;
         match field_type {
             FieldType::I64 => {
                 let v = i64::from_le_bytes(d.get(..8)?.try_into().ok()?);
@@ -710,12 +756,21 @@ impl<'a> FieldValueRef<'a> {
             }
             FieldType::StringMap => {
                 let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
-                let mut pos = 4;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
+                let mut pos = 4usize;
                 for _ in 0..count {
-                    let klen = u32::from_le_bytes(d.get(pos..pos + 4)?.try_into().ok()?) as usize;
-                    pos += 4 + klen;
-                    let vlen = u32::from_le_bytes(d.get(pos..pos + 4)?.try_into().ok()?) as usize;
-                    pos += 4 + vlen;
+                    let klen = u32::from_le_bytes(d.get(pos..pos.checked_add(4)?)?.try_into().ok()?)
+                        as usize;
+                    pos = pos.checked_add(4)?.checked_add(klen)?;
+                    // Bounds-check that the key data is within `d`
+                    d.get(pos.checked_sub(klen)?..pos)?;
+                    let vlen = u32::from_le_bytes(d.get(pos..pos.checked_add(4)?)?.try_into().ok()?)
+                        as usize;
+                    pos = pos.checked_add(4)?.checked_add(vlen)?;
+                    // Bounds-check that the value data is within `d`
+                    d.get(pos.checked_sub(vlen)?..pos)?;
                 }
                 Some((
                     FieldValueRef::StringMap(StringMapRef {
@@ -727,13 +782,16 @@ impl<'a> FieldValueRef<'a> {
             }
             FieldType::DynamicList | FieldType::OptionalDynamicList => {
                 let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
                 let mut pos = 4;
                 let mut items = Vec::with_capacity(count.min(d.len() / 2));
                 for _ in 0..count {
                     let tag = *d.get(pos)?;
                     pos += 1;
                     let ft = FieldType::from_tag(tag)?;
-                    let (val, consumed) = Self::decode(ft, data, offset + pos)?;
+                    let (val, consumed) = Self::decode_depth(ft, data, offset + pos, depth + 1)?;
                     pos += consumed;
                     items.push(val);
                 }
@@ -741,19 +799,24 @@ impl<'a> FieldValueRef<'a> {
             }
             FieldType::DynamicMap | FieldType::OptionalDynamicMap => {
                 let count = u32::from_le_bytes(d.get(..4)?.try_into().ok()?) as usize;
+                if count > MAX_DECODE_CONTAINER_ELEMENTS {
+                    return None;
+                }
                 let mut pos = 4;
                 let mut pairs = Vec::with_capacity(count.min(d.len() / 4));
                 for _ in 0..count {
                     let key_tag = *d.get(pos)?;
                     pos += 1;
                     let key_ft = FieldType::from_tag(key_tag)?;
-                    let (key, key_consumed) = Self::decode(key_ft, data, offset + pos)?;
+                    let (key, key_consumed) =
+                        Self::decode_depth(key_ft, data, offset + pos, depth + 1)?;
                     pos += key_consumed;
 
                     let val_tag = *d.get(pos)?;
                     pos += 1;
                     let val_ft = FieldType::from_tag(val_tag)?;
-                    let (val, val_consumed) = Self::decode(val_ft, data, offset + pos)?;
+                    let (val, val_consumed) =
+                        Self::decode_depth(val_ft, data, offset + pos, depth + 1)?;
                     pos += val_consumed;
 
                     pairs.push((key, val));
@@ -761,7 +824,7 @@ impl<'a> FieldValueRef<'a> {
                 Some((FieldValueRef::Map(DynamicMapRef(pairs)), pos))
             }
             // Optional variants: decode using the inner type.
-            _ => Self::decode(field_type.inner(), data, offset),
+            _ => Self::decode_depth(field_type.inner(), data, offset, depth),
         }
     }
 
@@ -1407,6 +1470,56 @@ mod tests {
             buf.len() <= 4,
             "PollEnd payload should be <=4 bytes, got {}",
             buf.len()
+        );
+    }
+
+    /// Regression: FieldValueRef::decode must not panic when offset > data.len()
+    #[test]
+    fn field_value_ref_decode_offset_past_end() {
+        let data = [1u8, 2, 3, 4];
+        // offset 10 > data.len() = 4 — must return None, not panic
+        assert!(FieldValueRef::decode(FieldType::Varint, &data, 10).is_none());
+        assert!(FieldValueRef::decode(FieldType::I64, &data, 100).is_none());
+        assert!(FieldValueRef::decode(FieldType::String, &data, 5).is_none());
+        assert!(FieldValueRef::decode(FieldType::Bytes, &data, usize::MAX).is_none());
+    }
+
+    /// Regression: FieldValueRef::decode at offset == data.len() returns None
+    #[test]
+    fn field_value_ref_decode_offset_at_end() {
+        let data = [0u8; 8];
+        assert!(FieldValueRef::decode(FieldType::Varint, &data, 8).is_none());
+        assert!(FieldValueRef::decode(FieldType::Bool, &data, 8).is_none());
+    }
+
+    /// Depth-limited decoding returns None on deeply nested dynamic values
+    #[test]
+    fn field_value_ref_decode_depth_limit() {
+        // Construct a deeply nested DynamicList: each element is another DynamicList
+        // Build from the innermost out: innermost has 0 elements
+        // We need 34+ levels of nesting to exceed MAX_DECODE_RECURSION_DEPTH (32)
+        // Each DynamicList: count(4 bytes) + per-element: tag(1 byte) + element
+        // Innermost: count=0
+        let depth = 34;
+        // Build a nested structure: DynamicList with 1 element which is DynamicList with 1 element...
+        fn build_nested_list(depth: usize) -> Vec<u8> {
+            if depth == 0 {
+                // Innermost: a DynamicList with 0 elements
+                return 0u32.to_le_bytes().to_vec();
+            }
+            let inner = build_nested_list(depth - 1);
+            let mut out = Vec::new();
+            out.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+            out.push(FieldType::DynamicList as u8); // element type tag
+            out.extend_from_slice(&inner);
+            out
+        }
+        let data = build_nested_list(depth);
+
+        let result = FieldValueRef::decode(FieldType::DynamicList, &data, 0);
+        assert!(
+            result.is_none(),
+            "deeply nested DynamicList should hit depth limit and return None"
         );
     }
 }

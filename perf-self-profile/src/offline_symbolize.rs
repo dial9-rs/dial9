@@ -22,7 +22,7 @@ type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 /// Each entry maps an instruction pointer address to a resolved symbol name.
 /// When a function has inlined callees, multiple entries share the same `addr`
 /// with increasing `inline_depth` (0 = outermost).
-#[derive(dial9_trace_format::TraceEvent)]
+#[derive(Debug, dial9_trace_format::TraceEvent)]
 pub struct SymbolTableEntry {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -223,10 +223,13 @@ impl std::fmt::Debug for OfflineSymbolizer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "android", target_arch = "aarch64")
+))]
 mod imp {
     use super::{FxHashSet, MapsEntry, collect_stack_frame_addresses};
-    use crate::rate_limit::rate_limited;
+    use dial9_core::rate_limited;
     use dial9_trace_format::decoder::Decoder;
     use std::io;
     use std::panic::AssertUnwindSafe;
@@ -461,7 +464,10 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(
+    target_os = "linux",
+    all(target_os = "android", target_arch = "aarch64")
+)))]
 mod imp {
     use super::MapsEntry;
     use std::io;

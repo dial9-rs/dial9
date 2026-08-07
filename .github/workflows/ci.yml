@@ -64,6 +64,45 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+  windows-cli-check:
+    name: Windows CLI check
+    runs-on: windows-latest
+    if: github.event_name == 'push'
+    env:
+      RUSTFLAGS: "--cfg tokio_unstable"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check -p dial9-viewer
+      - run: cargo check -p dial9 --features cli
+
+  android-aarch64-build:
+    name: Android aarch64 build
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_API: "30"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+          targets: aarch64-linux-android
+      - name: Build CPU profiling example
+        run: |
+          toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export AR="$toolchain/llvm-ar"
+          export RANLIB="$toolchain/llvm-ranlib"
+          export CC_aarch64_linux_android="$toolchain/aarch64-linux-android$ANDROID_API-clang"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo build -p dial9-perf-self-profile \
+            --example basic \
+            --target aarch64-linux-android
+
   # TEMPORARY: the nightly build is disabled while aws-runtime fails to compile
   # on nightly rustc (E0282 type-inference regression upstream). This gate skips
   # `build-nightly` until 2026-07-20 (UTC), after which the job re-enables
@@ -132,6 +171,26 @@ jobs:
           --exclude metrics-service
           --exclude simple-local
           --exclude-features _shuttle
+      - name: Test viewer without S3
+        run: cargo test -p dial9-viewer --no-default-features --lib
+      - name: Check local-only viewer excludes AWS dependencies
+        run: |
+          cargo tree -p dial9-viewer --no-default-features \
+            --target all --edges normal --prefix none --format '{p}' \
+            > /tmp/dial9-viewer-local-tree.txt
+          if grep -E '^(aws-|s3s)' /tmp/dial9-viewer-local-tree.txt; then
+            echo "AWS SDK/S3 dependencies found in the local-only viewer graph"
+            exit 1
+          fi
+      - name: Check S3 CLI includes the AWS SDK
+        run: |
+          cargo tree -p dial9 --no-default-features --features cli \
+            --target all --edges normal --prefix none --format '{p}' \
+            > /tmp/dial9-cli-s3-tree.txt
+          if ! grep -qE '^aws-sdk-s3 ' /tmp/dial9-cli-s3-tree.txt; then
+            echo "S3 CLI no longer includes aws-sdk-s3"
+            exit 1
+          fi
 
   check-docs:
     name: Check docs.rs
@@ -146,7 +205,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: command -v jq >/dev/null || (sudo apt-get update && sudo apt-get install -y jq)
       - run: cargo install cargo-docs-rs
       - run: ./scripts/check-docsrs.sh
 
@@ -174,6 +233,28 @@ jobs:
           sudo sysctl kernel.perf_event_paranoid=1
           sudo sysctl kernel.kptr_restrict=0
       - run: scripts/e2e-trace-tests.sh
+
+  ui:
+    name: UI (tsc, vitest, vite build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dial9-viewer/ui
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dial9-viewer/ui/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      # Re-checks src/types/*.d.ts with skipLibCheck OFF: the main config's
+      # skipLibCheck (for node_modules) also skips our hand-written frozen-core
+      # declarations, which is how three of them drifted from the JS.
+      - run: npm run check:types
+      - run: npm run test
+      - run: npm run build
 
   asan:
     name: AddressSanitizer (perf-self-profile)
@@ -284,7 +365,10 @@ jobs:
             -p dial9-trace-format \
             -p dial9-perf-self-profile \
             -p dial9-macro \
-            -p dial9-tokio-telemetry
+            -p dial9-utils \
+            -p dial9-tokio-telemetry \
+            -p dial9-metrique \
+            -p dial9-destinations-s3
 
   package:
     name: Cargo package
@@ -307,15 +391,33 @@ jobs:
             -p dial9-trace-format \
             -p dial9-core \
             -p dial9-utils \
+            -p dial9-destinations-s3 \
             -p dial9-perf-self-profile \
             -p dial9-macro \
+            -p dial9-metrique \
             -p dial9-tokio-telemetry \
             -p dial9-viewer
+
+  doctests:
+    name: Doc tests (dial9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run dial9 doctests
+        run: cargo test -p dial9 --doc --all-features
+        env:
+          RUSTFLAGS: "--cfg tokio_unstable"
 
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, feature-check, check-docs, trace-integrity, asan, ecs-sim, shuttle, package]
+    needs: [fmt, clippy, build, android-aarch64-build, feature-check, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle, package, doctests]
     if: always()
     steps:
       - run: |

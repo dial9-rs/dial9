@@ -13,7 +13,9 @@ use super::fp_profiler::{
     unwind::{self, MAX_FRAMES},
 };
 use super::gettid;
+
 use super::sampler::SamplerBackend;
+use libc::{timer_getoverrun, timer_settime};
 
 use crate::sampler::{Sample, SamplerConfig};
 
@@ -151,7 +153,7 @@ extern "C" fn sigprof_handler(
             // is valid and disarms without deleting.
             unsafe {
                 let zero: libc::itimerspec = mem::zeroed();
-                libc::timer_settime(t, 0, &zero, ptr::null_mut());
+                timer_settime(t, 0, &zero, ptr::null_mut());
             }
         }
         return;
@@ -193,17 +195,42 @@ extern "C" fn sigprof_handler(
 
         slot.write(pid, tid, time, cpu, period);
 
-        // Unwind into the slot's frame buffer
-        let result = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
-        slot.set_num_frames(result.frames_written as u32);
+        // Unwind into the slot's frame buffer.
+        //
+        // On Android, the safe_load SIGSEGV recovery used by the
+        // frame-pointer unwinder only works if safe_load faults can be
+        // recovered. Android apps register through `libsigchain` (ART's
+        // signal-chaining library); standalone native processes install the
+        // handler directly. Otherwise a bad FP read could crash the process,
+        // so we degrade to a single-PC sample.
+        //
+        // We also can't use `libc::ucontext_t` on Android because the
+        // libc crate's struct is missing the 120-byte `__padding` between
+        // `uc_sigmask` and `uc_mcontext` (Bionic pads sigmask to 128 bytes,
+        // but the libc crate's sigset_t is only 8 bytes). Read the PC
+        // directly at the correct offset for the fallback path.
+        #[cfg(target_os = "android")]
+        {
+            if crate::sys::fp_profiler::fp_unwind_supported() {
+                let result = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
+                slot.set_num_frames(result.frames_written as u32);
+            } else {
+                let pc = crate::sys::fp_profiler::bionic_arm64::android_ucontext_pc(ucontext);
+                let frames = slot.frames_mut();
+                if !frames.is_empty() {
+                    frames[0] = pc;
+                }
+                slot.set_num_frames(1);
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let result = unwind::unwind_from_ucontext(ucontext, slot.frames_mut());
+            slot.set_num_frames(result.frames_written as u32);
+        }
 
         slot.commit();
     }
-}
-
-// timer_getoverrun is POSIX async-signal-safe.
-unsafe extern "C" {
-    fn timer_getoverrun(timerid: libc::timer_t) -> libc::c_int;
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! (or minimally overlapping) time ranges.
 
 use common::decode_file;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use serde::Deserialize;
 use std::time::Duration;
@@ -29,6 +29,9 @@ enum TimedEvent {
         timestamp_ns: u64,
     },
     QueueSampleEvent {
+        timestamp_ns: u64,
+    },
+    RuntimeMetricsEvent {
         timestamp_ns: u64,
     },
     TaskSpawnEvent {
@@ -70,6 +73,7 @@ impl TimedEvent {
             | Self::WorkerParkEvent { timestamp_ns }
             | Self::WorkerUnparkEvent { timestamp_ns }
             | Self::QueueSampleEvent { timestamp_ns }
+            | Self::RuntimeMetricsEvent { timestamp_ns }
             | Self::TaskSpawnEvent { timestamp_ns }
             | Self::TaskTerminateEvent { timestamp_ns }
             | Self::CpuSampleEvent { timestamp_ns }
@@ -93,6 +97,7 @@ impl TimedEvent {
             Self::WorkerParkEvent { .. } => "WorkerPark",
             Self::WorkerUnparkEvent { .. } => "WorkerUnpark",
             Self::QueueSampleEvent { .. } => "QueueSample",
+            Self::RuntimeMetricsEvent { .. } => "RuntimeMetrics",
             Self::TaskSpawnEvent { .. } => "TaskSpawn",
             Self::TaskTerminateEvent { .. } => "TaskTerminate",
             Self::CpuSampleEvent { .. } => "CpuSample",
@@ -110,13 +115,12 @@ impl TimedEvent {
 #[test]
 fn rotated_segments_have_bounded_time_overlap() {
     let dir = tempfile::tempdir().unwrap();
-    let trace_path = dir.path().join("trace.bin");
 
     let rotation_period = Duration::from_secs(2);
     let num_workers = 4;
 
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
+    let writer = DiskBuffer::builder()
+        .base_path(dir.path())
         .max_file_size(u64::MAX)
         .max_total_size(u64::MAX)
         .rotation_period(rotation_period)
@@ -126,17 +130,16 @@ fn rotated_segments_have_bounded_time_overlap() {
     let (render_queue, metrics_sink) =
         metrique_writer::test_util::render_entry_sink(LocalFormat::new(OutputStyle::Pretty));
 
-    let guard = TelemetryCore::builder()
-        .writer(writer)
-        .worker_metrics_sink(metrics_sink)
-        .build()
-        .unwrap();
-    guard.enable();
+    // Unused current-thread primary; the workload runs on the "main" runtime
+    // attached below.
+    let recorder = recorder(writer).metrics_sink(metrics_sink).build();
+    let rt = common::attach_current_thread(&recorder, TokioAttachOptions::default());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
-
-    let (runtime, _handle) = guard.trace_runtime("main").build(builder).unwrap();
+    let runtime = common::attach(
+        &recorder,
+        num_workers,
+        TokioAttachOptions::builder().runtime_name("main").build(),
+    );
 
     runtime.block_on(async {
         let start = tokio::time::Instant::now();
@@ -163,9 +166,8 @@ fn rotated_segments_have_bounded_time_overlap() {
     });
 
     drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(5))
-        .expect("graceful shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
     let flush_metrics = render_queue.entries();
     eprintln!("flush-thread metrics ({} entries):", flush_metrics.len());

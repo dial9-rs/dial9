@@ -158,8 +158,13 @@ dial9-tokio-telemetry = { version = "0.1", features = ["worker-s3"] }
 **Solution:** A `SegmentProcessor` trait with a pipeline of processors:
 
 ```rust
-pub(crate) trait SegmentProcessor: Send {
+pub trait SegmentProcessor: Send {
     fn name(&self) -> &'static str;
+    fn initialize(&mut self)
+        -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>
+    {
+        Box::pin(std::future::ready(Ok(())))
+    }
     fn process(&mut self, data: SegmentData)
         -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
 }
@@ -212,7 +217,6 @@ let s3_config = S3Config::builder()
 
 let (runtime, guard) = TracedRuntime::builder()
     .with_task_tracking(true)
-    .with_trace_path(trace_path)
     .with_s3_uploader(s3_config)
     .build_and_start(builder, writer)?;
 
@@ -224,13 +228,19 @@ The builder auto-constructs the worker pipeline from the configured options. Whe
 
 Additional builder options:
 - `with_worker_poll_interval(Duration)` — how often to scan for sealed segments (default: 1s)
-- `with_s3_client(Client)` — pre-built `aws_sdk_s3::Client` (skips default SDK config loading)
+- `with_s3_uploader_client(S3Config, Client)` — use a pre-built `aws_sdk_s3::Client`
+- `with_s3_uploader_client_future(S3Config, Future<Output = Client>)` — construct the client when the worker starts
 - `with_worker_metrics_sink(BoxEntrySink)` — pipeline metrics sink (default: dev-null)
 
 ## Worker Loop
 
 ```rust
-// WorkerLoop::run — runs on dedicated thread with its own current_thread runtime
+// WorkerLoop::new — runs on a dedicated thread with its own current_thread runtime
+for processor in &mut pipeline {
+    processor.initialize().await?;
+}
+
+// WorkerLoop::run
 loop {
     if stop.load(Acquire) {
         drain_remaining();  // process all sealed segments one last time

@@ -21,38 +21,42 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-use dial9_tokio_telemetry::telemetry::InMemoryWriter;
+use dial9_tokio_telemetry::telemetry::MemoryBuffer;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     let _ = tracing_subscriber::fmt::try_init();
     use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-    use dial9_tokio_telemetry::telemetry::TracedRuntime;
     use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
+    use dial9_tokio_telemetry::telemetry::{
+        RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
+    };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     let (capture, batches) = capture_processor();
 
     let num_workers = 2u64;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers as usize).enable_all();
 
-    let (runtime, guard) = TracedRuntime::builder()
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach(
+        &recorder,
+        num_workers as usize,
+        TokioAttachOptions::default(),
+    );
 
     // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
-    let _trace_start = guard.start_time();
+    let _trace_start = recorder.start_time();
     let burn_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Pattern: 150ms sleep → 80ms burn → 150ms sleep, repeated sequentially.
     // The 150ms gaps are much larger than the ~25ms MONOTONIC_RAW offset,
     // so a clock mismatch will cause samples to spill outside burn windows.
-    runtime.block_on(async {
+    rt.block_on(async {
         for _ in 0..3u64 {
             let windows = burn_windows.clone();
             tokio::spawn(async move {
@@ -69,10 +73,8 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -255,22 +257,26 @@ fn burn_cpu(duration: std::time::Duration) {
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
     use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-    use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::{
+        Dial9HandleTokioExt, RecorderPerfExt, RecorderPipelineExt, TokioAttachOptions, recorder,
+    };
     use std::time::Duration;
 
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder
-        .worker_threads(2)
-        .thread_name("test-traced-runtime")
-        .enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .enable_all()
+        .worker_threads(2)
+        .thread_name("test-traced-runtime");
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
+        .expect("build tokio runtime");
 
     // ── std::thread with a known name — exits before flush ───────────────
     let ext_handle = std::thread::Builder::new()
@@ -279,7 +285,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .unwrap();
 
     // ── spawn_blocking — also exits before flush ─────────────────────────
-    let blocking_handle = runtime.spawn(async {
+    let blocking_handle = rt.spawn(async {
         tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
         tokio::task::spawn_blocking(|| {
             let tid = nix::unistd::gettid().as_raw() as u32;
@@ -292,16 +298,14 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     // Wait for both to finish — threads are gone after this point
     ext_handle.join().unwrap();
-    let blocking_tid = runtime.block_on(async {
+    let blocking_tid = rt.block_on(async {
         let tid = blocking_handle.await.unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         tid
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

@@ -3,12 +3,17 @@ source: dial9-macro/src/lib.rs
 expression: output
 ---
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(my_config());
-    let __dial9_out = __dial9_rt
-        .block_on(async move {
+    let __dial9_config_result: ::std::io::Result<::dial9::AttachedRuntime> = my_config();
+    let (__dial9_recorder, __dial9_rt) = __dial9_config_result
+        .expect("dial9::main: config failed");
+    let __dial9_out = ::dial9::block_on(
+        &__dial9_rt,
+        async move {
             do_work().await?;
             Ok(())
-        });
-    __dial9_rt.graceful_shutdown();
+        },
+    );
+    drop(__dial9_rt);
+    __dial9_recorder.graceful_shutdown(::std::time::Duration::from_secs(1));
     __dial9_out
 }

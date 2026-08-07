@@ -2,10 +2,12 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    DiskBuffer, MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder, spawn,
+};
 use std::time::Duration;
 
-/// Run a known workload under TracedRuntime, read the trace back, and verify
+/// Run a known workload on an attached runtime, read the trace back, and verify
 /// basic consistency.
 #[test]
 fn end_to_end_trace_matches_workload_and_metrics() {
@@ -15,13 +17,11 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let num_workers = 4;
     let total_tasks: usize = 2000;
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    let rt = common::attach(&recorder, num_workers, TokioAttachOptions::default());
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
-
-    let tokio_metrics = runtime.block_on(async {
+    let tokio_metrics = rt.block_on(async move {
         let mut handles = Vec::new();
         for _ in 0..total_tasks {
             handles.push(tokio::spawn(async {
@@ -38,8 +38,8 @@ fn end_to_end_trace_matches_workload_and_metrics() {
         tokio::runtime::Handle::current().metrics()
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(rt);
+    drop(recorder);
 
     let sealed_path = dir.path().join("trace.0.bin");
     let events: Vec<Dial9Event> = decode_file(&sealed_path);
@@ -132,16 +132,18 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
     const N: usize = 10;
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
-    runtime.block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..N {
             handles.push(tokio::spawn(async {}));
@@ -151,10 +153,8 @@ fn task_spawn_events_from_main_thread_are_captured() {
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -175,16 +175,18 @@ fn task_terminate_events_are_captured() {
 
     const N: usize = 10;
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
-    runtime.block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..N {
             handles.push(tokio::spawn(async {}));
@@ -194,10 +196,8 @@ fn task_terminate_events_are_captured() {
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -226,14 +226,12 @@ fn custom_event_appears_in_trace() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    let rt = common::attach(&recorder, 2, TokioAttachOptions::default());
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
-
-    let handle = guard.handle();
-    runtime.block_on(async {
+    let handle = recorder.handle().clone();
+    rt.block_on(async move {
         for i in 0..5 {
             handle.record_event(MyCustomEvent {
                 timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
@@ -243,8 +241,8 @@ fn custom_event_appears_in_trace() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(rt);
+    drop(recorder);
 
     let sealed_path = dir.path().join("trace.0.bin");
     let data = std::fs::read(&sealed_path).unwrap();
@@ -268,22 +266,21 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     const RAW: usize = 5;
     const INSTRUMENTED: usize = 3;
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .build_and_start(builder, writer)
-        .unwrap();
-
-    let handle = guard.tokio_handle(runtime.handle());
-
-    runtime.block_on(async {
+    rt.block_on(async {
         let mut joins = Vec::new();
 
         for _ in 0..INSTRUMENTED {
-            joins.push(handle.spawn(async {}));
+            joins.push(spawn(async {}));
         }
 
         for _ in 0..RAW {
@@ -297,8 +294,8 @@ fn spawn_audit_detects_uninstrumented_spawns() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(rt);
+    drop(recorder);
 
     let sealed_path = dir.path().join("trace.0.bin");
     let events: Vec<Dial9Event> = decode_file(&sealed_path);

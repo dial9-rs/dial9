@@ -1,5 +1,5 @@
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
+use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions};
+use std::io;
 use std::time::Duration;
 
 const TRACE_DIR: &str = "/tmp/simple-local-traces";
@@ -17,26 +17,32 @@ async fn do_some_work() {
     fibonacci_recursive(25);
 }
 
-fn my_config() -> Dial9Config {
-    let trace_path = format!("{}/trace.bin", TRACE_DIR);
-    Dial9Config::builder()
-        .on_disk_buffer(&trace_path)
+fn my_config() -> io::Result<AttachedRuntime> {
+    let writer = DiskBuffer::builder()
+        .base_path(TRACE_DIR)
         .max_file_size(10_000_000) // 10MB per file
         .max_total_size(50_000_000) // 50MB total
-        .with_runtime(|r| r.with_task_tracking(true))
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .build_or_disabled()
+        .build();
+    let recorder = dial9::recorder_or_disabled(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    )?;
+    Ok((recorder, runtime))
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
-    let handle = Dial9TokioHandle::current();
     let mut handles = vec![];
 
     for _ in 0..100 {
-        handles.push(handle.spawn(do_some_work()));
+        handles.push(dial9::spawn(do_some_work()));
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 

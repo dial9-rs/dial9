@@ -2,19 +2,19 @@
 //!
 //! Available under the `test-util` feature.
 
+use crate::buffer::{BufferMode, SegmentWriter};
 use crate::shared_state::SharedState;
-use crate::writer::{SegmentWriter, WriterMode};
 
 /// Flush the calling thread's buffered events into `shared`'s collector,
 /// leaving them queued.
 pub fn drain_thread_local(shared: &SharedState) {
-    crate::buffer::drain_to_collector(&shared.collector);
+    crate::encoder::drain_to_collector(&shared.collector);
 }
 
 /// Drain everything recorded in `shared` into raw encoded-segment bytes, one
 /// entry per batch.
 pub fn drain_encoded_batches(shared: &SharedState) -> Vec<Vec<u8>> {
-    crate::buffer::drain_to_collector(&shared.collector);
+    crate::encoder::drain_to_collector(&shared.collector);
     let mut out = Vec::new();
     while let Some(batch) = shared.collector.next() {
         out.push(batch.into_encoded_bytes());
@@ -25,11 +25,11 @@ pub fn drain_encoded_batches(shared: &SharedState) -> Vec<Vec<u8>> {
 /// Drain everything recorded in `shared` through `writer`, transcoding each
 /// batch into the writer's active segment. Mirrors the flush loop's
 /// collector -> writer step
-pub fn drain_into<M: WriterMode>(
+pub fn drain_into<M: BufferMode>(
     shared: &SharedState,
     writer: &mut SegmentWriter<M>,
 ) -> std::io::Result<()> {
-    crate::buffer::drain_to_collector(&shared.collector);
+    crate::encoder::drain_to_collector(&shared.collector);
     while let Some(batch) = shared.collector.next() {
         writer.write_encoded_batch(&batch)?;
     }
@@ -38,11 +38,11 @@ pub fn drain_into<M: WriterMode>(
 
 /// Encode a single event and write it into `writer`'s active segment as its own
 /// batch. For tests that build a trace file from individual events.
-pub fn write_event<M: WriterMode>(
+pub fn write_event<M: BufferMode>(
     writer: &mut SegmentWriter<M>,
-    event: &dyn crate::buffer::Encodable,
+    event: &dyn crate::encoder::Encodable,
 ) -> std::io::Result<()> {
-    let bytes = crate::buffer::encode_single(event);
+    let bytes = crate::encoder::encode_single(event);
     writer.write_encoded_batch(&crate::collector::Batch::new(bytes, 1))
 }
 
@@ -51,7 +51,7 @@ pub use pipeline_helpers::*;
 
 /// Worker-pipeline drivers for sibling-crate processor tests. They build the
 /// `Fs` + `WorkerLoop` + dump channel internally and expose only opaque handles
-/// plus already-public types, so callers (e.g. `dial9-utils`) can exercise a real
+/// plus already-public types, so callers (e.g. `dial9-destinations-s3`) can exercise a real
 /// `SegmentProcessor` end-to-end without touching the worker internals.
 #[cfg(feature = "pipeline")]
 mod pipeline_helpers {
@@ -139,7 +139,7 @@ mod pipeline_helpers {
         fs.mark_writer_done();
         let stop = CancellationToken::new();
         let mut worker =
-            WorkerLoop::new(fs, poll_interval, processors, stop, dev_null_sink(), None);
+            WorkerLoop::new(fs, poll_interval, processors, stop, dev_null_sink(), None).await?;
         worker.run().await;
         Ok(())
     }
@@ -153,6 +153,12 @@ mod pipeline_helpers {
         fs: Arc<Fs>,
         stop: CancellationToken,
         join: JoinHandle<()>,
+    }
+
+    impl std::fmt::Debug for TriggeredPipeline {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TriggeredPipeline").finish_non_exhaustive()
+        }
     }
 
     impl TriggeredPipeline {
@@ -178,15 +184,21 @@ mod pipeline_helpers {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let (trigger, rx) = crate::dump::channel();
         let stop = CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            Arc::clone(&fs),
-            Duration::from_millis(10),
-            processors,
-            stop.clone(),
-            dev_null_sink(),
-            Some(rx),
-        );
-        let join = tokio::spawn(async move { worker.run().await });
+        let worker_fs = Arc::clone(&fs);
+        let worker_stop = stop.clone();
+        let join = tokio::spawn(async move {
+            let mut worker = WorkerLoop::new(
+                worker_fs,
+                Duration::from_millis(10),
+                processors,
+                worker_stop,
+                dev_null_sink(),
+                Some(rx),
+            )
+            .await
+            .expect("initialize worker");
+            worker.run().await;
+        });
         TriggeredPipeline {
             trigger,
             fs,

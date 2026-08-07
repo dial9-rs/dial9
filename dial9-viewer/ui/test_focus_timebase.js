@@ -36,7 +36,9 @@ function assert(cond, desc) {
 }
 
 (async () => {
-  const raw = fs.readFileSync(path.resolve(__dirname, "demo-trace.bin"));
+  // The migration moved the committed demo trace under public/ (Vite serves it
+  // at the site root); this node bridge reads it straight off disk.
+  const raw = fs.readFileSync(path.resolve(__dirname, "public/demo-trace.bin"));
   let buf = raw;
   try {
     buf = zlib.gunzipSync(raw);

@@ -245,6 +245,8 @@ assertEq(
   src.set("api", "1");
   src.set("bucket", "my-bucket");
   src.set("aws_region", "us-west-2");
+  src.set("credential_mode", "role");
+  src.set("aws_role_arn", "arn:aws:iam::123456789012:role/Dial9TraceReader");
   src.set("prefix", "traces/svc");
   src.set("service", "svc");
   src.append("host", "h1");
@@ -262,11 +264,31 @@ assertEq(
   const out = fullScopeQuery(src);
   assertEq(out.get("bucket"), "my-bucket", "bucket survives (fixes lossy address bar)");
   assertEq(out.get("aws_region"), "us-west-2", "region survives (cross-region bucket link)");
+  assertEq(out.get("credential_mode"), "role", "credential mode survives");
+  assertEq(out.get("aws_role_arn"),
+    "arn:aws:iam::123456789012:role/Dial9TraceReader", "role ARN survives");
   assertEq(out.get("prefix"), "traces/svc", "prefix survives");
   assertEq(out.get("max_files"), "256", "max_files survives");
   assertEq(out.getAll("host").join(","), "h1,h2", "repeatable host set survives in order");
   assertEq(out.get("worker-zoom"), null, "transient zoom param dropped");
   assertEq(out.get("x-dial9-aws-access-key-id"), null, "credential-shaped param never carried");
+}
+
+// ── fullScopeQuery: span-type filter params survive (span-explorer deep link) ──
+// Regression: the span explorer's "🔥 On-CPU Flamegraph" link carries
+// span_type_uid (+ optional min/max_span_ns) so the flamegraph is scoped to one
+// span type. If fullScopeQuery drops them, the copy/diff/scope link silently
+// widens back to the whole scope — the "span filter does nothing" bug.
+{
+  const src = new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1" +
+    "&span_type_uid=aabbccddeeff00112233445566778899" +
+    "&min_span_ns=1000000&max_span_ns=50000000");
+  const out = fullScopeQuery(src);
+  assertEq(out.get("span_type_uid"), "aabbccddeeff00112233445566778899",
+    "span_type_uid survives fullScopeQuery");
+  assertEq(out.get("min_span_ns"), "1000000", "min_span_ns survives fullScopeQuery");
+  assertEq(out.get("max_span_ns"), "50000000", "max_span_ns survives fullScopeQuery");
 }
 
 // ── fullScopeQuery: empty/absent values are omitted (not emitted as "") ──

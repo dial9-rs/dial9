@@ -1,7 +1,7 @@
 use assert2::check;
 use dial9_viewer::server::{AppState, UploadLimits, router};
 use dial9_viewer::storage::{
-    ListPage, LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError,
+    BucketInfo, ListPage, LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -13,7 +13,7 @@ struct FakeBackend;
 impl StorageBackend for FakeBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Ok(vec![]) })
     }
 
@@ -111,7 +111,7 @@ struct ErroringBackend;
 impl StorageBackend for ErroringBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 
@@ -217,6 +217,28 @@ async fn config_returns_defaults() {
         .unwrap();
     check!(resp["default_bucket"] == "my-bucket");
     check!(resp["default_prefix"] == "my-prefix");
+    // T15: the bucket-picker filter is config-driven; "dial9" is the default.
+    check!(resp["bucket_filter"] == "dial9");
+}
+
+/// `/api/config` advertises a server-configured `bucket_filter` (T15): the
+/// picker's trace-bucket predicate is no longer hardcoded client-side, so a
+/// deployment whose buckets are not named `*dial9*` can surface them.
+#[tokio::test]
+async fn config_reports_custom_bucket_filter() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None).with_bucket_filter("acme-traces");
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["bucket_filter"] == "acme-traces");
 }
 
 #[tokio::test]
@@ -563,6 +585,175 @@ async fn browse_uses_minute_granularity_for_short_window() {
     check!(objects[0]["key"].as_str().unwrap().contains("1910"));
 }
 
+/// A selected service uses exact `{date}/{HHMM}/{service}/` prefixes even for a
+/// window that would otherwise use broad hour prefixes.
+#[tokio::test]
+async fn browse_filters_exact_service_for_wide_window() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    for (service, payload) in [("api", b"a".as_slice()), ("api-worker", b"b".as_slice())] {
+        put_object(
+            &s3,
+            "traces-bucket",
+            &format!("2026-04-09/1910/{service}/host/1000-0.bin.gz"),
+            &gzip_bytes(payload),
+        )
+        .await;
+    }
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 22 * 60; // wide enough to use hour prefixes when unfiltered
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&service=api&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("/api/"));
+}
+
+#[tokio::test]
+async fn services_discovers_sorted_unique_services_without_browse_objects() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    for key in [
+        "2026-04-09/1925/worker/host-a/1000-0.bin.gz",
+        "2026-04-09/1925/api/host-a/1000-0.bin.gz",
+        "2026-04-09/1926/api/host-b/1001-0.bin.gz",
+        "2026-04-09/2010/outside/host/1002-0.bin.gz",
+    ] {
+        put_object(&s3, "traces-bucket", key, &gzip_bytes(b"trace")).await;
+    }
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 22 * 60;
+    let resp = client
+        .get(format!(
+            "{base}/api/services?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["api", "worker"]));
+    check!(
+        body["service_metadata"]
+            == serde_json::json!([
+                {"service": "api", "host_count": 2},
+                {"service": "worker", "host_count": 1}
+            ])
+    );
+    check!(body["truncated"] == false);
+    check!(body.get("objects").is_none());
+}
+
+#[tokio::test]
+async fn services_discovers_only_the_trailing_ten_minutes_of_a_long_range() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+
+    for key in [
+        "2026-04-09/1910/old-service/host/1000-0.bin.gz",
+        "2026-04-09/2005/recent-service/host/1001-0.bin.gz",
+    ] {
+        put_object(&s3, "traces-bucket", key, &gzip_bytes(b"trace")).await;
+    }
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 60 * 60; // 20:08:00Z
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/services?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["recent-service"]));
+    check!(
+        body["service_metadata"]
+            == serde_json::json!([{"service": "recent-service", "host_count": 1}])
+    );
+    check!(body["truncated"] == false);
+}
+
+#[tokio::test]
+async fn services_honors_default_and_request_prefix() {
+    let (s3, base, _dir) = setup_s3_test(
+        "traces-bucket",
+        Some("traces-bucket".into()),
+        Some("root".into()),
+    )
+    .await;
+
+    for key in [
+        "root/team-a/2026-04-09/1925/api/host/1000-0.bin.gz",
+        "root/team-b/2026-04-09/1925/worker/host/1000-0.bin.gz",
+    ] {
+        put_object(&s3, "traces-bucket", key, &gzip_bytes(b"trace")).await;
+    }
+
+    let from = 1_775_761_680;
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/services?bucket=traces-bucket&prefix=team-a&from={from}&to={}",
+            from + 22 * 60
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["api"]));
+    check!(body["service_metadata"] == serde_json::json!([{"service": "api", "host_count": 1}]));
+}
+
+#[tokio::test]
+async fn browse_empty_service_is_unfiltered_and_invalid_service_is_rejected() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    for service in ["api", "worker"] {
+        put_object(
+            &s3,
+            "traces-bucket",
+            &format!("2026-04-09/1910/{service}/host/1000-0.bin.gz"),
+            &gzip_bytes(b"trace"),
+        )
+        .await;
+    }
+
+    let from = 1_775_761_680;
+    let to = from + 22 * 60;
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&service=%20%20&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["objects"].as_array().unwrap().len() == 2);
+
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&service=api%2Fworker&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
 /// `/api/browse` rejects a window where `to` precedes `from`.
 #[tokio::test]
 async fn browse_rejects_inverted_range() {
@@ -610,7 +801,7 @@ fn obj_info(key: &str) -> ObjectInfo {
 impl StorageBackend for ReorderingBackend {
     fn list_buckets(
         &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Ok(vec![]) })
     }
 
@@ -775,9 +966,9 @@ async fn byo_credentials_list_buckets_from_headers() {
 
     let resp = client_list_buckets(&base).await;
     check!(resp.status().as_u16() == 200);
-    let names: Vec<String> = resp.json().await.unwrap();
-    check!(names.contains(&"byo-bucket".to_string()));
-    check!(names.contains(&"dial9-traces".to_string()));
+    let buckets: Vec<BucketInfo> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket.name == "byo-bucket"));
+    check!(buckets.iter().any(|bucket| bucket.name == "dial9-traces"));
 }
 
 #[tokio::test]
@@ -1058,6 +1249,69 @@ async fn browse_local_mode_finds_buffer_traces() {
     check!(keys.contains(&"aczi-148206/trace.0.bin"));
     check!(keys.contains(&"aczi-148206/trace.1.bin"));
     check!(keys.contains(&"bxyz-999999/trace.0.bin.gz"));
+}
+
+#[tokio::test]
+async fn browse_local_mode_filters_known_layout_by_exact_service() {
+    let dir = tempfile::tempdir().unwrap();
+    for service in ["api", "api-worker"] {
+        let path = dir.path().join(format!("2026-04-09/1910/{service}/host"));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("1000-0.bin.gz"), gzip_bytes(b"trace")).unwrap();
+    }
+
+    let base = start_server(local_state(dir.path())).await;
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/api/browse?bucket=local&service=api&from=0&to=1"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("/api/"));
+}
+
+#[tokio::test]
+async fn services_local_mode_reports_unique_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    for (service, host) in [
+        ("api", "host-a"),
+        ("api", "host-b"),
+        ("api", "host-a"),
+        ("worker", "host-c"),
+    ] {
+        let minute = if host == "host-a" { "1910" } else { "1911" };
+        let path = dir
+            .path()
+            .join(format!("2026-04-09/{minute}/{service}/{host}"));
+        std::fs::create_dir_all(&path).unwrap();
+        let segment = path.join(format!(
+            "{}-0.bin.gz",
+            std::fs::read_dir(&path).unwrap().count()
+        ));
+        std::fs::write(segment, gzip_bytes(b"trace")).unwrap();
+    }
+
+    let base = start_server(local_state(dir.path())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/services?bucket=local&from=0&to=1"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["services"] == serde_json::json!(["api", "worker"]));
+    check!(
+        body["service_metadata"]
+            == serde_json::json!([
+                {"service": "api", "host_count": 2},
+                {"service": "worker", "host_count": 1}
+            ])
+    );
 }
 
 // --- trace upload tests ---
@@ -1435,8 +1689,8 @@ async fn assume_role_lists_bucket_via_assumed_creds() {
         .await
         .unwrap();
     check!(resp.status().as_u16() == 200);
-    let names: Vec<String> = resp.json().await.unwrap();
-    check!(names.contains(&"byo-bucket".to_string()));
+    let buckets: Vec<BucketInfo> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket.name == "byo-bucket"));
     // The exact ARN from the header reached the assumer.
     let assumed = assumed.lock().unwrap();
     check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
@@ -1461,8 +1715,8 @@ async fn assume_role_via_query_params_is_linkable() {
         .await
         .unwrap();
     check!(resp.status().as_u16() == 200);
-    let names: Vec<String> = resp.json().await.unwrap();
-    check!(names.contains(&"byo-bucket".to_string()));
+    let buckets: Vec<BucketInfo> = resp.json().await.unwrap();
+    check!(buckets.iter().any(|bucket| bucket.name == "byo-bucket"));
     let assumed = assumed.lock().unwrap();
     check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
 }
@@ -1874,4 +2128,177 @@ async fn router_supports_middleware_layers() {
         .unwrap();
     check!(resp.status().as_u16() == 200);
     check!(resp.headers().get("x-custom-embedder").unwrap() == "my-internal-tool");
+}
+
+// ── Flamegraph parameter validation tests (finding 1) ────────────────────────
+// These prove that malformed span filter params return 400 BEFORE attempting
+// any agg_context_for resolution. The FakeBackend has no agg context configured,
+// so if validation happened after context resolution, we'd get 404 instead of 400.
+
+#[tokio::test]
+async fn flamegraph_malformed_span_type_uid_returns_400_without_agg_context() {
+    // FakeBackend has no agg context → if validation is after context lookup, we'd get 404.
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // Invalid hex (odd length)
+    let resp = client
+        .get(format!("{base}/api/flamegraph?span_type_uid=abc"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("invalid span_type_uid"));
+
+    // Too short (valid hex but not 16 bytes)
+    let resp = client
+        .get(format!("{base}/api/flamegraph?span_type_uid=aabbccdd"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn flamegraph_negative_span_bounds_returns_400_without_agg_context() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{base}/api/flamegraph?span_type_uid=00112233445566778899aabbccddeeff&min_span_ns=-5"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("non-negative"));
+}
+
+#[tokio::test]
+async fn flamegraph_inverted_span_bounds_returns_400_without_agg_context() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{base}/api/flamegraph?span_type_uid=00112233445566778899aabbccddeeff&min_span_ns=100&max_span_ns=50"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("inverted"));
+}
+
+#[tokio::test]
+async fn flamegraph_span_bounds_without_type_uid_returns_400_without_agg_context() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/flamegraph?min_span_ns=100"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("require span_type_uid"));
+}
+
+#[tokio::test]
+async fn flamegraph_invalid_phase_returns_400_without_agg_context() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/flamegraph?phase=invalid_value"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("invalid phase"));
+}
+
+/// Finding 1: Empty span_type_uid is an explicit 400 before agg context.
+/// The FakeBackend has no agg context → if this validation happened after
+/// context resolution, we'd get 404 instead of 400.
+#[tokio::test]
+async fn flamegraph_empty_span_type_uid_returns_400_without_agg_context() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // `axum_extra::Query` maps the empty optional value to `None`; RawQuery
+    // must still distinguish this explicit empty value from an absent key.
+    let resp = client
+        .get(format!("{base}/api/flamegraph?span_type_uid="))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("must not be empty"));
+
+    // Whitespace-only span_type_uid is invalid hex → 400 before agg context.
+    let resp = client
+        .get(format!("{base}/api/flamegraph?span_type_uid=%20%20"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("span_type_uid"));
+}
+
+/// Percent-encoded key names like `%73pan_type_uid=` (decodes to `span_type_uid=`)
+/// and `ph%61se=` (decodes to `phase=`) must be rejected as empty before any
+/// aggregation context is resolved. This prevents attackers from bypassing the
+/// validation by encoding the key name.
+#[tokio::test]
+async fn flamegraph_percent_encoded_empty_params_rejected() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // %73 = 's', so `%73pan_type_uid=` → `span_type_uid=`
+    let resp = client
+        .get(format!("{base}/api/flamegraph?%73pan_type_uid="))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("must not be empty"));
+
+    // %61 = 'a', so `ph%61se=` → `phase=`
+    let resp = client
+        .get(format!("{base}/api/flamegraph?ph%61se="))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("must not be empty"));
+
+    // Fully percent-encoded `span_type_uid` without a value.
+    let resp = client
+        .get(format!(
+            "{base}/api/flamegraph?%73%70%61%6e%5f%74%79%70%65%5f%75%69%64="
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+    let body = resp.text().await.unwrap();
+    check!(body.contains("must not be empty"));
 }

@@ -2,7 +2,7 @@ mod common;
 
 use common::decode_file;
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -58,18 +58,19 @@ fn overhead_bench_validates() {
     let trace_path = dir.path().join("trace.bin");
 
     let num_workers = 4;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
-
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .build_and_start(builder, writer)
-        .unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let recorder = recorder(writer).build();
+    let rt = common::attach(
+        &recorder,
+        num_workers,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
     let running = Arc::new(AtomicBool::new(true));
 
-    let tokio_metrics = runtime.block_on(async {
+    let tokio_metrics = rt.block_on(async move {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -94,8 +95,8 @@ fn overhead_bench_validates() {
         (metrics, total_requests)
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(rt);
+    drop(recorder);
 
     let (metrics, total_requests) = tokio_metrics;
     eprintln!("Total requests processed: {total_requests}");

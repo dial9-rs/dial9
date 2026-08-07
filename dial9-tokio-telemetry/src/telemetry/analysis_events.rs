@@ -148,6 +148,10 @@ pub struct WorkerUnparkEvent {
 }
 
 /// Periodic sample of the global task queue depth.
+///
+/// Superseded by [`RuntimeMetricsEvent`], which reports queue depth and alive
+/// tasks per runtime rather than summed across all runtimes. Retained so the
+/// decoder can still read older traces that only contain `QueueSampleEvent`s.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[non_exhaustive]
 pub struct QueueSampleEvent {
@@ -155,6 +159,27 @@ pub struct QueueSampleEvent {
     pub timestamp_ns: u64,
     /// Global queue depth.
     pub global_queue: u8,
+    /// Number of active (alive) tasks at sample time.
+    #[serde(default)]
+    pub active_tasks: Option<u64>,
+}
+
+/// Periodic per-runtime scheduler metrics sample.
+///
+/// One event is emitted per attached runtime per sample. Supersedes
+/// [`QueueSampleEvent`] (which summed queue depth and active-task count across
+/// all runtimes into a single sample).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[non_exhaustive]
+pub struct RuntimeMetricsEvent {
+    /// Timestamp in nanoseconds (monotonic).
+    pub timestamp_ns: u64,
+    /// Human-readable runtime name, or empty for the unnamed default runtime.
+    pub runtime_name: String,
+    /// Tasks currently pending in this runtime's global (injection) queue.
+    pub global_queue_depth: u32,
+    /// Tasks currently alive (spawned and not yet completed) in this runtime.
+    pub alive_tasks: u32,
 }
 
 /// A new task was spawned.
@@ -398,8 +423,10 @@ pub enum Dial9Event {
     WorkerParkEvent(WorkerParkEvent),
     /// A worker thread unparked.
     WorkerUnparkEvent(WorkerUnparkEvent),
-    /// Global queue depth sample.
+    /// Global queue depth sample (legacy; superseded by `RuntimeMetricsEvent`).
     QueueSampleEvent(QueueSampleEvent),
+    /// Per-runtime scheduler metrics sample.
+    RuntimeMetricsEvent(RuntimeMetricsEvent),
     /// A task was spawned.
     TaskSpawnEvent(TaskSpawnEvent),
     /// A task terminated.
@@ -488,10 +515,22 @@ mod tests {
         })
         .unwrap();
 
-        // 5. QueueSampleEvent
+        // 5. QueueSampleEvent (legacy; still decodable)
         enc.write(&format::QueueSampleEvent {
             timestamp_ns: 4_000_000,
             global_queue: 7,
+            active_tasks: 0,
+        })
+        .unwrap();
+
+        // 5b. RuntimeMetricsEvent (per-runtime; supersedes QueueSampleEvent).
+        // runtime_name is interned, like PollStart's spawn_loc.
+        let runtime_name = enc.intern_string("io").unwrap();
+        enc.write(&format::RuntimeMetricsEvent {
+            timestamp_ns: 4_500_000,
+            runtime_name,
+            global_queue_depth: 9,
+            alive_tasks: 12,
         })
         .unwrap();
 
@@ -548,7 +587,7 @@ mod tests {
         .unwrap();
 
         // 13. ProcessResourceUsageEvent
-        enc.write(&format::ProcessResourceUsageEvent {
+        enc.write(&dial9_perf_self_profile::ProcessResourceUsageEvent {
             timestamp_ns: 14_000_000,
             user_cpu_ns: 1_000_000,
             system_cpu_ns: 2_000_000,
@@ -563,7 +602,7 @@ mod tests {
         .unwrap();
 
         // 14. TcpAcceptQueueEvent
-        enc.write(&format::TcpAcceptQueueEvent {
+        enc.write(&dial9_perf_self_profile::TcpAcceptQueueEvent {
             timestamp_ns: 15_000_000,
             socket_cookie: 67890,
             socket_inode: 12345,
@@ -587,7 +626,7 @@ mod tests {
         })
         .expect("decode");
 
-        assert_eq!(events.len(), 13);
+        assert_eq!(events.len(), 14);
 
         // 1. PollStartEvent
         let Dial9Event::PollStartEvent(ref e) = events[0] else {
@@ -627,16 +666,25 @@ mod tests {
         assert_eq!(e.sched_wait_ns, Some(100_000));
         assert_eq!(e.tid, 12345);
 
-        // 5. QueueSampleEvent
+        // 5. QueueSampleEvent (legacy)
         let Dial9Event::QueueSampleEvent(ref e) = events[4] else {
             panic!("expected QueueSampleEvent, got {:?}", events[4]);
         };
         assert_eq!(e.timestamp_ns, 4_000_000);
         assert_eq!(e.global_queue, 7);
 
+        // 5b. RuntimeMetricsEvent
+        let Dial9Event::RuntimeMetricsEvent(ref e) = events[5] else {
+            panic!("expected RuntimeMetricsEvent, got {:?}", events[5]);
+        };
+        assert_eq!(e.timestamp_ns, 4_500_000);
+        assert_eq!(e.runtime_name, "io");
+        assert_eq!(e.global_queue_depth, 9);
+        assert_eq!(e.alive_tasks, 12);
+
         // 6. TaskSpawnEvent
-        let Dial9Event::TaskSpawnEvent(ref e) = events[5] else {
-            panic!("expected TaskSpawnEvent, got {:?}", events[5]);
+        let Dial9Event::TaskSpawnEvent(ref e) = events[6] else {
+            panic!("expected TaskSpawnEvent, got {:?}", events[6]);
         };
         assert_eq!(e.timestamp_ns, 5_000_000);
         assert_eq!(e.task_id, 200);
@@ -644,23 +692,23 @@ mod tests {
         assert!(e.instrumented);
 
         // 7. TaskTerminateEvent
-        let Dial9Event::TaskTerminateEvent(ref e) = events[6] else {
-            panic!("expected TaskTerminateEvent, got {:?}", events[6]);
+        let Dial9Event::TaskTerminateEvent(ref e) = events[7] else {
+            panic!("expected TaskTerminateEvent, got {:?}", events[7]);
         };
         assert_eq!(e.timestamp_ns, 6_000_000);
         assert_eq!(e.task_id, 200);
 
         // 8. TaskDumpEvent
-        let Dial9Event::TaskDumpEvent(ref e) = events[7] else {
-            panic!("expected TaskDumpEvent, got {:?}", events[7]);
+        let Dial9Event::TaskDumpEvent(ref e) = events[8] else {
+            panic!("expected TaskDumpEvent, got {:?}", events[8]);
         };
         assert_eq!(e.timestamp_ns, 8_000_000);
         assert_eq!(e.task_id, 100);
         assert_eq!(e.callchain, vec![0x1111, 0x2222, 0x3333]);
 
         // 9. WakeEvent
-        let Dial9Event::WakeEvent(ref e) = events[8] else {
-            panic!("expected WakeEvent, got {:?}", events[8]);
+        let Dial9Event::WakeEvent(ref e) = events[9] else {
+            panic!("expected WakeEvent, got {:?}", events[9]);
         };
         assert_eq!(e.timestamp_ns, 9_000_000);
         assert_eq!(e.waker_task_id, 100);
@@ -668,8 +716,8 @@ mod tests {
         assert_eq!(e.target_worker, 1);
 
         // 10. SegmentMetadataEvent
-        let Dial9Event::SegmentMetadataEvent(ref e) = events[9] else {
-            panic!("expected SegmentMetadataEvent, got {:?}", events[9]);
+        let Dial9Event::SegmentMetadataEvent(ref e) = events[10] else {
+            panic!("expected SegmentMetadataEvent, got {:?}", events[10]);
         };
         assert_eq!(e.timestamp_ns, 10_000_000);
         assert_eq!(e.entries.get("runtime").unwrap(), "main");
@@ -677,15 +725,15 @@ mod tests {
         assert_eq!(e.entries.len(), 2);
 
         // 11. ClockSyncEvent
-        let Dial9Event::ClockSyncEvent(ref e) = events[10] else {
-            panic!("expected ClockSyncEvent, got {:?}", events[10]);
+        let Dial9Event::ClockSyncEvent(ref e) = events[11] else {
+            panic!("expected ClockSyncEvent, got {:?}", events[11]);
         };
         assert_eq!(e.timestamp_ns, 11_000_000);
         assert_eq!(e.realtime_ns, 1_700_000_000_000_000_000);
 
         // 12. ProcessResourceUsageEvent
-        let Dial9Event::ProcessResourceUsageEvent(ref e) = events[11] else {
-            panic!("expected ProcessResourceUsageEvent, got {:?}", events[11]);
+        let Dial9Event::ProcessResourceUsageEvent(ref e) = events[12] else {
+            panic!("expected ProcessResourceUsageEvent, got {:?}", events[12]);
         };
         assert_eq!(e.timestamp_ns, 14_000_000);
         assert_eq!(e.user_cpu_ns, 1_000_000);
@@ -698,9 +746,9 @@ mod tests {
         assert_eq!(e.voluntary_context_switches, 4);
         assert_eq!(e.involuntary_context_switches, 5);
 
-        // 13. TcpAcceptQueueEvent
-        let Dial9Event::TcpAcceptQueueEvent(ref e) = events[12] else {
-            panic!("expected TcpAcceptQueueEvent, got {:?}", events[12]);
+        // 13. TcpAcceptQueueEvent (index 13 after RuntimeMetricsEvent insertion)
+        let Dial9Event::TcpAcceptQueueEvent(ref e) = events[13] else {
+            panic!("expected TcpAcceptQueueEvent, got {:?}", events[13]);
         };
         assert_eq!(e.timestamp_ns, 15_000_000);
         assert_eq!(e.socket_cookie, 67890);

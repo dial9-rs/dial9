@@ -28,17 +28,4 @@ pub(crate) mod traced;
 #[cfg(feature = "taskdump")]
 pub(crate) mod unwind;
 
-#[cfg(feature = "tracing-layer")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
-/// Tracing subscriber layer for emitting span events into dial9 traces.
-pub mod tracing_layer;
-
-#[path = "config.rs"]
-mod current_config;
-
-pub use current_config::{
-    Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, DiskConfigBuilder,
-    MemoryConfigBuilder, ValidationError,
-};
-pub use dial9_macro::main;
-pub use telemetry::{TelemetryRuntimeError, TracedFuture, TracedRuntime, spawn};
+pub use telemetry::{TracedFuture, block_on, spawn, spawn_in};

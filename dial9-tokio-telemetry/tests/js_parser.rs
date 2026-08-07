@@ -1,6 +1,8 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+mod common;
+
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::io::{BufWriter, Write};
 use std::process::Command;
@@ -31,21 +33,26 @@ fn test_js_parser_matches_rust() {
 
     // Generate a trace — enable CPU profiling on Linux where it's available
     {
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(2).enable_all();
-
-        let writer = DiskWriter::single_file(&trace_path).unwrap();
+        let writer = DiskBuffer::single_file(&trace_path).unwrap();
         #[allow(unused_mut)]
-        let mut tb = TracedRuntime::builder().with_task_tracking(true);
+        let mut rec = recorder(writer);
         #[cfg(feature = "cpu-profiling")]
         {
-            tb = tb.with_cpu_profiling(
+            use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
+            rec = rec.with_cpu_profiling(
                 dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default(),
             );
         }
-        let (runtime, _guard) = tb.build_and_start(builder, writer).unwrap();
+        let recorder = rec.build();
+        let rt = common::attach(
+            &recorder,
+            2,
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+        );
 
-        runtime.block_on(async {
+        rt.block_on(async {
             let mut tasks = vec![];
             for i in 0..10 {
                 tasks.push(tokio::spawn(cpu_task(i)));
@@ -54,6 +61,9 @@ fn test_js_parser_matches_rust() {
                 let _ = task.await;
             }
         });
+
+        drop(rt);
+        drop(recorder);
     }
 
     let sealed_path = temp_dir.path().join("test_trace.0.bin");

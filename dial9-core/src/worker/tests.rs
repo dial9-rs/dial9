@@ -14,6 +14,136 @@ mod worker_s3_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    #[tokio::test]
+    async fn processors_initialize_before_the_pipeline_runs() {
+        struct InitializingProcessor(Arc<AtomicUsize>);
+
+        impl SegmentProcessor for InitializingProcessor {
+            fn name(&self) -> &'static str {
+                "InitializingProcessor"
+            }
+
+            fn initialize(
+                &mut self,
+            ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+                Box::pin(async move {
+                    self.0
+                        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .expect("initialize must run exactly once before process");
+                    Ok(())
+                })
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async move {
+                    self.0
+                        .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                        .expect("process must run after initialize");
+                    Ok(data)
+                })
+            }
+        }
+
+        let initialized = Arc::new(AtomicUsize::new(0));
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut segment = fs.create_segment(Path::new("trace")).unwrap();
+        std::io::Write::write_all(&mut segment, b"segment").unwrap();
+        fs.seal(segment, Path::new("trace"), 0).unwrap();
+        fs.mark_writer_done();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            fs,
+            DEFAULT_POLL_INTERVAL,
+            vec![Box::new(InitializingProcessor(initialized.clone()))],
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+            None,
+        )
+        .await
+        .expect("initialize worker");
+
+        worker.run().await;
+
+        check!(initialized.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn initialization_error_aborts_worker_construction() {
+        struct FailingInitializer;
+
+        impl SegmentProcessor for FailingInitializer {
+            fn name(&self) -> &'static str {
+                "FailingInitializer"
+            }
+
+            fn initialize(
+                &mut self,
+            ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+                Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "initialization failed",
+                ))))
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        struct FollowingInitializer(Arc<AtomicUsize>);
+
+        impl SegmentProcessor for FollowingInitializer {
+            fn name(&self) -> &'static str {
+                "FollowingInitializer"
+            }
+
+            fn initialize(
+                &mut self,
+            ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Ok(())))
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        let following_initialized = Arc::new(AtomicUsize::new(0));
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        fs.mark_writer_done();
+        let result = WorkerLoop::new(
+            fs,
+            DEFAULT_POLL_INTERVAL,
+            vec![
+                Box::new(FailingInitializer),
+                Box::new(FollowingInitializer(following_initialized.clone())),
+            ],
+            tokio_util::sync::CancellationToken::new(),
+            metrique_writer::sink::DevNullSink::boxed(),
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("worker construction should fail"),
+            Err(error) => error,
+        };
+        check!(error.to_string().contains("FailingInitializer"));
+        check!(following_initialized.load(Ordering::SeqCst) == 0);
+    }
+
     // --- Review finding #1: compressed_size metric is non-zero after pipeline ---
 
     /// After a successful pipeline run (gzip + a terminal stage), the
@@ -62,7 +192,9 @@ mod worker_s3_tests {
             stop,
             inspector.clone().boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         tokio::time::timeout(Duration::from_secs(5), worker.run())
             .await
             .expect("worker exited");
@@ -144,20 +276,23 @@ mod worker_s3_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
         let config = BackgroundTaskConfig::builder()
-            .trace_path(dir.path().join("trace.bin"))
+            .trace_dir(dir.path())
+            .trace_stem("trace")
             .build();
 
         let processors: Vec<Box<dyn SegmentProcessor>> =
             vec![Box::new(CountingProcessor(processed.clone()))];
 
         let mut worker = WorkerLoop::new(
-            Fs::new_disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_dir(), config.trace_stem()),
             config.poll_interval(),
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
 
         // Worker should have drained both segments even though stop was set.
@@ -212,7 +347,8 @@ mod worker_s3_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
         let config = BackgroundTaskConfig::builder()
-            .trace_path(dir.path().join("trace.bin"))
+            .trace_dir(dir.path())
+            .trace_stem("trace")
             .build();
 
         let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(FailFirstProcessor {
@@ -221,13 +357,15 @@ mod worker_s3_tests {
         })];
 
         let mut worker = WorkerLoop::new(
-            Fs::new_disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_dir(), config.trace_stem()),
             config.poll_interval(),
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
 
         // Second segment should still be processed despite first failing.
@@ -235,56 +373,22 @@ mod worker_s3_tests {
     }
 
     #[test]
-    fn trace_dir_for_bare_relative_path_defaults_to_current_directory() {
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("trace.bin")
-            .build();
-
+    fn trace_dir_and_stem_default_for_memory_backend() {
+        // No trace_dir/trace_stem set: the in-memory backend has no on-disk
+        // segments, so the accessors fall back to `.` and `trace`.
+        let config = BackgroundTaskConfig::builder().build();
         check!(config.trace_dir() == std::path::Path::new("."));
-    }
-}
-
-// --- Review finding #9: trace_stem edge cases ---
-
-#[cfg(test)]
-mod trace_stem_tests {
-    use crate::worker::BackgroundTaskConfig;
-    use assert2::check;
-
-    #[test]
-    fn trace_stem_normal_path() {
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("/tmp/traces/trace.bin")
-            .build();
         check!(config.trace_stem() == "trace");
     }
 
     #[test]
-    fn trace_stem_directory_path() {
-        // A path like "/tmp/traces/" — file_stem returns "traces", not an error
+    fn trace_dir_and_stem_return_configured_values() {
         let config = BackgroundTaskConfig::builder()
-            .trace_path("/tmp/traces/")
+            .trace_dir("/tmp/traces")
+            .trace_stem("trace")
             .build();
-        // This is the current behavior — it returns "traces" not "trace"
-        // which would silently match the wrong files
-        check!(config.trace_stem() == "traces");
-    }
-
-    #[test]
-    fn trace_stem_root_path() {
-        // A path like "/" has no file stem
-        let config = BackgroundTaskConfig::builder().trace_path("/").build();
-        // Should fall back to "trace" and log an error
+        check!(config.trace_dir() == std::path::Path::new("/tmp/traces"));
         check!(config.trace_stem() == "trace");
-    }
-
-    #[test]
-    fn trace_dir_for_directory_path() {
-        let config = BackgroundTaskConfig::builder()
-            .trace_path("/tmp/traces/")
-            .build();
-        // trace_dir should be the parent of the path
-        check!(config.trace_dir() == std::path::Path::new("/tmp"));
     }
 }
 
@@ -294,8 +398,8 @@ mod worker_pipeline_tests {
     use crate::payload::Payload;
     use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
     use crate::sealed;
-    use crate::worker::WorkerLoop;
     use crate::worker::processors::{GzipCompressor, WriteBackProcessor};
+    use crate::worker::{BackgroundTaskConfig, WorkerLoop, run_background_task};
     use assert2::check;
     use std::collections::HashMap;
     use std::future::Future;
@@ -305,7 +409,7 @@ mod worker_pipeline_tests {
     use std::time::Duration;
 
     fn fs_for(dir: &std::path::Path) -> Arc<Fs> {
-        Fs::new_disk(&dir.join("trace.bin"))
+        Fs::new_disk(dir, "trace")
     }
 
     fn default_poll() -> Duration {
@@ -335,7 +439,7 @@ mod worker_pipeline_tests {
     /// A retryable error keeps the segment on disk for a later attempt. (The
     /// real S3 transient-failure and circuit-breaker-open paths both surface
     /// as a retryable transfer error; they're covered against real S3 in
-    /// `dial9-utils`.)
+    /// `dial9-destinations-s3`.)
     #[tokio::test]
     async fn failed_segment_kept_on_transient_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -352,7 +456,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.process_open_segments().await;
 
         check!(
@@ -398,7 +504,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.process_open_segments().await;
 
         // File still exists because the processor returned NotFound (eviction),
@@ -445,7 +553,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.process_open_segments().await;
 
         check!(
@@ -482,7 +592,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
 
         // The captured bytes should be identical to the input (not double-gzipped).
@@ -570,7 +682,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
 
         // Original .bin removed; .bin.gz written.
@@ -637,7 +751,9 @@ mod worker_pipeline_tests {
             stop,
             inspector.clone().boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
 
         // The worker must have processed at least one segment (the non-panicking one)
@@ -699,7 +815,9 @@ mod worker_pipeline_tests {
             stop.clone(),
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
 
         let run_fut = worker.run();
 
@@ -713,8 +831,61 @@ mod worker_pipeline_tests {
         check!(result.is_err(), "expected timeout, but worker completed");
     }
 
+    #[test]
+    fn initializer_hang_respects_shutdown_timeout() {
+        struct HangingInitializer(std::sync::mpsc::SyncSender<()>);
+
+        impl SegmentProcessor for HangingInitializer {
+            fn name(&self) -> &'static str {
+                "HangingInitializer"
+            }
+
+            fn initialize(
+                &mut self,
+            ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+                Box::pin(async move {
+                    self.0.send(()).expect("test is waiting for initialization");
+                    std::future::pending().await
+                })
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(std::future::ready(Ok(data)))
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (initializing_tx, initializing_rx) = std::sync::mpsc::sync_channel(0);
+        let config = BackgroundTaskConfig::builder()
+            .processors(vec![
+                Box::new(HangingInitializer(initializing_tx)) as Box<dyn SegmentProcessor>
+            ])
+            .build();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            run_background_task(config, shutdown_rx, fs);
+            done_tx.send(()).expect("test is waiting for worker exit");
+        });
+
+        initializing_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should start processor initialization");
+        shutdown_tx
+            .send(Duration::from_millis(10))
+            .expect("worker should still be running");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown timeout should bound processor initialization");
+        worker.join().expect("worker should exit cleanly");
+    }
+
     /// Disk `mark_writer_done` alone (no stop-token cancel) drains and exits.
-    /// Symmetric with memory mode: `DiskWriter::finalize` is a complete
+    /// Symmetric with memory mode: `DiskBuffer::finalize` is a complete
     /// shutdown signal across both backends.
     #[tokio::test]
     async fn disk_worker_run_drains_on_writer_done() {
@@ -754,7 +925,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
 
         fs.mark_writer_done();
 
@@ -893,7 +1066,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         tokio::time::timeout(Duration::from_secs(5), worker.run())
             .await
             .expect("worker exited");
@@ -946,7 +1121,9 @@ mod worker_pipeline_tests {
                 stop,
                 metrique_writer::sink::DevNullSink::boxed(),
                 None,
-            );
+            )
+            .await
+            .expect("initialize worker");
             let worker_task = tokio::spawn(async move { worker.run().await });
 
             // Let the worker reach wait_for_more on an empty ring so the
@@ -1032,7 +1209,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
         check!(attempts.load(Ordering::SeqCst) == 3, "2 fails + 1 success");
         let snap = fs.take_files();
@@ -1086,7 +1265,9 @@ mod worker_pipeline_tests {
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
             None,
-        );
+        )
+        .await
+        .expect("initialize worker");
         worker.run().await;
         check!(
             attempts.load(Ordering::SeqCst) == crate::fs::MEMORY_RETRY_BUDGET + 1,
@@ -1207,15 +1388,19 @@ mod triggered_test_support {
         rx: crate::dump::DumpRx,
         stop: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        let mut worker = WorkerLoop::new(
-            fs,
-            Duration::from_millis(10),
-            processors,
-            stop,
-            metrique_writer::sink::DevNullSink::boxed(),
-            Some(rx),
-        );
-        tokio::spawn(async move { worker.run().await })
+        tokio::spawn(async move {
+            let mut worker = WorkerLoop::new(
+                fs,
+                Duration::from_millis(10),
+                processors,
+                stop,
+                metrique_writer::sink::DevNullSink::boxed(),
+                Some(rx),
+            )
+            .await
+            .expect("initialize worker");
+            worker.run().await;
+        })
     }
 }
 
@@ -1455,7 +1640,7 @@ mod triggered_worker_tests {
         set_mtime(&old_path, now - 3600);
         std::fs::write(dir.path().join("trace.1.bin"), segment_with_epoch(now)).unwrap();
 
-        let fs = Fs::new_disk(&dir.path().join("trace.bin"));
+        let fs = Fs::new_disk(dir.path(), "trace");
         let (trigger, rx) = dump::channel();
         let stop = tokio_util::sync::CancellationToken::new();
         let worker = spawn_worker(

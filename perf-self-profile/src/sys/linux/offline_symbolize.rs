@@ -1,16 +1,31 @@
 //! Linux offline symbolization using blazesym.
 
 use blazesym::symbolize::{Input, Symbolized, Symbolizer, source};
+use dial9_core::rate_limited;
 use dial9_trace_format::decoder::Decoder;
 use dial9_trace_format::encoder::{Encoder, FxBuildHasher, FxHashMap};
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::time::Duration;
 
 type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 use super::USER_ADDR_LIMIT;
 use crate::MapsEntry;
 use crate::offline_symbolize::SymbolTableEntry;
+
+/// Strip aarch64 top-byte pointer tags before map lookup.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn strip_tbi(addr: u64) -> u64 {
+    addr & 0x00FF_FFFF_FFFF_FFFF
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline]
+fn strip_tbi(addr: u64) -> u64 {
+    addr
+}
 
 /// Reusable containers for [`write_symbol_data`], avoiding per-call allocations.
 pub(crate) struct SymbolizeContainers {
@@ -73,23 +88,47 @@ pub(crate) fn write_symbol_data(
 ) -> io::Result<()> {
     let mut encoder = decoder.into_encoder(output);
 
+    if maps.is_empty() {
+        rate_limited!(Duration::from_secs(60), {
+            tracing::warn!(
+                "symbolize: /proc/self/maps returned no executable mappings, skipping symbolization"
+            );
+        });
+    }
+
     // Partition addresses into kernel vs userspace, group userspace by mapping.
+    let mut unmatched = 0;
     for &addr in addresses {
-        if addr >= USER_ADDR_LIMIT {
+        let stripped = strip_tbi(addr);
+        if stripped >= USER_ADDR_LIMIT {
             containers.kernel_addrs.push(addr);
         } else {
+            let mut matched = false;
             for (i, entry) in maps.iter().enumerate() {
-                if addr >= entry.start && addr < entry.end {
-                    let offset = addr - entry.start + entry.file_offset;
+                if stripped >= entry.start && stripped < entry.end {
+                    let offset = stripped - entry.start + entry.file_offset;
                     containers
                         .user_groups
                         .entry(i)
                         .or_default()
                         .push((offset, addr));
+                    matched = true;
                     break;
                 }
             }
+            if !matched {
+                unmatched += 1;
+            }
         }
+    }
+
+    if unmatched > 0 {
+        tracing::debug!(
+            unmatched,
+            total = addresses.len(),
+            maps_entries = maps.len(),
+            "symbolize: userspace addresses did not match any mapping"
+        );
     }
 
     // Batch-resolve kernel addresses.
@@ -139,12 +178,14 @@ pub(crate) fn write_symbol_data(
                 write_symbolized_batch(&results, &containers.addrs, &mut encoder)?;
             }
             Err(err) => {
-                tracing::warn!(
-                    path = %entry.path,
-                    count = containers.addrs.len(),
-                    error = %err,
-                    "failed to symbolize batch for ELF mapping, using placeholders"
-                );
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        path = %entry.path,
+                        count = containers.addrs.len(),
+                        error = %err,
+                        "failed to symbolize batch for ELF mapping, using placeholders"
+                    );
+                });
                 for &addr in &containers.addrs {
                     let name = format!("[symbolize-failed] {:#x}", addr);
                     let symbol_name = encoder.intern_string(&name)?;
@@ -175,6 +216,18 @@ fn write_symbolized_batch(
 ) -> io::Result<()> {
     for (symbolized, &addr) in results.iter().zip(addrs) {
         let Some(sym) = symbolized.as_sym() else {
+            let name = format!("[unknown] {:#x}", strip_tbi(addr));
+            let symbol_name = encoder.intern_string(&name)?;
+            let source_file = encoder.intern_string("")?;
+            encoder.write(&SymbolTableEntry {
+                timestamp_ns: 0,
+                addr,
+                size: 0,
+                symbol_name,
+                inline_depth: 0,
+                source_file,
+                source_line: 0,
+            })?;
             continue;
         };
         let symbol_name = encoder.intern_string(&sym.name)?;

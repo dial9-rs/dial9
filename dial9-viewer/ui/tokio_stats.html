@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Tokio Stats</title>
+<script src="ui-switch.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; padding: 20px; }
@@ -42,6 +43,7 @@
 </style>
 </head>
 <body>
+<script src="session.js"></script>
 <script src="creds.js"></script>
 <script src="format.js"></script>
 <script src="flamegraph_diff.js"></script>
@@ -78,9 +80,21 @@
   // signed for the server's default region and the listing comes back empty.
   // No-op when no creds are stored (region is header-only).
   const urlRegion = params.get("aws_region");
-  if (urlRegion && window.Dial9Creds) {
-    const stored = Dial9Creds.get();
-    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+  const urlMode = params.get("credential_mode");
+  const urlRoleArn = params.get("aws_role_arn");
+  if (window.__Dial9CredentialStore) {
+    if (urlMode === "ambient") __Dial9CredentialStore.setAmbient();
+    else if (urlMode === "literal" && __Dial9CredentialStore.get().kind !== "literal") {
+      __Dial9CredentialStore.setLiteralMode();
+    } else if ((urlMode === "role" || (!urlMode && urlRoleArn)) && urlRoleArn) {
+      __Dial9CredentialStore.setRoleArn(urlRoleArn, urlRegion ? { region: urlRegion } : undefined);
+    } else if (!urlMode && !urlRoleArn && __Dial9CredentialStore.get().kind !== "literal") {
+      __Dial9CredentialStore.setAmbient();
+    }
+  }
+  if (urlRegion && window.__Dial9CredentialStore) {
+    const stored = __Dial9CredentialStore.get();
+    if (stored && stored.region !== urlRegion) __Dial9CredentialStore.setRegion(urlRegion);
   }
 
   // Periods: each has {id, startNs, endNs, data (cached response), scope?, label?}.
@@ -96,6 +110,20 @@
   // consumes. Seeded from the landing page's "Add to diff" tray.
   const diffParsed = (typeof FlamegraphDiff !== "undefined") ? FlamegraphDiff.parseDiff(params) : null;
   const diffMode = !!diffParsed;
+  if (diffParsed) {
+    const sideMode = diffParsed.a.get("credential_mode");
+    const sideRoleArn = diffParsed.a.get("aws_role_arn");
+    const sideRegion = diffParsed.a.get("aws_region");
+    if (sideMode === "ambient") __Dial9CredentialStore.setAmbient();
+    else if (sideMode === "literal" && __Dial9CredentialStore.get().kind !== "literal") {
+      __Dial9CredentialStore.setLiteralMode();
+    } else if (sideMode === "role" && sideRoleArn) {
+      __Dial9CredentialStore.setRoleArn(
+        sideRoleArn,
+        sideRegion ? { region: sideRegion } : undefined,
+      );
+    }
+  }
 
   // `max_files` ceiling override, raised by the "Load more" button. null lets
   // the backend pick its own (default) sampling cap. Seeded from the URL so a
@@ -258,6 +286,11 @@
     }
     const u = new URLSearchParams();
     for (const k of ["bucket", "aws_region", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
+    const activeCredentials = __Dial9CredentialStore.get();
+    u.set("credential_mode", activeCredentials.kind);
+    if (activeCredentials.kind === "role") {
+      u.set("aws_role_arn", activeCredentials.roleArn);
+    }
     for (const h of params.getAll("host")) u.append("host", h);
     periods.forEach((p, i) => {
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
@@ -416,9 +449,140 @@
       </tr>`;
     }
     html += "</tbody></table>";
+    html += renderWorkerActivity(data, threshNs);
     html += renderLongPolls(data, threshNs);
     tableEl.innerHTML = html;
   }
+
+  // "Worker activity": per-host busyness summary with expandable per-worker
+  // detail. Per-worker busyness = busy_ns / observed active time (span_ns); a
+  // host's busyness pools its workers (Σ busy_ns / Σ span_ns — see hostBusyPct),
+  // which is bounded ≤100% and weights each worker by observed time. One row per
+  // host (runtime), click to expand individual workers. Each worker row shows a
+  // verification breakdown: busy_ns / span_ns = busy_pct.
+  let workerSortKey = "busy_pct"; // sort key for host rows
+  let workerSortDesc = true;
+  let expandedHosts = new Set(); // hosts whose worker details are visible
+
+  function renderWorkerActivity(data, threshNs) {
+    const workers = (data && data.worker_activity) || [];
+    if (!workers.length) return "";
+
+    // Group workers by host.
+    const hostMap = {};
+    for (const w of workers) {
+      const h = w.host || "(unknown)";
+      if (!hostMap[h]) hostMap[h] = [];
+      hostMap[h].push(w);
+    }
+
+    // Compute per-host aggregates. Busyness is the POOLED ratio Σ busy_ns /
+    // Σ span_ns (see hostBusyPct) — weighting workers by observed time so a
+    // host with sparse sampling doesn't read as spuriously busier than one
+    // doing more work.
+    const hostRows = Object.entries(hostMap).map(([host, ws]) => {
+      const totalPolls = ws.reduce((s, w) => s + w.total_polls, 0);
+      const notablePolls = ws.reduce((s, w) => s + w.notable_polls, 0);
+      const busyPct = hostBusyPct(ws);
+      const worstPollNs = Math.max(...ws.map(w => w.worst_poll_ns || 0));
+      // "active / total" workers: active = observed, total = configured (Tokio
+      // numbers workers 0..N-1, so max id + 1). Sort by total (numWorkers).
+      const { active: activeWorkers, total: numWorkers } = hostWorkerCounts(ws);
+      return { host, workers: ws, totalPolls, notablePolls, busyPct, worstPollNs, activeWorkers, numWorkers };
+    });
+
+    // Sort host rows.
+    hostRows.sort((a, b) => {
+      const av = a[workerSortKey] ?? a.busyPct, bv = b[workerSortKey] ?? b.busyPct;
+      const cmp = typeof av === "string" ? av.localeCompare(bv) : av - bv;
+      return workerSortDesc ? -cmp : cmp;
+    });
+
+    const totalWorkers = workers.length;
+    const numHosts = hostRows.length;
+    const sortInd = (key) => workerSortKey === key ? (workerSortDesc ? " ▼" : " ▲") : "";
+    const th = (label, key) => `<th style="cursor:pointer" onclick="sortWorkers('${key}')">${label}${sortInd(key)}</th>`;
+
+    let html = `<h3 style="margin:20px 0 8px">⚙️ Worker activity</h3>
+      <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">${totalWorkers} workers across ${numHosts} host${numHosts > 1 ? "s" : ""} — busyness = poll time / observed active time; a host's busyness pools its workers (Σ busy / Σ observed). Click a host row to expand individual workers.</p>
+      <table><thead><tr>
+        ${th("Host", "host")}${th("Workers<br><span style='font-weight:normal;color:#8b949e'>active / total</span>", "numWorkers")}${th("Busy", "busyPct")}<th>Bar</th>${th("Polls", "totalPolls")}${th("Notable", "notablePolls")}${th("Worst poll", "worstPollNs")}
+      </tr></thead><tbody>`;
+
+    for (const hr of hostRows) {
+      const expanded = expandedHosts.has(hr.host);
+      const toggle = expanded ? "▾" : "▸";
+      const busyFmt = hr.busyPct.toFixed(3) + "%";
+      const busyColor = busynessHeat(hr.busyPct);
+      const barWidth = Math.min(hr.busyPct, 100);
+      const barHtml = `<div style="background:${busyColor}33;border-radius:2px;height:14px;width:${barWidth}%"></div>`;
+      const worstDur = hr.worstPollNs > 0
+        ? `<span style="color:${latencyHeat(hr.worstPollNs)};font-weight:600">${formatDuration(hr.worstPollNs)}</span>`
+        : "—";
+      // Pass the host through a data-attribute (read back via this.dataset.host),
+      // never interpolated into the inline handler's JS: a host containing a
+      // quote would break `toggleWorkerHost('…')`. escapeHtml is the right (and
+      // sufficient) escaping for both the attribute value and the cell text —
+      // same pattern as openExemplar's data-url.
+      const hostLabel = escapeHtml(hr.host);
+
+      html += `<tr style="cursor:pointer;font-weight:600" data-host="${hostLabel}" onclick="toggleWorkerHost(this.dataset.host)">
+        <td>${toggle} ${hostLabel}</td>
+        <td>${hr.activeWorkers} / ${hr.numWorkers}</td>
+        <td><span style="color:${busyColor}">${busyFmt}</span></td>
+        <td style="width:120px">${barHtml}</td>
+        <td>${hr.totalPolls.toLocaleString()}</td>
+        <td>${hr.notablePolls.toLocaleString()}</td>
+        <td>${worstDur}</td>
+      </tr>`;
+
+      if (expanded) {
+        const sortedWorkers = hr.workers.slice().sort((a, b) => b.busy_pct - a.busy_pct);
+        for (const w of sortedWorkers) {
+          const url = w.worst_exemplar ? exemplarLink(w.worst_exemplar, data) : "";
+          const wBusyFmt = w.busy_pct.toFixed(3) + "%";
+          const wBusyColor = busynessHeat(w.busy_pct);
+          const wBarWidth = Math.min(w.busy_pct, 100);
+          const wBarHtml = `<div style="background:${wBusyColor}33;border-radius:2px;height:14px;width:${wBarWidth}%"></div>`;
+          const wWorstDur = w.worst_poll_ns > 0
+            ? `<span style="color:${latencyHeat(w.worst_poll_ns)};font-weight:600">${formatDuration(w.worst_poll_ns)}</span>`
+            : "—";
+          // Verification tooltip: busy_ns / span_ns = busy_pct
+          const spanFmt = w.span_ns ? formatDuration(w.span_ns) : "?";
+          const busyNsFmt = formatDuration(w.busy_ns);
+          const verifyTitle = `${busyNsFmt} busy / ${spanFmt} span = ${wBusyFmt}`;
+          const cells = `<td style="padding-left:28px;font-weight:normal">w${w.worker_id}</td>
+            <td></td>
+            <td title="${verifyTitle}"><span style="color:${wBusyColor}">${wBusyFmt}</span></td>
+            <td style="width:120px">${wBarHtml}</td>
+            <td>${w.total_polls.toLocaleString()}</td>
+            <td>${w.notable_polls.toLocaleString()}</td>
+            <td>${wWorstDur}</td>`;
+          html += url
+            ? `<tr style="cursor:pointer;background:#1a1f26" onclick="openExemplar(this)" data-url="${url.replace(/"/g, "&quot;")}">${cells}</tr>`
+            : `<tr style="background:#1a1f26">${cells}</tr>`;
+        }
+      }
+    }
+    html += "</tbody></table>";
+    return html;
+  }
+
+  window.toggleWorkerHost = function(host) {
+    if (expandedHosts.has(host)) expandedHosts.delete(host);
+    else expandedHosts.add(host);
+    renderFromCache();
+  };
+
+  window.sortWorkers = function(key) {
+    if (workerSortKey === key) {
+      workerSortDesc = !workerSortDesc;
+    } else {
+      workerSortKey = key;
+      workerSortDesc = true;
+    }
+    renderFromCache();
+  };
 
   // "Longest polls": the single futures that held a worker thread longest in one
   // poll — long polls starve every other task on that worker. Ported from IRIS's
@@ -572,7 +736,9 @@
     if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
 
     period.refining = true;
-    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    const credHeaders = Dial9Session.headers(
+      window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
+    );
     return new Promise((resolve, reject) => {
       Dial9Sse.openSse(u, {
         headers: credHeaders,

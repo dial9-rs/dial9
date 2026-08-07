@@ -165,7 +165,7 @@ unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(target_os = "android")))]
 unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
     let uc = uc as *mut libc::ucontext_t;
     unsafe {
@@ -176,6 +176,17 @@ unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
             m.sp as usize,
         )
     }
+}
+
+/// The `libc` crate's `ucontext_t` on Android aarch64 is missing 120 bytes of
+/// sigmask padding, so we use Bionic's documented layout. See
+/// [`super::bionic_arm64`] for details.
+#[cfg(all(target_arch = "aarch64", target_os = "android"))]
+unsafe fn read_pc_fp_sp(uc: *mut libc::c_void) -> (usize, usize, usize) {
+    // SAFETY: `uc` is the kernel-provided ucontext to a SA_SIGINFO handler;
+    // `bionic_arm64::struct_ucontext` matches Bionic's layout for aarch64.
+    let (pc, fp, sp) = unsafe { super::bionic_arm64::android_ucontext_pc_fp_sp(uc) };
+    (pc as usize, fp as usize, sp as usize)
 }
 
 #[cfg(test)]

@@ -3,8 +3,14 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TaskDumpConfig, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    Dial9TokioHandle, MemoryBuffer, RecorderPipelineExt, TaskDumpConfig, TokioAttachOptions,
+    recorder,
+};
 use serde::Deserialize;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -34,17 +40,19 @@ enum DumpEvent {
 fn task_dump_emitted_for_long_sleep() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+            .build(),
+    );
 
-    let handle = guard.tokio_handle(runtime.handle());
-    runtime.block_on(async {
+    let handle = Dial9TokioHandle::current();
+    rt.block_on(async {
         let join = handle.spawn(async {
             // Well above the 10ms default threshold.
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -52,10 +60,8 @@ fn task_dump_emitted_for_long_sleep() {
         join.await.unwrap();
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -77,32 +83,32 @@ fn task_dump_emitted_for_long_sleep() {
 fn no_task_dump_for_short_sleep() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_task_dumps(
-            TaskDumpConfig::builder()
-                .idle_threshold(Duration::from_secs(1))
-                .rng_seed(42)
-                .build(),
-        )
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(
+                TaskDumpConfig::builder()
+                    .idle_threshold(Duration::from_secs(1))
+                    .rng_seed(42)
+                    .build(),
+            ))
+            .build(),
+    );
 
-    let handle = guard.tokio_handle(runtime.handle());
-    runtime.block_on(async {
+    let handle = Dial9TokioHandle::current();
+    rt.block_on(async {
         let join = handle.spawn(async {
             tokio::time::sleep(Duration::from_millis(1)).await;
         });
         join.await.unwrap();
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -119,19 +125,21 @@ fn task_dump_does_not_produce_extra_events() {
     fn run(enable: bool) -> (usize, usize, usize) {
         let (capture, batches) = capture_processor();
 
-        let mut builder = tokio::runtime::Builder::new_current_thread();
-        builder.enable_all();
-        let mut tb = TracedRuntime::builder().with_task_tracking(true);
-        if enable {
-            tb = tb.with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build());
-        }
-        let (runtime, guard) = tb
+        let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
-            .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-            .unwrap();
+            .build();
+        let rt = common::attach_current_thread(
+            &recorder,
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .maybe_task_dump_config(
+                    enable.then(|| TaskDumpConfig::builder().rng_seed(42).build()),
+                )
+                .build(),
+        );
 
-        let handle = guard.tokio_handle(runtime.handle());
-        runtime.block_on(async {
+        let handle = Dial9TokioHandle::current();
+        rt.block_on(async {
             let join = handle.spawn(async {
                 tokio::task::yield_now().await;
                 tokio::task::yield_now().await;
@@ -139,10 +147,8 @@ fn task_dump_does_not_produce_extra_events() {
             });
             join.await.unwrap();
         });
-        drop(runtime);
-        guard
-            .graceful_shutdown(Duration::from_secs(1))
-            .expect("clean shutdown");
+        drop(rt);
+        recorder.graceful_shutdown(Duration::from_secs(1));
 
         let b = batches.lock().unwrap();
         let events: Vec<DumpEvent> = decode_all(&b);
@@ -173,17 +179,19 @@ fn task_dump_does_not_produce_extra_events() {
 fn spawn_with_joinset_emits_task_dump() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
-        .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+            .build(),
+    );
 
-    let handle = guard.tokio_handle(runtime.handle());
-    runtime.block_on(async {
+    let handle = Dial9TokioHandle::current();
+    rt.block_on(async {
         let mut set: JoinSet<()> = JoinSet::new();
         handle.spawn_with(
             async {
@@ -195,10 +203,8 @@ fn spawn_with_joinset_emits_task_dump() {
         while set.join_next().await.is_some() {}
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -210,5 +216,63 @@ fn spawn_with_joinset_emits_task_dump() {
     assert!(
         !dumps.is_empty(),
         "expected TaskDump events from spawn_with JoinSet task"
+    );
+}
+
+/// A contract-abiding future that completes on its **second** poll, used to
+/// reproduce the race condition in the regression test below.
+struct CompletesOnSecondPoll {
+    polls: u32,
+}
+
+impl Future for CompletesOnSecondPoll {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.polls += 1;
+        match self.polls {
+            // Park and arm the waker, as a future waiting on an external
+            // resource does; this pending wake reschedules the task.
+            1 => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            // The capture re-poll completes the future.
+            2 => Poll::Ready(()),
+            // Any further poll is a poll-after-`Ready` contract violation.
+            n => panic!("future polled again after it returned Ready (poll #{n})"),
+        }
+    }
+}
+
+/// Regression: the task-dump capture re-poll must not complete a future and
+/// then let it be polled again. Before the fix this panicked with a
+/// poll-after-`Ready` (surfacing as a `JoinError`); the task must instead
+/// complete cleanly.
+#[test]
+fn task_dump_capture_repoll_does_not_cause_poll_after_ready() {
+    let (capture, _batches) = capture_processor();
+
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+            .build(),
+    );
+
+    let handle = Dial9TokioHandle::current();
+    let result = rt.block_on(async { handle.spawn(CompletesOnSecondPoll { polls: 0 }).await });
+
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    assert!(
+        result.is_ok(),
+        "spawned future was polled after it returned Ready \
+         (TaskDumped re-polled a completed future): {result:?}"
     );
 }

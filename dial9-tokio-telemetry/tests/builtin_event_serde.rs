@@ -1,25 +1,31 @@
-//! End-to-end test: encode events via TracedRuntime, decode via serde into
+//! End-to-end test: encode events on an attached runtime, decode via serde into
 //! the built-in analysis event structs.
 
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    MemoryBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
+};
+use std::time::Duration;
 
 #[test]
 fn decode_builtin_events_via_serde() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
 
-    runtime.block_on(async {
+    rt.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..10 {
             handles.push(tokio::spawn(async {
@@ -33,10 +39,8 @@ fn decode_builtin_events_via_serde() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);

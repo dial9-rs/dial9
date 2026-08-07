@@ -1,15 +1,25 @@
-use crate::buffer;
-use crate::buffer::TlBufferHandle;
 use crate::collector::CentralCollector;
+use crate::encoder;
+use crate::encoder::TlBufferHandle;
 use crate::metrics::TlDrainStats;
-use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::primitives::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Recording lifecycle states. `Stopped` is terminal: the flush thread is
+/// gone, nothing drains buffers anymore.
+#[repr(u8)]
+enum State {
+    Disabled = 0,
+    Enabled = 1,
+    Stopped = 2,
+}
 
 /// Runtime-agnostic core recording state.
 #[doc(hidden)]
 pub struct SharedState {
-    pub(crate) enabled: AtomicBool,
+    /// Recording lifecycle: `Disabled ⇄ Enabled → Stopped` (terminal).
+    state: AtomicU8,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
@@ -32,18 +42,29 @@ pub struct SharedState {
     dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
 }
 
+impl std::fmt::Debug for SharedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedState")
+            .field("enabled", &self.is_enabled())
+            .field("start_time_ns", &self.start_time_ns)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SharedState {
-    pub fn new(start_time_ns: u64) -> Self {
-        Self {
-            enabled: AtomicBool::new(false),
-            collector: Arc::new(CentralCollector::new()),
-            start_time_ns,
-            next_worker_id: AtomicU64::new(0),
-            drain_epoch: AtomicU64::new(0),
-            tl_buffers: Mutex::new(Vec::new()),
-            sources: Mutex::new(Vec::new()),
-            #[cfg(feature = "pipeline")]
-            dump_trigger: std::sync::OnceLock::new(),
+    crate::test_util_pub! {
+        fn new(start_time_ns: u64) -> Self {
+            Self {
+                state: AtomicU8::new(State::Disabled as u8),
+                collector: Arc::new(CentralCollector::new()),
+                start_time_ns,
+                next_worker_id: AtomicU64::new(0),
+                drain_epoch: AtomicU64::new(0),
+                tl_buffers: Mutex::new(Vec::new()),
+                sources: Mutex::new(Vec::new()),
+                #[cfg(feature = "pipeline")]
+                dump_trigger: std::sync::OnceLock::new(),
+            }
         }
     }
 
@@ -61,6 +82,28 @@ impl SharedState {
         self.sources.lock().ok().map(|mut sources| f(&mut sources))
     }
 
+    /// Drop every registered source.
+    ///
+    /// Sources own OS resources (perf fds, mmap rings) and may hold a
+    /// [`Dial9Handle`](crate::handle::Dial9Handle) back to this state, which
+    /// would otherwise keep the `Arc` alive forever. Releasing them here bounds
+    /// both to the recorder's lifetime.
+    pub(crate) fn clear_sources(&self) {
+        match self.sources.lock() {
+            Ok(mut sources) => sources.clear(),
+            Err(_) => tracing::warn!("sources lock poisoned, sources left registered"),
+        }
+    }
+
+    /// Like [`with_sources_mut`](Self::with_sources_mut), but `f` receives the
+    /// list itself so it can register sources too.
+    pub fn with_sources_vec<R>(
+        &self,
+        f: impl FnOnce(&mut Vec<Box<dyn crate::source::Source>>) -> R,
+    ) -> Option<R> {
+        self.sources.lock().ok().map(|mut sources| f(&mut sources))
+    }
+
     /// Trace-start `CLOCK_MONOTONIC` timestamp.
     pub fn start_time_ns(&self) -> u64 {
         self.start_time_ns
@@ -71,14 +114,35 @@ impl SharedState {
         self.next_worker_id.fetch_add(count, Ordering::Relaxed)
     }
 
-    /// Turn recording on.
+    /// Turn recording on. No-op once stopped.
     pub fn enable(&self) {
-        self.enabled.store(true, Ordering::Relaxed);
+        let _ = self.state.compare_exchange(
+            State::Disabled as u8,
+            State::Enabled as u8,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 
-    /// Turn recording off.
+    /// Turn recording off. No-op once stopped.
     pub fn disable(&self) {
-        self.enabled.store(false, Ordering::Relaxed);
+        let _ = self.state.compare_exchange(
+            State::Enabled as u8,
+            State::Disabled as u8,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Stop for good: recording off, [`enable`](Self::enable) and new attaches
+    /// refused. Called at shutdown once the flush thread is gone.
+    pub(crate) fn mark_stopped(&self) {
+        self.state.store(State::Stopped as u8, Ordering::Relaxed);
+    }
+
+    /// Whether the recorder has shut down for good.
+    pub fn is_stopped(&self) -> bool {
+        self.state.load(Ordering::Relaxed) == State::Stopped as u8
     }
 
     /// Install the on-demand dump trigger. Set once at build time by the
@@ -104,14 +168,14 @@ impl SharedState {
     /// control-flow decisions that don't directly record events (e.g.
     /// deciding whether to wrap a waker in wake-tracking polls).
     pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+        self.state.load(Ordering::Relaxed) == State::Enabled as u8
     }
 
     /// Run `f` only when recording is enabled, passing an [`EventBuffer`]
     /// that provides `record_event` / `record_encodable_event`. Returns
     /// `None` when disabled (no work is done).
     pub fn if_enabled<R>(&self, f: impl FnOnce(&EventBuffer<'_>) -> R) -> Option<R> {
-        if !self.enabled.load(Ordering::Relaxed) {
+        if !self.is_enabled() {
             return None;
         }
         Some(f(&EventBuffer(self)))
@@ -120,9 +184,9 @@ impl SharedState {
     /// Test-only shortcut to record an event directly. Production code records
     /// through [`EventBuffer`] via [`if_enabled`](Self::if_enabled).
     #[cfg(test)]
-    fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
+    fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
         if let Some(handle) =
-            buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)
+            encoder::record_encodable_event(event, &self.collector, &self.drain_epoch)
         {
             self.tl_buffers.lock().unwrap().push(handle);
         }
@@ -228,19 +292,20 @@ impl SharedState {
 /// active. All event-recording calls should go through this type so that
 /// callers cannot accidentally emit events without an enabled check.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {
-    pub fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
+    pub fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
         if let Some(handle) =
-            buffer::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
+            encoder::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
         {
             self.0.tl_buffers.lock().unwrap().push(handle);
         }
     }
 
-    pub fn with_encoder(&self, f: impl FnOnce(&mut buffer::ThreadLocalEncoder<'_>)) {
-        if let Some(handle) = buffer::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
+    pub fn with_encoder(&self, f: impl FnOnce(&mut encoder::ThreadLocalEncoder<'_>)) {
+        if let Some(handle) = encoder::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
             self.0.tl_buffers.lock().unwrap().push(handle);
         }
     }
@@ -249,6 +314,7 @@ impl EventBuffer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::sync::atomic::AtomicBool;
 
     fn sample_event() -> crate::format::ClockSyncEvent {
         crate::format::ClockSyncEvent {
@@ -260,7 +326,7 @@ mod tests {
     /// Helper: create a SharedState with recording enabled.
     fn enabled_shared_state() -> SharedState {
         let ss = SharedState::new(0);
-        ss.enabled.store(true, Ordering::Relaxed);
+        ss.enable();
         ss
     }
 

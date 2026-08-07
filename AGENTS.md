@@ -22,7 +22,10 @@ these rules for all public APIs:
 
 The trace format uses a self-describing schema: each event type's schema is
 written to the wire before any events of that type. Decoders use the schema on
-the wire (not a compiled-in schema) to decode events.
+the wire (not a compiled-in schema) to decode events. A schema's *classifying*
+annotations (e.g. the `dial9.role` annotations that mark a single-event span)
+are likewise written before any event of that schema, so decoders classify in a
+single pass without buffering — see `docs/design/single-event-spans.md`.
 
 **Rules:**
 
@@ -71,13 +74,49 @@ rate_limited!(Duration::from_secs(60), {
 ```
 Unguarded logging in loops causes log spam that degrades observability and can itself become a performance problem. One-time paths (startup, shutdown, per-thread init) are exempt.
 
+## Viewer UI
+
+The viewer UI is mid-migration (ADR-0004): every page exists in two versions —
+a **legacy** one (inline `<script>` in `dial9-viewer/ui/*.html`, e.g.
+`index.html`) served at its canonical URL, and a **new** Vite/TypeScript one
+(`dial9-viewer/ui/src/pages/**`, served under `/new/…`) that is now the
+default. **Make behavior changes in the new UI only** (`src/`). Do NOT edit the
+legacy pages/scripts — they are frozen for the migration and are not what users
+load. Shared logic lives in the frozen-core modules at the `ui/` root (e.g.
+`prefix_detect.js`), imported into the new UI through the `src/lib/**` seams;
+change those when the behavior is genuinely shared, and expose new exports via
+the seam rather than reaching into the legacy pages.
+
 ## Testing
+
+### Local viewer server
+
+For local server testing, run the viewer from the repository root with:
+
+```bash
+cargo run -p dial9-viewer -- serve --port 3003 --local --dev
+```
+
+When testing on-demand aggregation, prefer a release build so Parquet encoding
+and trace decoding behave at representative speed:
+
+```bash
+cargo run --release -p dial9-viewer -- serve --port 3003 --local --dev
+```
+
+This is the recommended workflow: `--local` enables readable workstation logs,
+`--dev` serves UI assets directly from `dial9-viewer/ui`, and omitting
+`--agg-output-bucket` keeps on-demand S3/BYOC aggregate rollups in a
+process-local temporary directory. Source credentials therefore need only read
+access, and the temporary rollups are removed when the server exits. Open
+`http://127.0.0.1:3003/`; use `/tmp/dial9-viewer-3003.log` when running it in the
+background during agent-driven testing.
 
 - Behavior changes should include focused tests that fail without the change; if tests are not practical, state why.
 - For Rust behavior changes, run `cargo nextest run`.
 - For final verification of Rust changes, run `cargo nextest run --stress-duration 20s`. The package is expected to have no flaky tests; report any apparent flake instead of ignoring it.
-- **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the relevant JS tests under `dial9-viewer/ui/test_*.js` with `node <test>` and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
-- **Adding a new `dial9-viewer/ui/test_*.js` file:** CI does NOT auto-discover JS tests. You MUST register the new file in `scripts/e2e-trace-tests.sh` (the `trace-integrity` CI job runs that script), or it will never run in CI. See `dial9-viewer/ui/README.md`.
+- **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the Vitest suites (`npm run test` in `dial9-viewer/ui/`, or a filtered `npx vitest run tests/core/<suite>.test.ts`) and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
+- **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.ts` for suites over the frozen core, `src/**/*.test.ts` for new TS modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.
 - Shuttle tests are NOT included in `cargo nextest run`. They require a separate invocation: `./scripts/test-shuttle.sh`. Always run this when modifying code under `#[cfg(all(test, shuttle))]` or the flush/source paths.
 
 ## Scope
@@ -91,7 +130,7 @@ Unguarded logging in loops causes log spam that degrades observability and can i
 
 ## Demo Trace
 
-If you modify the trace format (event structure, encoding, parser, etc.), you MUST regenerate the demo trace:
+If you modify the trace format (event structure, encoding, parser, etc.), the metrique sink's emitted event shape, or the demo app's `RequestMetrics` entry, you MUST regenerate the demo trace; `trace_integrity.test.ts` asserts on its contents. Regenerate on a host with `perf_event_paranoid <= 1` so sched events survive, with `DIAL9_SCHED_WAIT_SAMPLE_RATE=1` and CPU load so sched-wait samples are captured (the script validates this). Afterwards refresh the demo-pinned anchors in `flamegraph_search.test.ts` if they fail.
 
 ```bash
 ./scripts/regenerate_demo_trace.sh
@@ -106,10 +145,10 @@ Or via Docker (no host Rust/AWS/Java needed — DDB Local runs as a sidecar):
 Or manually:
 
 ```bash
-rm -f dial9-viewer/ui/demo-trace.bin
+rm -rf dial9-viewer/ui/public/demo-trace.bin sched-traces
 cargo build --release -p metrics-service
-AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-trace.bin --demo
-cp sched-trace.*.bin dial9-viewer/ui/demo-trace.bin
+AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-traces --demo
+cp sched-traces/trace.*.bin dial9-viewer/ui/public/demo-trace.bin
 ```
 
 The demo trace is used for:

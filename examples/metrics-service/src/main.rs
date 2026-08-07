@@ -1,4 +1,3 @@
-mod axum_traced;
 mod buffer;
 mod ddb;
 mod routes;
@@ -8,23 +7,24 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
+use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TracedRuntime,
-};
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
-use tokio::runtime::Builder;
+use dial9::socket::SocketAcceptQueuesConfig;
+use dial9::{Dial9HandleTokioExt, RecorderPerfExt, RecorderPipelineExt};
+use dial9::{Dial9TokioHandle, TaskDumpConfig, TokioAttachOptions};
+use dial9::{DiskBuffer, recorder};
+use dial9_utils::tracing_layer::Dial9TracingLayer;
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+use dial9::metrique_sink::Dial9Stream;
+use metrique::ServiceMetrics;
 use metrique::local::{LocalFormat, OutputStyle};
+use metrique::writer::AttachGlobalEntrySinkExt;
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
 
@@ -52,8 +52,8 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "/tmp/metrics-service-traces/trace.bin",
-        help = "Trace file path"
+        default_value = "/tmp/metrics-service-traces",
+        help = "Trace output directory"
     )]
     trace_path: String,
 
@@ -192,7 +192,7 @@ fn main() -> std::io::Result<()> {
         args.trace_max_total_size = 100_000_000;
     }
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(&args.trace_path)
         .max_file_size(args.trace_max_file_size)
         .max_total_size(args.trace_max_total_size)
@@ -206,13 +206,9 @@ fn main() -> std::io::Result<()> {
         ])
         .build()?;
 
-    let mut builder = Builder::new_multi_thread();
-    builder.worker_threads(args.worker_threads).enable_all();
-    let traced_builder = TracedRuntime::builder()
-        .with_trace_path(&args.trace_path)
-        .with_task_tracking(true)
-        .with_process_resource_usage(ProcessResourceUsageConfig::default());
-    let traced_builder = if let Some(path) = &args.worker_metrics_path {
+    let mut rec =
+        recorder(writer).with_process_resource_usage(ProcessResourceUsageConfig::default());
+    if let Some(path) = &args.worker_metrics_path {
         // Open in append mode so multiple runs accumulate into the same
         // file. Each segment processed by the dial9 background worker
         // appends one line with PipelineMetrics including
@@ -223,27 +219,16 @@ fn main() -> std::io::Result<()> {
             .open(path)?;
         let sink = FlushImmediatelyBuilder::new()
             .build_boxed(LocalFormat::new(OutputStyle::Pretty).output_to(file));
-        traced_builder.with_worker_metrics_sink(sink)
-    } else {
-        traced_builder
-    };
-    let traced_builder = if args.no_task_dumps {
-        traced_builder
-    } else {
-        traced_builder.with_task_dumps(
-            TaskDumpConfig::builder()
-                .idle_threshold(Duration::from_millis(5))
-                .build(),
-        )
-    };
+        rec = rec.metrics_sink(sink);
+    }
     #[cfg(target_os = "linux")]
-    let traced_builder = traced_builder
+    let rec = rec
         .with_cpu_profiling(CpuProfilingConfig::default())
         .with_sched_events(SchedEventConfig::default().include_kernel(true))
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
-    let (runtime, guard) = if let Some(bucket) = &args.s3_bucket {
-        use dial9_tokio_telemetry::background_task::s3::S3Config;
+    let recorder = if let Some(bucket) = &args.s3_bucket {
+        use dial9::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)
@@ -258,14 +243,76 @@ fn main() -> std::io::Result<()> {
             .maybe_region(args.s3_region.as_ref())
             .build();
 
-        traced_builder
-            .with_s3_uploader(s3_config)
-            .build(builder, writer)?
+        rec.with_s3_uploader(s3_config).build()
     } else {
-        traced_builder.build(builder, writer)?
+        rec.build()
     };
-    guard.enable();
-    let handle = guard.tokio_handle(runtime.handle());
+
+    let task_dumps = (!args.no_task_dumps).then(|| {
+        TaskDumpConfig::builder()
+            .idle_threshold(Duration::from_millis(5))
+            .build()
+    });
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(args.worker_threads);
+
+    let runtime = recorder.handle().attach_tokio_runtime(
+        builder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(task_dumps)
+            .build(),
+    )?;
+
+    // In demo mode, attach a second named runtime ("io") sharing the same trace
+    // session and run a small background workload on it. This makes the demo
+    // trace exercise per-runtime grouping in the viewer (issue #697): the
+    // primary runtime's workers show as the inferred "main" group and these show
+    // as "io". Kept alive for the run and dropped just before shutdown.
+    let demo_io_runtime = if args.demo {
+        let mut io_builder = tokio::runtime::Builder::new_multi_thread();
+        io_builder.enable_all().worker_threads(2);
+        let io_runtime = recorder.handle().attach_tokio_runtime(
+            io_builder,
+            TokioAttachOptions::builder()
+                .runtime_name("io")
+                .task_tracking_enabled(true)
+                .build(),
+        )?;
+        // A periodic background-I/O style workload: light CPU + async sleeps, so
+        // the "io" lanes have polls, parks, and queue activity to look at.
+        for task in 0..4u64 {
+            io_runtime.spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(15));
+                loop {
+                    tick.tick().await;
+                    let mut acc = 0u64;
+                    for i in 0..50_000u64 {
+                        acc = acc.wrapping_add(i.wrapping_mul(task + 1));
+                    }
+                    std::hint::black_box(acc);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+        }
+        Some(io_runtime)
+    } else {
+        None
+    };
+
+    // Per-request metrique entries (routes::RequestMetrics) flow into the
+    // dial9 trace AND a conventional metrics stream, the way a production
+    // service tees dial9 alongside its EMF pipeline. `Dial9Stream::tee`
+    // keeps the `dial9.*` context fields out of the conventional side.
+    let request_metrics_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(&args.trace_path).join("request-metrics.log"))?;
+    let metrics_join = ServiceMetrics::attach_to_stream(Dial9Stream::tee(
+        recorder.handle(),
+        LocalFormat::new(OutputStyle::Pretty).output_to(request_metrics_file),
+    ));
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -276,15 +323,14 @@ fn main() -> std::io::Result<()> {
             .build();
         Some(
             MemoryProfiler::from_config(config)
-                .install(guard.handle())
+                .install(recorder.handle().clone())
                 .expect("failed to install memory profiler"),
         )
     };
 
     // Wrap the body in a spawned task so the root future is instrumented.
-    // Inside, Dial9TokioHandle::current() is available on every worker thread.
     runtime.block_on(async {
-        handle
+        Dial9TokioHandle::current()
             .spawn(async move {
                 let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
 
@@ -302,12 +348,10 @@ fn main() -> std::io::Result<()> {
                     .await
                     .expect("failed to ensure DynamoDB table");
 
-                let handle = Dial9TokioHandle::current();
-
                 // background flush worker
                 let flush_state = state.clone();
                 let flush_interval = Duration::from_secs(args.flush_interval);
-                handle.spawn(async move {
+                dial9::spawn(async move {
                     let mut interval = tokio::time::interval(flush_interval);
                     loop {
                         interval.tick().await;
@@ -317,7 +361,7 @@ fn main() -> std::io::Result<()> {
 
                 // intentional leak task: accumulates memory without freeing it
                 if args.leak {
-                    handle.spawn(async move {
+                    dial9::spawn(async move {
                         let mut sink: Vec<Vec<u8>> = Vec::new();
                         let mut interval = tokio::time::interval(Duration::from_millis(10));
                         loop {
@@ -362,14 +406,17 @@ fn main() -> std::io::Result<()> {
                 });
 
                 // Reap the child when it exits so it doesn't become a zombie.
-                handle.spawn(async move {
+                dial9::spawn(async move {
                     match client_child.wait().await {
                         Ok(status) => println!("Client process exited: {status}"),
                         Err(e) => eprintln!("Error waiting for client process: {e}"),
                     }
                 });
 
-                axum_traced::serve(listener, app.into_make_service())
+                dial9_utils::dial9_axum::axum_0_8::serve(listener, app.into_make_service())
+                    .with_executor(|future| {
+                        dial9::spawn(future);
+                    })
                     .with_graceful_shutdown(async move { shutdown.cancelled().await })
                     .await
                     .unwrap();
@@ -378,11 +425,13 @@ fn main() -> std::io::Result<()> {
             .unwrap();
     });
 
-    // Drop the runtime first so worker threads exit and flush their
-    // thread-local telemetry buffers, then run graceful_shutdown.
+    // Shutdown order: drain the metrique queue into dial9, then drop the
+    // runtime so workers flush their thread-local buffers, then seal the
+    // trace.
+    drop(metrics_join);
     drop(runtime);
-    let shutdown = guard.graceful_shutdown(Duration::from_secs(5));
-    tracing::info!("dial9 shutdown: {shutdown:?}");
+    drop(demo_io_runtime);
+    recorder.graceful_shutdown(Duration::from_secs(5));
 
     Ok(())
 }

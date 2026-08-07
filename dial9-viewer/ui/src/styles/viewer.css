@@ -1,0 +1,2128 @@
+/* Viewer shell styles. The DECIDED concept-1 hybrid layout: toolbar
+   row, overview minimap, a body splitting the unified time-aligned track
+   column from a persistent inspector, and a status bar. Dark theme matches
+   the other pages (#1a1a2e). Muted foregrounds are held at >= 4.5:1 against
+   the background (contrast; same bar as interact.css). */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+    --d9-bg: #1a1a2e;
+    --d9-bg-panel: #16213e;
+    --d9-bg-track: #12172a;
+    --d9-border: #2f2f4a;
+    --d9-fg: #e0e0e0;
+    /* Muted text lifted to clear the 4.5:1 contrast bar. */
+    --d9-fg-muted: #a9b0d0;
+    --d9-accent: #8f88ff;
+}
+
+html, body { height: 100%; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--d9-bg);
+    color: var(--d9-fg);
+    font-size: 14px;
+    overflow: hidden;
+}
+
+.d9-viewer {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    min-height: 0;
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────── */
+
+.d9-toolbar {
+    display: flex;
+    align-items: center;
+    /* Wrap on narrow screens: the spacer fills row 1, so the time slot (and any
+       other overflow) drops onto a second row instead of running off-screen. */
+    flex-wrap: wrap;
+    column-gap: 12px;
+    row-gap: 6px;
+    padding: 6px 12px;
+    background: var(--d9-bg-panel);
+    border-bottom: 1px solid var(--d9-border);
+    flex-shrink: 0;
+    min-height: 40px;
+}
+.d9-app-title {
+    font-size: 0.95em;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--d9-accent);
+    /* Always "dial9" / "trace viewer"; never squeezed to three lines. */
+    flex-shrink: 0;
+}
+.d9-app-title-sub { white-space: nowrap; }
+.d9-file-name { font-size: 0.85em; color: var(--d9-fg); }
+.d9-file-meta { font-size: 0.8em; color: var(--d9-fg-muted); }
+/* Trace-embedded service/host identity chips. */
+.d9-file-identity { display: inline-flex; align-items: center; gap: 6px; }
+.d9-file-identity-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    font-size: 0.8em;
+    color: var(--d9-fg);
+    padding: 0 7px;
+    border: 1px solid var(--d9-border);
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.d9-file-identity-key { color: var(--d9-fg-muted); }
+.d9-toolbar-spacer { flex: 1; }
+.d9-toolbar-slot {
+    display: inline-flex;
+    align-items: center;
+    /* Wrap the slot's own controls (issue rail + action buttons) when the slot
+       is narrower than its content, so a full analysis slot never runs off the
+       edge - it stacks within its row instead. */
+    flex-wrap: wrap;
+    gap: 6px;
+    row-gap: 4px;
+    max-width: 100%;
+    padding: 2px 8px;
+    border: 1px dashed var(--d9-border);
+    border-radius: 4px;
+}
+.d9-slot-hint { font-size: 0.75em; color: var(--d9-fg-muted); }
+
+/* ── Toolbar controls (analysis buttons, time toggles, ranges) ───────── */
+
+.d9-toolbar-btn {
+    background: #23233f;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.76em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-toolbar-btn:hover:not(:disabled) { background: #33335a; }
+.d9-toolbar-btn:disabled { opacity: 0.4; cursor: default; }
+.d9-toolbar-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-field-charts-btn { display: inline-flex; align-items: center; gap: 5px; }
+.d9-field-charts-btn svg { width: 1em; height: 1em; }
+.d9-hidden { display: none !important; }
+
+/* Screen-reader-only label text (visually hidden, still announced). */
+.d9-sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Red-flags summary chip (concept-2): existing detectors' counts. */
+.d9-redflags {
+    display: inline-flex;
+    align-items: center;
+    /* Wrap the detector counts between items on narrow screens (each item stays
+       nowrap); the chip flows onto multiple lines rather than running off-edge. */
+    flex-wrap: wrap;
+    gap: 5px;
+    row-gap: 2px;
+    max-width: 100%;
+    font-size: 0.74em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(255, 107, 107, 0.14);
+    border: 1px solid #b0504f;
+    color: #ffc9c9;
+    flex-shrink: 1;
+}
+.d9-redflags-sep { color: #8a6a6a; }
+.d9-redflags-item { white-space: nowrap; }
+
+/* Goto-time input. */
+.d9-goto-label { display: inline-flex; align-items: center; flex-shrink: 0; }
+.d9-goto-input {
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.76em;
+    width: 130px;
+}
+.d9-goto-input:disabled { opacity: 0.4; }
+.d9-goto-input:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* Info menu (Parse perf + uninstrumented demoted here). */
+.d9-info-menu { position: relative; flex-shrink: 0; }
+.d9-info-summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+}
+.d9-info-summary::-webkit-details-marker { display: none; }
+.d9-info-menu-body {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 200;
+    width: 260px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 8px 10px;
+    background: rgba(13, 13, 26, 0.98);
+    border: 1px solid #444;
+    border-radius: 6px;
+    font-size: 0.78em;
+}
+.d9-info-menu-body-wide {
+    box-sizing: border-box;
+    width: min(640px, calc(100vw - 24px));
+    max-height: min(60vh, 420px);
+    overflow: auto;
+}
+.d9-info-heading {
+    color: var(--d9-accent);
+    font-size: 0.9em;
+    font-weight: 600;
+    margin: 4px 0 3px;
+}
+.d9-info-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 1px 0;
+    color: var(--d9-fg);
+}
+.d9-info-row span:first-child { color: var(--d9-fg-muted); }
+.d9-info-note { color: var(--d9-fg-muted); font-size: 0.9em; margin: 4px 0; line-height: 1.4; }
+.d9-info-note code {
+    background: #2a2a4a;
+    padding: 0 3px;
+    border-radius: 2px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.d9-info-metadata-table {
+    width: 100%;
+    border-collapse: collapse;
+    color: var(--d9-fg);
+}
+.d9-info-metadata-table th {
+    padding: 3px 6px;
+    color: var(--d9-fg-muted);
+    text-align: left;
+}
+.d9-info-metadata-table th:first-child { width: 1%; }
+.d9-info-metadata-table td {
+    padding: 4px 6px;
+    border-top: 1px solid var(--d9-border);
+}
+.d9-info-metadata-table code {
+    display: block;
+    max-width: min(320px, 45vw);
+    overflow: hidden;
+    color: var(--d9-fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-info-metadata-table td:first-child code { max-width: min(280px, 40vw); }
+@media (max-width: 700px) {
+    .d9-info-menu-body-wide {
+        position: fixed;
+        inset: 50% 12px auto;
+        width: auto;
+        max-height: 70vh;
+        transform: translateY(-50%);
+    }
+}
+
+/* ── Issues rail (concept-2, replaces the "0/74" stepper) ────────────── */
+
+.d9-rail {
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #151530;
+    border-right: 1px solid var(--d9-border);
+}
+/* Issues/Tasks tab strip: pinned above the per-tab head. */
+.d9-rail-tabs {
+    flex-shrink: 0;
+    display: flex;
+    border-bottom: 1px solid var(--d9-border);
+}
+.d9-rail-tab {
+    flex: 1;
+    font-size: 0.74em;
+    letter-spacing: 0.04em;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 8px;
+    cursor: pointer;
+}
+.d9-rail-tab.on { color: var(--d9-fg); border-bottom-color: var(--d9-accent); }
+.d9-rail-tab:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-rail-head {
+    flex-shrink: 0;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--d9-border);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.d9-rail-title { display: flex; align-items: baseline; justify-content: space-between; }
+.d9-rail-heading { font-size: 0.72em; letter-spacing: 0.06em; color: var(--d9-fg-muted); }
+.d9-rail-pos { font-size: 0.74em; color: var(--d9-fg); font-variant-numeric: tabular-nums; }
+/* Shown only when the detector cap truncated the list, so the count above is
+   never mistaken for the number of navigable rows. */
+.d9-rail-truncated {
+    font-size: 0.68em;
+    color: var(--d9-fg-muted);
+    font-variant-numeric: tabular-nums;
+}
+.d9-rail-controls { display: flex; align-items: center; gap: 8px; }
+.d9-rail-filter {
+    flex: 1;
+    min-width: 0;
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.74em;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+.d9-rail-filter:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-rail-hint { font-size: 0.7em; color: var(--d9-fg-muted); white-space: nowrap; }
+.d9-rail-hint kbd {
+    background: #26265a;
+    border: 1px solid #3a3a5e;
+    border-radius: 3px;
+    padding: 0 3px;
+    font-size: 0.9em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.d9-rail-list { flex: 1; overflow-y: auto; min-height: 0; }
+.d9-rail-empty { padding: 12px 10px; color: var(--d9-fg-muted); font-size: 0.8em; font-style: italic; }
+
+.d9-rail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.76em;
+}
+.d9-rail-table thead th {
+    position: sticky;
+    top: 0;
+    background: #151530;
+    padding: 0;
+    text-align: left;
+    border-bottom: 1px solid var(--d9-border);
+    z-index: 1;
+}
+.d9-rail-sort {
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--d9-fg-muted);
+    font-size: inherit;
+    text-align: left;
+    padding: 4px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.d9-rail-sort:hover { color: var(--d9-fg); }
+.d9-rail-sort.on { color: var(--d9-accent); }
+.d9-rail-sort:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+.d9-rail-row { cursor: pointer; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+.d9-rail-row:hover { background: #1c1c40; }
+.d9-rail-row.on { background: #2a2a5e; }
+.d9-rail-row td { padding: 4px 6px; color: var(--d9-fg); }
+.d9-rail-worker { white-space: nowrap; }
+/* The severity-dot column: its own cell so the body's 5 columns line up with
+   the header's 5 (empty dot-th + worker + what + t + dur). Shrinks to the dot. */
+.d9-rail-dot-cell { width: 1%; padding-right: 0 !important; }
+.d9-rail-num { text-align: right; font-variant-numeric: tabular-nums; color: #cdd2f0; white-space: nowrap; }
+/* Tasks table: the hex id is monospace; the spawn loc is the flexible column
+   and truncates rather than widening the rail. */
+.d9-task-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.92em;
+    white-space: nowrap;
+    color: #cdd2f0;
+}
+.d9-task-loc {
+    max-width: 0;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--d9-fg-muted);
+}
+.d9-rail-dot {
+    display: inline-block;
+    vertical-align: middle;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.d9-rail-dot.sev-high { background: #ff6b6b; }
+.d9-rail-dot.sev-med { background: #ffa94d; }
+.d9-rail-dot.sev-low { background: #ffd43b; }
+.d9-help-btn {
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    width: 28px; height: 28px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.95em;
+    flex-shrink: 0;
+}
+.d9-help-btn:hover { background: #3a3a5a; }
+.d9-help-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* ── Minimap slot ────────────────────────────────────────────────────── */
+
+.d9-minimap {
+    height: 46px;
+    flex-shrink: 0;
+    background: #12122a;
+    border-bottom: 1px solid var(--d9-border);
+    /* Positioning context for the coverage badge. */
+    position: relative;
+}
+.d9-minimap:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+/* Overview minimap canvas: fills the host; grab to drag the viewport. */
+.d9-minimap-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+/* Coverage badge: shown only when the overview has tier-1-only regions
+   (unfetched/partial), so a windowed tail is never presented as whole. */
+.d9-minimap-badge {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    padding: 1px 6px;
+    font-size: 0.62em;
+    color: #12122a;
+    background: #e0b050;
+    border-radius: 3px;
+    pointer-events: none;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* ── Body: track column + inspector ──────────────────────────────────── */
+
+.d9-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+.d9-track-column {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #0f1424;
+    /* Positioning context for the transient crosshair overlay. */
+    position: relative;
+}
+.d9-track-column:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+/* Persistent interaction hint chips. */
+.d9-hint-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--d9-border);
+    background: #101632;
+}
+.d9-chip {
+    font-size: 0.72em;
+    color: #cdd2f0;
+    background: #26265a;
+    border: 1px solid #3a3a5e;
+    border-radius: 10px;
+    padding: 2px 9px;
+    white-space: nowrap;
+}
+
+/* ── Tracks ──────────────────────────────────────────────────────────── */
+
+.d9-tracks { display: flex; flex-direction: column; }
+.d9-track {
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid var(--d9-border);
+    /* Collapse/expand (#7): animate the row height so the tracks below slide
+       into the reclaimed space instead of snapping, and clip the canvas while
+       the row grows/shrinks so it reveals smoothly rather than popping. The
+       transition does not fire on first mount (no prior height to animate
+       from), so initial load stays instant. */
+    overflow: hidden;
+    transition: height 0.16s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+    .d9-track { transition: none; }
+}
+.d9-track-label {
+    width: var(--d9-label-w, 100px);
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 2px;
+    padding: 6px 8px 0 8px;
+    background: #131834;
+    border-right: 1px solid var(--d9-border);
+}
+.d9-track-name { font-size: 0.8em; color: var(--d9-fg); }
+/* On a manageable track the visible name lives in the management strip;
+   keep the inner name for aria-labelledby, but hide it visually (sr-only). */
+.d9-track-manage .d9-track-label .d9-track-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+.d9-track-canvas-wrap {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    position: relative;
+    background: var(--d9-bg-track);
+}
+.d9-track-canvas { display: block; }
+.d9-field-chart-canvas { cursor: crosshair; }
+
+/* ── Worker-lanes box: fixed-height rows in a resizeable inner-scroll box ── */
+/* The lanes track stacks its label + scroll box in a row, then a resize gutter
+   below. Rows are a FIXED height and the box scrolls internally, so 64+ workers
+   stay legible/clickable instead of collapsing to slivers. Drag-resize (the mount
+   wires it) never animates, so the box tracks the pointer 1:1. */
+.d9-track--lanes {
+    flex-direction: column;
+    overflow: visible;
+    transition: none;
+}
+.d9-lanes-head { display: flex; align-items: stretch; }
+/* The lanes label gutter: a per-row label canvas the lanes mount paints from the
+   SAME row layout + scrollTop as the lanes canvas. The canvas is sized to the
+   visible box height (not the stacked content) and the gutter clips it,
+   mirroring the virtualized lanes canvas — so the two always agree about which
+   rows are on screen.
+
+   The gutter drops ALL padding so the canvas's row 0 starts at exactly the same
+   y as the lanes canvas's row 0; any inset here would shift every label relative
+   to the lane it names. For the same reason the "Workers" track name is
+   sr-only rather than occupying the first line: the per-row labels (W0, W1,
+   "main runtime metrics", ...) say more than it did, and it is still the
+   aria-labelledby target for the lanes canvas. */
+.d9-lanes-label {
+    padding: 0;
+    overflow: hidden;
+}
+.d9-lanes-label .d9-track-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+.d9-lanes-label-canvas { display: block; }
+.d9-track--lanes .d9-track-canvas-wrap {
+    display: block;
+    position: relative;
+}
+.d9-lanes-viewport {
+    width: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* Reserve the scrollbar gutter always, so its width is constant and every
+       track's reserved right gutter (lanesScrollbarWidth) keeps the time axes
+       aligned whether or not the box is currently scrolling. */
+    scrollbar-gutter: stable;
+    position: relative;
+    background: var(--d9-bg-track);
+}
+/* The canvas is virtualized: sized to the visible box and pinned to its top,
+   while the spacer supplies the scrollable range. The mount redraws the visible
+   row window on scroll. */
+.d9-lanes-viewport > .d9-track-canvas {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: block;
+}
+.d9-lanes-spacer { width: 1px; flex: none; }
+.d9-lanes-resize {
+    height: 6px;
+    flex: none;
+    cursor: row-resize;
+    background: transparent;
+    border-top: 1px solid var(--d9-border);
+}
+.d9-lanes-resize:hover { background: var(--d9-accent); }
+
+/* ── Track management: collapse caret + drag-reorder grip (the fold
+   BEHAVIOR survives, one-line-fold presentation retired). The affordances
+   overlay a reserved strip at the LEFT edge of the
+   label gutter so the frozen per-track labels are not modified; the strip is
+   pointer-events:none except its controls, so the rest of the label (e.g.
+   the spans copy buttons) stays interactive. ── */
+.d9-track-manage { position: relative; }
+/* Reserve room for the strip so it never covers the label text / copy buttons. */
+/* The manageable-track header is a top-fixed row spanning the label gutter:
+   collapse, label, drag, and (for dynamic charts) close. */
+.d9-track-manage-strip {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: var(--d9-label-w, 100px);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 6px 0 6px;
+    pointer-events: none;
+    z-index: 2;
+}
+.d9-track-strip-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.8em;
+    line-height: 1.15;
+    color: var(--d9-fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-track-caret,
+.d9-track-grip,
+.d9-track-close {
+    pointer-events: auto;
+    width: 18px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    line-height: 1;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--d9-accent);
+    cursor: pointer;
+}
+/* CSS-driven caret (legacy was a ::before chevron): down = expanded,
+   right = collapsed. Keeps the glyph out of the TS source. */
+.d9-track-caret::before { content: "\25BE"; }
+.d9-track-manage.is-collapsed .d9-track-caret::before { content: "\25B8"; }
+.d9-track-caret:focus-visible,
+.d9-track-close:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+    border-radius: 3px;
+}
+.d9-track-grip {
+    color: var(--d9-fg-muted);
+    cursor: grab;
+}
+.d9-track-grip::before { content: "\2261"; } /* triple bar = drag handle */
+.d9-track-grip:active { cursor: grabbing; }
+.d9-track-close {
+    color: var(--d9-fg-muted);
+    font-size: 17px;
+}
+.d9-track-close:hover { color: #ff6b81; }
+.d9-track-manage.is-dynamic .d9-track-manage-strip {
+    gap: 2px;
+    padding-inline: 4px;
+}
+.d9-track-manage.is-dynamic .d9-track-caret,
+.d9-track-manage.is-dynamic .d9-track-grip,
+.d9-track-manage.is-dynamic .d9-track-close {
+    width: 16px;
+}
+/* Collapsed (label-only, legacy 24px): hide the drawing body. Covers both
+   body variants (spans/events) and the canvas-wrap variants (cpu/queue). */
+.d9-track-manage.is-collapsed .d9-track-body,
+.d9-track-manage.is-collapsed .d9-track-canvas-wrap {
+    display: none;
+}
+/* Collapsed: header is the whole row - span it so the label centers. */
+.d9-track-manage.is-collapsed .d9-track-manage-strip {
+    bottom: 0;
+    padding-top: 0;
+}
+
+/* ── Worker-lanes legend: non-interactive ribbon over the
+   lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */
+.d9-lanes-legend {
+    position: absolute;
+    left: 6px;
+    bottom: 4px;
+    right: 6px;
+    margin: 0;
+    padding: 3px 5px;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 9px;
+    font-size: 9px;
+    line-height: 1.1;
+    color: var(--d9-fg-muted);
+    background: rgba(10, 14, 28, 0.72);
+    border: 1px solid var(--d9-border);
+    border-radius: 3px;
+    pointer-events: none;
+}
+.d9-lanes-legend-row { display: inline-flex; align-items: center; gap: 4px; }
+.d9-lanes-legend-swatch {
+    width: 14px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 1px;
+}
+.d9-lanes-legend-swatch.shape-line { height: 2px; }
+.d9-lanes-legend-swatch.shape-dashed {
+    height: 0;
+    border-top: 2px dashed currentColor;
+    background: none !important;
+}
+.d9-lanes-legend-swatch.shape-tick { width: 4px; height: 8px; }
+.d9-lanes-legend-swatch.shape-triangle {
+    width: 0;
+    height: 0;
+    background: none !important;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 8px solid currentColor;
+}
+.d9-lanes-legend-text { white-space: nowrap; }
+
+/* ── Queue depth track ───────────────────────────────────────────────── */
+/* Column wrap: an always-visible legend strip above the chart canvas so
+   the global/max-local/active-task encodings are labeled (the fix - one
+   legible representation), not hidden in a collapsed fold. */
+.d9-queue-wrap { flex-direction: column; }
+.d9-queue-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 12px;
+    height: 18px;
+    margin: 0;
+    padding: 2px 6px;
+    list-style: none;
+    font-size: 9px;
+    line-height: 1;
+    color: var(--d9-fg-muted);
+    background: #131834;
+    border-bottom: 1px solid var(--d9-border);
+    overflow: hidden;
+}
+.d9-queue-legend-row { display: inline-flex; align-items: center; gap: 4px; }
+.d9-queue-legend-swatch {
+    width: 14px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 1px;
+}
+/* Line encodings (max-local, active-task) read as a 2px rule, not a box, so
+   the swatch matches what the track draws (swatches match rendering). */
+.d9-queue-legend-swatch.shape-line { height: 2px; }
+.d9-queue-legend-text { white-space: nowrap; }
+.d9-queue-canvas { flex: 1; min-width: 0; }
+
+/* ── Spans track ─────────────────────────────────────────────────────── */
+
+/* The spans row keeps the shared LABEL_W gutter so its canvas stays axis-
+   aligned with every other track; the gutter shows the focused-span metadata
+   and the body stacks a legend/controls strip over the canvas. */
+.d9-track--spans .d9-spans-label {
+    justify-content: flex-start;
+    padding: 4px 6px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+.d9-spans-meta-name {
+    font-size: 0.78em;
+    color: #ccc;
+    margin-bottom: 3px;
+    word-break: break-word;
+}
+.d9-kv-row {
+    display: flex;
+    align-items: baseline;
+    gap: 2px;
+    margin-top: 2px;
+    line-height: 1.3;
+}
+.d9-kv-key { color: var(--d9-fg-muted); font-size: 0.72em; white-space: nowrap; }
+.d9-kv-val {
+    color: #cdd2f0;
+    font-size: 0.72em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+.d9-kv-copy {
+    background: none;
+    border: 1px solid #555;
+    color: var(--d9-fg-muted);
+    font-size: 0.7em;
+    padding: 0 3px;
+    cursor: pointer;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+.d9-kv-copy:hover { background: #333; color: #fff; }
+
+.d9-spans-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--d9-bg-track);
+}
+.d9-spans-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 30px;
+    flex-shrink: 0;
+    padding: 0 8px;
+    background: #1a1a2e;
+    border-bottom: 1px solid var(--d9-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+}
+.d9-span-filter {
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.78em;
+    width: 150px;
+    flex-shrink: 0;
+}
+.d9-span-btn {
+    background: #23233f;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.72em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.d9-span-btn:hover:not(:disabled) { background: #33335a; }
+.d9-span-btn:disabled { opacity: 0.4; cursor: default; }
+.d9-span-count { font-size: 0.72em; color: var(--d9-fg-muted); flex-shrink: 0; }
+.d9-span-pct {
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.74em;
+    padding: 1px 3px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+.d9-span-chips {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+}
+.d9-span-chip {
+    font-size: 0.72em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--chip, #888);
+    color: var(--d9-fg-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-span-chip.on { background: var(--chip, #888); color: #fff; }
+.d9-span-unmatched {
+    font-size: 0.72em;
+    color: #d98a8a;
+    flex-shrink: 0;
+    margin-left: 4px;
+}
+.d9-spans-canvas-wrap { flex: 1; min-width: 0; display: flex; }
+.d9-spans-canvas { display: block; cursor: pointer; }
+
+/* Span hover tooltip: follows the cursor, appended to <body>. */
+.d9-span-tooltip {
+    position: fixed;
+    z-index: 80;
+    display: none;
+    max-width: 320px;
+    padding: 6px 9px;
+    border-radius: 5px;
+    background: rgba(13, 13, 26, 0.96);
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.75em;
+    line-height: 1.4;
+    pointer-events: none;
+}
+.d9-span-tooltip .tt-k { color: var(--d9-fg-muted); }
+.d9-span-tooltip .tt-dim { color: #888; }
+
+/* ── Task-detail track ───────────────────────────────────────────────────
+   Selection-only track: the label gutter shows the track name + a compact
+   task identity (the full textual header is the inspector Task tab); the
+   canvas hosts the timeline; a status readout floats top-right over
+   the canvas (updated imperatively on hover, matching the legacy
+   #task-detail-status). */
+.d9-track--task-detail .d9-track-label { justify-content: center; }
+.d9-task-detail-id {
+    font-size: 0.72em;
+    color: #4fc3f7;
+    font-family: var(--d9-mono, monospace);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.d9-task-detail-wrap { position: relative; }
+.d9-task-detail-status {
+    position: absolute;
+    top: 4px;
+    right: 12px;
+    z-index: 2;
+    font-size: 0.75em;
+    color: #aaa;
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: calc(100% - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.d9-task-detail-canvas { display: block; }
+
+/* ── Custom-events track ─────────────────────────────────────────────────── */
+
+/* The events row keeps the shared LABEL_W gutter (axis alignment) and stacks a
+   name-chip legend strip over the marker-tick canvas. */
+.d9-track--events .d9-events-label {
+    justify-content: center;
+}
+.d9-events-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--d9-bg-track);
+}
+.d9-events-legend {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    flex-shrink: 0;
+    padding: 0 8px;
+    background: #1a1a2e;
+    border-bottom: 1px solid var(--d9-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+}
+.d9-event-btn {
+    background: #23233f;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.72em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.d9-event-btn:hover { background: #33335a; }
+.d9-event-chips {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+}
+.d9-event-chip {
+    font-size: 0.72em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--chip, #888);
+    color: var(--d9-fg-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-event-chip.on { background: var(--chip, #888); color: #fff; }
+.d9-events-canvas-wrap { flex: 1; min-width: 0; display: flex; }
+.d9-events-canvas { display: block; cursor: default; }
+
+/* Event hover tooltip: follows the cursor, appended to <body>. */
+.d9-event-tooltip {
+    position: fixed;
+    z-index: 80;
+    display: none;
+    max-width: 320px;
+    padding: 6px 9px;
+    border-radius: 5px;
+    background: rgba(13, 13, 26, 0.96);
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.75em;
+    line-height: 1.4;
+    pointer-events: none;
+}
+.d9-event-tooltip .tt-k { color: var(--d9-fg-muted); }
+.d9-event-tooltip .tt-dim { color: #888; }
+
+/* ── Empty state ─────────────────────────────────────────────────────── */
+
+.d9-empty {
+    max-width: 520px;
+    margin: 48px auto;
+    padding: 0 20px;
+    color: var(--d9-fg);
+    text-align: center;
+}
+.d9-empty h2 { font-size: 1.1em; color: var(--d9-accent); margin-bottom: 10px; }
+.d9-empty p { color: var(--d9-fg-muted); margin: 8px 0; }
+.d9-empty-steps {
+    list-style: none;
+    display: inline-block;
+    text-align: left;
+    margin: 10px 0;
+    color: var(--d9-fg);
+}
+.d9-empty-steps li { padding: 4px 0; }
+.d9-empty-steps code {
+    background: #2a2a4a;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+}
+.d9-empty-hint { font-size: 0.8em; }
+
+/* ── Inspector ───────────────────────────────────────────────────────── */
+
+/* ── Persistent inspector ────────────────────────────────────────────────
+   Width is applied imperatively by mountInspector (uiPrefs.sidebarWidth,
+   persisted). The aside is position:relative so the drag handle
+   anchors to its left edge. The interior is rendered imperatively into the
+   otherwise-empty aside, so the shell's declarative re-render never clobbers
+   it. */
+.d9-inspector {
+    width: 360px;
+    flex-shrink: 0;
+    background: var(--d9-bg-panel);
+    border-left: 1px solid var(--d9-border);
+    position: relative;
+    overflow: hidden;
+}
+.d9-inspector:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-inspector-resize {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+}
+.d9-inspector-resize:hover { background: var(--d9-accent); }
+.d9-inspector-inner {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+/* "what is selected" line + explicit clear affordance. */
+.d9-inspector-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--d9-border);
+    font-size: 0.78em;
+}
+.d9-inspector-sel { color: var(--d9-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.d9-inspector-clear {
+    flex-shrink: 0;
+    font-size: 0.9em;
+    color: var(--d9-fg);
+    background: rgba(143, 136, 255, 0.12);
+    border: 1px solid var(--d9-accent);
+    border-radius: 4px;
+    padding: 1px 6px;
+    cursor: pointer;
+}
+.d9-inspector-clear:hover { color: #fff; background: rgba(143, 136, 255, 0.28); border-color: var(--d9-accent); }
+.d9-inspector-clear:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+/* The ONE at-cursor readout surface. */
+.d9-atcursor {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 8px;
+    align-items: baseline;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--d9-border);
+    font-size: 0.75em;
+}
+.d9-atcursor-title { color: var(--d9-accent); font-weight: 600; margin-right: 4px; }
+.d9-atcursor .k { color: var(--d9-fg-muted); }
+.d9-atcursor .v { color: var(--d9-fg); font-weight: 600; }
+.d9-atcursor-empty { color: var(--d9-fg-muted); font-style: italic; }
+.d9-atcursor-warn { color: #e0a94a; font-weight: 600; }
+.d9-inspector-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--d9-border);
+    flex-shrink: 0;
+}
+.d9-inspector-tab {
+    font-size: 0.78em;
+    color: var(--d9-fg-muted);
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+.d9-inspector-tab.on { color: var(--d9-fg); background: #26265a; }
+.d9-inspector-tab.disabled { opacity: 0.4; cursor: default; }
+.d9-inspector-tab:not(.disabled):hover { color: var(--d9-fg); }
+.d9-inspector-tab:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-inspector-body {
+    padding: 12px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+    font-size: 0.82em;
+    line-height: 1.5;
+}
+.d9-inspector-body:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-inspector-hint { color: var(--d9-fg-muted); font-style: italic; }
+
+/* Task tab. */
+.d9-task-detail-head { color: #ffeb3b; font-weight: 600; margin-bottom: 6px; }
+.d9-kv, .d9-kv-row { display: flex; gap: 8px; align-items: baseline; margin: 2px 0; }
+.d9-kv .k, .d9-kv-row .k { color: var(--d9-fg-muted); flex-shrink: 0; min-width: 72px; }
+.d9-kv .v, .d9-kv-row .v { color: var(--d9-fg); word-break: break-all; }
+.d9-badge {
+    margin-left: 6px;
+    font-size: 0.72em;
+    color: #e0a94a;
+    border: 1px solid #6b5220;
+    border-radius: 4px;
+    padding: 0 5px;
+    font-weight: 400;
+}
+
+/* Poll Detail tab. */
+.d9-poll-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; }
+.d9-poll-sched-head { color: #ff4444; font-weight: 600; margin-bottom: 6px; }
+.d9-poll-cpu-head { color: #ff8c00; font-weight: 600; margin: 8px 0 6px; }
+.d9-sample-group { margin-bottom: 10px; padding-left: 8px; }
+.d9-sample-group.sched { border-left: 3px solid #ff4444; }
+.d9-sample-group.cpu { border-left: 2px solid #333; }
+.d9-sample-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.d9-sample-group.sched .d9-sample-count { color: #ff4444; font-weight: 600; font-size: 1.1em; }
+.d9-sample-group.cpu .d9-sample-count { color: #ff8c00; }
+.d9-sample-leaf { color: #fff; font-weight: 600; word-break: break-all; }
+.d9-sample-pct { color: var(--d9-fg-muted); }
+.d9-sample-bar { display: inline-block; height: 8px; background: #ff4444; border-radius: 2px; opacity: 0.6; }
+.d9-frame {
+    color: #777;
+    padding-left: 8px;
+    font-size: 0.9em;
+    word-break: break-all;
+    font-family: var(--d9-mono, monospace);
+}
+.d9-frame.leaf { color: #ff8a65; }
+.d9-frame.deep { color: #666; padding-left: 16px; font-size: 0.85em; }
+.d9-frame a { color: inherit; text-decoration: underline dotted; }
+.d9-frame-toggle {
+    color: var(--d9-accent);
+    font-size: 0.85em;
+    padding-left: 8px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+
+/* Event tab. */
+.d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
+.d9-event-row {
+    display: grid;
+    grid-template-columns: minmax(72px, 3fr) minmax(0, 2fr) repeat(3, 24px);
+    align-items: start;
+    gap: 6px;
+}
+.d9-event-row .k {
+    grid-column: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.d9-event-row .v { grid-column: 2; min-width: 0; }
+.d9-event-row .d9-kv-corr { grid-column: 3; }
+.d9-event-row .d9-kv-chart { grid-column: 4; }
+.d9-event-row .d9-kv-copy { grid-column: 5; }
+.d9-kv-corr, .d9-kv-copy, .d9-kv-chart {
+    flex-shrink: 0;
+    font-size: 0.85em;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    padding: 0 5px;
+    cursor: pointer;
+}
+.d9-event-row .d9-kv-corr,
+.d9-event-row .d9-kv-copy,
+.d9-event-row .d9-kv-chart {
+    width: 24px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+.d9-kv-corr:hover, .d9-kv-copy:hover, .d9-kv-chart:hover {
+    color: var(--d9-fg);
+    border-color: var(--d9-accent);
+}
+.d9-kv-chart svg {
+    display: block;
+    width: 1em;
+    height: 1em;
+}
+
+/* ── Global field catalogue + chart-kind picker ───────────────────────── */
+.d9-field-chart-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1060;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.58);
+}
+.d9-field-chart-backdrop.open { display: flex; }
+.d9-field-chart-dialog {
+    width: min(480px, calc(100vw - 40px));
+    max-height: min(78vh, 680px);
+    display: flex;
+    flex-direction: column;
+    padding: 18px;
+    color: var(--d9-fg);
+    background: #151530;
+    border: 1px solid var(--d9-accent);
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65);
+}
+.d9-field-chart-dialog.is-catalog {
+    width: min(620px, calc(100vw - 40px));
+}
+.d9-field-chart-form {
+    min-height: 0;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+}
+.d9-field-chart-dialog h2 {
+    margin: 0 0 8px;
+    font-size: 1rem;
+}
+.d9-field-chart-body {
+    min-height: 0;
+    overflow-y: auto;
+}
+.d9-field-chart-dialog.is-catalog .d9-field-chart-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.d9-field-chart-intro {
+    margin: 0 0 10px;
+    color: var(--d9-fg-muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.d9-field-chart-search {
+    flex-shrink: 0;
+    width: 100%;
+    padding: 8px 10px;
+    color: var(--d9-fg);
+    background: #0f1629;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+    outline: none;
+}
+.d9-field-chart-search:focus { border-color: var(--d9-accent); }
+.d9-field-chart-search::placeholder { color: var(--d9-fg-muted); }
+.d9-field-chart-catalog {
+    min-height: 0;
+    margin-top: 10px;
+    overflow-y: auto;
+}
+.d9-field-chart-section h3,
+.d9-field-chart-other > summary {
+    color: var(--d9-fg-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+.d9-field-chart-section h3 { margin: 0 0 6px; }
+.d9-field-chart-other {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--d9-border);
+}
+.d9-field-chart-other > summary {
+    cursor: pointer;
+    user-select: none;
+}
+.d9-field-chart-other[open] > summary { margin-bottom: 7px; }
+.d9-field-chart-source-group {
+    margin-bottom: 8px;
+    overflow: hidden;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+}
+.d9-field-chart-event {
+    padding: 5px 9px;
+    overflow: hidden;
+    color: var(--d9-fg-muted);
+    background: var(--d9-bg-panel);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-field-chart-source-button {
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 9px;
+    color: var(--d9-fg);
+    text-align: left;
+    background: #0f1629;
+    border: 0;
+    border-top: 1px solid var(--d9-border);
+    cursor: pointer;
+}
+.d9-field-chart-source-button:hover,
+.d9-field-chart-source-button:focus-visible {
+    background: #22224a;
+    outline: none;
+}
+.d9-field-chart-field {
+    overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-field-chart-kind-badge,
+.d9-field-chart-choose {
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+.d9-field-chart-kind-badge {
+    padding: 2px 6px;
+    color: #0d1728;
+    background: #55d6be;
+    border-radius: 999px;
+    font-weight: 600;
+}
+.d9-field-chart-choose { color: var(--d9-fg-muted); }
+.d9-field-chart-empty {
+    margin: 6px 0;
+    color: var(--d9-fg-muted);
+    font-size: 0.8rem;
+    font-style: italic;
+}
+.d9-field-chart-source {
+    margin-bottom: 14px;
+    color: var(--d9-fg-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+}
+.d9-field-chart-kind-label {
+    margin: 0 0 7px;
+    color: var(--d9-fg-muted);
+    font-size: 0.8rem;
+}
+.d9-field-chart-kind-options {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+.d9-field-chart-kind {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 6px;
+    text-align: left;
+    color: var(--d9-fg);
+    background: #0f1629;
+    border: 1px solid var(--d9-border);
+    border-radius: 5px;
+    cursor: pointer;
+}
+.d9-field-chart-kind:hover,
+.d9-field-chart-kind:focus-visible,
+.d9-field-chart-kind.selected {
+    border-color: var(--d9-accent);
+    outline: none;
+}
+.d9-field-chart-kind.selected { background: #22224a; }
+.d9-field-chart-kind svg { width: 28px; height: 28px; }
+.d9-field-chart-kind-text { min-width: 0; text-align: center; }
+.d9-field-chart-kind-name,
+.d9-field-chart-kind-description { display: block; }
+.d9-field-chart-kind-name { font-size: 0.8rem; font-weight: 600; }
+.d9-field-chart-kind-description {
+    margin-top: 2px;
+    color: var(--d9-fg-muted);
+    font-size: 0.68rem;
+}
+.d9-field-chart-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-shrink: 0;
+}
+.d9-field-chart-cancel { margin-left: auto; }
+.d9-field-chart-actions button {
+    padding: 6px 10px;
+    color: var(--d9-fg);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    cursor: pointer;
+}
+.d9-field-chart-actions button:hover { border-color: var(--d9-accent); }
+.d9-field-chart-actions button.primary {
+    color: #0d1728;
+    background: #55d6be;
+    border-color: #55d6be;
+    font-weight: 600;
+}
+@media (max-width: 520px) {
+    .d9-field-chart-kind-options { grid-template-columns: 1fr; }
+    .d9-field-chart-kind {
+        flex-direction: row;
+        justify-content: flex-start;
+        text-align: left;
+    }
+    .d9-field-chart-kind-text { text-align: left; }
+}
+
+/* Related tab. */
+.d9-related-section { margin-bottom: 4px; }
+.d9-related-head {
+    display: block;
+    width: 100%;
+    text-align: left;
+    color: var(--d9-fg);
+    font-size: 0.9em;
+    font-weight: 600;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+.d9-related-head:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-related-empty { color: var(--d9-fg-muted); font-style: italic; padding: 2px 6px; }
+.d9-related-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+.d9-related-row[role="button"] { cursor: pointer; }
+.d9-related-row[role="button"]:hover { background: #22224a; }
+.d9-related-row.r-self { background: #2a2a4a; }
+.d9-related-row .r-name { color: var(--d9-fg); word-break: break-all; }
+.d9-related-row .r-aside { color: var(--d9-fg-muted); flex-shrink: 0; font-size: 0.9em; }
+.d9-related-loadmore {
+    display: block;
+    width: 100%;
+    text-align: left;
+    color: var(--d9-accent);
+    font-size: 0.85em;
+    padding: 2px 6px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+
+/* Stack tab: spawned tasks. */
+.d9-spawned-head { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; }
+.d9-spawned-group { margin-bottom: 8px; }
+.d9-spawned-loc { color: var(--d9-fg-muted); word-break: break-all; margin-bottom: 2px; }
+.d9-spawned-tasks { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.d9-task-link {
+    color: var(--d9-accent);
+    font-family: var(--d9-mono, monospace);
+    font-size: 0.9em;
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    padding: 0 5px;
+    cursor: pointer;
+}
+.d9-task-link:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
+.d9-spawned-more { color: var(--d9-fg-muted); font-size: 0.85em; }
+
+/* ── Status bar ──────────────────────────────────────────────────────── */
+
+.d9-status {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 5px 12px;
+    background: var(--d9-bg-panel);
+    border-top: 1px solid var(--d9-border);
+    flex-shrink: 0;
+    font-size: 0.76em;
+    color: var(--d9-fg-muted);
+}
+/* Status-bar text row: the shell host also holds the imperative
+   copy-link button as a sibling, so this stays flex:1 and the button sits at
+   the far right. */
+.d9-status-main {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex: 1;
+    min-width: 0;
+}
+.d9-status-sel { color: var(--d9-fg); display: inline-flex; align-items: center; gap: 6px; }
+/* Explicit clear-selection affordance. */
+.d9-status-clear {
+    padding: 0 5px;
+    font: inherit;
+    line-height: 1.4;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 3px;
+    cursor: pointer;
+}
+.d9-status-clear:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
+.d9-status-clear:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+/* Segment fetch/parse progress (2.8 feedback surface). */
+.d9-status-progress { color: var(--d9-fg-muted); white-space: nowrap; }
+.d9-status-progress.active { color: var(--d9-accent); }
+.d9-status-progress.active::after {
+    content: "";
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-left: 6px;
+    vertical-align: -1px;
+    border: 2px solid var(--d9-border);
+    border-top-color: var(--d9-accent);
+    border-radius: 50%;
+    animation: d9-spin 0.8s linear infinite;
+}
+.d9-status-hints { margin-left: auto; white-space: nowrap; }
+
+/* ── Toasts ──────────────────────────────────────────────────────────── */
+
+.d9-toast-region {
+    position: absolute;
+    top: 52px;
+    left: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* Above the load modal (z-index 300) so a load-error toast stays
+       visible when a failed load drops back to the drop zone; still below the
+       help overlay (1040). */
+    z-index: 400;
+    pointer-events: none;
+}
+.d9-toast-item {
+    pointer-events: auto;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    max-width: 360px;
+    border: 1px solid #444;
+    background: rgba(13, 13, 26, 0.95);
+    color: var(--d9-fg);
+}
+.d9-toast-info { border-color: #4a6fb0; }
+.d9-toast-warn { border-color: #c98a3a; }
+.d9-toast-error { border-color: #c9524a; }
+.d9-toast-in { animation: d9-toast-in 0.2s ease-out; }
+.d9-toast-wiggle { animation: d9-toast-wiggle 0.4s ease-in-out; }
+@keyframes d9-toast-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+@keyframes d9-toast-wiggle {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-4px); }
+    75% { transform: translateX(4px); }
+}
+
+/* ── Transient overlay: crosshair, tooltip, at-cursor readout ───────────
+   The overlay canvas covers the scrollable track content; it is
+   non-interactive so pointer events reach the lanes underneath. Sits above
+   the track canvases but is a faint 1px line, so it never obscures content. */
+.d9-crosshair-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: 5;
+}
+
+/* Region/zoom selection box. Absolutely placed inside the track column
+   (position:relative) by mountSelectionOverlay from the shared ns<->x mapping;
+   non-interactive so pointer events reach the lanes. Blue = Shift region,
+   teal (.zoom) = Alt zoom, matching the legacy #selection-overlay colours. */
+.d9-selection-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: none;
+    pointer-events: none;
+    z-index: 4;
+    background: rgba(66, 133, 244, 0.15);
+    border: 1px solid rgba(66, 133, 244, 0.6);
+}
+.d9-selection-overlay.zoom {
+    background: rgba(0, 188, 180, 0.15);
+    border-color: rgba(0, 188, 180, 0.6);
+}
+
+/* Floating viewport controls: zoom in / out / fit, bottom-right glass
+   panel. Fixed so it stays in the corner while the track column scrolls; its
+   buttons stopPropagation so a click is never treated as a lane click. */
+.d9-viewport-controls {
+    position: fixed;
+    right: 20px;
+    bottom: 44px;
+    z-index: 50;
+    display: flex;
+    gap: 4px;
+    padding: 6px;
+    background: rgba(22, 33, 62, 0.92);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--d9-border);
+    border-radius: 8px;
+}
+.d9-viewport-controls button {
+    min-width: 30px;
+    height: 26px;
+    padding: 0 8px;
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+.d9-viewport-controls button:hover { background: #3a3a5a; }
+.d9-viewport-controls button:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+}
+
+/* Shared hover tooltip. One element, appended to <body>, reused
+   by every panel. Ported from the legacy #tooltip; placement is JS-driven
+   from CACHED dimensions (never measured after write). */
+.d9-tooltip {
+    position: fixed;
+    display: none;
+    top: 0;
+    left: 0;
+    background: #222244;
+    border: 1px solid #555;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    line-height: 1.5;
+    max-width: 320px;
+    pointer-events: none;
+    z-index: 100;
+    color: var(--d9-fg);
+}
+.d9-tooltip .label { color: #8a90b4; }
+.d9-tooltip .value { color: #fff; font-weight: 600; }
+.d9-tooltip .hint { color: #6a6a86; }
+
+/* At-cursor readout stub in the inspector slot. Until
+   `transient.atCursor` is rendered properly, this proves the store contract
+   is populated during hover. */
+.d9-atcursor-readout {
+    margin: 0 0 10px;
+    padding: 6px 8px;
+    background: #10163000;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    font-size: 0.76em;
+    line-height: 1.6;
+}
+.d9-atcursor-row { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: baseline; }
+.d9-atcursor-row .label { color: var(--d9-fg-muted); }
+.d9-atcursor-row .value { color: var(--d9-fg); font-weight: 600; }
+.d9-atcursor-empty { color: var(--d9-fg-muted); font-style: italic; }
+.d9-atcursor-warn { color: #e0a94a; font-weight: 600; }
+
+/* ── Load chrome: drop zone, loading view, drag feedback
+   The layer is a fixed full-cover sibling of #app (like the toast region), so
+   the shell's declarative re-render never clobbers it. It is a modal (blocks
+   the trace) while the drop zone / loading view is up; a bare drag overlay
+   stays click-through so a `drop` reaches the document listener. */
+
+.d9-load-file-input { display: none; }
+
+.d9-load-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    display: none;
+}
+.d9-load-layer.open { display: block; }
+.d9-load-layer.modal { pointer-events: auto; }
+.d9-load-layer:not(.modal) { pointer-events: none; }
+.d9-load-render { height: 100%; }
+
+/* Drop zone (chooser) and loading view both fill the layer, centered. */
+.d9-drop-zone,
+.d9-load-view {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px;
+    text-align: center;
+    background: var(--d9-bg);
+    color: var(--d9-fg);
+}
+.d9-drop-zone {
+    margin: 24px;
+    border: 2px dashed #444;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.d9-drop-zone:hover,
+.d9-drop-zone.dragover {
+    border-color: var(--d9-accent);
+    background: #1d1d38;
+}
+.d9-drop-zone:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -6px; }
+.d9-drop-title { font-size: 1em; max-width: 460px; }
+.d9-drop-title code {
+    background: #2a2a4a;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+}
+.d9-drop-sub { font-size: 0.8em; color: var(--d9-fg-muted); }
+.d9-load-demo { color: var(--d9-accent); font-size: 0.9em; text-decoration: none; }
+.d9-load-demo:hover { text-decoration: underline; }
+.d9-load-demo:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 2px; }
+
+/* Close control (#281 dismissal): only present when a trace waits behind. */
+.d9-load-close {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    width: 32px;
+    height: 32px;
+    background: #2a2a4a;
+    border: 1px solid var(--d9-border);
+    color: var(--d9-fg);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1.1em;
+    line-height: 1;
+}
+.d9-load-close:hover { background: #3a3a5a; }
+.d9-load-close:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* Loading view: spinner + phase label + elapsed + Back. */
+.d9-load-spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid #2f2f4a;
+    border-top-color: var(--d9-accent);
+    border-radius: 50%;
+    animation: d9-spin 0.8s linear infinite;
+    will-change: transform;
+}
+@keyframes d9-spin { to { transform: rotate(360deg); } }
+.d9-load-label { font-size: 0.95em; }
+.d9-load-back {
+    margin-top: 4px;
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 6px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+.d9-load-back:hover { background: #3a3a5a; }
+.d9-load-back:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* Replace drag overlay: shown when dragging a file over a loaded trace. */
+.d9-drag-overlay {
+    position: absolute;
+    inset: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(13, 13, 26, 0.85);
+    border: 2px dashed var(--d9-accent);
+    border-radius: 12px;
+    backdrop-filter: blur(4px);
+    z-index: 310;
+    pointer-events: none;
+}
+.d9-drag-overlay-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-align: center;
+    font-size: 1.2em;
+    color: var(--d9-fg);
+}
+.d9-drag-overlay-msg small { font-size: 0.65em; color: var(--d9-fg-muted); }
+
+/* Toolbar "New File"; rendered by the shell when a trace is loaded. */
+.d9-new-file-btn {
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.82em;
+    flex-shrink: 0;
+}
+.d9-new-file-btn:hover { background: #3a3a5a; }
+.d9-new-file-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* ── Region analysis: the flamegraph /
+   blocking-calls / heap panel that opens in the inspector Stack tab for a
+   Shift+drag region (or a whole-trace toolbar open). The `[data-region-host]`
+   is a binding-free node the controller renders into imperatively; the
+   embedded flamegraph widget lives in `.d9-region-fg` inside `.d9-region-fg-host`
+   and persists across the inspector's re-renders. */
+
+.d9-region-host { display: block; }
+.d9-region { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.d9-region-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.d9-region-tab {
+    font-size: 0.78em;
+    color: var(--d9-fg-muted);
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    cursor: pointer;
+}
+.d9-region-tab.on { color: var(--d9-fg); background: #26265a; border-color: var(--d9-accent); }
+.d9-region-tab:hover { color: var(--d9-fg); }
+.d9-region-tab:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+.d9-region-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78em;
+    color: #e0a94a;
+    background: rgba(224, 169, 74, 0.1);
+    border: 1px solid rgba(224, 169, 74, 0.4);
+    border-radius: 4px;
+    padding: 3px 8px;
+}
+
+.d9-region-body { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.d9-region-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+.d9-region-count { font-size: 0.8em; color: var(--d9-fg-muted); font-variant-numeric: tabular-nums; }
+.d9-region-showtime, .d9-region-popout {
+    font-size: 0.78em;
+    color: var(--d9-accent);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.d9-region-showtime:hover, .d9-region-popout:hover { background: #26265a; }
+.d9-region-showtime:focus-visible, .d9-region-popout:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+}
+
+.d9-region-fg-host { flex: 1; min-height: 360px; height: 46vh; position: relative; }
+.d9-region-fg { width: 100%; height: 100%; }
+
+.d9-heap-toggle { display: inline-flex; border: 1px solid var(--d9-border); border-radius: 4px; overflow: hidden; }
+.d9-heap-mode {
+    font-size: 0.76em;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: none;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.d9-heap-mode.on { color: #fff; background: #4caf50; }
+.d9-heap-mode:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+/* List/flame switch, shared by the poll inspector and the blocking panel. */
+.d9-stacks-view { display: inline-flex; border: 1px solid var(--d9-border); border-radius: 4px; overflow: hidden; }
+.d9-stacks-view-btn {
+    font-size: 0.72em;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: none;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.d9-stacks-view-btn.on { color: #fff; background: var(--d9-accent); }
+.d9-stacks-view-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+/* Poll-tab flamegraph: the title row splits label vs the view toggle; the host
+   sizes like the region flamegraph, and the cpu/sched section switch sits above
+   it when a poll carries both. */
+.d9-poll-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.d9-poll-fg-sections { display: inline-flex; gap: 4px; margin: 4px 0; }
+.d9-poll-fg-section {
+    font-size: 0.72em;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.d9-poll-fg-section.on { color: #fff; background: var(--d9-accent); border-color: var(--d9-accent); }
+.d9-poll-fg-section:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-poll-fg-host,
+.d9-task-dump-fg-host { min-height: 320px; height: 42vh; position: relative; }
+.d9-poll-fg,
+.d9-task-dump-fg { width: 100%; height: 100%; }
+
+/* Blocking-calls panel. */
+.d9-block-groupby select {
+    background: var(--d9-bg-track);
+    border: 1px solid var(--d9-border);
+    color: var(--d9-fg);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.82em;
+}
+.d9-block-note { color: var(--d9-fg-muted); font-size: 0.82em; line-height: 1.4; }
+.d9-block-bars { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.d9-block-row { display: flex; align-items: center; gap: 8px; font-size: 0.82em; }
+.d9-block-count { min-width: 40px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.d9-block-bar { display: inline-block; height: 12px; border-radius: 2px; opacity: 0.75; }
+.d9-block-leaf { color: var(--d9-fg); word-break: break-all; }
+.d9-block-pct { color: var(--d9-fg-muted); }
+.d9-block-row.c-lock .d9-block-count, .d9-block-row.c-lock .d9-block-bar { color: #ff4444; background: #ff4444; }
+.d9-block-row.c-io .d9-block-count, .d9-block-row.c-io .d9-block-bar { color: #ff8a65; background: #ff8a65; }
+.d9-block-row.c-poll .d9-block-count, .d9-block-row.c-poll .d9-block-bar { color: #4fc3f7; background: #4fc3f7; }
+.d9-block-row.c-syscall .d9-block-count, .d9-block-row.c-syscall .d9-block-bar { color: #888; background: #888; }
+.d9-block-row.c-other .d9-block-count, .d9-block-row.c-other .d9-block-bar { color: #cc66ff; background: #cc66ff; }
+.d9-block-row .d9-block-count { background: transparent; }
+
+.d9-block-group { border: 1px solid var(--d9-border); border-radius: 6px; margin-bottom: 8px; overflow: hidden; }
+.d9-block-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--d9-bg-panel);
+    flex-wrap: wrap;
+}
+.d9-block-group.c-lock .d9-block-group-head .d9-block-count { color: #ff4444; }
+.d9-block-group.c-io .d9-block-group-head .d9-block-count,
+.d9-block-group.c-poll .d9-block-group-head .d9-block-count,
+.d9-block-group.c-syscall .d9-block-group-head .d9-block-count,
+.d9-block-group.c-other .d9-block-group-head .d9-block-count { color: #ff8a65; }
+.d9-block-sub { margin: 8px 12px; border-left: 3px solid var(--d9-border); padding-left: 10px; }
+.d9-block-sub-head { color: var(--d9-fg-muted); font-size: 0.82em; margin-bottom: 2px; }
+.d9-block-frame { color: #aaa; font-family: ui-monospace, monospace; font-size: 0.8em; }
+.d9-block-frame.leaf { color: #fff; font-weight: 600; }
+.d9-block-frame.tokio { color: #555; }
+.d9-block-frame a { color: inherit; text-decoration: underline dotted; }
+.d9-block-examples { padding: 6px 12px; color: var(--d9-accent); font-size: 0.82em; }
+.d9-block-jump {
+    color: var(--d9-accent);
+    background: transparent;
+    border: none;
+    text-decoration: underline;
+    cursor: pointer;
+    margin-right: 8px;
+    padding: 0;
+    font-size: inherit;
+}
+.d9-block-jump:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-block-more { color: var(--d9-fg-muted); }
+
+/* ── Search palette (`/`): centered modal over tasks / spans / POIs ───── */
+
+.d9-search-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    z-index: 1050;
+}
+.d9-search-backdrop.open { display: block; }
+.d9-search {
+    position: fixed;
+    top: 12%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 560px;
+    max-width: calc(100vw - 32px);
+    max-height: 72vh;
+    display: flex;
+    flex-direction: column;
+    background: #151530;
+    border: 1px solid var(--d9-accent);
+    border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    color: var(--d9-fg);
+    z-index: 1051;
+    overflow: hidden;
+}
+.d9-search-input {
+    flex-shrink: 0;
+    background: #0f1629;
+    border: none;
+    border-bottom: 1px solid var(--d9-border);
+    color: var(--d9-fg);
+    font-size: 15px;
+    padding: 12px 16px;
+    outline: none;
+}
+.d9-search-input::placeholder { color: var(--d9-fg-muted); }
+.d9-search-results { overflow-y: auto; padding: 4px 0; }
+.d9-search-empty {
+    padding: 16px;
+    color: var(--d9-fg-muted);
+    font-size: 0.85em;
+    font-style: italic;
+}
+.d9-search-group {
+    padding: 6px 16px 2px;
+    font-size: 0.68em;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--d9-fg-muted);
+}
+.d9-search-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 5px 16px;
+    cursor: pointer;
+}
+.d9-search-row.active { background: #2a2a4a; }
+.d9-search-row:hover { background: #22224a; }
+.d9-search-badge {
+    flex-shrink: 0;
+    font-size: 0.62em;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: #131834;
+    font-weight: 600;
+}
+.d9-search-badge.k-task { background: #8f88ff; }
+.d9-search-badge.k-span { background: #5bd6a8; }
+.d9-search-badge.k-poi { background: #ffb454; }
+.d9-search-label {
+    flex-shrink: 0;
+    color: var(--d9-fg);
+    font-size: 0.86em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.d9-search-sub {
+    flex: 1;
+    min-width: 0;
+    color: var(--d9-fg-muted);
+    font-size: 0.8em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+}
+.d9-search-foot {
+    flex-shrink: 0;
+    padding: 6px 16px;
+    border-top: 1px solid var(--d9-border);
+    color: var(--d9-fg-muted);
+    font-size: 0.72em;
+}

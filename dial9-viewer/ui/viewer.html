@@ -4,6 +4,7 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>dial9 Trace Viewer</title>
+        <script src="ui-switch.js"></script>
         <link rel="stylesheet" href="flamegraph.css" />
         <style>
             /* Stacking layers (low -> high). Only the tiers that must agree on
@@ -1006,6 +1007,7 @@
 
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
+        <script src="session.js"></script>
         <script src="creds.js"></script>
         <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
@@ -1640,7 +1642,10 @@
                 if (pendingFocus) {
                     const focus = pendingFocus;
                     pendingFocus = null;
-                    focusOnWindow(focus);
+                    // Prefer selecting the actual span (exemplar deep links): if we
+                    // can resolve a span matching the focus window, focus it in the
+                    // span panel. Otherwise fall back to a plain timeline pan/zoom.
+                    if (!focusOnSpanFromDeepLink(focus)) focusOnWindow(focus);
                 }
                 // Record the TOTAL load time including the analysis+render phase
                 // that just ran in showViewer. The live `loadStartTime` timer was
@@ -1701,7 +1706,9 @@
             async function streamAndShowTrace(urls, name, opts = {}) {
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
-                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const credHeaders = Dial9Session.headers(
+                        window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
+                    );
                     const stream = list.length === 1
                         ? await TraceParser.fetchTraceStream(list[0], {
                             signal: loadAbortController?.signal,
@@ -1891,7 +1898,9 @@
                     // Attach bring-your-own-credentials headers if present. A
                     // tab opened directly (not from the browser page) has no
                     // inherited credentials — see the catch below.
-                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const credHeaders = Dial9Session.headers(
+                        window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
+                    );
                     const arrayBuffer = await TraceParser.fetchTraces(list, {
                         signal: loadAbortController?.signal,
                         headers: credHeaders,
@@ -1903,7 +1912,7 @@
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
-                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                    if (/HTTP 401/.test(err.message) && window.__Dial9CredentialStore && !__Dial9CredentialStore.has()) {
                         alert(
                             "This trace requires AWS credentials. Open it from the " +
                             "dial9 home page after applying your credentials, or this " +
@@ -1954,17 +1963,29 @@
             // for the server's default region and the listing comes back empty.
             // No-op when no creds are stored (region is header-only).
             const urlRegion = urlParams.get('s_region') || urlParams.get('aws_region');
-            if (urlRegion && window.Dial9Creds) {
-                const stored = Dial9Creds.get();
-                if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+            const urlMode = urlParams.get('s_credential_mode') || urlParams.get('credential_mode');
+            const urlRoleArn = urlParams.get('s_role_arn') || urlParams.get('aws_role_arn');
+            if (window.__Dial9CredentialStore) {
+                if (urlMode === 'ambient') __Dial9CredentialStore.setAmbient();
+                else if (urlMode === 'literal' && __Dial9CredentialStore.get().kind !== 'literal') {
+                    __Dial9CredentialStore.setLiteralMode();
+                } else if ((urlMode === 'role' || (!urlMode && urlRoleArn)) && urlRoleArn) {
+                    __Dial9CredentialStore.setRoleArn(urlRoleArn, urlRegion ? { region: urlRegion } : undefined);
+                } else if (!urlMode && !urlRoleArn && __Dial9CredentialStore.get().kind !== 'literal') {
+                    __Dial9CredentialStore.setAmbient();
+                }
+            }
+            if (urlRegion && window.__Dial9CredentialStore) {
+                const stored = __Dial9CredentialStore.get();
+                if (stored && stored.region !== urlRegion) __Dial9CredentialStore.setRegion(urlRegion);
             }
 
             // Credentialed JSON fetch for scope resolution: same BYO-credentials
             // headers loadTraceFromUrl attaches, so /api/browse runs under the
             // user's creds (BYOC) or the task's ambient identity (no creds).
             async function fetchJsonWithCreds(url) {
-                const headers = window.Dial9Creds ? Dial9Creds.headers() : {};
-                const resp = await fetch(url, { headers });
+                const headers = window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {};
+                const resp = await Dial9Session.fetch(url, { headers });
                 if (!resp.ok) {
                     const body = await resp.text().catch(() => '');
                     throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
@@ -1984,7 +2005,7 @@
                     }
                     await loadTraceFromUrl(urls);
                 } catch (err) {
-                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                    if (/HTTP 401/.test(err.message) && window.__Dial9CredentialStore && !__Dial9CredentialStore.has()) {
                         alert(
                             'This trace requires AWS credentials. Open it from the ' +
                             'dial9 home page after applying your credentials, or this ' +
@@ -2030,6 +2051,10 @@
                         endNs: urlParams.get('focus_end'),
                         worker: urlParams.get('focus_worker'),
                         taskId: urlParams.get('focus_task'),
+                        // When set, select+focus the matching tracing span (not just
+                        // pan the timeline). `focus_span_name` disambiguates when
+                        // many spans overlap the window (e.g. a slow-exemplar link).
+                        spanName: urlParams.get('focus_span_name'),
                     };
                 }
             }
@@ -2164,7 +2189,15 @@
                 _spanDurCache = null;
                 clearSpanTaskSelection();
                 if (trace.customEvents && trace.customEvents.length > 0) {
-                    const spanResult2 = buildSpanData(trace.customEvents);
+                    // Pass workerSpans (built above) so span active/idle segments
+                    // are reconstructed from each span's owning task's polls,
+                    // rather than the coarse on-wire SpanEnter/SpanExit segments.
+                    const spanResult2 = buildSpanData(
+                        trace.customEvents,
+                        workerSpans,
+                        trace.tidBindings,
+                        trace.blockInPlaceGaps,
+                    );
                     allSpans = spanResult2.allSpans;
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
@@ -2197,6 +2230,7 @@
                         const spanPrefixes = ["SpanEnter:", "SpanExit:", "SpanEnter__", "SpanExit__", "SpanClose__"];
                         const spanExact = new Set(["SpanEnterEvent", "SpanExitEvent", "SpanCloseEvent"]);
                         for (const ev of trace.customEvents) {
+                            if (ev.singleEventSpan) continue;
                             if (spanExact.has(ev.name)) continue;
                             if (spanPrefixes.some(p => ev.name.startsWith(p))) continue;
                             genericCustomEvents.push(ev);
@@ -2573,6 +2607,60 @@
                 if (taskId != null) selectedTaskId = Number(taskId);
                 if (worker != null) scrollToWorkerLane(Number(worker));
                 renderAll();
+            }
+
+            // Deep-link span focus: resolve the tracing span matching a focus
+            // window and select+focus it exactly as clicking its bar would, so a
+            // slow-exemplar link lands ON the span (not just near it in time — a
+            // long span's window overlaps dozens of others). Returns true when a
+            // span was focused, false to fall back to focusOnWindow (plain pan).
+            //
+            // The deep link's focus_start/end are WALL-CLOCK ns; client spans are
+            // MONOTONIC (built from customEvents), so convert with the same
+            // clock offset focusOnWindow uses. Matching: among spans overlapping
+            // the window (and matching focus_span_name when provided), pick the
+            // one whose [start,end] is closest to the requested window — the
+            // exemplar's own span is the tightest, boundary-aligned match.
+            function focusOnSpanFromDeepLink({ startNs, endNs, spanName }) {
+                if (startNs == null || !allSpans || allSpans.length === 0) return false;
+                const offset = (trace && trace.clockOffsetNs != null) ? trace.clockOffsetNs : 0;
+                const ws = Number(startNs) - offset;
+                const we = (endNs != null ? Number(endNs) : Number(startNs)) - offset;
+                if (!Number.isFinite(ws)) return false;
+
+                let best = null;
+                let bestScore = Infinity;
+                for (const s of allSpans) {
+                    if (spanName && s.spanName !== spanName) continue;
+                    // Require temporal overlap with the requested window.
+                    if (s.end < ws || s.start > we) continue;
+                    // Score by how far the span's edges sit from the requested
+                    // window edges (0 == exact match). Lower is better.
+                    const score = Math.abs(s.start - ws) + Math.abs(s.end - we);
+                    if (score < bestScore) { bestScore = score; best = s; }
+                }
+                if (!best) return false;
+
+                // Drive the same selection the span-panel click handler does.
+                clearSpanTaskSelection();
+                focusedSpanId = best.spanId;
+                selectedSpanId = best.spanId;
+                selectedSpanIds = new Set([best.spanId]);
+                let parentId = best.parentSpanId;
+                while (parentId != null && !selectedSpanIds.has(parentId)) {
+                    selectedSpanIds.add(parentId);
+                    parentId = spanMeta.get(parentId)?.parentSpanId ?? null;
+                }
+                if (best.taskId != null) selectedTaskId = best.taskId;
+
+                // Frame the view on the span (like navigateToSpan/jumpToPoi): show
+                // ~5x its duration so it sits in context, clamped to the trace.
+                const dur = Math.max(best.end - best.start, 0);
+                const viewDur = Math.max(dur * 5, 1e6);
+                viewStart = Math.max(minTs, best.start - viewDur * 0.3);
+                viewEnd = Math.min(maxTs, viewStart + viewDur);
+                renderAll();
+                return true;
             }
 
             // ── Lane DOM ──
@@ -3909,6 +3997,9 @@
                 const my = e.clientY - rect.top;
 
                 const bucket = findBucketAtXY(mx, my);
+                // Spans are clickable (focus the span / select its task), so show
+                // the pointer cursor on hover — matching the CE/CPU panels.
+                c.style.cursor = bucket ? "pointer" : "default";
                 if (bucket) {
                     const spans = bucket.spans;
                     const rep = bucket.representative;
@@ -3954,6 +4045,7 @@
             });
             document.getElementById("span-panel-canvas").addEventListener("mouseleave", () => {
                 tooltip.style.display = "none";
+                document.getElementById("span-panel-canvas").style.cursor = "default";
             });
 
             // Copy button handler for span field values
@@ -3985,15 +4077,9 @@
                             const parent = spanMeta.get(parentId);
                             parentId = parent?.parentSpanId ?? null;
                         }
-                        // Find the task that was polling when this span's first segment ran
-                        const firstSeg = hit.segments[0];
-                        if (firstSeg) {
-                            const polls = workerSpans[firstSeg.workerId]?.polls;
-                            if (polls) {
-                                const poll = polls.find(p => p.start <= firstSeg.start && p.end >= firstSeg.start);
-                                if (poll && poll.taskId) selectedTaskId = poll.taskId;
-                            }
-                        }
+                        // The owning task is resolved once in buildSpanData (poll
+                        // covering the span's enter) and stored on the span.
+                        if (hit.taskId != null) selectedTaskId = hit.taskId;
                         // Show percentile info
                         const durations = allSpans
                             .filter(s => s.spanName === hit.spanName)

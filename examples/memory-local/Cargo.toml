@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 tokio = { version = "1.51.0", default-features = false, features = ["time"] }
-dial9-tokio-telemetry = { path = "../../dial9-tokio-telemetry", features = [
+dial9 = { path = "../../dial9", default-features = false, features = [
+    "tokio",
     "memory-profiling",
 ] }

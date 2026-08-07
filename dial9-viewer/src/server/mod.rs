@@ -1,4 +1,4 @@
-use crate::storage::{EphemeralS3Config, S3Backend, StorageBackend};
+use crate::storage::{LocalBackend, StorageBackend};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
@@ -7,48 +7,146 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 
 mod browse;
 mod buckets;
+#[cfg(feature = "s3")]
 mod check;
 mod config;
+#[cfg(feature = "s3")]
+pub mod credentials;
+#[cfg(not(feature = "s3"))]
+#[path = "credentials_disabled.rs"]
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
+pub(crate) mod fold_stream;
 pub(crate) mod metrics;
 mod prefixes;
+#[cfg(feature = "s3")]
+mod s3;
+#[cfg(not(feature = "s3"))]
+#[path = "s3_disabled.rs"]
+mod s3;
+mod services;
+pub(crate) mod span_stats;
 pub(crate) mod tokio_stats;
 mod trace;
 mod upload;
 
 pub use upload::{UploadLimits, UploadStore};
 
-use credentials::{CredError, CredSource, MaybeCreds};
+use credentials::MaybeCreds;
 
-/// Detect a bucket's region via `HeadBucket`, reading `bucket_region()` on
-/// success and the `x-amz-bucket-region` response header on the redirect error
-/// that S3 returns when the client's region doesn't match the bucket's.
-///
-/// Shared by startup region detection ([`crate::build_app`]) and the
-/// `/api/credentials/check` endpoint.
-pub(crate) async fn region_from_head_bucket(
-    client: &aws_sdk_s3::Client,
-    bucket: &str,
-) -> Option<String> {
-    match client.head_bucket().bucket(bucket).send().await {
-        Ok(resp) => resp.bucket_region().map(|r| r.to_string()),
-        Err(err) => err.raw_response().and_then(|r| {
-            r.headers()
-                .get("x-amz-bucket-region")
-                .map(|v| v.to_string())
-        }),
-    }
+#[cfg(feature = "s3")]
+pub(crate) use s3::region_from_head_bucket;
+
+// Embed ONLY the built artifact set (`npm run build` output), never sources,
+// tests, or node_modules. A cargo-only checkout still compiles: the committed
+// `ui/dist/.gitkeep` keeps the folder present (empty UI until built). Release
+// CI runs the JS build before packaging, so published crates/binaries carry a
+// populated dist. See docs/adr/0004-viewer-ui-migration.md section 3.
+#[derive(Embed)]
+#[folder = "ui/dist/"]
+struct UiAssets;
+
+pub(crate) fn embedded_ui_asset(path: &str) -> Option<Vec<u8>> {
+    UiAssets::get(path).map(|file| file.data.into_owned())
 }
 
-#[derive(Embed)]
-#[folder = "ui/"]
-struct UiAssets;
+/// Default output key prefix for aggregate part-files.
+const DEFAULT_AGG_OUTPUT_PREFIX: &str = "flamegraph-data";
+const RAW_SPAN_STATS_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Destination for the aggregate part-files produced by demand-driven folding.
+///
+/// This is always a **server-owned** backend — never the request's source
+/// backend or the caller's bring-your-own credentials. That is the invariant
+/// that lets aggregation run against a read-only source bucket without failing
+/// on the first `PutObject`, and guarantees a caller's keys are never used for
+/// writes. There are two shapes:
+///   - [`AggOutput::s3`] persists parts to an operator-owned S3 bucket, so
+///     rollups survive restarts. Built from `--agg-output-bucket`.
+///   - [`AggOutput::temporary`] writes to a fresh process-local temporary
+///     directory that is removed at shutdown; rollups are recomputed after a
+///     restart. This is the default when no output bucket is configured.
+///
+/// The backend, bucket, and prefix always travel together, so they are one
+/// value rather than three independently-optional fields on [`AppState`].
+#[derive(Clone)]
+pub struct AggOutput {
+    /// Backend all aggregate writes go through.
+    backend: Arc<dyn StorageBackend>,
+    /// The S3 output bucket, or `None` for the process-local temporary
+    /// directory (whose [`LocalBackend`] ignores the bucket argument, so the
+    /// per-request source bucket rides along as an inert placeholder).
+    bucket: Option<String>,
+    /// Output key prefix (default [`DEFAULT_AGG_OUTPUT_PREFIX`]).
+    prefix: String,
+    /// Human-readable destination, captured at construction for startup logging
+    /// (the temp path is only reachable on the concrete backend, not `dyn`).
+    location: String,
+}
+
+impl AggOutput {
+    /// Persist aggregate parts to the operator-owned S3 `bucket` via `backend`
+    /// (built once at startup with the server's ambient identity, region-aware).
+    pub fn s3(bucket: impl Into<String>, backend: Arc<dyn StorageBackend>) -> Self {
+        let bucket = bucket.into();
+        let location = format!("s3://{bucket}");
+        Self {
+            backend,
+            bucket: Some(bucket),
+            prefix: DEFAULT_AGG_OUTPUT_PREFIX.to_string(),
+            location,
+        }
+    }
+
+    /// Write aggregate parts to a fresh process-local temporary directory,
+    /// removed when this value's last clone drops at server shutdown.
+    pub fn temporary() -> Self {
+        let backend = LocalBackend::new_temporary_aggregate();
+        let location = format!("temporary local directory ({})", backend.root().display());
+        Self {
+            backend: Arc::new(backend),
+            bucket: None,
+            prefix: DEFAULT_AGG_OUTPUT_PREFIX.to_string(),
+            location,
+        }
+    }
+
+    /// Override the output key prefix (default `flamegraph-data`).
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        self
+    }
+
+    pub(crate) fn backend(&self) -> Arc<dyn StorageBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The bucket argument for writes: the configured S3 output bucket, or the
+    /// request's `source_bucket` as an inert placeholder for the local
+    /// temporary backend (which ignores it).
+    pub(crate) fn output_bucket_for(&self, source_bucket: &str) -> String {
+        self.bucket
+            .clone()
+            .unwrap_or_else(|| source_bucket.to_string())
+    }
+
+    /// Human-readable destination, for startup logging.
+    pub(crate) fn location(&self) -> &str {
+        &self.location
+    }
+}
 
 #[derive(Clone)]
 #[non_exhaustive]
@@ -70,32 +168,36 @@ pub struct AppState {
     /// aggregation: any S3 bucket can run the `/api/flamegraph` refinement loop,
     /// but a local-directory source cannot.
     pub allow_byo_creds: bool,
+    /// Whether source keys use the production date-partitioned S3 layout.
+    ///
+    /// This controls time-scoped browse and service-discovery listings. It is
+    /// independent of credentials because non-S3 backends such as the simulator
+    /// can expose the same layout.
+    time_partitioned_source: bool,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
-    pub ephemeral_s3: Option<EphemeralS3Config>,
+    #[cfg(feature = "s3")]
+    pub ephemeral_s3: Option<crate::storage::EphemeralS3Config>,
     /// Mints credentials for the assume-role path (`x-dial9-aws-role-arn`). When
     /// `None`, role-arn requests are refused (the server has no identity wired to
     /// do the assuming); production sets the STS-backed assumer, tests inject a
     /// fake. Independent of `allow_byo_creds` so a deployment can offer one path,
     /// both, or neither.
+    #[cfg(feature = "s3")]
     pub role_assumer: Option<Arc<dyn credentials::RoleAssumer>>,
-    /// Output prefix for BYOC aggregation. Defaults to "flamegraph-data".
-    pub agg_output_prefix: String,
-    /// Output bucket for BYOC aggregation. `None` means write the aggregated
-    /// part-files back into the source bucket (the query-param `bucket`). Set it
-    /// (via `--agg-output-bucket`) when the source bucket is read-only, so the
-    /// output lands in a separate writable bucket.
-    pub agg_output_bucket: Option<String>,
-    /// Region-aware backend for [`Self::agg_output_bucket`], built once at
-    /// startup (the output bucket name is known then, so no per-request region
-    /// detection). Writes to the output bucket use the server's ambient identity
-    /// — the operator controls that bucket via `--agg-output-bucket`. `None`
-    /// when no output bucket override is configured; the BYOC path then writes
-    /// to the source bucket through the request's own (BYOC or ambient) backend.
-    pub agg_output_backend: Option<Arc<dyn StorageBackend>>,
+    /// Destination for BYOC aggregate part-files: an operator-owned S3 bucket
+    /// (persistent) or a process-local temporary directory (the default,
+    /// removed at shutdown). Always a server-owned backend — aggregate writes
+    /// never use the request's source credentials. See [`AggOutput`].
+    pub agg_output: AggOutput,
     /// Segment duration (seconds) for BYOC aggregation scope padding.
     pub agg_segment_secs: i64,
+    /// Bucket-name substring the UI's bucket picker filters on, advertised via
+    /// `/api/config` as `bucket_filter` (the filtering itself is client-side).
+    /// Defaults to "dial9"; empty disables filtering. See
+    /// [`Self::with_bucket_filter`].
+    pub bucket_filter: String,
     /// Process-global concurrency limits for the demand-driven fold pipeline,
     /// shared across all in-flight `/api/flamegraph` requests so total fold work
     /// is bounded application-wide (see [`FoldLimits`]).
@@ -116,35 +218,16 @@ impl AppState {
             agg: None,
             uploads: None,
             allow_byo_creds: false,
+            time_partitioned_source: false,
+            #[cfg(feature = "s3")]
             ephemeral_s3: None,
+            #[cfg(feature = "s3")]
             role_assumer: None,
-            agg_output_prefix: "flamegraph-data".to_string(),
-            agg_output_bucket: None,
-            agg_output_backend: None,
+            agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
+            bucket_filter: "dial9".to_string(),
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
-    }
-
-    /// Build an `AppState` backed by an S3 bucket, with automatic region
-    /// detection, bring-your-own-credentials support, and the assume-role
-    /// credential path enabled.
-    ///
-    /// This is the high-level entry point for embedders who want to serve
-    /// traces from S3 without replicating the CLI's setup logic:
-    ///
-    /// ```ignore
-    /// let state = AppState::from_bucket("my-traces", None).await;
-    /// let app = dial9_viewer::server::router(state);
-    /// // … customize app, then bind …
-    /// ```
-    pub async fn from_bucket(bucket: impl Into<String>, prefix: Option<String>) -> Self {
-        let bucket = bucket.into();
-        let backend = Arc::new(crate::s3_backend_for(&bucket).await);
-        let assumer = credentials::StsRoleAssumer::from_env().await;
-        Self::new(backend, Some(bucket), prefix)
-            .with_byo_creds(true)
-            .with_role_assumer(Arc::new(assumer))
     }
 
     /// Build an `AppState` backed by a local directory.
@@ -175,49 +258,47 @@ impl AppState {
         self
     }
 
-    /// Enable the bring-your-own-credentials path (S3 backends only). This also
-    /// enables on-demand aggregation; leave unset (the default) for local-dir
-    /// sources, where credentials are meaningless and aggregation is local.
+    /// Enable the bring-your-own-credentials path (S3 backends only).
+    ///
+    /// Enabling it also selects the production time-partitioned source layout
+    /// for backwards compatibility with existing S3 embedders.
     pub fn with_byo_creds(mut self, allow: bool) -> Self {
         self.allow_byo_creds = allow;
+        if allow {
+            self.time_partitioned_source = true;
+        }
         self
     }
 
-    /// Inject ephemeral-S3 plumbing (test seam; production leaves this unset).
-    #[doc(hidden)]
-    pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
-        self.ephemeral_s3 = Some(cfg);
+    /// Use production date/time-partitioned trace keys for browse and service
+    /// discovery without enabling AWS credential handling.
+    pub fn with_time_partitioned_source(mut self) -> Self {
+        self.time_partitioned_source = true;
         self
     }
 
-    /// Enable the assume-role credential path with the given assumer. Production
-    /// passes an [`crate::server::credentials::StsRoleAssumer`]; tests inject a
-    /// fake. Without this, `x-dial9-aws-role-arn` requests are refused.
-    pub fn with_role_assumer(mut self, assumer: Arc<dyn credentials::RoleAssumer>) -> Self {
-        self.role_assumer = Some(assumer);
-        self
-    }
-
-    pub fn with_agg_output_prefix(mut self, prefix: String) -> Self {
-        self.agg_output_prefix = prefix;
-        self
-    }
-
-    /// Set the output bucket for BYOC aggregation, paired with the region-aware
-    /// backend that writes to it. Pass `None` to keep the default of writing
-    /// back into the source bucket through the request's own backend.
-    pub fn with_agg_output_bucket(
-        mut self,
-        bucket: Option<String>,
-        backend: Option<Arc<dyn StorageBackend>>,
-    ) -> Self {
-        self.agg_output_bucket = bucket;
-        self.agg_output_backend = backend;
+    /// Set the destination for BYOC aggregate part-files. Defaults to a
+    /// process-local temporary directory ([`AggOutput::temporary`]); pass
+    /// [`AggOutput::s3`] to persist to an operator-owned bucket. In every case
+    /// the source backend is never used for aggregate writes.
+    pub fn with_agg_output(mut self, output: AggOutput) -> Self {
+        self.agg_output = output;
         self
     }
 
     pub fn with_agg_segment_secs(mut self, secs: i64) -> Self {
         self.agg_segment_secs = secs;
+        self
+    }
+
+    /// Set the bucket-name substring the UI's bucket picker uses to surface
+    /// trace buckets, advertised to clients via `/api/config` as
+    /// `bucket_filter` (T15; the match is case-insensitive and happens
+    /// client-side). Defaults to "dial9"; pass an empty string to disable the
+    /// filtering. A page can still override the advertised value per load with
+    /// a `bucket_filter=` query param on its own URL.
+    pub fn with_bucket_filter(mut self, filter: impl Into<String>) -> Self {
+        self.bucket_filter = filter.into();
         self
     }
 
@@ -227,9 +308,10 @@ impl AppState {
     /// When `bucket` is `Some`, the request targets the user's own bucket:
     /// resolve a backend from any supplied credentials, scope the source listing
     /// to `prefix` (falling back to the server default), and route output to the
-    /// configured `--agg-output-bucket` (through its own region-aware backend) or
-    /// else back into the source bucket. When `bucket` is `None`, fall back to
-    /// the server's `--agg` context if one is configured.
+    /// configured `--agg-output-bucket` or the shared process-local temporary
+    /// directory. The request's source backend is never used for aggregate
+    /// writes. When `bucket` is `None`, fall back to the server's `--agg`
+    /// context if one is configured.
     ///
     /// Returns `None` only when no `bucket` is given *and* the server has no
     /// `--agg` context — the caller maps that to 404. This is the single place
@@ -241,167 +323,40 @@ impl AppState {
         &self,
         bucket: Option<&str>,
         prefix: Option<&str>,
+        aws_region: Option<&str>,
         creds: MaybeCreds,
     ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
         use crate::ingest::aggregate::AggContext;
         if let Some(bucket) = bucket {
-            let backend = self.resolve(creds).await?;
+            let backend = self.resolve_with_region(creds, aws_region).await?;
             let source_prefix = prefix
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
                 .unwrap_or_default();
-            // Output may target a different, writable bucket than the (often
-            // read-only) source. When `--agg-output-bucket` is configured we
-            // write there through its own region-aware backend; otherwise we
-            // write back into the source bucket through the request's backend.
-            let (output_bucket, output) = match (&self.agg_output_bucket, &self.agg_output_backend)
-            {
-                (Some(out_bucket), Some(out_backend)) => {
-                    (out_bucket.clone(), Arc::clone(out_backend))
-                }
-                _ => (bucket.to_string(), Arc::clone(&backend)),
-            };
+            // Output goes through the server-owned backend, never through the
+            // request's source credentials: either the configured S3 output
+            // bucket or the process-local temporary directory.
+            let output_bucket = self.agg_output.output_bucket_for(bucket);
             tracing::info!(
                 %bucket,
                 %output_bucket,
                 resolved_source_prefix = %source_prefix,
-                output_prefix = %self.agg_output_prefix,
+                output_prefix = %self.agg_output.prefix(),
                 "agg: BYOC context"
             );
             Ok(Some(AggContext {
                 source: backend,
-                output,
+                output: self.agg_output.backend(),
                 source_bucket: bucket.to_string(),
                 source_is_local: false,
                 output_bucket,
-                output_prefix: self.agg_output_prefix.clone(),
+                output_prefix: self.agg_output.prefix().to_string(),
                 source_prefixes: vec![source_prefix],
                 segment_duration_secs: self.agg_segment_secs,
             }))
         } else {
             Ok(self.agg.clone())
         }
-    }
-
-    /// Pick the storage backend for a request given its credential source.
-    ///
-    /// Supplying credentials is always optional, and the two credentialed
-    /// transports are alternatives (the extractor already rejected supplying
-    /// both):
-    /// - malformed/incomplete/conflicting headers → 400
-    /// - [`CredSource::Static`] (and BYO enabled) → ephemeral S3 backend signed
-    ///   with the user's keys directly
-    /// - [`CredSource::AssumeRole`] (and an assumer wired) → assume the role with
-    ///   the server's own identity via STS, then build the ephemeral backend from
-    ///   the minted credentials
-    /// - [`CredSource::Default`] → the server's default backend
-    ///
-    /// When BYO is disabled (local-dir mode) any supplied credentials are
-    /// ignored and the default backend is used. A role-arn request against a
-    /// server with no assumer wired is a 400 (the feature is off here).
-    ///
-    /// The ephemeral client is pinned to the region carried on the request (the
-    /// `x-dial9-aws-region` header or `aws_region` query param). A cross-region
-    /// bucket therefore requires the correct region to ride along — the UI
-    /// detects it once via `/api/credentials/check` and then keeps it in the
-    /// stored credentials and the URL, so every subsequent request carries it.
-    /// A request that reaches the wrong regional endpoint fails with
-    /// [`StorageError::WrongRegion`] rather than an opaque error.
-    ///
-    /// [`StorageError::WrongRegion`]: crate::storage::StorageError::WrongRegion
-    pub async fn resolve(
-        &self,
-        creds: MaybeCreds,
-    ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
-        let parsed = match creds.0 {
-            Ok(parsed) => parsed,
-            Err(
-                e @ (CredError::Incomplete
-                | CredError::Malformed
-                | CredError::InvalidRegion
-                | CredError::ConflictingCredentials
-                | CredError::InvalidRoleArn),
-            ) => {
-                return Err((StatusCode::BAD_REQUEST, e.message().to_string()));
-            }
-        };
-
-        match parsed {
-            CredSource::Static(temp) if self.allow_byo_creds => {
-                self.log_chosen_identity(&temp, "bring-your-own credentials");
-                Ok(self.ephemeral_backend(temp))
-            }
-            CredSource::AssumeRole { role_arn, region } if self.allow_byo_creds => {
-                let temp = self.assume(&role_arn, region.as_deref()).await?;
-                self.log_chosen_identity(&temp, "assumed-role credentials");
-                Ok(self.ephemeral_backend(temp))
-            }
-            // BYO disabled (local-dir) — credentials are meaningless here.
-            CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
-            CredSource::Default => {
-                // No credential headers reached the backend. On a BYO-capable
-                // server this means we fall back to the server's ambient identity
-                // — the usual cause of a "wrong account" error.
-                if self.allow_byo_creds {
-                    tracing::debug!(
-                        "no x-dial9-aws-* credentials on request; using server's default identity"
-                    );
-                }
-                Ok(self.backend.clone())
-            }
-        }
-    }
-
-    /// Assume `role_arn` (with the server's own identity) and return the minted
-    /// credentials. Shared by `resolve` and the `/api/credentials/check` handler
-    /// so the single assume-and-map-to-error policy can't drift between them:
-    ///
-    /// - no assumer wired → 400 (the feature is off here; never silently fall
-    ///   back to the ambient identity, which would read the *wrong* account).
-    /// - STS failure → 401 with a generic body; the concrete cause (which can
-    ///   name the role/account) is logged server-side, never reflected.
-    pub(crate) async fn assume(
-        &self,
-        role_arn: &credentials::RoleArn,
-        region: Option<&str>,
-    ) -> Result<credentials::TempCredentials, (StatusCode, String)> {
-        let Some(assumer) = &self.role_assumer else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "this server does not support assume-role credentials".to_string(),
-            ));
-        };
-        tracing::info!(role_arn = %role_arn.as_str(), "assuming role for request");
-        assumer.assume_role(role_arn, region).await.map_err(|e| {
-            tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                "could not assume the requested role".to_string(),
-            )
-        })
-    }
-
-    /// Build an ephemeral S3 backend from temporary credentials (shared by the
-    /// BYOC and assume-role paths — both end here once they hold creds).
-    fn ephemeral_backend(&self, temp: credentials::TempCredentials) -> Arc<dyn StorageBackend> {
-        Arc::new(S3Backend::from_credentials(
-            temp.credentials,
-            temp.region.as_deref(),
-            &self.ephemeral_s3,
-        ))
-    }
-
-    /// Log which identity served the request — the access-key-id PREFIX only,
-    /// never the secret/token — so it is unambiguous in the logs whether the
-    /// user's keys, an assumed role, or the server's ambient identity made the
-    /// S3 call.
-    fn log_chosen_identity(&self, temp: &credentials::TempCredentials, via: &str) {
-        let akid_prefix: String = temp.credentials.access_key_id().chars().take(8).collect();
-        tracing::info!(
-            akid_prefix = %akid_prefix,
-            region = temp.region.as_deref().unwrap_or("(default)"),
-            "using {via} for request"
-        );
     }
 }
 
@@ -457,15 +412,23 @@ fn api_router(state: AppState) -> Router {
     let upload_route = Router::new()
         .route("/upload", axum::routing::post(upload::upload_trace))
         .layer(DefaultBodyLimit::max(upload_body_limit));
+    let raw_span_stats_post = axum::routing::post(span_stats::post_raw_span_stats)
+        .route_layer(DefaultBodyLimit::max(span_stats::RAW_SPAN_STATS_BODY_LIMIT))
+        // Acquire capacity before Bytes extraction buffers the request body.
+        .route_layer(raw_span_stats_concurrency_limit())
+        // Bound body buffering and decode work. This is outermost so timing out
+        // drops the inner future and releases its concurrency permit.
+        .route_layer(raw_span_stats_timeout(RAW_SPAN_STATS_REQUEST_TIMEOUT));
+    let span_stats_route = Router::new().route(
+        "/span-stats",
+        axum::routing::get(span_stats::get_span_stats).merge(raw_span_stats_post),
+    );
 
-    Router::new()
+    let router = Router::new()
         .route("/config", axum::routing::get(config::get_config))
         .route("/buckets", axum::routing::get(buckets::list_buckets))
-        .route(
-            "/credentials/check",
-            axum::routing::post(check::check_credentials),
-        )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
+        .route("/services", axum::routing::get(services::list_services))
         .route("/browse", axum::routing::get(browse::browse))
         .route("/object", axum::routing::get(trace::get_object))
         .route(
@@ -476,8 +439,11 @@ fn api_router(state: AppState) -> Router {
             "/tokio-stats",
             axum::routing::get(tokio_stats::get_tokio_stats),
         )
-        .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
+        .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded));
+    let router = s3::add_routes(router);
+    router
         .merge(upload_route)
+        .merge(span_stats_route)
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())
@@ -486,4 +452,135 @@ fn api_router(state: AppState) -> Router {
         // static-asset fetches. Publishes to the global `ServiceMetrics` sink.
         .layer(axum::middleware::from_fn(metrics::record_request_metrics))
         .with_state(state)
+}
+
+fn raw_span_stats_concurrency_limit() -> ConcurrencyLimitLayer {
+    ConcurrencyLimitLayer::new(span_stats::MAX_CONCURRENT_RAW_SPAN_STATS)
+}
+
+fn raw_span_stats_timeout(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Bytes;
+    use axum::http::Request;
+    use futures::stream;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Semaphore;
+    use tower::{Layer, ServiceExt, service_fn};
+
+    /// The temporary output uses the request's source bucket as the (ignored)
+    /// bucket argument, while an S3 output always writes to its own bucket
+    /// regardless of the source. This is the routing that keeps aggregate
+    /// writes off the caller's (possibly read-only) source bucket.
+    #[test]
+    fn output_bucket_for_routes_temp_to_source_and_s3_to_configured() {
+        let temp = AggOutput::temporary();
+        assert_eq!(temp.output_bucket_for("caller-source"), "caller-source");
+
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
+        let s3 = AggOutput::s3("operator-owned", backend);
+        assert_eq!(s3.output_bucket_for("caller-source"), "operator-owned");
+    }
+
+    #[tokio::test]
+    async fn raw_span_stats_concurrency_is_bounded() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let service = raw_span_stats_concurrency_limit().layer(service_fn({
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move |()| {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    release.acquire().await.unwrap().forget();
+                    Ok::<_, Infallible>(())
+                }
+            }
+        }));
+
+        let mut requests = Vec::new();
+        for _ in 0..span_stats::MAX_CONCURRENT_RAW_SPAN_STATS {
+            requests.push(tokio::spawn(service.clone().oneshot(())));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) < span_stats::MAX_CONCURRENT_RAW_SPAN_STATS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("configured number of requests should start");
+
+        requests.push(tokio::spawn(service.clone().oneshot(())));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            span_stats::MAX_CONCURRENT_RAW_SPAN_STATS,
+            "an additional request must wait for decode capacity"
+        );
+
+        release.add_permits(span_stats::MAX_CONCURRENT_RAW_SPAN_STATS);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while started.load(Ordering::SeqCst) <= span_stats::MAX_CONCURRENT_RAW_SPAN_STATS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiting request should start after capacity is released");
+        release.add_permits(1);
+        for request in requests {
+            request.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_span_stats_stalled_bodies_time_out_and_release_capacity() {
+        let route = axum::routing::post(|_: Bytes| async { StatusCode::OK })
+            .route_layer(DefaultBodyLimit::max(1024))
+            .route_layer(raw_span_stats_concurrency_limit())
+            .route_layer(raw_span_stats_timeout(Duration::from_millis(50)));
+        let app = Router::new().route("/", route);
+        let stalled_request = || {
+            Request::post("/")
+                .body(Body::from_stream(stream::pending::<
+                    Result<Bytes, Infallible>,
+                >()))
+                .unwrap()
+        };
+
+        let first = tokio::spawn(app.clone().oneshot(stalled_request()));
+        let second = tokio::spawn(app.clone().oneshot(stalled_request()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let waiting = tokio::spawn(
+            app.clone()
+                .oneshot(Request::post("/").body(Body::from("complete")).unwrap()),
+        );
+
+        assert_eq!(
+            first.await.unwrap().unwrap().status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            second.await.unwrap().unwrap().status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(waiting.await.unwrap().unwrap().status(), StatusCode::OK);
+    }
+
+    /// The default output prefix is applied and overridable, and the default
+    /// matches the CLI's `--agg-output-prefix` default.
+    #[test]
+    fn agg_output_prefix_defaults_and_overrides() {
+        assert_eq!(AggOutput::temporary().prefix(), DEFAULT_AGG_OUTPUT_PREFIX);
+        assert_eq!(
+            AggOutput::temporary().with_prefix("custom").prefix(),
+            "custom"
+        );
+    }
 }

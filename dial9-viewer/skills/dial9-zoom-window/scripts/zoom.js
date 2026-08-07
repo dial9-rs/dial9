@@ -29,7 +29,7 @@ function resolve(name) {
 }
 
 const { parseTrace, EVENT_TYPES, symbolizeChain, formatFrame } = require(resolve("trace_parser.js"));
-const { buildWorkerSpans, attachCpuSamples, buildSpanData } = require(resolve("trace_analysis.js"));
+const { buildWorkerSpans, attachCpuSamples, buildSpanData, globalQueueSeries } = require(resolve("trace_analysis.js"));
 
 function leafOf(sample, symbols) {
   const frames = symbolizeChain(sample.callchain, symbols);
@@ -161,7 +161,7 @@ async function main() {
     }
 
     // ── Queue depth across the window ──
-    const qs = (spans.queueSamples || []).filter((s) => s.t >= lo && s.t <= hi);
+    const qs = globalQueueSeries(trace, spans).filter((s) => s.t >= lo && s.t <= hi);
     if (qs.length) {
       const g = qs.map((s) => s.global);
       console.log(`\nglobal queue in window: max=${Math.max(...g)} min=${Math.min(...g)} (${qs.length} samples) — >0 means work was waiting behind the long poll`);
@@ -184,6 +184,14 @@ async function main() {
         console.log(`\ninner tracing spans of dominant ${dominant.durMs.toFixed(1)}ms poll (task ${dominant.task}): ${summary}`);
       }
     }
+
+    // ── Viewer deep link for this window ──
+    // `start`/`end` are ABSOLUTE monotonic ns, per the URL contract
+    // (dial9-viewer/ui/README.md, "URL contract (stable deep-link API)").
+    // The trace URL placeholder needs filling in because this script reads
+    // local files; the viewer needs the trace served over HTTP.
+    console.log(`\nviewer deep link (replace <TRACE_URL> with the served trace URL):`);
+    console.log(`  viewer.html?trace=<TRACE_URL>&start=${Math.round(lo)}&end=${Math.round(hi)}`);
   }
 }
 

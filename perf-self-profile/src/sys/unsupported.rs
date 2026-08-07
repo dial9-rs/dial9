@@ -13,6 +13,7 @@ fn unsupported<T>() -> io::Result<T> {
 /// Stub `PerfSampler` for non-Linux platforms.
 ///
 /// All constructors return [`io::ErrorKind::Unsupported`].
+#[derive(Debug)]
 pub struct PerfSampler {
     _private: (),
 }
@@ -22,10 +23,12 @@ impl PerfSampler {
         unsupported()
     }
 
+    #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_perf_only(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }
 
+    #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_ctimer_only(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }

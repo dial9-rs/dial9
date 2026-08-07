@@ -1,0 +1,86 @@
+//! Telemetry example using `DiskBuffer` for bounded disk usage.
+//!
+//! This demonstrates how to collect runtime telemetry with automatic file
+//! rotation so that trace files never exceed a configured total size on disk.
+//!
+//! Usage:
+//!   cargo run --example telemetry_rotating
+//!
+//! After running, inspect the trace files:
+//!   cargo run --example analyze_trace -- /tmp/telemetry_rotating/trace.0.bin
+
+use dial9::{Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder};
+use std::time::Duration;
+
+fn main() -> std::io::Result<()> {
+    let trace_dir = "/tmp/telemetry_rotating";
+
+    // DiskBuffer rotates to a new file when the current file exceeds
+    // `max_file_size`, and deletes the oldest files when total disk usage
+    // exceeds `max_total_size`.
+    //
+    // Files are written as `trace.0.bin`, `trace.1.bin`, etc.
+    let writer = DiskBuffer::builder()
+        .base_path(trace_dir)
+        .max_file_size(1024 * 1024) // rotate after 1 MiB per file
+        .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB of trace data on disk
+        .build()?;
+
+    // recorder(writer).build() plus attach_tokio_runtime installs telemetry hooks on the
+    // tokio runtime; the recorder owns the background flush/sampler thread.
+    let recorder = recorder(writer).build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+
+    let rt = recorder
+        .handle()
+        .attach_tokio_runtime(builder, TokioAttachOptions::default())
+        .expect("build tokio runtime");
+
+    dial9::block_on(&rt, async {
+        println!("Starting rotating-writer telemetry demo...");
+
+        // Spawn a batch of tasks that do a mix of yielding and sleeping to
+        // generate a realistic stream of poll/park/unpark events.
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            handles.push(tokio::spawn(async move {
+                for j in 0..200 {
+                    if j % 20 == 0 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                println!("Task {i} completed");
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        println!("All tasks completed");
+    });
+
+    // Dropping the runtime then the recorder flushes remaining events.
+    drop(rt);
+    drop(recorder);
+
+    // List the trace files that were written.
+    println!("\nTrace files in {trace_dir}/:");
+    for entry in std::fs::read_dir(trace_dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        println!(
+            "  {} ({} bytes)",
+            entry.file_name().to_string_lossy(),
+            meta.len()
+        );
+    }
+
+    println!("\nAnalyze a trace with:");
+    println!("  cargo run --example analyze_trace -- {trace_dir}/trace.0.bin");
+
+    Ok(())
+}

@@ -138,6 +138,17 @@ pub trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
 
+    /// Initialize this processor on the worker's Tokio runtime before the
+    /// pipeline begins processing segments.
+    ///
+    /// Drivers should call this once before [`process`](Self::process) and abort
+    /// pipeline construction if it returns an error. Default: no-op.
+    ///
+    /// The same panic-safety contract as [`process`](Self::process) applies.
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     /// Process a segment, transforming or consuming its data.
     /// Returns the (possibly modified) data for the next processor,
     /// or an error to skip this segment.

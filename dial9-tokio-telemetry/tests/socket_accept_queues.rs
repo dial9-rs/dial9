@@ -4,7 +4,10 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, SocketAcceptQueuesConfig, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{
+    MemoryBuffer, RecorderPerfExt, RecorderPipelineExt, SocketAcceptQueuesConfig,
+    TokioAttachOptions, recorder,
+};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
@@ -15,22 +18,18 @@ fn traced_runtime_records_socket_accept_queue_snapshot() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_custom_pipeline(|p| p.pipe(capture))
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_socket_accept_queues(
             SocketAcceptQueuesConfig::builder()
                 .sample_interval(Duration::ZERO)
                 .build(),
         )
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
     drop(client);
     drop(listener);
 
@@ -66,17 +65,13 @@ fn traced_runtime_does_not_record_socket_accept_queues_by_default() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .unwrap();
+        .build();
+    let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
     drop(client);
     drop(listener);
 

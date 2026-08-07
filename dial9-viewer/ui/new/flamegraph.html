@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<!-- The migrated flamegraph page: the Vite entry served at
+     /new/flamegraph.html (the new-UI path; the canonical /flamegraph.html
+     keeps serving the legacy page until removal - ADR-0004 section 8).
+     Static skeleton + styles are byte-faithful to the legacy page so the
+     rendered chrome is pixel-identical; ALL script lives in the module
+     entry (src/pages/flamegraph/main.ts) except ui-switch.js, which is
+     deliberately the same plain copied file both UI generations load. -->
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Flamegraph</title>
+        <script src="/ui-switch.js"></script>
+        <link rel="stylesheet" href="/flamegraph.css" />
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                background: #1a1a2e;
+                color: #e0e0e0;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                font-size: 14px;
+                display: flex;
+                flex-direction: column;
+                height: 100vh;
+                overflow: hidden;
+            }
+            .fg-page-header {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 6px 12px;
+                background: #16213e;
+                border-bottom: 1px solid #333;
+                font-size: 0.8em;
+                flex-shrink: 0;
+            }
+            .fg-page-header .fg-title { color: #6c63ff; font-weight: 600; }
+            .fg-page-header .fg-stats { color: #888; }
+
+            /* Main container */
+            #fg-container {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+
+            /* Loading */
+            #loading {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex: 1;
+                color: #888;
+                font-size: 1.1em;
+                gap: 0.6em;
+            }
+            #loading.hidden { display: none; }
+            .spinner {
+                width: 1.2em; height: 1.2em;
+                border: 2px solid #444;
+                border-top-color: #aaa;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+            }
+            @keyframes spin { to { transform: rotate(360deg); } }
+
+            /* Error */
+            #error {
+                display: none;
+                align-items: center;
+                justify-content: center;
+                flex: 1;
+                color: #ff6b6b;
+                font-size: 1em;
+                padding: 24px;
+                text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <!-- id="fg-header": mount point for page-level controls
+             (copy-link); the class/styling stays legacy-faithful. -->
+        <div class="fg-page-header" id="fg-header">
+            <span class="fg-title" id="fg-title">Flamegraph</span>
+            <span class="fg-stats" id="fg-stats"></span>
+        </div>
+        <div id="fg-container"></div>
+        <div id="loading"><div class="spinner"></div>Loading trace&hellip;</div>
+        <div id="error"></div>
+
+        <script type="module" src="/src/pages/flamegraph/main.ts"></script>
+    </body>
+</html>

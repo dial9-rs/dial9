@@ -2,7 +2,7 @@
 
 Design companion to the feature inventories (`01..03-*.md`, the functional
 contract), the constraints (`01-technical-constraints.md`, H*/S* references), and
-the stack decision (`docs/adr/0003-viewer-ui-migration.md`: TypeScript + Vite,
+the stack decision (`docs/adr/0004-viewer-ui-migration.md`: TypeScript + Vite,
 no framework, npm allowed, dist built in CI before packaging).
 
 Functional requirements are deliberately absent: the inventories ARE the
@@ -81,7 +81,7 @@ beat them but must not regress them.
 - **N17. Chrome cannot desynchronize from state.** DOM chrome renders
   declaratively from store state (see section 2.4); there is no code path that
   mutates chrome DOM outside a state-driven render. Removes the stale-DOM bug
-  class (per R2 in ADR-0003).
+  class (per R2 in ADR-0004).
 - **N18. Dev-build assertions.** Invariants that the types cannot carry
   (time-axis alignment, downsampling column bounds, store-update ordering) are
   runtime-asserted in dev builds and compiled out of release bundles.
@@ -374,6 +374,39 @@ mechanism for ever lifting the 100 MB cap - lifting it is the acceptance test.
   `test_*.js` files keep running via `scripts/e2e-trace-tests.sh`.
 - CI additions: `tsc --noEmit`, `vitest run`, and a `vite build` job proving
   dist compiles (N13).
+
+### Test-suite inventory (refreshed 2026-07-08, T01)
+
+Ground truth for T10/T11 suite counts, against HEAD (84a21e5). 28 `test_*.js`
+suites exist under `dial9-viewer/ui/` (`test_harness.js` is a shared helper,
+not a suite). 15 are registered in `scripts/e2e-trace-tests.sh` (the only CI
+that runs JS tests); the other 13 run in no CI today (local `node` only).
+
+New suites since the inventory snapshot - ALL five are CI-registered:
+
+| Suite | Added by | Covers |
+| --- | --- | --- |
+| `test_url_state.js` | #585 (ext. #607) | `url_state.js` serialize/parse round-trip incl. `aws_region` (features/01 A6/A7) |
+| `test_flamegraph_api.js` | #570 | `flamegraph_api.js` coverage math, UTC picker conversion, facet options (features/03 section P) |
+| `test_trace_properties.js` | #570 | `trace_properties.js` - JS/Rust decoder parity oracle (not loaded by any page; no feature rows) |
+| `test_runtime_groups.js` | #596 | `computeRuntimeGroups` / `buildRuntimeFilterData` (features/02 G21-G24, features/03 F167) |
+| `test_parse_yield_throttle.js` | #600 | `makePaintThrottle` shared parse-yield policy (features/02 B18) |
+
+Suites extended (not added) by the drift set: `test_fetch_traces.js` (#600:
+`fetchTracesStream` concat-parity / order / concurrent-dispatch /
+late-failure cases), `test_heatmap.js` (#600: `MAX_OPEN_BYTES` 200 MB
+assertion).
+
+Registered (15): `test_all_skills_snippets`, `test_creds`,
+`test_enclosing_spans`, `test_fetch_traces`, `test_flamegraph_api`,
+`test_flamegraph_export`, `test_parse_yield_throttle`,
+`test_prefix_detection`, `test_runtime_groups`, `test_stream_parse`,
+`test_task_lifecycle`, `test_trace_analysis`, `test_trace_integrity`,
+`test_trace_properties`, `test_url_state`.
+Unregistered (13, local-only): `test_block_in_place`, `test_diagnose_setup`,
+`test_directory_parse`, `test_directory_scale`, `test_flamegraph_recipes`,
+`test_format`, `test_heatmap`, `test_panel_layout`, `test_parse_key`,
+`test_parser`, `test_poll_color`, `test_slice`, `test_time_range`.
 - Release (`release.yml` + crates.io publish): `npm ci && npm run build` BEFORE
   `cargo publish` / binary builds, so packaged crates and binstall archives carry
   `ui/dist` (N12). Lockfile-pinned (N7).

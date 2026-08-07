@@ -39,8 +39,10 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// Storage-format version baked into the output key path
 /// (`{output_prefix}/v{N}/…`). Bump when changing *what* we persist and we want
 /// a deliberate recompute; reads/writes then target a fresh empty tree that
-/// repopulates lazily. The old tree is abandoned and GC'd out-of-band.
-pub(crate) const SAMPLES_FORMAT_VERSION: u32 = 3;
+/// repopulates lazily. The value is a monotonic cache namespace, not a schema
+/// revision, so skipped values are expected. The old tree is abandoned and
+/// GC'd out-of-band.
+pub const SAMPLES_FORMAT_VERSION: u32 = 7;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this
@@ -135,6 +137,20 @@ fn polls_part_key(output_prefix: &str, source_key: &str) -> String {
         root = versioned_root(output_prefix, &parse_source_bucket(source_key)),
         leaf = part_leaf_of(source_key),
     )
+}
+
+fn spans_part_key(output_prefix: &str, source_key: &str) -> String {
+    let (date, service, host) = parse_scope_fields(source_key);
+    format!(
+        "{root}/spans/service={service}/date={date}/host={host}/{leaf}.parquet",
+        root = versioned_root(output_prefix, &parse_source_bucket(source_key)),
+        leaf = part_leaf_of(source_key),
+    )
+}
+
+/// Public accessor for `spans_part_key` used by span_stats endpoint.
+pub(crate) fn spans_part_key_pub(output_prefix: &str, source_key: &str) -> String {
+    spans_part_key(output_prefix, source_key)
 }
 
 /// The `samples/` prefix for one source bucket under the versioned root — the
@@ -288,15 +304,25 @@ fn full_source_key(source_is_local: bool, source_bucket: &str, key: &str) -> Str
 /// Without this, N concurrent polls each running their own bounded batch could
 /// still oversubscribe the box by a factor of N.
 ///
-/// The two stages are bounded independently because they bottleneck on
-/// different resources:
+/// The stages are bounded independently because they bottleneck on different
+/// resources:
 ///
-/// - [`fetch`](Self::fetch): network-bound source GETs (~37–50 MB each). These
-///   spend almost all their time waiting on the network, so we run them at high
-///   concurrency (~2× available parallelism by default).
+/// - [`fetch`](Self::fetch): network-bound source GETs (~37–50 MB compressed
+///   each). Mostly waiting on the network; bounded by `inflight` in practice
+///   (a fetch can't start without an inflight permit).
 /// - [`cpu`](Self::cpu): gunzip + decode + parquet-encode, run on blocking
-///   threads. Sized to ~= available parallelism so concurrent folds don't
-///   oversubscribe the cores and inflate every fold's wall time.
+///   threads. This is the dominant memory consumer — decoding one segment
+///   expands to >1 GB of transient structures — so it is capped by a small
+///   ABSOLUTE number ([`MAX_DECODE_CONCURRENCY`]), NOT by core count. Scaling it
+///   with cores is what OOM-killed a 64-core box.
+/// - [`inflight`](Self::inflight): the total number of folds that may hold a
+///   fetched-but-not-yet-written segment buffer at once. This is the memory
+///   backstop: [`fold_one`] releases the fetch permit before acquiring the CPU
+///   permit (so network and CPU overlap), which means a decoded-slower-than-
+///   fetched work-list would otherwise let downloaded buffers pile up without
+///   bound between the two stages — thousands of them for a broad scope,
+///   OOM-killing the process. Holding one inflight permit across the *whole*
+///   fold caps the resident segment buffers regardless of work-list size.
 ///
 /// Part-file writes (small, network-bound) run ungated: they are cheap relative
 /// to the fetch and we don't want to hold a CPU permit across their I/O.
@@ -306,27 +332,58 @@ pub(crate) struct FoldLimits {
     pub fetch: Arc<Semaphore>,
     /// Bounds concurrent decode/encode work (CPU-bound).
     pub cpu: Arc<Semaphore>,
+    /// Bounds concurrently in-flight folds (memory backstop; held fetch→write).
+    pub inflight: Arc<Semaphore>,
 }
 
 impl FoldLimits {
     /// Construct with explicit permit counts. Each is clamped to at least 1 so a
-    /// zero never deadlocks the pipeline.
-    pub(crate) fn new(fetch_permits: usize, cpu_permits: usize) -> Self {
+    /// zero never deadlocks the pipeline. `inflight` bounds resident segment
+    /// buffers and must be ≥ `fetch` (a fetch can't proceed without an inflight
+    /// permit, so a smaller inflight would cap effective fetch concurrency).
+    pub(crate) fn new(fetch_permits: usize, cpu_permits: usize, inflight_permits: usize) -> Self {
         Self {
             fetch: Arc::new(Semaphore::new(fetch_permits.max(1))),
             cpu: Arc::new(Semaphore::new(cpu_permits.max(1))),
+            inflight: Arc::new(Semaphore::new(inflight_permits.max(1))),
         }
     }
 
-    /// Default sizing derived from available CPU parallelism: fetch at 2×
-    /// parallelism (network-bound, mostly waiting), CPU at 1× parallelism.
+    /// Default sizing.
+    ///
+    /// Memory — not cores — is the binding constraint on a fold, so the
+    /// memory-bound stages use small ABSOLUTE caps rather than scaling with
+    /// parallelism (an earlier core-scaled sizing OOM-killed a 64-core box:
+    /// 64 concurrent decodes × ~1.5 GB each ≈ 96 GB):
+    ///
+    /// - `cpu` (decode/encode) is the real memory lever: decoding one segment
+    ///   expands ~1.3M events to well over 1 GB of transient structures. Capped
+    ///   at [`MAX_DECODE_CONCURRENCY`] so peak decode memory is bounded to roughly
+    ///   that many segments regardless of core count, then further limited to the
+    ///   available parallelism on small boxes.
+    /// - `inflight` (whole-fold, memory backstop) bounds how many fetched
+    ///   segment buffers are resident; a small multiple of the decode cap gives
+    ///   fetch a little runway ahead of decode without unbounded pile-up.
+    /// - `fetch` (network) can safely exceed the memory caps since a GET only
+    ///   holds a compressed (~40 MB) buffer, but it never needs to exceed
+    ///   `inflight` (a fetch can't start without an inflight permit).
     pub(crate) fn from_available_parallelism() -> Self {
         let par = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self::new(par * 2, par)
+        let cpu = par.min(MAX_DECODE_CONCURRENCY);
+        let inflight = cpu * 2;
+        let fetch = inflight;
+        Self::new(fetch, cpu, inflight)
     }
 }
+
+/// Hard ceiling on concurrent segment decodes. Each decode transiently holds
+/// over a gigabyte (a ~1.3M-event segment expanded in memory), so this count
+/// times ~1.5 GB is roughly the fold pipeline's peak decode memory. Deliberately
+/// small and core-independent: adding cores speeds each decode but must not
+/// multiply the memory high-water mark.
+const MAX_DECODE_CONCURRENCY: usize = 6;
 
 impl Default for FoldLimits {
     fn default() -> Self {
@@ -339,6 +396,20 @@ struct EncodedParts {
     samples_buf: Vec<u8>,
     dict_buf: Vec<u8>,
     polls_buf: Vec<u8>,
+    spans_buf: Vec<u8>,
+    /// CPU-stage timing/count breakdown, threaded out to the per-file metric.
+    cpu_stats: CpuStageStats,
+}
+
+/// Timing and size breakdown of the CPU stage ([`decode_and_encode`]), surfaced
+/// to the per-file [`FoldFileMetrics`] so the fold's cost is attributable to
+/// gunzip vs. the individual decode phases vs. parquet encode.
+#[derive(Default)]
+struct CpuStageStats {
+    decompressed_bytes: u64,
+    gunzip: std::time::Duration,
+    parquet_encode: std::time::Duration,
+    decode: crate::ingest::decode::DecodeStats,
 }
 
 /// CPU-bound stage of a fold: gunzip + decode + parquet-encode over
@@ -347,12 +418,22 @@ struct EncodedParts {
 /// network-bound fetch and write stages. (The parquet encode previously ran on
 /// the async executor thread; moving it here keeps CPU work off the runtime.)
 fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedParts> {
+    use std::time::Instant;
+    let mut cpu_stats = CpuStageStats::default();
+
+    let t_gunzip = Instant::now();
     let raw = maybe_gunzip(bytes);
-    let (samples, stacks, polls) = decode::decode_samples(&raw, full_key)
-        .map_err(|e| anyhow::anyhow!("decode {full_key}: {e}"))?;
+    cpu_stats.gunzip = t_gunzip.elapsed();
+    cpu_stats.decompressed_bytes = raw.len() as u64;
+
+    let ((samples, stacks, polls, spans), decode_stats) =
+        decode::decode_samples_with_stats(&raw, full_key)
+            .map_err(|e| anyhow::anyhow!("decode {full_key}: {e}"))?;
+    cpu_stats.decode = decode_stats;
 
     // Always encode the samples part-file, even with zero rows: its existence is
     // the record that this file is folded, so it is never re-fetched.
+    let t_encode = Instant::now();
     let metadata = HashMap::new();
     let mut samples_buf = Vec::new();
     parquet_writer::write_samples(&mut samples_buf, &samples, &metadata)?;
@@ -364,10 +445,17 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
     let mut polls_buf = Vec::new();
     parquet_writer::write_polls(&mut polls_buf, &polls)?;
 
+    // Write spans part-file (may be empty for files with no tracing spans).
+    let mut spans_buf = Vec::new();
+    parquet_writer::write_spans(&mut spans_buf, &spans)?;
+    cpu_stats.parquet_encode = t_encode.elapsed();
+
     Ok(EncodedParts {
         samples_buf,
         dict_buf,
         polls_buf,
+        spans_buf,
+        cpu_stats,
     })
 }
 
@@ -375,13 +463,14 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
 ///
 /// The `samples/` part is the durable record of "this file is folded"
 /// ([`list_folded_leaves`] lists it; see ADR-0003), so it MUST be written LAST,
-/// only after the dict and polls parts have landed. Writing it concurrently
-/// would let a mid-write failure — or a cancelled fold task (the streaming
-/// endpoints abort in-flight folds whenever the client disconnects) — commit a
-/// file as folded while its dict/polls parts are missing, permanently: a folded
-/// file is never re-folded, so the gap would never heal. Orphaned dict/polls
-/// parts from the reverse interleaving are harmless — the file stays unfolded
-/// and a later re-fold idempotently overwrites the same keys.
+/// only after the dict, polls, and spans parts have landed. Writing it
+/// concurrently would let a mid-write failure — or a cancelled fold task (the
+/// streaming endpoints abort in-flight folds whenever the client disconnects) —
+/// commit a file as folded while its dict/polls/spans parts are missing,
+/// permanently: a folded file is never re-folded, so the gap would never heal.
+/// Orphaned dict/polls/spans parts from the reverse interleaving are harmless —
+/// the file stays unfolded and a later re-fold idempotently overwrites the same
+/// keys.
 async fn write_parts(
     output: &dyn StorageBackend,
     output_bucket: &str,
@@ -392,12 +481,17 @@ async fn write_parts(
     let part_key = samples_part_key(output_prefix, full_key);
     let dict_key = dict_part_key(output_prefix, full_key);
     let polls_key = polls_part_key(output_prefix, full_key);
-    let (dict_res, polls_res) = tokio::join!(
+    let spans_key = spans_part_key(output_prefix, full_key);
+    // Write dict, polls, and spans concurrently — all before the samples commit marker.
+    let (dict_res, polls_res, spans_res) = tokio::join!(
         output.put_object(output_bucket, &dict_key, encoded.dict_buf),
         output.put_object(output_bucket, &polls_key, encoded.polls_buf),
+        output.put_object(output_bucket, &spans_key, encoded.spans_buf),
     );
     dict_res.map_err(|e| anyhow::anyhow!("write dict {dict_key}: {e}"))?;
     polls_res.map_err(|e| anyhow::anyhow!("write polls {polls_key}: {e}"))?;
+    spans_res.map_err(|e| anyhow::anyhow!("write spans {spans_key}: {e}"))?;
+    // Samples part LAST — its presence is the folded-set record (ADR-0003).
     output
         .put_object(output_bucket, &part_key, encoded.samples_buf)
         .await
@@ -418,18 +512,49 @@ pub(crate) async fn fold_one(
     raw_key: &str,
     limits: &FoldLimits,
 ) -> anyhow::Result<()> {
+    use std::time::Instant;
+    // One per-file metric per fold: assemble phase timings as we go, emit once on
+    // the way out (success or failure). See `FoldFileMetrics`.
+    let mut metric = crate::server::metrics::FoldFileMetricsBuilder::new();
+    let t_total = Instant::now();
+    // Emit-on-exit helper so every early return still publishes what we measured.
+    let emit = |mut metric: crate::server::metrics::FoldFileMetricsBuilder,
+                total: std::time::Duration,
+                failed: bool| {
+        metric.total(total).failed(failed);
+        metric.emit();
+    };
+
+    // Memory backstop — held across the WHOLE fold (fetch → decode → write), so
+    // the number of resident ~40 MB segment buffers is bounded regardless of how
+    // many files the work-list spawned. Without this, fetch (fast, network) races
+    // ahead of decode (slow, CPU) and downloaded buffers pile up between the two
+    // stages, OOM-killing the process on a broad scope. Acquired before the fetch
+    // permit so a fold doesn't occupy fetch concurrency while waiting for memory.
+    let _inflight = limits
+        .inflight
+        .acquire()
+        .await
+        .expect("inflight semaphore is never closed");
+
     // Stage 1 — fetch (network-bound). Permit held only for the duration of the GET.
+    let t_fetch = Instant::now();
     let bytes = {
         let _permit = limits
             .fetch
             .acquire()
             .await
             .expect("fetch semaphore is never closed");
-        agg.source
-            .get_object(&agg.source_bucket, raw_key)
-            .await
-            .map_err(|e| anyhow::anyhow!("fetch {raw_key}: {e}"))?
+        match agg.source.get_object(&agg.source_bucket, raw_key).await {
+            Ok(b) => b,
+            Err(e) => {
+                emit(metric, t_total.elapsed(), true);
+                return Err(anyhow::anyhow!("fetch {raw_key}: {e}"));
+            }
+        }
     };
+    metric.fetch(t_fetch.elapsed());
+    metric.source_bytes(bytes.len() as u64);
 
     // Stage 2 — decode + encode (CPU-bound) on a blocking thread, gated so
     // concurrent folds don't oversubscribe the cores.
@@ -441,32 +566,56 @@ pub(crate) async fn fold_one(
             .acquire()
             .await
             .expect("cpu semaphore is never closed");
-        tokio::task::spawn_blocking(move || decode_and_encode(&bytes, &decode_key))
-            .await
-            .map_err(|e| anyhow::anyhow!("decode task panicked: {e}"))??
+        match tokio::task::spawn_blocking(move || decode_and_encode(&bytes, &decode_key)).await {
+            Ok(Ok(encoded)) => encoded,
+            Ok(Err(e)) => {
+                emit(metric, t_total.elapsed(), true);
+                return Err(e);
+            }
+            Err(e) => {
+                emit(metric, t_total.elapsed(), true);
+                return Err(anyhow::anyhow!("decode task panicked: {e}"));
+            }
+        }
     };
+    // Fold the CPU-stage breakdown into the metric before `encoded` is consumed
+    // by the writer.
+    let cpu = &encoded.cpu_stats;
+    metric
+        .gunzip(cpu.gunzip)
+        .decompressed_bytes(cpu.decompressed_bytes)
+        .decode_phases(&cpu.decode)
+        .parquet_encode(cpu.parquet_encode);
 
     // Stage 3 — write part-files (small, network-bound). Ungated.
-    write_parts(
+    let t_write = Instant::now();
+    let write_result = write_parts(
         &*agg.output,
         &agg.output_bucket,
         &agg.output_prefix,
         &full_key,
         encoded,
     )
-    .await
+    .await;
+    metric.write_parts(t_write.elapsed());
+
+    let failed = write_result.is_err();
+    emit(metric, t_total.elapsed(), failed);
+    write_result
 }
 
-/// LIST the folded set for one source bucket: the source-file leaf hashes that
-/// already have a samples part-file under that bucket's versioned root. Pruned
-/// to `source_bucket`, so a BYOC source's folded set never mixes with another's.
+/// LIST the folded set for one source bucket and optional service: the
+/// source-file leaf hashes that already have a samples part-file under that
+/// partitioned root. A BYOC source's folded set never mixes with another's, and
+/// a service scope does not enumerate sibling services.
 pub(crate) async fn list_folded_leaves(
     output: &dyn StorageBackend,
     output_bucket: &str,
     output_prefix: &str,
     source_bucket: &str,
+    service: Option<&str>,
 ) -> HashSet<String> {
-    let prefix = samples_prefix(output_prefix, source_bucket);
+    let prefix = folded_set_prefix(output_prefix, source_bucket, service);
     let objects = output
         .list_objects_all(output_bucket, &prefix)
         .await
@@ -493,11 +642,34 @@ pub(crate) async fn list_folded_leaves(
         .collect()
 }
 
+fn folded_set_prefix(output_prefix: &str, source_bucket: &str, service: Option<&str>) -> String {
+    let prefix = samples_prefix(output_prefix, source_bucket);
+    match service {
+        Some(service) => format!("{prefix}service={service}/"),
+        None => prefix,
+    }
+}
+
 /// How much of a scope has been folded so far. Reported on every query.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct Coverage {
     pub files_matched: usize,
     pub files_folded: usize,
+    /// Deterministic digest of the successfully represented folded leaf set.
+    /// Clients use this to ensure partial refreshes patch statistics produced
+    /// from exactly the same files, not merely the same file count. Omitted by
+    /// endpoints that do not track their represented set precisely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folded_set_id: Option<String>,
+    /// Deterministic digest of the full cached seed set this stream is working
+    /// toward. Seed-only exemplar refreshes expose it on every cumulative event,
+    /// allowing clients to preview subsets only when the final target matches
+    /// the catalog they are patching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_folded_set_id: Option<String>,
+    /// Number of matched files in the deterministic prefix eligible for new
+    /// folding in this request. Cached coverage may exceed this value.
+    pub fold_work_cap: usize,
     pub samples_folded: usize,
     /// Total bytes of all matched source files in the scope.
     pub total_bytes: u64,
@@ -623,6 +795,7 @@ pub(crate) type FacetFilters = HashMap<&'static str, String>;
 
 /// Accumulates distinct facet values across part-files. One `HashSet<String>`
 /// per facet definition.
+#[derive(Clone)]
 struct FacetAccum {
     /// Distinct values per facet (indexed same as [`FACETS`]).
     sets: Vec<HashSet<String>>,
@@ -658,7 +831,7 @@ impl FacetAccum {
 }
 
 /// The combined per-query filter: time range + poll-duration band + per-facet
-/// exact-match filters.
+/// exact-match filters + span-type filter.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SampleFilter {
     /// Optional time range filter (epoch nanoseconds, half-open: [start, end)).
@@ -680,6 +853,15 @@ pub(crate) struct SampleFilter {
     /// or absent = no constraint. For "source", the default is "cpu" (set by the
     /// endpoint when the param is absent).
     pub facets: FacetFilters,
+    /// Span type UID filter (raw 16 bytes). When Some, only samples whose
+    /// `enclosing_spans` column contains a matching type UID pass. Reads
+    /// the new v4 `enclosing_spans` column; old part-files without it pass all
+    /// samples when no span filter is active (backwards compatible).
+    pub span_type_uid: Option<[u8; 16]>,
+    /// Minimum span elapsed_ns for span filtering (inclusive).
+    pub min_span_ns: Option<i64>,
+    /// Maximum span elapsed_ns for span filtering (inclusive).
+    pub max_span_ns: Option<i64>,
 }
 
 /// One bar of the poll-duration histogram: a log-scale duration bucket
@@ -791,18 +973,64 @@ impl FlamegraphAccum {
     }
 
     /// Merge one folded file's samples part-file (and its optional stacks dict)
-    /// into the running totals.
+    /// into the running totals **transactionally**: both the sample counts and the
+    /// dict are staged into temporaries and committed only when the full merge
+    /// (samples + dict) succeeds. A failure in either step leaves `self` unchanged.
     pub(crate) fn merge(&mut self, samples: Vec<u8>, dict: Option<Vec<u8>>) -> anyhow::Result<()> {
-        self.read_samples_part(samples)?;
+        // Stage: clone the mutable state that read_samples_part and read_dict_part
+        // would mutate, so a failure in either step leaves self unchanged.
+        let mut staged_counts = self.counts.clone();
+        let mut staged_dict = self.dict.clone();
+        let mut staged_facets = self.facets.clone();
+        let mut staged_total = self.total_samples;
+        let mut staged_min_ts = self.min_ts;
+        let mut staged_max_ts = self.max_ts;
+        let mut staged_poll_hist = self.poll_hist.clone();
+
+        // Apply samples into the staged state.
+        self.read_samples_part_into(
+            samples,
+            &mut staged_counts,
+            &mut staged_dict,
+            &mut staged_facets,
+            &mut staged_total,
+            &mut staged_min_ts,
+            &mut staged_max_ts,
+            &mut staged_poll_hist,
+        )?;
+
+        // Apply dict into the staged state.
         if let Some(dict) = dict {
-            read_dict_part(dict, &mut self.dict)?;
+            read_dict_part(dict, &mut staged_dict)?;
         }
+
+        // Commit: both succeeded — swap staged state into self.
+        self.counts = staged_counts;
+        self.dict = staged_dict;
+        self.facets = staged_facets;
+        self.total_samples = staged_total;
+        self.min_ts = staged_min_ts;
+        self.max_ts = staged_max_ts;
+        self.poll_hist = staged_poll_hist;
         Ok(())
     }
 
-    /// Parse a single samples part-file and merge its rows into the running
-    /// accumulators, applying time/facet/band filters.
-    fn read_samples_part(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+    /// Parse a single samples part-file and merge its rows into the provided
+    /// staged accumulators, applying time/facet/band filters. Used by the
+    /// transactional [`merge`](Self::merge) to stage mutations without touching
+    /// `self` until both samples and dict succeed.
+    #[allow(clippy::too_many_arguments)]
+    fn read_samples_part_into(
+        &self,
+        data: Vec<u8>,
+        counts: &mut HashMap<[u8; 16], u64>,
+        _dict: &mut HashMap<Vec<u8>, Vec<String>>,
+        facets: &mut FacetAccum,
+        total_samples: &mut usize,
+        min_ts: &mut Option<i64>,
+        max_ts: &mut Option<i64>,
+        poll_hist: &mut PollHist,
+    ) -> anyhow::Result<()> {
         // `Bytes::from(Vec<u8>)` reuses the allocation (no copy); threading the
         // owned buffer in from the caller avoids the round-trip through `&[u8]`.
         let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
@@ -849,7 +1077,7 @@ impl FlamegraphAccum {
                 for (fi, col) in facet_cols.iter().enumerate() {
                     let val = extract_facet_value(col, i);
                     if let Some(ref v) = val {
-                        self.facets.sets[fi].insert(v.clone());
+                        facets.sets[fi].insert(v.clone());
                     }
                     row_values.push(val);
                 }
@@ -884,7 +1112,7 @@ impl FlamegraphAccum {
                 // Off-poll rows (no duration) don't fall in any log₂ bucket, so they
                 // simply don't contribute — matching the band's exclusion of them.
                 if let Some(k) = poll_dur.and_then(poll_bucket) {
-                    *self.poll_hist.entry(k).or_insert(0) += 1;
+                    *poll_hist.entry(k).or_insert(0) += 1;
                 }
 
                 // Poll-duration band filter. A row with no poll duration (null column,
@@ -904,19 +1132,35 @@ impl FlamegraphAccum {
                     }
                 }
 
+                // Span-type filter: when active, only samples whose
+                // enclosing_spans list contains a matching span_type_uid pass.
+                // Old part-files without the column pass all rows when no span
+                // filter is active (backwards compatible per design §7).
+                if let Some(ref wanted_uid) = self.filter.span_type_uid
+                    && !span_filter_matches(
+                        &batch,
+                        i,
+                        wanted_uid,
+                        self.filter.min_span_ns,
+                        self.filter.max_span_ns,
+                    )
+                {
+                    continue;
+                }
+
                 // Count this sample.
                 let mut id = [0u8; 16];
                 id.copy_from_slice(stack_arr.value(i));
-                *self.counts.entry(id).or_insert(0) += 1;
-                self.total_samples += 1;
+                *counts.entry(id).or_insert(0) += 1;
+                *total_samples += 1;
                 if let Some(ts) = ts_arr {
                     let v = ts.value(i);
-                    self.min_ts = Some(self.min_ts.map_or(v, |m| m.min(v)));
-                    self.max_ts = Some(self.max_ts.map_or(v, |m| m.max(v)));
+                    *min_ts = Some(min_ts.map_or(v, |m| m.min(v)));
+                    *max_ts = Some(max_ts.map_or(v, |m| m.max(v)));
                 }
                 // Track matched hosts for the "N hosts" badge.
                 if let Some(ref h) = row_values[host_facet_index()] {
-                    self.facets.matched_hosts.insert(h.clone());
+                    facets.matched_hosts.insert(h.clone());
                 }
             }
         }
@@ -961,27 +1205,33 @@ pub(crate) async fn fetch_sample_parts(
     Some((samples.ok()?, dict_data.ok()))
 }
 
-/// Fetch the samples + dict part-files for every folded key in `source_keys`,
-/// concurrently (`buffer_unordered`). Used to prime a [`FlamegraphAccum`] with
-/// the already-folded set before streaming new folds. The caller merges the
-/// returned buffers serially, so the accumulator needs no locking.
+/// Fetch the samples + dict part-files for each explicit source key,
+/// concurrently (`buffer_unordered`). Returns `(leaf, Result)` pairs keyed by
+/// [`part_leaf_of`] so callers can identify exactly which leaves succeeded or
+/// failed regardless of completion order. Used by the fold-stream driver to
+/// seed a [`FlamegraphAccum`] one bounded batch at a time.
 pub(crate) async fn fetch_folded_sample_parts(
     output: &dyn StorageBackend,
     bucket: &str,
     output_prefix: &str,
     source_keys: &[String],
-    folded: &HashSet<String>,
-) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+) -> Vec<(String, Result<(Vec<u8>, Option<Vec<u8>>), String>)> {
     use futures::stream::StreamExt;
-    let keys: Vec<String> = source_keys
-        .iter()
-        .filter(|sk| folded.contains(&part_leaf_of(sk)))
-        .cloned()
-        .collect();
-    futures::stream::iter(keys)
-        .map(|sk| async move { fetch_sample_parts(output, bucket, output_prefix, &sk).await })
+    futures::stream::iter(source_keys.iter().cloned())
+        .map(|sk| async move {
+            let leaf = part_leaf_of(&sk);
+            match fetch_sample_parts(output, bucket, output_prefix, &sk).await {
+                Some(parts) => (leaf, Ok(parts)),
+                None => (
+                    leaf,
+                    Err(format!(
+                        "{}: sample parts GET failed",
+                        sk.rsplit('/').next().unwrap_or(&sk)
+                    )),
+                ),
+            }
+        })
         .buffer_unordered(SAMPLES_READ_CONCURRENCY)
-        .filter_map(|x| async { x })
         .collect()
         .await
 }
@@ -1228,6 +1478,102 @@ pub(crate) fn ordered_full_keys_with_size(
     (keys, total_bytes)
 }
 
+/// Check if a sample row at index `i` has an enclosing span matching the
+/// span-type filter (type UID + optional duration band). Reads the nested
+/// `enclosing_spans` LIST<STRUCT> column. Returns `true` if ANY membership
+/// matches.
+///
+/// FAIL CLOSED: If the column is absent (old v3 part-file without span data)
+/// or malformed, returns `false` — no samples pass a span filter when the
+/// membership data is unavailable. This prevents silently including unvetted
+/// samples when a user explicitly requests span-scoped analysis.
+pub(crate) fn span_filter_matches(
+    batch: &arrow::record_batch::RecordBatch,
+    row: usize,
+    wanted_uid: &[u8; 16],
+    min_span_ns: Option<i64>,
+    max_span_ns: Option<i64>,
+) -> bool {
+    use arrow::array::{Array, AsArray};
+
+    let Some(col) = batch.column_by_name("enclosing_spans") else {
+        // Old part-file without enclosing_spans column — fail closed: the sample
+        // cannot prove membership, so it does not pass the span filter.
+        return false;
+    };
+    let list_arr = match col.as_list_opt::<i32>() {
+        Some(a) => a,
+        None => return false, // Malformed column — fail closed
+    };
+
+    if list_arr.is_null(row) {
+        return false;
+    }
+
+    let offsets = list_arr.offsets();
+    let start = offsets[row] as usize;
+    let end = offsets[row + 1] as usize;
+    if start == end {
+        return false; // Empty list = no enclosing spans
+    }
+
+    let values = list_arr.values();
+    let struct_arr = match values.as_struct_opt() {
+        Some(a) => a,
+        None => return false, // Malformed — fail closed
+    };
+
+    // Find span_type_uid and elapsed_ns columns in the struct.
+    let type_uid_col = struct_arr.column_by_name("span_type_uid").and_then(|c| {
+        c.as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+    });
+    let elapsed_col = struct_arr
+        .column_by_name("elapsed_ns")
+        .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+
+    let Some(type_uid_arr) = type_uid_col else {
+        return false; // Schema doesn't have the expected field — fail closed
+    };
+
+    // When duration bounds exist, the elapsed_ns column MUST be present and
+    // valid. If it's absent, fail closed — we cannot verify the bound.
+    let has_bounds = min_span_ns.is_some() || max_span_ns.is_some();
+    if has_bounds && elapsed_col.is_none() {
+        return false; // Cannot verify bounds without elapsed_ns — fail closed
+    }
+
+    for idx in start..end {
+        // Fail closed on null list children (malformed struct entries).
+        if struct_arr.is_null(idx) {
+            continue;
+        }
+        if type_uid_arr.is_null(idx) {
+            continue; // Null type UID — skip (fail closed for this child)
+        }
+        let uid = type_uid_arr.value(idx);
+        if uid == wanted_uid.as_slice() {
+            // Type matches. Check optional duration band.
+            if has_bounds {
+                let elapsed_arr = elapsed_col.unwrap(); // safe: checked above
+                if elapsed_arr.is_null(idx) {
+                    // Null elapsed when bounds are required — fail closed for this entry.
+                    continue;
+                }
+                let elapsed = elapsed_arr.value(idx);
+                if min_span_ns.is_some_and(|min| elapsed < min) {
+                    continue;
+                }
+                if max_span_ns.is_some_and(|max| elapsed > max) {
+                    continue;
+                }
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// Shared `Arc`-friendly handle bundle the server uses to run the refinement
 /// loop without re-reading config each call.
 #[derive(Clone)]
@@ -1244,7 +1590,154 @@ pub struct AggContext {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
     use super::*;
+    use crate::storage::{BucketInfo, StorageError};
+
+    /// A source backend that records the peak number of `get_object` calls
+    /// running at once, so a test can assert the in-flight fold cap holds. Each
+    /// GET holds the "in-flight" state briefly (a yield-heavy spin) so overlap is
+    /// observable, then returns junk bytes (decode fails downstream — the test
+    /// only cares about fetch-stage concurrency).
+    #[derive(Default)]
+    struct ConcurrencyProbe {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StorageBackend for ConcurrencyProbe {
+        fn list_buckets(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<BucketInfo>, StorageError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn list_objects(
+            &self,
+            _bucket: &str,
+            _prefix: &str,
+            _cap: usize,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::storage::ListPage, StorageError>> + Send + '_>>
+        {
+            Box::pin(async { Err(StorageError::NotFound("unused".into())) })
+        }
+        fn list_objects_all(
+            &self,
+            _bucket: &str,
+            _prefix: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn list_prefixes(
+            &self,
+            _bucket: &str,
+            _prefix: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn get_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(cur, Ordering::SeqCst);
+                // Hold the in-flight window open across several executor turns so
+                // concurrent folds actually overlap here.
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                // Junk bytes: fold_one's decode stage fails, but only AFTER the
+                // fetch — which is all this probe measures.
+                Ok(vec![0u8; 8])
+            })
+        }
+        fn put_object(
+            &self,
+            _bucket: &str,
+            _key: &str,
+            _data: Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// The in-flight cap bounds how many folds hold a fetched segment buffer at
+    /// once — the memory backstop against a broad scope OOM-killing the process.
+    /// Even with a high fetch permit count, concurrent `fold_one`s must never run
+    /// more source GETs simultaneously than `inflight` allows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inflight_cap_bounds_concurrent_fetches() {
+        use std::sync::atomic::Ordering;
+
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let agg = AggContext {
+            source: probe.clone() as Arc<dyn StorageBackend>,
+            output: probe.clone() as Arc<dyn StorageBackend>,
+            source_bucket: "src".to_string(),
+            source_is_local: false,
+            output_bucket: "out".to_string(),
+            output_prefix: "flamegraph-data".to_string(),
+            source_prefixes: vec![],
+            segment_duration_secs: 60,
+        };
+
+        // fetch permits high (32) but inflight capped low (3): the inflight cap
+        // must be the binding constraint on concurrent fetches.
+        const INFLIGHT: usize = 3;
+        let limits = FoldLimits::new(32, 8, INFLIGHT);
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..64 {
+            let agg = agg.clone();
+            let limits = limits.clone();
+            tasks.spawn(async move {
+                // Decode fails on junk bytes; we don't care about the result,
+                // only that the fetch obeyed the in-flight cap.
+                let _ = fold_one(&agg, &format!("raw-{i}"), &limits).await;
+            });
+        }
+        while tasks.join_next().await.is_some() {}
+
+        let peak = probe.peak.load(Ordering::SeqCst);
+        assert!(peak > 0, "probe should have observed fetches");
+        assert!(
+            peak <= INFLIGHT,
+            "peak concurrent fetches {peak} exceeded the in-flight cap {INFLIGHT}"
+        );
+    }
+
+    /// Regression guard for the OOM: the default fold sizing must NOT scale the
+    /// memory-bound decode stage with core count. On a big box the decode cap has
+    /// to stay small and absolute — a 64-core machine running 64 concurrent
+    /// ~1.5 GB decodes is ~96 GB and gets OOM-killed. `cpu` is the decode gate and
+    /// must never exceed MAX_DECODE_CONCURRENCY regardless of parallelism.
+    #[test]
+    fn default_fold_limits_do_not_scale_decode_with_cores() {
+        let limits = FoldLimits::from_available_parallelism();
+        assert!(
+            limits.cpu.available_permits() <= MAX_DECODE_CONCURRENCY,
+            "decode concurrency {} must stay within the absolute cap {MAX_DECODE_CONCURRENCY}",
+            limits.cpu.available_permits()
+        );
+        // The whole-fold (memory backstop) cap is a small multiple of the decode
+        // cap, and fetch never needs to exceed inflight.
+        assert!(
+            limits.inflight.available_permits() <= MAX_DECODE_CONCURRENCY * 2,
+            "inflight {} should stay a small multiple of the decode cap",
+            limits.inflight.available_permits()
+        );
+        assert!(
+            limits.fetch.available_permits() <= limits.inflight.available_permits(),
+            "fetch must not exceed inflight (a fetch needs an inflight permit)"
+        );
+    }
 
     #[test]
     fn sample_filter_source_and_thread() {
@@ -1297,6 +1790,7 @@ mod tests {
                 date: "2026-06-19".to_string(),
                 poll_duration_ns: *poll,
                 spawn_location: Some("src/main.rs:42".to_string()),
+                enclosing_spans: Vec::new(),
             })
             .collect();
         let mut buf = Vec::new();
@@ -1461,12 +1955,23 @@ mod tests {
         let sk = "s3://bkt/2026-06-19/1300/shale/host-a/boot-1/1-0.bin.gz";
         let pk = samples_part_key("flamegraph-data", sk);
         // Output is namespaced by source bucket, then partitioned by scope.
-        assert!(pk.starts_with(
-            "flamegraph-data/v3/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
-        ));
+        // Reference the version constant so bumping it doesn't break this test.
+        let expected_prefix = format!(
+            "flamegraph-data/v{SAMPLES_FORMAT_VERSION}/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
+        );
+        assert!(pk.starts_with(&expected_prefix));
         assert!(pk.ends_with(".parquet"));
         // Leaf is the content hash, idempotent across calls.
         assert_eq!(pk, samples_part_key("flamegraph-data", sk));
+    }
+
+    #[test]
+    fn folded_set_prefix_is_pruned_to_service() {
+        let prefix = folded_set_prefix("flamegraph-data", "bkt", Some("shale"));
+        assert_eq!(
+            prefix,
+            format!("flamegraph-data/v{SAMPLES_FORMAT_VERSION}/bucket=bkt/samples/service=shale/")
+        );
     }
 
     #[test]
@@ -1585,6 +2090,322 @@ mod tests {
         assert_eq!(
             ordered.iter().map(|o| &o.key).collect::<Vec<_>>(),
             by_key.iter().map(|o| &o.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// Verify span_filter_matches fails closed when enclosing_spans column is absent
+    /// (old v3 schema). A span filter should exclude rather than include samples
+    /// with no provable membership.
+    #[test]
+    fn span_filter_old_schema_fail_closed() {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::write_samples;
+
+        // Create a sample WITH NO enclosing_spans data (simulating old schema)
+        let samples = vec![ResolvedSample {
+            timestamp_ns: 1000,
+            stack_id: [1u8; 16],
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: Some(5_000_000),
+            spawn_location: Some("src/main.rs:42".to_string()),
+            enclosing_spans: Vec::new(), // empty = no membership
+        }];
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+
+        // A span filter with a specific span_type_uid should NOT match this sample.
+        let filter = SampleFilter {
+            span_type_uid: Some([42u8; 16]),
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(buf, None).unwrap();
+        assert_eq!(
+            accum.snapshot().total_samples,
+            0,
+            "span filter must fail closed: sample with no membership data must NOT pass"
+        );
+    }
+
+    /// Verify span_filter_matches works with valid membership data.
+    #[test]
+    fn span_filter_matches_valid_membership() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::write_samples;
+
+        let target_uid = [42u8; 16];
+        let samples = vec![ResolvedSample {
+            timestamp_ns: 1000,
+            stack_id: [1u8; 16],
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: Some(5_000_000),
+            spawn_location: Some("src/main.rs:42".to_string()),
+            enclosing_spans: vec![EnclosingSpanSummary {
+                span_uid: [1u8; 16],
+                span_type_uid: target_uid,
+                elapsed_ns: 10_000_000,
+                details_complete: true,
+            }],
+        }];
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+
+        // Filter matches the target uid
+        let filter = SampleFilter {
+            span_type_uid: Some(target_uid),
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(buf, None).unwrap();
+        assert_eq!(
+            accum.snapshot().total_samples,
+            1,
+            "span filter must match when membership is present"
+        );
+    }
+
+    /// Verify that min_span_ns/max_span_ns bounds work on exact boundaries.
+    #[test]
+    fn span_filter_exact_window_boundaries() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::write_samples;
+
+        let target_uid = [42u8; 16];
+        let make_sample = |elapsed_ns: u64| -> ResolvedSample {
+            ResolvedSample {
+                timestamp_ns: 1000,
+                stack_id: [1u8; 16],
+                worker_id: Some(1),
+                source: SOURCE_CPU_PROFILE,
+                source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+                host: "myhost".to_string(),
+                service: "shale".to_string(),
+                date: "2026-06-19".to_string(),
+                poll_duration_ns: None,
+                spawn_location: None,
+                enclosing_spans: vec![EnclosingSpanSummary {
+                    span_uid: [1u8; 16],
+                    span_type_uid: target_uid,
+                    elapsed_ns,
+                    details_complete: true,
+                }],
+            }
+        };
+
+        let samples = vec![
+            make_sample(1_000_000),  // exactly at min boundary
+            make_sample(5_000_000),  // in the middle
+            make_sample(10_000_000), // exactly at max boundary
+            make_sample(10_000_001), // just above max
+            make_sample(999_999),    // just below min
+        ];
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+
+        // Band [1ms, 10ms] inclusive — should keep exactly 3 samples
+        let filter = SampleFilter {
+            span_type_uid: Some(target_uid),
+            min_span_ns: Some(1_000_000),
+            max_span_ns: Some(10_000_000),
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(buf, None).unwrap();
+        assert_eq!(
+            accum.snapshot().total_samples,
+            3,
+            "span filter boundaries must be inclusive: [min, max]"
+        );
+    }
+
+    /// DELIVERABLE (span-explorer bug repro): the `span_type_uid` filter must keep
+    /// ONLY the samples enclosed by a span of the requested type, and the surviving
+    /// flamegraph must therefore contain ONLY that type's frames. This is the test
+    /// that makes a broken filter obvious: two span types (A, B) enclose samples
+    /// with clearly distinguishable stack frames ("frame_A_only" vs "frame_B_only").
+    /// Filtering to A must yield frame_A_only and NOT frame_B_only, and vice versa.
+    ///
+    /// The count-only span-filter tests above use identical stack frames, so they
+    /// would still pass if the filter mixed the wrong samples in. This test asserts
+    /// on the actual frames present in the folded stacks dictionary, so a filter
+    /// that lets the wrong span type's samples through fails loudly.
+    #[test]
+    fn span_filter_keeps_only_matching_span_types_frames() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::{write_samples, write_stacks_dict};
+
+        let type_a = [0xAAu8; 16];
+        let type_b = [0xBBu8; 16];
+
+        // Two stacks with distinct, easily-greppable leaf frames.
+        let stack_a = [0x0Au8; 16];
+        let stack_b = [0x0Bu8; 16];
+        let frames_a = vec!["frame_A_only".to_string(), "shared_root".to_string()];
+        let frames_b = vec!["frame_B_only".to_string(), "shared_root".to_string()];
+
+        let sample = |stack_id: [u8; 16], type_uid: [u8; 16], ts: u64| ResolvedSample {
+            timestamp_ns: ts,
+            stack_id,
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: vec![EnclosingSpanSummary {
+                span_uid: [1u8; 16],
+                span_type_uid: type_uid,
+                elapsed_ns: 5_000_000,
+                details_complete: true,
+            }],
+        };
+
+        // 3 samples enclosed by type A (frame_A_only), 2 by type B (frame_B_only).
+        let samples = vec![
+            sample(stack_a, type_a, 1000),
+            sample(stack_a, type_a, 1001),
+            sample(stack_a, type_a, 1002),
+            sample(stack_b, type_b, 1003),
+            sample(stack_b, type_b, 1004),
+        ];
+        let mut samples_buf = Vec::new();
+        write_samples(&mut samples_buf, &samples, &HashMap::new()).unwrap();
+
+        let mut dict = HashMap::new();
+        dict.insert(stack_a, frames_a.clone());
+        dict.insert(stack_b, frames_b.clone());
+        let mut dict_buf = Vec::new();
+        write_stacks_dict(&mut dict_buf, &dict).unwrap();
+
+        // Collect the distinct frame names present in the surviving (kept) stacks.
+        let surviving_frames =
+            |span_type_uid: Option<[u8; 16]>| -> std::collections::HashSet<String> {
+                let filter = SampleFilter {
+                    span_type_uid,
+                    facets: HashMap::from([("source", "cpu".to_string())]),
+                    ..Default::default()
+                };
+                let mut accum = FlamegraphAccum::new(filter);
+                accum
+                    .merge(samples_buf.clone(), Some(dict_buf.clone()))
+                    .unwrap();
+                let snap = accum.snapshot();
+                let mut frames = std::collections::HashSet::new();
+                for (stack_id, count) in &snap.stack_counts {
+                    assert!(*count > 0, "a stack with zero count should not be present");
+                    if let Some(fs) = snap.stacks_dict.get(stack_id) {
+                        for f in fs {
+                            frames.insert(f.clone());
+                        }
+                    }
+                }
+                frames
+            };
+
+        // Filter to type A: only frame_A_only survives.
+        let a = surviving_frames(Some(type_a));
+        assert!(
+            a.contains("frame_A_only"),
+            "type-A filter must keep frame_A_only, got {a:?}"
+        );
+        assert!(
+            !a.contains("frame_B_only"),
+            "type-A filter must NOT keep frame_B_only (broken filter leaks B), got {a:?}"
+        );
+
+        // Filter to type B: only frame_B_only survives.
+        let b = surviving_frames(Some(type_b));
+        assert!(
+            b.contains("frame_B_only"),
+            "type-B filter must keep frame_B_only, got {b:?}"
+        );
+        assert!(
+            !b.contains("frame_A_only"),
+            "type-B filter must NOT keep frame_A_only (broken filter leaks A), got {b:?}"
+        );
+
+        // No filter: both frames survive.
+        let both = surviving_frames(None);
+        assert!(
+            both.contains("frame_A_only") && both.contains("frame_B_only"),
+            "no span filter must keep both span types' frames, got {both:?}"
+        );
+    }
+
+    /// FlamegraphAccum::merge is transactional: a dict parse failure after
+    /// samples have been read must leave the accumulator unchanged.
+    #[test]
+    fn flamegraph_merge_dict_failure_leaves_accum_unchanged() {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::write_samples;
+
+        let sample = ResolvedSample {
+            timestamp_ns: 5000,
+            stack_id: [42u8; 16],
+            worker_id: Some(0),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: Vec::new(),
+        };
+        let mut samples_buf = Vec::new();
+        write_samples(&mut samples_buf, &[sample], &HashMap::new()).unwrap();
+
+        // A valid dict: the merge should succeed.
+        let filter = SampleFilter {
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter.clone());
+        accum.merge(samples_buf.clone(), None).unwrap();
+        assert_eq!(accum.snapshot().total_samples, 1);
+
+        // Now attempt a merge with garbage dict: must fail and leave accum
+        // unchanged (transactional — samples should not be committed).
+        let mut accum2 = FlamegraphAccum::new(filter);
+        let result = accum2.merge(samples_buf, Some(b"not valid parquet".to_vec()));
+        assert!(result.is_err(), "garbage dict must fail");
+        assert_eq!(
+            accum2.snapshot().total_samples,
+            0,
+            "transactional merge must leave accum unchanged on dict failure"
+        );
+    }
+
+    /// FlamegraphAccum::merge is transactional: a samples parse failure must
+    /// leave the accumulator unchanged.
+    #[test]
+    fn flamegraph_merge_samples_failure_leaves_accum_unchanged() {
+        let filter = SampleFilter {
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        let result = accum.merge(b"not valid parquet".to_vec(), None);
+        assert!(result.is_err(), "garbage samples must fail");
+        assert_eq!(
+            accum.snapshot().total_samples,
+            0,
+            "transactional merge must leave accum unchanged on samples failure"
         );
     }
 }

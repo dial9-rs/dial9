@@ -179,6 +179,12 @@ dial9 serve --bucket <raw-traces> --agg \
   [--agg-output-bucket <bucket>] [--agg-output-prefix flamegraph-data]
 ```
 
+For S3/BYOC aggregation, omitting `--agg-output-bucket` stores aggregate
+part-files in a process-local temporary directory. Source credentials only need
+read access, the source bucket is never modified, and rollups are recomputed
+after server restart. The temporary directory is removed when the server exits.
+Set `--agg-output-bucket` to retain the existing persistent S3-backed cache.
+
 `--agg-segment-secs` (default 60) sets the segment-duration pad for the time
 filter.
 

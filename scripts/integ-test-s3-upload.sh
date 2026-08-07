@@ -9,7 +9,7 @@ cd "$REPO_ROOT"
 
 BUCKET="dial9-integ-test-$$-$(date +%s)"
 REGION="${AWS_REGION:-us-east-1}"
-TRACE_PATH="/tmp/dial9-integ-test-$$/trace.bin"
+TRACE_PATH="/tmp/dial9-integ-test-$$/traces"
 SERVICE_PID=""
 POLL_INTERVAL=5      # seconds between S3 checks
 MAX_WAIT=120         # total seconds before giving up
@@ -61,7 +61,7 @@ aws s3api put-bucket-lifecycle-configuration \
     }'
 
 # --- start service ---
-mkdir -p "$(dirname "$TRACE_PATH")"
+mkdir -p "$TRACE_PATH"
 echo "Starting metrics-service with --s3-bucket $BUCKET ..."
 AWS_PROFILE="${AWS_PROFILE:-}" cargo run --release -p metrics-service --bin metrics-service -- \
     --trace-path "$TRACE_PATH" \

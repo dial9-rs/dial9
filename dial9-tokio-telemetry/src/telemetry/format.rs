@@ -1,6 +1,8 @@
 use crate::telemetry::task_metadata::TaskId;
+#[cfg(any(feature = "taskdump", test))]
+use dial9_trace_format::InternedStackFrames;
 use dial9_trace_format::types::{EventEncoder, FieldType};
-use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
+use dial9_trace_format::{InternedString, TraceEvent, TraceField};
 use serde::Serialize;
 use std::fmt;
 use std::io::{self, Write};
@@ -67,6 +69,7 @@ impl TraceField for WorkerId {
 /// Wire-format event for a task poll start.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct PollStartEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -84,6 +87,7 @@ pub struct PollStartEvent {
 /// Wire-format event for a task poll end.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct PollEndEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -95,6 +99,7 @@ pub struct PollEndEvent {
 /// Wire-format event for a worker park.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WorkerParkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -113,6 +118,7 @@ pub struct WorkerParkEvent {
 /// Wire-format event for a worker unpark.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WorkerUnparkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -132,72 +138,50 @@ pub struct WorkerUnparkEvent {
     pub tid: u32,
 }
 
+/// Legacy per-flush scheduler sample, summed across all runtimes.
+///
+/// Superseded by [`RuntimeMetricsEvent`], which reports the same metrics
+/// per-runtime rather than summed. No longer emitted by the recorder, but
+/// retained so the decoder can still read older traces (and so tests can
+/// synthesize old-format traces to exercise backwards compatibility).
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct QueueSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub global_queue: u8,
+    pub active_tasks: u64,
 }
 
-/// Wire-format event for process resource usage sampled from `getrusage(RUSAGE_SELF)`.
-#[derive(Debug, TraceEvent)]
+/// Wire-format event for per-runtime scheduler metrics, sampled periodically by
+/// the flush thread.
+///
+/// Supersedes [`QueueSampleEvent`], which summed queue depth and active-task
+/// count across every attached runtime into a single sample and so lost
+/// per-runtime granularity. One `RuntimeMetricsEvent` is emitted per runtime
+/// per sample, tagged with the runtime's identity so consumers can attribute a
+/// backlog to a specific runtime.
+#[derive(TraceEvent)]
 #[traceevent(wire_slot)]
-#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
-pub struct ProcessResourceUsageEvent {
-    /// Monotonic timestamp in nanoseconds.
+pub(crate) struct RuntimeMetricsEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
-    /// Cumulative user CPU time used by this process.
-    #[traceevent(unit = "ns")]
-    pub user_cpu_ns: u64,
-    /// Cumulative system CPU time used by this process.
-    #[traceevent(unit = "ns")]
-    pub system_cpu_ns: u64,
-    /// Maximum resident set size in bytes.
-    #[traceevent(unit = "bytes")]
-    pub max_rss_bytes: u64,
-    /// Page faults serviced without disk I/O.
-    pub minor_faults: u64,
-    /// Page faults serviced with disk I/O.
-    pub major_faults: u64,
-    /// Block input operations performed by the process.
-    pub block_input_ops: u64,
-    /// Block output operations performed by the process.
-    pub block_output_ops: u64,
-    /// Voluntary context switches performed by the process.
-    pub voluntary_context_switches: u64,
-    /// Involuntary context switches performed by the process.
-    pub involuntary_context_switches: u64,
-}
-
-/// Wire-format event for a TCP listener accept queue snapshot.
-#[derive(Debug, TraceEvent)]
-#[traceevent(wire_slot)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) struct TcpAcceptQueueEvent {
-    /// Monotonic timestamp in nanoseconds.
-    #[traceevent(timestamp)]
-    pub(crate) timestamp_ns: u64,
-    /// Linux socket cookie reported by sock_diag.
-    pub(crate) socket_cookie: u64,
-    /// Linux socket inode reported by sock_diag.
-    pub(crate) socket_inode: u64,
-    /// IP version for `local_addr`: 4 or 6.
-    pub(crate) ip_version: u8,
-    /// Local listener address.
-    pub(crate) local_addr: String,
-    /// Local listener port.
-    pub(crate) local_port: u16,
-    /// Completed connections waiting to be accepted.
-    pub(crate) pending_connections: u32,
-    /// Effective accept backlog limit.
-    pub(crate) backlog_limit: u32,
+    /// Interned runtime name, or the empty string for the unnamed default
+    /// runtime. Interned (not an owned `String`) so the recorder re-emits the
+    /// same handle every flush cycle instead of allocating the name each time —
+    /// runtime names are a tiny fixed set for the process lifetime.
+    pub runtime_name: InternedString,
+    /// Tasks currently pending in this runtime's global (injection) queue.
+    pub global_queue_depth: u32,
+    /// Tasks currently alive (spawned and not yet completed) in this runtime.
+    pub alive_tasks: u32,
 }
 
 /// Wire-format event for a task spawn.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct TaskSpawnEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -222,6 +206,7 @@ pub(crate) struct TaskTerminateEvent {
 /// after the task stayed idle past the configured threshold.
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg(any(feature = "taskdump", test))]
 pub(crate) struct TaskDumpEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -232,6 +217,7 @@ pub(crate) struct TaskDumpEvent {
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WakeEventEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -279,29 +265,4 @@ pub(crate) fn decode_events(
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     Ok(events)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn process_resource_usage_unit_annotations() {
-        use dial9_trace_format::TraceEvent;
-        let entry = ProcessResourceUsageEvent::schema_entry();
-        let units: Vec<(&str, &str)> = entry
-            .annotations()
-            .iter()
-            .filter(|a| a.key() == "unit")
-            .map(|a| (entry.fields()[a.field_index() as usize].name(), a.value()))
-            .collect();
-        assert_eq!(
-            units,
-            vec![
-                ("user_cpu_ns", "ns"),
-                ("system_cpu_ns", "ns"),
-                ("max_rss_bytes", "bytes"),
-            ]
-        );
-    }
 }

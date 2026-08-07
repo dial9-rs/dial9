@@ -20,18 +20,31 @@
     if (typeof FlamegraphDiff !== "undefined") return FlamegraphDiff;
     throw new Error("FlamegraphDiff not found. Load flamegraph_diff.js first.");
   }
+  function browserApi(root) {
+    return {
+      formatCoverageBadge: root.formatCoverageBadge,
+      foldErrorNotice: root.foldErrorNotice,
+      nextMaxFiles: root.nextMaxFiles,
+      refinementWorkDepth: root.refinementWorkDepth,
+      shouldAdoptRefinementSnapshot: root.shouldAdoptRefinementSnapshot,
+    };
+  }
   function getApi() {
     if (typeof require !== "undefined") return require("./flamegraph_api.js");
-    return {
-      formatCoverageBadge: window.formatCoverageBadge,
-      foldErrorNotice: window.foldErrorNotice,
-      nextMaxFiles: window.nextMaxFiles,
-    };
+    return browserApi(window);
   }
   function getSse() {
     if (typeof require !== "undefined") return require("./sse.js");
     if (typeof Dial9Sse !== "undefined") return Dial9Sse;
     throw new Error("Dial9Sse not found. Load sse.js first.");
+  }
+
+  function refinementLifecycleBadge(badge, lifecycle) {
+    const base = String(badge || "").replace(
+      / · (?:refining…|refined|refinement (?:incomplete|interrupted))(?= ·|$)/g,
+      "",
+    );
+    return lifecycle ? base + (base ? " · " : "") + lifecycle : base;
   }
 
   const D = getDiff();
@@ -586,26 +599,43 @@
     }
 
     // ── Per-side SSE stream ──
-    // One stream per side: the server emits the already-folded snapshot, then a
-    // fresh full snapshot per newly-folded file, and closes at its sampling cap
-    // (it owns the stop condition — no client polling or plateau detection). A
-    // new tree on either side triggers a re-merge + re-render. The cap is the
+    // One stream per side: the server emits cumulative snapshots after bounded
+    // cached batches, then a fresh full snapshot per newly-folded capped-prefix
+    // file, and closes when that work-list drains (the server owns the stop
+    // condition — no client polling or plateau detection). A new tree on either
+    // side triggers a re-merge + re-render. The cap is the
     // shared client-driven `maxFiles` (small initial fold, raised by "Load
     // more") rather than the server default.
-    function startSide(side, scope, status) {
+    function startSide(side, scope, status, preserveExisting = false) {
       const sse = getSse();
       const ctl = new AbortController();
+      const baselineFilesFolded = preserveExisting && status.coverage
+        ? Number(status.coverage.files_folded) || 0
+        : 0;
+      let adoptedSnapshot = !preserveExisting || baselineFilesFolded === 0;
       status.refining = true;
+      if (preserveExisting && status.badge) {
+        status.badge = refinementLifecycleBadge(status.badge, "refining…");
+        updateStats();
+      }
       updateMoreButton();
 
       sse.openSse(apiUrlFor({ scope, maxFiles }), {
         headers: headersFor(side),
         signal: ctl.signal,
         onEvent: (resp) => {
+          const cov = resp.coverage;
+          const incomingFilesFolded = cov ? Number(cov.files_folded) || 0 : 0;
+          if (!api.shouldAdoptRefinementSnapshot(
+            preserveExisting,
+            baselineFilesFolded,
+            incomingFilesFolded,
+          )) return;
+
+          adoptedSnapshot = true;
           if (side === "a") treeA = resp.tree; else treeB = resp.tree;
           status.total = resp.total_samples || (resp.tree && resp.tree.count) || 0;
           status.meta = resp.metadata || null;
-          const cov = resp.coverage;
           status.coverage = cov || null;
           if (cov != null) {
             status.badge = api.formatCoverageBadge(cov) + " · refining…";
@@ -620,14 +650,20 @@
           render();
         },
         onClose: () => {
-          // Server folded this side to its cap and closed the stream.
           status.refining = false;
-          status.badge = status.badge.replace(" · refining…", " · refined");
+          status.badge = refinementLifecycleBadge(
+            status.badge,
+            adoptedSnapshot ? "refined" : "refinement incomplete",
+          );
           updateStats();
           updateMoreButton();
         },
         onError: (e) => {
           status.refining = false;
+          if (preserveExisting && status.coverage) {
+            status.badge = refinementLifecycleBadge(status.badge, "refinement interrupted");
+            updateStats();
+          }
           updateMoreButton();
           onSideError(side, e);
         },
@@ -645,8 +681,8 @@
     // creds, and by "Load more" after raising the cap). Already-folded files are
     // re-served instantly, so a repoll only pays for the newly-uncapped tail.
     function repollSide(side) {
-      if (side === "a") { sideA.stop(); sideA = startSide("a", scopeA, statusA); }
-      else { sideB.stop(); sideB = startSide("b", scopeB, statusB); }
+      if (side === "a") { sideA.stop(); sideA = startSide("a", scopeA, statusA, true); }
+      else { sideB.stop(); sideB = startSide("b", scopeB, statusB, true); }
     }
 
     // "Load more data": raise the shared cap to ~4× the deepest fold so far
@@ -655,8 +691,8 @@
     moreBtn.addEventListener("click", () => {
       if (statusA.refining || statusB.refining) return;
       const deepest = Math.max(
-        (statusA.coverage && Number(statusA.coverage.files_folded)) || 0,
-        (statusB.coverage && Number(statusB.coverage.files_folded)) || 0,
+        api.refinementWorkDepth(statusA.coverage, maxFiles),
+        api.refinementWorkDepth(statusB.coverage, maxFiles),
         maxFiles,
       );
       maxFiles = api.nextMaxFiles(deepest);
@@ -688,7 +724,14 @@
     };
   }
 
-  const ex = { createDiffView, apiUrlFor, scopeLabel, isSearchFocusKey };
+  const ex = {
+    createDiffView,
+    apiUrlFor,
+    scopeLabel,
+    isSearchFocusKey,
+    browserApi,
+    refinementLifecycleBadge,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = ex;
   else exports.FlamegraphDiffView = ex;
 })(typeof exports === "undefined" ? this : exports);

@@ -1,6 +1,6 @@
 //! iai-callgrind benchmark for writer-side encoded-batch ingestion.
 //!
-//! Measures `DiskWriter::write_encoded_batch` on pre-encoded `Batch`
+//! Measures `DiskBuffer::write_encoded_batch` on pre-encoded `Batch`
 //! payloads so we can track writer-path regressions separately from encoder
 //! regressions. Uses a temporary file-backed writer (same path as production)
 //! and flushes once per run.
@@ -19,7 +19,7 @@ fn main() {}
 
 use dial9_core::collector::Batch;
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, PollEndEvent, PollStartEvent, TaskId, TaskSpawnEvent, WakeEventEvent, WorkerId,
+    DiskBuffer, PollEndEvent, PollStartEvent, TaskId, TaskSpawnEvent, WakeEventEvent, WorkerId,
     WorkerParkEvent, WorkerUnparkEvent,
 };
 use dial9_trace_format::encoder::Encoder;
@@ -95,7 +95,7 @@ fn batches(num_batches: usize) -> Vec<Batch> {
 
 fn write_encoded(batches: Vec<Batch>) -> usize {
     let tmp = TempDir::new().unwrap();
-    let mut writer = DiskWriter::single_file(tmp.path().join("trace")).unwrap();
+    let mut writer = DiskBuffer::single_file(tmp.path().join("trace")).unwrap();
     let mut total_bytes = 0usize;
 
     for batch in &batches {

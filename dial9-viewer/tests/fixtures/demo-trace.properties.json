@@ -1,75 +1,77 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 8993,
+  "total_samples": 13090,
   "by_source": {
-    "0": 147,
-    "1": 8846
+    "0": 116,
+    "1": 12974
   },
   "on_off_all": {
-    "on_runtime": 8993,
-    "off_runtime": 0
+    "on_runtime": 13080,
+    "off_runtime": 10
   },
   "on_off_by_source": {
     "0": {
-      "on": 147,
-      "off": 0
+      "on": 106,
+      "off": 10
     },
     "1": {
-      "on": 8846,
+      "on": 12974,
       "off": 0
     }
   },
   "worker_set": [
     0,
-    1
+    1,
+    2,
+    3
   ],
   "cpu_profile": {
-    "count": 147,
-    "distinct_stacks": 116,
-    "stack_sig_digest": "a9a7f7ccc3890e67",
-    "ts_count": 147,
-    "ts_span_ns": 3637993460,
-    "ts_delta_digest": "f23bfcd1eaa71887",
+    "count": 116,
+    "distinct_stacks": 109,
+    "stack_sig_digest": "5205b06ca07fe93d",
+    "ts_count": 116,
+    "ts_span_ns": 3866002419,
+    "ts_delta_digest": "4b3158d4832e70f5",
     "top_stacks": [
       {
-        "count": 8,
-        "depth": 129,
-        "leaf": "_Unwind_Find_FDE"
+        "count": 2,
+        "depth": 99,
+        "leaf": "writev"
       },
       {
-        "count": 6,
-        "depth": 129,
-        "leaf": "0xffff9ba4de60"
+        "count": 2,
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8c24de8c"
       },
       {
-        "count": 4,
-        "depth": 122,
-        "leaf": "0xffff9ba4c97c"
-      },
-      {
-        "count": 4,
-        "depth": 129,
-        "leaf": "0xffff9b87d200"
-      },
-      {
-        "count": 3,
-        "depth": 129,
-        "leaf": "0xffff9ba4de8c"
-      },
-      {
-        "count": 3,
-        "depth": 59,
-        "leaf": "0xffff9babd2f8"
-      },
-      {
-        "count": 3,
-        "depth": 122,
+        "count": 2,
+        "depth": 107,
         "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 122,
-        "leaf": "0xffff9ba4de54"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8c24de58"
+      },
+      {
+        "count": 2,
+        "depth": 89,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 98,
+        "leaf": "<F as axum::handler::Handler<(M,T1,T2),S>>::call::{{closure}}"
+      },
+      {
+        "count": 2,
+        "depth": 113,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 1,
+        "depth": 140,
+        "leaf": "<time::offset_date_time::OffsetDateTime as core::ops::arith::Add<core::time::Duration>>::add"
       }
     ]
   }

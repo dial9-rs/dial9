@@ -1,0 +1,54 @@
+// Tests for the viewer track catalogue + per-track geometry.
+// The load-bearing property: every track shares ONE drawW so their time
+// axes line up - a shell regression here silently misaligns tracks, so it
+// is asserted explicitly.
+
+import { describe, it, expect } from "vitest";
+import { TRACKS, LABEL_W, trackGeometry } from "./track-layout.js";
+import type { TrackSpec } from "./track-layout.js";
+
+const opts = { pw: 1000, viewStart: 0, viewEnd: 4_000_000_000, dpr: 1 };
+
+describe("track catalogue", () => {
+  it("orders the unified column: axis, lanes, task detail, then analysis surfaces", () => {
+    expect(TRACKS.map((t) => t.id)).toEqual([
+      "timeline",
+      "lanes",
+      "task-detail",
+      "cpu",
+      "queue",
+      "spans",
+      "events",
+    ]);
+  });
+
+  it("marks only task-detail as selection-only", () => {
+    const selectionOnly = TRACKS.filter((t) => t.selectionOnly).map((t) => t.id);
+    expect(selectionOnly).toEqual(["task-detail"]);
+  });
+});
+
+describe("trackGeometry - shared axis", () => {
+  it("gives every track the same drawW at a fixed column width", () => {
+    const drawWs = new Set(TRACKS.map((t) => trackGeometry(t, opts).time.drawW));
+    expect(drawWs.size).toBe(1);
+  });
+
+  it("splits width as LABEL_W gutter + drawW (no scrollbar)", () => {
+    const t = TRACKS[0] as TrackSpec;
+    const g = trackGeometry(t, opts);
+    expect(g.time.drawW).toBe(opts.pw - LABEL_W);
+  });
+
+  it("subtracts the scrollbar gutter so the right edge matches the lanes", () => {
+    const t = TRACKS[0] as TrackSpec;
+    const g = trackGeometry(t, { ...opts, scrollbarW: 15 });
+    expect(g.time.drawW).toBe(opts.pw - LABEL_W - 15);
+  });
+
+  it("carries the track height into the geometry box", () => {
+    for (const t of TRACKS) {
+      expect(trackGeometry(t, opts).height).toBe(t.height);
+    }
+  });
+});

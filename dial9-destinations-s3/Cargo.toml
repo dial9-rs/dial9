@@ -1,0 +1,53 @@
+[package]
+name = "dial9-destinations-s3"
+version = "0.5.0-rc2"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "S3 upload destination for dial9 trace segments"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[dependencies]
+dial9-core = { workspace = true, features = ["pipeline"] }
+bon = "3"
+# `sync` is used directly (S3Uploader holds a tokio Mutex); do not rely on the
+# aws-smithy stack to enable it.
+tokio = { version = "1", features = ["fs", "sync"], default-features = false }
+tracing = "0.1.44"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+    "sigv4a",
+    "rt-tokio",
+    "default-https-client",
+] }
+aws-config = { version = "1", default-features = false }
+time = { version = "0.3", features = ["formatting", "macros"] }
+hostname = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+dial9-core = { workspace = true, features = ["pipeline", "test-util"] }
+assert2 = { workspace = true }
+async-trait = "0.1.89"
+flate2 = "1"
+tempfile = "3"
+tokio = { version = "1.52.0", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+    "net",
+    "sync",
+    "time",
+    "test-util",
+] }
+s3s = "0.14.1"
+s3s-fs = "0.14.1"
+s3s-aws = "0.14.1"

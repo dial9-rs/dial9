@@ -21,6 +21,10 @@ function key(host, epoch, i) {
   return `traces/2026-06-29/1915/shale/${host}/abcd-boot/${epoch}-${i}.bin.gz`;
 }
 
+function keyForService(service, host, epoch, i) {
+  return `traces/2026-06-29/1915/${service}/${host}/abcd-boot/${epoch}-${i}.bin.gz`;
+}
+
 // --- parseKey / extractPrefix (moved here; keep parity) --------------------
 
 test("parseKey reads the boot_id layout", () => {
@@ -72,6 +76,8 @@ test("encodeScope/readScope round-trips a scope", () => {
   const s = {
     bucket: "cell1-prod-pdx-dial9-traces",
     region: "us-west-2",
+    roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
+    credentialMode: "",
     prefix: "traces",
     service: "shale",
     hosts: ["ip-10-2-1-1", "ip-10-2-1-2"],
@@ -79,17 +85,26 @@ test("encodeScope/readScope round-trips a scope", () => {
     to: 1782760800,
   };
   const { query } = scope.encodeScope(new URLSearchParams(), s);
+  // The role ARN rides in the scope so a link opened in a fresh session still
+  // has an identity to read the bucket with.
+  assert.strictEqual(
+    new URLSearchParams(query).get("s_role_arn"),
+    s.roleArn,
+    "role ARN serialized",
+  );
   const got = scope.readScope(new URLSearchParams(query));
   assert.deepStrictEqual(got, s);
 });
 
-test("encodeScope/readScope round-trips an empty region as ''", () => {
-  // A region-less scope (bucket in the server's default region, or unknown)
-  // must still round-trip cleanly: encodeScope omits s_region, readScope
-  // normalizes the absence back to "".
+test("encodeScope/readScope round-trips an empty region/role as ''", () => {
+  // A region- and role-less scope (bucket in the server's default region, read
+  // with the tab's own creds) must still round-trip cleanly: encodeScope omits
+  // s_region/s_role_arn, readScope normalizes the absence back to "".
   const s = {
     bucket: "b",
     region: "",
+    roleArn: "",
+    credentialMode: "",
     prefix: "traces",
     service: "shale",
     hosts: ["h1"],
@@ -98,6 +113,7 @@ test("encodeScope/readScope round-trips an empty region as ''", () => {
   };
   const { query } = scope.encodeScope(new URLSearchParams(), s);
   assert.strictEqual(new URLSearchParams(query).get("s_region"), null, "empty region not serialized");
+  assert.strictEqual(new URLSearchParams(query).get("s_role_arn"), null, "empty role not serialized");
   assert.deepStrictEqual(scope.readScope(new URLSearchParams(query)), s);
 });
 
@@ -242,12 +258,35 @@ test("scopeFromKeys region survives an aggregation round-trip", () => {
   assert.strictEqual(new URLSearchParams(query).get("aws_region"), "us-west-2");
 });
 
+test("scopeFromKeys carries the role ARN when supplied, else ''", () => {
+  const keys = [key("h1", 1782760100, 1)];
+  const arn = "arn:aws:iam::123456789012:role/Dial9TraceReader";
+  assert.strictEqual(
+    scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800, "us-west-2", arn).roleArn,
+    arn,
+    "role ARN threaded through",
+  );
+  // Trailing/optional: existing 5-arg callers get an empty roleArn, not undefined.
+  assert.strictEqual(scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800, "us-west-2").roleArn, "");
+});
+
+test("scopeFromKeys role ARN survives an aggregation round-trip", () => {
+  // End-to-end: an assume-role selection produces an /api/flamegraph link that
+  // carries the bare aws_role_arn, so a link opened in a fresh session assumes
+  // the same role rather than 401ing with no identity.
+  const keys = [key("h1", 1782760100, 1)];
+  const arn = "arn:aws:iam::123456789012:role/Dial9TraceReader";
+  const s = scope.scopeFromKeys("cell1-prod-pdx-dial9-traces", keys, 1782760000, 1782760800, "us-west-2", arn);
+  const { query } = scope.encodeAggregationParams(new URLSearchParams(), s);
+  assert.strictEqual(new URLSearchParams(query).get("aws_role_arn"), arn);
+});
+
 test("scopeFromKeys derives the window from key epochs when none is supplied", () => {
   // Raw mode passes no window; it comes from the keys' epochs.
   const keys = [key("h1", 1782760100, 1), key("h1", 1782760300, 2)];
   const s = scope.scopeFromKeys("bkt", keys, null, null);
   assert.strictEqual(s.from, 1782760100, "min epoch");
-  assert.strictEqual(s.to, 1782760300, "max epoch");
+  assert.strictEqual(s.to, 1782760301, "exclusive bound after max epoch");
 });
 
 test("scopeFromKeys returns null when no window and no parseable epochs", () => {
@@ -263,7 +302,9 @@ test("scopeFromKeys returns null when no window and no parseable epochs", () => 
   assert.strictEqual(s.to, 1782760800);
 });
 
-testAsync("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
+const asyncTests = [];
+
+asyncTests.push(testAsync("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
   const s = {
     bucket: "bkt",
     prefix: "traces",
@@ -292,9 +333,91 @@ testAsync("resolveScope lists the window, filters to the host set, maps to /api/
   assert.strictEqual(urls.length, 1, "only the in-window h1 object survives");
   assert.ok(urls[0].startsWith("/api/object?"), "maps to /api/object");
   assert.ok(urls[0].includes(encodeURIComponent(key("h1", 1782760100, 1))), "carries the right key");
-});
+}));
 
-testAsync("resolveScope with an empty host set keeps all in-window hosts", async () => {
+asyncTests.push(testAsync("resolveScope uses half-open boundaries for adjacent segments", async () => {
+  const s = {
+    bucket: "bkt",
+    prefix: "traces",
+    service: "shale",
+    hosts: ["h1"],
+    from: 1782760100,
+    to: 1782760160,
+  };
+  const selected = key("h1", 1782760100, 1);
+  const adjacent = key("h1", 1782760160, 2);
+  const previous = key("h1", 1782760040, 0);
+  const browse = {
+    objects: [
+      {
+        key: previous,
+        size: 10,
+        last_modified: "2026-06-29T19:08:20Z",
+      },
+      {
+        key: selected,
+        size: 10,
+        last_modified: "2026-06-29T19:09:20Z",
+      },
+      {
+        key: adjacent,
+        size: 10,
+        last_modified: "2026-06-29T19:10:20Z",
+      },
+    ],
+  };
+
+  const urls = await scope.resolveScope(s, async () => browse);
+  assert.strictEqual(urls.length, 1, "segments touching either scope boundary must be excluded");
+  assert.strictEqual(
+    new URL(urls[0], "http://dial9.test").searchParams.get("key"),
+    selected,
+  );
+}));
+
+asyncTests.push(testAsync("resolveScope sends an encoded service and retains client-side service filtering", async () => {
+  const service = "checkout api+canary?";
+  const s = {
+    bucket: "bkt",
+    prefix: "traces",
+    service,
+    hosts: [],
+    from: 1782760000,
+    to: 1782760800,
+  };
+  const matchingKey = keyForService(service, "h1", 1782760100, 1);
+  const browse = {
+    objects: [
+      { key: matchingKey, size: 10, last_modified: "2026-06-29T19:15:05Z" },
+      {
+        key: keyForService("other-service", "h1", 1782760150, 1),
+        size: 10,
+        last_modified: "2026-06-29T19:15:06Z",
+      },
+    ],
+  };
+  let requested = "";
+  const urls = await scope.resolveScope(s, async (url) => {
+    requested = url;
+    return browse;
+  });
+
+  assert.ok(
+    requested.includes("service=checkout+api%2Bcanary%3F"),
+    "service is URL-encoded on /api/browse",
+  );
+  assert.strictEqual(
+    new URL(requested, "http://dial9.test").searchParams.get("service"),
+    service,
+    "browse receives the exact service value",
+  );
+  assert.strictEqual(urls.length, 1, "client-side filtering rejects a mismatched service from browse");
+  const objectParams = new URL(urls[0], "http://dial9.test").searchParams;
+  assert.strictEqual(objectParams.get("bucket"), "bkt");
+  assert.strictEqual(objectParams.get("key"), matchingKey);
+}));
+
+asyncTests.push(testAsync("resolveScope with an empty host set keeps all in-window hosts", async () => {
   const s = { bucket: "bkt", prefix: "traces", service: "", hosts: [], from: 1782760000, to: 1782760800 };
   const browse = {
     objects: [
@@ -304,6 +427,6 @@ testAsync("resolveScope with an empty host set keeps all in-window hosts", async
   };
   const urls = await scope.resolveScope(s, async () => browse);
   assert.strictEqual(urls.length, 2, "empty host set = all hosts in window");
-});
+}));
 
-summarize();
+Promise.all(asyncTests).then(summarize);

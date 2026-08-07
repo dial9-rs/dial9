@@ -239,6 +239,20 @@ impl<'a> Decoder<'a> {
         self.version
     }
 
+    /// Returns the current byte offset within the input data.
+    ///
+    /// After `next_frame()` returns `Ok(None)`, this should equal `data_len()`
+    /// for a well-formed, non-truncated trace. A mismatch indicates trailing
+    /// bytes that could not be decoded.
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// Returns the total length of the input data slice.
+    pub fn data_len(&self) -> usize {
+        self.data.len()
+    }
+
     pub fn string_pool(&self) -> &StringPool {
         &self.string_pool
     }

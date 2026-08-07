@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use crate::ingest::aggregate::{self, Scope};
+use crate::ingest::decode::SchedulingDelayKind;
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
@@ -37,10 +38,17 @@ const LONG_POLL_TOP: usize = 100;
 /// regardless of scope size.
 const LONG_POLL_SOFT_CAP: usize = LONG_POLL_TOP * 4;
 
+/// Number of observed runnable-to-poll delays shipped to the client.
+const SCHEDULING_DELAY_TOP: usize = 100;
+const SCHEDULING_DELAY_SOFT_CAP: usize = SCHEDULING_DELAY_TOP * 4;
+const HIGH_SCHEDULING_DELAY_NS: i64 = 1_000_000;
+
 #[derive(Deserialize)]
 pub struct TokioStatsParams {
     pub bucket: Option<String>,
     pub prefix: Option<String>,
+    /// Region for ambient-credential S3 reads, carried by browse deep links.
+    pub aws_region: Option<String>,
     pub service: Option<String>,
     #[serde(default)]
     pub host: Vec<String>,
@@ -68,6 +76,15 @@ pub struct TokioStatsResponse {
     /// coordinates to deep-link its trace segment. Ported from IRIS's
     /// `longPolls.top` (rust-ingest `analyze.rs`).
     pub top_long_polls: Vec<LongPoll>,
+    /// Longest runnable-to-poll latencies backed by spawn/wake evidence.
+    pub top_scheduling_delays: Vec<SchedulingDelay>,
+    /// Measurement coverage, including polls that cannot be safely inferred.
+    pub scheduling_delay_coverage: SchedulingDelayCoverage,
+    /// Per-worker busyness + poll distribution, ranked by busyness descending.
+    /// Ported from IRIS's `workers` rollup, extended with a busyness metric
+    /// (sum of poll durations / worker's own observed time span). Workers are
+    /// keyed per-host so multi-runtime deployments don't conflate worker IDs.
+    pub worker_activity: Vec<WorkerStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<aggregate::Coverage>,
 }
@@ -113,6 +130,92 @@ pub struct LongPoll {
     pub source_key: String,
 }
 
+/// One measured scheduling delay for the top-N "Scheduling delay" list: the gap
+/// between a task becoming runnable (`ready_at_ns`) and the worker starting to
+/// poll it (`poll_start_ns`). Backed by spawn- or wake-inferred evidence; each
+/// row carries the coordinates to deep-link its trace segment.
+#[derive(Serialize, Clone)]
+pub struct SchedulingDelay {
+    pub delay_ns: i64,
+    pub ready_at_ns: i64,
+    pub poll_start_ns: i64,
+    pub poll_end_ns: i64,
+    pub worker_id: u32,
+    pub task_id: u64,
+    /// Where the future was spawned; `None` when the trace didn't record it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_loc: Option<String>,
+    /// How the ready time was established: spawn, wake, or wake-during-poll.
+    pub kind: SchedulingDelayKind,
+    /// The task that woke this one, when the evidence is a wake.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waker_task_id: Option<u64>,
+    pub host: String,
+    /// Source trace file key for constructing the viewer deep link.
+    pub source_key: String,
+}
+
+/// Measurement coverage for the scheduling-delay rollup: how many polls carried
+/// usable readiness evidence versus not, and why the unmeasured ones could not
+/// be inferred. Lets the UI qualify the top-N with an honest denominator rather
+/// than implying every poll was measured.
+#[derive(Serialize, Clone, Default)]
+pub struct SchedulingDelayCoverage {
+    /// Polls with a measured scheduling delay (readiness evidence present).
+    pub observed_polls: u64,
+    /// Polls with no usable readiness evidence.
+    pub unmeasured_polls: u64,
+    /// Measured polls whose delay cleared [`HIGH_SCHEDULING_DELAY_NS`].
+    pub over_1ms_polls: u64,
+    /// Measured polls whose readiness came from a task spawn.
+    pub spawn_inferred_polls: u64,
+    /// Measured polls whose readiness came from an idle wake.
+    pub wake_observed_polls: u64,
+    /// Measured polls whose readiness came from a wake during a prior poll.
+    pub wake_during_poll_polls: u64,
+    /// Unmeasured polls on tasks known NOT to use dial9's traced waker.
+    pub uninstrumented_unmeasured_polls: u64,
+    /// Unmeasured polls where instrumentation state is unknown (old traces).
+    pub instrumentation_unknown_unmeasured_polls: u64,
+    /// Unmeasured polls on instrumented tasks that simply lacked evidence.
+    pub missing_readiness_unmeasured_polls: u64,
+}
+
+/// Per-worker poll distribution + busyness, for the "Worker activity" card.
+/// Ported from IRIS's `workers` rollup, extended with a busyness metric (sum of
+/// poll durations / wall-clock time) as the best utilization proxy available
+/// without park/unpark events. Workers are scoped per-host so multi-runtime
+/// (multi-host) deployments don't conflate worker IDs across different runtimes.
+#[derive(Serialize, Clone)]
+pub struct WorkerStats {
+    pub worker_id: u32,
+    /// Host this worker belongs to. Workers on different hosts are distinct
+    /// runtime instances; this disambiguates worker 0 on host-A from worker 0
+    /// on host-B in multi-host scopes.
+    pub host: String,
+    /// All polls observed on this worker (including sub-floor).
+    pub total_polls: u64,
+    /// Sum of ALL poll durations on this worker (ns).
+    pub busy_ns: i64,
+    /// The worker's observed active time (ns) — the denominator for `busy_pct`,
+    /// exposed so the UI can show the breakdown for verification
+    /// (busy_ns / span_ns = busy_pct). This is observed time, not the wall-clock
+    /// span; see [`WorkerAccum::observed_ns`].
+    pub span_ns: i64,
+    /// Busyness percentage: `busy_ns / span_ns * 100`. Approximates worker
+    /// utilization — 100% means the worker was polling for the whole of its
+    /// observed active time. Bounded to ≤100% because a worker's polls are
+    /// sequential (non-overlapping), so `busy_ns ≤ span_ns`.
+    pub busy_pct: f64,
+    /// Polls above the duration floor on this worker.
+    pub notable_polls: u64,
+    /// Longest poll duration on this worker (for heat-coloring).
+    pub worst_poll_ns: i64,
+    /// Exemplar of the worst poll for deep-linking into the viewer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worst_exemplar: Option<PollExemplar>,
+}
+
 /// Handler for GET /api/tokio-stats — a Server-Sent Events stream.
 ///
 /// [Resolves](refine::resolve) the scope, reads the already-folded `polls/`
@@ -133,7 +236,12 @@ pub async fn get_tokio_stats(
     (StatusCode, String),
 > {
     let Some(agg) = state
-        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .agg_context_for(
+            params.bucket.as_deref(),
+            params.prefix.as_deref(),
+            params.aws_region.as_deref(),
+            creds,
+        )
         .await?
     else {
         return Err((
@@ -179,7 +287,7 @@ pub async fn get_tokio_stats(
     // it is reported as absent rather than a misleading zero.
     let op = OperationMetrics::tokio_stats(
         resolved.files_matched as u32,
-        resolved.files_folded_in(resolved.folded()) as u32,
+        resolved.capped_files_folded_in(resolved.folded()) as u32,
         None,
     );
 
@@ -204,7 +312,7 @@ struct StreamCtx {
 enum Phase {
     Start,
     Folding {
-        acc: TokioStatsAccum,
+        acc: Box<TokioStatsAccum>,
         folded: HashSet<String>,
         errors: FoldErrors,
     },
@@ -260,7 +368,7 @@ fn tokio_stats_stream(
                             ctx,
                             folds,
                             Phase::Folding {
-                                acc,
+                                acc: Box::new(acc),
                                 folded,
                                 errors,
                             },
@@ -357,21 +465,27 @@ fn snapshot_event(
         .collect();
     by_spawn_loc.sort_by_key(|l| std::cmp::Reverse(l.durations_ns.len()));
 
-    let files_folded = ctx.resolved.files_folded_in(folded);
+    let files_folded = ctx.resolved.capped_files_folded_in(folded);
     let resp = TokioStatsResponse {
         time_span_ns,
         total_polls: acc.total_polls,
         bucket: ctx.source_bucket.clone(),
         by_spawn_loc,
         top_long_polls: acc.top_long_polls(),
+        top_scheduling_delays: acc.top_scheduling_delays(),
+        scheduling_delay_coverage: acc.scheduling_delay_coverage.clone(),
+        worker_activity: acc.worker_activity(),
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
             files_folded,
+            folded_set_id: None,
+            target_folded_set_id: None,
+            fold_work_cap: ctx.resolved.fold_work_cap(),
             // tokio-stats counts folded files, not samples, as its "folded" unit.
             samples_folded: files_folded,
             total_bytes: ctx.resolved.total_bytes,
             hosts_matched: ctx.resolved.hosts_matched,
-            hosts_folded: ctx.resolved.folded_hosts(folded),
+            hosts_folded: ctx.resolved.capped_folded_hosts(folded),
             fold_errors: errors.count,
             fold_error_sample: errors.sample.clone(),
         }),
@@ -397,6 +511,18 @@ struct TokioStatsAccum {
     /// Unsorted between compactions; [`TokioStatsAccum::top_long_polls`] produces
     /// the final ranked list.
     long_polls: Vec<LongPoll>,
+    /// Per-worker accumulation for the "Worker activity" rollup. Keyed by
+    /// `(host, worker_id)` so multi-host scopes (multiple runtimes) don't
+    /// conflate workers with the same ID from different hosts. Populated only
+    /// when the polls part-file includes the `worker_id` column (older files are
+    /// silently skipped, same as long polls).
+    by_worker: HashMap<(String, u32), WorkerAccum>,
+    /// Longest scheduling delays seen so far, kept bounded by
+    /// [`TokioStatsAccum::push_scheduling_delay`]. Unsorted between compactions;
+    /// [`TokioStatsAccum::top_scheduling_delays`] produces the ranked list.
+    scheduling_delays: Vec<SchedulingDelay>,
+    /// Running coverage tallies for the scheduling-delay rollup.
+    scheduling_delay_coverage: SchedulingDelayCoverage,
 }
 
 impl TokioStatsAccum {
@@ -421,6 +547,89 @@ impl TokioStatsAccum {
         top.truncate(LONG_POLL_TOP);
         top
     }
+
+    /// Record a candidate scheduling delay, compacting to the top
+    /// [`SCHEDULING_DELAY_TOP`] by delay whenever the buffer exceeds the soft
+    /// cap. Same grow-then-truncate strategy as [`Self::push_long_poll`].
+    fn push_scheduling_delay(&mut self, delay: SchedulingDelay) {
+        self.scheduling_delays.push(delay);
+        if self.scheduling_delays.len() > SCHEDULING_DELAY_SOFT_CAP {
+            self.scheduling_delays
+                .sort_unstable_by_key(|d| std::cmp::Reverse(d.delay_ns));
+            self.scheduling_delays.truncate(SCHEDULING_DELAY_TOP);
+        }
+    }
+
+    /// The final ranked top-N scheduling delays (descending by delay). Clones so
+    /// repeated SSE snapshots don't consume the still-growing accumulator.
+    fn top_scheduling_delays(&self) -> Vec<SchedulingDelay> {
+        let mut top = self.scheduling_delays.clone();
+        top.sort_unstable_by_key(|d| std::cmp::Reverse(d.delay_ns));
+        top.truncate(SCHEDULING_DELAY_TOP);
+        top
+    }
+
+    /// Per-worker activity ranked by busyness descending. Busyness is
+    /// `busy_ns / observed_ns` — poll time over the worker's observed active
+    /// time (the sum of its per-segment windows, NOT the gap-filled span across
+    /// segments; see [`WorkerAccum::observed_ns`]). A worker with no observed
+    /// window (e.g. a single instantaneous poll in every segment) reports 0%
+    /// rather than dividing by zero.
+    fn worker_activity(&self) -> Vec<WorkerStats> {
+        if self.by_worker.is_empty() {
+            return Vec::new();
+        }
+        let mut workers: Vec<WorkerStats> = self
+            .by_worker
+            .iter()
+            .map(|((host, wid), wa)| {
+                let busy_pct = if wa.observed_ns > 0 {
+                    (wa.busy_ns as f64 / wa.observed_ns as f64) * 100.0
+                } else {
+                    0.0
+                };
+                WorkerStats {
+                    worker_id: *wid,
+                    host: host.clone(),
+                    total_polls: wa.total_polls,
+                    busy_ns: wa.busy_ns,
+                    span_ns: wa.observed_ns,
+                    busy_pct,
+                    notable_polls: wa.notable_polls,
+                    worst_poll_ns: wa.worst_poll_ns,
+                    worst_exemplar: wa.worst_exemplar.clone(),
+                }
+            })
+            .collect();
+        workers.sort_unstable_by(|a, b| {
+            b.busy_pct
+                .partial_cmp(&a.busy_pct)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        workers
+    }
+}
+
+/// Per-worker accumulator for the worker activity rollup. Tracks total polls,
+/// busy time (for busyness %), observed active time (the busyness denominator),
+/// and the worst poll (for heat-coloring + deep-link).
+#[derive(Default)]
+struct WorkerAccum {
+    total_polls: u64,
+    /// Sum of all poll durations on this worker (ns), for busyness computation.
+    busy_ns: i64,
+    /// Sum of this worker's per-segment observed windows (ns): for each trace
+    /// segment (= one polls part-file), `max(end_ns) − min(start_ns)` over the
+    /// worker's polls in that segment, accumulated across segments. This is the
+    /// busyness denominator. It deliberately EXCLUDES the idle gaps between
+    /// segments: taking `max − min` across all segments would count that
+    /// unobserved downtime, making a host whose segments cluster in wall-clock
+    /// time read as far busier than one whose segments are spread out —
+    /// independent of actual work.
+    observed_ns: i64,
+    notable_polls: u64,
+    worst_poll_ns: i64,
+    worst_exemplar: Option<PollExemplar>,
 }
 
 struct LocAccum {
@@ -472,6 +681,11 @@ fn read_polls_part(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Per-worker (min start_ns, max end_ns) window within this segment (one
+    // part-file = one segment), accumulated across this file's batches and
+    // folded into each worker's `observed_ns` after the loop.
+    let mut seg_windows: HashMap<(String, u32), (i64, i64)> = HashMap::new();
+
     for batch in reader {
         let batch = batch.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let duration_arr = batch
@@ -504,6 +718,24 @@ fn read_polls_part(
         let task_arr = batch
             .column_by_name("task_id")
             .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt64Array>());
+        // Scheduling-delay evidence columns. All nullable and absent from
+        // part-files that predate the rollup; rows without a measured delay fall
+        // into the coverage tallies rather than the top-N.
+        let ready_at_arr = batch
+            .column_by_name("ready_at_ns")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+        let scheduling_delay_arr = batch
+            .column_by_name("scheduling_delay_ns")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+        let scheduling_kind_arr = batch
+            .column_by_name("scheduling_delay_kind")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt8Array>());
+        let waker_task_arr = batch
+            .column_by_name("waker_task_id")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt64Array>());
+        let task_instrumented_arr = batch
+            .column_by_name("task_instrumented")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::BooleanArray>());
 
         let Some(duration_arr) = duration_arr else {
             continue;
@@ -525,6 +757,94 @@ fn read_polls_part(
 
             let dur = duration_arr.value(i);
             acc.total_polls += 1;
+
+            // Worker activity: count every poll and accumulate busy_ns (before
+            // the notable floor) so busyness reflects the true distribution.
+            // Keyed by (host, worker_id) so multi-host scopes don't conflate
+            // workers from different runtimes. Skip part-files that predate the
+            // worker_id column rather than fabricating a worker 0.
+            if let Some(workers) = worker_arr {
+                let host_val = host_arr
+                    .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                    .unwrap_or("");
+                let key = (host_val.to_string(), workers.value(i));
+                let wa = acc.by_worker.entry(key.clone()).or_default();
+                wa.total_polls += 1;
+                wa.busy_ns += dur;
+                // Extend this worker's window within this segment. The upper
+                // bound uses end_ns (not start_ns) so it covers the last poll's
+                // full duration, keeping busy_ns ≤ the window. Folded into
+                // `observed_ns` after the batch loop.
+                if let (Some(sa), Some(ea)) = (start_arr, end_arr) {
+                    let (start, end) = (sa.value(i), ea.value(i));
+                    let w = seg_windows.entry(key).or_insert((start, end));
+                    w.0 = w.0.min(start);
+                    w.1 = w.1.max(end);
+                }
+            }
+
+            // Scheduling delay (IRIS has no equivalent; dial9-specific). A poll
+            // is "measured" when the trace carried readiness evidence; otherwise
+            // it lands in the coverage tallies, bucketed by why we couldn't infer
+            // it. Column-absent part-files (predating the rollup) count every row
+            // as instrumentation-unknown, matching the null-instrumented case.
+            let measured = scheduling_delay_arr
+                .zip(ready_at_arr)
+                .filter(|(delay, ready)| !delay.is_null(i) && !ready.is_null(i))
+                .map(|(delay, ready)| (delay.value(i), ready.value(i)));
+            if let Some((delay_ns, ready_at_ns)) = measured {
+                let cov = &mut acc.scheduling_delay_coverage;
+                cov.observed_polls += 1;
+                if delay_ns >= HIGH_SCHEDULING_DELAY_NS {
+                    cov.over_1ms_polls += 1;
+                }
+                let kind = scheduling_kind_arr
+                    .filter(|a| !a.is_null(i))
+                    .and_then(|a| SchedulingDelayKind::from_u8(a.value(i)));
+                match kind {
+                    Some(SchedulingDelayKind::Spawn) => cov.spawn_inferred_polls += 1,
+                    Some(SchedulingDelayKind::Wake) => cov.wake_observed_polls += 1,
+                    Some(SchedulingDelayKind::WakeDuringPoll) => cov.wake_during_poll_polls += 1,
+                    None => {}
+                }
+                // Only rows with a worker + task can be deep-linked, same guard
+                // as the long-polls list; measured rows lacking them still count
+                // toward coverage above.
+                if let (Some(kind), Some(workers), Some(tasks)) = (kind, worker_arr, task_arr) {
+                    let host = host_arr
+                        .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                        .unwrap_or("");
+                    let spawn_loc = spawn_loc_arr
+                        .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                        .map(str::to_string);
+                    let waker_task_id =
+                        waker_task_arr.filter(|a| !a.is_null(i)).map(|a| a.value(i));
+                    acc.push_scheduling_delay(SchedulingDelay {
+                        delay_ns,
+                        ready_at_ns,
+                        poll_start_ns: start_arr.map_or(0, |a| a.value(i)),
+                        poll_end_ns: end_arr.map_or(0, |a| a.value(i)),
+                        worker_id: workers.value(i),
+                        task_id: tasks.value(i),
+                        spawn_loc,
+                        kind,
+                        waker_task_id,
+                        host: host.to_string(),
+                        source_key: source_key.to_string(),
+                    });
+                }
+            } else {
+                let cov = &mut acc.scheduling_delay_coverage;
+                cov.unmeasured_polls += 1;
+                match task_instrumented_arr
+                    .filter(|a| !a.is_null(i))
+                    .map(|a| a.value(i))
+                {
+                    Some(true) => cov.missing_readiness_unmeasured_polls += 1,
+                    Some(false) => cov.uninstrumented_unmeasured_polls += 1,
+                    None => cov.instrumentation_unknown_unmeasured_polls += 1,
+                }
+            }
 
             if let Some(sa) = start_arr {
                 let ts = sa.value(i);
@@ -578,6 +898,27 @@ fn read_polls_part(
                 });
             }
 
+            // Worker activity: track notable polls + worst exemplar per worker
+            // (above the floor, so they're meaningful). Same guard as long-polls:
+            // skip old part-files lacking the worker_id column.
+            if let Some(workers) = worker_arr {
+                let wa = acc
+                    .by_worker
+                    .entry((host.to_string(), workers.value(i)))
+                    .or_default();
+                wa.notable_polls += 1;
+                if dur > wa.worst_poll_ns {
+                    wa.worst_poll_ns = dur;
+                    wa.worst_exemplar = Some(PollExemplar {
+                        start_ns: start_arr.map_or(0, |a| a.value(i)),
+                        end_ns: end_arr.map_or(0, |a| a.value(i)),
+                        duration_ns: dur,
+                        host: host.to_string(),
+                        source_key: source_key.to_string(),
+                    });
+                }
+            }
+
             // Top longest polls (IRIS `longPolls.top`): a poll is only useful in
             // this list if we can attribute it to a worker + task, so skip rows
             // from older part-files that predate those columns rather than
@@ -599,6 +940,15 @@ fn read_polls_part(
             }
         }
     }
+
+    // Fold this segment's per-worker windows into each worker's observed active
+    // time (summed across segments, so inter-segment gaps aren't counted).
+    for (key, (start, end)) in seg_windows {
+        if let Some(wa) = acc.by_worker.get_mut(&key) {
+            wa.observed_ns += (end - start).max(0);
+        }
+    }
+
     Ok(())
 }
 
@@ -610,8 +960,11 @@ mod tests {
 
     #[test]
     fn test_read_polls_from_demo_trace() {
-        let data =
-            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap();
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/public/demo-trace.bin"
+        ))
+        .unwrap();
         let decompressed = {
             use std::io::Read;
             let mut dec = flate2::read::GzDecoder::new(data.as_slice());
@@ -619,7 +972,7 @@ mod tests {
             dec.read_to_end(&mut buf).unwrap();
             buf
         };
-        let (_, _, polls) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
+        let (_, _, polls, _) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
         assert!(!polls.is_empty());
 
         let mut buf = Vec::new();
@@ -658,13 +1011,153 @@ mod tests {
             top[0].duration_ns >= DURATION_FLOOR_NS,
             "long polls must clear the notable floor"
         );
+        // Worker activity: populated, ranked by busy_pct descending, busyness
+        // > 0 and bounded ≤100%, host is set, and worst exemplar carries a
+        // source key.
+        let workers = acc.worker_activity();
+        assert!(!workers.is_empty(), "expected at least one worker");
+        assert!(
+            workers.windows(2).all(|w| w[0].busy_pct >= w[1].busy_pct),
+            "worker activity must be ranked descending by busyness"
+        );
+        assert!(
+            workers.iter().all(|w| w.total_polls > 0),
+            "every worker must have at least one poll"
+        );
+        assert!(
+            workers.iter().all(|w| w.busy_ns > 0),
+            "every worker must have accumulated some busy time"
+        );
+        assert!(
+            workers.iter().all(|w| w.busy_pct > 0.0),
+            "every worker must have non-zero busyness"
+        );
+        // Busyness is poll time over observed active time. A worker's polls are
+        // sequential (non-overlapping), so busy_ns ≤ observed_ns ⇒ busy_pct is
+        // bounded to ≤100% (with a small epsilon for float error). This is the
+        // invariant the old gap-filled-span denominator could violate.
+        assert!(
+            workers.iter().all(|w| w.busy_pct <= 100.0 + 1e-6),
+            "busyness must be bounded to 100% (got {:?})",
+            workers.iter().map(|w| w.busy_pct).fold(0.0_f64, f64::max)
+        );
+        assert!(
+            workers.iter().all(|w| w.span_ns >= w.busy_ns),
+            "observed span must be at least the busy time for every worker"
+        );
+        // In real traces, host is non-empty (parsed from source key structure);
+        // in the demo-trace test the source key "test-key" yields "" — which is
+        // fine: workers group by whatever host string the parquet carries. What
+        // matters is that all workers from the same runtime share the same host.
+        let hosts: HashSet<&str> = workers.iter().map(|w| w.host.as_str()).collect();
+        assert_eq!(
+            hosts.len(),
+            1,
+            "demo trace is single-host: all workers should share one host value"
+        );
+        assert!(
+            workers.iter().any(|w| w.worst_exemplar.is_some()),
+            "at least one worker should have a worst exemplar (from above-floor polls)"
+        );
+        assert!(
+            workers
+                .iter()
+                .filter_map(|w| w.worst_exemplar.as_ref())
+                .all(|ex| !ex.source_key.is_empty()),
+            "worker worst exemplars must carry a source key for deep-linking"
+        );
+        let total_worker_polls: u64 = workers.iter().map(|w| w.total_polls).sum();
+        assert_eq!(
+            total_worker_polls, acc.total_polls,
+            "sum of per-worker polls must equal total_polls"
+        );
+
+        // Scheduling delay: every poll is accounted for in coverage (measured or
+        // not), the per-kind and per-reason tallies partition their totals, and
+        // the top-N is bounded, ranked descending, carries deep-link coordinates,
+        // and never exceeds the observed count.
+        let cov = &acc.scheduling_delay_coverage;
+        assert_eq!(
+            cov.observed_polls + cov.unmeasured_polls,
+            acc.total_polls,
+            "every poll must be counted as measured or unmeasured"
+        );
+        assert_eq!(
+            cov.spawn_inferred_polls + cov.wake_observed_polls + cov.wake_during_poll_polls,
+            cov.observed_polls,
+            "per-kind tallies must partition the observed polls"
+        );
+        assert_eq!(
+            cov.uninstrumented_unmeasured_polls
+                + cov.instrumentation_unknown_unmeasured_polls
+                + cov.missing_readiness_unmeasured_polls,
+            cov.unmeasured_polls,
+            "per-reason tallies must partition the unmeasured polls"
+        );
+        assert!(
+            cov.over_1ms_polls <= cov.observed_polls,
+            "over-1ms polls are a subset of the measured polls"
+        );
+        let delays = acc.top_scheduling_delays();
+        assert!(delays.len() <= SCHEDULING_DELAY_TOP);
+        assert!(delays.len() as u64 <= cov.observed_polls);
+        assert!(
+            delays.windows(2).all(|w| w[0].delay_ns >= w[1].delay_ns),
+            "top scheduling delays must be ranked descending by delay"
+        );
+        assert!(
+            delays.iter().all(|d| !d.source_key.is_empty()),
+            "each scheduling delay must carry a source key for deep-linking"
+        );
+        assert!(
+            delays.iter().all(|d| d.delay_ns >= 0),
+            "scheduling delay cannot be negative"
+        );
+
         eprintln!(
-            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns)",
+            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns), {} workers (busiest {:.1}%), {} measured delays / {} unmeasured",
             acc.total_polls,
             notable,
             with_exemplar,
             top.len(),
             top[0].duration_ns,
+            workers.len(),
+            workers[0].busy_pct,
+            cov.observed_polls,
+            cov.unmeasured_polls,
+        );
+    }
+
+    #[test]
+    fn scheduling_delay_top_n_is_bounded_and_ranked() {
+        let mut acc = TokioStatsAccum::default();
+        // Push more than the soft cap so a compaction runs, with descending
+        // delays so we can assert the top row is the largest.
+        for n in 0..(SCHEDULING_DELAY_SOFT_CAP + 50) {
+            acc.push_scheduling_delay(SchedulingDelay {
+                delay_ns: n as i64,
+                ready_at_ns: 0,
+                poll_start_ns: n as i64,
+                poll_end_ns: n as i64 + 1,
+                worker_id: 0,
+                task_id: n as u64,
+                spawn_loc: None,
+                kind: SchedulingDelayKind::Wake,
+                waker_task_id: Some(1),
+                host: "h".to_string(),
+                source_key: "k".to_string(),
+            });
+        }
+        let top = acc.top_scheduling_delays();
+        assert_eq!(top.len(), SCHEDULING_DELAY_TOP);
+        assert!(
+            top.windows(2).all(|w| w[0].delay_ns >= w[1].delay_ns),
+            "must be ranked descending by delay"
+        );
+        assert_eq!(
+            top[0].delay_ns,
+            (SCHEDULING_DELAY_SOFT_CAP + 50 - 1) as i64,
+            "the largest delay must survive compaction"
         );
     }
 }

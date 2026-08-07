@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, InMemoryWriter, TracedRuntime,
+    Dial9HandleTokioExt, Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderPerfExt,
+    RecorderPipelineExt, TokioAttachOptions, recorder,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -194,26 +195,19 @@ fn measure(mode: Mode) -> Sample {
 
     // Scope writer/runtime so they drop before we sample post_shutdown.
     let steady_state = {
-        let mut tk = tokio::runtime::Builder::new_multi_thread();
-        tk.worker_threads(WORKER_THREADS).enable_all();
-
-        let (runtime, guard) = match mode {
+        let recorder = match mode {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
-                let trace_path = tmp.path().join("trace.bin");
-                let writer = DiskWriter::builder()
-                    .base_path(trace_path.to_str().unwrap())
+                let writer = DiskBuffer::builder()
+                    .base_path(tmp.path().to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
                     .rotation_period(ROTATION_PERIOD)
                     .build()
                     .unwrap();
-                let r = TracedRuntime::builder()
-                    .with_task_tracking(true)
-                    .with_trace_path(&trace_path)
+                let r = recorder(writer)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (disk)");
+                    .build();
                 // Keep tmp alive for the duration; leak it intentionally so
                 // its Drop doesn't show up in the measurement window.
                 std::mem::forget(tmp);
@@ -221,60 +215,61 @@ fn measure(mode: Mode) -> Sample {
             }
             Mode::DiskCpu => {
                 let tmp = tempfile::tempdir().unwrap();
-                let trace_path = tmp.path().join("trace.bin");
-                let writer = DiskWriter::builder()
-                    .base_path(trace_path.to_str().unwrap())
+                let writer = DiskBuffer::builder()
+                    .base_path(tmp.path().to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
                     .rotation_period(ROTATION_PERIOD)
                     .build()
                     .unwrap();
-                let r = TracedRuntime::builder()
-                    .with_task_tracking(true)
+                let r = recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
-                    .with_trace_path(&trace_path)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (disk+cpu)");
+                    .build();
                 std::mem::forget(tmp);
                 r
             }
             Mode::Mem => {
-                let writer = InMemoryWriter::builder()
+                let writer = MemoryBuffer::builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
                     .rotation_period(ROTATION_PERIOD)
                     .build()
-                    .expect("InMemoryWriter build");
-                TracedRuntime::builder()
-                    .with_task_tracking(true)
+                    .expect("MemoryBuffer build");
+                recorder(writer)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (mem)")
+                    .build()
             }
             Mode::MemCpu => {
-                let writer = InMemoryWriter::builder()
+                let writer = MemoryBuffer::builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
                     .rotation_period(ROTATION_PERIOD)
                     .build()
-                    .expect("InMemoryWriter build");
-                TracedRuntime::builder()
-                    .with_task_tracking(true)
+                    .expect("MemoryBuffer build");
+                recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (mem+cpu)")
+                    .build()
             }
         };
-        guard.enable();
-        let handle = guard.tokio_handle(runtime.handle());
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(WORKER_THREADS);
+        let runtime = recorder
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder()
+                    .task_tracking_enabled(true)
+                    .build(),
+            )
+            .expect("build runtime");
+
+        let handle = runtime.block_on(async { Dial9TokioHandle::current() });
         runtime.block_on(workload(handle, tasks_done.clone()));
         let steady = ALLOC.peak();
-        guard
-            .graceful_shutdown(Duration::from_secs(30))
-            .expect("graceful_shutdown");
         drop(runtime);
+        recorder.graceful_shutdown(Duration::from_secs(30));
         steady
     };
 

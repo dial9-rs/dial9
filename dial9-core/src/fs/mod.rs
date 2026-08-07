@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::primitives::fs;
 use crate::primitives::sync::Arc;
@@ -263,8 +263,8 @@ impl Fs {
         }
     }
 
-    pub(crate) fn new_disk(base_path: &Path) -> Arc<Self> {
-        Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
+    pub(crate) fn new_disk(dir: impl Into<PathBuf>, stem: impl Into<String>) -> Arc<Self> {
+        Arc::new(Fs::Disk(DiskFs::new(dir, stem)))
     }
 
     /// Ring budget = `max_total_size - PIPELINE_RESERVE_SEGMENTS * max_segment_size`.
@@ -385,7 +385,7 @@ impl Fs {
         }
     }
 
-    /// Returns `true` once `DiskWriter::finalize` has run.
+    /// Returns `true` once `DiskBuffer::finalize` has run.
     #[cfg(feature = "pipeline")]
     pub(crate) fn writer_done(&self) -> bool {
         match self {

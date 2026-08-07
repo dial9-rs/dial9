@@ -98,7 +98,8 @@ pub type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 /// itself with any encoder on first use. This means a `Schema` created on one
 /// encoder can be passed to a different encoder and it will just work.
 ///
-/// `Schema` is cheap to clone (internally `Arc`-backed).
+/// `Schema` is cheap to clone (internally `Arc`-backed). Create it once and
+/// reuse it across events; see [`Encoder::write_event`].
 #[derive(Clone, Debug)]
 pub struct Schema {
     pub(crate) entry: Arc<SchemaEntry>,
@@ -160,6 +161,11 @@ enum SchemaKey {
 ///
 /// The default type parameter (`Vec<u8>`) buffers everything in memory;
 /// use [`Encoder::new_to`] to write to an arbitrary [`Write`] sink.
+/// Upper bound on [`Encoder::dynamic_schema_cache`]. Far above any sane
+/// number of distinct live schema handles, small enough that pinned
+/// `SchemaEntry` Arcs stay negligible.
+const DYNAMIC_SCHEMA_CACHE_LIMIT: usize = 1024;
+
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,
@@ -168,6 +174,18 @@ pub struct Encoder<W: Write = Vec<u8>> {
     stack_pool: FxHashMap<Box<[u64]>, u32>,
     next_stack_pool_id: u32,
     schema_ids: FxHashMap<SchemaKey, WireTypeId>,
+    /// Identity fast path for dynamic [`Schema`] handles: wire ids keyed by
+    /// the address of the schema's shared `SchemaEntry` allocation. The
+    /// `Arc` is kept alive in the value so the address cannot be reused
+    /// while cached. Repeated `write_event` calls with the same handle skip
+    /// the name hash and deep schema comparison in `ensure_registered`.
+    ///
+    /// Bounded to [`DYNAMIC_SCHEMA_CACHE_LIMIT`] entries and cleared when
+    /// full: a caller that mints a fresh `Schema` per event would otherwise
+    /// grow it (and pin the `Arc`s) without bound. Clearing only costs the
+    /// fast path; registration stays correct through the name-keyed slow
+    /// path.
+    dynamic_schema_cache: FxHashMap<usize, (Arc<SchemaEntry>, WireTypeId)>,
     /// Per-type dense cache keyed by `TraceEvent::type_slot()`.
     /// Stores `wire_id + 1` so that `0` means "unset".
     slot_cache: Vec<u32>,
@@ -195,6 +213,7 @@ impl Encoder<Vec<u8>> {
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
+            dynamic_schema_cache: FxHashMap::default(),
             slot_cache: Vec::new(),
             registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         }
@@ -219,6 +238,7 @@ impl<W: Write> Encoder<W> {
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
+            dynamic_schema_cache: FxHashMap::default(),
             slot_cache: Vec::new(),
             registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         })
@@ -268,6 +288,7 @@ impl<W: Write> Encoder<W> {
             stack_pool: new_stack_pool,
             next_stack_pool_id,
             schema_ids,
+            dynamic_schema_cache: FxHashMap::default(),
             slot_cache: Vec::new(),
             registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         }
@@ -298,6 +319,7 @@ impl<W: Write> Encoder<W> {
         self.next_stack_pool_id = 0;
         self.registry.clear();
         self.schema_ids.clear();
+        self.dynamic_schema_cache.clear();
         self.slot_cache.fill(0);
         self.registered_ids.fill(0);
         // creating a new EncodeState resets the timestamp delta
@@ -311,6 +333,25 @@ impl<W: Write> Encoder<W> {
     /// Idempotent if the schema matches. Errors if a different schema was
     /// already registered under the same name.
     fn ensure_registered(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
+        let identity = Arc::as_ptr(&schema.entry) as usize;
+        if let Some((_, wire_id)) = self.dynamic_schema_cache.get(&identity) {
+            return Ok(*wire_id);
+        }
+        let wire_id = self.ensure_registered_slow(schema)?;
+        if self.dynamic_schema_cache.len() >= DYNAMIC_SCHEMA_CACHE_LIMIT {
+            // Pathological usage (a fresh handle per event); drop the cache
+            // rather than the memory. Well-behaved callers re-enter their
+            // entry on the next event.
+            self.dynamic_schema_cache.clear();
+        }
+        self.dynamic_schema_cache
+            .insert(identity, (Arc::clone(&schema.entry), wire_id));
+        Ok(wire_id)
+    }
+
+    /// Name-keyed registration with collision validation; the slow path
+    /// behind the identity cache above.
+    fn ensure_registered_slow(&mut self, schema: &Schema) -> io::Result<WireTypeId> {
         let key = SchemaKey::Name(Arc::clone(&schema.name_key));
         if let Some(&wire_id) = self.schema_ids.get(&key) {
             // TODO: unify registry and schema_ids to avoid this error case
@@ -381,6 +422,12 @@ impl<W: Write> Encoder<W> {
     ///
     /// If this encoder hasn't seen `schema` before, it is auto-registered
     /// (the schema frame is written before the event).
+    ///
+    /// # Performance
+    ///
+    /// Create the `Schema` once and reuse it (or clones of it) across events.
+    /// Reused handles hit an identity cache; a fresh handle per event falls
+    /// back to registration by name (hash and compare) on every write.
     pub fn write_event(
         &mut self,
         schema: &Schema,
@@ -1472,5 +1519,80 @@ mod tests {
         assert_eq!(events[0].1, vec![FieldValue::Varint(1)]);
         assert_eq!(events[1].0, Some(2_000));
         assert_eq!(events[1].1, vec![FieldValue::Varint(2)]);
+    }
+}
+
+#[cfg(test)]
+mod dynamic_schema_cache_tests {
+    use super::*;
+    use crate::schema::{FieldDef, SchemaEntry};
+    use crate::types::{FieldType, FieldValue};
+
+    fn schema(name: &str) -> Schema {
+        Schema::from_entry(SchemaEntry::new(
+            name,
+            /* has_timestamp */ true,
+            vec![FieldDef::new("v", FieldType::Varint)],
+        ))
+    }
+
+    /// The same handle re-registers through the identity cache, and a fresh
+    /// handle for the same name resolves to the same wire id through the
+    /// slow path (then caches its own identity).
+    #[test]
+    fn identity_cache_agrees_with_name_registration() {
+        let mut enc = Encoder::new();
+        let a = schema("Ev");
+        let id1 = enc.ensure_registered(&a).unwrap();
+        let id2 = enc.ensure_registered(&a).unwrap();
+        assert_eq!(id1, id2, "same handle must reuse its wire id");
+
+        let b = schema("Ev"); // distinct allocation, same layout and name
+        let id3 = enc.ensure_registered(&b).unwrap();
+        assert_eq!(id1, id3, "same name must resolve to the same wire id");
+        assert_eq!(enc.dynamic_schema_cache.len(), 2);
+    }
+
+    /// A caller minting a fresh handle per event must not grow the cache
+    /// (and pin schema Arcs) without bound.
+    #[test]
+    fn identity_cache_is_bounded() {
+        let mut enc = Encoder::new();
+        for i in 0..(DYNAMIC_SCHEMA_CACHE_LIMIT * 2 + 7) {
+            // Cycle a few names so both fresh-per-event and fresh-name
+            // shapes are covered; every handle is a distinct allocation.
+            let s = schema(&format!("Ev{}", i % 3));
+            enc.ensure_registered(&s).unwrap();
+            assert!(
+                enc.dynamic_schema_cache.len() <= DYNAMIC_SCHEMA_CACHE_LIMIT,
+                "cache exceeded its bound at iteration {i}"
+            );
+        }
+    }
+
+    /// Clearing the cache must not affect decodability: events written
+    /// before and after the flush decode against one schema.
+    #[test]
+    fn events_across_cache_clears_decode() {
+        let mut enc = Encoder::new();
+        for i in 0..(DYNAMIC_SCHEMA_CACHE_LIMIT + 3) {
+            let s = schema("Ev");
+            // Timestamp plus the one schema field.
+            enc.write_event(
+                &s,
+                &[FieldValue::Varint(i as u64), FieldValue::Varint(i as u64)],
+            )
+            .unwrap();
+        }
+        let data = enc.finish();
+        let mut decoder = crate::decoder::Decoder::new(&data).unwrap();
+        let mut count = 0u64;
+        decoder
+            .for_each_event(|ev| {
+                assert_eq!(ev.name, "Ev");
+                count += 1;
+            })
+            .unwrap();
+        assert_eq!(count, (DYNAMIC_SCHEMA_CACHE_LIMIT + 3) as u64);
     }
 }

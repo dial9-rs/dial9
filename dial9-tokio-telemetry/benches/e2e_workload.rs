@@ -4,9 +4,11 @@
 mod bmf;
 
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use std::time::Instant;
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RecorderPerfExt};
+use dial9_tokio_telemetry::telemetry::{
+    Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions, recorder,
+};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -64,14 +66,26 @@ async fn cpu_task() {
 }
 
 fn main() {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let writer = DiskWriter::single_file("/tmp/e2e_workload_trace.bin").unwrap();
-    let tb = TracedRuntime::builder().with_task_tracking(true);
+    let writer = DiskBuffer::single_file("/tmp/e2e_workload_trace.bin").unwrap();
+    #[allow(unused_mut)]
+    let mut rec = recorder(writer);
     #[cfg(target_os = "linux")]
-    let tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
-    let (runtime, _guard) = tb.build_and_start(builder, writer).unwrap();
+    {
+        rec = rec.with_cpu_profiling(CpuProfilingConfig::default());
+    }
+    let recorder = rec.build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(4);
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder,
+            TokioAttachOptions::builder()
+                .task_tracking_enabled(true)
+                .build(),
+        )
+        .unwrap();
 
     let start = Instant::now();
     runtime.block_on(async {
@@ -96,7 +110,8 @@ fn main() {
     });
     let wall = start.elapsed();
 
-    drop(_guard);
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(1));
 
     let rps = TOTAL_REQUESTS as f64 / wall.as_secs_f64();
     let mut report = bmf::Report::new();

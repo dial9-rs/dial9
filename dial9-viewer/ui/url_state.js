@@ -7,20 +7,20 @@
 // (loaded via require). Keep this dependency-free so both contexts can use it.
 //
 // State shape (all fields optional):
-//   { bucket, region, roleArn, prefix, tab, tz, last, from, to, q }
+//   { bucket, region, credentialMode, roleArn, prefix, service, tab, tz,
+//     last, from, to, q }
 //     bucket : S3 bucket name (string)
 //     region : S3 region the bucket lives in (string) — serialized as
 //              `aws_region`. Carried so a cross-region bucket is signed for the
-//              right endpoint and a shared link reproduces it (the region is not
-//              a secret; the credentials are header-only and never in the URL).
+//              right endpoint and a shared link reproduces it.
+//     credentialMode: `ambient` | `literal` | `role`, serialized as
+//              `credential_mode`. New URLs always write it so ambient intent
+//              cannot silently inherit credentials from an existing tab.
 //     roleArn: IAM role the server should assume for this read (string) —
-//              serialized as `aws_role_arn`. This is the linkable assume-role
-//              path: a shared "read these traces as this role" link. A role ARN
-//              grants nothing on its own (the server's identity must be allowed
-//              to assume it), so it is safe in a URL — the same property the
-//              backend relies on, and why it round-trips like `aws_region`
-//              rather than being hidden like the secret BYOC keys.
+//              serialized as `aws_role_arn` only with role mode. The ARN grants
+//              nothing by itself and is safe in a URL; literal keys never are.
 //     prefix : user-entered key prefix (string)
+//     service: optional service filter for browse-mode searches (string)
 //     tab    : 'browse' | 'raw'   (default 'browse' — omitted from URL)
 //     tz     : 'utc' | 'local'    (default 'utc'    — omitted from URL)
 //     last   : relative window in hours (number) — a quick range like "Last
@@ -50,15 +50,25 @@
     const region = p.get("aws_region");
     if (region) out.region = region;
 
-    // `aws_role_arn` names a role for the server to assume (the linkable
-    // assume-role path — see the state-shape note). Validation of the ARN shape
-    // is left to the credentials store (Dial9Creds.setRoleArn), which index.html
-    // seeds from this on load.
+    const credentialMode = p.get("credential_mode");
+    if (
+      credentialMode === "ambient" ||
+      credentialMode === "literal" ||
+      credentialMode === "role"
+    ) {
+      out.credentialMode = credentialMode;
+    }
+
+    // Legacy links may carry only aws_role_arn; SourceScope resolves that to
+    // role mode when credential_mode is absent.
     const roleArn = p.get("aws_role_arn");
     if (roleArn) out.roleArn = roleArn;
 
     const prefix = p.get("prefix");
     if (prefix) out.prefix = prefix;
+
+    const service = p.get("service");
+    if (service) out.service = service;
 
     const q = p.get("q");
     if (q) out.q = q;
@@ -95,12 +105,18 @@
 
     if (s.bucket) p.set("bucket", s.bucket);
     if (s.region) p.set("aws_region", s.region);
-    // `aws_role_arn` round-trips so the assume-role read stays shareable (a role
-    // ARN is not a secret — see the state-shape note). index.html feeds this
-    // from the active credential store on syncUrl, so a role loaded from the
-    // panel or a prior link is reflected back into the address bar.
-    if (s.roleArn) p.set("aws_role_arn", s.roleArn);
+    if (
+      s.credentialMode === "ambient" ||
+      s.credentialMode === "literal" ||
+      s.credentialMode === "role"
+    ) {
+      p.set("credential_mode", s.credentialMode);
+    }
+    if (s.credentialMode === "role" && s.roleArn) {
+      p.set("aws_role_arn", s.roleArn);
+    }
     if (s.prefix) p.set("prefix", s.prefix);
+    if (s.service) p.set("service", s.service);
     // 'browse' is the default tab, so only the non-default 'raw' is recorded.
     if (s.tab === "raw") p.set("tab", s.tab);
     // 'utc' is the default timezone, so only 'local' is recorded.

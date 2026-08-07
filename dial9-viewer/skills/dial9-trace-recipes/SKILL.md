@@ -275,16 +275,31 @@ for (const s of matches) {
 const { buildSpanData } = require('./trace_analysis.js');
 const { allSpans } = buildSpanData(trace.customEvents);
 
+// Polls on a worker are sorted and non-overlapping, so one forward sweep per
+// worker buckets segments into their poll -- avoiding the O(polls x spans) cost
+// of re-filtering every span for every poll (minutes on a large trace).
+const segsByWorker = {};
+for (const s of allSpans) {
+  for (const seg of s.segments) {
+    (segsByWorker[seg.workerId] ??= []).push({ start: seg.start, end: seg.end, span: s });
+  }
+}
+for (const segs of Object.values(segsByWorker)) segs.sort((a, b) => a.start - b.start);
+
 for (const w of workerIds) {
+  const segs = segsByWorker[w] || [];
+  let i = 0;
   for (const p of spans.workerSpans[w].polls) {
-    const inner = allSpans.filter(s =>
-      s.segments.some(seg => seg.workerId === w && seg.start >= p.start && seg.end <= p.end)
-    );
-    if (inner.length > 10) {
+    while (i < segs.length && segs[i].start < p.start) i++;
+    const inner = new Set();
+    for (let j = i; j < segs.length && segs[j].start <= p.end; j++) {
+      if (segs[j].end <= p.end) inner.add(segs[j].span);
+    }
+    if (inner.size > 10) {
       const byName = {};
       for (const s of inner) byName[s.spanName] = (byName[s.spanName] || 0) + 1;
       const summary = Object.entries(byName).map(([n, c]) => `${n}×${c}`).join(', ');
-      console.log(`Worker ${w} poll at +${((p.start - minTs) / 1e6).toFixed(1)}ms: ${inner.length} spans (${summary}), poll duration ${((p.end - p.start) / 1e6).toFixed(2)}ms`);
+      console.log(`Worker ${w} poll at +${((p.start - minTs) / 1e6).toFixed(1)}ms: ${inner.size} spans (${summary}), poll duration ${((p.end - p.start) / 1e6).toFixed(2)}ms`);
     }
   }
 }

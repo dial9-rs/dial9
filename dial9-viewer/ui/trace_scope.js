@@ -34,11 +34,13 @@
   const P = {
     bucket: "s_bucket",
     region: "s_region", // AWS region the bucket lives in (see scopeFromKeys)
+    roleArn: "s_role_arn", // reader role to assume for this bucket (see scopeFromKeys)
+    credentialMode: "s_credential_mode",
     prefix: "s_prefix",
     service: "s_svc",
     host: "s_host", // repeatable
     from: "s_from", // epoch seconds (inclusive)
-    to: "s_to", // epoch seconds (inclusive)
+    to: "s_to", // epoch seconds (exclusive)
   };
 
   // Parse an S3 trace key into its {service, host, bootId, epoch, segIndex}.
@@ -132,24 +134,42 @@
   // endpoint without relying on the tab having inherited a region-detection
   // result from the page that opened it. Optional and trailing so existing
   // callers keep working; falsy region simply isn't carried.
-  function scopeFromKeys(bucket, keys, t0, t1, region) {
+  //
+  // `roleArn` is the same story for the *assume-role* read path: when the bucket
+  // is read by assuming a role (the `aws_role_arn` credential), that ARN must
+  // ride in the scope too, or a link opened in a fresh session (no stored creds)
+  // has a bucket+region but no identity and every /api/browse 401s. The ARN is
+  // not a secret (it grants nothing on its own — the server must be allowed to
+  // assume it), so it is safe to carry in a shareable URL, exactly as the home
+  // page already carries `aws_role_arn`. Optional and trailing; falsy isn't carried.
+  // New callers pass canonical SourceScope as the first argument. The legacy
+  // positional form remains accepted for frozen HTML callers until they are
+  // migrated; both normalize to the same URL-safe scope (literal values never
+  // enter this object, only their mode marker).
+  function scopeFromKeys(sourceOrBucket, keys, t0, t1, region, roleArn, credentialMode) {
+    let bucket = sourceOrBucket;
+    if (sourceOrBucket && typeof sourceOrBucket === "object") {
+      const source = sourceOrBucket;
+      bucket = source.bucket || "";
+      region = source.region || "";
+      credentialMode = source.credentials && source.credentials.kind || "ambient";
+      roleArn = credentialMode === "role" ? source.credentials.roleArn : "";
+    }
     if (!keys || !keys.length) return null;
     const parsed = keys.map(parseKey);
     const services = [...new Set(parsed.map((p) => p.service).filter(Boolean))];
     const hosts = [...new Set(parsed.map((p) => p.host).filter(Boolean))];
     const epochs = parsed.map((p) => p.epoch).filter((e) => e > 0);
     // When no window is supplied (raw-mode selection), derive it from the keys'
-    // epochs. If none parse (e.g. a custom key layout the filename regex misses)
-    // there is no window to derive — return null rather than
-    // Math.min(...[])/Math.max(...[]), which are +Infinity/-Infinity and would
-    // be written into the URL as s_from=Infinity, then rejected by the i64
-    // /api/browse params (400) — a silently broken deep link.
+    // epochs. If none parse, there is no valid bounded scope to produce.
     if ((t0 == null || t1 == null) && !epochs.length) return null;
     const from = t0 != null ? Math.floor(t0) : Math.min(...epochs);
-    const to = t1 != null ? Math.ceil(t1) : Math.max(...epochs);
+    const to = t1 != null ? Math.ceil(t1) : Math.max(...epochs) + 1;
     return {
       bucket: bucket || "",
       region: region || "",
+      roleArn: roleArn || "",
+      credentialMode: credentialMode || "",
       prefix: extractPrefix(keys[0]),
       service: services.length === 1 ? services[0] : "",
       hosts,
@@ -178,6 +198,8 @@
     const base = new URLSearchParams(baseParams ? baseParams.toString() : "");
     if (scope.bucket) base.set(P.bucket, scope.bucket);
     if (scope.region) base.set(P.region, scope.region);
+    if (scope.roleArn) base.set(P.roleArn, scope.roleArn);
+    if (scope.credentialMode) base.set(P.credentialMode, scope.credentialMode);
     if (scope.prefix) base.set(P.prefix, scope.prefix);
     if (scope.service) base.set(P.service, scope.service);
     if (scope.from != null) base.set(P.from, String(scope.from));
@@ -216,6 +238,11 @@
     // for the bucket's region (credentials::QUERY_REGION), so a scope link that
     // points straight at /api/flamegraph or /api/tokio-stats is self-contained.
     if (scope.region) base.set("aws_region", scope.region);
+    // Likewise the bare `aws_role_arn` (credentials::QUERY_ROLE_ARN): a scope
+    // read via an assumed role must carry it so the server assumes the same role,
+    // else the endpoint has no identity for the bucket and 401s.
+    if (scope.roleArn) base.set("aws_role_arn", scope.roleArn);
+    if (scope.credentialMode) base.set("credential_mode", scope.credentialMode);
     if (scope.prefix) base.set("prefix", scope.prefix);
     if (scope.service) base.set("service", scope.service);
     if (scope.from != null) base.set("start_ns", String(Math.round(scope.from * 1e9)));
@@ -241,6 +268,8 @@
     return {
       bucket: params.get(P.bucket) || "",
       region: params.get(P.region) || "",
+      roleArn: params.get(P.roleArn) || "",
+      credentialMode: params.get(P.credentialMode) || "",
       prefix: params.get(P.prefix) || "",
       service: params.get(P.service) || "",
       hosts: params.getAll(P.host),
@@ -263,6 +292,7 @@
     const q = new URLSearchParams();
     if (scope.bucket) q.set("bucket", scope.bucket);
     if (scope.prefix) q.set("prefix", scope.prefix);
+    if (scope.service) q.set("service", scope.service);
     q.set("from", String(scope.from));
     q.set("to", String(scope.to));
     const result = await fetchJson("/api/browse?" + q.toString());
@@ -278,7 +308,7 @@
       const end = obj.last_modified
         ? new Date(obj.last_modified).getTime() / 1000
         : start;
-      if (start > scope.to || end < scope.from) continue;
+      if (start >= scope.to || end <= scope.from) continue;
       if (scope.service && p.service && p.service !== scope.service) continue;
       if (hostSet.size && !hostSet.has(p.host)) continue;
       matched.push({ key: obj.key, epoch: start });
