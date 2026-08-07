@@ -59,7 +59,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     rt.block_on(async {
         for _ in 0..3u64 {
             let windows = burn_windows.clone();
-            tokio::spawn(async move {
+            dial9_tokio_telemetry::telemetry::spawn(async move {
                 std::thread::sleep(Duration::from_millis(150));
                 let before = clock_monotonic_ns();
                 burn_cpu(Duration::from_millis(80));

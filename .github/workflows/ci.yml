@@ -210,6 +210,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Enable perf_event_open and kallsyms for tests
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.kptr_restrict=0
       # `__nonlinux_all_features` is every feature except `taskdump`, which
       # forwards to tokio/taskdump and is a hard compile error without the cfg.
       - name: Test dial9-tokio-telemetry
