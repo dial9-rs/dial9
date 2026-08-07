@@ -34,7 +34,7 @@ export type { IdentityField, ReconciledIdentity } from "./segment-metadata.js";
 export { formatFieldValue } from "./format.js";
 
 // prefixes.ts - S3 prefix-discovery heuristics (frozen prefix_detect.js).
-export { isDateLayer, lastSegment } from "./prefixes.js";
+export { isDateLayer, lastSegment, preferredPrefix } from "./prefixes.js";
 
 // load.ts - load orchestration + the trace_parser.js surface.
 export {
