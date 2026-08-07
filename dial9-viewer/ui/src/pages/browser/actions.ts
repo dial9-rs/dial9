@@ -17,7 +17,7 @@ import {
   makeSourceScope,
   type SourceScope,
 } from "../../lib/trace/source-scope.js";
-import { isDateLayer } from "../../lib/trace/prefixes.js";
+import { isDateLayer, preferredPrefix } from "../../lib/trace/prefixes.js";
 import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import {
   apiFetch,
@@ -495,11 +495,16 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         syncUrl();
         return;
       }
-      // If there's exactly one prefix and the input is empty, auto-select it
-      if (prefixes.length === 1 && !els.prefixInput.value) {
-        els.prefixInput.value = prefixes[0]!.replace(/\/$/, "");
-        mirrorPrefix();
-        syncUrl();
+      // Pre-select a prefix when the input is empty: `dial9-traces` if the
+      // bucket offers it (the conventional default), otherwise the sole
+      // prefix. With several non-default prefixes we leave it to the user.
+      if (!els.prefixInput.value) {
+        const preferred = preferredPrefix(prefixes);
+        if (preferred) {
+          els.prefixInput.value = preferred;
+          mirrorPrefix();
+          syncUrl();
+        }
       }
       const labels = prefixes.map((p) => p.replace(/\/$/, ""));
       const current = els.prefixInput.value;
