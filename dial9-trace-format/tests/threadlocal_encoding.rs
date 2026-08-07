@@ -41,7 +41,7 @@ fn test_reset_to_returns_decodable_bytes() {
     let mut count = 0;
     dec.for_each_event(|ev| {
         count += 1;
-        assert!(ev.timestamp_ns.is_some());
+        assert!(ev.timestamp_ns > 0);
     })
     .unwrap();
     assert_eq!(count, 2);
@@ -102,7 +102,7 @@ fn test_rawcopy_round_trip_single_batch() {
         events.push(ev.timestamp_ns);
     })
     .unwrap();
-    assert_eq!(events, vec![Some(1000), Some(2000)]);
+    assert_eq!(events, vec![1000, 2000]);
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn test_rawcopy_timestamp_preserved() {
         timestamps.push(ev.timestamp_ns);
     })
     .unwrap();
-    assert_eq!(timestamps, vec![Some(5000), Some(10000)]);
+    assert_eq!(timestamps, vec![5000, 10000]);
 }
 
 #[test]

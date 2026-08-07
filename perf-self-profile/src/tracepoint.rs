@@ -236,10 +236,7 @@ impl TracepointDef {
     ) -> io::Result<()> {
         let extracted = self.extract_fields(raw)?;
         let field_values = self.to_trace_format_values(&extracted);
-        let mut values = Vec::with_capacity(1 + field_values.len());
-        values.push(FieldValue::Varint(timestamp_ns));
-        values.extend(field_values);
-        encoder.write_event(schema, &values)
+        encoder.write_event(schema, timestamp_ns, &field_values)
     }
 }
 
@@ -634,7 +631,6 @@ print fmt: "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=
             match frame {
                 DecodedFrame::Schema(entry) => {
                     assert_eq!(entry.name(), "sched_switch");
-                    assert!(entry.has_timestamp());
                     assert_eq!(entry.fields().len(), 7);
                     assert_eq!(entry.fields()[0].name(), "prev_comm");
                     found_schema = true;
@@ -644,7 +640,7 @@ print fmt: "prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=
                     values,
                     ..
                 } => {
-                    assert_eq!(timestamp_ns, Some(5_000_000));
+                    assert_eq!(timestamp_ns, 5_000_000);
                     // prev_comm
                     assert_eq!(values[0], FieldValue::String("bash".to_string()));
                     // prev_pid

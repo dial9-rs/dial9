@@ -32,11 +32,8 @@ fn make_test_trace() -> Vec<u8> {
     let schema = enc
         .register_schema("TestEvent", vec![FieldDef::new("value", FieldType::Varint)])
         .unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+        .unwrap();
     enc.finish()
 }
 

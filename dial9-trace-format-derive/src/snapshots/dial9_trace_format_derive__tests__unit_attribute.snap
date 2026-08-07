@@ -1,5 +1,6 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
+assertion_line: 349
 expression: "expand_to_string(quote!\n{\n    struct ResourceUsage\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, #[traceevent(unit = \"ns\")]\n        user_cpu_ns: u64, minor_faults: u64, #[traceevent(unit = \"bytes\")]\n        max_rss_bytes: u64,\n    }\n})"
 ---
 impl ::dial9_trace_format::TraceEvent for ResourceUsage {
@@ -19,7 +20,6 @@ impl ::dial9_trace_format::TraceEvent for ResourceUsage {
     fn schema_entry() -> ::dial9_trace_format::schema::SchemaEntry {
         ::dial9_trace_format::schema::SchemaEntry::with_annotations(
             Self::event_name(),
-            Self::has_timestamp(),
             Self::field_defs(),
             vec![
                 ::dial9_trace_format::schema::FieldAnnotation::new(0u16, "unit", "ns"),
