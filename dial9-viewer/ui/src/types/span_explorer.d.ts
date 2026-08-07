@@ -99,6 +99,8 @@ declare module "*/span_explorer.js" {
     max_files?: number | null;
     bucket?: string | null;
     region?: string | null;
+    credentialMode?: "ambient" | "literal" | "role" | null;
+    roleArn?: string | null;
     prefix?: string | null;
     service?: string | null;
     hosts?: readonly string[] | null;
@@ -115,6 +117,8 @@ declare module "*/span_explorer.js" {
     max_files: number | null;
     bucket: string | null;
     region: string | null;
+    credentialMode: string | null;
+    roleArn: string | null;
     prefix: string | null;
     service: string | null;
     hosts: string[];
@@ -131,6 +135,8 @@ declare module "*/span_explorer.js" {
     trace?: string | null;
     bucket?: string | null;
     region?: string | null;
+    credentialMode?: "ambient" | "literal" | "role" | null;
+    roleArn?: string | null;
     service?: string | null;
     /** Forwarded as `focus_span_name` so the viewer selects the exact span. */
     spanName?: string | null;

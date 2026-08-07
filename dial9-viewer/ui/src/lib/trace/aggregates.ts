@@ -358,6 +358,16 @@ export interface TokioStatsResponse {
 export interface AggregateScope {
   /** S3 bucket override (bring-your-own-credentials mode). */
   bucket?: string;
+  /**
+   * AWS region the bucket lives in. Carried on the REQUEST URL (the server
+   * reads it from the `aws_region` query param — the only place an ambient
+   * cross-region read learns the region). Safe on a request URL: the server
+   * tolerates region on both header and query (header wins). The reader-role
+   * ARN deliberately has no field here — the role is header-only (a role on
+   * both header and query is the server's ConflictingCredentials 400), restored
+   * into the creds store at boot rather than put on the request URL.
+   */
+  aws_region?: string;
   /** S3 key prefix scoping the source segment listing. */
   prefix?: string;
   service?: string;
@@ -502,6 +512,7 @@ export const TOKIO_STATS_ENDPOINT = "/api/tokio-stats";
 /** Append scope params common to both endpoints. */
 function appendScope(search: URLSearchParams, scope: AggregateScope): void {
   if (scope.bucket !== undefined) search.set("bucket", scope.bucket);
+  if (scope.aws_region !== undefined) search.set("aws_region", scope.aws_region);
   if (scope.prefix !== undefined) search.set("prefix", scope.prefix);
   if (scope.service !== undefined) search.set("service", scope.service);
   for (const h of scope.host ?? []) search.append("host", h);

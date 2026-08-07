@@ -17,11 +17,13 @@ import {
   Dial9Creds,
   Dial9Session,
   addAttrFilter,
+  applyToCreds,
   classifyExemplarSnapshot,
   completeExemplarRefresh,
   exemplarRequestMatches,
   formatCoverageBadge,
   hasAttrFilter,
+  isSourceShareable,
   mergeSelectedExemplarSnapshot,
   nextMaxFiles,
   nsToPickerUtc,
@@ -31,6 +33,7 @@ import {
   refinementWorkDepth,
   removeAttrFilter,
   shouldAdoptCatalogSnapshot,
+  sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import type {
   AttrFilter,
@@ -65,9 +68,14 @@ const els = pageEls();
 
 // URL params are read ONCE: the load scope is fixed for the page's lifetime.
 const params = new URLSearchParams(window.location.search);
-const scope = readScope(params);
+const scope = readScope(params, sourceScopeFromStored("", Dial9Creds.get()));
 const aggregate = isAggregateMode(params, scope);
 const rawMode = scope.trace != null;
+
+applyToCreds(scope.source, Dial9Creds);
+// Keep the static node and ID for the private userscript's page marker, but hide
+// built-in sharing whenever literal credentials are active.
+els.btnCopyLink.style.display = isSourceShareable(scope.source) ? "" : "none";
 
 // ── Mutable page state ──
 
@@ -117,8 +125,12 @@ function linkState(): SpanExplorerState | null {
   return {
     data_dir: scope.dataDir,
     max_files: maxFiles,
-    bucket: scope.bucket,
-    region: scope.region,
+    bucket: scope.source.bucket || null,
+    region: scope.source.region || null,
+    credentialMode: scope.source.credentials.kind,
+    ...(scope.source.credentials.kind === "role"
+      ? { roleArn: scope.source.credentials.roleArn }
+      : {}),
     prefix: scope.prefix,
     service: scope.service,
     hosts: scope.hosts,
@@ -161,7 +173,7 @@ function renderDetailNow(): void {
     exemplarPreviewAvailable,
     linkState: linkState(),
     rawTrace: scope.trace,
-    rawRegion: scope.region,
+    rawRegion: scope.source.region || null,
     onBand: applyBand,
     onClearBand: () => applyBand({ min_ns: null, max_ns: null }),
     onToggleFilter: toggleAttrFilter,

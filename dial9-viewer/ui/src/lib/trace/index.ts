@@ -293,6 +293,43 @@ export {
 } from "./trace_scope.js";
 export type { EncodeScopeOptions, EncodedScope, TraceScope } from "./trace_scope.js";
 
+// source-scope.ts - canonical bucket+region+credential identity and the safe
+// projections used by browser URLs, built-in sharing, and API requests.
+export {
+  AMBIENT_CREDENTIALS,
+  EMPTY_LITERAL_CREDENTIALS,
+  EMPTY_SOURCE_SCOPE,
+  applyToCreds,
+  credentialHeadersForSource,
+  credentialMode,
+  isLiteralConfigured,
+  isSourceShareable,
+  makeSourceScope,
+  readNamespacedSourceScope,
+  readPlainSourceScope,
+  sourceScopeFromStored,
+  toShareableSourceScope,
+  toUrlSourceScope,
+  writeNamespacedParams,
+  writeNamespacedUrlParams,
+  writeRequestParams,
+  writeShareableParams,
+  writeUrlParams,
+} from "./source-scope.js";
+export type {
+  AmbientCredentials,
+  LiteralCredentials,
+  RoleCredentials,
+  Shareability,
+  ShareableSourceScope,
+  SourceCredentials,
+  SourceScope,
+  SourceScopeCredentials,
+  StoredSourceCredentials,
+  UrlCredentials,
+  UrlSourceScope,
+} from "./source-scope.js";
+
 // aggregates.ts - server aggregate wire types (/api/flamegraph +
 // /api/tokio-stats), the tokio-stats URL builder, and the coverage
 // full/partial/none fallback signal. (Both endpoints stream over SSE now, so
