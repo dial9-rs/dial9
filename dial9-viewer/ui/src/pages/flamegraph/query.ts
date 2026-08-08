@@ -3,6 +3,12 @@
 // mode loading-phase labels, and the aggregated-mode (`?api=1`) /api/flamegraph
 // query and browser-URL builders.
 
+import {
+  writeRequestParams,
+  writeUrlParams,
+} from "../../lib/trace/index.js";
+import type { SourceScope } from "../../lib/trace/index.js";
+
 /**
  * Resolve each `trace=` component against the origin root. Relative
  * values ("demo-trace.bin") and root-relative values ("/api/object?...")
@@ -44,7 +50,8 @@ export function loadingLabel(
 export interface ApiQueryState {
   /** data_dir passthrough (local-dir mode); empty/absent skipped. */
   dataDir: string | null;
-  bucket: string | null;
+  /** Canonical bucket, region, and credential identity. */
+  source: SourceScope;
   prefix: string | null;
   service: string | null;
   /** Host filter; each entry becomes a repeated `host=` param. */
@@ -83,9 +90,13 @@ export function seedFacetState(params: URLSearchParams): Record<string, string> 
   };
 }
 
+// The data + facet + window params (everything except the bucket+region+role
+// identity, which the two callers layer on differently: a request URL omits the
+// role, a shareable link carries it). `data_dir` and `bucket` are mutually
+// exclusive (local-dir vs S3), so putting the identity's bucket ahead of this
+// costs no ordering the caller relies on.
 function appendScope(p: URLSearchParams, state: ApiQueryState): void {
   if (state.dataDir) p.set("data_dir", state.dataDir);
-  if (state.bucket) p.set("bucket", state.bucket);
   if (state.prefix) p.set("prefix", state.prefix);
   if (state.service) p.set("service", state.service);
   for (const h of state.hosts) p.append("host", h);
@@ -110,6 +121,10 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
  */
 export function buildApiUrl(state: ApiQueryState, origin: string): string {
   const u = new URL("/api/flamegraph", origin);
+  // Request URL: bucket+region only. The role is header-only (restored into
+  // creds at boot), so it must NOT appear here — a role on both header and
+  // query is the server's ConflictingCredentials 400.
+  writeRequestParams(u.searchParams, state.source);
   appendScope(u.searchParams, state);
   if (state.maxFiles != null) u.searchParams.set("max_files", String(state.maxFiles));
   return u.toString();
@@ -125,6 +140,9 @@ export function buildApiUrl(state: ApiQueryState, origin: string): string {
 export function buildBrowserQuery(state: ApiQueryState): string {
   const p = new URLSearchParams();
   p.set("api", "1");
+  // Address-bar link: carries the role (aws_role_arn) so a fresh tab restores
+  // the identity at boot; it is never re-emitted onto a request URL from there.
+  writeUrlParams(p, state.source);
   appendScope(p, state);
   if (state.maxFiles != null) p.set("max_files", String(state.maxFiles));
   return p.toString();

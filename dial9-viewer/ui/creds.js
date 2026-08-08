@@ -25,7 +25,7 @@
     sessionToken: "x-dial9-aws-session-token",
     region: "x-dial9-aws-region",
     // Assume-role path: name a role for the server to assume with its own
-    // identity, instead of supplying static keys. Alternative to the four above.
+    // identity, instead of supplying literal keys. Alternative to the four above.
     roleArn: "x-dial9-aws-role-arn",
   };
 
@@ -61,46 +61,30 @@
   }
 
   /**
-   * Read the active credential, normalized to exactly one of two shapes (or null
-   * when nothing usable is stored):
-   *
-   *   { kind: "static", accessKeyId, secretAccessKey, sessionToken?, region? }
-   *   { kind: "role",   roleArn, region? }
-   *
-   * This mirrors the server's `CredSource` union (src/server/credentials.rs):
-   * exactly one transport is active per request, and the two never coexist.
-   * Normalizing on read (see [`classify`]) means every consumer — `has`,
-   * `headers`, `setRegion` — branches on `kind` instead of re-deriving which
-   * transport applies, and the "both at once" combination is unrepresentable
-   * rather than something downstream code has to defend against.
+   * Read the active credential as an explicit ambient | literal | role union.
+   * Missing, malformed, and legacy-empty storage all mean ambient; callers never
+   * need to infer the server identity from null.
    */
   function get() {
     try {
       const raw = storage().getItem(STORAGE_KEY);
-      return raw ? classify(JSON.parse(raw)) : null;
+      return raw ? classify(JSON.parse(raw)) : { kind: "ambient" };
     } catch {
-      return null;
+      return { kind: "ambient" };
     }
   }
 
   /**
-   * Collapse a stored bag into the one canonical credential shape it represents,
-   * or null if it names no usable transport. This is the single place the
-   * "static and role never coexist" invariant is enforced: a bag carrying both a
-   * static key pair and a role ARN resolves to static (the more specific intent),
-   * so `headers`/`has` never see the ambiguous pair.
-   *
-   * Tolerant of the legacy flat bag (pre-discriminant, and the static-only shape
-   * that predates assume-role): those have no `kind`, so we derive it from the
-   * fields present. sessionStorage is tab-scoped, but a tab open across the
-   * upgrade can still hold one.
+   * Normalize both current records and the pre-discriminant literal/role bags.
+   * A legacy bag carrying both key fields and a role resolves to literal, so the
+   * server's conflicting credential transports remain unrepresentable.
    */
   function classify(bag) {
-    if (!bag) return null;
+    if (!bag) return { kind: "ambient" };
     const region = (bag.region || "").trim() || undefined;
     if (bag.accessKeyId && bag.secretAccessKey) {
       return {
-        kind: "static",
+        kind: "literal",
         accessKeyId: bag.accessKeyId,
         secretAccessKey: bag.secretAccessKey,
         sessionToken: (bag.sessionToken || "").trim() || undefined,
@@ -110,12 +94,17 @@
     if (bag.roleArn) {
       return { kind: "role", roleArn: bag.roleArn, region };
     }
-    return null;
+    if (bag.kind === "literal") {
+      return { kind: "literal", accessKeyId: "", secretAccessKey: "", region };
+    }
+    return { kind: "ambient" };
   }
 
-  /** True if a usable credential (static keys or a role ARN) is stored. */
+  /** True only when a usable non-ambient request credential is active. */
   function has() {
-    return !!get();
+    const c = get();
+    return c.kind === "role" ||
+      (c.kind === "literal" && !!c.accessKeyId && !!c.secretAccessKey);
   }
 
   /** Write a fully-formed credential object to storage and notify listeners.
@@ -127,11 +116,11 @@
     return obj;
   }
 
-  /** Persist a static bring-your-own key pair as the active credential. Replaces
+  /** Persist a literal bring-your-own key pair as the active credential. Replaces
    * whatever was stored, so a prior role ARN cannot linger alongside the keys. */
   function storeStatic(creds) {
     return persist({
-      kind: "static",
+      kind: "literal",
       accessKeyId: (creds.accessKeyId || "").trim(),
       secretAccessKey: (creds.secretAccessKey || "").trim(),
       sessionToken: (creds.sessionToken || "").trim() || undefined,
@@ -140,7 +129,7 @@
   }
 
   /** Persist an assume-role ARN as the active credential. Replaces whatever was
-   * stored, so static keys cannot linger alongside the ARN — the two transports
+   * stored, so literal keys cannot linger alongside the ARN — the two transports
    * never coexist (the server rejects both together, `ConflictingCredentials`).
    * `roleArn` is trusted to be validated/trimmed by the caller ([`setRoleArn`]). */
   function storeRole(roleArn, region) {
@@ -151,11 +140,23 @@
     });
   }
 
+  /** Select the server's ambient identity and remove any prior key/role data. */
+  function setAmbient() {
+    storage().removeItem(STORAGE_KEY);
+    notifyChanged();
+    return { kind: "ambient" };
+  }
+
+  /** Select literal mode before keys have been entered. */
+  function setLiteralMode() {
+    return persist({ kind: "literal", accessKeyId: "", secretAccessKey: "" });
+  }
+
   /**
    * Patch the region onto whatever credential is currently stored, preserving
    * its kind. This is the one region-update entry point for both transports:
    * region auto-detection persists the resolved region here without caring
-   * whether the active credential is static keys or an assumed role. No-op (and
+   * whether the active credential is literal keys or an assumed role. No-op (and
    * returns null) when nothing is stored — the ambient path has no per-request
    * region to pin. Returns the stored object.
    *
@@ -163,7 +164,7 @@
    */
   function setRegion(region) {
     const c = get();
-    if (!c) return null;
+    if (c.kind === "ambient") return c;
     return persist({ ...c, region: (region || "").trim() || undefined });
   }
 
@@ -250,7 +251,7 @@
 
   /**
    * Store an assume-role ARN as the active credential (the linkable
-   * `?aws_role_arn=…` path). Clears any static BYOC keys so the two transports
+   * `?aws_role_arn=…` path). Clears any literal BYOC keys so the two transports
    * never coexist — the server rejects both together (`ConflictingCredentials`).
    * An optional `region` pins the S3 endpoint, exactly like the BYOC region.
    *
@@ -364,34 +365,27 @@
     return await resp.json();
   }
 
-  /** Clear stored credentials and notify listeners. */
+  /** Clear stored credentials, selecting ambient identity, and notify listeners. */
   function clear() {
-    storage().removeItem(STORAGE_KEY);
-    notifyChanged();
+    return setAmbient();
   }
 
   /**
    * Build the `x-dial9-aws-*` request headers for the active credential.
-   * Returns an empty object when nothing is stored (so it can be spread into any
-   * fetch unconditionally). Token/region keys are omitted when unset.
-   *
-   * One transport per request, keyed off the stored credential's `kind` (the two
-   * are mutually exclusive — the server rejects both at once with
-   * `ConflictingCredentials`):
-   *  - static BYOC keys → the `access-key-id`/`secret-access-key`/
-   *    `session-token` headers (+ optional `region`);
-   *  - an assume-role ARN → the single `role-arn` header (+ optional `region`).
+   * Ambient and unconfigured literal modes return an empty object. One usable
+   * transport is emitted per request; region accompanies literal/role headers.
    */
   function headers() {
     const c = get();
-    if (!c) return {};
+    if (c.kind === "ambient") return {};
+    if (c.kind === "literal" && (!c.accessKeyId || !c.secretAccessKey)) return {};
 
     const h = {};
-    if (c.kind === "static") {
+    if (c.kind === "literal") {
       h[H.accessKeyId] = c.accessKeyId;
       h[H.secretAccessKey] = c.secretAccessKey;
       if (c.sessionToken) h[H.sessionToken] = c.sessionToken;
-    } else if (c.kind === "role") {
+    } else {
       h[H.roleArn] = c.roleArn;
     }
     if (c.region) h[H.region] = c.region;
@@ -409,6 +403,8 @@
     get,
     has,
     set,
+    setAmbient,
+    setLiteralMode,
     setRoleArn,
     setRegion,
     isValidRoleArn,
@@ -423,9 +419,12 @@
     },
   };
 
-  // Browser: expose on window as the stable scripting contract.
+  // Browser: the public userscript contract is intentionally narrow. Shipped
+  // page modules import the full internal store; legacy inline pages use the
+  // explicitly-private compatibility global while they are migrated.
   if (typeof window !== "undefined") {
-    window.Dial9Creds = Dial9Creds;
+    window.Dial9Creds = { set, check, setRegion };
+    window.__Dial9CredentialStore = Dial9Creds;
   }
   // Node: CommonJS export for tests.
   if (typeof module !== "undefined" && module.exports) {

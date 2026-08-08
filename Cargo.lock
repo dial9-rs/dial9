@@ -2054,16 +2054,22 @@ dependencies = [
  "axum 0.8.9",
  "axum-core 0.4.5",
  "axum-core 0.5.6",
+ "criterion 0.5.1",
+ "dial9",
  "dial9-core",
+ "dial9-tokio-telemetry",
  "dial9-trace-format",
+ "dial9-utils",
  "futures-util",
  "hyper",
  "hyper-util",
+ "iai-callgrind",
  "tempfile",
  "tokio",
  "tower",
  "tower-service",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

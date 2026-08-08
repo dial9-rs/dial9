@@ -503,6 +503,10 @@ function encodeSpanExplorerState(state) {
   setMaxFilesParam(p, state.max_files);
   if (state.bucket) p.set("bucket", state.bucket);
   if (state.region) p.set("aws_region", state.region);
+  if (state.credentialMode) p.set("credential_mode", state.credentialMode);
+  if (state.credentialMode === "role" && state.roleArn) {
+    p.set("aws_role_arn", state.roleArn);
+  }
   if (state.prefix) p.set("prefix", state.prefix);
   if (state.service) p.set("service", state.service);
   if (state.hosts) for (const h of state.hosts) p.append("host", h);
@@ -521,6 +525,8 @@ function decodeSpanExplorerState(params) {
     max_files: params.get("max_files") != null ? Number(params.get("max_files")) : null,
     bucket: params.get("bucket") || null,
     region: params.get("aws_region") || null,
+    credentialMode: params.get("credential_mode") || null,
+    roleArn: params.get("aws_role_arn") || null,
     prefix: params.get("prefix") || null,
     service: params.get("service") || null,
     hosts: params.getAll("host"),
@@ -541,6 +547,10 @@ function flamegraphUrl(state, phase) {
   setMaxFilesParam(p, state.max_files);
   if (state.bucket) p.set("bucket", state.bucket);
   if (state.region) p.set("aws_region", state.region);
+  if (state.credentialMode) p.set("credential_mode", state.credentialMode);
+  if (state.credentialMode === "role" && state.roleArn) {
+    p.set("aws_role_arn", state.roleArn);
+  }
   if (state.prefix) p.set("prefix", state.prefix);
   if (state.service) p.set("service", state.service);
   if (state.hosts) for (const h of state.hosts) p.append("host", h);
@@ -692,6 +702,8 @@ function exemplarViewerUrl(exemplar, scope) {
   // Prefer the exemplar's own host (it may differ from the scope's host set).
   if (ex.host) p.set("host", ex.host);
   if (sc.region) p.set("aws_region", sc.region);
+  if (sc.credentialMode) p.set("credential_mode", sc.credentialMode);
+  if (sc.credentialMode === "role" && sc.roleArn) p.set("aws_role_arn", sc.roleArn);
   // Non-destructive focus on the exact span. `focus_start` alone triggers the
   // pan; `focus_end` frames the zoom; `focus_span_name` lets the viewer select
   // the matching span rather than just pan to a time window.

@@ -417,13 +417,12 @@ export async function probeCreds(blob: string): Promise<void> {
   if (!result.ok) void (result.error ?? "unknown");
   void (result.region ?? "");
   const stored = Dial9Creds.get();
-  if (stored !== null) {
-    // Discriminated union (#615): narrow on `kind` before reading a
-    // transport's fields; `region` rides both.
-    if (stored.kind === "static") void (stored.accessKeyId + (stored.sessionToken ?? ""));
-    else void stored.roleArn;
-    void (stored.region ?? "");
+  if (stored.kind === "literal") {
+    void (stored.accessKeyId + (stored.sessionToken ?? ""));
+  } else if (stored.kind === "role") {
+    void stored.roleArn;
   }
+  if ("region" in stored) void (stored.region ?? "");
   // Assume-role transport (#615): validate + store an ARN, then patch region.
   const arn = "arn:aws:iam::123456789012:role/dial9-reader";
   if (Dial9Creds.isValidRoleArn(arn)) Dial9Creds.setRoleArn(arn, { region: "us-west-2" });

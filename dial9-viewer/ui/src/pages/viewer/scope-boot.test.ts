@@ -43,9 +43,19 @@ describe("scope boot", () => {
       },
     };
     const creds: ScopeBootCredentials = {
-      get: () => ({ region }),
+      get: () => ({
+        kind: "literal",
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        region,
+      }),
+      setAmbient() {},
+      setLiteralMode() {},
       setRegion(next) {
         region = next;
+      },
+      setRoleArn() {
+        /* no role in this URL */
       },
       has: () => true,
       headers: () => ({ "x-dial9-aws-region": region }),
@@ -91,6 +101,58 @@ describe("scope boot", () => {
           startNs: 1_784_588_999_000_000_000,
           endNs: 1_784_589_010_000_000_000,
         },
+      },
+    ]);
+  });
+
+  it("restores the scope's role ARN into creds so a fresh-session link has an identity", async () => {
+    // The bug: a shared viewer link opened in a session with NO stored creds
+    // carries the bucket + region + role in its s_* scope, but the role was
+    // never restored, so /api/browse 401'd. Assert the role is folded back in.
+    const roleCalls: Array<{ arn: string; region?: string }> = [];
+    let region = "";
+    const creds: ScopeBootCredentials = {
+      get: () => ({ kind: "ambient" }),
+      setAmbient() {},
+      setLiteralMode() {},
+      setRegion(next) {
+        region = next;
+      },
+      setRoleArn(arn, opts) {
+        roleCalls.push(opts?.region === undefined ? { arn } : { arn, region: opts.region });
+        if (opts?.region) region = opts.region;
+      },
+      has: () => false, // fresh session: no stored creds
+      headers: () => ({}),
+    };
+
+    const search =
+      REPORTED_SEARCH +
+      "&s_role_arn=" +
+      encodeURIComponent("arn:aws:iam::123456789012:role/Dial9TraceReader");
+
+    const handled = await bootScopeFromSearch({
+      search,
+      hasInlineUrls: false,
+      loadChrome: {
+        scopeLoading: () => () => true,
+        loadUrls: () => {},
+        scopeFailed: () => {},
+      },
+      onError: () => {},
+      creds,
+      fetchJson: async () => ({
+        objects: [
+          { key: TRACE_KEY, size: 10, last_modified: "2026-07-20T23:10:14Z" },
+        ],
+      }),
+    });
+
+    expect(handled).toBe(true);
+    expect(roleCalls).toEqual([
+      {
+        arn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
+        region: "us-west-2",
       },
     ]);
   });

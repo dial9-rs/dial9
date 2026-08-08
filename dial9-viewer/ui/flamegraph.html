@@ -129,9 +129,21 @@
                 // source files match this scope". No-op when no creds are stored
                 // (region is header-only) or no region is in the URL.
                 const urlRegion = params.get("aws_region") || params.get("s_region");
-                if (urlRegion && window.Dial9Creds) {
-                    const stored = Dial9Creds.get();
-                    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+                const urlMode = params.get("credential_mode") || params.get("s_credential_mode");
+                const urlRoleArn = params.get("aws_role_arn") || params.get("s_role_arn");
+                if (window.__Dial9CredentialStore) {
+                    if (urlMode === "ambient") __Dial9CredentialStore.setAmbient();
+                    else if (urlMode === "literal" && __Dial9CredentialStore.get().kind !== "literal") {
+                        __Dial9CredentialStore.setLiteralMode();
+                    } else if ((urlMode === "role" || (!urlMode && urlRoleArn)) && urlRoleArn) {
+                        __Dial9CredentialStore.setRoleArn(urlRoleArn, urlRegion ? { region: urlRegion } : undefined);
+                    } else if (!urlMode && !urlRoleArn && __Dial9CredentialStore.get().kind !== "literal") {
+                        __Dial9CredentialStore.setAmbient();
+                    }
+                }
+                if (urlRegion && window.__Dial9CredentialStore) {
+                    const stored = __Dial9CredentialStore.get();
+                    if (stored && stored.region !== urlRegion) __Dial9CredentialStore.setRegion(urlRegion);
                 }
 
                 function showError(msg) {
@@ -166,6 +178,18 @@
                 // never in sessionStorage).
                 const diffParsed = FlamegraphDiff.parseDiff(params);
                 if (diffParsed) {
+                    const sideMode = diffParsed.a.get("credential_mode");
+                    const sideRoleArn = diffParsed.a.get("aws_role_arn");
+                    const sideRegion = diffParsed.a.get("aws_region");
+                    if (sideMode === "ambient") __Dial9CredentialStore.setAmbient();
+                    else if (sideMode === "literal" && __Dial9CredentialStore.get().kind !== "literal") {
+                        __Dial9CredentialStore.setLiteralMode();
+                    } else if (sideMode === "role" && sideRoleArn) {
+                        __Dial9CredentialStore.setRoleArn(
+                            sideRoleArn,
+                            sideRegion ? { region: sideRegion } : undefined,
+                        );
+                    }
                     document.title = "Flamegraph diff";
                     titleEl.textContent = "Flamegraph diff";
                     loadingEl.classList.add("hidden");
@@ -176,7 +200,7 @@
                     let credsB = null; // {accessKeyId, secretAccessKey, sessionToken?, region?}
                     function sessionHeaders() {
                         return Dial9Session.headers(
-                            window.Dial9Creds ? Dial9Creds.headers() : {}
+                            window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
                         );
                     }
                     function credsToHeaders(c) {
@@ -208,7 +232,7 @@
                             "Side " + side.toUpperCase() + " failed: " + (err && err.message || err);
                     }
 
-                    // In-memory creds prompt for side B. Reuses Dial9Creds.parse()
+                    // In-memory creds prompt for side B. Reuses __Dial9CredentialStore.parse()
                     // to accept the same pasted blobs as the home page (STS JSON
                     // or flat JSON), and validates them against B's bucket via
                     // /api/credentials/check — which both confirms access and
@@ -253,7 +277,7 @@
                         applyBtn.addEventListener("click", async () => {
                             let parsed;
                             try {
-                                parsed = Dial9Creds.parse(ta.value);
+                                parsed = __Dial9CredentialStore.parse(ta.value);
                             } catch (e) {
                                 errEl.textContent = "Could not parse: " + e.message;
                                 return;
@@ -710,6 +734,13 @@
                     // address bar and any copy/diff link so a shared URL stays
                     // self-contained rather than depending on the tab's store.
                     const scopeRegion = params.get("aws_region");
+                    function writeCredentialState(p) {
+                        const credentials = __Dial9CredentialStore.get();
+                        p.set("credential_mode", credentials.kind);
+                        if (credentials.kind === "role") {
+                            p.set("aws_role_arn", credentials.roleArn);
+                        }
+                    }
                     // Span-type filter carried by span-explorer deep links. These
                     // scope the flamegraph to CPU/sched samples enclosed by a span
                     // of this type (and optional duration band). They are fixed for
@@ -730,7 +761,7 @@
                         const u = new URL("/api/flamegraph", window.location.origin);
                         if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
-                        // Region also travels as a header (Dial9Creds), but naming
+                        // Region also travels as a header (__Dial9CredentialStore), but naming
                         // it on the URL keeps the request self-describing and works
                         // even on the ambient (no-creds) path.
                         if (scopeRegion) u.searchParams.set("aws_region", scopeRegion);
@@ -764,6 +795,7 @@
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) p.set("bucket", scopeBucket);
                         if (scopeRegion) p.set("aws_region", scopeRegion);
+                        writeCredentialState(p);
                         if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
                         for (const h of filterState.hosts) p.append("host", h);
@@ -1351,7 +1383,7 @@
                         const token = ++streamToken;
                         abortCtl = new AbortController();
                         const credHeaders = Dial9Session.headers(
-                            window.Dial9Creds ? Dial9Creds.headers() : {}
+                            window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
                         );
                         Dial9Sse.openSse(buildApiUrl(), {
                             headers: credHeaders,
@@ -1438,6 +1470,7 @@
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) p.set("bucket", scopeBucket);
                         if (scopeRegion) p.set("aws_region", scopeRegion);
+                        writeCredentialState(p);
                         if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
                         for (const h of filterState.hosts) p.append("host", h);
@@ -1461,7 +1494,11 @@
                         return FlamegraphDiff.fullScopeQuery(p);
                     }
 
-                    document.getElementById("f-copylink").addEventListener("click", async () => {
+                    const builtInCopyLink = document.getElementById("f-copylink");
+                    if (__Dial9CredentialStore.get().kind === "literal") {
+                        builtInCopyLink.style.display = "none";
+                    }
+                    builtInCopyLink.addEventListener("click", async () => {
                         // The Copy link carries the full scope PLUS the live
                         // zoom/inspect focus, so a coworker opening it lands on the
                         // exact same focus position. (currentScopeQuery stays
@@ -1514,7 +1551,7 @@
                         try {
                             loadingEl.textContent = "Resolving trace selection…";
                             const fetchJson = async (u) => {
-                                const h = window.Dial9Creds ? Dial9Creds.headers() : {};
+                                const h = window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {};
                                 const r = await Dial9Session.fetch(u, { headers: h });
                                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                                 return r.json();
@@ -1542,7 +1579,7 @@
                 // path (each component fetched and gunzipped independently, then
                 // concatenated).
                 const credHeaders = Dial9Session.headers(
-                    window.Dial9Creds ? Dial9Creds.headers() : {}
+                    window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
                 );
                 let trace;
                 try {
@@ -1563,7 +1600,7 @@
                         trace = await TraceParser.parseTrace(buffer);
                     }
                 } catch (err) {
-                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                    if (/HTTP 401/.test(err.message) && window.__Dial9CredentialStore && !__Dial9CredentialStore.has()) {
                         showError(
                             "This trace requires AWS credentials. Open it from the dial9 " +
                             "home page after applying your credentials."

@@ -74,6 +74,19 @@ rate_limited!(Duration::from_secs(60), {
 ```
 Unguarded logging in loops causes log spam that degrades observability and can itself become a performance problem. One-time paths (startup, shutdown, per-thread init) are exempt.
 
+## Viewer UI
+
+The viewer UI is mid-migration (ADR-0004): every page exists in two versions —
+a **legacy** one (inline `<script>` in `dial9-viewer/ui/*.html`, e.g.
+`index.html`) served at its canonical URL, and a **new** Vite/TypeScript one
+(`dial9-viewer/ui/src/pages/**`, served under `/new/…`) that is now the
+default. **Make behavior changes in the new UI only** (`src/`). Do NOT edit the
+legacy pages/scripts — they are frozen for the migration and are not what users
+load. Shared logic lives in the frozen-core modules at the `ui/` root (e.g.
+`prefix_detect.js`), imported into the new UI through the `src/lib/**` seams;
+change those when the behavior is genuinely shared, and expose new exports via
+the seam rather than reaching into the legacy pages.
+
 ## Testing
 
 ### Local viewer server

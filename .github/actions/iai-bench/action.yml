@@ -63,7 +63,7 @@ runs:
           --adapter rust_iai_callgrind \
           ${{ inputs.bencher-extra-args }} \
           "cargo bench --workspace \
-            --features dial9-tokio-telemetry/tracing-layer \
+            --features dial9-utils/tracing-layer \
             --bench writer_encode_iai \
             --bench writer_write_encoded_iai \
             --bench threadlocal_encode_iai \

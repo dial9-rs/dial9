@@ -194,31 +194,17 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
-  // Re-measured after the demo-trace regen. Read this before trusting the
-  // numbers: the regen was captured on a host whose glibc lacks frame pointers
-  // in most functions, so samples landing in libc (__malloc, __strlen_sse2) or
-  // vendored assembly truncate at depth 1-2 instead of unwinding to a thread
-  // root. The tree these anchors measure is CPU-profile samples only
-  // (`source !== 1`, 66 of them — NOT the ~10k sched-wait samples), and only 36
-  // of those reach depth >= 16. The "60.6%" values are therefore closer to the
-  // unwind-success rate than to a property of the search path, and framebuf's
-  // fall to 1.5% is FrameBuf::capture being absent from this capture's symbol
-  // table, not a share shift.
-  //
-  // A code regression was ruled out — the previous anchors reproduce exactly
-  // against the pre-regen bytes — so these are honest measurements of a thin
-  // capture, not of broken code. But they guard less than the pre-regen set
-  // did, and framebuf at 1 sample will flip on any regen. The fix is a heavier
-  // or longer demo run: this regen collected 25.6k polls against the previous
-  // 59.8k, which is why the fixed malloc/strlen noise grew from 9% to 29% of the
-  // sample set. Re-measure and re-tighten these when that lands.
+  // Re-measured after the combined multi-runtime/task-ID demo regen. The old
+  // anchors reproduce exactly against both parent traces, ruling out a search
+  // regression. This capture has healthy unwind depth: 104 of its 106 worker
+  // CPU samples reach depth >= 16.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 66, "60.6"],
-    ["tokio", 83, "60.6"],
-    ["axum", 23, "50.0"],
-    ["dispatcher", 15, "51.5"],
-    ["framebuf", 3, "1.5"],
-    ["spawn", 2, "60.6"],
+    ["poll", 145, "100.0"],
+    ["tokio", 218, "100.0"],
+    ["axum", 25, "85.8"],
+    ["dispatcher", 31, "70.8"],
+    ["framebuf", 10, "47.2"],
+    ["spawn", 2, "100.0"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {

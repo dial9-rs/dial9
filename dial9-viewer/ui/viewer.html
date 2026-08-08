@@ -1707,7 +1707,7 @@
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
                     const credHeaders = Dial9Session.headers(
-                        window.Dial9Creds ? Dial9Creds.headers() : {}
+                        window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
                     );
                     const stream = list.length === 1
                         ? await TraceParser.fetchTraceStream(list[0], {
@@ -1899,7 +1899,7 @@
                     // tab opened directly (not from the browser page) has no
                     // inherited credentials — see the catch below.
                     const credHeaders = Dial9Session.headers(
-                        window.Dial9Creds ? Dial9Creds.headers() : {}
+                        window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
                     );
                     const arrayBuffer = await TraceParser.fetchTraces(list, {
                         signal: loadAbortController?.signal,
@@ -1912,7 +1912,7 @@
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
-                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                    if (/HTTP 401/.test(err.message) && window.__Dial9CredentialStore && !__Dial9CredentialStore.has()) {
                         alert(
                             "This trace requires AWS credentials. Open it from the " +
                             "dial9 home page after applying your credentials, or this " +
@@ -1963,16 +1963,28 @@
             // for the server's default region and the listing comes back empty.
             // No-op when no creds are stored (region is header-only).
             const urlRegion = urlParams.get('s_region') || urlParams.get('aws_region');
-            if (urlRegion && window.Dial9Creds) {
-                const stored = Dial9Creds.get();
-                if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+            const urlMode = urlParams.get('s_credential_mode') || urlParams.get('credential_mode');
+            const urlRoleArn = urlParams.get('s_role_arn') || urlParams.get('aws_role_arn');
+            if (window.__Dial9CredentialStore) {
+                if (urlMode === 'ambient') __Dial9CredentialStore.setAmbient();
+                else if (urlMode === 'literal' && __Dial9CredentialStore.get().kind !== 'literal') {
+                    __Dial9CredentialStore.setLiteralMode();
+                } else if ((urlMode === 'role' || (!urlMode && urlRoleArn)) && urlRoleArn) {
+                    __Dial9CredentialStore.setRoleArn(urlRoleArn, urlRegion ? { region: urlRegion } : undefined);
+                } else if (!urlMode && !urlRoleArn && __Dial9CredentialStore.get().kind !== 'literal') {
+                    __Dial9CredentialStore.setAmbient();
+                }
+            }
+            if (urlRegion && window.__Dial9CredentialStore) {
+                const stored = __Dial9CredentialStore.get();
+                if (stored && stored.region !== urlRegion) __Dial9CredentialStore.setRegion(urlRegion);
             }
 
             // Credentialed JSON fetch for scope resolution: same BYO-credentials
             // headers loadTraceFromUrl attaches, so /api/browse runs under the
             // user's creds (BYOC) or the task's ambient identity (no creds).
             async function fetchJsonWithCreds(url) {
-                const headers = window.Dial9Creds ? Dial9Creds.headers() : {};
+                const headers = window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {};
                 const resp = await Dial9Session.fetch(url, { headers });
                 if (!resp.ok) {
                     const body = await resp.text().catch(() => '');
@@ -1993,7 +2005,7 @@
                     }
                     await loadTraceFromUrl(urls);
                 } catch (err) {
-                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                    if (/HTTP 401/.test(err.message) && window.__Dial9CredentialStore && !__Dial9CredentialStore.has()) {
                         alert(
                             'This trace requires AWS credentials. Open it from the ' +
                             'dial9 home page after applying your credentials, or this ' +

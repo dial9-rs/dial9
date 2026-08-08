@@ -37,6 +37,25 @@ function isDateLayer(prefixes) {
   return dateCount * 2 > prefixes.length;
 }
 
+// The conventional default key prefix dial9 writes traces under. When a bucket
+// exposes several key prefixes we can't otherwise disambiguate, prefer this one
+// if it's present rather than leaving the user to pick.
+const DEFAULT_TRACE_PREFIX = "dial9-traces";
+
+// Pick a sensible prefix to pre-select from a discovered listing, or undefined
+// when the user should choose. Returns `dial9-traces` if the listing offers it
+// (the conventional default), otherwise the sole prefix when there is exactly
+// one. With multiple non-default prefixes we return undefined so the picker
+// stays neutral. Prefixes may carry a trailing slash; the returned value never
+// does.
+function preferredPrefix(prefixes) {
+  if (!prefixes || prefixes.length === 0) return undefined;
+  const labels = prefixes.map((p) => String(p).replace(/\/+$/, ""));
+  if (labels.includes(DEFAULT_TRACE_PREFIX)) return DEFAULT_TRACE_PREFIX;
+  if (labels.length === 1) return labels[0];
+  return undefined;
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { lastSegment, isDateLayer };
+  module.exports = { lastSegment, isDateLayer, preferredPrefix };
 }

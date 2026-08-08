@@ -11,13 +11,13 @@
 //! end across N ∈ {1, 2, 4, 8, 16, 32}.
 //!
 //! Usage:
-//!   cargo bench --bench tracing_layer_bench --features tracing-layer
+//!   cargo bench -p dial9-utils --bench tracing_layer_bench --features tracing-layer
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dial9_tokio_telemetry::telemetry::{
     Dial9Handle, Dial9HandleTokioExt, MemoryBuffer, TokioAttachOptions, recorder,
 };
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+use dial9_utils::tracing_layer::Dial9TracingLayer;
 use std::sync::{Arc, Barrier};
 use tracing::Dispatch;
 use tracing_subscriber::prelude::*;
