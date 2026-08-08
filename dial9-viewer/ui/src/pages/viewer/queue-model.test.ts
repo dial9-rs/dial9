@@ -200,6 +200,38 @@ describe("local series when queue depth is unavailable", () => {
     expect(m.local).toEqual([]);
   });
 
+  it("sentinel samples never mark buckets or reset the global carry", () => {
+    // One global sample at t=5, sentinel locals at t=0/50. 10 buckets over
+    // [0,100]: the global value 3 carries to the last bucket; the t=50
+    // sentinel must not zero it from bucket 5 on.
+    const m = buildQueueRenderModel({
+      data: queueData({
+        hasLocalQueueDepth: false,
+        workerIds: [0],
+        queueSamples: [{ t: 5, global: 3 }],
+        mergedLocalSamples: samples,
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 10,
+    });
+    expect(m.global[m.global.length - 1]).toBe(3);
+    expect(m.hasData).toBe(true);
+
+    // Sentinels alone are not data.
+    const empty = buildQueueRenderModel({
+      data: queueData({
+        hasLocalQueueDepth: false,
+        workerIds: [0],
+        mergedLocalSamples: samples,
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 10,
+    });
+    expect(empty.hasData).toBe(false);
+  });
+
   it("keeps a genuine zero series when the depth is real", () => {
     const m = buildQueueRenderModel({
       data: queueData({

@@ -107,14 +107,17 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     : spanResult.queueSamples;
 
   // Merge every worker's local-queue series into one t-sorted timeline, built
-  // ONCE here so the per-frame render never re-merges.
+  // ONCE here so the per-frame render never re-merges. Skipped when the trace
+  // has no local-queue measurements (the per-event values are sentinel zeros).
   const merged: MergedLocalSample[] = [];
-  for (const w of workerIds) {
-    const samples = spanResult.workerQueueSamples[w];
-    if (!samples) continue;
-    for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+  if (trace.hasLocalQueueDepth) {
+    for (const w of workerIds) {
+      const samples = spanResult.workerQueueSamples[w];
+      if (!samples) continue;
+      for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+    }
+    merged.sort((a, b) => a.t - b.t);
   }
-  merged.sort((a, b) => a.t - b.t);
 
   return {
     workerIds,
@@ -345,25 +348,30 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   }
 
   // ── Local queue: single pass over the merged timeline ───────────────────
-  const merged = data.mergedLocalSamples;
-  runningMax.reset(data.workerIds);
-  // Seed each worker from the sample just before viewStart.
-  const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
-  for (let i = mergeStart; i < merged.length; i++) {
-    const s = merged[i]!;
-    if (s.t >= viewStart) break;
-    runningMax.set(s.w, s.local);
-  }
-  let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
-  for (let bi = 0; bi < numBuckets; bi++) {
-    const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
-    while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
-      const s = merged[sampleIdx++]!;
+  // Only when the trace measures local depth: without the flag, local-queue
+  // values are sentinel zeros, not measurements, and must not mark buckets as
+  // having data. bucketLocal stays all-zero (ensureScratch).
+  if (data.hasLocalQueueDepth) {
+    const merged = data.mergedLocalSamples;
+    runningMax.reset(data.workerIds);
+    // Seed each worker from the sample just before viewStart.
+    const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
+    for (let i = mergeStart; i < merged.length; i++) {
+      const s = merged[i]!;
+      if (s.t >= viewStart) break;
       runningMax.set(s.w, s.local);
-      bucketHasData[bi] = 1;
-      hasData = true;
     }
-    bucketLocal[bi] = runningMax.value();
+    let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
+    for (let bi = 0; bi < numBuckets; bi++) {
+      const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
+      while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
+        const s = merged[sampleIdx++]!;
+        runningMax.set(s.w, s.local);
+        bucketHasData[bi] = 1;
+        hasData = true;
+      }
+      bucketLocal[bi] = runningMax.value();
+    }
   }
 
   // maxQ across visible buckets, and the carry-forward that makes
