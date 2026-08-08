@@ -1,4 +1,5 @@
 mod handle;
+mod join_set;
 mod recorder_tokio;
 mod runtime_context;
 pub(crate) use dial9_core::shared_state::SharedState;
@@ -12,6 +13,7 @@ pub(crate) use runtime_context::poll_start_ts_monotonic;
 pub use dial9_core::handle::Dial9Handle;
 pub(crate) use handle::traced_handle;
 pub use handle::{Dial9TokioHandle, block_on, spawn, spawn_in};
+pub use join_set::JoinSetExt;
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
