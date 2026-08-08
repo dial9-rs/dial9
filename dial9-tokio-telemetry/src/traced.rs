@@ -307,17 +307,19 @@ impl<F: Future> Future for WakeTraced<F> {
         }
         #[cfg(not(tokio_unstable))]
         {
-            use crate::telemetry::recorder::{make_poll_end, make_poll_start};
+            use crate::telemetry::recorder::make_poll_start;
 
             let outermost = POLL_DEPTH.with(|d| {
                 let n = d.get();
                 d.set(n + 1);
                 n == 0
             });
-            // Restores the depth on unwind, so a panic cannot wedge this thread
-            // at a non-zero depth and silence every later poll on it. Taken
-            // before the first emit, which is itself inside the window.
-            let _guard = PollDepthGuard;
+            // Restores the depth and closes the span on the way out, panic or
+            // not. A panicking future unwinds past the rest of this function and
+            // tokio catches it above us.
+            let _guard = PollDepthGuard {
+                shared: outermost.then(|| &*this.waker_data.shared),
+            };
             if outermost {
                 this.waker_data.shared.if_enabled(|buf| {
                     buf.record_encodable_event(&make_poll_start(
@@ -328,24 +330,30 @@ impl<F: Future> Future for WakeTraced<F> {
                     ));
                 });
             }
-            let out = this.inner.poll(&mut traced_cx);
-            if outermost {
-                this.waker_data.shared.if_enabled(|buf| {
-                    buf.record_encodable_event(&make_poll_end(None, &this.waker_data.shared));
-                });
-            }
-            out
+            this.inner.poll(&mut traced_cx)
         }
     }
 }
 
+/// Restores this thread's poll depth, and closes the poll span when this is the
+/// outermost wrapper. `shared` is `Some` only then, so a nested wrapper unwinds
+/// without emitting.
 #[cfg(not(tokio_unstable))]
-struct PollDepthGuard;
+struct PollDepthGuard<'a> {
+    shared: Option<&'a SharedState>,
+}
 
 #[cfg(not(tokio_unstable))]
-impl Drop for PollDepthGuard {
+impl Drop for PollDepthGuard<'_> {
     fn drop(&mut self) {
         POLL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        if let Some(shared) = self.shared {
+            shared.if_enabled(|buf| {
+                buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
+                    None, shared,
+                ));
+            });
+        }
     }
 }
 
