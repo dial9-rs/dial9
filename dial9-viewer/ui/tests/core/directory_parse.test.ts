@@ -203,6 +203,36 @@ describe("directory parsing", { timeout: 120_000 }, () => {
     }
   });
 
+  // ── Capability fields survive the cache round-trip ──
+  it("cached capability fields", async () => {
+    const dir = setupDir(1);
+    const caps = ["hasFullTaskCoverage", "hasLocalQueueDepth", "hasTaskLifetimes"];
+    try {
+      const cold = await first(demoPath);
+      const warm = await first(dir);
+      for (const k of caps) {
+        expect(warm[k], `cache: ${k} preserved`).toBe(cold[k]);
+        expect(typeof warm[k], `cache: ${k} is boolean`).toBe("boolean");
+      }
+
+      // Pre-capability cache file: strip the fields from the meta record and
+      // check the loader re-derives them from the cached segmentMetadata.
+      const cacheDir = path.join(dir, ".d9-cache");
+      const cp = path.join(cacheDir, fs.readdirSync(cacheDir)[0]!);
+      const lines = fs.readFileSync(cp, "utf8").split("\n");
+      const meta = JSON.parse(lines[0]!) as { d: Record<string, unknown> };
+      for (const k of caps) delete meta.d[k];
+      lines[0] = JSON.stringify(meta);
+      fs.writeFileSync(cp, lines.join("\n"));
+      const legacy = await first(dir);
+      for (const k of caps) {
+        expect(legacy[k], `backfill: ${k} re-derived`).toBe(cold[k]);
+      }
+    } finally {
+      cleanup(dir);
+    }
+  });
+
   // ── Cache invalidation ──
   it("cache invalidation", async () => {
     const dir = setupDir(1);

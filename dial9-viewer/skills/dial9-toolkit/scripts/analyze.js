@@ -19,7 +19,7 @@ function resolve(name) {
   return path.resolve(__dirname, '..', 'ui', name);
 }
 
-const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require(resolve('trace_parser.js'));
+const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples, deriveCapabilities } = require(resolve('trace_parser.js'));
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations,
         globalQueueSeries } = require(resolve('trace_analysis.js'));
@@ -925,6 +925,7 @@ async function parseWorkerMain(traceFile, cachePath) {
     truncated: trace.truncated, timeFiltered: trace.timeFiltered,
     filterStartTime: trace.filterStartTime, filterEndTime: trace.filterEndTime,
     hasCpuTime: trace.hasCpuTime, hasSchedWait: trace.hasSchedWait, hasTaskTracking: trace.hasTaskTracking,
+    hasFullTaskCoverage: trace.hasFullTaskCoverage, hasLocalQueueDepth: trace.hasLocalQueueDepth, hasTaskLifetimes: trace.hasTaskLifetimes,
     spawnLocations: mapToEntries(trace.spawnLocations),
     taskSpawnLocs: mapToEntries(trace.taskSpawnLocs),
     taskSpawnTimes: mapToEntries(trace.taskSpawnTimes),
@@ -982,6 +983,8 @@ function loadCacheFile(cachePath) {
   raw.events = events; raw.cpuSamples = cpuSamples; raw.customEvents = customEvents;
   if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
   if (!raw.runtimeMetrics) raw.runtimeMetrics = []; // pre-RuntimeMetrics cache files
+  // Pre-capability cache files: re-derive from the cached metadata.
+  if (raw.hasFullTaskCoverage === undefined) Object.assign(raw, deriveCapabilities(raw.segmentMetadata));
   raw.allocEvents = allocEvents; raw.freeEvents = freeEvents;
   return raw;
 }

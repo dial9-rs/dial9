@@ -1556,6 +1556,27 @@
     }
 
     /**
+     * @private The recorder-declared capability fields, derived from segment
+     * metadata. Shared with the NDJSON cache loaders, which re-derive them for
+     * cache files written before these fields were serialized.
+     */
+    function deriveCapabilities(segmentMetadata) {
+        return {
+            // What the recorder says the trace holds. `dial9-spawns-only` means
+            // poll events cover just the tasks spawned through dial9's own
+            // helpers, and there are no task spawn/terminate events. Traces
+            // predating these keys all carried the full set, so absent means
+            // full.
+            hasFullTaskCoverage: segmentMetadata.get("tokio.poll_coverage") !== "dial9-spawns-only",
+            hasLocalQueueDepth: segmentMetadata.get("tokio.local_queue") !== "false",
+            // False when no task spawn/terminate events were recorded, so an
+            // empty lifetime column means "not captured" rather than "these
+            // tasks had none". Absent on traces predating the key.
+            hasTaskLifetimes: segmentMetadata.get("tokio.task_events") !== "false",
+        };
+    }
+
+    /**
      * @private Run the post-frame-loop passes (clock anchors, tid→worker
      * resolution, block-in-place gaps) and assemble the final `ParsedTrace`.
      * Identical for the whole-buffer and streaming paths. `version` is read from
@@ -1717,17 +1738,7 @@
             hasCpuTime: true,
             hasSchedWait: true,
             hasTaskTracking: true,
-            // What the recorder says the trace holds. `dial9-spawns-only` means
-            // poll events cover just the tasks spawned through dial9's own
-            // helpers, and there are no task spawn/terminate events. Traces
-            // predating these keys all carried the full set, so absent means
-            // full.
-            hasFullTaskCoverage: segmentMetadata.get("tokio.poll_coverage") !== "dial9-spawns-only",
-            hasLocalQueueDepth: segmentMetadata.get("tokio.local_queue") !== "false",
-            // False when no task spawn/terminate events were recorded, so an
-            // empty lifetime column means "not captured" rather than "these
-            // tasks had none". Absent on traces predating the key.
-            hasTaskLifetimes: segmentMetadata.get("tokio.task_events") !== "false",
+            ...deriveCapabilities(segmentMetadata),
             spawnLocations,
             taskSpawnLocs,
             taskSpawnTimes,
@@ -2103,6 +2114,11 @@
         raw.events = events;
         raw.cpuSamples = cpuSamples;
         if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
+        // Cache files written before the capability fields were serialized:
+        // re-derive them from the cached metadata.
+        if (raw.hasFullTaskCoverage === undefined) {
+            Object.assign(raw, deriveCapabilities(raw.segmentMetadata));
+        }
         raw.customEvents = customEvents;
         raw.allocEvents = allocEvents;
         raw.freeEvents = freeEvents;
@@ -2471,6 +2487,7 @@
             symbolizeChain,
             deduplicateSamples,
             deriveBlockInPlaceGaps,
+            deriveCapabilities,
             // Exported for unit tests: the single-event span schema compiler
             // and its runtime timing resolution. Not part of the browser API.
             compileSingleEventSpanSchema,
