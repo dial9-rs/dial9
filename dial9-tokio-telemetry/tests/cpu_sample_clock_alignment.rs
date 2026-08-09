@@ -254,10 +254,11 @@ fn burn_cpu(duration: std::time::Duration) {
 /// happens later at write time, after the threads have exited — proving the
 /// eager cache is necessary.
 ///
-/// `BURN` has to outlive a drain, which the flush loop runs every
-/// `SELF_DRAIN_INTERVAL` (200) cycles of 5ms, so once a second. A shorter burn
-/// races: the thread exits first, `/proc` no longer has its `comm`, and the
-/// samples arrive with no name at all.
+/// `BURN` has to outlive a drain. The test drains explicitly via
+/// `flush_sources` while the threads still burn instead of waiting for the
+/// flush loop's once-a-second cadence: on a loaded CI runner the loop slips
+/// past `BURN`, the threads exit first, `/proc` no longer has their `comm`,
+/// and the samples arrive with no name at all.
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -303,6 +304,11 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .await
         .unwrap()
     });
+
+    // Drain while the burn threads are still alive (see the doc above). The
+    // sleep lets sampling accumulate; the threads have ~1s of burn left.
+    std::thread::sleep(Duration::from_millis(500));
+    recorder.shared().unwrap().flush_sources();
 
     // Wait for both to finish — threads are gone after this point
     ext_handle.join().unwrap();
