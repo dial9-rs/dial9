@@ -508,13 +508,16 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
         <thead>
           <tr>
             ${TASK_COLUMNS.map((col) => {
-              // The lifetime column is blank for every row when the recorder
-              // captured no task spawn/terminate events. Say so in the header
-              // rather than letting it read as "these tasks were instant".
-              const unrecorded = col.key === "lifetime" && !vm.hasTaskLifetimes;
+              // A "-" lifetime cell reads as "instant task" unless the header
+              // says it went unrecorded.
+              const coverage =
+                col.key === "lifetime" ? vm.taskLifetimeCoverage : "all";
+              const unrecorded = coverage === "none";
               const title = unrecorded
                 ? "Task lifetimes were not recorded for this trace"
-                : col.title;
+                : coverage === "partial"
+                  ? "Task lifetimes were not captured for every task (untracked runtime, or spawned before the capture window)"
+                  : col.title;
               return html`<th scope="col">
                 <button
                   type="button"

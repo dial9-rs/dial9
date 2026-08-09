@@ -1556,11 +1556,10 @@
     }
 
     /**
-     * @private The recorder-declared capability fields, derived from segment
-     * metadata. Shared with the NDJSON cache loaders, which re-derive them for
-     * cache files written before these fields were serialized.
+     * @private Capability fields from segment metadata and spawn-event
+     * evidence. The NDJSON cache loaders re-derive them for older caches.
      */
-    function deriveCapabilities(segmentMetadata) {
+    function deriveCapabilities(segmentMetadata, taskSpawnTimes) {
         return {
             // What the recorder says the trace holds. `dial9-spawns-only` means
             // poll events cover just the tasks spawned through dial9's own
@@ -1569,10 +1568,8 @@
             // full.
             hasFullTaskCoverage: segmentMetadata.get("tokio.poll_coverage") !== "dial9-spawns-only",
             hasLocalQueueDepth: segmentMetadata.get("tokio.local_queue") !== "false",
-            // False when no task spawn/terminate events were recorded, so an
-            // empty lifetime column means "not captured" rather than "these
-            // tasks had none". Absent on traces predating the key.
-            hasTaskLifetimes: segmentMetadata.get("tokio.task_events") !== "false",
+            // false means the lifetime column is "not captured", not "instant tasks".
+            hasTaskLifetimes: taskSpawnTimes.size > 0,
         };
     }
 
@@ -1738,7 +1735,7 @@
             hasCpuTime: true,
             hasSchedWait: true,
             hasTaskTracking: true,
-            ...deriveCapabilities(segmentMetadata),
+            ...deriveCapabilities(segmentMetadata, taskSpawnTimes),
             spawnLocations,
             taskSpawnLocs,
             taskSpawnTimes,
@@ -2115,9 +2112,15 @@
         raw.cpuSamples = cpuSamples;
         if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
         // Cache files written before the capability fields were serialized:
-        // re-derive them from the cached metadata.
+        // re-derive them from the cached metadata and spawn times.
         if (raw.hasFullTaskCoverage === undefined) {
-            Object.assign(raw, deriveCapabilities(raw.segmentMetadata));
+            Object.assign(
+                raw,
+                deriveCapabilities(
+                    raw.segmentMetadata,
+                    raw.taskSpawnTimes ?? new Map(),
+                ),
+            );
         }
         raw.customEvents = customEvents;
         raw.allocEvents = allocEvents;

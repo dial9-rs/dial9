@@ -253,10 +253,10 @@ export interface TaskViewModel {
    */
   hasFullTaskCoverage: boolean;
   /**
-   * False when no task spawn/terminate events were recorded, so every `life`
-   * cell is blank for want of data rather than because the tasks were instant.
+   * "none": no spawn events, "-" `life` cells mean "not captured", not
+   * "instant". "partial": some rows captured, some not.
    */
-  hasTaskLifetimes: boolean;
+  taskLifetimeCoverage: "all" | "partial" | "none";
 }
 
 /**
@@ -279,7 +279,7 @@ export function deriveTaskViewModel(
       sorted: [],
       total: 0,
       hasFullTaskCoverage: true,
-      hasTaskLifetimes: true,
+      taskLifetimeCoverage: "all",
     };
   }
   const sorted = sortTasks(taskIndexFor(trace).rows, poi.taskSort, poi.taskSortDir);
@@ -305,7 +305,11 @@ export function deriveTaskViewModel(
     rows,
     windowStart: start,
     hasFullTaskCoverage: trace.hasFullTaskCoverage,
-    hasTaskLifetimes: trace.hasTaskLifetimes,
+    taskLifetimeCoverage: !trace.hasTaskLifetimes
+      ? "none"
+      : sorted.some((t) => t.lifetimeNs === null)
+        ? "partial"
+        : "all",
     sorted,
     total: sorted.length,
   };

@@ -126,7 +126,13 @@ describe("deriveTaskViewModel", () => {
     } as unknown as typeof trace;
     const vm = deriveTaskViewModel(noLifetimes, POI);
     expect(vm.hasFullTaskCoverage).toBe(true);
-    expect(vm.hasTaskLifetimes).toBe(false);
+    expect(vm.taskLifetimeCoverage).toBe("none");
+
+    // With spawn events present, coverage comes from the rows: "all" when
+    // every row has a lifetime, "partial" when some were not captured.
+    const withLifetimes = deriveTaskViewModel(trace, POI);
+    const anyBlank = withLifetimes.sorted.some((t) => t.lifetimeNs === null);
+    expect(withLifetimes.taskLifetimeCoverage).toBe(anyBlank ? "partial" : "all");
   });
 
   it("carries task coverage, not task-data existence", () => {

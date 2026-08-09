@@ -983,8 +983,8 @@ function loadCacheFile(cachePath) {
   raw.events = events; raw.cpuSamples = cpuSamples; raw.customEvents = customEvents;
   if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
   if (!raw.runtimeMetrics) raw.runtimeMetrics = []; // pre-RuntimeMetrics cache files
-  // Pre-capability cache files: re-derive from the cached metadata.
-  if (raw.hasFullTaskCoverage === undefined) Object.assign(raw, deriveCapabilities(raw.segmentMetadata));
+  // Pre-capability cache files: re-derive from the cached metadata and spawn times.
+  if (raw.hasFullTaskCoverage === undefined) Object.assign(raw, deriveCapabilities(raw.segmentMetadata, raw.taskSpawnTimes ?? new Map()));
   raw.allocEvents = allocEvents; raw.freeEvents = freeEvents;
   return raw;
 }

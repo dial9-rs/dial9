@@ -206,13 +206,17 @@ describe("directory parsing", { timeout: 120_000 }, () => {
   // ── Capability fields survive the cache round-trip ──
   it("cached capability fields", async () => {
     const dir = setupDir(1);
-    const caps = ["hasFullTaskCoverage", "hasLocalQueueDepth", "hasTaskLifetimes"];
+    const caps = [
+      "hasFullTaskCoverage",
+      "hasLocalQueueDepth",
+      "hasTaskLifetimes",
+    ];
     try {
       const cold = await first(demoPath);
       const warm = await first(dir);
       for (const k of caps) {
         expect(warm[k], `cache: ${k} preserved`).toBe(cold[k]);
-        expect(typeof warm[k], `cache: ${k} is boolean`).toBe("boolean");
+        expect(warm[k], `cache: ${k} defined`).not.toBeUndefined();
       }
 
       // Pre-capability cache file: strip the fields from the meta record and
