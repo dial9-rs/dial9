@@ -196,6 +196,8 @@ pub struct TaskSpawnEvent {
 
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+// Only the `tokio_unstable` task hooks construct this. Unlike `TaskSpawnEvent`
+// it is not public API, so the stable build needs the dead-code allowance.
 #[cfg_attr(not(tokio_unstable), allow(dead_code))]
 pub(crate) struct TaskTerminateEvent {
     #[traceevent(timestamp)]

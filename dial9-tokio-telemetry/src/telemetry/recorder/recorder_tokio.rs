@@ -383,6 +383,10 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // Publish attach state only after a successful build.
         // `TokioRuntimesSource` picks the runtime up from the registry on its
         // next flush.
+        //
+        // Without tokio's task hooks, polls come from the `WakeTraced` wrapper,
+        // which reads this thread-local to attribute them. The flagged build's
+        // hooks capture the context in their closures and need no TL.
         #[cfg(not(tokio_unstable))]
         crate::telemetry::recorder::set_runtime_ctx(&ctx);
         registry.lock().unwrap().push(ctx);
