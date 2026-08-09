@@ -151,16 +151,6 @@ impl<F> WakeTraced<F> {
     }
 }
 
-#[cfg(not(tokio_unstable))]
-thread_local! {
-    /// Poll nesting depth for this thread.
-    ///
-    /// A `TracedFuture` awaited inside another one's poll would otherwise emit
-    /// a span nested inside its parent's, which the viewer's flat per-worker
-    /// span model cannot represent. Only the outermost wrapper emits.
-    static POLL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
 // --- Waker wrapping ---
 
 /// Shared state threaded through our custom `Waker`.
@@ -301,59 +291,46 @@ impl<F: Future> Future for WakeTraced<F> {
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
 
-        #[cfg(tokio_unstable)]
-        {
-            this.inner.poll(&mut traced_cx)
-        }
-        #[cfg(not(tokio_unstable))]
-        {
-            use crate::telemetry::recorder::make_poll_start;
+        use crate::telemetry::recorder::{make_poll_start, poll_span_open};
 
-            let outermost = POLL_DEPTH.with(|d| {
-                let n = d.get();
-                d.set(n + 1);
-                n == 0
-            });
-            // Restores the depth and closes the span on the way out, panic or
-            // not. A panicking future unwinds past the rest of this function and
-            // tokio catches it above us.
-            let _guard = PollDepthGuard {
-                shared: outermost.then(|| &*this.waker_data.shared),
-            };
-            if outermost {
-                this.waker_data.shared.if_enabled(|buf| {
-                    buf.record_encodable_event(&make_poll_start(
-                        None,
-                        &this.waker_data.shared,
-                        this.spawn_loc,
-                        this.waker_data.woken_task_id,
-                    ));
-                });
-            }
-            this.inner.poll(&mut traced_cx)
+        // Poll events claim worker occupancy; emitting inside an open span
+        // (tokio's hooks, or an outer wrapper) would claim the same time twice.
+        if poll_span_open() {
+            return this.inner.poll(&mut traced_cx);
         }
+        // Closes the span on the way out, panic or not. A panicking future
+        // unwinds past the rest of this function and tokio catches it above us.
+        let _guard = PollSpanGuard {
+            shared: &this.waker_data.shared,
+        };
+        this.waker_data.shared.if_enabled(|buf| {
+            buf.record_encodable_event(&make_poll_start(
+                None,
+                &this.waker_data.shared,
+                this.spawn_loc,
+                this.waker_data.woken_task_id,
+            ));
+        });
+        this.inner.poll(&mut traced_cx)
     }
 }
 
-/// Restores this thread's poll depth, and closes the poll span when this is the
-/// outermost wrapper. `shared` is `Some` only then, so a nested wrapper unwinds
-/// without emitting.
-#[cfg(not(tokio_unstable))]
-struct PollDepthGuard<'a> {
-    shared: Option<&'a SharedState>,
+/// Closes the poll span its wrapper opened, and clears the thread's span
+/// marker unconditionally: a buffer disabled at drop time must not leave the
+/// marker set.
+struct PollSpanGuard<'a> {
+    shared: &'a SharedState,
 }
 
-#[cfg(not(tokio_unstable))]
-impl Drop for PollDepthGuard<'_> {
+impl Drop for PollSpanGuard<'_> {
     fn drop(&mut self) {
-        POLL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-        if let Some(shared) = self.shared {
-            shared.if_enabled(|buf| {
-                buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
-                    None, shared,
-                ));
-            });
-        }
+        self.shared.if_enabled(|buf| {
+            buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
+                None,
+                self.shared,
+            ));
+        });
+        crate::telemetry::recorder::clear_poll_span();
     }
 }
 

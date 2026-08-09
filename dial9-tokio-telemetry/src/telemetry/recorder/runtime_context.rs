@@ -39,8 +39,6 @@ pub(crate) struct RuntimeContext {
     /// Global worker IDs within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
     pub worker_ids: Mutex<BTreeSet<u64>>,
-    /// Whether this runtime records task spawn/terminate events.
-    pub task_tracking_enabled: bool,
 }
 
 thread_local! {
@@ -403,11 +401,7 @@ impl Source for TokioRuntimesSource {
 }
 
 impl RuntimeContext {
-    pub(crate) fn new(
-        runtime_name: Option<String>,
-        session_handle: Dial9Handle,
-        task_tracking_enabled: bool,
-    ) -> Self {
+    pub(crate) fn new(runtime_name: Option<String>, session_handle: Dial9Handle) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
@@ -416,7 +410,6 @@ impl RuntimeContext {
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
-            task_tracking_enabled,
         }
     }
 
@@ -651,6 +644,20 @@ pub(crate) fn make_poll_end(ctx: Option<&RuntimeContext>, shared: &SharedState) 
     }
 }
 
+/// Whether a recorded poll span is open on this thread: set by
+/// [`make_poll_start`], cleared by [`make_poll_end`]. The `WakeTraced` wrapper
+/// reads it to leave polls that tokio's hooks (or an outer wrapper) already
+/// record to their recorder.
+pub(crate) fn poll_span_open() -> bool {
+    POLL_START_TS.with(|c| c.get().is_some())
+}
+
+/// Close this thread's poll-span marker unconditionally, so a buffer disabled
+/// at poll end cannot leave it set and mute every later wrapper poll.
+pub(crate) fn clear_poll_span() {
+    POLL_START_TS.with(|c| c.set(None));
+}
+
 pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> WorkerParkEvent {
     let worker_id = event_worker_id(Some(ctx), shared);
     let worker_local_queue_depth = current_local_queue_depth();
@@ -719,7 +726,6 @@ mod tests {
         let ctx = Arc::new(RuntimeContext::new(
             Some(name.to_string()),
             Dial9Handle::disabled(),
-            true,
         ));
         ctx.worker_ids.lock().unwrap().insert(worker_id);
         contexts.lock().unwrap().push(ctx);

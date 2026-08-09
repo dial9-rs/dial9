@@ -38,7 +38,7 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(tokio_unstable)]
 use handle::INSTRUMENTED_SPAWN;
-pub(crate) use runtime_context::{make_poll_end, make_poll_start};
+pub(crate) use runtime_context::{clear_poll_span, make_poll_end, make_poll_start, poll_span_open};
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -261,11 +261,7 @@ fn register_runtime_hooks(
     tokio_hooks: TokioHooks,
     taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
 ) -> Arc<RuntimeContext> {
-    let ctx = Arc::new(RuntimeContext::new(
-        runtime_name,
-        handle.clone(),
-        task_tracking_enabled,
-    ));
+    let ctx = Arc::new(RuntimeContext::new(runtime_name, handle.clone()));
     register_hooks(
         builder,
         &ctx,
@@ -1356,6 +1352,58 @@ mod tests {
             has_runtime_a && has_runtime_b,
             "expected worker IDs from both runtimes; observed={worker_ids:?} main={main_ids:?} io={io_ids:?}"
         );
+    }
+
+    /// A dial9-spawned future on a runtime without dial9's hooks records its
+    /// own polls: no span is open when the wrapper runs, so it emits.
+    #[cfg(tokio_unstable)]
+    #[test]
+    fn wrapper_records_polls_without_runtime_hooks() {
+        use crate::telemetry::recorder::{Dial9TokioHandle, traced_handle};
+
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle =
+            Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));
+        runtime.block_on(async {
+            handle.spawn(async {}).await.unwrap();
+        });
+
+        drop(runtime);
+        rec.graceful_shutdown(Duration::from_secs(1));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let starts = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::telemetry::analysis_events::Dial9Event::PollStartEvent(..)
+                )
+            })
+            .count();
+        let ends = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
+                )
+            })
+            .count();
+        assert!(
+            starts > 0,
+            "wrapper should record polls when no hooks are installed"
+        );
+        assert_eq!(starts, ends, "every wrapper PollStart needs a PollEnd");
     }
 
     /// One thread driving two `current_thread` runtimes in turn. The worker
