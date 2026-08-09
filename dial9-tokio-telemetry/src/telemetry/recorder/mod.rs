@@ -1358,6 +1358,118 @@ mod tests {
         );
     }
 
+    /// One thread driving two `current_thread` runtimes in turn. The worker
+    /// caches are keyed by runtime, so the second runtime enrolls this thread
+    /// under its own worker ID instead of short-circuiting on the first one's.
+    #[cfg(not(tokio_unstable))]
+    #[test]
+    fn one_thread_driving_two_runtimes_enrolls_with_both() {
+        use std::collections::HashSet;
+
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let attach = |name: &str| {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+            rec.handle()
+                .attach_tokio_runtime(
+                    builder,
+                    TokioAttachOptions::builder().runtime_name(name).build(),
+                )
+                .unwrap()
+        };
+
+        // Attach and drive in turn: attaching installs this thread's runtime
+        // context, so each drive claims under the runtime it belongs to.
+        let runtime_a = attach("main");
+        runtime_a.block_on(async {
+            crate::telemetry::spawn(async {}).await.unwrap();
+        });
+        let runtime_b = attach("io");
+        runtime_b.block_on(async {
+            crate::telemetry::spawn(async {}).await.unwrap();
+        });
+
+        let (main_ids, io_ids) = {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            let block = |name: &str| -> HashSet<u64> {
+                registry
+                    .iter()
+                    .find(|c| c.runtime_name.as_deref() == Some(name))
+                    .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                    .unwrap_or_default()
+            };
+            (block("main"), block("io"))
+        };
+        assert!(
+            !main_ids.is_empty() && !io_ids.is_empty(),
+            "both runtimes must enroll the driving thread: main={main_ids:?} io={io_ids:?}"
+        );
+        assert!(
+            main_ids.is_disjoint(&io_ids),
+            "runtimes must not share worker IDs: main={main_ids:?} io={io_ids:?}"
+        );
+
+        drop(runtime_a);
+        drop(runtime_b);
+        rec.graceful_shutdown(Duration::from_secs(1));
+    }
+
+    /// A panicking poll still closes its span: PollEnd comes from a drop
+    /// guard, so every PollStart has a matching PollEnd even when the future
+    /// unwinds.
+    #[cfg(not(tokio_unstable))]
+    #[test]
+    fn panicking_poll_still_emits_poll_end() {
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let runtime = rec
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder().runtime_name("main").build(),
+            )
+            .unwrap();
+
+        runtime.block_on(async {
+            crate::telemetry::spawn(async {}).await.unwrap();
+            let panicked = crate::telemetry::spawn(async { panic!("poll panic") }).await;
+            assert!(panicked.is_err(), "the panicking task must fail its join");
+        });
+
+        drop(runtime);
+        rec.graceful_shutdown(Duration::from_secs(1));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let count = |want: fn(&crate::telemetry::analysis_events::Dial9Event) -> bool| {
+            events.iter().filter(|e| want(e)).count()
+        };
+        let starts = count(|e| {
+            matches!(
+                e,
+                crate::telemetry::analysis_events::Dial9Event::PollStartEvent(..)
+            )
+        });
+        let ends = count(|e| {
+            matches!(
+                e,
+                crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
+            )
+        });
+        assert!(starts > 0, "expected poll events from the spawned tasks");
+        assert_eq!(
+            starts, ends,
+            "every PollStart needs a PollEnd, panic or not"
+        );
+    }
+
     // The public `handle.attach_tokio_runtime(..)` flow: one recorder, two runtimes
     // attached as feeds, driven and shut down by the caller. Both runtimes'
     // polls land in one trace.
