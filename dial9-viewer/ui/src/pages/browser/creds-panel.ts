@@ -112,14 +112,20 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
 
   // Auto-select when there's exactly one filter-matching bucket - the
   // common case - but not in the "show all" view, where the user is
-  // browsing.
+  // browsing. With several buckets to choose from and none selected yet,
+  // open the panel so the picker is in view (skipped when a bucket is
+  // already chosen, e.g. restored from a shared link).
   function autoSelectSingleMatch(): void {
     const s = store.getState().creds;
     if (s.showAll) return;
     const matches = [...s.buckets]
       .sort((a, b) => a.name.localeCompare(b.name))
       .filter(isTraceBucket);
-    if (matches.length === 1) void selectBucket(matches[0]!);
+    if (matches.length === 1) {
+      void selectBucket(matches[0]!);
+    } else if (matches.length > 1 && !els.bucketInput.value.trim()) {
+      togglePanel(true);
+    }
   }
 
   // List the buckets the stored credentials can see and render the picker.

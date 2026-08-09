@@ -117,18 +117,19 @@ impl Dial9TokioHandle {
     /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or whatever
     /// the spawn function returns.
     ///
+    /// For [`tokio::task::JoinSet`], prefer
+    /// [`JoinSetExt::spawn_traced`](crate::telemetry::JoinSetExt::spawn_traced).
+    ///
     /// # Examples
     ///
-    /// Spawn into a [`tokio::task::JoinSet`]:
+    /// Spawn while retaining the task's [`tokio::task::AbortHandle`]:
     ///
     /// ```rust,no_run
     /// # use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
-    /// # use tokio::task::JoinSet;
     /// # async fn work() {}
     /// # async fn demo() {
     /// let handle = Dial9TokioHandle::current();
-    /// let mut set: JoinSet<()> = JoinSet::new();
-    /// handle.spawn_with(work(), |f| set.spawn(f));
+    /// let abort_handle = handle.spawn_with(work(), |f| tokio::spawn(f).abort_handle());
     /// # }
     /// ```
     ///
@@ -154,6 +155,25 @@ impl Dial9TokioHandle {
                 spawn_fn(future)
             }
             None => spawn_fn(future),
+        }
+    }
+
+    #[track_caller]
+    pub(super) fn spawn_in_join_set<F, T>(
+        &self,
+        set: &mut tokio::task::JoinSet<T>,
+        future: F,
+    ) -> tokio::task::AbortHandle
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match &self.traced {
+            Some(traced) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                set.spawn(TracedFuture::new(future, Some(traced.clone())))
+            }
+            None => set.spawn(future),
         }
     }
 }

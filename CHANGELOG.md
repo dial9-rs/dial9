@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Task spawn/terminate events and per-worker queue depth have no stable source and are unavailable. 
   Traces carry `tokio.poll_coverage` and `tokio.local_queue` metadata keys describing what the trace holds, plus `tokio.unstable` for how it was built, and the viewer reports the reduced coverage.
   The `taskdump` feature still requires the flag: it forwards to `tokio/taskdump`, which is a hard compile error without it.
+- `JoinSetExt` adds dial9-instrumented `spawn_traced` and `spawn_traced_on`
+  methods to Tokio `JoinSet`s while preserving caller locations.
 
 ### Changed
 
