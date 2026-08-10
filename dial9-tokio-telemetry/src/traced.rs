@@ -2,7 +2,7 @@
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::format::WakeEventEvent;
-use crate::telemetry::recorder::SharedState;
+use crate::telemetry::recorder::{RuntimeContext, SharedState};
 use crate::telemetry::task_metadata::TaskId;
 use dial9_core::handle::Dial9Handle;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
@@ -124,6 +124,9 @@ pin_project! {
         #[pin]
         inner: F,
         waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
+        // The runtime this task runs on, when dial9 is attached to it. `None`
+        // means nothing to attribute polls to, so this wrapper records none.
+        runtime_ctx: Option<Arc<RuntimeContext>>,
         // Spawn site for the poll events this wrapper emits in place of
         // tokio's poll hooks (`pin_project!` takes no `#[cfg]` on fields, so
         // it is carried unconditionally).
@@ -138,6 +141,7 @@ impl<F> WakeTraced<F> {
         task_id: TaskId,
         spawn_loc: &'static Location<'static>,
     ) -> Self {
+        let runtime_ctx = crate::telemetry::recorder::current_runtime_ctx(&handle.shared);
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),
             woken_task_id: task_id,
@@ -146,6 +150,7 @@ impl<F> WakeTraced<F> {
         Self {
             inner,
             waker_data,
+            runtime_ctx,
             spawn_loc,
         }
     }
@@ -291,23 +296,24 @@ impl<F: Future> Future for WakeTraced<F> {
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
 
-        use crate::telemetry::recorder::{make_poll_start, poll_span_open, runtime_ctx_installed};
+        use crate::telemetry::recorder::{make_poll_start, poll_span_open};
 
-        // Only record polls this wrapper owns: a thread with no runtime context
-        // has no attached runtime to attribute them to, and poll events claim
+        // Only record polls this wrapper owns: a task on a runtime dial9 is not
+        // attached to has nothing to attribute them to, and poll events claim
         // worker occupancy, so emitting inside an open span (tokio's hooks, or
         // an outer wrapper) would claim the same time twice.
-        if !runtime_ctx_installed() || poll_span_open() {
+        let Some(ctx) = this.runtime_ctx.as_deref().filter(|_| !poll_span_open()) else {
             return this.inner.poll(&mut traced_cx);
-        }
+        };
         // Closes the span on the way out, panic or not. A panicking future
         // unwinds past the rest of this function and tokio catches it above us.
         let _guard = PollSpanGuard {
+            ctx,
             shared: &this.waker_data.shared,
         };
         this.waker_data.shared.if_enabled(|buf| {
             buf.record_encodable_event(&make_poll_start(
-                None,
+                Some(ctx),
                 &this.waker_data.shared,
                 this.spawn_loc,
                 this.waker_data.woken_task_id,
@@ -321,6 +327,7 @@ impl<F: Future> Future for WakeTraced<F> {
 /// marker unconditionally: a buffer disabled at drop time must not leave the
 /// marker set.
 struct PollSpanGuard<'a> {
+    ctx: &'a RuntimeContext,
     shared: &'a SharedState,
 }
 
@@ -328,7 +335,7 @@ impl Drop for PollSpanGuard<'_> {
     fn drop(&mut self) {
         self.shared.if_enabled(|buf| {
             buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
-                None,
+                Some(self.ctx),
                 self.shared,
             ));
         });

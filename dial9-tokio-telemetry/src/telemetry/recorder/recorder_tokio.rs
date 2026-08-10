@@ -49,7 +49,7 @@
 //! runtime-drop-before-shutdown ordering for you.
 
 use super::register_runtime_hooks;
-use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
+use super::runtime_context::{RuntimeContext, RuntimeContextRegistry, TokioRuntimesSource};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
@@ -384,11 +384,10 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // `TokioRuntimesSource` picks the runtime up from the registry on its
         // next flush.
         //
-        // Without tokio's task hooks, polls come from the `WakeTraced` wrapper,
-        // which reads this thread-local to attribute them. The flagged build's
-        // hooks capture the context in their closures and need no TL.
-        #[cfg(not(tokio_unstable))]
-        crate::telemetry::recorder::set_runtime_ctx(&ctx);
+        // Bind first: without tokio's task hooks the polls come from the
+        // `WakeTraced` wrapper, which finds this context by the runtime id it
+        // is running on.
+        ctx.bind_runtime(runtime.handle().id());
         registry.lock().unwrap().push(ctx);
         // The current-thread driver does not fire `on_thread_start`, so without
         // this the tracing layer and `dial9::spawn` find no handle until the
@@ -402,6 +401,16 @@ impl Dial9HandleTokioExt for Dial9Handle {
         register_runtime_metrics(shared, runtime_name, runtime.handle().metrics());
         Ok(runtime)
     }
+}
+
+/// The context instrumenting the tokio runtime this thread is currently
+/// running on, if dial9 is attached to it. Resolved by runtime id, so a thread
+/// that drives several runtimes gets the right one every time.
+pub(crate) fn current_runtime_ctx(shared: &Arc<SharedState>) -> Option<Arc<RuntimeContext>> {
+    let id = tokio::runtime::Handle::try_current().ok()?.id();
+    let registry = runtime_registry(shared)?;
+    let registry = registry.lock().ok()?;
+    registry.iter().find(|c| c.is_runtime(id)).cloned()
 }
 
 /// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that

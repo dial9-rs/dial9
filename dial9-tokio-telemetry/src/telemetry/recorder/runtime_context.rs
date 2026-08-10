@@ -1,7 +1,5 @@
 use super::SharedState;
 use super::source::{FlushContext, Source};
-#[cfg(not(tokio_unstable))]
-use crate::primitives::sync::Weak;
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
@@ -28,6 +26,9 @@ use tokio::runtime::RuntimeMetrics;
 pub(crate) struct RuntimeContext {
     /// Identity for the per-thread worker caches.
     id: u64,
+    /// The tokio runtime this context belongs to, set once the runtime is
+    /// built.
+    runtime_id: OnceLock<tokio::runtime::Id>,
     /// Optional human-readable name, set via `with_runtime_name`.
     pub runtime_name: Option<String>,
     /// Recorder handle, installed on each of this runtime's threads (TL) so
@@ -54,19 +55,6 @@ thread_local! {
     /// that also drives a second runtime still joins that runtime's worker set
     /// instead of short-circuiting as already enrolled.
     static WORKER_REGISTERED: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
-    /// Identity of the runtime in `RUNTIME_CTX`, kept separately so the poll
-    /// path can key the caches without upgrading the `Weak`.
-    #[cfg(not(tokio_unstable))]
-    static RUNTIME_CTX_ID: Cell<u64> = const { Cell::new(0) };
-    /// This thread's runtime, so a poll can register the worker ID it claims.
-    /// The park hooks hold the context directly, the `TracedFuture` wrapper
-    /// does not. Installed alongside the thread's `Dial9Handle`.
-    ///
-    /// Weak because the attaching thread gets no `on_thread_stop`, so an
-    /// owning handle here would keep the runtime's `SharedState` alive past
-    /// shutdown.
-    #[cfg(not(tokio_unstable))]
-    static RUNTIME_CTX: RefCell<Option<Weak<RuntimeContext>>> = const { RefCell::new(None) };
     /// Keeps this thread enrolled with the recorder's per-thread sources.
     /// Dropped by the runtime's `on_thread_stop` hook, or by the TLS destructor
     /// for threads that get none (a `current_thread` runtime's driver).
@@ -111,46 +99,22 @@ fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
 /// blocking-pool thread that then fires the park hooks, so the thread count is
 /// unbounded.
 ///
-/// Both the park/unpark hooks and the `TracedFuture` wrapper resolve through
-/// here, so a thread cannot get two different IDs, one driving two runtimes in
-/// turn keeps the first.
+/// Keyed by runtime: a thread that drives a second runtime claims a fresh ID
+/// there rather than reusing the one it holds in another runtime's block.
 #[cfg(not(tokio_unstable))]
-fn claim_thread_worker_id(shared: &SharedState) -> u64 {
-    let runtime = RUNTIME_CTX_ID.with(|c| c.get());
+fn claim_thread_worker_id(ctx: &RuntimeContext, shared: &SharedState) -> u64 {
     let id = GLOBAL_WORKER_ID.with(|cell| match cell.get() {
-        Some((owner, id)) if owner == runtime => id,
+        Some((owner, id)) if owner == ctx.id => id,
         _ => {
             let id = shared.reserve_worker_ids(1);
-            cell.set(Some((runtime, id)));
+            cell.set(Some((ctx.id, id)));
             id
         }
     });
     // A poll is this thread proving it belongs to the runtime, the same as a
-    // park. Already-enrolled threads stop at the thread-local read,
-    // so steady-state polls never touch the `Weak`.
-    if runtime != 0 && WORKER_REGISTERED.with(|c| c.get()) != Some((runtime, id)) {
-        RUNTIME_CTX.with(|cell| {
-            if let Some(ctx) = cell.borrow().as_ref().and_then(Weak::upgrade) {
-                enroll_thread(&ctx, id);
-            }
-        });
-    }
+    // park. Already-enrolled threads stop at the thread-local read.
+    enroll_thread(ctx, id);
     id
-}
-
-/// Install this thread's runtime context for [`claim_thread_worker_id`].
-#[cfg(not(tokio_unstable))]
-pub(crate) fn set_runtime_ctx(ctx: &Arc<RuntimeContext>) {
-    let weak = Arc::downgrade(ctx);
-    RUNTIME_CTX_ID.with(|c| c.set(ctx.id));
-    RUNTIME_CTX.with(|cell| *cell.borrow_mut() = Some(weak));
-}
-
-/// Release this thread's runtime context (thread-stop hook).
-#[cfg(not(tokio_unstable))]
-pub(crate) fn clear_runtime_ctx() {
-    let _ = RUNTIME_CTX_ID.try_with(|c| c.set(0));
-    let _ = RUNTIME_CTX.try_with(|cell| cell.borrow_mut().take());
 }
 
 /// Local queue depth for the current worker.
@@ -405,12 +369,24 @@ impl RuntimeContext {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            runtime_id: OnceLock::new(),
             runtime_name,
             session_handle,
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// Bind this context to the runtime it instruments, once that runtime is
+    /// built. Idempotent: the first binding wins.
+    pub(crate) fn bind_runtime(&self, id: tokio::runtime::Id) {
+        let _ = self.runtime_id.set(id);
+    }
+
+    /// Whether this context instruments the runtime with `id`.
+    pub(crate) fn is_runtime(&self, id: tokio::runtime::Id) -> bool {
+        self.runtime_id.get() == Some(&id)
     }
 
     /// Build segment metadata entries for this runtime, e.g. `("runtime.main", "0,1,2,3")`.
@@ -438,7 +414,7 @@ impl RuntimeContext {
         #[cfg(tokio_unstable)]
         let global_id = self.claim_worker_id(shared)?;
         #[cfg(not(tokio_unstable))]
-        let global_id = claim_thread_worker_id(shared);
+        let global_id = claim_thread_worker_id(self, shared);
 
         // Always update TLS so current_worker_id() returns the global ID.
         GLOBAL_WORKER_ID.with(|cell| cell.set(Some((self.id, global_id))));
@@ -601,15 +577,11 @@ impl Encodable for TaskSpawn {
 
 /// The worker id to stamp on an event this thread is about to record.
 ///
-/// `ctx` is `Some` when the caller is a tokio hook, which closes over its
-/// runtime. It is `None` for the `TracedFuture` wrapper, which only carries the
-/// recorder, and which reaches its runtime through a thread-local instead.
+/// `ctx` is the runtime the event belongs to: a tokio hook closes over it, the
+/// `TracedFuture` wrapper resolves it from the runtime its task runs on.
 fn event_worker_id(ctx: Option<&RuntimeContext>, shared: &SharedState) -> WorkerId {
     match ctx {
         Some(ctx) => ctx.resolve_worker(shared).unwrap_or(WorkerId::UNKNOWN),
-        #[cfg(not(tokio_unstable))]
-        None => WorkerId::from(claim_thread_worker_id(shared) as usize),
-        #[cfg(tokio_unstable)]
         None => WorkerId::UNKNOWN,
     }
 }
@@ -650,20 +622,6 @@ pub(crate) fn make_poll_end(ctx: Option<&RuntimeContext>, shared: &SharedState) 
 /// record to their recorder.
 pub(crate) fn poll_span_open() -> bool {
     POLL_START_TS.with(|c| c.get().is_some())
-}
-
-/// Whether this thread runs a dial9-attached runtime, so a poll has a runtime
-/// to attribute itself to. Always false where tokio's task hooks exist: there
-/// the hooks record polls and the wrapper stays out of it.
-pub(crate) fn runtime_ctx_installed() -> bool {
-    #[cfg(not(tokio_unstable))]
-    {
-        RUNTIME_CTX_ID.try_with(|c| c.get()).unwrap_or(0) != 0
-    }
-    #[cfg(tokio_unstable)]
-    {
-        false
-    }
 }
 
 /// Close this thread's poll-span marker unconditionally, so a buffer disabled

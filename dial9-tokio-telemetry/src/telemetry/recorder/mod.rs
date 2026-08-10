@@ -9,8 +9,6 @@ pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 #[cfg(any(feature = "taskdump", test))]
 pub(crate) use runtime_context::poll_start_ts_monotonic;
-#[cfg(not(tokio_unstable))]
-pub(crate) use runtime_context::set_runtime_ctx;
 
 pub use dial9_core::handle::Dial9Handle;
 pub(crate) use handle::traced_handle;
@@ -40,9 +38,8 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(tokio_unstable)]
 use handle::INSTRUMENTED_SPAWN;
-pub(crate) use runtime_context::{
-    clear_poll_span, make_poll_end, make_poll_start, poll_span_open, runtime_ctx_installed,
-};
+pub(crate) use recorder_tokio::current_runtime_ctx;
+pub(crate) use runtime_context::{clear_poll_span, make_poll_end, make_poll_start, poll_span_open};
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -205,17 +202,11 @@ fn register_hooks(
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
     let handle_for_tl = handle.clone();
-    #[cfg(not(tokio_unstable))]
-    let ctx_for_tl = ctx.clone();
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
         // Install this thread's Dial9Handle so user code can call
         // `Dial9Handle::current()` from anywhere on this thread.
         set_tl_handle(handle_for_tl.clone());
-        // Same for the runtime context, which a poll needs to register the
-        // worker ID it claims.
-        #[cfg(not(tokio_unstable))]
-        runtime_context::set_runtime_ctx(&ctx_for_tl);
 
         // Install this thread's task-dump config for `TaskDumped` to read.
         #[cfg(feature = "taskdump")]
@@ -237,8 +228,6 @@ fn register_hooks(
 
     register_hook!(builder, on_thread_stop, tokio_hooks.on_thread_stop, {
         clear_tl_handle();
-        #[cfg(not(tokio_unstable))]
-        runtime_context::clear_runtime_ctx();
 
         #[cfg(feature = "taskdump")]
         crate::task_dumped::clear_taskdump_config();
@@ -1399,6 +1388,59 @@ mod tests {
             polls, 0,
             "an unattached runtime has no worker identity, so its polls stay out of the trace"
         );
+    }
+
+    /// Attach two runtimes from one thread, then drive them. Each task's polls
+    /// resolve the runtime they actually run on, so attach order cannot file
+    /// one runtime's work under the other.
+    #[cfg(not(tokio_unstable))]
+    #[test]
+    fn attach_order_does_not_misattribute_polls() {
+        use std::collections::HashSet;
+
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let attach = |name: &str| {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+            rec.handle()
+                .attach_tokio_runtime(
+                    builder,
+                    TokioAttachOptions::builder().runtime_name(name).build(),
+                )
+                .unwrap()
+        };
+
+        let runtime_a = attach("main");
+        let runtime_b = attach("io");
+        runtime_a.block_on(async {
+            crate::telemetry::spawn(async {}).await.unwrap();
+        });
+
+        let block = |name: &str| -> HashSet<u64> {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            registry
+                .iter()
+                .find(|c| c.runtime_name.as_deref() == Some(name))
+                .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                .unwrap_or_default()
+        };
+        assert!(
+            !block("main").is_empty(),
+            "the runtime that ran the task must own the worker: main={:?} io={:?}",
+            block("main"),
+            block("io")
+        );
+        assert!(
+            block("io").is_empty(),
+            "the idle runtime must own no workers: io={:?}",
+            block("io")
+        );
+
+        drop(runtime_a);
+        drop(runtime_b);
+        rec.graceful_shutdown(Duration::from_secs(1));
     }
 
     /// One thread driving two `current_thread` runtimes in turn. The worker
