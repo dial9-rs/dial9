@@ -340,9 +340,17 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let ext_def = thread_defs
         .iter()
         .find(|(_, name)| *name == "my-ext-thread");
+    // The ctimer fallback only samples dial9-registered threads, so it can
+    // never name an external one: report the backend or the failure reads as a
+    // missing name rather than a missing profiler.
+    let backend = if dial9_perf_self_profile::is_ctimer_active() {
+        "ctimer"
+    } else {
+        "perf"
+    };
     assert!(
         ext_def.is_some(),
-        "expected CpuSample with thread_name 'my-ext-thread', got: {unique_defs:?}"
+        "expected CpuSample with thread_name 'my-ext-thread', got: {unique_defs:?} (backend: {backend})"
     );
     let ext_tid = ext_def.unwrap().0;
 
