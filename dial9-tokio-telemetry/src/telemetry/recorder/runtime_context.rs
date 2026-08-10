@@ -652,6 +652,20 @@ pub(crate) fn poll_span_open() -> bool {
     POLL_START_TS.with(|c| c.get().is_some())
 }
 
+/// Whether this thread runs a dial9-attached runtime, so a poll has a runtime
+/// to attribute itself to. Always false where tokio's task hooks exist: there
+/// the hooks record polls and the wrapper stays out of it.
+pub(crate) fn runtime_ctx_installed() -> bool {
+    #[cfg(not(tokio_unstable))]
+    {
+        RUNTIME_CTX_ID.try_with(|c| c.get()).unwrap_or(0) != 0
+    }
+    #[cfg(tokio_unstable)]
+    {
+        false
+    }
+}
+
 /// Close this thread's poll-span marker unconditionally, so a buffer disabled
 /// at poll end cannot leave it set and mute every later wrapper poll.
 pub(crate) fn clear_poll_span() {

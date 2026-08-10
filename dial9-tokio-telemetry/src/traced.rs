@@ -291,11 +291,13 @@ impl<F: Future> Future for WakeTraced<F> {
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
 
-        use crate::telemetry::recorder::{make_poll_start, poll_span_open};
+        use crate::telemetry::recorder::{make_poll_start, poll_span_open, runtime_ctx_installed};
 
-        // Poll events claim worker occupancy; emitting inside an open span
-        // (tokio's hooks, or an outer wrapper) would claim the same time twice.
-        if poll_span_open() {
+        // Only record polls this wrapper owns: a thread with no runtime context
+        // has no attached runtime to attribute them to, and poll events claim
+        // worker occupancy, so emitting inside an open span (tokio's hooks, or
+        // an outer wrapper) would claim the same time twice.
+        if !runtime_ctx_installed() || poll_span_open() {
             return this.inner.poll(&mut traced_cx);
         }
         // Closes the span on the way out, panic or not. A panicking future

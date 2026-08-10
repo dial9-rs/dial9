@@ -40,7 +40,9 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(tokio_unstable)]
 use handle::INSTRUMENTED_SPAWN;
-pub(crate) use runtime_context::{clear_poll_span, make_poll_end, make_poll_start, poll_span_open};
+pub(crate) use runtime_context::{
+    clear_poll_span, make_poll_end, make_poll_start, poll_span_open, runtime_ctx_installed,
+};
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -1356,11 +1358,11 @@ mod tests {
         );
     }
 
-    /// A dial9-spawned future on a runtime without dial9's hooks records its
-    /// own polls: no span is open when the wrapper runs, so it emits.
-    #[cfg(tokio_unstable)]
+    /// A dial9-spawned future on a runtime dial9 never attached to records no
+    /// polls: the thread has no runtime context, so there is nothing to
+    /// attribute them to and the wrapper stays out of it.
     #[test]
-    fn wrapper_records_polls_without_runtime_hooks() {
+    fn wrapper_leaves_unattached_runtimes_alone() {
         use crate::telemetry::recorder::{Dial9TokioHandle, traced_handle};
 
         let (capture, data) = CapturingProcessor::new();
@@ -1383,29 +1385,20 @@ mod tests {
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
-        let starts = events
+        let polls = events
             .iter()
             .filter(|e| {
                 matches!(
                     e,
                     crate::telemetry::analysis_events::Dial9Event::PollStartEvent(..)
+                        | crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
                 )
             })
             .count();
-        let ends = events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
-                )
-            })
-            .count();
-        assert!(
-            starts > 0,
-            "wrapper should record polls when no hooks are installed"
+        assert_eq!(
+            polls, 0,
+            "an unattached runtime has no worker identity, so its polls stay out of the trace"
         );
-        assert_eq!(starts, ends, "every wrapper PollStart needs a PollEnd");
     }
 
     /// One thread driving two `current_thread` runtimes in turn. The worker
