@@ -1,4 +1,4 @@
-// Store-integration tests for the spans track. The three checks that live at
+// Store-integration tests for the spans track. The checks that live at
 // the store/render-input boundary (the browser-driven halves - row-walker, perf
 // probe, visual - are covered elsewhere):
 //   1. derived-cache invalidation: the trace-invariant span data recomputes
@@ -8,6 +8,8 @@
 //      per frame - never a synchronous renderAll per keypress.
 //   3. selection-driven dimming: drawSpansCanvas's render input reacts to the
 //      selection slice - non-highlighted clusters recede.
+//   4. duration-axis fallback: sub-decade and single-duration ranges retain a
+//      visible label.
 
 import { describe, it, expect } from "vitest";
 import { createStore } from "../../store/store.js";
@@ -119,14 +121,16 @@ describe("filter typing coalescing", () => {
   });
 });
 
-// ── 3. Selection-driven dimming render input ──────────────────────────────
+// ── 3–4. Canvas rendering ─────────────────────────────────────────────────
 
 /** A minimal recording 2d context: captures each fillRect's y + alpha. */
 function recordingCtx(): {
   ctx: CanvasRenderingContext2D;
   fills: { y: number; alpha: number }[];
+  labels: { text: string; y: number }[];
 } {
   const fills: { y: number; alpha: number }[] = [];
+  const labels: { text: string; y: number }[] = [];
   const ctx = {
     globalAlpha: 1,
     fillStyle: "",
@@ -137,14 +141,16 @@ function recordingCtx(): {
     fillRect(_x: number, y: number, _w: number, _h: number) {
       fills.push({ y, alpha: (this as CanvasRenderingContext2D).globalAlpha });
     },
-    fillText() {},
+    fillText(text: string, _x: number, y: number) {
+      labels.push({ text, y });
+    },
     beginPath() {},
     moveTo() {},
     lineTo() {},
     stroke() {},
     setTransform() {},
   } as unknown as CanvasRenderingContext2D;
-  return { ctx, fills };
+  return { ctx, fills, labels };
 }
 
 function bucket(id: string, y: number): SpanDrawBucket {
@@ -182,6 +188,28 @@ function stateWithFocus(spanFocus: StoreState["selection"]["spanFocus"]): StoreS
   const base = initialViewerState();
   return { ...base, selection: { ...base.selection, spanFocus } };
 }
+
+describe("drawSpansCanvas duration axis", () => {
+  it("keeps fallback endpoint labels visible when no decade tick fits", () => {
+    const canvasH = 120;
+    const model = { ...twoBucketModel(), minDur: 120_000, maxDur: 180_000 };
+    const { ctx, labels } = recordingCtx();
+
+    drawSpansCanvas(ctx, model, emptyData, stateWithFocus(null), 400, canvasH, 0, 400, colorOf);
+
+    expect(labels.map((label) => label.text)).toEqual(["120.0µs", "180.0µs"]);
+    expect(labels.every((label) => label.y >= 9 && label.y <= canvasH - 2)).toBe(true);
+  });
+
+  it("draws one fallback label for a single-duration range", () => {
+    const model = { ...twoBucketModel(), minDur: 150_000, maxDur: 150_000 };
+    const { ctx, labels } = recordingCtx();
+
+    drawSpansCanvas(ctx, model, emptyData, stateWithFocus(null), 400, 120, 0, 400, colorOf);
+
+    expect(labels.map((label) => label.text)).toEqual(["150.0µs"]);
+  });
+});
 
 describe("drawSpansCanvas dimming", () => {
   it("draws every cluster at full weight when nothing is selected", () => {
