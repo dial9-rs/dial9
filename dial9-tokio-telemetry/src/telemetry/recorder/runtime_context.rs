@@ -1,6 +1,6 @@
 use super::SharedState;
 use super::source::{FlushContext, Source};
-use crate::primitives::sync::{Arc, Mutex};
+use crate::primitives::sync::{Arc, Mutex, Weak};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 #[cfg(tokio_unstable)]
@@ -55,6 +55,13 @@ thread_local! {
     /// that also drives a second runtime still joins that runtime's worker set
     /// instead of short-circuiting as already enrolled.
     static WORKER_REGISTERED: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+    /// The context this thread last resolved. Every traced task resolves on
+    /// its first poll, and resolving takes the recorder's source lock.
+    ///
+    /// `Weak` because this cache is never cleared, and a thread can outlive
+    /// the runtime it served.
+    static RUNTIME_CTX_CACHE: RefCell<Option<(tokio::runtime::Id, Weak<RuntimeContext>)>> =
+        const { RefCell::new(None) };
     /// Keeps this thread enrolled with the recorder's per-thread sources.
     /// Dropped by the runtime's `on_thread_stop` hook, or by the TLS destructor
     /// for threads that get none (a `current_thread` runtime's driver).
@@ -614,6 +621,25 @@ pub(crate) fn make_poll_end(ctx: Option<&RuntimeContext>, shared: &SharedState) 
         timestamp_ns: clock_monotonic_ns(),
         worker_id: event_worker_id(ctx, shared),
     }
+}
+
+/// This thread's cached context for `runtime`, if it resolved one before and
+/// that runtime is still alive.
+pub(crate) fn cached_runtime_ctx(runtime: tokio::runtime::Id) -> Option<Arc<RuntimeContext>> {
+    RUNTIME_CTX_CACHE
+        .try_with(|cell| {
+            let cached = cell.borrow();
+            let (id, weak) = cached.as_ref()?;
+            (*id == runtime).then(|| weak.upgrade())?
+        })
+        .ok()
+        .flatten()
+}
+
+/// Remember `ctx` as this thread's context for `runtime`.
+pub(crate) fn cache_runtime_ctx(runtime: tokio::runtime::Id, ctx: &Arc<RuntimeContext>) {
+    let _ = RUNTIME_CTX_CACHE
+        .try_with(|cell| *cell.borrow_mut() = Some((runtime, Arc::downgrade(ctx))));
 }
 
 /// Whether a recorded poll span is open on this thread: set by

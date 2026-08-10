@@ -408,9 +408,16 @@ impl Dial9HandleTokioExt for Dial9Handle {
 /// that drives several runtimes gets the right one every time.
 pub(crate) fn current_runtime_ctx(shared: &Arc<SharedState>) -> Option<Arc<RuntimeContext>> {
     let id = tokio::runtime::Handle::try_current().ok()?.id();
+    if let Some(ctx) = super::runtime_context::cached_runtime_ctx(id) {
+        return Some(ctx);
+    }
     let registry = runtime_registry(shared)?;
-    let registry = registry.lock().ok()?;
-    registry.iter().find(|c| c.is_runtime(id)).cloned()
+    let ctx = {
+        let registry = registry.lock().ok()?;
+        registry.iter().find(|c| c.is_runtime(id)).cloned()?
+    };
+    super::runtime_context::cache_runtime_ctx(id, &ctx);
+    Some(ctx)
 }
 
 /// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that
