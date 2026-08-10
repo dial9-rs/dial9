@@ -73,9 +73,8 @@ export function parseInitialPeriods(params: URLSearchParams): PeriodBounds[] {
 /**
  * Rebuild the query string from scratch: keep bucket/prefix/service/host* from
  * the ORIGINAL scope, write `p{i+1}_start_ns`/`_end_ns` per period (omitting
- * unset bounds), and DROP everything else (start_ns/end_ns become p1_*, and
- * unknown params including `ui=` are stripped - which is why ui-switch.js has
- * pinWouldBounce). Returns the query WITHOUT the leading "?".
+ * unset bounds), and DROP everything else (start_ns/end_ns become p1_*).
+ * Returns the query WITHOUT the leading "?".
  */
 export function buildSyncQuery(
   scope: ScopeParams,

@@ -206,7 +206,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
 
   it("restore-on-load produces ZERO url writes (like legacy)", () => {
     const url: UrlParts = {
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=t.bin&worker-zoom=main%09poll",
       hash: "",
     };
@@ -219,7 +219,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
 
   it("a user zoom after restore writes legacy params + hash, once", () => {
     const { fg, raf, timer, host, sync } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=t.bin&worker-zoom=main",
       hash: "",
     });
@@ -230,7 +230,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual([
-      "/new/flamegraph.html?trace=t.bin&worker-zoom=main%09poll%09do_work" +
+      "/flamegraph.html?trace=t.bin&worker-zoom=main%09poll%09do_work" +
         "#v=1&fg.w=main%09poll%09do_work",
     ]);
   });
@@ -283,7 +283,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
   it("preserves every non-view context param on write", () => {
     const fixture = LEGACY_FIXTURE_URLS[3]!; // the full context-param fixture URL
     const { fg, raf, timer, host, sync } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: fixture,
       hash: "",
     });

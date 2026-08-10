@@ -40,7 +40,7 @@ function state(over: Partial<ApiQueryState> = {}): ApiQueryState {
 }
 
 describe("resolveTraceUrls", () => {
-  it("resolves relative values against the origin root (not the /new/ page path)", () => {
+  it("resolves relative values against the origin root", () => {
     expect(resolveTraceUrls(["demo-trace.bin"], ORIGIN)).toEqual([
       `${ORIGIN}/demo-trace.bin`,
     ]);
