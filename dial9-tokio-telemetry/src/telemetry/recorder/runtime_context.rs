@@ -45,12 +45,14 @@ pub(crate) struct RuntimeContext {
 thread_local! {
     /// Global worker ID for this thread, set on every `resolve_worker` call.
     /// Read by `current_worker_id()` for wake events.
+    static GLOBAL_WORKER_ID: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Worker IDs claimed by this thread, keyed by `RuntimeContext::id`.
     ///
-    /// Keyed by runtime, matching the flagged path where the ID comes from the
-    /// runtime's own block. A thread serving a second runtime claims a fresh ID
-    /// there rather than reusing one belonging to another runtime's block, or to
-    /// another recorder's counter entirely.
-    static GLOBAL_WORKER_ID: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+    /// The fallback path assigns IDs per thread-runtime pair. Retaining previous
+    /// claims lets a thread reuse its ID when it returns to a runtime instead of
+    /// reserving a new ID after every runtime switch.
+    #[cfg(not(tokio_unstable))]
+    static CLAIMED_WORKER_IDS: RefCell<Vec<(u64, u64)>> = const { RefCell::new(Vec::new()) };
     /// The runtime and worker ID this thread last enrolled with, so a thread
     /// that also drives a second runtime still joins that runtime's worker set
     /// instead of short-circuiting as already enrolled.
@@ -110,13 +112,14 @@ fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
 /// there rather than reusing the one it holds in another runtime's block.
 #[cfg(not(tokio_unstable))]
 fn claim_thread_worker_id(ctx: &RuntimeContext, shared: &SharedState) -> u64 {
-    let id = GLOBAL_WORKER_ID.with(|cell| match cell.get() {
-        Some((owner, id)) if owner == ctx.id => id,
-        _ => {
-            let id = shared.reserve_worker_ids(1);
-            cell.set(Some((ctx.id, id)));
-            id
+    let id = CLAIMED_WORKER_IDS.with(|claimed| {
+        let mut claimed = claimed.borrow_mut();
+        if let Some((_, id)) = claimed.iter().find(|(owner, _)| *owner == ctx.id) {
+            return *id;
         }
+        let id = shared.reserve_worker_ids(1);
+        claimed.push((ctx.id, id));
+        id
     });
     // A poll is this thread proving it belongs to the runtime, the same as a
     // park. Already-enrolled threads stop at the thread-local read.
@@ -424,7 +427,7 @@ impl RuntimeContext {
         let global_id = claim_thread_worker_id(self, shared);
 
         // Always update TLS so current_worker_id() returns the global ID.
-        GLOBAL_WORKER_ID.with(|cell| cell.set(Some((self.id, global_id))));
+        GLOBAL_WORKER_ID.with(|cell| cell.set(Some(global_id)));
 
         enroll_thread(self, global_id);
 
@@ -503,7 +506,7 @@ pub(crate) fn stop_sched_sampling() {
 ///
 /// This is a thread-local read with no synchronization overhead.
 pub fn current_worker_id() -> WorkerId {
-    GLOBAL_WORKER_ID.with(|cell| cell.get().map_or(WorkerId::UNKNOWN, |(_, id)| WorkerId(id)))
+    GLOBAL_WORKER_ID.with(|cell| cell.get().map_or(WorkerId::UNKNOWN, WorkerId))
 }
 
 // ── Event construction helpers ───────────────────────────────────────────────

@@ -1465,14 +1465,17 @@ mod tests {
 
         // Attach and drive in turn: attaching installs this thread's runtime
         // context, so each drive claims under the runtime it belongs to.
+        // Several rounds, because a thread that only remembers its latest
+        // runtime would claim a new ID on every switch.
         let runtime_a = attach("main");
-        runtime_a.block_on(async {
-            crate::telemetry::spawn(async {}).await.unwrap();
-        });
         let runtime_b = attach("io");
-        runtime_b.block_on(async {
-            crate::telemetry::spawn(async {}).await.unwrap();
-        });
+        for _ in 0..3 {
+            for runtime in [&runtime_a, &runtime_b] {
+                runtime.block_on(async {
+                    crate::telemetry::spawn(async {}).await.unwrap();
+                });
+            }
+        }
 
         let (main_ids, io_ids) = {
             let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
@@ -1487,9 +1490,11 @@ mod tests {
             };
             (block("main"), block("io"))
         };
-        assert!(
-            !main_ids.is_empty() && !io_ids.is_empty(),
-            "both runtimes must enroll the driving thread: main={main_ids:?} io={io_ids:?}"
+        assert_eq!(
+            (main_ids.len(), io_ids.len()),
+            (1, 1),
+            "one driving thread is one worker per runtime, however often it switches: \
+             main={main_ids:?} io={io_ids:?}"
         );
         assert!(
             main_ids.is_disjoint(&io_ids),
