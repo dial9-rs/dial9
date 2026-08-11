@@ -24,14 +24,14 @@ If you are integrating dial9 into a production service, see the [`production_use
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
-Tokio relies on `tokio_unstable` for Tokio runtime hooks and frame pointers for efficient profiling.
+Tokio relies on `tokio_unstable` for Tokio runtime hooks. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
 
 ```toml
 # .cargo/config.toml
 [build]
 rustflags = [
   "--cfg", "tokio_unstable",
-  # For profiling, you also need:
+  # Required by the cpu-profiling and memory-profiling features:
   "-C", "force-frame-pointers=yes"
 ]
 ```
@@ -426,6 +426,13 @@ dial9 can sample heap allocations using [probabilistic sampling](https://github.
 ```toml
 [dependencies]
 dial9 = { version = "0.5", features = ["memory-profiling"] }
+```
+
+**Enable frame pointers** (allocation stacks are captured with a frame-pointer unwinder):
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
 **Install the allocator and profiler:**
