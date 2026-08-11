@@ -120,10 +120,10 @@ const classicScripts = [
   "url_state.js",
 ];
 
-// Root-served verbatim assets (demo-trace.bin, flamegraph.css) live in
-// public/: Vite copies public/ into the dist root unchanged (build) and
-// serves it at / (dev), so the pages' root-relative references keep working
-// in both modes with no static-copy entry.
+// Root-served verbatim assets (demo trace, shared CSS, compatibility redirects)
+// live in public/: Vite copies public/ into the dist root unchanged (build) and
+// serves it at / (dev), so root-relative references work in both modes with no
+// static-copy entry.
 
 // Rollup does not watch statically copied files in build mode. Register the
 // classic scripts and public assets so `npm run dev:embedded` stays live.
@@ -221,12 +221,17 @@ export default defineConfig({
     viteStaticCopy({
       targets: classicScripts.map((f) => ({ src: f, dest: "." })),
     }),
-    // public/ is re-copied by each rebuild too, so watching its two assets
-    // keeps the dev:embedded loop alive for them as well.
+    // public/ is re-copied by each rebuild too, so watch its source assets to
+    // keep the dev:embedded loop live for them as well.
     watchStaticFiles([
       ...classicScripts,
       "public/flamegraph.css",
       "public/demo-trace.bin",
+      "public/new/redirect.js",
+      "public/new/index.html",
+      "public/new/viewer.html",
+      "public/new/flamegraph.html",
+      "public/new/tokio_stats.html",
     ]),
     keepDistMarker(),
   ],

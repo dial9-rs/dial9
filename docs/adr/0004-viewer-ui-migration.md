@@ -25,10 +25,11 @@ Ground rule: lose nothing. The current functional surface is the contract. This 
 ## Outcome
 
 The Vite/TypeScript pages now occupy the canonical routes. The prior inline
-pages, `/new/` entries, and dual-UI switch were removed; Vitest is the sole
-JavaScript test runner. Shared root modules remain behind the `src/lib` seams
-where the canonical UI still consumes them. The decisions below are retained
-as the historical migration record.
+pages, full `/new/` entries, and dual-UI switch were removed; four compatibility
+stubs redirect migration-era `/new/*.html` links to their canonical routes.
+Vitest is the sole JavaScript test runner. Shared root modules remain behind the
+`src/lib` seams where the canonical UI still consumes them. The decisions below
+are retained as the historical migration record.
 
 ## Decisions
 

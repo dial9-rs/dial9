@@ -82,7 +82,8 @@ files are thin entries at the public routes; page behavior lives under
 `ui/` root (for example `prefix_detect.js`) and is imported through the
 `src/lib/**` seams; expose new shared exports through those seams. `creds.js`
 and `url_state.js` remain classic browser-global contracts copied verbatim by
-Vite. There is no `/new/` route or legacy page copy.
+Vite. `/new/*.html` assets are compatibility redirects only; there is no
+second UI or legacy page copy.
 
 ## Testing
 
