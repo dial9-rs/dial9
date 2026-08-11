@@ -1391,6 +1391,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn block_in_place_keeps_worker_ids_bounded() {
+        use crate::telemetry::analysis_events::Dial9Event;
+        use crate::telemetry::format::WorkerId;
+        use std::collections::HashSet;
+
+        const WORKERS: usize = 2;
+        const HANDOFFS: usize = 20;
+
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(WORKERS);
+        let rt = rec
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder().runtime_name("main").build(),
+            )
+            .unwrap();
+
+        rt.block_on(async {
+            crate::telemetry::spawn(async {
+                for _ in 0..HANDOFFS {
+                    tokio::task::block_in_place(|| {
+                        std::thread::sleep(Duration::from_millis(1));
+                    });
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+
+        // Read the worker set before shutdown: the registry goes away with the
+        // recorder.
+        let enrolled: HashSet<u64> = {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            registry
+                .iter()
+                .find(|c| c.runtime_name.as_deref() == Some("main"))
+                .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                .unwrap_or_default()
+        };
+
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(2));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let mut starts = 0usize;
+        let mut ends = 0usize;
+        let mut polled_by: HashSet<u64> = HashSet::new();
+        for e in &events {
+            match e {
+                Dial9Event::PollStartEvent(p) => {
+                    starts += 1;
+                    polled_by.insert(p.worker_id.as_u64());
+                }
+                Dial9Event::PollEndEvent(p) => {
+                    ends += 1;
+                    polled_by.insert(p.worker_id.as_u64());
+                }
+                _ => {}
+            }
+        }
+
+        assert!(starts > 0, "expected poll events from the spawned task");
+        assert_eq!(
+            starts, ends,
+            "every PollStart needs a PollEnd across the core handoff"
+        );
+        assert!(
+            !polled_by.contains(&WorkerId::UNKNOWN.as_u64()),
+            "a thread running the worker loop must resolve an identity: {polled_by:?}"
+        );
+        assert!(
+            polled_by.is_subset(&enrolled),
+            "polls came from workers the runtime never enrolled: polled={polled_by:?} enrolled={enrolled:?}"
+        );
+        assert!(
+            enrolled.len() < HANDOFFS,
+            "worker IDs must be bounded by threads, not by handoffs: {enrolled:?}"
+        );
+
+        #[cfg(tokio_unstable)]
+        assert!(
+            enrolled.len() <= WORKERS,
+            "worker_index() puts the migrant back in the runtime's own block: {enrolled:?}"
+        );
+        #[cfg(not(tokio_unstable))]
+        assert!(
+            enrolled.len() >= WORKERS,
+            "each thread that runs the worker loop claims its own ID: {enrolled:?}"
+        );
+    }
+
     /// Attach two runtimes from one thread, then drive them. Each task's polls
     /// resolve the runtime they actually run on, so attach order cannot file
     /// one runtime's work under the other.
