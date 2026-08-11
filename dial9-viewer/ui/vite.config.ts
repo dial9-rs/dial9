@@ -149,7 +149,7 @@ export default defineConfig({
   // Rust integration test tests/js_parser.rs, not by Vitest.
   test: {
     environment: "node",
-    include: ["tests/**/*.test.ts", "src/**/*.test.ts"],
+    include: ["tests/**/*.test.{js,ts}", "src/**/*.test.ts"],
     // Many suites parse the 3.4MB demo trace in beforeAll/tests; with the
     // whole tests/core/ set running in parallel workers (and on slow CI
     // runners), individual parses far exceed Vitest's 5s/10s defaults. These

@@ -72,21 +72,6 @@ declare module "*/span_explorer.js" {
     categories: CompositionCategory[];
   }
 
-  /** The accumulated raw sums for a duration band; see bandComposition. */
-  export interface BandCompositionSums {
-    on_cpu_ns: number;
-    blocked_ns: number;
-    async_wait_ns: number;
-    scheduler_delay_ns: number;
-    unknown_ns: number;
-    instance_count: number;
-    on_cpu_frac_sum: number;
-    blocked_frac_sum: number;
-    async_wait_frac_sum: number;
-    scheduler_delay_frac_sum: number;
-    unknown_frac_sum: number;
-  }
-
   /** One `attr=key=value` filter. Multiple filters are ANDed. */
   export interface AttrFilter {
     key: string;
@@ -109,24 +94,6 @@ declare module "*/span_explorer.js" {
     span_type_uid?: string | null;
     min_span_ns?: number | null;
     max_span_ns?: number | null;
-  }
-
-  /** decodeSpanExplorerState always fills every key (null when absent). */
-  export interface DecodedSpanExplorerState {
-    data_dir: string | null;
-    max_files: number | null;
-    bucket: string | null;
-    region: string | null;
-    credentialMode: string | null;
-    roleArn: string | null;
-    prefix: string | null;
-    service: string | null;
-    hosts: string[];
-    start_ns: string | null;
-    end_ns: string | null;
-    span_type_uid: string | null;
-    min_span_ns: number | null;
-    max_span_ns: number | null;
   }
 
   /** Scope for exemplarViewerUrl; the exemplar's own host wins over any here. */
@@ -207,13 +174,6 @@ declare module "*/span_explorer.js" {
     gap?: number,
   ): SpanHistogramLayout;
 
-  /** Pixel x to duration, geometric within the containing column. */
-  export function spanPxToNs(
-    bars: readonly HistogramBarLike[] | null | undefined,
-    width: number,
-    px: number,
-  ): number | null;
-
   /** Inverse of spanPxToNs; clamps outside the histogram's range. */
   export function spanNsToPx(
     bars: readonly HistogramBarLike[] | null | undefined,
@@ -256,13 +216,6 @@ declare module "*/span_explorer.js" {
     label: string;
     color: string;
   }[];
-
-  /** Sum the `composition_histogram` buckets inside a band; null when absent. */
-  export function bandComposition(
-    spanType: { composition_histogram?: readonly unknown[] },
-    min_ns: number | null,
-    max_ns: number | null,
-  ): BandCompositionSums | null;
 
   /**
    * Resolve a span type's composition for display, scoped to `band` when the
@@ -337,16 +290,6 @@ declare module "*/span_explorer.js" {
   ): { spanTypes: T; coverage: C; pending: boolean };
 
   /**
-   * Compare catalogs ignoring the duration-scoped exemplar fields, so a
-   * preserve-mode refresh can skip rerendering an already-complete catalog
-   * while still adopting a final snapshot after an interrupted refinement.
-   */
-  export function sameSpanCatalogStatistics(
-    leftTypes: readonly unknown[] | null | undefined,
-    rightTypes: readonly unknown[] | null | undefined,
-  ): boolean;
-
-  /**
    * Is a preserve-mode response still valid? Rejects a late A:X response after
    * an A -> B -> A switch has returned the UI to A:global.
    */
@@ -389,10 +332,6 @@ declare module "*/span_explorer.js" {
   ): AttrFilter[];
 
   // ── Deep links ──
-
-  export function encodeSpanExplorerState(state: SpanExplorerState): URLSearchParams;
-
-  export function decodeSpanExplorerState(params: URLSearchParams): DecodedSpanExplorerState;
 
   /**
    * Flamegraph URL for the selected span type + band. `phase` "blocking"

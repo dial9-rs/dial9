@@ -113,7 +113,7 @@
     // Fired whenever the user changes the view (zoom or highlight), so the host
     // can persist { zoom, search } to the URL for a shareable deep link. `zoom`
     // is the full path from the merged root down (root INCLUDED as element 0),
-    // matching flamegraph_view_state.js's readDiffState/writeDiffState contract.
+    // matching the page's readDiffState/writeDiffState contract.
     const onChange = opts.onChange || (() => {});
     // Optional { zoom, search } to seed the view from a shared link.
     const initialState = opts.initialState || {};

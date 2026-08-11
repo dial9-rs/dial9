@@ -1,7 +1,5 @@
-// The poll-duration histogram seam re-exports the frozen flamegraph_histogram.js
-// math unchanged; these scenarios are transcribed from the frozen node oracle
-// (test_flamegraph_histogram.js) so the seam is pinned to the same expected
-// values the legacy page relies on.
+// The poll-duration histogram seam re-exports the shared
+// flamegraph_histogram.js math used by the canonical flamegraph minimap.
 
 import { describe, it, expect } from "vitest";
 import {

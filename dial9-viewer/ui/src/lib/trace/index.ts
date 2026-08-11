@@ -368,22 +368,19 @@ export type {
   WorkerStats,
 } from "./aggregates.js";
 
-// span_explorer.ts - the frozen Span Explorer helpers: catalog sorting, the
+// span_explorer.ts - shared Span Explorer helpers: catalog sorting, the
 // log-duration histogram geometry + percentile estimation, the five-way time
 // composition, attribute filters, and the flamegraph/viewer deep links.
 export {
   TIME_CATEGORIES,
   addAttrFilter,
-  bandComposition,
   classifyExemplarSnapshot,
   collectExemplarAttributeKeys,
   columnIsDegenerate,
   completeExemplarRefresh,
   computeTimeComposition,
   countInBand,
-  decodeSpanExplorerState,
   durationAtPercentile,
-  encodeSpanExplorerState,
   exemplarAttrValue,
   exemplarRequestMatches,
   exemplarViewerUrl,
@@ -398,22 +395,18 @@ export {
   parseAttrFilterParams,
   percentileForDuration,
   removeAttrFilter,
-  sameSpanCatalogStatistics,
   setMaxFilesParam,
   shouldAdoptCatalogSnapshot,
   sortSpanTypes,
   spanBrushToBand,
   spanHistogramLayout,
   spanNsToPx,
-  spanPxToNs,
   spanTypeLabel,
   spanTypeQuality,
 } from "./span_explorer.js";
 export type {
   AttrFilter,
-  BandCompositionSums,
   CompositionCategory,
-  DecodedSpanExplorerState,
   DurationBand,
   ExemplarLinkScope,
   HistogramBarLike,

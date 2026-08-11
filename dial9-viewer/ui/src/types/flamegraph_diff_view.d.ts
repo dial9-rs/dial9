@@ -10,7 +10,7 @@ declare module "*/flamegraph_diff_view.js" {
   /**
    * The diff view's persisted state (onChange arg / initialState):
    * `zoom` is the merged-root-inclusive frame path, `search` the highlight
-   * regex. Matches flamegraph_view_state.js readDiffState/writeDiffState.
+   * regex. Matches the canonical page's readDiffState/writeDiffState.
    */
   export interface DiffViewState {
     zoom?: readonly string[];

@@ -1777,9 +1777,9 @@
       }
     }
 
-    // The complete, serializable view state — the exact shape the URL codec in
-    // flamegraph_view_state.js reads/writes. Absent pieces are simply omitted so
-    // the codec deletes their keys. `inspect` carries the name/symbol split so a
+    // The complete, serializable view state consumed by the page's URL sync.
+    // Absent pieces are omitted so the codec deletes their keys. `inspect`
+    // carries the name/symbol split so a
     // restored link re-derives the same identity key (fullName || name).
     function getViewState() {
       const z = getZoomPath();
@@ -1915,7 +1915,7 @@
     return {
       setData, setTreeDirect, resize, destroy, handleEscape, isZoomed,
       getZoomPath, zoomToPath, getInspectFocus, focusInspectByKey, resetView,
-      // Consolidated view-state accessors (shape matches flamegraph_view_state.js).
+      // Consolidated view-state accessors consumed by the canonical URL codec.
       getViewState, applyViewState,
       getSearch, setSearch, getSpawnFilter, getRuntimeFilter,
     };

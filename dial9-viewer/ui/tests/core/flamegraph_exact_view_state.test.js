@@ -1,4 +1,8 @@
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // Exact-trace view-state round-trip: search + spawn-location filter. The
 // deep-link test uses setTreeDirect (aggregated/API mode), where the spawn and
@@ -7,10 +11,7 @@
 // search and the spawn filter, including the ordering rule that a filter rebuilds
 // the trees BEFORE zoom/inspect restore.
 //
-// The repo has no jsdom, so — like test_flamegraph_inspect_dom.js and
-// test_flamegraph_deeplink.js — we install a minimal DOM stub.
-
-const { assert, test, summarize } = require("./test_harness.js");
+// The repo has no jsdom, so this installs a minimal DOM stub.
 
 function makeCtx() {
   return {
@@ -128,7 +129,7 @@ function sampleData() {
 test("search round-trips through getViewState/applyViewState (exact mode)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     const { samples, symbols } = sampleData();
     fg.setData(samples, symbols, { exportTitle: "t" });
@@ -149,7 +150,7 @@ test("search round-trips through getViewState/applyViewState (exact mode)", () =
 test("spawn filter round-trips and rebuilds the tree before zoom restore", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     const { samples, symbols } = sampleData();
     fg.setData(samples, symbols, { exportTitle: "t" });
@@ -174,7 +175,7 @@ test("spawn filter round-trips and rebuilds the tree before zoom restore", () =>
 test("applyViewState({}) clears a previously-applied spawn filter", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     const { samples, symbols } = sampleData();
     fg.setData(samples, symbols, { exportTitle: "t" });
@@ -191,7 +192,7 @@ test("applyViewState({}) clears a previously-applied spawn filter", () => {
 test("a stale spawn value not present in this trace is ignored", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     const { samples, symbols } = sampleData();
     fg.setData(samples, symbols, { exportTitle: "t" });
@@ -202,5 +203,3 @@ test("a stale spawn value not present in this trace is ignored", () => {
     dom.restore();
   }
 });
-
-summarize();

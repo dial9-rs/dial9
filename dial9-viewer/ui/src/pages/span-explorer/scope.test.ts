@@ -1,7 +1,5 @@
-// The Span Explorer's URL contract. These assertions replace the source-text
-// greps test_span_explorer.js used to run against the legacy inline page (the
-// duration-band params, the exemplar-only scoping, the depth persistence), plus
-// the raw-mode `trace` preservation the legacy page got wrong.
+// The Span Explorer's URL contract: duration-band params, exemplar-only
+// scoping, refinement depth, and raw-mode `trace` preservation.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";

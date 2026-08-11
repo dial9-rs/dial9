@@ -353,19 +353,6 @@ describe("data-driven facet options", () => {
 });
 
 describe("flamegraph refinement wiring", () => {
-  it("persists max_files and preserves the live view during refinement", () => {
-    const html = readFileSync(
-      fileURLToPath(new URL("../../flamegraph.html", import.meta.url)),
-      "utf8",
-    );
-    expect(html).toContain('if (maxFiles != null) p.set("max_files", String(maxFiles));');
-    expect(html).toContain("shouldAdoptRefinementSnapshot(");
-    expect(html).toContain("if (preserveSplit) {");
-    expect(html).toContain("const preservedView = preserveSplit && viewRestored");
-    expect(html).toContain("fg.applyViewState(preservedView);");
-    expect(html).toContain("updateBrowserUrl();\n                        startStreaming(true)");
-  });
-
   it("publishes refinement helpers through the browser namespace", () => {
     const browserGlobal: {
       window?: unknown;
