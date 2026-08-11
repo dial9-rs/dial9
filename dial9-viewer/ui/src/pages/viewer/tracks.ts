@@ -379,8 +379,9 @@ function defaultTrackRow(
             `
           : null}
         <canvas
-          class="d9-track-canvas ${isCpu ? "d9-cpu-canvas" : ""}
-            ${isFieldChartTrackId(t.id) ? "d9-field-chart-canvas" : ""}"
+          class="d9-track-canvas ${isFieldChartTrackId(t.id)
+            ? "d9-field-chart-canvas"
+            : ""}"
           data-track-canvas=${t.id}
           aria-labelledby="d9-track-label-${t.id}"
           role="img"

@@ -525,8 +525,7 @@ body {
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
-.d9-field-chart-canvas,
-.d9-cpu-canvas { cursor: crosshair; }
+.d9-field-chart-canvas { cursor: crosshair; }
 
 /* CPU guide + visible-window summary share a real DOM header so they cannot
    overlap. The guide swatch mirrors the canvas line's 4px/3px dash pattern. */
