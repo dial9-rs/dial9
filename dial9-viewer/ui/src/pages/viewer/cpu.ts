@@ -195,17 +195,17 @@ export function fmtCpuPercent(value: number): string {
 const SEP = " \u00b7 ";
 
 /**
- * The visible-window info readout: `avg <cores> cores`, then (only when
+ * The visible-window info readout: `avg <cores>`, then (only when
  * capacity is known) `· avg <pct>%` where pct = min(100, avg/capacity*100),
- * then `· max <cores> cores`.
+ * then `· max <cores>`.
  */
 export function cpuReadoutText(stats: CpuStats, capacity: number | null): string {
-  let out = `avg ${fmtCpuCores(stats.avgCores)} cores`;
+  let out = `avg ${fmtCpuCores(stats.avgCores)}`;
   if (capacity != null) {
     const avgPct = Math.min(100, (stats.avgCores / capacity) * 100);
     out += `${SEP}avg ${fmtCpuPercent(avgPct)}`;
   }
-  out += `${SEP}max ${fmtCpuCores(stats.maxCores)} cores`;
+  out += `${SEP}max ${fmtCpuCores(stats.maxCores)}`;
   return out;
 }
 

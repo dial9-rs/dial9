@@ -135,16 +135,16 @@ describe("cpuReadoutText", () => {
 
   it("includes the percent clause only when capacity is known", () => {
     const withCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, 4);
-    expect(withCap).toBe(`avg 1.5 cores ${DOT} avg 37.5% ${DOT} max 3 cores`);
+    expect(withCap).toBe(`avg 1.5 ${DOT} avg 37.5% ${DOT} max 3`);
 
     const noCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, null);
-    expect(noCap).toBe(`avg 1.5 cores ${DOT} max 3 cores`);
+    expect(noCap).toBe(`avg 1.5 ${DOT} max 3`);
   });
 
   it("clamps the percent at 100 (legacy Math.min)", () => {
     // avg 10 cores on a 4-core box = 250% -> clamped to 100.0%.
     const s = cpuReadoutText({ avgCores: 10, maxCores: 12 }, 4);
-    expect(s).toBe(`avg 10 cores ${DOT} avg 100.0% ${DOT} max 12 cores`);
+    expect(s).toBe(`avg 10 ${DOT} avg 100.0% ${DOT} max 12`);
   });
 });
 
@@ -326,7 +326,7 @@ describe("renderCpuTrack", () => {
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs([], null), false);
     expect(rec.fillRects.length).toBe(1); // background only
     expect(rec.strokes).toBe(0);
-    expect(readout).toBe("avg 0 cores · max 0 cores");
+    expect(readout).toBe("avg 0 · max 0");
   });
 
   it("batches the grid + capacity strokes: one stroke() per STYLE", () => {
@@ -420,7 +420,7 @@ describe("renderCpuTrack", () => {
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
     const stats = visibleCpuStats(intervals, 0, 1000);
     expect(readout).toBe(cpuReadoutText(stats, 4));
-    expect(readout).toBe("avg 3 cores · avg 75.0% · max 4 cores");
+    expect(readout).toBe("avg 3 · avg 75.0% · max 4");
   });
 });
 
@@ -453,13 +453,13 @@ describe("renderCpuTrack surfaces a windowed view (windowing obligation)", () =>
   });
 });
 
-// ── Behavioral diff: readout EXACT vs legacy ─────────────────────────────
+// ── Behavioral diff: readout figures vs legacy ───────────────────────────
 //
 // The demo trace carries no ProcessResourceUsageEvent data (the legacy CPU
 // panel is hidden for it), and no other repo fixture does either, so a live
 // real-trace diff is not available. Instead this diffs the ported readout
 // against the LEGACY functions copied VERBATIM from viewer.html (fmtCpuCores,
-// fmtCpuPercent, visibleCpuStats, the info string) over a realistic interval
+// fmtCpuPercent, visibleCpuStats) over a realistic interval
 // series at many viewports. The readout is a pure function of (intervals,
 // viewport, capacity), so this is complete behavioral coverage.
 
@@ -496,19 +496,17 @@ function legacyVisibleCpuStats(
   const avgCores = totalOverlapNs > 0 ? weightedCoresNs / totalOverlapNs : 0;
   return { avgCores, maxCores };
 }
-function legacyReadout(
+function expectedCompactReadout(
   stats: { avgCores: number; maxCores: number },
   capacity: number | null,
 ): string {
-  // Copied byte-for-byte from viewer.html (the middle dot is the literal
-  // U+00B7 that ships in the legacy label).
   const avgPct =
     capacity != null ? Math.min(100, (stats.avgCores / capacity) * 100) : null;
   const pctText = avgPct != null ? ` · avg ${legacyFmtCpuPercent(avgPct)}` : "";
-  return `avg ${legacyFmtCpuCores(stats.avgCores)} cores${pctText} · max ${legacyFmtCpuCores(stats.maxCores)}`;
+  return `avg ${legacyFmtCpuCores(stats.avgCores)}${pctText} · max ${legacyFmtCpuCores(stats.maxCores)}`;
 }
 
-describe("readout behavioral diff: legacy figures with explicit max unit", () => {
+describe("readout behavioral diff: legacy figures in compact label", () => {
   // A realistic, contiguous avg-cores series (varying loads incl. >capacity).
   const series: ProcessCpuUsageInterval[] = [];
   for (let i = 0; i < 60; i++) {
@@ -529,17 +527,20 @@ describe("readout behavioral diff: legacy figures with explicit max unit", () =>
 
   for (const cap of capacities) {
     for (const [vs, ve] of viewports) {
-      it(`cap=${cap} view=[${vs},${ve}] matches legacy`, () => {
+      it(`cap=${cap} view=[${vs},${ve}] matches legacy figures`, () => {
         const mine = cpuReadoutText(visibleCpuStats(series, vs, ve), cap);
-        const legacy = legacyReadout(legacyVisibleCpuStats(series, vs, ve), cap);
-        expect(mine).toBe(`${legacy} cores`);
+        const expected = expectedCompactReadout(
+          legacyVisibleCpuStats(series, vs, ve),
+          cap,
+        );
+        expect(mine).toBe(expected);
       });
     }
   }
 
   it("also matches for an empty series (panel-hidden analog)", () => {
     expect(cpuReadoutText(visibleCpuStats([], 0, 1000), 4)).toBe(
-      `${legacyReadout(legacyVisibleCpuStats([], 0, 1000), 4)} cores`,
+      expectedCompactReadout(legacyVisibleCpuStats([], 0, 1000), 4),
     );
   });
 });
