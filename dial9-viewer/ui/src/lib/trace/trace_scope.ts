@@ -5,8 +5,8 @@
 //
 // Only the scope-building/encoding surface is re-exported: parseKey /
 // extractPrefix / objectTraceUrls have their own canonical seams (keys.ts,
-// object-urls.ts) whose TypeScript reimplementations the new app uses
-// everywhere else. scopeFromKeys deliberately keeps trace_scope.js's own
+// object-urls.ts) whose TypeScript reimplementations page code uses everywhere
+// else. scopeFromKeys deliberately keeps trace_scope.js's own
 // positional key parser so a scope built here matches viewer.html and
 // flamegraph.html exactly.
 //
