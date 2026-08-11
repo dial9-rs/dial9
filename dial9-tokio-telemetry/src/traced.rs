@@ -141,6 +141,11 @@ impl<F> WakeTraced<F> {
         task_id: TaskId,
         spawn_loc: &'static Location<'static>,
     ) -> Self {
+        // Tokio's poll hooks cover every poll under the flag, so the wrapper
+        // never records and has nothing to resolve.
+        #[cfg(tokio_unstable)]
+        let runtime_ctx = None;
+        #[cfg(not(tokio_unstable))]
         let runtime_ctx = crate::telemetry::recorder::current_runtime_ctx(&handle.shared);
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),

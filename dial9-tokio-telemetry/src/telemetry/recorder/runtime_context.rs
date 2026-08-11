@@ -1,6 +1,8 @@
 use super::SharedState;
 use super::source::{FlushContext, Source};
-use crate::primitives::sync::{Arc, Mutex, Weak};
+#[cfg(not(tokio_unstable))]
+use crate::primitives::sync::Weak;
+use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 #[cfg(tokio_unstable)]
@@ -62,6 +64,7 @@ thread_local! {
     ///
     /// `Weak` because this cache is never cleared, and a thread can outlive
     /// the runtime it served.
+    #[cfg(not(tokio_unstable))]
     static RUNTIME_CTX_CACHE: RefCell<Option<(tokio::runtime::Id, Weak<RuntimeContext>)>> =
         const { RefCell::new(None) };
     /// Keeps this thread enrolled with the recorder's per-thread sources.
@@ -395,6 +398,7 @@ impl RuntimeContext {
     }
 
     /// Whether this context instruments the runtime with `id`.
+    #[cfg(not(tokio_unstable))]
     pub(crate) fn is_runtime(&self, id: tokio::runtime::Id) -> bool {
         self.runtime_id.get() == Some(&id)
     }
@@ -628,6 +632,7 @@ pub(crate) fn make_poll_end(ctx: Option<&RuntimeContext>, shared: &SharedState) 
 
 /// This thread's cached context for `runtime`, if it resolved one before and
 /// that runtime is still alive.
+#[cfg(not(tokio_unstable))]
 pub(crate) fn cached_runtime_ctx(runtime: tokio::runtime::Id) -> Option<Arc<RuntimeContext>> {
     RUNTIME_CTX_CACHE
         .try_with(|cell| {
@@ -640,6 +645,7 @@ pub(crate) fn cached_runtime_ctx(runtime: tokio::runtime::Id) -> Option<Arc<Runt
 }
 
 /// Remember `ctx` as this thread's context for `runtime`.
+#[cfg(not(tokio_unstable))]
 pub(crate) fn cache_runtime_ctx(runtime: tokio::runtime::Id, ctx: &Arc<RuntimeContext>) {
     let _ = RUNTIME_CTX_CACHE
         .try_with(|cell| *cell.borrow_mut() = Some((runtime, Arc::downgrade(ctx))));

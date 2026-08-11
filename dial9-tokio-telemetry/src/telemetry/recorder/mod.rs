@@ -38,6 +38,7 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(tokio_unstable)]
 use handle::INSTRUMENTED_SPAWN;
+#[cfg(not(tokio_unstable))]
 pub(crate) use recorder_tokio::current_runtime_ctx;
 pub(crate) use runtime_context::{clear_poll_span, make_poll_end, make_poll_start, poll_span_open};
 

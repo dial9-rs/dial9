@@ -201,3 +201,7 @@ harness = false
 [[bench]]
 name = "writer_write_encoded_iai"
 harness = false
+
+[[bench]]
+name = "traced_poll_iai"
+harness = false

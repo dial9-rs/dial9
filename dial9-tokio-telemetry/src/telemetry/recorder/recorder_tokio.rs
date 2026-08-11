@@ -49,7 +49,9 @@
 //! runtime-drop-before-shutdown ordering for you.
 
 use super::register_runtime_hooks;
-use super::runtime_context::{RuntimeContext, RuntimeContextRegistry, TokioRuntimesSource};
+#[cfg(not(tokio_unstable))]
+use super::runtime_context::RuntimeContext;
+use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
@@ -406,6 +408,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
 /// The context instrumenting the tokio runtime this thread is currently
 /// running on, if dial9 is attached to it. Resolved by runtime id, so a thread
 /// that drives several runtimes gets the right one every time.
+#[cfg(not(tokio_unstable))]
 pub(crate) fn current_runtime_ctx(shared: &Arc<SharedState>) -> Option<Arc<RuntimeContext>> {
     let id = tokio::runtime::Handle::try_current().ok()?.id();
     if let Some(ctx) = super::runtime_context::cached_runtime_ctx(id) {
