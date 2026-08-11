@@ -1,5 +1,5 @@
 // The Process CPU usage track: a fillRect BAR chart of avg-cores-over-time
-// (not a curve). Bars go through the run-length coalescer; their top edges,
+// (not a curve). Bars go through the run-length coalescer; their step outline,
 // grid lines, and dashed capacity line go through separate batched-stroke
 // paths (one path per style). Draws in draw-area-relative x (nsToDrawX, no
 // LABEL_W) so bars line up pixel-exact with the lanes/axis.
@@ -337,9 +337,9 @@ function cpuBarStrokeColor(
  *
  * Draw order: background, then the grid + dashed-capacity strokes via the
  * batched-stroke path (one path per style), then the load-coloured bars via
- * the coalescer (one fillRect per pixel run) and their batched top strokes,
- * then the axis text and window markers. The top stroke keeps zero/sub-pixel
- * loads visible at the baseline instead of relying on a zero-height fill.
+ * the coalescer (one fillRect per pixel run) and their batched step outline,
+ * then the axis text and window markers. Fractional fills + the outline keep
+ * sub-pixel loads visible instead of rounding them down to zero height.
  *
  * Called from tracks.ts `sizeTracks` for the "cpu" track, inside the store's
  * frame tick. A blank background is painted before the trace loads / when the
@@ -405,6 +405,7 @@ export function renderCpuTrack(
     { fill: string; stroke: string; top: number }
   >();
   const barStrokes = makeStrokeBatcher();
+  let previousStroke: { right: number; y: number } | null = null;
   const coalescer = makeBarCoalescer((left: number, width: number, key: string) => {
     const meta = runMeta.get(key);
     if (meta === undefined) return;
@@ -414,10 +415,20 @@ export function renderCpuTrack(
       ctx.fillRect(left, meta.top, width, barHeight);
     }
     const y = Math.min(meta.top, baselineY - 0.5);
-    barStrokes.polyline(meta.stroke, [
-      { x: left, y },
-      { x: left + width, y },
-    ]);
+    const right = left + width;
+    const outline = [];
+    if (previousStroke !== null && left <= previousStroke.right + 1) {
+      outline.push({ x: previousStroke.right, y: previousStroke.y });
+      if (left !== previousStroke.right) {
+        outline.push({ x: left, y: previousStroke.y });
+      }
+      if (y !== previousStroke.y) outline.push({ x: left, y });
+    } else {
+      outline.push({ x: left, y });
+    }
+    outline.push({ x: right, y });
+    barStrokes.polyline(meta.stroke, outline);
+    previousStroke = { right, y };
   });
   for (
     let i = firstIntervalEndingAtOrAfter(intervals, viewStart);
@@ -430,15 +441,15 @@ export function renderCpuTrack(
     const x2 = clampX(nsToDrawX(interval.end, viewStart, viewEnd, drawW), drawW);
     const fill = cpuBarColor(interval.cores, capacity, scaleMax);
     const stroke = cpuBarStrokeColor(interval.cores, capacity, scaleMax);
-    const top = Math.round(chartTop + chartH - (interval.cores / scaleMax) * chartH);
-    const key = `${fill}|${top}`;
+    const top = chartTop + chartH - (interval.cores / scaleMax) * chartH;
+    const key = `${fill}|${Math.round(top)}`;
     if (!runMeta.has(key)) runMeta.set(key, { fill, stroke, top });
     coalescer.push(x1, x2, key);
   }
   coalescer.flush();
   drawStrokeBatches(ctx, barStrokes.batches(), (strokeStyle) => ({
     strokeStyle,
-    lineWidth: 1,
+    lineWidth: 1.5,
   }));
 
   // ── Text overlay: y-axis scale ──────────────────────────────────

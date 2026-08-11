@@ -234,7 +234,7 @@ describe("nsToDrawX (alignment invariant)", () => {
 });
 
 // A recording 2D context capturing the ops the CPU render makes (node has no
-// canvas). Enough to assert the stroke batching + coalesced fills.
+// canvas). Enough to assert stroke geometry/batching + coalesced fills.
 interface RectCall {
   x: number;
   y: number;
@@ -246,13 +246,20 @@ interface TextCall {
   x: number;
   y: number;
 }
+interface SegmentCall {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
 interface Recording {
   fillRects: RectCall[];
   strokes: number;
   beginPaths: number;
   labels: TextCall[];
   dashes: number[][];
-  lineTos: Array<{ x: number; y: number }>;
+  segments: SegmentCall[];
+  strokeWidths: number[];
 }
 function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
   const rec: Recording = {
@@ -261,8 +268,10 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     beginPaths: 0,
     labels: [],
     dashes: [],
-    lineTos: [],
+    segments: [],
+    strokeWidths: [],
   };
+  let point: { x: number; y: number } | null = null;
   const ctx = {
     fillStyle: "",
     strokeStyle: "",
@@ -275,13 +284,20 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     },
     beginPath() {
       rec.beginPaths++;
+      point = null;
     },
-    moveTo() {},
+    moveTo(x: number, y: number) {
+      point = { x, y };
+    },
     lineTo(x: number, y: number) {
-      rec.lineTos.push({ x, y });
+      if (point !== null) {
+        rec.segments.push({ x1: point.x, y1: point.y, x2: x, y2: y });
+      }
+      point = { x, y };
     },
     stroke() {
       rec.strokes++;
+      rec.strokeWidths.push(ctx.lineWidth);
     },
     setLineDash(segments: number[]) {
       rec.dashes.push([...segments]);
@@ -372,15 +388,36 @@ describe("renderCpuTrack", () => {
     expect(barFills(diff.rec).length).toBe(4);
   });
 
-  it("strokes a sub-pixel load at the baseline when its fill rounds to zero height", () => {
+  it("keeps a sub-pixel fill and its outline visible at the baseline", () => {
     const { ctx, rec } = recordingCtx();
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 0.001)], 11), true);
 
-    expect(rec.fillRects).toHaveLength(1); // background; zero-height fill skipped
+    const tinyFill = rec.fillRects.find((r) => r.y > 0);
+    expect(tinyFill?.h).toBeGreaterThan(0);
+    expect(tinyFill?.h).toBeLessThan(1);
     const baseline = geo().height - 8;
     expect(
-      rec.lineTos.some((p) => p.y < baseline && p.y >= baseline - 1),
+      rec.segments.some((s) => s.y2 < baseline && s.y2 >= baseline - 1),
     ).toBe(true);
+  });
+
+  it("connects adjacent bar tops as a continuous step outline, but preserves gaps", () => {
+    const render = (intervals: ProcessCpuUsageInterval[]): Recording => {
+      const { ctx, rec } = recordingCtx();
+      renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
+      return rec;
+    };
+    const verticalCount = (rec: Recording) =>
+      rec.segments.filter(
+        (s) => Math.abs(s.x2 - s.x1) < 1e-6 && Math.abs(s.y2 - s.y1) > 1e-6,
+      ).length;
+
+    const adjacent = render([iv(0, 500, 1), iv(500, 1000, 2)]);
+    expect(verticalCount(adjacent)).toBe(1);
+    expect(adjacent.strokeWidths).toContain(1.5);
+
+    const gapped = render([iv(0, 400, 1), iv(600, 1000, 2)]);
+    expect(verticalCount(gapped)).toBe(0);
   });
 
   it("returns the readout for the DOM header", () => {
