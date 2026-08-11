@@ -33,7 +33,6 @@ import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "../../lib/canvas/track-renderers.js";
 import {
   CPU_CAPACITY_STROKE,
-  cpuCapacityText,
   renderCpuTrack,
   type CpuInputs,
 } from "./cpu.js";
@@ -370,7 +369,7 @@ function defaultTrackRow(
                         style="color:${CPU_CAPACITY_STROKE}"
                       >
                         <span class="d9-cpu-capacity-swatch" aria-hidden="true"></span>
-                        <span>${cpuCapacityText(cpuCapacity)}</span>
+                        <span>available parallelism</span>
                       </span>
                     `
                   : null}

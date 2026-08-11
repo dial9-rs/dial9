@@ -209,12 +209,6 @@ export function cpuReadoutText(stats: CpuStats, capacity: number | null): string
   return out;
 }
 
-/** Human-readable label for the available-parallelism guide. */
-export function cpuCapacityText(capacity: number): string {
-  const unit = capacity === 1 ? "core" : "cores";
-  return `available parallelism (${fmtCpuCores(capacity)} ${unit})`;
-}
-
 // ── Hover content ────────────────────────────────────────────────────────
 
 /**

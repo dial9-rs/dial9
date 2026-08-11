@@ -13,7 +13,6 @@ import {
   fmtCpuCores,
   fmtCpuPercent,
   cpuReadoutText,
-  cpuCapacityText,
   cpuIntervalAt,
   cpuIntervalTooltip,
   cpuBarColor,
@@ -146,11 +145,6 @@ describe("cpuReadoutText", () => {
     // avg 10 cores on a 4-core box = 250% -> clamped to 100.0%.
     const s = cpuReadoutText({ avgCores: 10, maxCores: 12 }, 4);
     expect(s).toBe(`avg 10 cores ${DOT} avg 100.0% ${DOT} max 12 cores`);
-  });
-
-  it("labels the capacity guide by its actual meaning and unit", () => {
-    expect(cpuCapacityText(11)).toBe("available parallelism (11 cores)");
-    expect(cpuCapacityText(1)).toBe("available parallelism (1 core)");
   });
 });
 
