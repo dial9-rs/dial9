@@ -538,7 +538,7 @@ export function sizeTracks(
       canvas.dataset["cpuReadout"] = readout;
       const readoutEl = canvas.parentElement?.querySelector<HTMLElement>(
         ".d9-cpu-readout",
-      );
+      ) ?? null;
       if (readoutEl !== null) readoutEl.textContent = readout;
     } else {
       paintPlaceholder(ctx, drawW, track.height, vm.hasTrace);
