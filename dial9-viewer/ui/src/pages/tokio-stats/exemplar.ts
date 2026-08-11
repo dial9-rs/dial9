@@ -1,8 +1,3 @@
-// The exemplar deep-link builder: delegates to the frozen exemplarViewerUrl so
-// the viewer link stays identical between the two UIs. The poll's window is
-// forwarded as a non-destructive focus (focus_*), targeting an /api/object
-// trace component.
-
 import type { PollExemplar } from "../../lib/trace/index.js";
 import { exemplarViewerUrl } from "../../lib/trace/tokio_stats_api.js";
 
