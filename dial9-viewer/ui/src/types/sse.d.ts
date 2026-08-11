@@ -2,8 +2,8 @@
 // `fetch` used by the aggregated (`?api=1`) flamegraph/tokio-stats streams.
 // See src/types/decode.d.ts for the declaration-form rationale.
 //
-// Not frozen core, but loaded as a browser global (CommonJS-guard form) and
-// consumed by typed src/ through the lib/trace boundary (src/lib/trace/sse.ts).
+// Not frozen core; CommonJS-guarded and bundled through the typed lib/trace
+// boundary (src/lib/trace/sse.ts).
 // Native `EventSource` can't be used because the aggregate endpoints
 // authenticate via `x-dial9-aws-*` request headers, so this reads the
 // text/event-stream body off a `fetch` reader instead.

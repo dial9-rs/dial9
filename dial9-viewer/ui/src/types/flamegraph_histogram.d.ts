@@ -2,9 +2,8 @@
 // histogram minimap helpers (aggregated `?api=1` flamegraph mode). See
 // src/types/decode.d.ts for the declaration-form rationale.
 //
-// Not frozen core, but loaded as a browser global (CommonJS-guard form) and
-// consumed by typed src/ through the lib/canvas boundary
-// (src/lib/canvas/flamegraph_histogram.ts) exactly like the core.
+// Not frozen core; CommonJS-guarded and bundled through the typed lib/canvas
+// boundary (src/lib/canvas/flamegraph_histogram.ts) exactly like the core.
 
 declare module "*/flamegraph_histogram.js" {
   /** One log2 poll-duration histogram bucket (ascending by range). */

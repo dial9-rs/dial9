@@ -2,7 +2,7 @@
 
 - **Status:** proposed
 - **Date:** 2026-07-27
-- **Scope:** all migrated viewer pages: browser, trace viewer, flamegraph,
+- **Scope:** all viewer pages: browser, trace viewer, flamegraph,
   Tokio Stats, and Span Explorer
 - **Amends if adopted:** ADR-0004 sections 2 and 4; N17 in
   `docs/ui-inventory/02-architecture.md`

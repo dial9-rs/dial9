@@ -3,12 +3,12 @@
 // max_files ceiling, facet options). See src/types/decode.d.ts for the
 // declaration-form rationale.
 //
-// Not frozen core, but loaded as a browser global (CommonJS-guard form) and
-// consumed by typed src/ through the lib/trace boundary
-// (src/lib/trace/api_format.ts) exactly like the core. Coverage-freeze and
-// plateau/auto-stop helpers used to live here but were dropped when aggregation
-// became a server-driven SSE stream; the coverage-signal port the src/ app
-// still needs lives in lib/trace/aggregates.ts (typed Coverage).
+// Not frozen core; CommonJS-guarded and bundled through the typed lib/trace
+// boundary (src/lib/trace/api_format.ts) exactly like the core.
+// Coverage-freeze and plateau/auto-stop helpers used to live here but were
+// dropped when aggregation became a server-driven SSE stream; the
+// coverage-signal port the src/ app still needs lives in
+// lib/trace/aggregates.ts (typed Coverage).
 
 declare module "*/flamegraph_api.js" {
   /**

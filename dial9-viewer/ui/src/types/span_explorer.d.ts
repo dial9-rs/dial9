@@ -4,8 +4,8 @@
 // flamegraph/viewer deep-link builders). See src/types/decode.d.ts for the
 // declaration-form rationale.
 //
-// Loaded as a browser global in CommonJS-guard form and consumed by typed src/
-// only through the lib/trace boundary (src/lib/trace/span_explorer.ts).
+// CommonJS-guarded and bundled only through the typed lib/trace boundary
+// (src/lib/trace/span_explorer.ts).
 //
 // The wire shapes (SpanTypeStats, Exemplar, ...) are declared once in
 // src/lib/trace/aggregates.ts; this module re-states only the LOOSE shapes the
