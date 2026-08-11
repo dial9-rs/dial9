@@ -41,6 +41,10 @@ const HISTOGRAM: HistogramBarLike[] = [
   { lo_ns: 4_000_000, hi_ns: 8_000_000, count: 10 },
 ];
 
+function pickParams(params: URLSearchParams, keys: readonly string[]) {
+  return Object.fromEntries(keys.map((key) => [key, params.get(key)]));
+}
+
 describe("scope and catalog helpers", () => {
   it("sets or clears the requested refinement depth", () => {
     const params = new URLSearchParams("api=1");
@@ -164,6 +168,24 @@ describe("time composition", () => {
     expect(
       composition.categories.find((cat) => cat.key === "async_wait")?.frac,
     ).toBeCloseTo(1 / 11);
+  });
+
+  it("uses nanosecond weighting when fraction sums are unavailable", () => {
+    const composition = computeTimeComposition({
+      composition: {
+        on_cpu_ns: 5_000,
+        blocked_ns: 2_000,
+        async_wait_ns: 1_000,
+        scheduler_delay_ns: 500,
+        unknown_ns: 1_500,
+      },
+    });
+    expect(composition.weighting).toBe("time");
+    expect(composition.total_ns).toBe(10_000);
+    expect(composition.categories.find((cat) => cat.key === "on_cpu"))
+      .toMatchObject({ ns: 5_000, frac: 0.5 });
+    expect(composition.categories.find((cat) => cat.key === "unknown"))
+      .toMatchObject({ ns: 1_500, frac: 0.15 });
   });
 
   it("scopes composition to overlapping duration buckets", () => {
@@ -307,6 +329,10 @@ describe("exemplar refresh state", () => {
       selected_duration_count: 3,
     });
     expect(merged.spanTypes[1]).toBe(catalog[1]);
+
+    const absent = mergeSelectedExemplarSnapshot(catalog, [], "missing");
+    expect(absent.matched).toBe(false);
+    expect(absent.spanTypes).toBe(catalog);
   });
 
   it("distinguishes preview snapshots from cache-complete snapshots", () => {
@@ -333,7 +359,10 @@ describe("visualization deep links", () => {
     data_dir: "/tmp/dial9-traces",
     max_files: 80,
     bucket: "bkt",
-    credentialMode: "ambient",
+    region: "us-west-2",
+    credentialMode: "role",
+    roleArn: "arn:aws:iam::123:role/Dial9",
+    prefix: "traces",
     service: "svc",
     hosts: ["h1"],
     start_ns: "100",
@@ -346,10 +375,30 @@ describe("visualization deep links", () => {
   it("builds CPU and blocked flamegraphs with the full selected scope", () => {
     const cpu = new URL(flamegraphUrl(state, "cpu"), "https://viewer.test");
     expect(cpu.pathname).toBe("/flamegraph.html");
-    expect(cpu.searchParams.get("data_dir")).toBe("/tmp/dial9-traces");
-    expect(cpu.searchParams.get("max_files")).toBe("80");
-    expect(cpu.searchParams.get("span_type_uid")).toBe("aabb");
-    expect(cpu.searchParams.get("source")).toBe("cpu");
+    expect(pickParams(
+      cpu.searchParams,
+      [
+        "data_dir", "max_files", "bucket", "aws_region", "credential_mode",
+        "aws_role_arn", "prefix", "service", "start_ns", "end_ns",
+        "span_type_uid", "min_span_ns", "max_span_ns", "source",
+      ],
+    )).toEqual({
+      data_dir: "/tmp/dial9-traces",
+      max_files: "80",
+      bucket: "bkt",
+      aws_region: "us-west-2",
+      credential_mode: "role",
+      aws_role_arn: "arn:aws:iam::123:role/Dial9",
+      prefix: "traces",
+      service: "svc",
+      start_ns: "100",
+      end_ns: "200",
+      span_type_uid: "aabb",
+      min_span_ns: "1000",
+      max_span_ns: "5000",
+      source: "cpu",
+    });
+    expect(cpu.searchParams.getAll("host")).toEqual(["h1"]);
     const blocked = new URL(flamegraphUrl(state, "blocking"), cpu);
     expect(blocked.searchParams.get("source")).toBe("sched");
   });
@@ -379,6 +428,16 @@ describe("visualization deep links", () => {
     expect(params.get("focus_start")).toBe("1000");
     expect(params.get("focus_end")).toBe("2000");
     expect(params.get("focus_span_name")).toBe("request");
+    expect(pickParams(
+      params,
+      ["svc", "host", "aws_region", "credential_mode", "aws_role_arn"],
+    )).toEqual({
+      svc: "svc",
+      host: "host-9",
+      aws_region: "us-west-2",
+      credential_mode: "role",
+      aws_role_arn: "arn:aws:iam::123:role/Dial9",
+    });
     expect(params.has("start")).toBe(false);
     expect(params.has("end")).toBe(false);
   });
