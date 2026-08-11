@@ -101,6 +101,7 @@ function baseInput(over: Partial<LanesRenderInput>): LanesRenderInput {
     blockInPlaceGaps: [],
     hasCpuTime: false,
     hasSchedWait: false,
+    hasLocalQueueDepth: true,
     viewStart: 0,
     viewEnd: 1000,
     selectedTaskId: null,
@@ -255,6 +256,38 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
       scrollTop: 120,
     });
     expect(qLabelCount(rec.fillTexts)).toBe(2);
+  });
+
+  // A stable-tokio trace carries local_queue 0 on every event. Zeros still
+  // plot (a flat line at the baseline plus a q: label), so the capability
+  // flag is what has to suppress the series, not the values.
+  it("drops the queue step line when the trace has no local-queue depth", () => {
+    const ids = [10, 11];
+    const sentinels = Object.fromEntries(
+      ids.map((id) => [
+        id,
+        [
+          { t: 0, local: 0 },
+          { t: 1000, local: 0 },
+        ],
+      ]),
+    );
+    const render = (hasLocalQueueDepth: boolean): Recording => {
+      const rec = recordingCtx();
+      renderLanes(
+        rec.ctx,
+        { ...workersInput(ids), workerQueueSamples: sentinels, hasLocalQueueDepth },
+        {
+          time: layout(0, 1000, 300),
+          height: ids.length * LANE_ROW_H,
+          rowLayout: flatRows(ids),
+          scrollTop: 0,
+        },
+      );
+      return rec;
+    };
+    expect(qLabelCount(render(true).fillTexts)).toBe(2);
+    expect(qLabelCount(render(false).fillTexts)).toBe(0);
   });
 
   it("draws a runtime header band with name + worker count per group", () => {
