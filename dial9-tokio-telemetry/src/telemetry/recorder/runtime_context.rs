@@ -124,9 +124,6 @@ fn claim_thread_worker_id(ctx: &RuntimeContext, shared: &SharedState) -> u64 {
         claimed.push((ctx.id, id));
         id
     });
-    // A poll is this thread proving it belongs to the runtime, the same as a
-    // park. Already-enrolled threads stop at the thread-local read.
-    enroll_thread(ctx, id);
     id
 }
 
