@@ -330,7 +330,7 @@ describe("renderCpuTrack", () => {
     expect(rec.dashes[rec.dashes.length - 1]).toEqual([]);
   });
 
-  it("draws only the grid stroke when capacity is unknown (no capacity line)", () => {
+  it("omits the capacity stroke when capacity is unknown", () => {
     const { ctx, rec } = recordingCtx();
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], null), true);
     expect(rec.strokes).toBe(2); // grid + one bar style, no capacity line
@@ -376,10 +376,10 @@ describe("renderCpuTrack", () => {
     const { ctx, rec } = recordingCtx();
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 0.001)], 11), true);
 
-    const tinyFill = rec.fillRects.find((r) => r.y > 0 && r.h === 0);
-    expect(tinyFill).toBeDefined();
+    expect(rec.fillRects).toHaveLength(1); // background; zero-height fill skipped
+    const baseline = geo().height - 8;
     expect(
-      rec.lineTos.some((p) => p.y < tinyFill!.y && p.y >= tinyFill!.y - 1),
+      rec.lineTos.some((p) => p.y < baseline && p.y >= baseline - 1),
     ).toBe(true);
   });
 

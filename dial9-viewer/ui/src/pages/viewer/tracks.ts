@@ -348,7 +348,7 @@ function manageWrapper(
   `;
 }
 
-/** The uniform placeholder row: label gutter + canvas host. */
+/** The default track row: label gutter + canvas host. */
 function defaultTrackRow(
   t: TrackSpec,
   cpuCapacity?: number | null,
@@ -359,7 +359,7 @@ function defaultTrackRow(
       <div class="d9-track-label" id="d9-track-label-${t.id}">
         <span class="d9-track-name">${t.label}</span>
       </div>
-      <div class="d9-track-canvas-wrap ${isCpu ? "d9-cpu-wrap" : ""}">
+      <div class="d9-track-canvas-wrap">
         ${isCpu
           ? html`
               <div class="d9-cpu-header">
@@ -536,7 +536,9 @@ export function sizeTracks(
         vm.hasTrace,
       );
       canvas.dataset["cpuReadout"] = readout;
-      const readoutEl = columnEl.querySelector<HTMLElement>(".d9-cpu-readout");
+      const readoutEl = canvas.parentElement?.querySelector<HTMLElement>(
+        ".d9-cpu-readout",
+      );
       if (readoutEl !== null) readoutEl.textContent = readout;
     } else {
       paintPlaceholder(ctx, drawW, track.height, vm.hasTrace);

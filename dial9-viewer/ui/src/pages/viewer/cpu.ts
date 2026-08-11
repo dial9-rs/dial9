@@ -120,6 +120,20 @@ export interface CpuStats {
   maxCores: number;
 }
 
+function firstIntervalEndingAtOrAfter(
+  intervals: readonly ProcessCpuUsageInterval[],
+  ns: number,
+): number {
+  let lo = 0;
+  let hi = intervals.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (intervals[mid]!.end < ns) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /**
  * The avg/max readout stats for the visible window: `avgCores` is the
  * overlap-weighted mean of `interval.cores`, `maxCores` the peak interval
@@ -136,13 +150,11 @@ export function visibleCpuStats(
   let maxCores = 0;
   let totalOverlapNs = 0;
   let weightedCoresNs = 0;
-  let lo = 0, hi = intervals.length;
-  while (lo < hi) {
-    const m = (lo + hi) >> 1;
-    if (intervals[m]!.end < viewStart) lo = m + 1;
-    else hi = m;
-  }
-  for (let i = lo; i < intervals.length; i++) {
+  for (
+    let i = firstIntervalEndingAtOrAfter(intervals, viewStart);
+    i < intervals.length;
+    i++
+  ) {
     const interval = intervals[i]!;
     if (interval.start > viewEnd) break;
     const overlap =
@@ -374,9 +386,8 @@ export function renderCpuTrack(
       { x: drawW, y },
     ]);
   }
-  let capY: number | null = null;
   if (capacity != null) {
-    capY = chartTop + chartH - (capacity / scaleMax) * chartH;
+    const capY = chartTop + chartH - (capacity / scaleMax) * chartH;
     batcher.polyline(CAP_STYLE, [
       { x: 0, y: capY },
       { x: drawW, y: capY },
@@ -397,16 +408,23 @@ export function renderCpuTrack(
   const coalescer = makeBarCoalescer((left: number, width: number, key: string) => {
     const meta = runMeta.get(key);
     if (meta === undefined) return;
-    ctx.fillStyle = meta.fill;
-    ctx.fillRect(left, meta.top, width, baselineY - meta.top);
+    const barHeight = baselineY - meta.top;
+    if (barHeight > 0) {
+      ctx.fillStyle = meta.fill;
+      ctx.fillRect(left, meta.top, width, barHeight);
+    }
     const y = Math.min(meta.top, baselineY - 0.5);
     barStrokes.polyline(meta.stroke, [
       { x: left, y },
       { x: left + width, y },
     ]);
   });
-  for (const interval of intervals) {
-    if (interval.end < viewStart) continue;
+  for (
+    let i = firstIntervalEndingAtOrAfter(intervals, viewStart);
+    i < intervals.length;
+    i++
+  ) {
+    const interval = intervals[i]!;
     if (interval.start > viewEnd) break;
     const x1 = clampX(nsToDrawX(interval.start, viewStart, viewEnd, drawW), drawW);
     const x2 = clampX(nsToDrawX(interval.end, viewStart, viewEnd, drawW), drawW);

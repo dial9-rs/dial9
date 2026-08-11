@@ -33,7 +33,7 @@ import { buildLaneTooltip, createTooltip, type TooltipHandle } from "./tooltip.j
 
 const OVERLAY_CLASS = "d9-crosshair-overlay";
 
-/** Resolve a track-specific tooltip without coupling the overlay to a page track. */
+/** Resolve a track tooltip without coupling the overlay to a page track. */
 export type TrackTooltipAt = (
   trackId: string,
   state: StoreState,
@@ -221,12 +221,12 @@ export function mountOverlay(
       tooltip.hide();
       hidePending = false;
     } else if (pendingTooltip !== null) {
-      const data = overlayData();
-      if (data) {
-        const req = pendingTooltip;
-        if (req.kind === "track") {
-          tooltip.show(req.content, req.cursor);
-        } else {
+      const req = pendingTooltip;
+      if (req.kind === "track") {
+        tooltip.show(req.content, req.cursor);
+      } else {
+        const data = overlayData();
+        if (data) {
           const spans = data.workerSpans[req.workerId];
           if (spans) {
             const input: LaneHoverInput = {
@@ -249,6 +249,8 @@ export function mountOverlay(
           } else {
             tooltip.hide();
           }
+        } else {
+          tooltip.hide();
         }
       }
       pendingTooltip = null;
