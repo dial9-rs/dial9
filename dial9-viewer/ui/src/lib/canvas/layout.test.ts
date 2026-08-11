@@ -75,7 +75,7 @@ describe("timePanelLayout", () => {
     expect(withSb.nsToPanelX(0)).toBe(LABEL_W);
   });
 
-  it("round-trips x <-> ns like the legacy wrapper", () => {
+  it("round-trips x <-> ns", () => {
     const l = timePanelLayout({
       pw: 1234,
       scrollbarW: 17,
@@ -85,6 +85,19 @@ describe("timePanelLayout", () => {
     for (const ns of [1_000_000, 1_250_000, 1_999_999]) {
       expect(Math.abs(l.panelXToNs(l.nsToPanelX(ns)) - ns)).toBeLessThan(1e-6);
     }
+  });
+
+  it("clamps timestamps outside the visible range", () => {
+    const l = timePanelLayout({ pw: 1000, viewStart: 500, viewEnd: 1500 });
+    expect(l.nsToPanelXClamped(100)).toBe(LABEL_W);
+    expect(l.nsToPanelXClamped(2000)).toBe(LABEL_W + l.drawW);
+    expect(l.nsToPanelXClamped(1000)).toBe(l.nsToPanelX(1000));
+  });
+
+  it("handles a zero-width time range without producing NaN", () => {
+    const l = timePanelLayout({ pw: 1000, viewStart: 500, viewEnd: 500 });
+    expect(Number.isFinite(l.nsToPanelX(500))).toBe(true);
+    expect(Number.isFinite(l.nsToPanelXClamped(500))).toBe(true);
   });
 
   it("narrow panel: drawW <= 0 is reported, not masked", () => {

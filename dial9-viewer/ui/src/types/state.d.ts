@@ -245,7 +245,7 @@ export interface PoiSlice {
  */
 export interface UiPrefsSlice {
   /**
-   * Legacy foldable-panel collapsed state. SUPERSEDED by `collapsed`: the
+   * Deprecated foldable-panel collapsed state. Superseded by `collapsed`: the
    * one-line-fold presentation is retired and per-track collapse now lives in
    * `collapsed` (keyed by any track id, not just the four foldable panels).
    * Retained as an additive no-op holder so existing defaults are undisturbed;

@@ -20,7 +20,7 @@ const VP: ViewportSlice = { viewStart: 0, viewEnd: 1_000, minTs: 0, maxTs: 10_00
 
 // ── pure math ─────────────────────────────────────────────────────────────
 
-describe("zoomWindow (viewer.html:5090)", () => {
+describe("zoomWindow", () => {
   it("zoom in about the centre halves the visible duration", () => {
     expect(zoomWindow(VP, 0.5)).toEqual({ viewStart: 250, viewEnd: 750 });
   });

@@ -180,7 +180,6 @@ describe("createKeyRouter", () => {
   });
 
   it("preserveDefault consumes without preventDefault", () => {
-    // The legacy flamegraph Escape wiring never called preventDefault.
     const router = createKeyRouter([
       { key: "Escape", preserveDefault: true, onKey: vi.fn() },
     ]);

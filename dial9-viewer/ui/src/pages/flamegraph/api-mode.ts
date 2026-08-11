@@ -353,8 +353,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     renderScopeHeader(meta);
     renderFacets(meta);
 
-    // Poll-duration minimap (#663). Guarded: a minimap failure must never
-    // strand the flamegraph (legacy wraps this in try/catch too).
+    // Poll-duration minimap (#663). Guarded so a minimap failure cannot strand
+    // the flamegraph.
     try {
       minimap?.render(meta.poll_duration_histogram);
     } catch (e) {

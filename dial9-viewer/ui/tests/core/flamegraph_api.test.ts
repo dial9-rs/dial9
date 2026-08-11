@@ -1,8 +1,8 @@
 // Unit tests for the API-mode flamegraph refinement helpers in
 // flamegraph_api.js: coverage-badge formatting, freeze detection, and the
 // "Fetch more" max_files computation. These are the pure pieces of the
-// poll loop in flamegraph.html, factored out so they can be tested without a
-// browser DOM.
+// flamegraph polling loop, factored out so they can be tested without a browser
+// DOM.
 //
 // Migrated from test_flamegraph_api.js (T11); frozen core loaded via
 // createRequire (see format.test.ts for the rationale).

@@ -337,7 +337,7 @@ declare module "*/trace_parser.js" {
     onParseProgress?: (progress: ParseProgress & DirParseProgress) => void;
     /**
      * Optional pluggable event store, used in place of the default plain array
-     * for `state.events`. The new viewer passes a columnar sink
+     * for `state.events`. The viewer passes a columnar sink
      * (src/lib/trace/columnar-events.ts ColumnarEvents) whose `.push(event)`
      * writes fields into typed-array columns and drops the object, so a large
      * trace never materializes millions of fat event objects. A plain

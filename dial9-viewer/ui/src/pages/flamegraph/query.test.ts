@@ -1,7 +1,5 @@
-// Unit tests for the flamegraph page's pure URL/label logic. The api-mode
-// expectations are transcribed from the legacy inline bootstrap
-// (flamegraph.html buildApiUrl/updateBrowserUrl) - parameter ORDER included,
-// since the browser URL is user-visible shared state.
+// Unit tests for the flamegraph page's pure URL/label logic. Parameter order is
+// pinned because the browser URL is user-visible shared state.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -96,13 +94,13 @@ describe("seedFacetState", () => {
   });
 });
 
-describe("buildApiUrl (legacy buildApiUrl parity)", () => {
+describe("buildApiUrl", () => {
   it("SSE stream URL: scope + non-empty facets, no refine flag", () => {
     expect(buildApiUrl(state(), ORIGIN)).toBe(
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu`,
     );
   });
-  it("hosts repeat, times and max_files serialize in legacy order", () => {
+  it("serializes repeated hosts, times and max_files in stable order", () => {
     const u = buildApiUrl(
       state({
         service: "svc-a",
@@ -157,10 +155,9 @@ describe("buildApiUrl (legacy buildApiUrl parity)", () => {
   });
 });
 
-describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
-  // max_files used to be omitted here (legacy parity). It now rides along, so a
-  // link copied after "Refine more" reopens at the depth on screen instead of
-  // silently resetting to the backend default.
+describe("buildBrowserQuery", () => {
+  // max_files rides along so a link copied after "Refine more" reopens at the
+  // depth on screen instead of silently resetting to the backend default.
   it("api=1 leads; max_files persists; no ui param", () => {
     expect(buildBrowserQuery(state({ maxFiles: 640 }))).toBe(
       "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&source=cpu&max_files=640",
@@ -184,7 +181,7 @@ describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
         "&span_type_uid=abc123&min_span_ns=1000&max_span_ns=5000",
     );
   });
-  it("full scope round-trips in legacy order", () => {
+  it("round-trips the full scope in stable order", () => {
     expect(
       buildBrowserQuery(
         state({

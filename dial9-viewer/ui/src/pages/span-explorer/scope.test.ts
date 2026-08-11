@@ -189,9 +189,6 @@ describe("buildBrowserQuery", () => {
     expect(p.has("trace")).toBe(false);
   });
 
-  // The legacy page rewrote every selection to `?api=1&span_type_uid=...`,
-  // dropping `trace` - so reloading or sharing that URL landed in aggregate
-  // mode with no scope at all.
   it("raw mode keeps its trace and never gains api=1", () => {
     const raw: PageScope = {
       ...AGG_SCOPE,

@@ -1,8 +1,8 @@
 // Tests for the POI / issues-rail model.
 //
-// The headline check is rail-count parity: with the demo trace, the default
-// filter ("sched") and worst-first, the derived rail lists EXACTLY the count
-// the "x/74" stepper reported. We prove it by independently re-deriving the
+// The headline check is the rail-count contract: with the demo trace, the
+// default filter ("sched") and worst-first, the derived rail lists exactly the
+// independently computed count. We verify it by re-deriving the
 // detector pipeline (buildWorkerSpans -> computeSchedulingDelays ->
 // filterPointsOfInterest) and asserting the model's count equals it, for every
 // detector filter - so a wrong default filter, a dropped worst-first, or a
@@ -73,8 +73,8 @@ beforeAll(async () => {
   expect(trace.minTs).not.toBeNull();
 });
 
-/** Re-derive the legacy detector count for one filter, from scratch. */
-function legacyCount(t: ParsedTrace, filter: PointOfInterestType): number {
+/** Independently derive the detector count for one filter. */
+function referenceCount(t: ParsedTrace, filter: PointOfInterestType): number {
   const set = new Set<number>();
   for (const e of t.events) {
     if (e.eventType === EVENT_TYPES.QueueSample || e.eventType === EVENT_TYPES.WakeEvent) {
@@ -94,22 +94,22 @@ function legacyCount(t: ParsedTrace, filter: PointOfInterestType): number {
   }).length;
 }
 
-describe("rail count parity (DoD)", () => {
-  it("lists exactly the legacy sched count at the default filter + worst-first", () => {
+describe("rail count contract", () => {
+  it("lists the reference sched count at the default filter + worst-first", () => {
     const vm = derivePoiViewModel(trace, DEFAULT_POI, trace.minTs ?? 0);
-    expect(vm.total).toBe(legacyCount(trace, "sched"));
+    expect(vm.total).toBe(referenceCount(trace, "sched"));
     // The demo trace is expected to have scheduling delays (the "x/74" case).
     expect(vm.total).toBeGreaterThan(0);
   });
 
-  it("matches the legacy count for every detector filter (all 5 wired)", () => {
+  it("matches the reference count for every detector filter", () => {
     for (const filter of POI_FILTERS) {
       const vm = derivePoiViewModel(trace, { ...DEFAULT_POI, filter }, trace.minTs ?? 0);
-      expect(vm.total, `filter=${filter}`).toBe(legacyCount(trace, filter));
+      expect(vm.total, `filter=${filter}`).toBe(referenceCount(trace, filter));
     }
   });
 
-  it("the displayed sort never changes the count (parity is sort-independent)", () => {
+  it("the displayed sort never changes the count", () => {
     const base = derivePoiViewModel(trace, DEFAULT_POI, trace.minTs ?? 0).total;
     for (const sortKey of ["worker", "kind", "time", "duration"] as const) {
       for (const sortDir of ["asc", "desc"] as const) {
@@ -235,7 +235,7 @@ describe("sortPois", () => {
   });
 });
 
-describe("stepIndex (n/p semantics, legacy Prev/Next)", () => {
+describe("stepIndex (n/p semantics)", () => {
   it("lands on 0 from nothing-selected in either direction", () => {
     expect(stepIndex(5, -1, 1)).toBe(0);
     expect(stepIndex(5, -1, -1)).toBe(0);

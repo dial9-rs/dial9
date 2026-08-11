@@ -232,7 +232,7 @@ function shellTemplate(
 
     <!-- Toast channel: imperative children, so no dynamic
          template content here - createToasts owns it. role=status makes
-         errors/info audible (an axe gap the legacy container had). -->
+         errors/info audible. -->
     <div
       class="d9-toast-region"
       role="status"

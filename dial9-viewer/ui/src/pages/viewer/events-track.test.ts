@@ -102,7 +102,7 @@ describe("dispatchEventPin", () => {
     expect(pinned!.timestamp).toBe(500);
     expect(pinned!.detailEvent).toBe(e); // single event -> Related detail
     expect(pinned!.poll?.taskId).toBe(42);
-    // Prior task/span selection dropped (legacy clearSpanTaskSelection).
+    // Pinning an event clears the prior task/span selection.
     expect(store.getState().selection.selectedTaskId).toBeNull();
     expect(store.getState().selection.spanFocus).toBeNull();
     expect(store.getState().selection.focusedSpanId).toBeNull();
@@ -215,7 +215,7 @@ describe("drawEventsCanvas dimming", () => {
     expect(fills.find((f) => f.x === 48.5)!.alpha).toBeCloseTo(0.55, 10);
   });
 
-  it("fades ticks not on the highlighted task to 20% (legacy)", () => {
+  it("fades ticks not on the highlighted task to 20%", () => {
     const { ctx, fills } = recordingCtx();
     // Highlight task 1: the px-10 cluster stays bright, the px-50 one dims.
     drawEventsCanvas(ctx, twoClusterModel(), 1, 100, 40, false, false);

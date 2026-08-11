@@ -5,8 +5,8 @@
 //
 // Coverage here:
 //   - bounded-scan: filterVisibleEvents binary-searches BOTH window edges, so
-//     the per-frame work is O(log N + window), never the legacy O(all generic
-//     events) scan. Proven with an access-counting Proxy.
+//     the per-frame work is O(log N + window), not O(all events). Proven with
+//     an access-counting Proxy.
 //   - clustering + geometry, name filter, info counts, task/poll resolution,
 //     and the highlight-task derivation.
 

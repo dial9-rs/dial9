@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 // Deep-link support: the flamegraph's view state (zoom path + inspect focus)
 // must be readable and restorable so a shared URL reproduces the exact focus
-// position. This exercises the renderer API that flamegraph.html serializes
+// position. This exercises the renderer API that the page serializes
 // to/from the URL: getZoomPath/zoomToPath and getInspectFocus/focusInspectByKey,
 // plus the onZoomChange callback firing on inspect enter/exit.
 //
@@ -160,7 +160,7 @@ test("zoom path round-trips through zoomToPath/getZoomPath", () => {
     // Nothing zoomed initially.
     assert.deepStrictEqual(fg.getZoomPath().worker, [], "no zoom initially");
 
-    // Restore a nested zoom the way flamegraph.html does from the URL.
+    // Restore a nested zoom from the URL.
     fg.zoomToPath("worker", ["a", "mid", "leaf"]);
     assert.deepStrictEqual(
       fg.getZoomPath().worker, ["a", "mid", "leaf"],
@@ -200,7 +200,7 @@ test("inspect focus round-trips through focusInspectByKey/getInspectFocus", () =
 
     assert.strictEqual(fg.getInspectFocus(), null, "no inspect focus initially");
 
-    // Restore inspect focus the way flamegraph.html does from the ?inspect= key.
+    // Restore inspect focus from the ?inspect= key.
     const ok = fg.focusInspectByKey("mid");
     assert.strictEqual(ok, true, "focusInspectByKey found the frame");
     assert.strictEqual(fg.getInspectFocus(), "mid", "getInspectFocus reports the restored focus");
@@ -281,7 +281,7 @@ test("resetView makes repeated zoom restore idempotent (streaming retry safety)"
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
-    // Simulate flamegraph.html retrying restore over several streamed snapshots:
+    // Simulate retrying restore over several streamed snapshots:
     // reset-then-apply each time must converge to the exact path, never append.
     for (let i = 0; i < 3; i++) {
       fg.resetView();
@@ -295,7 +295,7 @@ test("resetView makes repeated zoom restore idempotent (streaming retry safety)"
   }
 });
 
-// --- getViewState / applyViewState: the bridge flamegraph.html uses with the
+// --- getViewState / applyViewState: the bridge the page uses with the
 // URL codec. These pin its object shape and restore semantics (silent,
 // full-restore, retry-safe). ---
 
@@ -362,7 +362,7 @@ test("repeated applyViewState converges (streamed-snapshot retry safety)", () =>
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
-    // flamegraph.html re-applies the URL state on each streamed snapshot until
+    // The page re-applies URL state on each streamed snapshot until
     // the focus lands; that must be idempotent (no duplicated zoom frames).
     for (let i = 0; i < 3; i++) {
       fg.applyViewState({ workerZoom: ["a", "mid", "leaf"] });
@@ -384,7 +384,7 @@ test("captured full view state survives replacement with duplicate terminal name
     const preserved = fg.getViewState();
 
     // Put branch b first. setTreeDirect's best-effort terminal-name retention
-    // may choose b/…/leaf, but flamegraph.html reapplies this captured full path.
+    // may choose b/…/leaf, but the page reapplies this captured full path.
     const reordered = sampleTree();
     fg.setTreeDirect(
       tree("", 15, 0, [reordered.children.get("b"), reordered.children.get("a")]),

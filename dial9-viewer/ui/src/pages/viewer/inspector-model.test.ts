@@ -90,7 +90,7 @@ describe("buildPollDetail", () => {
     cpuSamples: [sample(stackCpu), sample(stackCpu)],
   };
 
-  it("titles with duration + section counts (legacy showStackPopup)", () => {
+  it("titles with duration and section counts", () => {
     const v = buildPollDetail(poll, SYMS);
     expect(v.cpuCount).toBe(2);
     expect(v.schedCount).toBe(4);
@@ -290,7 +290,7 @@ describe("buildSpawnedTasksView", () => {
     expect(v.groups[0]!.moreCount).toBe(2);
   });
 
-  it("returns null when the range found no task (legacy early return)", () => {
+  it("returns null when the range found no task", () => {
     expect(buildSpawnedTasksView(null, "1.0ms")).toBeNull();
   });
 });

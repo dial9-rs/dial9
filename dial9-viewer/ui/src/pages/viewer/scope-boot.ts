@@ -81,11 +81,11 @@ export async function bootScopeFromSearch(
  * Resolve a boot `s_*` scope to its trace-component URLs and load them. The S3
  * browser emits a compact scope (bucket/prefix/service/host-set + window) for
  * large selections instead of one `?trace=` per file, so the viewer must
- * re-list the matching files via `/api/browse` before it has anything to load
- * (mirrors the legacy viewer's loadTraceFromScope). Credentialed like the
- * browser page: the scope's pinned region is folded into Dial9Creds so every
- * request carries the region header (a cross-region bucket lists empty
- * otherwise), and `/api/browse` is fetched with the BYO-credentials headers.
+ * re-list the matching files via `/api/browse` before it has anything to load.
+ * Credentialed like the browser page: the scope's pinned region is folded into
+ * Dial9Creds so every request carries the region header (a cross-region bucket
+ * lists empty otherwise), and `/api/browse` is fetched with the
+ * BYO-credentials headers.
  */
 async function loadFromScope(
   loadChrome: ScopeLoadTarget,

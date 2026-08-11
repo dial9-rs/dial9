@@ -9,8 +9,8 @@ import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { fmtTick } from "./format.js";
 
-// A row of theme-matched inline styles kept local to the tray (the page's CSS
-// is frozen, so the tray styles itself the way the legacy markup did).
+// A row of theme-matched inline styles kept local to the tray because the
+// page's CSS is frozen.
 const CHIP_A = { bg: "#1e3050", fg: "#9ec1ff" };
 const CHIP_B = { bg: "#4a221c", fg: "#ffb3a0" };
 const ACCENT = "#6c63ff";

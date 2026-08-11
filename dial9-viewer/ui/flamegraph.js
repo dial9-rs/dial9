@@ -804,7 +804,7 @@
       renderAll();
       renderBreadcrumb();
       // Entering/re-pivoting inspect is a view-state change, so notify the host
-      // (flamegraph.html) to persist the new focus into the URL for deep links.
+      // to persist the new focus into the URL for deep links.
       notifyChange();
     }
 
@@ -1847,8 +1847,8 @@
       }
     }
 
-    // Clear zoom + inspect WITHOUT notifying the host. Used by flamegraph.html's
-    // URL-restore retries (the aggregate tree streams in, so restore may run over
+    // Clear zoom + inspect WITHOUT notifying the host. Used by URL-restore
+    // retries (the aggregate tree streams in, so restore may run over
     // several snapshots): each attempt resets first, making re-applying a URL
     // zoom path idempotent (zoomToPath appends, so it must start from a clean
     // stack). Not part of the user-facing zoom-out flow — that's resetZoom(),

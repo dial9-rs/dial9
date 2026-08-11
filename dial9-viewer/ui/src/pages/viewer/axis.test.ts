@@ -123,7 +123,7 @@ describe("nsToDrawX / alignment invariant (three widths)", () => {
   }
 });
 
-describe("clockOffsetForTimestamp (legacy port)", () => {
+describe("clockOffsetForTimestamp", () => {
   it("uses the whole-trace offset when there are no anchors", () => {
     expect(clockOffsetForTimestamp([], 1234, 999)).toBe(1234);
     expect(clockOffsetForTimestamp([], null, 999)).toBeNull();

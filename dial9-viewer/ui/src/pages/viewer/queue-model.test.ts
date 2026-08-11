@@ -65,7 +65,7 @@ describe("queueScaleY (#282: 0 must render a visible baseline)", () => {
   });
 });
 
-describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
+describe("buildQueueRenderModel", () => {
   it("returns no-data on an empty view or degenerate window", () => {
     const m = buildQueueRenderModel({
       data: queueData(),
@@ -126,7 +126,7 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
     expect(Math.max(...m.local)).toBe(7);
   });
 
-  it("reproduces legacy active-task maxTasks / startCount / points", () => {
+  it("tracks active-task start count, in-view peak, and points", () => {
     const m = buildQueueRenderModel({
       data: queueData({
         activeTaskSamples: [
@@ -158,9 +158,8 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
   });
 
   it("active-task window is bounded when panned far right (many samples before view)", () => {
-    // Dense samples before the view (the old code scanned all of them each
-    // frame); the binary-searched window must still seed startCount from the
-    // last pre-view sample and only emit in-view points.
+    // Dense samples before the view; the binary-searched window must still seed
+    // startCount from the last pre-view sample and only emit in-view points.
     const before = Array.from({ length: 1000 }, (_, i) => ({ t: i, count: i % 5 }));
     const inView = [{ t: 5000, count: 42 }, { t: 5050, count: 7 }];
     const m = buildQueueRenderModel({
@@ -176,7 +175,7 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
   });
 });
 
-describe("computeSpawnedTasks (legacy task-finding + grouping)", () => {
+describe("computeSpawnedTasks", () => {
   const data = queueData({
     hasTaskTracking: true,
     taskFirstPoll: new Map([
@@ -211,7 +210,7 @@ describe("computeSpawnedTasks (legacy task-finding + grouping)", () => {
     expect(locs).toContain("(unknown)"); // task 0x5 has a null spawn loc
   });
 
-  it("bounds are inclusive on both ends (legacy >= / <=)", () => {
+  it("includes both range bounds", () => {
     const res = computeSpawnedTasks(data, { startNs: 100, endNs: 100 });
     expect(res!.total).toBe(1);
     expect(res!.groups[0]!.tasks[0]!.taskId).toBe(0x1);

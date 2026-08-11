@@ -24,9 +24,9 @@
 // window since it was shared. For a finished trace that is nil; it is the
 // deliberate trade for a portable, length-safe link.
 //
-// `parseKey` / `extractPrefix` live here as the single source of truth (they
-// were inline in index.html) so the browser pages and the Node tests share one
-// implementation. Dependency-free so both contexts can require/script it.
+// `parseKey` / `extractPrefix` live here as the single source of truth so the
+// browser pages and Node tests share one implementation. Dependency-free so
+// both contexts can require/script it.
 
 (function (exports) {
   // Scope params are namespaced `s_*` so they never collide with the viewer's
