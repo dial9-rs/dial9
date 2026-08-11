@@ -13,6 +13,7 @@ import {
   fmtCpuCores,
   fmtCpuPercent,
   cpuReadoutText,
+  cpuCapacityText,
   cpuIntervalAt,
   cpuIntervalTooltip,
   cpuBarColor,
@@ -130,21 +131,26 @@ describe("fmtCpuCores / fmtCpuPercent (verbatim ports)", () => {
   });
 });
 
-describe("cpuReadoutText (legacy #cpu-panel-info string, exact)", () => {
+describe("cpuReadoutText", () => {
   const DOT = "·"; // middle dot the legacy label joins with
 
   it("includes the percent clause only when capacity is known", () => {
     const withCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, 4);
-    expect(withCap).toBe(`avg 1.5 cores ${DOT} avg 37.5% ${DOT} max 3`);
+    expect(withCap).toBe(`avg 1.5 cores ${DOT} avg 37.5% ${DOT} max 3 cores`);
 
     const noCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, null);
-    expect(noCap).toBe(`avg 1.5 cores ${DOT} max 3`);
+    expect(noCap).toBe(`avg 1.5 cores ${DOT} max 3 cores`);
   });
 
   it("clamps the percent at 100 (legacy Math.min)", () => {
     // avg 10 cores on a 4-core box = 250% -> clamped to 100.0%.
     const s = cpuReadoutText({ avgCores: 10, maxCores: 12 }, 4);
-    expect(s).toBe(`avg 10 cores ${DOT} avg 100.0% ${DOT} max 12`);
+    expect(s).toBe(`avg 10 cores ${DOT} avg 100.0% ${DOT} max 12 cores`);
+  });
+
+  it("labels the capacity guide by its actual meaning and unit", () => {
+    expect(cpuCapacityText(11)).toBe("available parallelism (11 cores)");
+    expect(cpuCapacityText(1)).toBe("available parallelism (1 core)");
   });
 });
 
@@ -246,6 +252,7 @@ interface Recording {
   beginPaths: number;
   labels: TextCall[];
   dashes: number[][];
+  lineTos: Array<{ x: number; y: number }>;
 }
 function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
   const rec: Recording = {
@@ -254,6 +261,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     beginPaths: 0,
     labels: [],
     dashes: [],
+    lineTos: [],
   };
   const ctx = {
     fillStyle: "",
@@ -269,7 +277,9 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
       rec.beginPaths++;
     },
     moveTo() {},
-    lineTo() {},
+    lineTo(x: number, y: number) {
+      rec.lineTos.push({ x, y });
+    },
     stroke() {
       rec.strokes++;
     },
@@ -306,14 +316,15 @@ describe("renderCpuTrack", () => {
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs([], null), false);
     expect(rec.fillRects.length).toBe(1); // background only
     expect(rec.strokes).toBe(0);
-    expect(readout).toBe("avg 0 cores · max 0");
+    expect(readout).toBe("avg 0 cores · max 0 cores");
   });
 
   it("batches the grid + capacity strokes: one stroke() per STYLE", () => {
     const { ctx, rec } = recordingCtx();
-    // 3 grid lines + 1 capacity line = 4 primitives, but 2 styles.
+    // The 3 grid lines + capacity line are 2 reference styles; the bar top is
+    // a third style, still one stroke rather than one per primitive.
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], 4), true);
-    expect(rec.strokes).toBe(2); // NOT 4 - the whole point of the batcher
+    expect(rec.strokes).toBe(3); // grid + capacity + one bar style
     // The capacity line is dashed exactly once, then reset to solid.
     expect(rec.dashes.some((d) => d.length > 0)).toBe(true);
     expect(rec.dashes[rec.dashes.length - 1]).toEqual([]);
@@ -322,7 +333,7 @@ describe("renderCpuTrack", () => {
   it("draws only the grid stroke when capacity is unknown (no capacity line)", () => {
     const { ctx, rec } = recordingCtx();
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], null), true);
-    expect(rec.strokes).toBe(1); // grid only
+    expect(rec.strokes).toBe(2); // grid + one bar style, no capacity line
   });
 
   it("folds contiguous equal bars via the coalescer but keeps distinct ones", () => {
@@ -361,13 +372,24 @@ describe("renderCpuTrack", () => {
     expect(barFills(diff.rec).length).toBe(4);
   });
 
-  it("returns the readout it painted (mirror source)", () => {
+  it("strokes a sub-pixel load at the baseline when its fill rounds to zero height", () => {
+    const { ctx, rec } = recordingCtx();
+    renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 0.001)], 11), true);
+
+    const tinyFill = rec.fillRects.find((r) => r.y > 0 && r.h === 0);
+    expect(tinyFill).toBeDefined();
+    expect(
+      rec.lineTos.some((p) => p.y < tinyFill!.y && p.y >= tinyFill!.y - 1),
+    ).toBe(true);
+  });
+
+  it("returns the readout for the DOM header", () => {
     const { ctx } = recordingCtx();
     const intervals = [iv(0, 500, 2), iv(500, 1000, 4)];
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
     const stats = visibleCpuStats(intervals, 0, 1000);
     expect(readout).toBe(cpuReadoutText(stats, 4));
-    expect(readout).toBe("avg 3 cores · avg 75.0% · max 4");
+    expect(readout).toBe("avg 3 cores · avg 75.0% · max 4 cores");
   });
 });
 
@@ -455,7 +477,7 @@ function legacyReadout(
   return `avg ${legacyFmtCpuCores(stats.avgCores)} cores${pctText} · max ${legacyFmtCpuCores(stats.maxCores)}`;
 }
 
-describe("readout behavioral diff: ported == legacy, to the digit", () => {
+describe("readout behavioral diff: legacy figures with explicit max unit", () => {
   // A realistic, contiguous avg-cores series (varying loads incl. >capacity).
   const series: ProcessCpuUsageInterval[] = [];
   for (let i = 0; i < 60; i++) {
@@ -479,14 +501,14 @@ describe("readout behavioral diff: ported == legacy, to the digit", () => {
       it(`cap=${cap} view=[${vs},${ve}] matches legacy`, () => {
         const mine = cpuReadoutText(visibleCpuStats(series, vs, ve), cap);
         const legacy = legacyReadout(legacyVisibleCpuStats(series, vs, ve), cap);
-        expect(mine).toBe(legacy);
+        expect(mine).toBe(`${legacy} cores`);
       });
     }
   }
 
   it("also matches for an empty series (panel-hidden analog)", () => {
     expect(cpuReadoutText(visibleCpuStats([], 0, 1000), 4)).toBe(
-      legacyReadout(legacyVisibleCpuStats([], 0, 1000), 4),
+      `${legacyReadout(legacyVisibleCpuStats([], 0, 1000), 4)} cores`,
     );
   });
 });

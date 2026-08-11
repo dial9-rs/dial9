@@ -1,11 +1,12 @@
 // The Process CPU usage track: a fillRect BAR chart of avg-cores-over-time
-// (not a curve). Bars go through the run-length coalescer; the grid lines and
-// the dashed capacity line go through the batched-stroke path (one path per
-// style) - the two paths are never mixed. Draws in draw-area-relative x
-// (nsToDrawX, no LABEL_W) so bars line up pixel-exact with the lanes/axis.
+// (not a curve). Bars go through the run-length coalescer; their top edges,
+// grid lines, and dashed capacity line go through separate batched-stroke
+// paths (one path per style). Draws in draw-area-relative x (nsToDrawX, no
+// LABEL_W) so bars line up pixel-exact with the lanes/axis.
 // `renderCpuTrack` returns the top-right info readout so the shell can mirror
-// it into a DOM-queryable attribute; the hover CONTENT (cpuIntervalAt +
-// cpuIntervalTooltip) is consumed by the overlay/tooltip system.
+// it into the DOM header and a queryable attribute; the hover CONTENT
+// (cpuIntervalAt + cpuIntervalTooltip) is consumed by the overlay/tooltip
+// system.
 //
 // Windowing: when the data is segment-windowed the renderer must NOT paint a
 // truncated window as complete. `renderCpuTrack` consumes a `CpuWindow`
@@ -184,7 +185,7 @@ const SEP = " \u00b7 ";
 /**
  * The visible-window info readout: `avg <cores> cores`, then (only when
  * capacity is known) `· avg <pct>%` where pct = min(100, avg/capacity*100),
- * then `· max <cores>`.
+ * then `· max <cores> cores`.
  */
 export function cpuReadoutText(stats: CpuStats, capacity: number | null): string {
   let out = `avg ${fmtCpuCores(stats.avgCores)} cores`;
@@ -192,8 +193,14 @@ export function cpuReadoutText(stats: CpuStats, capacity: number | null): string
     const avgPct = Math.min(100, (stats.avgCores / capacity) * 100);
     out += `${SEP}avg ${fmtCpuPercent(avgPct)}`;
   }
-  out += `${SEP}max ${fmtCpuCores(stats.maxCores)}`;
+  out += `${SEP}max ${fmtCpuCores(stats.maxCores)} cores`;
   return out;
+}
+
+/** Human-readable label for the available-parallelism guide. */
+export function cpuCapacityText(capacity: number): string {
+  const unit = capacity === 1 ? "core" : "cores";
+  return `available parallelism (${fmtCpuCores(capacity)} ${unit})`;
 }
 
 // ── Hover content ────────────────────────────────────────────────────────
@@ -254,9 +261,7 @@ export function cpuIntervalTooltip(
 const CPU_BG = "#111b2e";
 const Y_LABEL = "#667";
 const GRID_STROKE = "rgba(255,255,255,0.07)";
-const CAP_STROKE = "rgba(255,207,153,0.65)";
-const CAP_LABEL = "#ffcf99";
-const READOUT_FILL = "#aaa";
+export const CPU_CAPACITY_STROKE = "rgba(255,207,153,0.65)";
 const CAP_DASH: readonly number[] = [4, 3];
 
 // Vertical chart margins: top headroom for labels, small bottom margin.
@@ -268,7 +273,7 @@ const CAP_STYLE = "capacity";
 
 function strokeStyleOf(key: string): StrokeStyleSpec {
   if (key === CAP_STYLE) {
-    return { strokeStyle: CAP_STROKE, lineWidth: 1, lineDash: CAP_DASH };
+    return { strokeStyle: CPU_CAPACITY_STROKE, lineWidth: 1, lineDash: CAP_DASH };
   }
   return { strokeStyle: GRID_STROKE, lineWidth: 1 };
 }
@@ -279,10 +284,11 @@ function strokeStyleOf(key: string): StrokeStyleSpec {
  * 0.42 alpha. Same load value drives the same colour (the coalescer run key,
  * so equal-load neighbours fold into one fillRect).
  */
-export function cpuBarColor(
+function cpuBarRgba(
   cores: number,
   capacity: number | null,
   scaleMax: number,
+  alpha: number,
 ): string {
   const load =
     capacity != null
@@ -291,7 +297,23 @@ export function cpuBarColor(
   const r = Math.round(79 + 176 * load);
   const g = Math.round(195 - 80 * load);
   const b = Math.round(247 - 150 * load);
-  return `rgba(${r}, ${g}, ${b}, 0.42)`;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+export function cpuBarColor(
+  cores: number,
+  capacity: number | null,
+  scaleMax: number,
+): string {
+  return cpuBarRgba(cores, capacity, scaleMax, 0.42);
+}
+
+function cpuBarStrokeColor(
+  cores: number,
+  capacity: number | null,
+  scaleMax: number,
+): string {
+  return cpuBarRgba(cores, capacity, scaleMax, 0.9);
 }
 
 // ── Canvas render ────────────────────────────────────────────────────────
@@ -299,12 +321,13 @@ export function cpuBarColor(
 /**
  * Render the CPU track into `ctx` (already DPR-scaled and sized to
  * `geometry.time.drawW` x `geometry.height`) and RETURN the info readout
- * string (the shell mirrors it into a DOM-queryable attribute).
+ * string (the shell mirrors it into the DOM header + a queryable attribute).
  *
  * Draw order: background, then the grid + dashed-capacity strokes via the
  * batched-stroke path (one path per style), then the load-coloured bars via
- * the coalescer (one fillRect per pixel run), then the axis/capacity/readout
- * text, then the window markers on top. The two render paths are never mixed.
+ * the coalescer (one fillRect per pixel run) and their batched top strokes,
+ * then the axis text and window markers. The top stroke keeps zero/sub-pixel
+ * loads visible at the baseline instead of relying on a zero-height fill.
  *
  * Called from tracks.ts `sizeTracks` for the "cpu" track, inside the store's
  * frame tick. A blank background is painted before the trace loads / when the
@@ -335,8 +358,7 @@ export function renderCpuTrack(
   const chartH = height - CHART_TOP - CHART_BOTTOM;
   const baselineY = chartTop + chartH;
   if (chartH <= 0) {
-    // Too short to host a chart: keep the readout, skip the chart body.
-    paintReadout(ctx, readout, drawW);
+    // Too short to host a chart: keep the DOM readout, skip the chart body.
     return readout;
   }
 
@@ -366,28 +388,42 @@ export function renderCpuTrack(
   // Key = fill colour + pixel-rounded top, so contiguous bars of equal height
   // AND colour fold into one fillRect while a taller/shorter or
   // differently-loaded neighbour starts a new run (no height is lost). The
-  // parallel runMeta map recovers the colour + top the opaque key stands for.
-  const runMeta = new Map<string, { color: string; top: number }>();
+  // parallel runMeta map recovers the colours + top the opaque key stands for.
+  const runMeta = new Map<
+    string,
+    { fill: string; stroke: string; top: number }
+  >();
+  const barStrokes = makeStrokeBatcher();
   const coalescer = makeBarCoalescer((left: number, width: number, key: string) => {
     const meta = runMeta.get(key);
     if (meta === undefined) return;
-    ctx.fillStyle = meta.color;
+    ctx.fillStyle = meta.fill;
     ctx.fillRect(left, meta.top, width, baselineY - meta.top);
+    const y = Math.min(meta.top, baselineY - 0.5);
+    barStrokes.polyline(meta.stroke, [
+      { x: left, y },
+      { x: left + width, y },
+    ]);
   });
   for (const interval of intervals) {
     if (interval.end < viewStart) continue;
     if (interval.start > viewEnd) break;
     const x1 = clampX(nsToDrawX(interval.start, viewStart, viewEnd, drawW), drawW);
     const x2 = clampX(nsToDrawX(interval.end, viewStart, viewEnd, drawW), drawW);
-    const color = cpuBarColor(interval.cores, capacity, scaleMax);
+    const fill = cpuBarColor(interval.cores, capacity, scaleMax);
+    const stroke = cpuBarStrokeColor(interval.cores, capacity, scaleMax);
     const top = Math.round(chartTop + chartH - (interval.cores / scaleMax) * chartH);
-    const key = `${color}|${top}`;
-    if (!runMeta.has(key)) runMeta.set(key, { color, top });
+    const key = `${fill}|${top}`;
+    if (!runMeta.has(key)) runMeta.set(key, { fill, stroke, top });
     coalescer.push(x1, x2, key);
   }
   coalescer.flush();
+  drawStrokeBatches(ctx, barStrokes.batches(), (strokeStyle) => ({
+    strokeStyle,
+    lineWidth: 1,
+  }));
 
-  // ── Text overlays: y-axis scale, capacity label, info readout ─────────
+  // ── Text overlay: y-axis scale ──────────────────────────────────
   ctx.fillStyle = Y_LABEL;
   ctx.font = "10px monospace";
   ctx.textAlign = "left";
@@ -395,33 +431,10 @@ export function renderCpuTrack(
   ctx.fillText(fmtCpuCores(scaleMax), 2, chartTop + 9);
   ctx.fillText("0", 2, baselineY);
 
-  if (capY != null) {
-    ctx.fillStyle = CAP_LABEL;
-    ctx.fillText(
-      `${fmtCpuCores(capacity!)} core capacity`,
-      6,
-      Math.max(12, capY - 4),
-    );
-  }
-
-  paintReadout(ctx, readout, drawW);
-
   // ── Surface a truncated / oversized window (never as complete) ───
   drawWindowMarkers(ctx, window, drawW, height);
 
   return readout;
-}
-
-/** Draw the info readout at the draw area's top-right. */
-function paintReadout(
-  ctx: CanvasRenderingContext2D,
-  readout: string,
-  drawW: number,
-): void {
-  ctx.fillStyle = READOUT_FILL;
-  ctx.font = "10px monospace";
-  ctx.textAlign = "right";
-  ctx.fillText(readout, Math.max(0, drawW - 6), 11);
 }
 
 /**
