@@ -2,9 +2,9 @@
 // page below, and Escape closes it again.
 //
 // Page instances checked:
-//   - new/index.html                       (browser page)
-//   - new/flamegraph.html?trace=...        (flamegraph, exact mode)
-//   - new/flamegraph.html?api=1&...        (flamegraph, aggregated mode)
+//   - index.html                         (browser page)
+//   - flamegraph.html?trace=...          (flamegraph, exact mode)
+//   - flamegraph.html?api=1&...          (flamegraph, aggregated mode)
 //
 // Usage (dev-server serving a BUILT dist, dev seed):
 //   node parity/keyboard-checks.mjs --base http://localhost:3101
@@ -22,21 +22,21 @@ const SPEC = {
 
 const PAGES = [
   {
-    name: "browser page (new/index.html)",
-    path: "/new/index.html",
+    name: "browser page (index.html)",
+    path: "/index.html",
     fixedClock: true,
     waitLoaded: (page) => waitBrowserBootstrap(page),
   },
   {
-    name: "flamegraph exact mode (new/flamegraph.html?trace=/demo-trace.bin)",
-    path: "/new/flamegraph.html?trace=/demo-trace.bin",
+    name: "flamegraph exact mode (flamegraph.html?trace=/demo-trace.bin)",
+    path: "/flamegraph.html?trace=/demo-trace.bin",
     fixedClock: false,
     // Keys mount after the widget renders (landing time).
     waitLoaded: (page) => page.waitForSelector(".fg-canvas", { timeout: 60_000 }),
   },
   {
-    name: "flamegraph api mode (new/flamegraph.html?api=1&bucket=demo-traces&prefix=traces)",
-    path: "/new/flamegraph.html?api=1&bucket=demo-traces&prefix=traces",
+    name: "flamegraph api mode (flamegraph.html?api=1&bucket=demo-traces&prefix=traces)",
+    path: "/flamegraph.html?api=1&bucket=demo-traces&prefix=traces",
     fixedClock: false,
     waitLoaded: (page) => page.waitForSelector(".fg-canvas", { timeout: 60_000 }),
   },

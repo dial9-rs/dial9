@@ -1,7 +1,8 @@
 # ADR-0004: Viewer UI migration - consolidated plan
 
-- **Status:** pending
+- **Status:** accepted
 - **Date:** 2026-07-02
+- **Completed:** 2026-08-10 (#769)
 
 ## Context
 
@@ -20,6 +21,14 @@ Ground rule: lose nothing. The current functional surface is the contract. This 
 | `docs/ui-inventory/04-ux-findings.md`           | UX audit: 23 verified findings (8 structural, 8 keyboard, 7 feedback), genre-gap table, works-well list                                        |
 | `docs/ui-inventory/05-url-view-state.md`        | Versioned URL view-state schema (hash codec, T19): key registry, precedence vs legacy zoom params, ownership boundary, chunk-2 extension rules |
 | `docs/ui-inventory/mocks/`                      | Runnable design mocks (3 layout concepts + interactive keyboard model); see its README                                                         |
+
+## Outcome
+
+The Vite/TypeScript pages now occupy the canonical routes. The prior inline
+pages, `/new/` entries, and dual-UI switch were removed; Vitest is the sole
+JavaScript test runner. Shared root modules remain behind the `src/lib` seams
+where the canonical UI still consumes them. The decisions below are retained
+as the historical migration record.
 
 ## Decisions
 

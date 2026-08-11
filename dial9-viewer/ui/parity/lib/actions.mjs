@@ -5,10 +5,8 @@
 // auto-search), running the April-window browse search that reaches the dev
 // seed's single segment, and running a raw search that yields rows.
 //
-// All of them assume the page clock is pinned to DEV_SEED_CLOCK (see
-// lib/browser.mjs): "Last 24hr" then covers the seeded key's
-// `2026-04-09/1900` time bucket, and raw search's implicit last-30-days
-// window covers the seed date.
+// The page clock is pinned to DEV_SEED_CLOCK (see lib/browser.mjs), which
+// keeps raw search's implicit last-30-days window over the seeded date.
 
 export class WalkError extends Error {}
 
@@ -49,12 +47,13 @@ export async function gotoBrowserPage(page, pageUrl) {
 }
 
 /**
- * Browse-tab search over a window that contains the dev seed's segment:
- * "Last 24hr" from the pinned clock (2026-04-09 21:00Z) covers the seeded
+ * Browse-tab search over a window that contains the dev seed's segment.
+ * The narrow window also lets the service-discovery feeler observe the
  * `2026-04-09/1900` bucket. Waits for the heatmap to render.
  */
 export async function searchAprilWindow(page) {
-  await page.click(".quick-btns button:has-text('Last 24hr')");
+  await page.fill("#range-from", "2026-04-09T18:55");
+  await page.fill("#range-to", "2026-04-09T19:05");
   await page.click("#search-btn");
   await page.waitForSelector("#heatmap-view", { state: "visible", timeout: 20_000 });
   await page.waitForSelector("#heatmap-labels .row", { timeout: 20_000 });
@@ -104,13 +103,22 @@ export async function rawSearchSeededRows(page) {
   await page.waitForSelector("#raw-body tr", { timeout: 30_000 });
 }
 
-/** Open the creds panel and Apply the dev-server's test credentials. */
-export async function applyTestCreds(page) {
+/** Open the panel and switch its credential mode to literal inputs. */
+export async function openLiteralCreds(page) {
   // The header button TOGGLES the panel — only click it when closed.
   if (!(await page.locator("#creds-panel").isVisible())) {
     await page.click("#creds-btn");
   }
   await page.waitForSelector("#creds-panel", { state: "visible" });
+  if (!(await page.locator("#creds-literal-fields").isVisible())) {
+    await page.click("#creds-use-literal");
+  }
+  await page.waitForSelector("#creds-literal-fields", { state: "visible" });
+}
+
+/** Apply the dev-server's test credentials. */
+export async function applyTestCreds(page) {
+  await openLiteralCreds(page);
   await page.fill("#creds-akid", "test");
   await page.fill("#creds-secret", "test");
   await page.click("#creds-apply");

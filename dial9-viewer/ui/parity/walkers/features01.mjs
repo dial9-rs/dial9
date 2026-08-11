@@ -14,12 +14,8 @@
 //     the pinned page clock (lib/browser.mjs DEV_SEED_CLOCK) and the
 //     April-window helpers (lib/actions.mjs);
 //   - the seeded key has six post-date path components — an UNKNOWN layout.
-//     On the legacy page the positional fallback mislabels it: Service reads
-//     "host-0", Host reads "abcd". The migrated page renders unknown keys
-//     RAW, sorts the raw table, dates day-crossing axis spans, and drives the
-//     bucket filter from config. Walkers for these rows branch on `side`
-//     (walk-rows.mjs): "new" asserts the amended contract, "legacy" the
-//     preserved pre-amendment behavior. All other walkers are side-blind.
+//     The page renders unknown keys raw, sorts the raw table, dates
+//     day-crossing axis spans, and drives the bucket filter from config.
 
 import {
   expect,
@@ -30,6 +26,7 @@ import {
   altDragZoom,
   rawSearchSeededRows,
   applyTestCreds,
+  openLiteralCreds,
   HEATMAP_ROW_H,
 } from "../lib/actions.mjs";
 import { popupUrl } from "../lib/browser.mjs";
@@ -98,7 +95,7 @@ export const registry = {
 
   C2: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await page.click("#creds-btn");
+    await openLiteralCreds(page);
     await page.fill(
       "#creds-paste",
       '{"accessKeyId":"AKIAEXAMPLE","secretAccessKey":"secret123","sessionToken":"tok"}',
@@ -115,7 +112,7 @@ export const registry = {
 
   C3: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await page.click("#creds-btn");
+    await openLiteralCreds(page);
     for (const [sel, v] of [
       ["#creds-akid", "AKIAMANUAL"],
       ["#creds-secret", "s3cret"],
@@ -154,13 +151,12 @@ export const registry = {
     return 'status "Credentials cleared"; fields and picker wiped';
   },
 
-  C6: async ({ page, pageUrl, side }) => {
+  C6: async ({ page, pageUrl }) => {
     // Bucket picker. Default filter "dial9": the seeded `demo-traces` bucket
     // does not match, so the filtered view is empty with a "Show all (1)"
-    // toggle revealing it (both pages). The migrated page additionally makes
-    // the predicate config-driven: a `?bucket_filter=demo` page override
-    // surfaces demo-traces as a match directly (and auto-selects the single
-    // match).
+    // toggle revealing it. A `?bucket_filter=demo` page override makes the
+    // predicate config-driven, surfaces demo-traces directly, and
+    // auto-selects the single match.
     await gotoBrowserPage(page, pageUrl);
     await applyTestCreds(page);
     const picker = page.locator("#creds-buckets");
@@ -174,13 +170,9 @@ export const registry = {
     await page.waitForSelector("#creds-buckets button:has-text('demo-traces')", {
       timeout: 5_000,
     });
-    if (side !== "new") {
-      return 'dial9 filter empty; "Show all (1)" revealed demo-traces (toggle path)';
-    }
-    // New page only: the config-driven override. Credentials persist in
-    // sessionStorage, so the reload re-lists buckets in the background; with
-    // creds active the bucket input starts EMPTY (no server-default prefill),
-    // letting the auto-select below prove itself.
+    // Credentials persist in sessionStorage, so the reload re-lists buckets
+    // in the background. With creds active the bucket input starts EMPTY (no
+    // server-default prefill), letting the auto-select below prove itself.
     await page.goto(`${pageUrl}?bucket_filter=demo`);
     await page.waitForFunction(
       () => document.getElementById("creds-btn-label")?.textContent.includes("✓"),
@@ -200,7 +192,7 @@ export const registry = {
 
   C8: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await page.click("#creds-btn");
+    await openLiteralCreds(page);
     await page.click("#creds-apply"); // empty fields -> error message
     const err = await textOf(page, "#creds-status");
     expect(/required/.test(err), `expected validation error, got "${err}"`);
@@ -319,23 +311,18 @@ export const registry = {
   },
 
   // ── F. Browse view: density heatmap ──
-  F4: async ({ page, pageUrl, side }) => {
+  F4: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
     await searchAprilWindow(page);
     const rows = page.locator("#heatmap-labels .row");
     expect((await rows.count()) === 1, "expected 1 host row for the single seeded host");
     const label = (await rows.first().textContent()).trim();
-    if (side === "new") {
-      // The seeded key's layout is unknown, so the row groups/labels by its
-      // raw directory path - no mislabeled "service / host" split.
-      expect(
-        label === "traces/2026-04-09/1900/demo-service/local/host-0/abcd",
-        `row label was "${label}" (expected the raw directory path)`,
-      );
-    } else {
-      // Legacy page: the mislabel is its documented behavior.
-      expect(/host-0 \/ abcd/.test(label), `row label was "${label}"`);
-    }
+    // The seeded key's layout is unknown, so the row groups by its raw
+    // directory path rather than inventing a service/host split.
+    expect(
+      label === "traces/2026-04-09/1900/demo-service/local/host-0/abcd",
+      `row label was "${label}" (expected the raw directory path)`,
+    );
     return `1 host row "${label}"`;
   },
 
@@ -353,28 +340,21 @@ export const registry = {
     return `density canvas drawn (${painted} painted device px)`;
   },
 
-  F10: async ({ page, pageUrl, side }) => {
+  F10: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
     await searchAprilWindow(page);
     const ticks = page.locator("#heatmap-axis .tick");
     const n = await ticks.count();
     expect(n >= 2, `expected >=2 axis ticks, got ${n}`);
-    if (side === "new") {
-      // The seeded segment's span (filename epoch 2025-04 -> upload time)
-      // crosses day boundaries, so ticks carry the date. Single-day spans
-      // keep the compact HH:MM:SS form.
-      for (const t of await ticks.allTextContents()) {
-        expect(
-          /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t.trim()),
-          `tick "${t}" not date-carrying on a day-crossing span`,
-        );
-      }
-      return `${n} date-carrying ticks rendered (day-crossing span)`;
-    }
+    // The seeded segment crosses day boundaries, so ticks carry the date.
+    // Single-day spans keep the compact HH:MM:SS form.
     for (const t of await ticks.allTextContents()) {
-      expect(/^\d{2}:\d{2}:\d{2}$/.test(t.trim()), `tick "${t}" not HH:MM:SS`);
+      expect(
+        /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t.trim()),
+        `tick "${t}" not date-carrying on a day-crossing span`,
+      );
     }
-    return `${n} HH:MM:SS ticks rendered`;
+    return `${n} date-carrying ticks rendered (day-crossing span)`;
   },
 
   F11: async ({ page, pageUrl }) => {
@@ -452,11 +432,13 @@ export const registry = {
     await searchAprilWindow(page);
     await dragSelectRowZero(page);
     await page.click("header h1"); // outside #heatmap-view and #actions-bar
-    await page.waitForFunction(
-      () => document.getElementById("selection-count").textContent === "",
-      { timeout: 5_000 },
+    await page.waitForSelector("#heatmap-sel", { state: "hidden" });
+    expect((await page.locator("#heatmap-labels .row.sel").count()) === 0, "row stayed selected");
+    expect(
+      (await textOf(page, "#selection-count")).startsWith("Current service · "),
+      "actions did not fall back to the current service",
     );
-    return "click outside cleared the selection count";
+    return "click outside cleared the box; actions fell back to the current service";
   },
 
   // ── G. Raw search view ──
@@ -515,42 +497,29 @@ export const registry = {
     return "Select All -> 1 checked; Deselect All -> 0 checked";
   },
 
-  G8: async ({ page, pageUrl, side }) => {
+  G8: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
-    if (side === "new") {
-      // The advertised sortable columns actually sort. The dev seed yields
-      // ONE row, so reordering is not observable live; assert the click ->
-      // sort-state effect (indicator + aria-sort, toggling direction) and
-      // rows surviving the rebuild. Ordering semantics are pinned by the
-      // raw-rows.test.ts suite.
-      const th = page.locator('#raw-table th[data-sort="service"]');
-      await th.click();
-      expect(
-        (await th.getAttribute("aria-sort")) === "ascending",
-        "first header click did not sort ascending",
-      );
-      expect(
-        (await th.locator(".sort-arrow").textContent()) === "^",
-        "ascending sort indicator missing",
-      );
-      await th.click();
-      expect(
-        (await th.getAttribute("aria-sort")) === "descending",
-        "second header click did not flip to descending",
-      );
-      const rows = await page.locator("#raw-body tr").count();
-      expect(rows === 1, `rows lost across sort rebuilds (${rows})`);
-      return "Service header sorts: asc -> desc toggle with indicator; rows intact";
-    }
-    // Legacy page: the sort is dead - the access path producing no effect IS
-    // the expected behavior.
-    const before = await page.locator("#raw-body").innerHTML();
-    await page.click('#raw-table th[data-sort="service"]');
-    await page.waitForTimeout(250);
-    const after = await page.locator("#raw-body").innerHTML();
-    expect(before === after, "header click changed the table (sort is documented DEAD)");
-    return "clicking the Service header had no effect (rows unchanged)";
+    // The dev seed yields one row, so assert the observable sort state and
+    // rows surviving the rebuild; raw-rows.test.ts pins ordering semantics.
+    const th = page.locator('#raw-table th[data-sort="service"]');
+    await th.click();
+    expect(
+      (await th.getAttribute("aria-sort")) === "ascending",
+      "first header click did not sort ascending",
+    );
+    expect(
+      (await th.locator(".sort-arrow").textContent()) === "^",
+      "ascending sort indicator missing",
+    );
+    await th.click();
+    expect(
+      (await th.getAttribute("aria-sort")) === "descending",
+      "second header click did not flip to descending",
+    );
+    const rows = await page.locator("#raw-body tr").count();
+    expect(rows === 1, `rows lost across sort rebuilds (${rows})`);
+    return "Service header sorts: asc -> desc toggle with indicator; rows intact";
   },
 
   // ── H. Actions bar ──
@@ -575,42 +544,30 @@ export const registry = {
     expect(/viewer\.html\?/.test(url), `popup was ${url}`);
     const params = new URL(url).searchParams;
     expect(params.get("segs") === "1", "segs param missing");
-    expect(
-      params.getAll("trace").every((t) => t.startsWith("/api/object?bucket=demo-traces&key=")),
-      "trace components are not /api/object URLs",
-    );
-    return "popup viewer.html?...&segs=1&trace=/api/object?bucket&key";
+    return "popup viewer.html with selection title metadata";
   },
 
   // ── I. Cross-cutting behaviors ──
-  I2: async ({ page, pageUrl, side }) => {
+  I2: async ({ page, pageUrl }) => {
     // parseKey runs on every displayed key. The seeded key has an extra
-    // path component: an UNKNOWN layout. Legacy mislabels it positionally;
-    // the migrated page renders it RAW.
+    // path component: an UNKNOWN layout, which the page renders raw.
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
-    if (side === "new") {
-      const rawCell = page.locator("#raw-body tr td.rawkey");
-      expect((await rawCell.count()) === 1, "raw-key cell missing for the unknown-layout key");
-      expect(
-        (await rawCell.getAttribute("colspan")) === "3",
-        "raw-key cell does not span the Service/Host/Boot columns",
-      );
-      const text = (await rawCell.textContent()).trim();
-      expect(
-        /^traces\/2026-04-09\/1900\/demo-service\/local\/host-0\/abcd\/\d+-0\.bin\.gz$/.test(text),
-        `raw-key cell was "${text}"`,
-      );
-      // The layout-independent filename epoch still fills Trace Start.
-      const traceStart = await textOf(page, "#raw-body tr td:nth-child(3)");
-      expect(/^\d{4}-\d{2}-\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
-      return "unknown-layout key rendered raw (full key across Service/Host/Boot); epoch kept";
-    }
-    const service = await textOf(page, "#raw-body tr td:nth-child(2)");
-    const host = await textOf(page, "#raw-body tr td:nth-child(3)");
-    expect(service === "host-0", `Service cell was "${service}" (expected mislabel "host-0")`);
-    expect(host === "abcd", `Host cell was "${host}" (expected mislabel "abcd")`);
-    return 'parse ran; demo key mislabeled as recorded (Service "host-0", Host "abcd")';
+    const rawCell = page.locator("#raw-body tr td.rawkey");
+    expect((await rawCell.count()) === 1, "raw-key cell missing for the unknown-layout key");
+    expect(
+      (await rawCell.getAttribute("colspan")) === "3",
+      "raw-key cell does not span the Service/Host/Boot columns",
+    );
+    const text = (await rawCell.textContent()).trim();
+    expect(
+      /^traces\/2026-04-09\/1900\/demo-service\/local\/host-0\/abcd\/\d+-0\.bin\.gz$/.test(text),
+      `raw-key cell was "${text}"`,
+    );
+    // The layout-independent filename epoch still fills Trace Start.
+    const traceStart = await textOf(page, "#raw-body tr td:nth-child(3)");
+    expect(/^\d{4}-\d{2}-\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
+    return "unknown-layout key rendered raw (full key across Service/Host/Boot); epoch kept";
   },
 
   I4: async ({ page, pageUrl }) => {
@@ -618,12 +575,13 @@ export const registry = {
     await searchAprilWindow(page);
     await dragSelectRowZero(page);
     const url = await popupUrl(page, () => page.click("#view-btn"));
-    const traces = new URL(url).searchParams.getAll("trace");
-    expect(traces.length === 1, `expected 1 trace component, got ${traces.length}`);
+    const params = new URL(url).searchParams;
+    expect(params.getAll("trace").length === 0, "time-partitioned link used inline traces");
     expect(
-      /^\/api\/object\?bucket=demo-traces&key=traces%2F2026-04-09/.test(traces[0]),
-      `trace component was ${traces[0]}`,
+      params.get("s_bucket") === "demo-traces" && params.get("s_prefix") === "traces",
+      `scope source was ${params}`,
     );
-    return `viewer link carries trace=${traces[0].slice(0, 60)}...`;
+    expect(params.has("s_from") && params.has("s_to"), `scope window was ${params}`);
+    return "viewer link carries a compact bucket/prefix/window scope, not inline traces";
   },
 };

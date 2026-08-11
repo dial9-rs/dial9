@@ -92,7 +92,7 @@ declare module "*/trace_scope.js" {
     t1: number | null,
   ): TraceScope | null;
 
-  /** Legacy positional form used by frozen HTML until its next migration. */
+  /** Backward-compatible positional form. */
   export function scopeFromKeys(
     bucket: string,
     keys: readonly string[],

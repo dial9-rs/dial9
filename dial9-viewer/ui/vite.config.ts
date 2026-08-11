@@ -142,11 +142,10 @@ function watchStaticFiles(files: string[]): Plugin {
 export default defineConfig({
   // Vitest, the single test runner (ADR-0004 section 7, 02-architecture.md).
   // Config lives here, not in a separate vitest.config file
-  // (02-architecture.md section 2.1). Frozen-core suites live under
-  // tests/core/; new TS modules colocate their tests under src/. The legacy
-  // `node test_*.js` runner is retired;
-  // the one remaining root script, test_parser.js, is driven by the
-  // Rust integration test tests/js_parser.rs, not by Vitest.
+  // (02-architecture.md section 2.1). Shared-core suites live under
+  // tests/core/; TS modules colocate their tests under src/. The remaining
+  // root test_parser.js is driven by the Rust integration test
+  // tests/js_parser.rs, not by Vitest.
   test: {
     environment: "node",
     include: ["tests/**/*.test.{js,ts}", "src/**/*.test.ts"],
@@ -208,8 +207,7 @@ export default defineConfig({
       // as a literal `require` in the output instead of rewriting it to a
       // throwing helper. In a bundled module worker `typeof require` is
       // then genuinely "undefined", so the core takes its browser branch
-      // (the TraceDecoder global, seeded by the worker entry) - the same
-      // resolution the legacy <script src> pages use.
+      // (the TraceDecoder global, seeded by the worker entry).
       ignoreDynamicRequires: true,
     },
     rollupOptions: {

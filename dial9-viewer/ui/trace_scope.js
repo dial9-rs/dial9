@@ -142,10 +142,10 @@
   // not a secret (it grants nothing on its own — the server must be allowed to
   // assume it), so it is safe to carry in a shareable URL, exactly as the home
   // page already carries `aws_role_arn`. Optional and trailing; falsy isn't carried.
-  // New callers pass canonical SourceScope as the first argument. The legacy
-  // positional form remains accepted for frozen HTML callers until they are
-  // migrated; both normalize to the same URL-safe scope (literal values never
-  // enter this object, only their mode marker).
+  // Current callers pass canonical SourceScope as the first argument. The
+  // positional form remains accepted for compatibility; both normalize to the
+  // same URL-safe scope (literal values never enter this object, only their
+  // mode marker).
   function scopeFromKeys(sourceOrBucket, keys, t0, t1, region, roleArn, credentialMode) {
     let bucket = sourceOrBucket;
     if (sourceOrBucket && typeof sourceOrBucket === "object") {

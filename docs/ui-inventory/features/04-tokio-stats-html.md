@@ -15,6 +15,10 @@
 > registry exists yet (that is T41's implementation-time deliverable);
 > DOM-interaction verdicts here are CODE-READ, API-contract verdicts were
 > walked live with curl against the dev-server.
+>
+> UPDATE 2026-08-10: #769 made the Vite implementation canonical and removed
+> the prior UI and rollout switch. The snapshot remains historical; A8 records
+> the switch's conscious retirement and is gated by the row-walker.
 
 ## What this surface is
 
@@ -83,7 +87,7 @@ once into `params` (`:66`) and never re-read.
 | A5. Single-period fallback | When no `p{i}_` param exists, creates one period from `start_ns`/`end_ns` (the shape the features/01 H6 button builds; also the backward-compat shape). Both absent -> one blank period. | URL `?start_ns=&end_ns=` (or nothing). | `tokio_stats.html:145` |
 | A6. Auto-load on open | Fires `loadAll()` immediately when the ORIGINAL URL had `start_ns` or `bucket`. Caveat: A7 rewrites `start_ns`/`end_ns` to `p1_*` during init, so a bucket-less URL (`?start_ns=...` only) auto-loads once but its rewritten URL no longer auto-loads on reload (`p1_start_ns` does not satisfy the check). With `bucket` present (the H6 shape) reloads keep auto-loading. | Open the page with `start_ns` or `bucket` in the URL. | `tokio_stats.html:428` |
 | A7. URL sync | `syncUrl()` rebuilds the query from scratch on every period add/remove/edit: keeps `bucket`/`prefix`/`service`/`host*` from the original params, writes `p{i+1}_start_ns`/`_end_ns` per period (omitting unset bounds), `history.replaceState` (no history entries). DROPS everything else - the legacy `start_ns`/`end_ns` (renamed to `p1_*`) and unknown params including `ui=` (which is why `ui-switch.js` has `pinWouldBounce`, A8). | Automatic on any period change (also during init). | `tokio_stats.html:147-156` (`syncUrl`) |
-| A8. Dual-UI switch include | `ui-switch.js` in `<head>` (T38): on this canonical URL it resolves `?ui=` param > stored preference > default and would redirect to a registered new-UI entry or render the "Switch to new UI" pill. At this snapshot `NEW_UI_ENTRIES` is empty, so it is a no-op here - no control renders ("a switch to nowhere must not exist") until T41 registers the migrated page. Because A7 strips `?ui=legacy`, the script persists a bounce-risk pin to localStorage (`pinWouldBounce`). | Automatic at parse time; visible only post-T41. | `tokio_stats.html:6`; `ui-switch.js:59-61` (registry), `246-255` (`pinWouldBounce`), `428` (auto-boot) |
+| A8. Retired dual-UI switch | `DEAD` by decision (#769). The canonical page has no rollout control or alternate UI route. | Open the page; `#d9-ui-switch` must be absent. | `tokio_stats.html`; `parity/walkers/features04.mjs` (`A8`) |
 | A9. Credential attachment | `creds.js` provides `Dial9Creds.headers()`: `x-dial9-aws-*` headers (key id, secret, optional token/region) from sessionStorage, spread into every `/api/tokio-stats` fetch; empty object when no creds stored. Same-origin by construction (URL built from `window.location.origin`), so no cross-origin withholding logic is needed here. | Automatic when creds were applied on the home page. | `tokio_stats.html:46,386-387`; `creds.js:240-252` (`headers`) |
 | A10. Title and heading | Browser tab title `Tokio Stats`; page heading `[zap] Tokio Stats` (U+26A1 emoji). Static - never updated from data (unlike flamegraph's api mode F175). | Visible on load. | `tokio_stats.html:5,47` |
 
@@ -337,7 +341,7 @@ Dev-server facts observed (fresh server, seeded `demo-traces`/`traces`):
 | A5 single-period fallback | CODE-READ | `:145`. |
 | A6 auto-load | CODE-READ | `:428`; rewrite caveat derived from A7 ordering. |
 | A7 URL sync | CODE-READ | `syncUrl` `:147-156`; param-drop set enumerated from code (matches ui-switch.js's own comment at `ui-switch.js:229-238`). |
-| A8 ui-switch include | VERIFIED (unit, T38) + CODE-READ | script served (above); decision logic covered by `tests/ui_switch.test.ts` (T38); no control renders while `NEW_UI_ENTRIES` is empty - by design. |
+| A8 retired dual-UI switch | DEAD (retired by #769) | `#d9-ui-switch` is absent from the canonical page; row-walker gates the retirement. |
 | A9 cred headers | CODE-ONLY | header spread at `:386-387`; not asserted on the wire (dev-server accepts anonymous). |
 | A10 title/heading | VERIFIED (served markup) | title/h1 in the served bytes. |
 | B1-B2 period rows + inputs | CODE-READ | `renderPeriods` `:116-126`, `updatePeriod` `:127-134`. |

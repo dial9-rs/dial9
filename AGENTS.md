@@ -76,16 +76,13 @@ Unguarded logging in loops causes log spam that degrades observability and can i
 
 ## Viewer UI
 
-The viewer UI is mid-migration (ADR-0004): every page exists in two versions —
-a **legacy** one (inline `<script>` in `dial9-viewer/ui/*.html`, e.g.
-`index.html`) served at its canonical URL, and a **new** Vite/TypeScript one
-(`dial9-viewer/ui/src/pages/**`, served under `/new/…`) that is now the
-default. **Make behavior changes in the new UI only** (`src/`). Do NOT edit the
-legacy pages/scripts — they are frozen for the migration and are not what users
-load. Shared logic lives in the frozen-core modules at the `ui/` root (e.g.
-`prefix_detect.js`), imported into the new UI through the `src/lib/**` seams;
-change those when the behavior is genuinely shared, and expose new exports via
-the seam rather than reaching into the legacy pages.
+The viewer has one canonical Vite/TypeScript UI (ADR-0004). Root `*.html`
+files are thin entries at the public routes; page behavior lives under
+`dial9-viewer/ui/src/pages/**`. Shared CJS-compatible logic remains in the
+`ui/` root (for example `prefix_detect.js`) and is imported through the
+`src/lib/**` seams; expose new shared exports through those seams. `creds.js`
+and `url_state.js` remain classic browser-global contracts copied verbatim by
+Vite. There is no `/new/` route or legacy page copy.
 
 ## Testing
 
@@ -116,7 +113,7 @@ background during agent-driven testing.
 - For Rust behavior changes, run `cargo nextest run`.
 - For final verification of Rust changes, run `cargo nextest run --stress-duration 20s`. The package is expected to have no flaky tests; report any apparent flake instead of ignoring it.
 - **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the Vitest suites (`npm run test` in `dial9-viewer/ui/`, or a filtered `npx vitest run tests/core/<suite>.test.ts`) and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
-- **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.ts` for suites over the frozen core, `src/**/*.test.ts` for new TS modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.
+- **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.{js,ts}` for suites over the shared core, `src/**/*.test.ts` for TypeScript modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.
 - Shuttle tests are NOT included in `cargo nextest run`. They require a separate invocation: `./scripts/test-shuttle.sh`. Always run this when modifying code under `#[cfg(all(test, shuttle))]` or the flush/source paths.
 
 ## Scope

@@ -12,7 +12,7 @@ sources in this directory. Working on the UI requires Node (CI uses Node 24):
 ```bash
 npm ci            # lockfile-pinned install (never `npm install` in CI)
 npm run build     # vite build -> dist/ (what rust-embed embeds)
-npm run test      # vitest (passes with no tests until suites migrate, T10)
+npm run test      # vitest
 npx tsc --noEmit  # typecheck
 ```
 
@@ -38,8 +38,8 @@ npm run dev       # Vite dev server, prints its URL (default :5173)
 
 Browse the Vite URL: `/api/*` is proxied to the dev-server on :3001
 (`server.proxy` in `vite.config.ts`), edits to `src/` modules hot-reload
-in the browser, and the legacy pages/scripts are served from this
-directory as-is.
+in the browser, and the root HTML entries and classic scripts are served
+from this directory.
 
 **Embedded mode (single-server, edit -> refresh):**
 
@@ -49,55 +49,24 @@ npm run dev:embedded   # vite build --watch -> dist/
 
 Browse the dev-server directly (http://localhost:3001): it serves `dist/`
 from disk, and the watch build rewrites `dist/` on every edit - including
-edits to the statically-copied legacy pages/scripts and the `public/`
-assets, which a config plugin registers as watch files. Edit, refresh,
-done. `dial9 serve --dev` serves the same `dist/` from disk (run it from
-the repo root or `dial9-viewer/`).
+edits to the two statically copied browser-global scripts and the `public/`
+assets. Edit, refresh, done. `dial9 serve --dev` serves the same `dist/` from
+disk (run it from the repo root or `dial9-viewer/`).
 
 Root-served verbatim assets (`demo-trace.bin`, `flamegraph.css`) live in
 `public/`: Vite serves `public/` at `/` in dev mode and copies it into the
 `dist/` root at build, so the pages' root-relative references keep working
-in both modes. The Node tests read the demo trace from
+in both modes. The Vitest suites read the demo trace from
 `public/demo-trace.bin`.
 
 Key files:
 
-- `index.html` — landing page / S3 browser. Emits one `trace=/api/object?…`
-  component per selected file and opens the viewer or flamegraph.
-- `viewer.html` — main trace viewer.
-- `flamegraph.html` — standalone CPU-profile flamegraph view.
+- `*.html` — thin Vite multi-page entries at the canonical routes.
+- `src/pages/` — page behavior for the browser, viewer, flamegraph, Tokio
+  stats, and span explorer.
 - `decode.js` — low-level binary trace-frame decoder (`TraceDecoder`).
 - `trace_parser.js` — higher-level parser (`parseTrace`, `fetchTraces`, …)
   built on `decode.js`. Works in both the browser and Node.
-
-## Dual-UI switch (`ui-switch.js`)
-
-During the migration (ADR-0004 section 8) every page can exist in two
-versions: the legacy one at its canonical URL and a migrated Vite entry at its
-own dist path. `ui-switch.js` (plain browser JS at the `ui/` root, shipped via
-the static-copy list; NOT frozen core) is the whole rollout mechanism:
-
-- **Routing convention:** `?ui=new` on the canonical page URL selects the new
-  version. Precedence: explicit `?ui=new`/`?ui=legacy` param > stored
-  preference (localStorage key `dial9-ui-preference`) > default (legacy until
-  the flip - a single commented line in `ui-switch.js`, `DEFAULT_UI`).
-- **Raw switch:** the query string (trace source) is preserved across every
-  switch, minus the `ui` param which the script owns; the hash (view state) is
-  always dropped. No view state ports in either direction.
-- **The control:** a small fixed bottom-right pill (`id="d9-ui-switch"`, the
-  id the T12 census asserts), always visible on BOTH versions. It only renders
-  when there is somewhere to go: a legacy page with no registered new version
-  shows nothing.
-- **Legacy pages** load it via one `<script src="ui-switch.js"></script>` line
-  in `<head>` - the only edit legacy pages ever receive.
-
-**Registering a migrated page (T13/T14/T41):** add ONE line to
-`NEW_UI_ENTRIES` in `ui-switch.js` mapping the canonical page to your entry's
-served dist path, e.g. `"flamegraph.html": "new/flamegraph.html"` (and update
-the registry expectation in `tests/ui_switch.test.ts`). Your new entry should
-load `ui-switch.js` and call `window.D9UiSwitch.mount({ side: "new" })` to
-render the "Switch to legacy UI" control (pass `page: "x.html"` if your entry
-path is not the registered value verbatim).
 
 ## The `trace=` query parameter
 
@@ -199,40 +168,38 @@ The split, made explicit:
   Query params can reach the server and are preserved verbatim by every
   view-state rewrite.
 - **HASH = versioned view state** (`#v=1&...`), what the reader is LOOKING
-  at, never what is loaded. Owned exclusively by the T19 codec on migrated
-  pages; never reaches the server; deliberately dropped by the dual-UI raw
-  switch. Normative schema: `docs/ui-inventory/05-url-view-state.md`
-  (codec: `src/lib/url/view-state.ts`).
+  at, never what is loaded. Owned by the T19 codec; never reaches the server.
+  Normative schema: `docs/ui-inventory/05-url-view-state.md` (codec:
+  `src/lib/url/view-state.ts`).
 
 ### Query params - viewer.html and flamegraph.html (exact mode)
 
-Both trace-rendering pages read the same load-scope vocabulary (the browser
+Both trace-rendering pages accept this compatible URL vocabulary (the browser
 page emits it via `traceTitleParams`/`objectTraceUrls`):
 
 | Param | Value | Meaning |
 |-------|-------|---------|
 | `trace` | URL, **repeatable** | Trace component to fetch and gunzip client-side; N values parse as one trace (see "The `trace=` query parameter" above). Relative or absolute; must be same-origin-fetchable. |
-| `start` | absolute monotonic ns (integer) | Parse-time time-range filter, inclusive; either optional. The page re-writes it via `history.replaceState` when the user sets/clears a range (viewer "Set Range", features/02 E3-E5; flamegraph F19). |
-| `end` | absolute monotonic ns (integer) | Filter end; same semantics as `start`. |
+| `start` | absolute monotonic ns (integer) | Viewer: visible viewport start. Flamegraph: inclusive parse-time filter start. |
+| `end` | absolute monotonic ns (integer) | Viewer: visible viewport end. Flamegraph: inclusive parse-time filter end. |
 | `svc` | string | Service name, display label only. |
 | `host` | string | Host name, display label only. |
 | `segs` | integer as string | Segment COUNT for the header/stats display (index.html sets `String(keys.length)`); NOT a list of segment keys. |
 | `from` | string | Human-readable wall-clock range start, display only. |
 | `to` | string | Human-readable wall-clock range end, display only. |
-| `worker-zoom` | TAB-joined frame names, root -> target | Flamegraph only: worker-tree zoom path (features/03 F148/F150). Legacy view-state param, kept live forever; the migrated page also mirrors zoom state here so copied links open on both page generations. |
+| `worker-zoom` | TAB-joined frame names, root -> target | Flamegraph only: stable worker-tree zoom path (features/03 F148/F150), mirrored with `fg.w` when zoom changes. |
 | `offworker-zoom` | same | Flamegraph only: off-worker-tree zoom path (F149). |
 | `prof` | `1` | Viewer only, debug: enables the render profiler (features/02 A14). Honored but not part of any UI's emitted links. |
 
 `start`/`end` are ABSOLUTE monotonic nanoseconds, the same values carried by
 `event.ts`/`trace.minTs` from `TraceParser.parseTrace()`, NOT offsets from
-trace start. On the legacy exact-mode pages `start`/`end` are parse filters;
-on `/new/viewer.html` they are viewport bounds and the additive
-`data-start`/`data-end` pair carries the parse filter. The legacy pages do not
-honor the new-viewer state table below; the migrated viewer does.
+trace start. `viewer.html` uses them as viewport bounds and uses the additive
+`data-start`/`data-end` pair for its parse filter. `flamegraph.html` retains
+the original parse-filter meaning.
 
-### Query params - new/viewer.html durable view state
+### Query params - viewer.html durable view state
 
-Only the migrated trace viewer owns these additive parameters. They are
+The trace viewer owns these additive parameters. They are
 canonicalized with `history.replaceState` after each settled store update;
 defaults are omitted. Values are semantic anchors where possible, so agents
 can construct them directly. `start`/`end` are the visible viewport here;
@@ -339,54 +306,47 @@ push history entries so Back/Forward restores the focused service:
 | `to` | epoch seconds | Precise window end. |
 | `q` | string | Raw-search prefix query. |
 
-### Query params - every page
-
-| Param | Value | Meaning |
-|-------|-------|---------|
-| `ui` | `new` \| `legacy` | Dual-UI switch (owned by `ui-switch.js`, see above). Preserved-minus-`ui` across switches; the hash is dropped by design. |
-
 ### Hash - versioned view state (`#v=1`)
 
 The hash carries a form-encoded payload with a leading integer version:
 `#v=1&fg.w=<tab-joined path>&tm=abs`. Full grammar, precedence against the
-legacy zoom params, tolerant-reader and version rules:
+stable zoom query params, tolerant-reader and version rules:
 `docs/ui-inventory/05-url-view-state.md`. The v1 key registry, with honest
 status:
 
 | Key | Status | Meaning |
 |-----|--------|---------|
 | `v` | live | Schema version, currently `1`. Required; a hash without a well-formed integer `v` is foreign and left alone. |
-| `fg.w` | live (flamegraph) | Worker-tree zoom path; overrides `worker-zoom` per field, legacy fills gaps. |
+| `fg.w` | live (flamegraph) | Worker-tree zoom path; overrides `worker-zoom` per field, which fills gaps. |
 | `fg.o` | live (flamegraph) | Off-worker-tree zoom path. |
 | `fg.i` | live (flamegraph) | Inspect (butterfly) focus display name; overrides legacy `inspect`. |
 | `fg.if` | live (flamegraph) | Inspect focus symbol; overrides legacy `inspect_full`. Emitted only when it differs from `fg.i`. |
 | `fg.s` | live (flamegraph) | Frames-search query; overrides legacy `search`. |
 | `fg.sp` | live (flamegraph) | Spawn-location filter value (exact mode); overrides legacy `spawn`. |
 | `fg.rt` | live (flamegraph) | Runtime filter value (exact mode); overrides legacy `runtime`. |
-| `tm` | live (new viewer) | Clock display mode (`rel`\|`abs`). |
-| `tz` | live (new viewer) | Timezone (`utc`\|`local`) for absolute timestamps. |
-| `vp` | reserved hash name | Not honored in hash; new viewer uses query `start`/`end`. |
-| `sel.*` | reserved hash names | Not honored in hash; new viewer uses readable selection query params. |
+| `tm` | live (viewer) | Clock display mode (`rel`\|`abs`). |
+| `tz` | live (viewer) | Timezone (`utc`\|`local`) for absolute timestamps. |
+| `vp` | reserved hash name | Not honored in hash; the viewer uses query `start`/`end`. |
+| `sel.*` | reserved hash names | Not honored in hash; the viewer uses readable selection query params. |
 | `poi` | reserved hash name | Not honored in hash; rail cursors are page-owned query params. |
 
 Reserved hash keys claim the NAME only. Emitting them does nothing; the
-new-viewer query implementation does not activate or reinterpret them.
+viewer query implementation does not activate or reinterpret them.
 
 ### Deep-link recipes for agents (issue #303)
 
 The three asks from #303, in contract terms:
 
-1. **Open the new viewer at an exact window, optionally with Set Range:**
+1. **Open the viewer at an exact window, optionally with Set Range:**
 
    ```
-   new/viewer.html?trace=<trace-url>&start=<visible-start-ns>&end=<visible-end-ns>
-   new/viewer.html?trace=<trace-url>&data-start=<parse-start-ns>&data-end=<parse-end-ns>&start=<visible-start-ns>&end=<visible-end-ns>
+   viewer.html?trace=<trace-url>&start=<visible-start-ns>&end=<visible-end-ns>
+   viewer.html?trace=<trace-url>&data-start=<parse-start-ns>&data-end=<parse-end-ns>&start=<visible-start-ns>&end=<visible-end-ns>
    ```
 
    All values are absolute monotonic nanoseconds. Omit `data-start`/`data-end`
    to keep the full trace zoomable; include them to reproduce a Set Range
-   reparse exactly. Legacy `viewer.html` continues to interpret `start`/`end`
-   as its parse filter.
+   reparse exactly.
 
 2. **Open a flamegraph, optionally pre-zoomed to a subtree:**
 
@@ -394,10 +354,9 @@ The three asks from #303, in contract terms:
    flamegraph.html?trace=<trace-url>&start=<ns>&end=<ns>&worker-zoom=<f1>%09<f2>
    ```
 
-   Emit the legacy `worker-zoom`/`offworker-zoom` QUERY form for maximum
-   compatibility: both page generations honor it (the migrated page reads
-   it as the hash's fallback). The hash form
-   `#v=1&fg.w=<f1>%09<f2>` is equivalent on migrated pages and wins per
+   Emit the stable `worker-zoom`/`offworker-zoom` QUERY form for maximum
+   compatibility with existing links. The hash form
+   `#v=1&fg.w=<f1>%09<f2>` is equivalent and wins per
    field when both are present. Zoom restore is gated on the time-range
    filter reproducing the shared tree (F151), so carry the same
    `start`/`end` the zoomed view had (or none).
@@ -405,9 +364,9 @@ The three asks from #303, in contract terms:
 3. **Select an analysis target and exact surface:**
 
    ```
-   new/viewer.html?trace=<trace-url>&task=0x2a&start=<ns>&end=<ns>
-   new/viewer.html?trace=<trace-url>&region=<a>-<b>&analysis=heap&heap-weight=count&inspector=stack
-   new/viewer.html?trace=<trace-url>&poll=<poll-start>:<task-id>&inspector=poll&stack-view=flame&poll-section=sched&poll-worker-zoom=<f1>%09<f2>
+   viewer.html?trace=<trace-url>&task=0x2a&start=<ns>&end=<ns>
+   viewer.html?trace=<trace-url>&region=<a>-<b>&analysis=heap&heap-weight=count&inspector=stack
+   viewer.html?trace=<trace-url>&poll=<poll-start>:<task-id>&inspector=poll&stack-view=flame&poll-section=sched&poll-worker-zoom=<f1>%09<f2>
    ```
 
    Selection anchors that depend on trace content are validated after load;
@@ -428,9 +387,8 @@ The three asks from #303, in contract terms:
 
 ## Parity gate tooling (`parity/`)
 
-The migration's "lose nothing" machinery (ticket T12; ADR-0004 section 7):
-plain Node scripts, dev-only — `parity/` is not a Vite input and never enters
-`dist/` or the crate package. Every page-migration ticket's DoD invokes these
+The UI's live regression tools are plain Node scripts, dev-only — `parity/`
+is not a Vite input and never enters `dist/` or the crate package. Run them
 against a live server (the dev-server, or `dial9 serve`; readiness gate:
 `GET /api/config` returns JSON):
 
@@ -448,11 +406,8 @@ relative time windows.
 **(a) Row-walker** — drives every feature-inventory row's access path, emits
 `VERIFIED` / `FAILED` / `NOT-TRIGGERABLE` per the shared verdict mapping
 (chunk-1 tickets header). Green = zero FAILED; exit 0 only when green.
-Amended rows (T15: features/01 G8/C6/I2/F4/F10) walk PER-SIDE: the walker
-derives `side` from the URL (`/new/` = the migrated page) and those rows'
-walkers assert the amended contract on the new page and the preserved
-recorded behavior on the legacy page, so both sides gate green against the
-one inventory.
+Amended rows (T15: features/01 G8/C6/I2/F4/F10) assert the canonical behavior
+recorded by the inventory.
 
 ```bash
 node parity/walk-rows.mjs \
@@ -558,27 +513,25 @@ node parity/perf-probe.mjs --url <pageUrl> [--journey J3] [--render-source stub]
 **(f) URL-contract check** - the live half of the URL contract's
 enforcement (the codec-level pin is `src/lib/url/url-contract.test.ts`):
 constructs the contract section's deep-link recipe URLs in plain Node (no
-browser) and asserts real pages honor them - the legacy viewer opens at an
-exact `?start/?end` window, the recorded zoom link restores on both page
-generations (query form on legacy, `#v=1` hash form on migrated), reserved
-hash keys are inert, a foreign version restores nothing. Exit 0 only when
-all legs pass:
+browser) and asserts real pages honor them: the viewer opens with an exact
+parse range and viewport, both zoom-link forms restore, reserved hash keys
+are inert, and a foreign version restores nothing. Exit 0 only when all legs
+pass:
 
 ```bash
 node parity/url-contract.mjs --base http://localhost:3021 [--json p]
 ```
 
 Self-tests (run whenever the tools themselves change): census and behavioral
-differ legacy-vs-legacy on the same URL must emit ZERO diff; the row-walker
-against the legacy browser page must stay green (zero FAILED).
+differ against the same URL must emit ZERO diff; the row-walker against the
+canonical browser page must stay green (zero FAILED).
 
 ## Tests — IMPORTANT for agents
 
-Vitest is the single test runner (ADR-0004 section 7); the legacy
-`node test_*.js` runner was retired when the last suite migrated (T11):
+Vitest is the single JavaScript test runner (ADR-0004 section 7):
 
-- **Vitest suites** (`tests/core/**/*.test.ts` for suites over the frozen
-  core, `src/**/*.test.ts` for new TS modules) run with `npm run test` and
+- **Vitest suites** (`tests/core/**/*.test.{js,ts}` for shared core,
+  `src/**/*.test.ts` for TypeScript modules) run with `npm run test` and
   are auto-discovered — no registration needed. The `ui` job in
   `.github/workflows/ci.yml` runs them against the committed demo trace.
 - **Trace-dependent suites** additionally run against a freshly regenerated
@@ -598,5 +551,5 @@ Vitest is the single test runner (ADR-0004 section 7); the legacy
 - **Exception:** `test_parser.js` stays a plain Node script at the ui/ root —
   the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs`
   invokes it by filename as `node test_parser.js <trace.bin>
-  <expected.jsonl>`. Do not migrate or rename it without updating that test.
+  <expected.jsonl>`. Do not move or rename it without updating that test.
 - `bench_parse.js` is a benchmark, not a test.

@@ -1,14 +1,14 @@
 // The flamegraph page's URL view-state wiring, in two halves:
 //
 // - restoreFgStateFromUrl: on load, resolve the effective view state from the
-//   URL (versioned hash wins per field, legacy query params fill the gaps) and
+//   URL (versioned hash wins per field, stable query params fill the gaps) and
 //   drive the widget's applyViewState (zoom + inspect focus + search + spawn/
 //   runtime filters). Restore is SILENT: the widget suspends its onViewChange
 //   while applying, so restoring produces zero URL writes and keeps a shared
 //   link byte-stable on open.
 //
 // - createFgUrlSync: user view change -> store slice update -> ONE debounced
-//   history.replaceState carrying BOTH the legacy query params and the
+//   history.replaceState carrying BOTH the stable query params and the
 //   versioned hash.
 //
 // Kept DOM-free (URL host, timer and frame scheduler injectable) so the
@@ -149,7 +149,7 @@ export function createFgUrlSync(
   const binding = bindViewStateToUrl(store, {
     slices: ["fgView"],
     project: (s) => fgViewToViewState(s.fgView),
-    // Keep the legacy params live alongside the hash.
+    // Keep the stable query params live alongside the hash.
     mirrorToQuery: applyLegacyZoomToQuery,
     ...(options.host !== undefined ? { host: options.host } : {}),
     ...(options.timer !== undefined ? { timer: options.timer } : {}),

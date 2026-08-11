@@ -5,14 +5,14 @@
 // browser involved - then drives real pages and asserts they honor them.
 //
 // Legs:
-//   viewer-window        recipe 1: viewer.html?trace&start&end opens the
-//                        viewer at exactly that window (?start/?end are its
-//                        stable parse-time filters). The start/end values are
-//                        computed from the demo trace parsed in Node
-//                        (minTs + relative-ms * 1e6).
-//   fg-legacy-zoom       recipe 2, query form, legacy page: the recorded J9
+//   viewer-viewport      recipe 1: start/end restores a viewport without
+//                        filtering the loaded events.
+//   viewer-data-window   recipe 1: data-start/data-end filters the data;
+//                        redundant matching viewport params canonicalize out.
+//                        Values are computed from the demo trace in Node.
+//   fg-query-zoom        recipe 2, stable query form: the recorded J9
 //                        worker-zoom link restores the zoom, zero rewrites.
-//   fg-hash-zoom         recipe 2, hash form, migrated page: #v=1&fg.w=
+//   fg-hash-zoom         recipe 2, hash form: #v=1&fg.w=
 //                        restores the same zoom, zero rewrites; a reserved
 //                        key riding along (sel.task) is inert and preserved.
 //   fg-foreign-version   version rule: #v=2 restores nothing, rewrites
@@ -44,9 +44,9 @@ const SPEC = {
   json: { help: "write leg results as JSON to this path" },
 };
 
-// The recorded J9 zoom link (a legacy worker-zoom URL recorded from the
-// legacy page against the demo trace) is the shared zoom fixture for both
-// zoom legs; reusing it keeps this script in lockstep with the journey.
+// The recorded J9 worker-zoom URL against the demo trace is the shared zoom
+// fixture for both forms; reusing it keeps this script in lockstep with the
+// journey.
 const J9_PATH = JOURNEYS.J9.defaultPath;
 const J9_ZOOM_ENCODED = new URL(J9_PATH, "http://x").search.match(
   /worker-zoom=([^&]*)/,
@@ -69,6 +69,22 @@ async function loadAndCapture(browser, kind, url, { settleMs = 0 } = {}) {
     await LOADED_WAITS[kind](page);
     if (settleMs > 0) await page.waitForTimeout(settleMs);
     return await captureReadouts(page, READOUT_SCHEMA[kind]);
+  } finally {
+    await context.close();
+  }
+}
+
+async function captureViewer(browser, url) {
+  const { context, page } = await newPage(browser);
+  try {
+    await page.goto(url);
+    await LOADED_WAITS.viewer(page);
+    await page.waitForTimeout(250); // trailing URL sync settles at 150ms
+    return {
+      readouts: await captureReadouts(page, READOUT_SCHEMA.viewer),
+      viewLabel: (await page.locator("[data-status-view]").textContent())?.trim() ?? "",
+      clearRangeVisible: await page.locator("#d9-btn-clear-range").isVisible(),
+    };
   } finally {
     await context.close();
   }
@@ -107,80 +123,126 @@ async function main() {
   const legs = [];
   const browser = await launchBrowser();
   try {
-    // ── Leg 1: recipe 1, the legacy viewer at an exact window ────────────
+    const urlFull = `${opts.base}/viewer.html?trace=demo-trace.bin`;
+    const full = await loadAndCapture(browser, "viewer", urlFull);
+    const fullCount = Number((full["events.count"] ?? "").replace(/,/g, ""));
+
+    // ── Leg 1: recipe 1, viewport only (all events stay loaded) ──────────
     {
-      const urlFull = `${opts.base}/viewer.html?trace=demo-trace.bin`;
-      const urlWin =
+      const url =
         `${opts.base}/viewer.html?trace=demo-trace.bin&start=${startNs}&end=${endNs}`;
-      const full = await loadAndCapture(browser, "viewer", urlFull);
-      const { context, page } = await newPage(browser);
       const problems = [];
-      let win;
-      try {
-        await page.goto(urlWin);
-        await LOADED_WAITS.viewer(page);
-        win = await captureReadouts(page, READOUT_SCHEMA.viewer);
-        // A range present on load reveals Clear Range immediately.
-        if (!(await page.locator("#btn-clear-range").isVisible())) {
-          problems.push("Clear Range button not visible with ?start/?end present");
-        }
-      } finally {
-        await context.close();
+      const { readouts, viewLabel, clearRangeVisible } = await captureViewer(browser, url);
+      if (clearRangeVisible) {
+        problems.push("Clear Range visible without a data filter");
       }
-      const fullCount = Number((full["events.count"] ?? "").replace(/,/g, ""));
-      const winCount = Number((win["events.count"] ?? "").replace(/,/g, ""));
+      const viewCount = Number((readouts["events.count"] ?? "").replace(/,/g, ""));
+      if (viewCount !== fullCount) {
+        problems.push(`viewport link filtered events: ${viewCount} vs full ${fullCount}`);
+      }
+      const viewDuration = /\(([^)]+)\)$/.exec(viewLabel)?.[1] ?? null;
+      const viewMs = durationToMs(viewDuration);
+      if (viewMs === null || viewMs > windowMs * 1.01) {
+        problems.push(`viewport readout "${viewLabel}" exceeds the ${windowMs}ms window`);
+      }
+      const settled = new URLSearchParams(readouts["url.query"] ?? "");
+      for (const [key, value] of Object.entries({
+        trace: "demo-trace.bin",
+        start: String(startNs),
+        end: String(endNs),
+      })) {
+        if (settled.get(key) !== value) {
+          problems.push(`URL lost ${key}=${value}: ${readouts["url.query"]}`);
+        }
+      }
+      if (settled.has("data-start") || settled.has("data-end")) {
+        problems.push(`viewport link gained a data filter: ${readouts["url.query"]}`);
+      }
+      legs.push({
+        leg: "viewer-viewport",
+        url,
+        pass: problems.length === 0,
+        problems,
+        readouts: { events: readouts["events.count"], viewport: viewLabel },
+      });
+    }
+
+    // ── Leg 2: recipe 1, parse filter plus matching viewport ─────────────
+    {
+      const url =
+        `${opts.base}/viewer.html?trace=demo-trace.bin` +
+        `&data-start=${startNs}&data-end=${endNs}&start=${startNs}&end=${endNs}`;
+      const problems = [];
+      const { readouts, clearRangeVisible } = await captureViewer(browser, url);
+      if (!clearRangeVisible) {
+        problems.push("Clear Range not visible with a data filter");
+      }
+      const winCount = Number((readouts["events.count"] ?? "").replace(/,/g, ""));
       if (!(winCount > 0 && winCount < fullCount)) {
         problems.push(
           `windowed event count not a strict subset: ${winCount} vs full ${fullCount}`,
         );
       }
-      const durMs = durationToMs(win["trace.duration"]);
+      const durMs = durationToMs(readouts["trace.duration"]);
       // The parsed range is inclusive within [start, end], so the rendered
       // duration must not exceed the requested window (small tolerance for
       // the readout's formatting rounding).
       if (durMs === null || durMs > windowMs * 1.01) {
         problems.push(
-          `duration readout "${win["trace.duration"]}" exceeds the ${windowMs}ms window`,
+          `duration readout "${readouts["trace.duration"]}" exceeds the ${windowMs}ms window`,
         );
       }
-      if (win["url.query"] !== `?trace=demo-trace.bin&start=${startNs}&end=${endNs}`) {
-        problems.push(`URL rewritten on load: ${win["url.query"]}`);
+      const settled = new URLSearchParams(readouts["url.query"] ?? "");
+      const expected = {
+        trace: "demo-trace.bin",
+        "data-start": String(startNs),
+        "data-end": String(endNs),
+      };
+      for (const [key, value] of Object.entries(expected)) {
+        if (settled.get(key) !== value) {
+          problems.push(`URL lost ${key}=${value}: ${readouts["url.query"]}`);
+        }
+      }
+      // Once filtered, the requested viewport is the full available extent;
+      // the canonical URL therefore omits its redundant start/end pair.
+      if (settled.has("start") || settled.has("end")) {
+        problems.push(`redundant viewport did not canonicalize out: ${readouts["url.query"]}`);
       }
       legs.push({
-        leg: "viewer-window",
-        url: urlWin,
+        leg: "viewer-data-window",
+        url,
         pass: problems.length === 0,
         problems,
         readouts: {
           fullEvents: full["events.count"],
-          windowEvents: win["events.count"],
-          windowDuration: win["trace.duration"],
+          windowEvents: readouts["events.count"],
+          windowDuration: readouts["trace.duration"],
         },
       });
     }
 
-    // ── Leg 2: recipe 2 query form on the LEGACY flamegraph page ────────
+    // ── Leg 3: recipe 2 stable query form ───────────────────────────────
     {
       const url = new URL(J9_PATH, opts.base).href;
       const r = await captureFgLeg(browser, url);
-      legs.push({ leg: "fg-legacy-zoom", url, ...r });
+      legs.push({ leg: "fg-query-zoom", url, ...r });
     }
 
-    // ── Leg 3: recipe 2 hash form (+ inert reserved key) on the MIGRATED
-    //    page. Same zoom path, carried as #v=1&fg.w=; sel.task is reserved
-    //    vocabulary and must change nothing. ──────────────────────────────
+    // ── Leg 4: recipe 2 hash form (+ inert reserved key). Same zoom path,
+    //    carried as #v=1&fg.w=; sel.task is reserved vocabulary and must
+    //    change nothing. ──────────────────────────────────────────────────
     {
       const url =
-        `${opts.base}/new/flamegraph.html?trace=demo-trace.bin` +
+        `${opts.base}/flamegraph.html?trace=demo-trace.bin` +
         `#v=1&fg.w=${J9_ZOOM_ENCODED}&sel.task=3`;
       const r = await captureFgLeg(browser, url);
       legs.push({ leg: "fg-hash-zoom", url, ...r });
     }
 
-    // ── Leg 4: foreign version restores nothing, rewrites nothing ───────
+    // ── Leg 5: foreign version restores nothing, rewrites nothing ───────
     {
       const url =
-        `${opts.base}/new/flamegraph.html?trace=demo-trace.bin` +
+        `${opts.base}/flamegraph.html?trace=demo-trace.bin` +
         `#v=2&fg.w=${J9_ZOOM_ENCODED}`;
       const readouts = await loadAndCapture(browser, "flamegraph", url, {
         settleMs: 300,
