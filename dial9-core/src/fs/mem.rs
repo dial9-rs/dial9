@@ -610,4 +610,9 @@ mod shuttle_tests {
     fn shuttle_eviction_accounting_pct() {
         shuttle::check_pct(scenario_with_eviction, 5_000, 3);
     }
+
+    #[test]
+    fn shuttle_eviction_accounting_determinism() {
+        shuttle::check_uncontrolled_nondeterminism(scenario_with_eviction, 5_000);
+    }
 }
