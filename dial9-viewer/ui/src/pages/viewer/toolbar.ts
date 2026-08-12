@@ -414,6 +414,17 @@ function infoMenu(
                 </div>`
             : ""}
         </div>
+        ${!trace.hasFullTaskCoverage
+          ? html`<div class="d9-info-heading">Reduced fidelity</div>
+              <div class="d9-info-note">
+                Recorded without <code>--cfg tokio_unstable</code>. Poll events
+                cover only tasks spawned through dial9's helpers
+                (<code>spawn</code>, <code>spawn_in</code>,
+                <code>block_on</code>, <code>spawn_with</code>), and the task
+                list and blocking-call analysis are built from them. Task
+                lifetimes and per-worker queue depth are unavailable.
+              </div>`
+          : ""}
         ${metadata.length > 0
           ? html`<div class="d9-info-heading" id="d9-segment-metadata-heading">
                 Segment metadata

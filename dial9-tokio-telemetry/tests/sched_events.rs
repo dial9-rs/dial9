@@ -104,7 +104,22 @@ fn sched_events_sampling_reduces_count() {
         TokioAttachOptions::default(),
     );
 
-    // Baseline switch counts for all current threads (workers already spawned).
+    // A worker arms its sampler on its first park. Warm up until every worker has run a task,
+    // and then gone idle.
+    rt.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..num_workers * 4 {
+            handles.push(tokio::spawn(async {
+                std::thread::sleep(Duration::from_millis(5));
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+
+    // Baseline switch counts, taken with the samplers armed.
     let before = common::snapshot_task_switches();
 
     rt.block_on(async {
@@ -124,6 +139,12 @@ fn sched_events_sampling_reduces_count() {
 
     // Snapshot again while the worker threads are still alive.
     let after = common::snapshot_task_switches();
+
+    // Drain the samplers before the workers exit: sched samples live in each
+    // thread's perf ring until a source flush reads them, and `drop(rt)` closes
+    // those fds. Waiting for the flush loop's own cadence loses every sample on
+    // a loaded machine.
+    recorder.shared().unwrap().flush_sources();
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(5));

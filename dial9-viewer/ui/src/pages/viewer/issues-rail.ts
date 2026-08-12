@@ -328,7 +328,14 @@ function railTemplate(
       ${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
       ${tab === "tasks"
         ? taskVm.total === 0
-          ? html`<p class="d9-rail-empty">No tasks in this trace.</p>`
+          ? taskVm.hasFullTaskCoverage
+            ? html`<p class="d9-rail-empty">No tasks in this trace.</p>`
+            : html`<p class="d9-rail-empty">
+                No tasks recorded. This trace was built without
+                <code>--cfg tokio_unstable</code>, so only tasks spawned
+                through dial9's own helpers are tracked, and this trace has
+                none.
+              </p>`
           : taskTable(taskVm, h)
         : vm.total === 0
           ? html`<p class="d9-rail-empty">No issues match this filter.</p>`
@@ -500,13 +507,29 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
       >
         <thead>
           <tr>
-            ${TASK_COLUMNS.map(
-              (col) => html`<th scope="col">
+            ${TASK_COLUMNS.map((col) => {
+              // A "-" lifetime cell reads as "instant task" unless the header
+              // says it went unrecorded.
+              const coverage =
+                col.key === "lifetime" ? vm.taskLifetimeCoverage : "all";
+              const unrecorded = coverage === "none";
+              // Availability comes from whether spawn events are present, so
+              // this is about what reached the view, not what the trace holds.
+              const title = unrecorded
+                ? "No task lifetimes in view (task tracking off, or nothing spawned in the window)"
+                : coverage === "partial"
+                  ? "Task lifetimes were not captured for every task (untracked runtime, or spawned before the capture window)"
+                  : col.title;
+              return html`<th scope="col">
                 <button
                   type="button"
-                  class=${classMap({ "d9-rail-sort": true, on: vm.sortKey === col.key })}
-                  title=${col.title}
-                  aria-label=${col.title}
+                  class=${classMap({
+                    "d9-rail-sort": true,
+                    on: vm.sortKey === col.key,
+                    "d9-col-unrecorded": unrecorded,
+                  })}
+                  title=${title}
+                  aria-label=${title}
                   @click=${() => h.sortTaskByColumn(col)}
                 >
                   ${col.label}${vm.sortKey === col.key
@@ -515,8 +538,8 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
                       >`
                     : ""}
                 </button>
-              </th>`,
-            )}
+              </th>`;
+            })}
           </tr>
         </thead>
         <tbody>

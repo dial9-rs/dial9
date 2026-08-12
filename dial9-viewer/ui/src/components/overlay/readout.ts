@@ -14,6 +14,7 @@ export interface AtCursorInput {
   queueSamples: readonly { t: number; global: number }[];
   workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
   activeTaskSamples: readonly { t: number; count: number }[];
+  hasLocalQueueDepth: boolean;
 }
 
 /**
@@ -64,11 +65,13 @@ export function computeAtCursorReadout(
   const nearestGlobal = nearestByT(input.queueSamples, ns);
 
   let localMax: number | null = null;
-  for (const w of input.workerIds) {
-    const samples = input.workerQueueSamples[w];
-    if (!samples || samples.length === 0) continue;
-    const s = nearestByT(samples, ns);
-    if (s !== null) localMax = localMax === null ? s.local : Math.max(localMax, s.local);
+  if (input.hasLocalQueueDepth) {
+    for (const w of input.workerIds) {
+      const samples = input.workerQueueSamples[w];
+      if (!samples || samples.length === 0) continue;
+      const s = nearestByT(samples, ns);
+      if (s !== null) localMax = localMax === null ? s.local : Math.max(localMax, s.local);
+    }
   }
 
   return {

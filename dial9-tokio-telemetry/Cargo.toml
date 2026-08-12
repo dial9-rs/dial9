@@ -19,6 +19,7 @@ all-features = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(shuttle)",
     "cfg(iai_enabled)",
+    "cfg(tokio_unstable)",
 ] }
 missing_debug_implementations = "warn"
 
@@ -167,7 +168,6 @@ dial9-tokio-telemetry = { path = ".", features = [
     "memory-profiling",
     "worker-s3",
     "analysis",
-    "taskdump",
     "linux-socket",
 ] }
 nix = { version = "0.29", features = ["process"] }
@@ -200,4 +200,8 @@ harness = false
 
 [[bench]]
 name = "writer_write_encoded_iai"
+harness = false
+
+[[bench]]
+name = "traced_poll_iai"
 harness = false

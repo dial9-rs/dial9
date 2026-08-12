@@ -38,12 +38,24 @@ fn assert_instrumented_spawn_at(batches: &Mutex<Vec<Vec<u8>>>, task_id: TaskId, 
     let events: Vec<Dial9Event> = decode_all(&batches.lock().unwrap());
     let expected_loc = format!("join_set_ext.rs:{call_line}:");
 
+    // With tokio's task hooks the caller lands on the TaskSpawn event; without
+    // them it lands on the traced wrapper's PollStart.
+    #[cfg(tokio_unstable)]
     assert!(events.iter().any(|event| {
         matches!(
             event,
             Dial9Event::TaskSpawnEvent(event)
                 if event.task_id == task_id.to_u64()
                     && event.instrumented
+                    && event.spawn_loc.contains(&expected_loc)
+        )
+    }));
+    #[cfg(not(tokio_unstable))]
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            Dial9Event::PollStartEvent(event)
+                if event.task_id == task_id.to_u64()
                     && event.spawn_loc.contains(&expected_loc)
         )
     }));

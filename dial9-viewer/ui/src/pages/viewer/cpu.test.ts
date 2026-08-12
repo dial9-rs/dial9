@@ -128,16 +128,16 @@ describe("cpuReadoutText", () => {
 
   it("includes the percent clause only when capacity is known", () => {
     const withCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, 4);
-    expect(withCap).toBe(`avg 1.5 cores ${DOT} avg 37.5% ${DOT} max 3`);
+    expect(withCap).toBe(`avg 1.5 ${DOT} avg 37.5% ${DOT} max 3`);
 
     const noCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, null);
-    expect(noCap).toBe(`avg 1.5 cores ${DOT} max 3`);
+    expect(noCap).toBe(`avg 1.5 ${DOT} max 3`);
   });
 
   it("clamps the percent at 100", () => {
     // avg 10 cores on a 4-core box = 250% -> clamped to 100.0%.
     const s = cpuReadoutText({ avgCores: 10, maxCores: 12 }, 4);
-    expect(s).toBe(`avg 10 cores ${DOT} avg 100.0% ${DOT} max 12`);
+    expect(s).toBe(`avg 10 ${DOT} avg 100.0% ${DOT} max 12`);
   });
 });
 
@@ -221,7 +221,7 @@ describe("nsToDrawX (alignment invariant)", () => {
 });
 
 // A recording 2D context capturing the ops the CPU render makes (node has no
-// canvas). Enough to assert the stroke batching + coalesced fills.
+// canvas). Enough to assert stroke geometry/batching + coalesced fills.
 interface RectCall {
   x: number;
   y: number;
@@ -233,12 +233,20 @@ interface TextCall {
   x: number;
   y: number;
 }
+interface SegmentCall {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
 interface Recording {
   fillRects: RectCall[];
   strokes: number;
   beginPaths: number;
   labels: TextCall[];
   dashes: number[][];
+  segments: SegmentCall[];
+  strokeWidths: number[];
 }
 function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
   const rec: Recording = {
@@ -247,7 +255,10 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     beginPaths: 0,
     labels: [],
     dashes: [],
+    segments: [],
+    strokeWidths: [],
   };
+  let point: { x: number; y: number } | null = null;
   const ctx = {
     fillStyle: "",
     strokeStyle: "",
@@ -260,11 +271,20 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     },
     beginPath() {
       rec.beginPaths++;
+      point = null;
     },
-    moveTo() {},
-    lineTo() {},
+    moveTo(x: number, y: number) {
+      point = { x, y };
+    },
+    lineTo(x: number, y: number) {
+      if (point !== null) {
+        rec.segments.push({ x1: point.x, y1: point.y, x2: x, y2: y });
+      }
+      point = { x, y };
+    },
     stroke() {
       rec.strokes++;
+      rec.strokeWidths.push(ctx.lineWidth);
     },
     setLineDash(segments: number[]) {
       rec.dashes.push([...segments]);
@@ -299,23 +319,24 @@ describe("renderCpuTrack", () => {
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs([], null), false);
     expect(rec.fillRects.length).toBe(1); // background only
     expect(rec.strokes).toBe(0);
-    expect(readout).toBe("avg 0 cores · max 0");
+    expect(readout).toBe("avg 0 · max 0");
   });
 
   it("batches the grid + capacity strokes: one stroke() per STYLE", () => {
     const { ctx, rec } = recordingCtx();
-    // 3 grid lines + 1 capacity line = 4 primitives, but 2 styles.
+    // The 3 grid lines + capacity line are 2 reference styles; the bar top is
+    // a third style, still one stroke rather than one per primitive.
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], 4), true);
-    expect(rec.strokes).toBe(2); // NOT 4 - the whole point of the batcher
+    expect(rec.strokes).toBe(3); // grid + capacity + one bar style
     // The capacity line is dashed exactly once, then reset to solid.
     expect(rec.dashes.some((d) => d.length > 0)).toBe(true);
     expect(rec.dashes[rec.dashes.length - 1]).toEqual([]);
   });
 
-  it("draws only the grid stroke when capacity is unknown (no capacity line)", () => {
+  it("omits the capacity stroke when capacity is unknown", () => {
     const { ctx, rec } = recordingCtx();
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], null), true);
-    expect(rec.strokes).toBe(1); // grid only
+    expect(rec.strokes).toBe(2); // grid + one bar style, no capacity line
   });
 
   it("folds contiguous equal bars via the coalescer but keeps distinct ones", () => {
@@ -354,13 +375,45 @@ describe("renderCpuTrack", () => {
     expect(barFills(diff.rec).length).toBe(4);
   });
 
-  it("returns the readout it painted (mirror source)", () => {
+  it("keeps a sub-pixel fill and its outline visible at the baseline", () => {
+    const { ctx, rec } = recordingCtx();
+    renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 0.001)], 11), true);
+
+    const tinyFill = rec.fillRects.find((r) => r.y > 0);
+    expect(tinyFill?.h).toBeGreaterThan(0);
+    expect(tinyFill?.h).toBeLessThan(1);
+    const baseline = geo().height - 8;
+    expect(
+      rec.segments.some((s) => s.y2 < baseline && s.y2 >= baseline - 1),
+    ).toBe(true);
+  });
+
+  it("connects adjacent bar tops as a continuous step outline, but preserves gaps", () => {
+    const render = (intervals: ProcessCpuUsageInterval[]): Recording => {
+      const { ctx, rec } = recordingCtx();
+      renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
+      return rec;
+    };
+    const verticalCount = (rec: Recording) =>
+      rec.segments.filter(
+        (s) => Math.abs(s.x2 - s.x1) < 1e-6 && Math.abs(s.y2 - s.y1) > 1e-6,
+      ).length;
+
+    const adjacent = render([iv(0, 500, 1), iv(500, 1000, 2)]);
+    expect(verticalCount(adjacent)).toBe(1);
+    expect(adjacent.strokeWidths).toContain(1.5);
+
+    const gapped = render([iv(0, 400, 1), iv(600, 1000, 2)]);
+    expect(verticalCount(gapped)).toBe(0);
+  });
+
+  it("returns the readout for the DOM header", () => {
     const { ctx } = recordingCtx();
     const intervals = [iv(0, 500, 2), iv(500, 1000, 4)];
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
     const stats = visibleCpuStats(intervals, 0, 1000);
     expect(readout).toBe(cpuReadoutText(stats, 4));
-    expect(readout).toBe("avg 3 cores · avg 75.0% · max 4");
+    expect(readout).toBe("avg 3 · avg 75.0% · max 4");
   });
 });
 

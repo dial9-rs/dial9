@@ -29,12 +29,18 @@ pub use recorder_tokio::{
 use handle::InstrumentedSpawnGuard;
 
 use dial9_core::handle::{clear_tl_handle, set_tl_handle};
-use handle::INSTRUMENTED_SPAWN;
-use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
+use runtime_context::{make_worker_park, make_worker_unpark};
 
 use crate::primitives::sync::Arc;
+#[cfg(tokio_unstable)]
 use crate::telemetry::format::TaskTerminateEvent;
+#[cfg(tokio_unstable)]
 use crate::telemetry::task_metadata::TaskId;
+#[cfg(tokio_unstable)]
+use handle::INSTRUMENTED_SPAWN;
+#[cfg(not(tokio_unstable))]
+pub(crate) use recorder_tokio::current_runtime_ctx;
+pub(crate) use runtime_context::{clear_poll_span, make_poll_end, make_poll_start, poll_span_open};
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -84,7 +90,7 @@ fn register_hooks(
     ctx: &Arc<RuntimeContext>,
     shared: &Arc<SharedState>,
     handle: &Dial9Handle,
-    task_tracking_enabled: bool,
+    #[cfg_attr(not(tokio_unstable), allow(unused_variables))] task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
     #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
         crate::telemetry::task_dump_config::TaskDumpConfig,
@@ -96,9 +102,13 @@ fn register_hooks(
     let s1 = shared.clone();
     let c2 = ctx.clone();
     let s2 = shared.clone();
+    #[cfg(tokio_unstable)]
     let c3 = ctx.clone();
+    #[cfg(tokio_unstable)]
     let s3 = shared.clone();
+    #[cfg(tokio_unstable)]
     let c4 = ctx.clone();
+    #[cfg(tokio_unstable)]
     let s4 = shared.clone();
 
     register_hook!(builder, on_thread_park, tokio_hooks.on_thread_park, {
@@ -115,6 +125,7 @@ fn register_hooks(
         })
     });
 
+    #[cfg(tokio_unstable)]
     register_hook!(
         meta: builder,
         on_before_task_poll,
@@ -123,24 +134,26 @@ fn register_hooks(
             s3.if_enabled(|buf| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
-                let event = make_poll_start(&c3, &s3, location, task_id);
+                let event = make_poll_start(Some(&c3), &s3, location, task_id);
                 buf.record_encodable_event(&event);
             })
         }
     );
 
+    #[cfg(tokio_unstable)]
     register_hook!(
         meta: builder,
         on_after_task_poll,
         tokio_hooks.on_after_task_poll,
         |_meta| {
             s4.if_enabled(|buf| {
-                let event = make_poll_end(&c4, &s4);
+                let event = make_poll_end(Some(&c4), &s4);
                 buf.record_encodable_event(&event);
             })
         }
     );
 
+    #[cfg(tokio_unstable)]
     if task_tracking_enabled {
         let s5 = shared.clone();
         register_hook!(meta: builder, on_task_spawn, tokio_hooks.on_task_spawn, |meta| {
@@ -267,6 +280,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use super::handle::INSTRUMENTED_SPAWN;
+
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -331,7 +346,7 @@ mod tests {
             .unwrap();
 
         rt.block_on(async {
-            tokio::spawn(async {
+            crate::telemetry::spawn(async {
                 tokio::task::yield_now().await;
             })
             .await
@@ -371,12 +386,14 @@ mod tests {
         let (capture, data) = CapturingProcessor::new();
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let on_thread_start_calls = hook_calls.clone();
+        #[cfg(tokio_unstable)]
         let on_before_poll_calls = hook_calls.clone();
 
         let mut hooks = TokioHooks::default();
         hooks.on_thread_start(move || {
             on_thread_start_calls.fetch_add(1, Ordering::Relaxed);
         });
+        #[cfg(tokio_unstable)]
         hooks.on_before_task_poll(move |_meta| {
             on_before_poll_calls.fetch_add(1, Ordering::Relaxed);
         });
@@ -760,6 +777,7 @@ mod tests {
     /// The narrower "re-emit only after the runtime/worker count actually grows"
     /// logic is unit-tested deterministically in
     /// `runtime_context::tests::segment_metadata_only_rebuilds_after_a_change`.
+    #[cfg(tokio_unstable)]
     #[test]
     fn attached_runtime_metadata_reaches_sealed_segment() {
         use crate::telemetry::analysis_events::Dial9Event;
@@ -934,7 +952,7 @@ mod tests {
                 registry
                     .iter()
                     .find(|c| c.runtime_name.as_deref() == Some(name))
-                    .map(|c| c.worker_ids.read().unwrap().values().copied().collect())
+                    .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
                     .unwrap_or_default()
             };
             (block("main"), block("attached"))
@@ -1187,6 +1205,7 @@ mod tests {
         rec.graceful_shutdown(Duration::from_secs(1));
     }
 
+    #[cfg(tokio_unstable)]
     #[test]
     fn task_tracking_produces_task_spawn_events() {
         let (capture, data) = CapturingProcessor::new();
@@ -1269,7 +1288,11 @@ mod tests {
             .unwrap();
 
         let worker_id = |runtime: &tokio::runtime::Runtime| {
-            runtime.block_on(async { tokio::spawn(async { current_worker_id() }).await.unwrap() })
+            runtime.block_on(async {
+                crate::telemetry::spawn(async { current_worker_id() })
+                    .await
+                    .unwrap()
+            })
         };
         let runtime_a_id = worker_id(&runtime_a);
         let runtime_b_id = worker_id(&runtime_b);
@@ -1288,7 +1311,7 @@ mod tests {
                 registry
                     .iter()
                     .find(|c| c.runtime_name.as_deref() == Some(name))
-                    .map(|c| c.worker_ids.read().unwrap().values().copied().collect())
+                    .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
                     .unwrap_or_default()
             };
             (block("main"), block("io"))
@@ -1322,6 +1345,320 @@ mod tests {
         assert!(
             has_runtime_a && has_runtime_b,
             "expected worker IDs from both runtimes; observed={worker_ids:?} main={main_ids:?} io={io_ids:?}"
+        );
+    }
+
+    /// A dial9-spawned future on a runtime dial9 never attached to records no
+    /// polls: the thread has no runtime context, so there is nothing to
+    /// attribute them to and the wrapper stays out of it.
+    #[test]
+    fn wrapper_leaves_unattached_runtimes_alone() {
+        use crate::telemetry::recorder::{Dial9TokioHandle, traced_handle};
+
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle =
+            Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));
+        runtime.block_on(async {
+            handle.spawn(async {}).await.unwrap();
+        });
+
+        drop(runtime);
+        rec.graceful_shutdown(Duration::from_secs(1));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let polls = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::telemetry::analysis_events::Dial9Event::PollStartEvent(..)
+                        | crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
+                )
+            })
+            .count();
+        assert_eq!(
+            polls, 0,
+            "an unattached runtime has no worker identity, so its polls stay out of the trace"
+        );
+    }
+
+    #[test]
+    fn block_in_place_keeps_worker_ids_bounded() {
+        use crate::telemetry::analysis_events::Dial9Event;
+        use crate::telemetry::format::WorkerId;
+        use std::collections::HashSet;
+
+        const WORKERS: usize = 2;
+        const HANDOFFS: usize = 20;
+
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(WORKERS);
+        let rt = rec
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder().runtime_name("main").build(),
+            )
+            .unwrap();
+
+        rt.block_on(async {
+            crate::telemetry::spawn(async {
+                for _ in 0..HANDOFFS {
+                    tokio::task::block_in_place(|| {
+                        std::thread::sleep(Duration::from_millis(1));
+                    });
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+
+        // Read the worker set before shutdown: the registry goes away with the
+        // recorder.
+        let enrolled: HashSet<u64> = {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            registry
+                .iter()
+                .find(|c| c.runtime_name.as_deref() == Some("main"))
+                .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                .unwrap_or_default()
+        };
+
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(2));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let mut starts = 0usize;
+        let mut ends = 0usize;
+        let mut polled_by: HashSet<u64> = HashSet::new();
+        for e in &events {
+            match e {
+                Dial9Event::PollStartEvent(p) => {
+                    starts += 1;
+                    polled_by.insert(p.worker_id.as_u64());
+                }
+                Dial9Event::PollEndEvent(p) => {
+                    ends += 1;
+                    polled_by.insert(p.worker_id.as_u64());
+                }
+                _ => {}
+            }
+        }
+
+        assert!(starts > 0, "expected poll events from the spawned task");
+        assert_eq!(
+            starts, ends,
+            "every PollStart needs a PollEnd across the core handoff"
+        );
+        assert!(
+            !polled_by.contains(&WorkerId::UNKNOWN.as_u64()),
+            "a thread running the worker loop must resolve an identity: {polled_by:?}"
+        );
+        assert!(
+            polled_by.is_subset(&enrolled),
+            "polls came from workers the runtime never enrolled: polled={polled_by:?} enrolled={enrolled:?}"
+        );
+        assert!(
+            enrolled.len() < HANDOFFS,
+            "worker IDs must be bounded by threads, not by handoffs: {enrolled:?}"
+        );
+
+        #[cfg(tokio_unstable)]
+        assert!(
+            enrolled.len() <= WORKERS,
+            "worker_index() puts the migrant back in the runtime's own block: {enrolled:?}"
+        );
+        #[cfg(not(tokio_unstable))]
+        assert!(
+            enrolled.len() >= WORKERS,
+            "each thread that runs the worker loop claims its own ID: {enrolled:?}"
+        );
+    }
+
+    /// Attach two runtimes from one thread, then drive them. Each task's polls
+    /// resolve the runtime they actually run on, so attach order cannot file
+    /// one runtime's work under the other.
+    #[cfg(not(tokio_unstable))]
+    #[test]
+    fn attach_order_does_not_misattribute_polls() {
+        use std::collections::HashSet;
+
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let attach = |name: &str| {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+            rec.handle()
+                .attach_tokio_runtime(
+                    builder,
+                    TokioAttachOptions::builder().runtime_name(name).build(),
+                )
+                .unwrap()
+        };
+
+        let runtime_a = attach("main");
+        let runtime_b = attach("io");
+        runtime_a.block_on(async {
+            crate::telemetry::spawn(async {}).await.unwrap();
+        });
+
+        let block = |name: &str| -> HashSet<u64> {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            registry
+                .iter()
+                .find(|c| c.runtime_name.as_deref() == Some(name))
+                .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                .unwrap_or_default()
+        };
+        assert!(
+            !block("main").is_empty(),
+            "the runtime that ran the task must own the worker: main={:?} io={:?}",
+            block("main"),
+            block("io")
+        );
+        assert!(
+            block("io").is_empty(),
+            "the idle runtime must own no workers: io={:?}",
+            block("io")
+        );
+
+        drop(runtime_a);
+        drop(runtime_b);
+        rec.graceful_shutdown(Duration::from_secs(1));
+    }
+
+    /// One thread driving two `current_thread` runtimes in turn. The worker
+    /// caches are keyed by runtime, so the second runtime enrolls this thread
+    /// under its own worker ID instead of short-circuiting on the first one's.
+    #[cfg(not(tokio_unstable))]
+    #[test]
+    fn one_thread_driving_two_runtimes_enrolls_with_both() {
+        use std::collections::HashSet;
+
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let attach = |name: &str| {
+            let mut builder = tokio::runtime::Builder::new_current_thread();
+            builder.enable_all();
+            rec.handle()
+                .attach_tokio_runtime(
+                    builder,
+                    TokioAttachOptions::builder().runtime_name(name).build(),
+                )
+                .unwrap()
+        };
+
+        // Attach and drive in turn: attaching installs this thread's runtime
+        // context, so each drive claims under the runtime it belongs to.
+        // Several rounds, because a thread that only remembers its latest
+        // runtime would claim a new ID on every switch.
+        let runtime_a = attach("main");
+        let runtime_b = attach("io");
+        for _ in 0..3 {
+            for runtime in [&runtime_a, &runtime_b] {
+                runtime.block_on(async {
+                    crate::telemetry::spawn(async {}).await.unwrap();
+                });
+            }
+        }
+
+        let (main_ids, io_ids) = {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            let block = |name: &str| -> HashSet<u64> {
+                registry
+                    .iter()
+                    .find(|c| c.runtime_name.as_deref() == Some(name))
+                    .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                    .unwrap_or_default()
+            };
+            (block("main"), block("io"))
+        };
+        assert_eq!(
+            (main_ids.len(), io_ids.len()),
+            (1, 1),
+            "one driving thread is one worker per runtime, however often it switches: \
+             main={main_ids:?} io={io_ids:?}"
+        );
+        assert!(
+            main_ids.is_disjoint(&io_ids),
+            "runtimes must not share worker IDs: main={main_ids:?} io={io_ids:?}"
+        );
+
+        drop(runtime_a);
+        drop(runtime_b);
+        rec.graceful_shutdown(Duration::from_secs(1));
+    }
+
+    /// A panicking poll still closes its span: PollEnd comes from a drop
+    /// guard, so every PollStart has a matching PollEnd even when the future
+    /// unwinds.
+    #[cfg(not(tokio_unstable))]
+    #[test]
+    fn panicking_poll_still_emits_poll_end() {
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let runtime = rec
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder().runtime_name("main").build(),
+            )
+            .unwrap();
+
+        runtime.block_on(async {
+            crate::telemetry::spawn(async {}).await.unwrap();
+            let panicked = crate::telemetry::spawn(async { panic!("poll panic") }).await;
+            assert!(panicked.is_err(), "the panicking task must fail its join");
+        });
+
+        drop(runtime);
+        rec.graceful_shutdown(Duration::from_secs(1));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let count = |want: fn(&crate::telemetry::analysis_events::Dial9Event) -> bool| {
+            events.iter().filter(|e| want(e)).count()
+        };
+        let starts = count(|e| {
+            matches!(
+                e,
+                crate::telemetry::analysis_events::Dial9Event::PollStartEvent(..)
+            )
+        });
+        let ends = count(|e| {
+            matches!(
+                e,
+                crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
+            )
+        });
+        assert!(starts > 0, "expected poll events from the spawned tasks");
+        assert_eq!(
+            starts, ends,
+            "every PollStart needs a PollEnd, panic or not"
         );
     }
 
@@ -1364,7 +1701,7 @@ mod tests {
             rt.block_on(async {
                 let mut handles = Vec::new();
                 for _ in 0..50 {
-                    handles.push(tokio::spawn(async {
+                    handles.push(crate::telemetry::spawn(async {
                         tokio::task::yield_now().await;
                     }));
                 }

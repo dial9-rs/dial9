@@ -57,6 +57,7 @@ The setup diagnostic (`diagnose_setup.js`) runs automatically as part of `analyz
 | `missing-wake-events` | warning | Tasks spawned but no wake events recorded |
 | `missing-debug-symbols` | warning | Stack addresses unresolved or no source locations |
 | `no-scheduling-events` | info | No off-CPU samples (sched profiling not enabled) |
+| `no-tokio-unstable` | warning | Recorded without the flag, so poll events cover only dial9 spawns |
 
 Run standalone:
 ```bash
