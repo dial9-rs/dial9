@@ -130,6 +130,66 @@ macro_rules! define_thread_local {
 #[cfg(shuttle)]
 pub use crate::define_thread_local as thread_local;
 
+/// Pairs a shuttle scenario with both `check_pct` and
+/// `check_uncontrolled_nondeterminism`, so a new test can't add one without
+/// the other. Nests the scenario in its own module so `pct`/`determinism`
+/// can be fixed leaf names without needing identifier concatenation.
+///
+/// ```ignore
+/// shuttle_test! {
+///     num_iters = 5_000, depth = 3;
+///     fn my_scenario() { /* ... */ }
+/// }
+/// ```
+///
+/// Add `, should_panic` after `depth = $depth` to document a known,
+/// reproduced bug instead of asserting correctness.
+/// Do not use this macro for a scenario that touches real
+/// global `static` state — the generated `pct`/`determinism` tests run
+/// concurrently and would corrupt shuttle's own per-primitive bookkeeping if
+/// they shared such state; write those by hand, serialized behind a real
+/// `std::sync::Mutex`.
+#[cfg(shuttle)]
+#[macro_export]
+macro_rules! shuttle_test {
+    (num_iters = $num_iters:expr, depth = $depth:expr; fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            fn $name() $body
+
+            #[test]
+            fn pct() {
+                shuttle::check_pct($name, $num_iters, $depth);
+            }
+
+            #[test]
+            fn determinism() {
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+            }
+        }
+    };
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic; fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            fn $name() $body
+
+            #[test]
+            #[should_panic]
+            fn pct() {
+                shuttle::check_pct($name, $num_iters, $depth);
+            }
+
+            #[test]
+            #[should_panic]
+            fn determinism() {
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+            }
+        }
+    };
+}
+
 #[cfg(not(shuttle))]
 pub mod fs {
     use std::io::{self, Write};
