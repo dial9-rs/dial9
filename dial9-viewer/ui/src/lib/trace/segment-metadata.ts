@@ -36,6 +36,14 @@ export function readSegmentIdentity(trace: ParsedTrace | null): SegmentIdentity 
   );
 }
 
+/** Return every segment-metadata entry, sorted by key for display. */
+export function readSegmentMetadataEntries(
+  trace: ParsedTrace | null,
+): [string, string][] {
+  if (trace === null) return [];
+  return [...trace.segmentMetadata].sort(([a], [b]) => a.localeCompare(b));
+}
+
 /**
  * Parse the S3-key-derived `svc`/`host` identity the browser page appends to
  * the viewer URL (`traceTitleParams`). Accepts a `location.search` string.

@@ -138,13 +138,44 @@ pub struct WorkerUnparkEvent {
     pub tid: u32,
 }
 
+/// Legacy per-flush scheduler sample, summed across all runtimes.
+///
+/// Superseded by [`RuntimeMetricsEvent`], which reports the same metrics
+/// per-runtime rather than summed. No longer emitted by the recorder, but
+/// retained so the decoder can still read older traces (and so tests can
+/// synthesize old-format traces to exercise backwards compatibility).
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct QueueSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub global_queue: u8,
     pub active_tasks: u64,
+}
+
+/// Wire-format event for per-runtime scheduler metrics, sampled periodically by
+/// the flush thread.
+///
+/// Supersedes [`QueueSampleEvent`], which summed queue depth and active-task
+/// count across every attached runtime into a single sample and so lost
+/// per-runtime granularity. One `RuntimeMetricsEvent` is emitted per runtime
+/// per sample, tagged with the runtime's identity so consumers can attribute a
+/// backlog to a specific runtime.
+#[derive(TraceEvent)]
+#[traceevent(wire_slot)]
+pub(crate) struct RuntimeMetricsEvent {
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// Interned runtime name, or the empty string for the unnamed default
+    /// runtime. Interned (not an owned `String`) so the recorder re-emits the
+    /// same handle every flush cycle instead of allocating the name each time —
+    /// runtime names are a tiny fixed set for the process lifetime.
+    pub runtime_name: InternedString,
+    /// Tasks currently pending in this runtime's global (injection) queue.
+    pub global_queue_depth: u32,
+    /// Tasks currently alive (spawned and not yet completed) in this runtime.
+    pub alive_tasks: u32,
 }
 
 /// Wire-format event for a task spawn.
@@ -165,6 +196,9 @@ pub struct TaskSpawnEvent {
 
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
+// Only the `tokio_unstable` task hooks construct this. Unlike `TaskSpawnEvent`
+// it is not public API, so the stable build needs the dead-code allowance.
+#[cfg_attr(not(tokio_unstable), allow(dead_code))]
 pub(crate) struct TaskTerminateEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,

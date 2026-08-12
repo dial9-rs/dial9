@@ -76,6 +76,7 @@ export interface LaneHoverInput {
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
+  hasLocalQueueDepth: boolean;
 }
 
 /**
@@ -207,7 +208,9 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
     blockInPlace,
     poll,
     globalQueue: nearestGlobal ? nearestGlobal.global : null,
-    localQueue: nearestLocal ? nearestLocal.local : null,
+    // The recorded 0 is a sentinel; report unknown so the tooltip shows "-".
+    localQueue:
+      input.hasLocalQueueDepth && nearestLocal ? nearestLocal.local : null,
     activeTaskCount: activeTaskCountAt(input.activeTaskSamples, ns),
     span,
     hasClickableStack,

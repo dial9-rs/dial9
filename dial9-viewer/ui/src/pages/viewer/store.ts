@@ -60,6 +60,7 @@ export function initialViewerState(): StoreState {
       trackOrder: [],
       collapsed: {},
       collapsedRuntimes: {},
+      collapsedRuntimeMetrics: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       lanesViewportHeight: DEFAULT_LANES_HEIGHT,
       lanesScrollTop: 0,
@@ -77,6 +78,7 @@ export function initialViewerState(): StoreState {
       stacksAsFlamegraph: false,
     },
     view: {
+      fieldCharts: [],
       inspectorTab: "task",
       expandedPollGroups: new Set<string>(),
       pollFlamegraphSection: "cpu",

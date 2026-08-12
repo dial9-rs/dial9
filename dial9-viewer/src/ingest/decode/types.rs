@@ -5,6 +5,34 @@
 
 use std::collections::HashMap;
 
+use serde::Serialize;
+
+/// Evidence used to establish when a task became runnable, for scheduling-delay
+/// measurement (runnable → first poll). Serialized to the client as the poll's
+/// delay provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(u8)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SchedulingDelayKind {
+    /// Task spawn to its first poll. This remains measurable without wake events.
+    Spawn = 0,
+    /// A wake while the task was idle to its next poll.
+    Wake = 1,
+    /// A wake arrived during a poll, so readiness starts at that poll's end.
+    WakeDuringPoll = 2,
+}
+
+impl SchedulingDelayKind {
+    pub(crate) fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Spawn),
+            1 => Some(Self::Wake),
+            2 => Some(Self::WakeDuringPoll),
+            _ => None,
+        }
+    }
+}
+
 /// A resolved CPU sample ready for Parquet output.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSample {
@@ -29,10 +57,10 @@ pub(crate) struct ResolvedSample {
     /// fired, or `None` if the sample didn't land inside a poll or the task
     /// has no recorded spawn location.
     pub(crate) spawn_location: Option<String>,
-    /// Tracing spans whose locally observed entered intervals enclose this
-    /// sample's timestamp. Typically zero, one, or two entries. Populated
-    /// during span resolution (stage 3). Never lifecycle envelopes — an async
-    /// span that is exited (waiting) does NOT claim samples during its idle gap.
+    /// Spans whose locally observed active intervals enclose this sample's
+    /// timestamp. Typically zero, one, or two entries. Populated during span
+    /// resolution (stage 3). Never lifecycle envelopes when finer interval
+    /// evidence is available.
     pub(crate) enclosing_spans: Vec<EnclosingSpanSummary>,
 }
 
@@ -52,17 +80,31 @@ pub(crate) struct ResolvedPoll {
     pub(crate) host: String,
     pub(crate) service: String,
     pub(crate) date: String,
+    /// Wall-clock time when the task became runnable, when that transition can
+    /// be proven from a spawn or wake event in this trace segment.
+    pub(crate) ready_at_ns: Option<u64>,
+    /// Time from becoming runnable to this poll start. `None` means the segment
+    /// contains no safe readiness evidence; an inter-poll gap is not a valid
+    /// substitute because it can include legitimate I/O or timer waiting.
+    pub(crate) scheduling_delay_ns: Option<u64>,
+    /// Provenance of the readiness transition backing `scheduling_delay_ns`.
+    pub(crate) scheduling_delay_kind: Option<SchedulingDelayKind>,
+    /// Task that issued the wake, when the readiness evidence came from a wake.
+    pub(crate) waker_task_id: Option<u64>,
+    /// Whether the task used dial9's traced waker. `None` means the source trace
+    /// predates the `instrumented` field.
+    pub(crate) task_instrumented: Option<bool>,
 }
 
-/// A decoded tracing span close summary from the source file, ready for the
-/// `spans/` Parquet table. One row per `SpanCloseEvent` observed.
+/// A decoded tracing or single-event span summary from the source file, ready for
+/// the `spans/` Parquet table.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSpan {
     /// Stable 16-byte identity: BLAKE3(boot_id || span_instance_id)[..16].
     pub(crate) span_uid: [u8; 16],
     /// Grouping identity: BLAKE3(kind || target || name || file || line)[..16].
     pub(crate) span_type_uid: [u8; 16],
-    pub(crate) kind: &'static str,
+    pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) target: String,
     pub(crate) callsite_file: Option<String>,
@@ -152,7 +194,7 @@ pub(crate) struct EnclosingSpanSummary {
 }
 
 /// Return type for [`super::decode_samples`]: resolved samples, stacks
-/// dictionary, poll spans, and tracing span close summaries.
+/// dictionary, poll spans, and resolved tracing/single-event spans.
 pub(crate) type DecodeResult = (
     Vec<ResolvedSample>,
     HashMap<[u8; 16], Vec<String>>,
@@ -172,7 +214,7 @@ pub struct DecodeStats {
     /// start/end + span enter/exit/close). The headline "how big is this file"
     /// number.
     pub events_decoded: u64,
-    /// Legacy span enter + exit + close events (subset of `events_decoded`).
+    /// Span-producing wire events (subset of `events_decoded`).
     pub span_events_decoded: u64,
     /// Phase: one-pass wire decode (`decode_trace`).
     pub wire_decode: std::time::Duration,
@@ -182,7 +224,7 @@ pub struct DecodeStats {
     pub poll_reconstruct: std::time::Duration,
     /// Phase: the sample loop (symbolication + per-sample poll attribution).
     pub sample_resolve: std::time::Duration,
-    /// Phase: legacy span reconstruction (`resolve_legacy_spans`).
+    /// Phase: tracing/single-event span resolution.
     pub span_resolve: std::time::Duration,
     /// Phase: sweep-line sample→span attribution.
     pub sample_attribution: std::time::Duration,

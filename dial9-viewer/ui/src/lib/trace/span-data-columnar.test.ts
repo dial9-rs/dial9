@@ -11,7 +11,7 @@ import { parseTraceBuffer } from "./load.js";
 import { buildSpanData, buildWorkerSpans } from "./analysis.js";
 import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
-import { ColumnarSpanEvents } from "./columnar-span-events.js";
+import { ColumnarSpanEvents, SPAN_KIND } from "./columnar-span-events.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
 
 let raw: Uint8Array;
@@ -68,5 +68,193 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     }
 
     expect([...col.childrenByParent.entries()].sort()).toEqual([...fat.childrenByParent.entries()].sort());
+  });
+
+  it("prefers the namespaced task ID and preserves an application task_id", () => {
+    const workerSpans = {
+      0: { polls: [{ start: 900, end: 1100, taskId: 99 }], parks: [], actives: [] },
+      1: {
+        polls: [
+          { start: 900, end: 1100, taskId: 42 },
+          { start: 4000, end: 4100, taskId: 42 },
+        ],
+        parks: [],
+        actives: [],
+      },
+    } as never;
+    const spanEvents = new ColumnarSpanEvents();
+    spanEvents.push(SPAN_KIND.Enter, 1000, {
+      worker_id: 0,
+      "dial9.tokio.task_id": 42,
+      task_id: "application-task",
+      span_id: 1,
+      parent_span_id: null,
+      span_name: "request",
+    });
+    spanEvents.push(SPAN_KIND.Exit, 5000, {
+      worker_id: 0,
+      "dial9.tokio.task_id": 42,
+      task_id: "application-task",
+      span_id: 1,
+      span_name: "request",
+    });
+    spanEvents.push(SPAN_KIND.Close, 5100, { span_id: 1 });
+
+    const result = buildSpanDataColumnar(
+      spanEvents,
+      ColumnarWorkerSpans.fromWorkerSpans(workerSpans),
+    );
+    const span = result.columnarSpans!.at(0);
+    expect(span.taskId).toBe(42);
+    expect(span.segments).toEqual([
+      { start: 1000, end: 1100, workerId: 1 },
+      { start: 4000, end: 4100, workerId: 1 },
+    ]);
+    expect(span.fields.task_id).toBe("application-task");
+  });
+
+  it("keeps single-event lifecycle timing without inventing active segments", () => {
+    const spanEvents = new ColumnarSpanEvents(1);
+    spanEvents.push(
+      SPAN_KIND.Complete,
+      0,
+      {},
+      {
+        start: 100,
+        end: 150,
+        name: "Request",
+        spanType: "test-producer",
+        threadId: null,
+        taskId: 42,
+        workerId: null,
+        fields: { Attempts: 1 },
+        units: { Attempts: "count" },
+      },
+    );
+    const store = ColumnarWorkerSpans.fromWorkerSpans({});
+    const result = buildSpanDataColumnar(spanEvents, store);
+    const span = result.columnarSpans!.at(0);
+
+    expect(span.start).toBe(100);
+    expect(span.end).toBe(150);
+    expect(span.taskId).toBe(42);
+    expect(span.activeNs).toBe(0);
+    expect(span.segments).toEqual([]);
+    expect(span.spanType).toBe("test-producer");
+    expect(span.units).toEqual({ Attempts: "count" });
+  });
+
+  it("resolves remapped thread context at the span start", () => {
+    const spanEvents = new ColumnarSpanEvents(1);
+    spanEvents.push(
+      SPAN_KIND.Complete,
+      390,
+      {},
+      {
+        start: 310,
+        end: 390,
+        name: "Request",
+        spanType: "test-producer",
+        threadId: 77,
+        taskId: null,
+        workerId: null,
+        fields: {},
+        units: null,
+      },
+    );
+    const store = ColumnarWorkerSpans.fromWorkerSpans({
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1, spawnLocId: null, spawnLoc: null }],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+      1: {
+        polls: [{ start: 300, end: 400, taskId: 2, spawnLocId: null, spawnLoc: null }],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    });
+    const bindings = new Map([[
+      77,
+      [
+        { timestamp: 50, workerId: 0 },
+        { timestamp: 250, workerId: 1 },
+      ],
+    ]]);
+
+    const span = buildSpanDataColumnar(spanEvents, store, bindings)
+      .columnarSpans!.at(0);
+    expect(span.taskId).toBe(2);
+  });
+
+  it("does not derive a task from a thread inside a block-in-place handoff gap", () => {
+    const spanEvents = new ColumnarSpanEvents(1);
+    spanEvents.push(
+      SPAN_KIND.Complete,
+      170,
+      {},
+      {
+        start: 110,
+        end: 170,
+        name: "work",
+        spanType: "producer",
+        threadId: 77,
+        taskId: null,
+        workerId: null,
+        fields: {},
+        units: null,
+      },
+    );
+    const store = ColumnarWorkerSpans.fromWorkerSpans({
+      0: {
+        polls: [{ start: 100, end: 200, taskId: 1, spawnLocId: null, spawnLoc: null }],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    });
+    const bindings = new Map([[77, [{ timestamp: 50, workerId: 0 }]]]);
+    const gaps = [{
+      workerId: 0,
+      fromTid: 77,
+      toTid: 88,
+      startNs: 50,
+      endNs: 200,
+    }];
+
+    const span = buildSpanDataColumnar(spanEvents, store, bindings, gaps)
+      .columnarSpans!.at(0);
+    expect(span.taskId).toBeNull();
+    expect(span.segments).toEqual([]);
+    expect(span.activeNs).toBe(0);
+
+    const directlyAnnotatedEvents = new ColumnarSpanEvents(1);
+    directlyAnnotatedEvents.push(
+      SPAN_KIND.Complete,
+      170,
+      {},
+      {
+        start: 110,
+        end: 170,
+        name: "work",
+        spanType: "producer",
+        threadId: 77,
+        taskId: null,
+        workerId: 0,
+        fields: {},
+        units: null,
+      },
+    );
+    const directlyAnnotated = buildSpanDataColumnar(
+      directlyAnnotatedEvents,
+      store,
+      bindings,
+      gaps,
+    )
+      .columnarSpans!.at(0);
+    expect(directlyAnnotated.taskId).toBeNull();
+    expect(directlyAnnotated.segments).toEqual([]);
   });
 });

@@ -476,8 +476,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     reparse(range): void {
       // Set/Clear Range: re-parse the retained buffer with a time window, OFF
       // the main thread (reuses the worker load path via an object URL). The
-      // worker filters events to the window; initViewportFromTrace refits to
-      // the new trace's extent. No-op before the first load.
+      // worker filters events to the window; viewer-reconstruction's fitTrace
+      // refits to the new trace's extent. No-op before the first load.
       if (retainedBuffer === null) return;
       const objectUrl = createObjectUrl(new Blob([retainedBuffer]));
       begin([objectUrl], {

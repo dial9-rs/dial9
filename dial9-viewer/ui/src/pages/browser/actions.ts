@@ -11,7 +11,13 @@ import {
   totalBytes,
 } from "../../lib/canvas/heatmap.js";
 import { parseKey } from "../../lib/trace/keys.js";
-import { isDateLayer } from "../../lib/trace/prefixes.js";
+import { Dial9Creds } from "../../lib/trace/creds.js";
+import {
+  isLiteralConfigured,
+  makeSourceScope,
+  type SourceScope,
+} from "../../lib/trace/source-scope.js";
+import { isDateLayer, preferredPrefix } from "../../lib/trace/prefixes.js";
 import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import {
   apiFetch,
@@ -95,24 +101,38 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     return store.getState().ui.useLocalTz;
   }
 
+  function currentSource(): SourceScope {
+    const source = store.getState().source;
+    return makeSourceScope(
+      els.bucketInput.value.trim(),
+      els.credsRegion?.value.trim() || source.region,
+      source.credentials,
+    );
+  }
+
   // Mirror the current page state into the URL, replacing the history entry
   // so a stream of actions doesn't stack up Back-button steps. A quick range
   // is stored relative (`last=N`); a manually-edited range as precise
   // epoch-second from/to.
   function syncUrl(historyMode: "replace" | "push" = "replace"): void {
     if (restoring) return;
-    // The bucket's region rides in the URL (as aws_region) so a cross-region
-    // bucket is reproducible from a shared link. The credentials store is
-    // the source of truth; the secret keys are header-only, never here.
-    const storedCreds = window.Dial9Creds ? window.Dial9Creds.get() : null;
+    const source = currentSource();
+    const previousSource = store.getState().source;
+    if (
+      source.bucket !== previousSource.bucket ||
+      source.region !== previousSource.region ||
+      source.credentials !== previousSource.credentials
+    ) {
+      store.update("source", source);
+    }
     const s = store.getState();
     const state: UrlStateFields = {
-      bucket: els.bucketInput.value.trim(),
-      region: (storedCreds && storedCreds.region) || "",
-      // Echo the assume-role ARN so the read stays shareable (it's not a
-      // secret; static BYOC keys are never serialized). Only the role
-      // transport carries one.
-      roleArn: storedCreds && storedCreds.kind === "role" ? storedCreds.roleArn : "",
+      bucket: source.bucket,
+      region: source.region,
+      credentialMode: source.credentials.kind,
+      ...(source.credentials.kind === "role"
+        ? { roleArn: source.credentials.roleArn }
+        : {}),
       prefix: els.prefixInput.value.trim(),
       service: els.serviceInput.value.trim(),
       tab: s.ui.tab,
@@ -475,11 +495,16 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         syncUrl();
         return;
       }
-      // If there's exactly one prefix and the input is empty, auto-select it
-      if (prefixes.length === 1 && !els.prefixInput.value) {
-        els.prefixInput.value = prefixes[0]!.replace(/\/$/, "");
-        mirrorPrefix();
-        syncUrl();
+      // Pre-select a prefix when the input is empty: `dial9-traces` if the
+      // bucket offers it (the conventional default), otherwise the sole
+      // prefix. With several non-default prefixes we leave it to the user.
+      if (!els.prefixInput.value) {
+        const preferred = preferredPrefix(prefixes);
+        if (preferred) {
+          els.prefixInput.value = preferred;
+          mirrorPrefix();
+          syncUrl();
+        }
       }
       const labels = prefixes.map((p) => p.replace(/\/$/, ""));
       const current = els.prefixInput.value;
@@ -675,20 +700,17 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // region via /api/credentials/check before any data endpoint is hit, and
   // persist it into the stored credentials. No-op without credentials.
   async function detectRegionForBucket(bucket: string): Promise<void> {
-    if (!bucket || !window.Dial9Creds || !window.Dial9Creds.has()) return;
+    const source = currentSource();
+    const configured =
+      source.credentials.kind === "role" || isLiteralConfigured(source.credentials);
+    if (!bucket || !configured) return;
     try {
-      const result = await window.Dial9Creds.check(bucket);
-      if (result.ok && result.region) {
-        const stored = window.Dial9Creds.get();
-        if (stored && stored.region !== result.region) {
-          // Patch the region in place (known now, no second round trip).
-          // setRegion keeps the active transport's kind, so it works for an
-          // assumed-role credential too - a static-only set() would throw
-          // on the role path.
-          window.Dial9Creds.setRegion(result.region);
-          els.credsRegion.value = result.region;
-          syncUrl();
-        }
+      const result = await Dial9Creds.check(bucket);
+      if (result.ok && result.region && source.region !== result.region) {
+        Dial9Creds.setRegion(result.region);
+        els.credsRegion.value = result.region;
+        store.update("source", { ...source, region: result.region });
+        syncUrl();
       }
     } catch {
       // Best-effort: on failure, leave the prior region in place - the data

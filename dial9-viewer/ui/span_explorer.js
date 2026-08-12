@@ -503,6 +503,10 @@ function encodeSpanExplorerState(state) {
   setMaxFilesParam(p, state.max_files);
   if (state.bucket) p.set("bucket", state.bucket);
   if (state.region) p.set("aws_region", state.region);
+  if (state.credentialMode) p.set("credential_mode", state.credentialMode);
+  if (state.credentialMode === "role" && state.roleArn) {
+    p.set("aws_role_arn", state.roleArn);
+  }
   if (state.prefix) p.set("prefix", state.prefix);
   if (state.service) p.set("service", state.service);
   if (state.hosts) for (const h of state.hosts) p.append("host", h);
@@ -521,6 +525,8 @@ function decodeSpanExplorerState(params) {
     max_files: params.get("max_files") != null ? Number(params.get("max_files")) : null,
     bucket: params.get("bucket") || null,
     region: params.get("aws_region") || null,
+    credentialMode: params.get("credential_mode") || null,
+    roleArn: params.get("aws_role_arn") || null,
     prefix: params.get("prefix") || null,
     service: params.get("service") || null,
     hosts: params.getAll("host"),
@@ -541,6 +547,10 @@ function flamegraphUrl(state, phase) {
   setMaxFilesParam(p, state.max_files);
   if (state.bucket) p.set("bucket", state.bucket);
   if (state.region) p.set("aws_region", state.region);
+  if (state.credentialMode) p.set("credential_mode", state.credentialMode);
+  if (state.credentialMode === "role" && state.roleArn) {
+    p.set("aws_role_arn", state.roleArn);
+  }
   if (state.prefix) p.set("prefix", state.prefix);
   if (state.service) p.set("service", state.service);
   if (state.hosts) for (const h of state.hosts) p.append("host", h);
@@ -650,35 +660,41 @@ function exemplarRequestMatches(requestUid, requestScopeKey, currentUid, current
 // page for a narrow single-span window). We never emit start/end here.
 //
 // `exemplar` is a Exemplar: { start_ns, end_ns, source_key, host, ... }.
-// `scope` carries the page scope: { bucket, region, service, spanName } (the
-// exemplar's own host takes precedence — exemplars can come from different
-// hosts). `spanName`, when given, is forwarded as `focus_span_name` so the
-// viewer selects the exact span (a long span's window overlaps many others).
+// `scope` carries the page scope: { trace, bucket, region, service, spanName }.
+// Raw mode reuses `trace`; aggregate mode builds an `/api/object` component
+// from the exemplar source. The exemplar's own host takes precedence because
+// exemplars can come from different hosts. `spanName`, when given, is forwarded
+// as `focus_span_name` so the viewer selects the exact span (a long span's
+// window overlaps many others).
 //
-// Returns "" when the exemplar has no source_key to link to.
+// Returns "" when neither a raw trace nor an exemplar source is available.
 function exemplarViewerUrl(exemplar, scope) {
   const ex = exemplar || {};
   const sc = scope || {};
 
-  if (!ex.source_key) return "";
-  // The backend stores source_key as the fully-qualified `s3://{bucket}/{key}`
-  // (that's the `full_key` decode_samples was handed). But `/api/object` wants a
-  // bucket + a BUCKET-RELATIVE key — passing the whole `s3://…` URI as `key=`
-  // 404s. Split it back into bucket + relative key; fall back to the scope
-  // bucket and the raw key for a already-relative key (local mode / older data).
-  let bucket = sc.bucket || "";
-  let key = ex.source_key;
-  const s3 = /^s3:\/\/([^/]+)\/(.+)$/.exec(ex.source_key);
-  if (s3) {
-    bucket = s3[1];
-    key = s3[2];
+  let traceUrl = sc.trace || "";
+  if (!traceUrl) {
+    if (!ex.source_key) return "";
+    // The backend stores source_key as the fully-qualified
+    // `s3://{bucket}/{key}` (that's the `full_key` decode_samples was handed).
+    // But `/api/object` wants a bucket + a BUCKET-RELATIVE key — passing the
+    // whole `s3://…` URI as `key=` 404s. Split it back into bucket + relative
+    // key; fall back to the scope bucket and an already-relative key.
+    let bucket = sc.bucket || "";
+    let key = ex.source_key;
+    const s3 = /^s3:\/\/([^/]+)\/(.+)$/.exec(ex.source_key);
+    if (s3) {
+      bucket = s3[1];
+      key = s3[2];
+    }
+    // Mirror the landing page's objectTraceUrls(): one
+    // `/api/object?bucket=&key=` component, built via URLSearchParams so the
+    // key is correctly encoded.
+    const oq = new URLSearchParams();
+    oq.set("bucket", bucket);
+    oq.set("key", key);
+    traceUrl = "/api/object?" + oq.toString();
   }
-  // Mirror the landing page's objectTraceUrls(): one `/api/object?bucket=&key=`
-  // component, built via URLSearchParams so the key is correctly encoded.
-  const oq = new URLSearchParams();
-  oq.set("bucket", bucket);
-  oq.set("key", key);
-  const traceUrl = "/api/object?" + oq.toString();
 
   const p = new URLSearchParams();
   p.set("trace", traceUrl);
@@ -686,6 +702,8 @@ function exemplarViewerUrl(exemplar, scope) {
   // Prefer the exemplar's own host (it may differ from the scope's host set).
   if (ex.host) p.set("host", ex.host);
   if (sc.region) p.set("aws_region", sc.region);
+  if (sc.credentialMode) p.set("credential_mode", sc.credentialMode);
+  if (sc.credentialMode === "role" && sc.roleArn) p.set("aws_role_arn", sc.roleArn);
   // Non-destructive focus on the exact span. `focus_start` alone triggers the
   // pan; `focus_end` frames the zoom; `focus_span_name` lets the viewer select
   // the matching span rather than just pan to a time window.
@@ -695,204 +713,6 @@ function exemplarViewerUrl(exemplar, scope) {
     if (sc.spanName) p.set("focus_span_name", sc.spanName);
   }
   return "viewer.html?" + p.toString();
-}
-
-// ── Raw trace → SpanTypeStats catalog ────────────────────────────────────────
-
-// Parse colon-delimited tracing-layer names and struct-derived names such as
-// `SpanEnter__CustomStruct`. Struct-derived schemas carry no target/file/line,
-// so their type suffix is the best available callsite discriminator.
-function parseSpanEventName(evName) {
-  for (const prefix of ["SpanEnter__", "SpanExit__"]) {
-    if (evName.startsWith(prefix)) {
-      const name = evName.slice(prefix.length);
-      return name ? { target: "", name, file: null, line: null } : null;
-    }
-  }
-
-  // Strip the dynamic-schema prefix: "SpanEnter:" or "SpanExit:"
-  let body = null;
-  if (evName.startsWith("SpanEnter:")) body = evName.slice("SpanEnter:".length);
-  else if (evName.startsWith("SpanExit:")) body = evName.slice("SpanExit:".length);
-  else return null;
-
-  // Format: {target}::{name}:{file}:{line}
-  // Target can itself contain "::" so find the last "::" that separates target from name
-  // Actually the format is: target::name:file:line where target is a Rust module path
-  // But file can contain /, and name doesn't contain ":"
-  // Real format: everything between first "::" (after the target module) and the next ":" gives name,
-  // then file:line. But the target itself uses "::" (e.g. metrics_service::buffer).
-  // Looking at actual data: "metrics_service::buffer::flush_to_ddb:examples/metrics-service/src/buffer.rs:55"
-  // The schema name format from the tracing layer is "{target}::{name}:{file}:{line}"
-  // where target = "metrics_service::buffer", name = "flush_to_ddb",
-  // file = "examples/metrics-service/src/buffer.rs", line = "55"
-  //
-  // Strategy: split from the END. The last segment after ":" is the line number.
-  // Then work backwards to find the file (contains "/" or ".rs" etc).
-  // Actually easier: line is the last colon-segment (a number), the file is the
-  // second-to-last colon-separated group that contains a "/" or ".". The rest is target::name.
-
-  const lastColon = body.lastIndexOf(":");
-  if (lastColon < 0) return null;
-  const line = body.slice(lastColon + 1);
-  const rest = body.slice(0, lastColon);
-
-  // Now find the file: it's the last colon-separated segment that looks like a path
-  const secondLastColon = rest.lastIndexOf(":");
-  if (secondLastColon < 0) return null;
-  const file = rest.slice(secondLastColon + 1);
-  const targetAndName = rest.slice(0, secondLastColon);
-
-  // target::name — find last "::" to split
-  const lastDblColon = targetAndName.lastIndexOf("::");
-  if (lastDblColon < 0) {
-    return { target: "", name: targetAndName, file, line: Number(line) || 0 };
-  }
-  const target = targetAndName.slice(0, lastDblColon);
-  const name = targetAndName.slice(lastDblColon + 2);
-
-  return { target, name, file, line: Number(line) || 0 };
-}
-
-// Build a unique key for grouping spans by target/name/callsite.
-function spanCallsiteKey(target, name, file, line) {
-  return `${target}::${name}:${file}:${line}`;
-}
-
-// Given the output of buildSpanData (from trace_analysis.js), build a
-// SpanTypeStats-like catalog suitable for the catalog table in raw mode.
-// Each entry has: { span_type_uid, name, target, callsite_file, callsite_line,
-//   kind, count, p50_ns, p95_ns, p99_ns, max_ns, histogram, composition }.
-function buildSpanCatalog(allSpans, customEvents) {
-  // Prefer exact span-instance lookup so two struct-derived event types with
-  // the same runtime `span_name` remain distinct. Keep the name fallback for
-  // callers that provide older allSpans records without span IDs/start times.
-  const spanStartToCallsite = new Map();
-  const nameToCallsite = new Map();
-  for (const ev of customEvents) {
-    if (ev.name.startsWith("SpanEnter:") || ev.name.startsWith("SpanEnter__")) {
-      const fields = ev.fields || {};
-      const spanName = fields.span_name;
-      const parsed = parseSpanEventName(ev.name);
-      if (!parsed) continue;
-      if (fields.span_id != null) {
-        spanStartToCallsite.set(`${String(fields.span_id)}@${Number(ev.timestamp)}`, parsed);
-      }
-      if (spanName && !nameToCallsite.has(spanName)) {
-        nameToCallsite.set(spanName, parsed);
-      }
-    }
-  }
-
-  // Group spans by callsite key (target::name:file:line).
-  const groups = new Map(); // callsiteKey → { spans: [], callsite }
-  for (const s of allSpans) {
-    const exactKey = `${String(s.spanId)}@${Number(s.start)}`;
-    const callsite = spanStartToCallsite.get(exactKey) || nameToCallsite.get(s.spanName);
-    let key;
-    if (callsite) {
-      key = spanCallsiteKey(callsite.target, callsite.name, callsite.file, callsite.line);
-    } else {
-      key = s.spanName || "unknown";
-    }
-    if (!groups.has(key)) {
-      groups.set(key, { spans: [], callsite: callsite || null, spanName: s.spanName });
-    }
-    groups.get(key).spans.push(s);
-  }
-
-  // Build catalog entries with exact percentiles and log histogram.
-  const catalog = [];
-  for (const [key, group] of groups) {
-    const { spans, callsite, spanName } = group;
-    const durations = spans.map(s => s.activeNs).sort((a, b) => a - b);
-    const count = durations.length;
-    if (count === 0) continue;
-
-    const p = (frac) => durations[Math.min(count - 1, Math.floor(count * frac))];
-    const p50_ns = p(0.5);
-    const p95_ns = p(0.95);
-    const p99_ns = p(0.99);
-    const max_ns = durations[count - 1];
-    const min_ns = durations[0];
-
-    // Log-scale histogram: divide the range [min, max] into ~20 log-spaced bins.
-    const histogram = buildLogHistogram(durations, min_ns, max_ns);
-
-    // All-Unknown composition (raw mode has no CPU/sched breakdown).
-    const totalNs = durations.reduce((sum, d) => sum + d, 0);
-    const composition = null; // signals fallback in computeTimeComposition
-
-    catalog.push({
-      span_type_uid: key,
-      name: callsite ? callsite.name : spanName,
-      target: callsite ? callsite.target : null,
-      callsite_file: callsite ? callsite.file : null,
-      callsite_line: callsite ? callsite.line : null,
-      kind: "tracing",
-      count,
-      p50_ns,
-      p95_ns,
-      p99_ns,
-      max_ns,
-      histogram,
-      composition,
-      // Mark as partial quality: zero detailed instances.
-      details_complete_count: 0,
-      partial_count: count,
-    });
-  }
-
-  // Sort by count descending (default).
-  catalog.sort((a, b) => b.count - a.count);
-  return catalog;
-}
-
-// Build a log-scale histogram with ~20 bins from sorted durations.
-function buildLogHistogram(sortedDurations, minNs, maxNs) {
-  if (sortedDurations.length === 0) return [];
-  // Ensure we have a valid range
-  const lo = Math.max(1, minNs);
-  const hi = Math.max(lo + 1, maxNs);
-
-  const NUM_BINS = 20;
-  const logLo = Math.log(lo);
-  const logHi = Math.log(hi);
-  const step = (logHi - logLo) / NUM_BINS;
-
-  // Build bin edges
-  const edges = [];
-  for (let i = 0; i <= NUM_BINS; i++) {
-    edges.push(Math.round(Math.exp(logLo + i * step)));
-  }
-  // Deduplicate (very tight ranges can collapse bins)
-  const dedupEdges = [edges[0]];
-  for (let i = 1; i < edges.length; i++) {
-    if (edges[i] > dedupEdges[dedupEdges.length - 1]) dedupEdges.push(edges[i]);
-  }
-  if (dedupEdges.length < 2) {
-    dedupEdges.push(dedupEdges[0] + 1);
-  }
-
-  // Count into bins
-  const bins = [];
-  let di = 0;
-  for (let i = 0; i < dedupEdges.length - 1; i++) {
-    const binLo = dedupEdges[i];
-    const binHi = dedupEdges[i + 1];
-    let count = 0;
-    while (di < sortedDurations.length && sortedDurations[di] < binHi) {
-      count++;
-      di++;
-    }
-    bins.push({ lo_ns: binLo, hi_ns: binHi, count });
-  }
-  // Put remaining into last bin
-  if (di < sortedDurations.length) {
-    bins[bins.length - 1].count += sortedDurations.length - di;
-  }
-
-  return bins;
 }
 
 // ── Exports ──────────────────────────────────────────────────────────────────
@@ -929,9 +749,6 @@ var SpanExplorer = {
   exemplarRequestMatches,
   sameSpanCatalogStatistics,
   exemplarViewerUrl,
-  parseSpanEventName,
-  buildSpanCatalog,
-  buildLogHistogram,
   parseAttrFilterParams,
   formatAttrFilterParams,
   hasAttrFilter,

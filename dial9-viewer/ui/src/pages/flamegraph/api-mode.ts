@@ -7,15 +7,20 @@
 
 import {
   Dial9Creds,
+  Dial9Session,
+  applyToCreds,
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
+  isSourceShareable,
   nextMaxFiles,
   nsToPickerUtc,
   openSse,
   pickerUtcToNs,
+  readPlainSourceScope,
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
+  sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import type {
   ApiFlamegraphNode,
@@ -40,11 +45,16 @@ interface AvailFacet {
 
 export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const { loadingEl, errorEl, containerEl, titleEl, statsEl } = els;
+  const source = readPlainSourceScope(
+    params,
+    sourceScopeFromStored("", Dial9Creds.get()),
+  );
+  applyToCreds(source, Dial9Creds);
 
-  // No beforeCopy flush here: the URL is already current (Apply/facet changes
-  // pushState synchronously, and canvas zoom is deliberately not URL-synced in
-  // this mode).
-  mountCopyLink(els.headerEl);
+  // Literal credential URLs are useful for same-tab reloads but are not safe
+  // built-in share targets. The private account-ID userscript owns that flow.
+  const copyLink = mountCopyLink(els.headerEl);
+  copyLink.el.style.display = isSourceShareable(source) ? "" : "none";
 
   // Filter toolbar. The facet controls are built from the backend's reported
   // metadata facets (see renderFacets), so only dimensions with data appear;
@@ -103,7 +113,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // (the box's service; hosts live alongside facetState above).
   const dataDir = params.get("data_dir");
   const scopeService = params.get("service");
-  const scopeBucket = params.get("bucket");
+  const scopeBucket = source.bucket || params.get("bucket");
   const scopePrefix = params.get("prefix");
 
   // Span-type filter from a Span Explorer deep link. Fixed for the life of the
@@ -121,7 +131,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     const band = minimap?.band() ?? { minPollNs: null, maxPollNs: null };
     return {
       dataDir,
-      bucket: scopeBucket,
+      source: { ...source, bucket: scopeBucket || source.bucket },
       prefix: scopePrefix,
       service: scopeService,
       hosts,
@@ -394,7 +404,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     const token = ++streamToken;
     abortCtl = new AbortController();
     void openSse(buildApiUrl(queryState(), window.location.origin), {
-      headers: Dial9Creds.headers(),
+      headers: Dial9Session.headers(Dial9Creds.headers()),
       signal: abortCtl.signal,
       onEvent: (obj) => {
         if (token !== streamToken) return;

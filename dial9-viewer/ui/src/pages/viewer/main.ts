@@ -22,10 +22,23 @@ import { mountLoadChrome } from "./load-chrome.js";
 import { mountInspector } from "./inspector.js";
 import { createRegionAnalysis } from "./region-analysis.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
-import { mountOverlay } from "../../components/overlay/index.js";
+import { mountOverlay, tooltipRowsTemplate } from "../../components/overlay/index.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
+import {
+  cpuIntervalAt,
+  cpuIntervalTooltip,
+  cpuSeriesFor,
+} from "./cpu.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
-import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
+import {
+  Dial9Creds,
+  applyToCreds,
+  isSourceShareable,
+  readNamespacedSourceScope,
+  readPlainSourceScope,
+  sourceScopeFromStored,
+  readKeyDerivedIdentity,
+} from "../../lib/trace/index.js";
 import { bootScopeFromSearch } from "./scope-boot.js";
 import {
   bindViewStateToUrl,
@@ -41,6 +54,7 @@ import { buildSearchIndex, searchWindow } from "./search-model.js";
 import type { SearchResult } from "./search-model.js";
 import { poiJump } from "./poi.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
+import { mountFieldChartDialog } from "./field-chart-dialog.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
 // <head> auto-boot is a no-op on this off-root new-UI path.
@@ -58,6 +72,13 @@ function boot(): void {
   if (root === null) {
     throw new Error("viewer shell: #app mount point missing");
   }
+
+  const params = new URLSearchParams(window.location.search);
+  const fallbackSource = sourceScopeFromStored("", Dial9Creds.get());
+  const credentialSource = params.has("s_bucket") || params.has("s_credential_mode")
+    ? readNamespacedSourceScope(params, fallbackSource)
+    : readPlainSourceScope(params, fallbackSource);
+  applyToCreds(credentialSource, Dial9Creds);
 
   const store = createViewerStore();
 
@@ -99,6 +120,7 @@ function boot(): void {
     getIndex: () => searchIndex(),
     onPick: (r) => navigateToSearchResult(r),
   });
+  const fieldChartDialog = mountFieldChartDialog(document, store, esc);
   function navigateToSearchResult(r: SearchResult): void {
     const vp = store.getState().viewport;
     if (r.nav.kind === "poi") {
@@ -149,10 +171,12 @@ function boot(): void {
     // toolbar reconciles it against the trace-embedded metadata.
     keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
     onNewFile: () => loadChrome?.requestNewFile(),
+    onOpenFieldCharts: () => fieldChartDialog.openCatalog(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     // Set Range: re-parse the loaded trace filtered to the current view, off
     // the main thread; the reparsed trace's extent becomes the new bounds
-    // (initViewportFromTrace refits). Clear Range: re-parse the full trace.
+    // (viewer-reconstruction's fitTrace refits). Clear Range: re-parse the
+    // full trace.
     onSetRange: (range) => loadChrome?.reparseToRange(range),
     onClearRange: () => loadChrome?.reparseToRange(null),
   });
@@ -188,8 +212,22 @@ function boot(): void {
   // subscriber runs LAST each frame - it re-ensures the overlay canvas after
   // any shell re-render that would clobber it, and reads column geometry only
   // after the shell's writes have settled.
-  const overlay = mountOverlay(root, shell.trackColumn, store, (state, ns) =>
-    fmtAxisTick(deriveAxisInputs(state), ns, false),
+  const overlay = mountOverlay(
+    root,
+    shell.trackColumn,
+    store,
+    (state, ns) => fmtAxisTick(deriveAxisInputs(state), ns, false),
+    (trackId, state, ns) => {
+      if (trackId !== "cpu" || state.trace.trace === null) return null;
+      const series = cpuSeriesFor(state.trace.trace);
+      const interval = cpuIntervalAt(series.intervals, ns);
+      if (interval === null) return null;
+      return tooltipRowsTemplate(
+        cpuIntervalTooltip(interval, series.availableParallelism).map((row) => [
+          { label: `${row.label}:`, value: row.value },
+        ]),
+      );
+    },
   );
 
   // Persistent inspector sidebar: tabs (Task/Poll/Event/Related/Stack), the
@@ -200,6 +238,8 @@ function boot(): void {
   const inspector = mountInspector(shell.inspectorRegion, store, {
     esc,
     regionPanel,
+    chartField: (eventName, fieldName) =>
+      fieldChartDialog.open(eventName, fieldName),
     preserveInitialTab: urlView.inspectorTab !== undefined,
     preserveInitialPollView:
       urlView.poll !== undefined &&
@@ -225,6 +265,7 @@ function boot(): void {
   // copy-link button, and the key hints. The copy-link copies the live URL,
   // passing a `beforeCopyLink` flush so it reflects live state.
   const statusBar = createStatusBar(shell.statusRegion, store, {
+    copyLinkVisible: isSourceShareable(credentialSource),
     clearSelection: () => {
       store.update("selection", {
         selectedTaskId: null,
@@ -335,6 +376,7 @@ function boot(): void {
   window.addEventListener("beforeunload", () => {
     urlBinding?.dispose();
     search.dispose();
+    fieldChartDialog.dispose();
     disposeTrackPrefs();
     loadChrome?.dispose();
     statusBar.dispose();

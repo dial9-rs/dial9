@@ -20,6 +20,7 @@ import {
   formatHumanDuration,
   hasCpuProfileSamples,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
   type IdentityField,
   type ReconciledIdentity,
@@ -32,6 +33,8 @@ export type AnalysisKind = "cpu" | "blocking" | "heap";
 
 /** Injected surface seams for controls whose panels other components own. */
 export interface ToolbarDeps {
+  /** Open the trace-wide catalogue of graphable custom-event fields. */
+  onOpenFieldCharts(): void;
   /** Open a whole-trace analysis in the inspector. */
   onOpenAnalysis(kind: AnalysisKind): void;
   /** Set a time-range filter from the current viewport (reparse). */
@@ -252,6 +255,7 @@ function analysisTemplate(
 
   return html`
     ${redFlagsChip(trace)}
+    ${fieldChartsButton(deps.onOpenFieldCharts)}
     ${schedCount > 0
       ? analysisButton(
           "d9-btn-blocking",
@@ -277,6 +281,35 @@ function analysisTemplate(
         )
       : ""}
     ${infoMenu(trace, sourceLabel, uninstrumented)}
+  `;
+}
+
+function fieldChartsButton(onClick: () => void): TemplateResult {
+  const title = "Browse graphable custom-event fields";
+  return html`
+    <button
+      type="button"
+      class="d9-toolbar-btn d9-field-charts-btn"
+      id="d9-btn-field-charts"
+      title=${title}
+      aria-label=${title}
+      @click=${onClick}
+    >
+      <svg
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <path d="M2.5 2.5v11h11"></path>
+        <path d="m4 10 2.5-3 2.2 1.8L12.5 4"></path>
+      </svg>
+      Field charts
+    </button>
   `;
 }
 
@@ -333,6 +366,11 @@ function infoMenu(
   sourceLabel: string,
   uninstrumented: number,
 ): TemplateResult {
+  const metadata = readSegmentMetadataEntries(trace);
+  const infoTitle =
+    metadata.length > 0
+      ? "Trace details and segment metadata"
+      : "Trace and load details (parse performance, uninstrumented tasks)";
   const workers = new Set(trace.tidToWorker.values()).size;
   const duration =
     trace.minTs !== null && trace.maxTs !== null
@@ -342,31 +380,73 @@ function infoMenu(
     <details class="d9-info-menu" data-info-menu>
       <summary
         class="d9-toolbar-btn d9-info-summary"
-        title="Trace and load details (parse performance, uninstrumented tasks)"
-        aria-label="Trace and load details"
+        title=${infoTitle}
+        aria-label=${infoTitle}
       >
         ⓘ
       </summary>
-      <div class="d9-info-menu-body" role="group" aria-label="Trace details">
-        <div class="d9-info-heading">Load &amp; trace</div>
-        <div class="d9-info-row"><span>source</span><span>${sourceLabel}</span></div>
-        <div class="d9-info-row"><span>events</span><span>${trace.events.length.toLocaleString()}</span></div>
-        <div class="d9-info-row"><span>workers</span><span>${workers}</span></div>
-        <div class="d9-info-row"><span>duration</span><span>${duration}</span></div>
-        <div class="d9-info-row"><span>truncated</span><span>${trace.truncated ? "yes" : "no"}</span></div>
-        <div class="d9-info-note">
-          Detailed fetch/parse timing (Parse perf) is recorded by the load
-          pipeline.
+      <div
+        class=${metadata.length > 0
+          ? "d9-info-menu-body d9-info-menu-body-wide"
+          : "d9-info-menu-body"}
+        role="group"
+        aria-label="Trace details"
+      >
+        <div class="d9-info-grid">
+          <div class="d9-info-heading">Load &amp; trace</div>
+          <div class="d9-info-row"><span>source</span><span>${sourceLabel}</span></div>
+          <div class="d9-info-row"><span>events</span><span>${trace.events.length.toLocaleString()}</span></div>
+          <div class="d9-info-row"><span>workers</span><span>${workers}</span></div>
+          <div class="d9-info-row"><span>duration</span><span>${duration}</span></div>
+          <div class="d9-info-row"><span>truncated</span><span>${trace.truncated ? "yes" : "no"}</span></div>
+          <div class="d9-info-note">
+            Detailed fetch/parse timing (Parse perf) is recorded by the load
+            pipeline.
+          </div>
+          ${uninstrumented > 0
+            ? html`<div class="d9-info-heading">Uninstrumented</div>
+                <div class="d9-info-row">
+                  <span>tasks</span><span>${uninstrumented}</span>
+                </div>
+                <div class="d9-info-note">
+                  Spawned via raw <code>tokio::spawn</code> (no wake tracking).
+                  Use <code>TelemetryHandle::spawn</code> for full data.
+                </div>`
+            : ""}
         </div>
-        ${uninstrumented > 0
-          ? html`<div class="d9-info-heading">Uninstrumented</div>
-              <div class="d9-info-row">
-                <span>tasks</span><span>${uninstrumented}</span>
-              </div>
+        ${!trace.hasFullTaskCoverage
+          ? html`<div class="d9-info-heading">Reduced fidelity</div>
               <div class="d9-info-note">
-                Spawned via raw <code>tokio::spawn</code> (no wake tracking).
-                Use <code>TelemetryHandle::spawn</code> for full data.
+                Recorded without <code>--cfg tokio_unstable</code>. Poll events
+                cover only tasks spawned through dial9's helpers
+                (<code>spawn</code>, <code>spawn_in</code>,
+                <code>block_on</code>, <code>spawn_with</code>), and the task
+                list and blocking-call analysis are built from them. Task
+                lifetimes and per-worker queue depth are unavailable.
               </div>`
+          : ""}
+        ${metadata.length > 0
+          ? html`<div class="d9-info-heading" id="d9-segment-metadata-heading">
+                Segment metadata
+              </div>
+              <table
+                class="d9-info-metadata-table"
+                aria-labelledby="d9-segment-metadata-heading"
+              >
+                <thead>
+                  <tr><th scope="col">Key</th><th scope="col">Value</th></tr>
+                </thead>
+                <tbody>
+                  ${metadata.map(
+                    ([key, value]) => html`
+                      <tr>
+                        <td><code title=${key}>${key}</code></td>
+                        <td><code title=${value}>${value}</code></td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>`
           : ""}
       </div>
     </details>

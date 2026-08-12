@@ -7,8 +7,18 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
-import type { SpawnLocStats, TokioStatsResponse } from "../../lib/trace/index.js";
-import { buildDiffModel, computeStats, singlePeriodRows } from "./stats.js";
+import type {
+  SpawnLocStats,
+  TokioStatsResponse,
+  WorkerStats,
+} from "../../lib/trace/index.js";
+import {
+  buildDiffModel,
+  buildHostRows,
+  computeStats,
+  singlePeriodRows,
+  sortedWorkers,
+} from "./stats.js";
 
 const REFINE: TokioStatsResponse = JSON.parse(
   readFileSync(
@@ -162,3 +172,111 @@ describe("buildDiffModel", () => {
   });
 });
 
+
+describe("buildHostRows (Worker activity grouping)", () => {
+  function worker(over: Partial<WorkerStats> = {}): WorkerStats {
+    return {
+      worker_id: 0,
+      host: "h1",
+      total_polls: 10,
+      busy_ns: 1_000,
+      span_ns: 10_000,
+      busy_pct: 10,
+      notable_polls: 1,
+      worst_poll_ns: 5_000,
+      ...over,
+    };
+  }
+  const workerResp = (workers: WorkerStats[]): TokioStatsResponse => ({
+    time_span_ns: 60e9,
+    total_polls: 100,
+    bucket: "b",
+    by_spawn_loc: [],
+    worker_activity: workers,
+  });
+
+  it("returns [] when the response carries no worker activity", () => {
+    expect(buildHostRows(undefined, "busyPct", true)).toEqual([]);
+    expect(buildHostRows(workerResp([]), "busyPct", true)).toEqual([]);
+  });
+
+  it("groups workers by host and sums poll counts", () => {
+    const rows = buildHostRows(
+      workerResp([
+        worker({ host: "h1", worker_id: 0, total_polls: 10, notable_polls: 2 }),
+        worker({ host: "h1", worker_id: 1, total_polls: 5, notable_polls: 1 }),
+        worker({ host: "h2", worker_id: 0, total_polls: 7, notable_polls: 3 }),
+      ]),
+      "host",
+      false,
+    );
+    expect(rows.map((r) => r.host)).toEqual(["h1", "h2"]);
+    expect(rows[0]!.totalPolls).toBe(15);
+    expect(rows[0]!.notablePolls).toBe(3);
+    expect(rows[1]!.totalPolls).toBe(7);
+  });
+
+  it("host busyness POOLS workers (Σ busy / Σ span), not a mean of percentages", () => {
+    // A sparsely-observed worker at 100% and a heavily-observed one at 1%:
+    // pooled = (100 + 100) / (100 + 10_000) = ~1.98%, whereas averaging the
+    // per-worker percentages would report a misleading ~50%.
+    const rows = buildHostRows(
+      workerResp([
+        worker({ worker_id: 0, busy_ns: 100, span_ns: 100, busy_pct: 100 }),
+        worker({ worker_id: 1, busy_ns: 100, span_ns: 10_000, busy_pct: 1 }),
+      ]),
+      "busyPct",
+      true,
+    );
+    expect(rows[0]!.busyPct).toBeCloseTo((200 / 10_100) * 100, 6);
+    expect(rows[0]!.busyPct).toBeLessThan(3);
+  });
+
+  it("reports active vs configured worker counts (max id + 1)", () => {
+    // Workers 0 and 3 observed -> 2 active, 4 configured.
+    const rows = buildHostRows(
+      workerResp([worker({ worker_id: 0 }), worker({ worker_id: 3 })]),
+      "busyPct",
+      true,
+    );
+    expect(rows[0]!.activeWorkers).toBe(2);
+    expect(rows[0]!.numWorkers).toBe(4);
+  });
+
+  it("worstPollNs is the max across the host's workers", () => {
+    const rows = buildHostRows(
+      workerResp([
+        worker({ worker_id: 0, worst_poll_ns: 5_000 }),
+        worker({ worker_id: 1, worst_poll_ns: 9_000 }),
+      ]),
+      "busyPct",
+      true,
+    );
+    expect(rows[0]!.worstPollNs).toBe(9_000);
+  });
+
+  it("sorts by the requested key in both directions", () => {
+    const data = workerResp([
+      worker({ host: "a", total_polls: 5 }),
+      worker({ host: "b", total_polls: 50 }),
+    ]);
+    expect(buildHostRows(data, "totalPolls", true).map((r) => r.host)).toEqual(["b", "a"]);
+    expect(buildHostRows(data, "totalPolls", false).map((r) => r.host)).toEqual(["a", "b"]);
+    // Host is a string key, so it compares lexically rather than numerically.
+    expect(buildHostRows(data, "host", false).map((r) => r.host)).toEqual(["a", "b"]);
+  });
+
+  it("falls back to '(unknown)' for a blank host", () => {
+    expect(buildHostRows(workerResp([worker({ host: "" })]), "busyPct", true)[0]!.host).toBe(
+      "(unknown)",
+    );
+  });
+
+  it("sortedWorkers orders a host's workers busiest-first without mutating", () => {
+    const ws = [worker({ worker_id: 0, busy_pct: 1 }), worker({ worker_id: 1, busy_pct: 9 })];
+    const row = buildHostRows(workerResp(ws), "busyPct", true)[0]!;
+    expect(sortedWorkers(row).map((w) => w.worker_id)).toEqual([1, 0]);
+    // The row keeps its original order (sortedWorkers copies).
+    expect(row.workers.map((w) => w.worker_id)).toEqual([0, 1]);
+  });
+});

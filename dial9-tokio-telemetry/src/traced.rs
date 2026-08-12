@@ -2,12 +2,13 @@
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::format::WakeEventEvent;
-use crate::telemetry::recorder::SharedState;
+use crate::telemetry::recorder::{RuntimeContext, SharedState};
 use crate::telemetry::task_metadata::TaskId;
 use dial9_core::handle::Dial9Handle;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
 use pin_project_lite::pin_project;
 use std::future::Future;
+use std::panic::Location;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -43,6 +44,8 @@ pin_project! {
     pub struct TracedFuture<F> {
         #[pin]
         state: TracedFutureState<F>,
+        // Carried to the first poll, where the task id becomes resolvable.
+        spawn_loc: &'static Location<'static>,
     }
 }
 
@@ -68,19 +71,25 @@ enum HandleSource {
 }
 
 impl<F> TracedFuture<F> {
+    #[track_caller]
     pub(crate) fn new(inner: F, handle: Option<TracedHandle>) -> Self {
         let source = match handle {
             Some(handle) => HandleSource::Eager(handle),
             None => HandleSource::Passthrough,
         };
         Self {
+            // The spawn site, resolved through the `#[track_caller]` chain from
+            // the public spawn helpers. Stands in for `TaskMeta::spawned_at()`.
+            spawn_loc: Location::caller(),
             state: TracedFutureState::Init { inner, source },
         }
     }
 
     /// Defer handle resolution to the first poll (see [`HandleSource::Lazy`]).
+    #[track_caller]
     pub(crate) fn new_lazy(inner: F) -> Self {
         Self {
+            spawn_loc: Location::caller(),
             state: TracedFutureState::Init {
                 inner,
                 source: HandleSource::Lazy,
@@ -115,17 +124,40 @@ pin_project! {
         #[pin]
         inner: F,
         waker_data: Arc<TracedWakerData>, // reused across polls to avoid a per-poll Arc allocation
+        // The runtime this task runs on, when dial9 is attached to it. `None`
+        // means nothing to attribute polls to, so this wrapper records none.
+        runtime_ctx: Option<Arc<RuntimeContext>>,
+        // Spawn site for the poll events this wrapper emits in place of
+        // tokio's poll hooks (`pin_project!` takes no `#[cfg]` on fields, so
+        // it is carried unconditionally).
+        spawn_loc: &'static Location<'static>,
     }
 }
 
 impl<F> WakeTraced<F> {
-    pub(crate) fn new(inner: F, handle: TracedHandle, task_id: TaskId) -> Self {
+    pub(crate) fn new(
+        inner: F,
+        handle: TracedHandle,
+        task_id: TaskId,
+        spawn_loc: &'static Location<'static>,
+    ) -> Self {
+        // Tokio's poll hooks cover every poll under the flag, so the wrapper
+        // never records and has nothing to resolve.
+        #[cfg(tokio_unstable)]
+        let runtime_ctx = None;
+        #[cfg(not(tokio_unstable))]
+        let runtime_ctx = crate::telemetry::recorder::current_runtime_ctx(&handle.shared);
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),
             woken_task_id: task_id,
             shared: handle.shared.clone(),
         });
-        Self { inner, waker_data }
+        Self {
+            inner,
+            waker_data,
+            runtime_ctx,
+            spawn_loc,
+        }
     }
 }
 
@@ -176,7 +208,12 @@ fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
     arc_waker(data)
 }
 
-fn make_instrumented<F>(inner: F, handle: TracedHandle, task_id: TaskId) -> InstrumentedFuture<F>
+fn make_instrumented<F>(
+    inner: F,
+    handle: TracedHandle,
+    task_id: TaskId,
+    spawn_loc: &'static std::panic::Location<'static>,
+) -> InstrumentedFuture<F>
 where
     F: Future,
 {
@@ -186,14 +223,16 @@ where
     #[cfg(not(feature = "taskdump"))]
     let _ = shared;
 
-    WakeTraced::new(inner, handle, task_id)
+    WakeTraced::new(inner, handle, task_id, spawn_loc)
 }
 
 impl<F: Future> Future for TracedFuture<F> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.project().state;
+        let this = self.project();
+        let spawn_loc = *this.spawn_loc;
+        let mut state = this.state;
 
         loop {
             match state.as_mut().project() {
@@ -237,7 +276,7 @@ impl<F: Future> Future for TracedFuture<F> {
                 continue;
             };
 
-            let inner = make_instrumented(inner, handle, task_id);
+            let inner = make_instrumented(inner, handle, task_id, spawn_loc);
             state.set(TracedFutureState::Instrumented { inner });
         }
     }
@@ -261,7 +300,51 @@ impl<F: Future> Future for WakeTraced<F> {
 
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
+
+        use crate::telemetry::recorder::{make_poll_start, poll_span_open};
+
+        // Only record polls this wrapper owns: a task on a runtime dial9 is not
+        // attached to has nothing to attribute them to, and poll events claim
+        // worker occupancy, so emitting inside an open span (tokio's hooks, or
+        // an outer wrapper) would claim the same time twice.
+        let Some(ctx) = this.runtime_ctx.as_deref().filter(|_| !poll_span_open()) else {
+            return this.inner.poll(&mut traced_cx);
+        };
+        // Closes the span on the way out, panic or not. A panicking future
+        // unwinds past the rest of this function and tokio catches it above us.
+        let _guard = PollSpanGuard {
+            ctx,
+            shared: &this.waker_data.shared,
+        };
+        this.waker_data.shared.if_enabled(|buf| {
+            buf.record_encodable_event(&make_poll_start(
+                Some(ctx),
+                &this.waker_data.shared,
+                this.spawn_loc,
+                this.waker_data.woken_task_id,
+            ));
+        });
         this.inner.poll(&mut traced_cx)
+    }
+}
+
+/// Closes the poll span its wrapper opened, and clears the thread's span
+/// marker unconditionally: a buffer disabled at drop time must not leave the
+/// marker set.
+struct PollSpanGuard<'a> {
+    ctx: &'a RuntimeContext,
+    shared: &'a SharedState,
+}
+
+impl Drop for PollSpanGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.if_enabled(|buf| {
+            buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
+                Some(self.ctx),
+                self.shared,
+            ));
+        });
+        crate::telemetry::recorder::clear_poll_span();
     }
 }
 

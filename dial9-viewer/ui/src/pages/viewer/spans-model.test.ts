@@ -30,6 +30,7 @@ interface SpanOpts {
   parent?: string | null;
   worker?: number;
   fields?: Record<string, unknown>;
+  units?: Record<string, string> | null;
   segments?: { start: number; end: number; workerId: number }[];
   activeNs?: number;
   taskId?: number;
@@ -44,6 +45,7 @@ function span(id: string, name: string, start: number, end: number, o: SpanOpts 
     spanId: id,
     spanName: name,
     fields: (o.fields ?? {}) as TracingSpan["fields"],
+    units: o.units,
     parentSpanId: o.parent ?? null,
     segments,
     activeNs,
@@ -66,6 +68,7 @@ function trackData(spans: TracingSpan[]): SpanTrackData {
     spanMeta.set(s.spanId, {
       spanName: s.spanName,
       fields: s.fields,
+      units: s.units,
       parentSpanId: s.parentSpanId,
     });
     const kids = childrenByParent.get(s.parentSpanId) ?? [];
@@ -94,6 +97,7 @@ function enter(ts: number, spanId: string, name: string, extra: Record<string, u
     timestamp: ts,
     fields: { worker_id: 0, span_id: spanId, span_name: name, ...extra } as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 function exit(ts: number, spanId: string, name: string, worker = 0): CustomTraceEvent {
@@ -102,6 +106,7 @@ function exit(ts: number, spanId: string, name: string, worker = 0): CustomTrace
     timestamp: ts,
     fields: { worker_id: worker, span_id: spanId, span_name: name } as CustomTraceEvent["fields"],
     units: null,
+    fieldKinds: null,
   };
 }
 function lane(polls: { start: number; end: number; taskId: number }[]): WorkerLane {
@@ -433,10 +438,17 @@ describe("spanLabelModel + focusInfoLine", () => {
   });
 
   it("renders the focused span name + a copyable row per field", () => {
-    const data = trackData([span("1", "auth", 0, 10, { fields: { user: "abc" } })]);
+    const data = trackData([
+      span("1", "auth", 0, 10, {
+        fields: { latency: 1_500_000 },
+        units: { latency: "ns" },
+      }),
+    ]);
     const label = spanLabelModel("1", data);
     expect(label?.name).toBe("auth");
-    expect(label?.rows).toEqual([{ key: "user", display: "abc", copy: "abc" }]);
+    expect(label?.rows).toEqual([
+      { key: "latency", display: "1.50ms", copy: "1500000" },
+    ]);
   });
 
   it("formats the focus readout name: dur (P% of N) P50 P99", () => {

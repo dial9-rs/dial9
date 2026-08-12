@@ -247,6 +247,16 @@ export interface TaskViewModel {
   sorted: readonly TaskIndexRow[];
   /** Total task count (the "N/total" position). */
   total: number;
+  /**
+   * False when this list covers only dial9-spawned tasks. Drives the empty
+   * state, which then explains why the list may be short.
+   */
+  hasFullTaskCoverage: boolean;
+  /**
+   * "none": no spawn events, "-" `life` cells mean "not captured", not
+   * "instant". "partial": some rows captured, some not.
+   */
+  taskLifetimeCoverage: "all" | "partial" | "none";
 }
 
 /**
@@ -268,6 +278,8 @@ export function deriveTaskViewModel(
       windowStart: 0,
       sorted: [],
       total: 0,
+      hasFullTaskCoverage: true,
+      taskLifetimeCoverage: "all",
     };
   }
   const sorted = sortTasks(taskIndexFor(trace).rows, poi.taskSort, poi.taskSortDir);
@@ -292,6 +304,12 @@ export function deriveTaskViewModel(
     index,
     rows,
     windowStart: start,
+    hasFullTaskCoverage: trace.hasFullTaskCoverage,
+    taskLifetimeCoverage: !trace.hasTaskLifetimes
+      ? "none"
+      : sorted.some((t) => t.lifetimeNs === null)
+        ? "partial"
+        : "all",
     sorted,
     total: sorted.length,
   };

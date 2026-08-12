@@ -51,6 +51,7 @@ fn build_capturing_recorder() -> (
 /// `spawn_in` from a thread that belongs to no runtime still yields an
 /// instrumented task: the spawn is marked instrumented and the task's wakes
 /// are recorded.
+#[cfg(tokio_unstable)]
 #[test]
 fn spawn_in_from_off_runtime_thread_is_instrumented() {
     let (rec, rt, batches) = build_capturing_recorder();
@@ -91,6 +92,7 @@ fn spawn_in_from_off_runtime_thread_is_instrumented() {
 
 /// `block_on` runs the root future as a spawned, instrumented task and
 /// returns its output.
+#[cfg(tokio_unstable)]
 #[test]
 fn block_on_instruments_the_root_future() {
     let (rec, rt, batches) = build_capturing_recorder();
@@ -141,4 +143,65 @@ fn block_on_propagates_panics() {
 
     drop(rt);
     rec.graceful_shutdown(Duration::from_secs(5));
+}
+
+/// Tasks spawned through dial9 carry poll spans in both builds: from tokio's
+/// poll hooks under `--cfg tokio_unstable`, and from the `TracedFuture`
+/// wrapper without it. Guards the wrapper's stand-in, which is the only source
+/// of poll data in a no-unstable build.
+#[test]
+fn spawn_in_records_poll_spans() {
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "event")]
+    enum PollEvent {
+        PollStartEvent {
+            task_id: u64,
+            spawn_loc: String,
+        },
+        PollEndEvent {},
+        #[serde(other)]
+        Other,
+    }
+
+    let (rec, rt, batches) = build_capturing_recorder();
+
+    let task_id: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
+    let id_w = task_id.clone();
+    let join = spawn_in(rt.handle(), async move {
+        *id_w.lock().unwrap() = tokio::task::try_id().map(TaskId::from);
+        tokio::task::yield_now().await;
+    });
+    rt.block_on(join).unwrap();
+
+    let id = task_id.lock().unwrap().expect("task ran, so it has an id");
+    drop(rt);
+    rec.graceful_shutdown(Duration::from_secs(5));
+
+    let batches = batches.lock().unwrap();
+    let events: Vec<PollEvent> = decode_all(&batches);
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            PollEvent::PollStartEvent { task_id, spawn_loc } if *task_id == id.to_u64() => {
+                Some(spawn_loc.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let ends = events
+        .iter()
+        .filter(|e| matches!(e, PollEvent::PollEndEvent {}))
+        .count();
+
+    // yield_now forces a second poll, so the task is polled at least twice.
+    assert!(
+        starts.len() >= 2,
+        "expected >=2 PollStart for the spawned task, got {}",
+        starts.len()
+    );
+    assert!(ends >= starts.len(), "every poll start needs an end");
+    assert!(
+        starts.iter().all(|loc| loc.contains("spawn_in.rs")),
+        "poll events should carry this file as the spawn location, got {starts:?}"
+    );
 }

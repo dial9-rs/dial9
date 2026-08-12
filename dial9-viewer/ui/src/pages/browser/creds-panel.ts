@@ -3,14 +3,23 @@
 // subscription; init() - called from the config bootstrap - wires the
 // handlers.
 //
-// The panel and the scripting API (window.Dial9Creds.set) share this exact
+// The panel and the scripting API (Dial9Creds.set) share this exact
 // apply path, so an injected userscript and a human exercise identical
 // logic. Credential VALUES live in creds.js/sessionStorage and the
 // uncontrolled input fields; the store carries only the UI state (panel
 // open, status line, bucket picker).
 
 import { assertInScheduledRender } from "../../store/store.js";
-import type { BucketInfo } from "../../lib/trace/creds.js";
+import {
+  Dial9Creds,
+  type BucketInfo,
+  type Dial9CredsApi,
+} from "../../lib/trace/creds.js";
+import {
+  EMPTY_LITERAL_CREDENTIALS,
+  isLiteralConfigured,
+  sourceScopeFromStored,
+} from "../../lib/trace/source-scope.js";
 import { bucketMatchesFilter } from "./bucket-filter.js";
 import type { PageCtx } from "./ctx.js";
 
@@ -20,6 +29,11 @@ export interface CredsPanel {
 }
 
 export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
+  const injected = window.Dial9Creds as Partial<Dial9CredsApi> | undefined;
+  const creds: Dial9CredsApi =
+    injected !== undefined && typeof injected.get === "function"
+      ? (injected as Dial9CredsApi)
+      : Dial9Creds;
   // Buckets whose name matches the configured filter are the trace buckets
   // - surfaced by default; everything else is hidden unless "Show all" is
   // on. The predicate is config-driven (URL `bucket_filter=` override >
@@ -32,21 +46,22 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     store.update("creds", { status: { text: msg || "", kind } });
   }
 
-  // Reflect stored-credential state in the header button and panel inputs.
+  // Reflect persisted credential state in canonical source state and inputs.
   function refreshFields(): void {
-    const creds = window.Dial9Creds;
-    if (!creds) return;
     const stored = creds.get();
+    const current = store.getState().source;
+    const storedSource = sourceScopeFromStored(current.bucket, stored);
+    const source = {
+      ...storedSource,
+      region: storedSource.region || current.region,
+    };
+    store.update("source", source);
     store.update("creds", { active: creds.has() });
-    if (stored) {
-      // Region rides both transports; the static key fields exist only on the
-      // static credential (a role ARN has no keys to reflect into the panel).
-      els.credsRegion.value = stored.region || "";
-      if (stored.kind === "static") {
-        els.credsAkid.value = stored.accessKeyId || "";
-        els.credsSecret.value = stored.secretAccessKey || "";
-        els.credsToken.value = stored.sessionToken || "";
-      }
+    els.credsRegion.value = source.region;
+    if (source.credentials.kind === "literal") {
+      els.credsAkid.value = source.credentials.accessKeyId;
+      els.credsSecret.value = source.credentials.secretAccessKey;
+      els.credsToken.value = source.credentials.sessionToken || "";
     }
   }
 
@@ -59,8 +74,6 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   // fall back to /api/credentials/check for compatible S3 implementations
   // that omit the newer BucketRegion field.
   async function selectBucket(bucket: BucketInfo): Promise<void> {
-    const creds = window.Dial9Creds;
-    if (!creds) return;
     const { name } = bucket;
     // Switching to a different bucket invalidates any active/leftover service:
     // it belongs to the previous bucket, and discoverServices would otherwise
@@ -99,21 +112,25 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
 
   // Auto-select when there's exactly one filter-matching bucket - the
   // common case - but not in the "show all" view, where the user is
-  // browsing.
+  // browsing. With several buckets to choose from and none selected yet,
+  // open the panel so the picker is in view (skipped when a bucket is
+  // already chosen, e.g. restored from a shared link).
   function autoSelectSingleMatch(): void {
     const s = store.getState().creds;
     if (s.showAll) return;
     const matches = [...s.buckets]
       .sort((a, b) => a.name.localeCompare(b.name))
       .filter(isTraceBucket);
-    if (matches.length === 1) void selectBucket(matches[0]!);
+    if (matches.length === 1) {
+      void selectBucket(matches[0]!);
+    } else if (matches.length > 1 && !els.bucketInput.value.trim()) {
+      togglePanel(true);
+    }
   }
 
   // List the buckets the stored credentials can see and render the picker.
   // Used by Apply and on page load when credentials are already present.
   async function loadBuckets(): Promise<void> {
-    const creds = window.Dial9Creds;
-    if (!creds) return;
     setStatus("Listing buckets…", null);
     try {
       const buckets = await creds.listBuckets();
@@ -195,13 +212,34 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     selectedBucket: string | null;
     bucketFilter: string;
   } | null = null;
-  store.subscribe(["creds", "config"], (state) => {
+  store.subscribe(["source", "creds", "config"], (state) => {
     assertInScheduledRender("creds-panel render");
     const c = state.creds;
+    const sourceCredentials = state.source.credentials;
+    const literal = sourceCredentials.kind === "literal";
+    const active =
+      sourceCredentials.kind === "role" || isLiteralConfigured(sourceCredentials);
     els.credsBtn.style.display = c.enabled ? "" : "none";
-    els.credsBtn.classList.toggle("active", c.active);
-    els.credsBtnLabel.textContent = c.active ? "AWS Credentials ✓" : "AWS Credentials";
+    els.credsBtn.classList.toggle("active", active);
+    els.credsBtnLabel.textContent =
+      sourceCredentials.kind === "ambient"
+        ? "AWS Credentials · Ambient"
+        : sourceCredentials.kind === "role"
+          ? "AWS Credentials · Role ✓"
+          : active
+            ? "AWS Credentials · Literal ✓"
+            : "AWS Credentials · Literal";
     els.credsPanel.style.display = c.panelOpen ? "" : "none";
+    els.credsLiteralFields.style.display = literal ? "" : "none";
+    els.credsUseLiteral.style.display = literal ? "none" : "";
+    els.credsModeSummary.textContent =
+      sourceCredentials.kind === "ambient"
+        ? "Using the backend's ambient AWS identity."
+        : sourceCredentials.kind === "role"
+          ? `Backend assumes ${sourceCredentials.roleArn}`
+          : active
+            ? "Using literal temporary AWS credentials."
+            : "Enter literal temporary AWS credentials.";
     els.credsStatus.textContent = c.status.text;
     els.credsStatus.className = "creds-status" + (c.status.kind ? " " + c.status.kind : "");
     els.credsBucketsRow.style.display = c.bucketsRowVisible ? "" : "none";
@@ -226,13 +264,21 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   function init(): void {
     if (initialized) return;
     initialized = true;
-    const creds = window.Dial9Creds;
-    if (!creds) return;
 
     store.update("creds", { enabled: true });
 
     els.credsBtn.addEventListener("click", () => togglePanel());
     els.credsClose.addEventListener("click", () => togglePanel(false));
+    els.credsUseLiteral.addEventListener("click", () => {
+      creds.setLiteralMode();
+      store.update("source", {
+        ...store.getState().source,
+        credentials: { ...EMPTY_LITERAL_CREDENTIALS },
+      });
+      actions.syncUrl();
+      setStatus("Enter literal temporary credentials", null);
+      els.credsAkid.focus();
+    });
 
     // Paste box: extract credentials from an STS / Isengard JSON blob into
     // the individual fields, then let the user review and click Apply.
@@ -278,6 +324,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
           region: els.credsRegion.value,
           autoDetectRegion: false,
         });
+        actions.syncUrl();
         await loadBuckets();
       })();
     });

@@ -131,8 +131,10 @@ function statusTemplate(vm: StatusViewModel, onClear: () => void): TemplateResul
 export interface StatusBarDeps {
   /** Clear affordance: clear the selection highlight state. */
   clearSelection(): void;
-  /** Flush live URL state, or return false when the source is not shareable. */
-  beforeCopyLink?(): void | boolean;
+  /** Flush live URL state and approve the copy, or reject an unshareable source. */
+  beforeCopyLink?(): boolean;
+  /** Whether the built-in control is rendered visibly (node remains mounted). */
+  copyLinkVisible?: boolean;
   /** URL text supplier for copy-link; defaults to the live location href. */
   copyLinkText?(): string;
   /** Clipboard writer; injectable for tests. */
@@ -173,6 +175,7 @@ export function createStatusBar(
   if (deps.copyLinkText !== undefined) copyOptions.getText = deps.copyLinkText;
   if (deps.copy !== undefined) copyOptions.copy = deps.copy;
   const copyLink: CopyLinkHandle = mountCopyLink(region, copyOptions);
+  if (deps.copyLinkVisible === false) copyLink.el.style.display = "none";
 
   const unsubscribe = store.subscribe(
     ["trace", "viewport", "selection", "segments"],

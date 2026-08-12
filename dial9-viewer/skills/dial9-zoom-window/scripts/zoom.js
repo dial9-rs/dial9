@@ -29,7 +29,7 @@ function resolve(name) {
 }
 
 const { parseTrace, EVENT_TYPES, symbolizeChain, formatFrame } = require(resolve("trace_parser.js"));
-const { buildWorkerSpans, attachCpuSamples, buildSpanData } = require(resolve("trace_analysis.js"));
+const { buildWorkerSpans, attachCpuSamples, buildSpanData, globalQueueSeries } = require(resolve("trace_analysis.js"));
 
 function leafOf(sample, symbols) {
   const frames = symbolizeChain(sample.callchain, symbols);
@@ -161,7 +161,7 @@ async function main() {
     }
 
     // ── Queue depth across the window ──
-    const qs = (spans.queueSamples || []).filter((s) => s.t >= lo && s.t <= hi);
+    const qs = globalQueueSeries(trace, spans).filter((s) => s.t >= lo && s.t <= hi);
     if (qs.length) {
       const g = qs.map((s) => s.global);
       console.log(`\nglobal queue in window: max=${Math.max(...g)} min=${Math.min(...g)} (${qs.length} samples) — >0 means work was waiting behind the long poll`);

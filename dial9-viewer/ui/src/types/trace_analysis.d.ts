@@ -16,6 +16,8 @@ declare module "*/trace_analysis.js" {
     AllocEvent,
     FreeEvent,
     MemoryOverflowEvent,
+    ParsedTrace,
+    RuntimeMetricsSample,
   } from "*/trace_parser.js";
   import type { DecodedFieldValue } from "*/decode.js";
 
@@ -115,6 +117,25 @@ declare module "*/trace_analysis.js" {
     maxTs: number,
     blockInPlaceGaps?: readonly BlockInPlaceGap[] | null
   ): WorkerSpansResult;
+
+  /**
+   * Sum per-runtime global-queue depth into one process-wide timeline, grouping
+   * by the flush-cycle timestamp every runtime's sample shares. Sorted by t.
+   */
+  export function sumGlobalQueueByCycle(
+    runtimeMetrics: readonly RuntimeMetricsSample[]
+  ): { t: number; global: number }[];
+
+  /**
+   * The process-wide global injection-queue timeline, from whichever event
+   * generation the trace carries: per-runtime `RuntimeMetricsEvent`s summed per
+   * cycle, else the legacy pre-summed `queueSamples` from `buildWorkerSpans`.
+   * THE one place that fallback is decided.
+   */
+  export function globalQueueSeries(
+    trace: Pick<ParsedTrace, "runtimeMetrics">,
+    workerSpansResult: Pick<WorkerSpansResult, "queueSamples">
+  ): { t: number; global: number }[];
 
   /**
    * Attach CPU samples to the poll spans they fall within. Mutates poll
@@ -346,8 +367,12 @@ declare module "*/trace_analysis.js" {
     end: number;
     spanId: string;
     spanName: string;
-    /** User-defined span fields (base worker/span fields excluded). */
+    /** User-defined span fields (structural runtime/span fields excluded). */
     fields: Record<string, DecodedFieldValue>;
+    /** Producer/instrumentation family for annotated single-event spans. */
+    spanType?: string | undefined;
+    /** Units for projected single-event span attributes. */
+    units?: Record<string, string> | null | undefined;
     /** Only set for explicit parents; null for most #[instrument] spans. */
     parentSpanId: string | null;
     segments: SpanSegment[];
@@ -355,9 +380,9 @@ declare module "*/trace_analysis.js" {
     /** 0 for roots, +1 per ancestor (computed from the parent chain). */
     depth: number;
     /**
-     * The owning task, resolved from the poll covering the first segment's
-     * (worker, start). null when buildSpanData was called without workerSpans
-     * or no poll covers the enter.
+     * The owning task, read directly from current span events or, for legacy
+     * traces, resolved from the poll covering the first segment's
+     * (worker, start). null when neither source can identify a task.
      */
     taskId: number | null;
   }
@@ -383,6 +408,8 @@ declare module "*/trace_analysis.js" {
       {
         spanName: string;
         fields: Record<string, DecodedFieldValue>;
+        spanType?: string | undefined;
+        units?: Record<string, string> | null | undefined;
         parentSpanId: string | null;
       }
     >;
@@ -394,7 +421,12 @@ declare module "*/trace_analysis.js" {
 
   export function buildSpanData(
     customEvents: readonly CustomTraceEvent[],
-    workerSpans?: Record<number, WorkerLane>
+    workerSpans?: Record<number, WorkerLane>,
+    tidBindings?: ReadonlyMap<
+      number,
+      readonly import("*/trace_parser.js").TidWorkerBinding[]
+    >,
+    blockInPlaceGaps?: readonly BlockInPlaceGap[]
   ): SpanData;
 
   /** Seeds plus all their descendants; cycle-safe. */

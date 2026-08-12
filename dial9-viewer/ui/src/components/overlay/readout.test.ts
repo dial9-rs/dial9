@@ -31,6 +31,7 @@ describe("computeAtCursorReadout (info-panel parity)", () => {
       { t: 50, count: 3 },
       { t: 150, count: 2 },
     ],
+    hasLocalQueueDepth: true,
   };
 
   it("nearest global queue, MAX local across workers, step active-task count", () => {
@@ -51,12 +52,27 @@ describe("computeAtCursorReadout (info-panel parity)", () => {
       queueSamples: [],
       workerQueueSamples: { 0: [] },
       activeTaskSamples: [],
+      hasLocalQueueDepth: true,
     };
     const r = computeAtCursorReadout(empty, 42, null, "complete");
     expect(r.globalQueue).toBeNull();
     expect(r.localMax).toBeNull();
     expect(r.activeTaskCount).toBeNull();
     expect(r.workerId).toBeNull();
+  });
+
+  // A stable-tokio trace carries local_queue 0 on every event, so the samples
+  // are present and would read as a measured 0.
+  it("reports unknown local max when the depth is a sentinel", () => {
+    const sentinel: AtCursorInput = {
+      ...input,
+      workerQueueSamples: { 0: [{ t: 0, local: 0 }], 1: [{ t: 0, local: 0 }] },
+      hasLocalQueueDepth: false,
+    };
+    const r = computeAtCursorReadout(sentinel, 90, 0, "complete");
+    expect(r.localMax).toBeNull();
+    // Global queue has a stable source, so it survives.
+    expect(r.globalQueue).toBe(5);
   });
 });
 

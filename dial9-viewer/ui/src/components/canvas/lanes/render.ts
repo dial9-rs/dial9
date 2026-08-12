@@ -38,6 +38,9 @@ import {
 import { pollColor } from "../../../lib/canvas/palette.js";
 import { laneRowLayout } from "../../../lib/canvas/layout.js";
 import type { LaneRowLayout } from "../../../lib/canvas/layout.js";
+import type { RuntimeMetrics } from "../../../lib/trace/runtime-metrics-model.js";
+import { drawRuntimeMetricsLane } from "./runtime-metrics-lane.js";
+import { DEFAULT_ACCENT, RAIL_W, type LaneIdentity } from "./chrome.js";
 import { findSpanAt, type SpanList } from "../../../lib/trace/query.js";
 import {
   isColumnarLane,
@@ -59,6 +62,9 @@ export const LANE_ROW_H = 60;
 /** Runtime-group header band height (drawn only when >1 runtime group). */
 export const RUNTIME_HEADER_H = 24;
 
+/** Divider between adjacent worker lanes, so row boundaries are unambiguous. */
+const LANE_DIVIDER = "#0b0e18";
+
 /** The minimal 2D-context surface renderLanes needs (Node-testable). */
 export interface LaneDrawContext extends StrokePathContext {
   fillStyle: string | CanvasGradient | CanvasPattern;
@@ -77,6 +83,16 @@ export interface LanesRenderInput {
   workerIds: readonly number[];
   /** Reconstructed spans per worker (buildWorkerSpans + attachCpuSamples). */
   workerSpans: Readonly<Record<number, LaneSpans>>;
+  /** Per-runtime scheduler metrics, drawn into each runtime's summary lane.
+   *  Empty for pre-RuntimeMetrics traces (no summary lanes emitted). */
+  runtimeMetrics: RuntimeMetrics;
+  /** worker id -> its owning runtime's accent (the lane's left rail). A worker
+   *  absent from this map falls back to the default accent, so a caller that has
+   *  not built identities still gets a rail. */
+  laneIdentity: ReadonlyMap<number, LaneIdentity>;
+  /** Runtime-group name -> its accent, so a group header carries the same colour
+   *  as its lanes' rails. Absent name -> the default accent. */
+  runtimeAccents: ReadonlyMap<string, string>;
   /** Per-worker local-queue samples, sorted by t. */
   workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
   /** Wake events indexed by target worker. */
@@ -87,6 +103,8 @@ export interface LanesRenderInput {
   blockInPlaceGaps: readonly BlockInPlaceGap[];
   hasCpuTime: boolean;
   hasSchedWait: boolean;
+  /** False when `workerQueueSamples` carries sentinel zeros, not measurements. */
+  hasLocalQueueDepth: boolean;
   viewStart: number;
   viewEnd: number;
   /** Selected task -> yellow polls + wake markers. */
@@ -264,7 +282,30 @@ export function renderLanes(
     const top = r.y - scrollTop;
 
     if (r.kind === "header") {
-      drawRuntimeHeader(ctx, r, drawW, top);
+      drawRuntimeHeader(
+        ctx,
+        r,
+        input.runtimeAccents.get(r.name) ?? DEFAULT_ACCENT,
+        drawW,
+        top,
+      );
+      continue;
+    }
+
+    if (r.kind === "runtime-metrics") {
+      // The inferred default group is labelled "main" but its metrics are keyed
+      // under the empty runtime name (the unnamed default runtime on the wire).
+      const series = input.runtimeMetrics.byRuntime.get(r.inferred ? "" : r.name);
+      drawRuntimeMetricsLane(
+        ctx,
+        series,
+        r,
+        input.runtimeAccents.get(r.name) ?? DEFAULT_ACCENT,
+        viewStart,
+        viewEnd,
+        drawW,
+        top,
+      );
       continue;
     }
 
@@ -297,6 +338,10 @@ export function renderLanes(
       { x: 0, y: sepY },
       { x: drawW, y: sepY },
     ]);
+
+    // Identity LAST so the rail and divider sit above the lane's marks rather
+    // than being overpainted by a park/poll bar at x=0.
+    drawLaneIdentity(ctx, input.laneIdentity.get(workerId), drawW, top, laneH);
   }
 
   // One stroke() per style: the whole canvas's queue lines, dashed markers,
@@ -305,29 +350,63 @@ export function renderLanes(
 }
 
 /**
- * Draw a runtime-group header band across the draw area: a caret (folded ->
- * right, open -> down), the runtime name, and its worker count. Clicking the
- * band folds/unfolds the runtime (lane-interaction). Only reached when a trace
- * has more than one runtime group (e.g. two traces opened together).
+ * Draw a worker lane's runtime accent rail and its bottom divider.
+ *
+ * The lane's IDENTITY (its "W<id>" and the runtime it belongs to) is spelled out
+ * in the label gutter (labels.ts), which costs no data pixels; this rail is the
+ * link between the two — it carries the runtime's colour continuously from the
+ * gutter row across the lane, so a lane's group is readable without tracking back
+ * to the gutter, and no poll bar is hidden to say so.
+ */
+function drawLaneIdentity(
+  ctx: LaneDrawContext,
+  identity: LaneIdentity | undefined,
+  drawW: number,
+  top: number,
+  laneH: number,
+): void {
+  // Left rail: full-height accent stripe.
+  ctx.fillStyle = identity?.accent ?? DEFAULT_ACCENT;
+  ctx.fillRect(0, top, RAIL_W, laneH);
+  // Bottom divider, so adjacent rows never blur into one band.
+  ctx.fillStyle = LANE_DIVIDER;
+  ctx.fillRect(0, top + laneH - 1, drawW, 1);
+}
+
+/**
+ * Draw a runtime-group header band across the draw area: the runtime's accent
+ * rail, a caret (folded -> right, open -> down), the runtime name, and its worker
+ * count. Clicking the band folds/unfolds the runtime (lane-interaction). Only
+ * reached when a trace has more than one runtime group (e.g. two traces opened
+ * together).
+ *
+ * The name is drawn here AND in the label gutter: the gutter names every row
+ * uniformly, while the band is the click target, and a header with an empty band
+ * reads as a gap rather than a control.
  */
 function drawRuntimeHeader(
   ctx: LaneDrawContext,
   row: { name: string; inferred: boolean; workerCount: number; collapsed: boolean; height: number },
+  accent: string,
   drawW: number,
   top: number,
 ): void {
   ctx.fillStyle = "#1b2036";
   ctx.fillRect(0, top, drawW, row.height);
-  drawCaret(ctx, 10, top + row.height / 2, row.collapsed);
+  // The group's accent, so the header and its lanes' rails read as one unit.
+  ctx.fillStyle = accent;
+  ctx.fillRect(0, top, RAIL_W, row.height);
+  drawCaret(ctx, 14, top + row.height / 2, row.collapsed);
   const label = row.inferred ? `${row.name} runtime` : `runtime: ${row.name}`;
   const count = row.collapsed
     ? `${row.workerCount} worker${row.workerCount === 1 ? "" : "s"} (folded)`
     : `${row.workerCount} worker${row.workerCount === 1 ? "" : "s"}`;
   ctx.fillStyle = "#aeb6e0";
-  ctx.font = "11px sans-serif";
+  ctx.font = "bold 11px sans-serif";
   ctx.textAlign = "left";
-  ctx.fillText(label, 22, top + row.height - 8);
+  ctx.fillText(label, 26, top + row.height - 8);
   ctx.fillStyle = "#6b73a0";
+  ctx.font = "11px sans-serif";
   ctx.fillText(count, drawW - 110, top + row.height - 8);
 }
 
@@ -753,6 +832,9 @@ function drawQueueStepLine(
   qH: number,
   sf: number,
 ): void {
+  // The recorded 0 is a sentinel; a step line would read as "the local queues
+  // are empty" rather than "unmeasured".
+  if (!input.hasLocalQueueDepth) return;
   const samples = input.workerQueueSamples[workerId];
   if (!samples || samples.length === 0) return;
   const { viewStart, viewEnd } = input;
@@ -761,11 +843,12 @@ function drawQueueStepLine(
   if (iEnd < iStart) return;
   const maxQ = input.sharedMaxQ || 1;
 
-  // q:N scale label (cheap text, drawn directly - not a stroke primitive).
-  ctx.fillStyle = "#666";
+  // q:N scale label (cheap text, drawn directly - not a stroke primitive). Inset
+  // past the runtime accent rail so the label is never hidden under it.
+  ctx.fillStyle = "#8a90a8";
   ctx.font = "8px monospace";
   ctx.textAlign = "left";
-  ctx.fillText(`q:${maxQ}`, 2, qTop + 8 * sf);
+  ctx.fillText(`q:${maxQ}`, RAIL_W + 2, qTop + 8 * sf);
 
   // Downsample the visible slice to one vertex per pixel column (spikes win),
   // expand into a step polyline, and extend the last level to the right edge

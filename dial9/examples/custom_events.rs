@@ -24,9 +24,9 @@ struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
-    /// The `unit` annotation makes the viewer render this as e.g. "1.50ms"
-    /// instead of a raw microsecond count.
-    #[traceevent(unit = "us")]
+    /// The annotations format this as a duration and chart observed latencies
+    /// directly, without asking for a metric interpretation.
+    #[traceevent(unit = "us", kind = "gauge")]
     latency_us: u64,
     /// Only present for failed requests.
     error_message: Option<String>,

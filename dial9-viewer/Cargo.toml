@@ -1,6 +1,6 @@
 [package]
 name = "dial9-viewer"
-version = "0.5.0-rc1"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -23,6 +23,7 @@ include = [
     "/skills/**",
     "/README.md",
     "/skill-source.md",
+    "/tracing-layer-skill-source.md",
     "/ui/dist/**",
 ]
 
@@ -30,7 +31,10 @@ include = [
 pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
 
 [features]
-dev-server = ["dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]
+default = ["s3"]
+## S3 storage, bring-your-own AWS credentials, and assume-role support.
+s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+dev-server = ["s3", "dep:s3s", "dep:s3s-fs", "dep:s3s-aws", "dep:tempfile"]
 
 [[bin]]
 name = "dial9-viewer"
@@ -49,6 +53,14 @@ name = "gen-fixtures"
 path = "src/bin/gen_fixtures.rs"
 required-features = ["dev-server"]
 
+[[test]]
+name = "aggregate_test"
+required-features = ["s3"]
+
+[[test]]
+name = "server_test"
+required-features = ["s3"]
+
 [dependencies]
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["query"] }
@@ -61,7 +73,8 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower = { version = "0.5", features = ["limit", "util"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "timeout"] }
 uuid = { version = "1", features = ["v4"] }
 form_urlencoded = "1"
 tracing = "0.1"
@@ -71,8 +84,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrique = { version = "0.1.28", features = ["emf", "local-format"] }
 metrique-writer = "0.1"
 time = "0.3"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"], optional = true }
 anyhow = "1"
 bon = "3"
 s3s = { version = "0.14.1", optional = true }
@@ -94,7 +107,6 @@ urlencoding = "2"
 [dev-dependencies]
 assert2 = { workspace = true }
 metrique = { version = "0.1.28", features = ["emf", "local-format", "test-util"] }
-tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 s3s = "0.14.1"
 s3s-fs = "0.14.1"

@@ -3,11 +3,8 @@
 
 // Unit tests for the Span Explorer helpers in span_explorer.js: duration
 // formatting, catalog sorting, histogram normalization/layout/brush, time
-// composition, URL deep-linking, flamegraph URL generation, and raw trace
-// catalog building. All DOM-free.
+// composition, URL deep-linking, and flamegraph URL generation. All DOM-free.
 
-const fs = require("fs");
-const path = require("path");
 const SE = require("./span_explorer.js");
 
 let passed = 0;
@@ -405,6 +402,8 @@ assertEq(
     max_files: 80,
     bucket: "my-bucket",
     region: "us-west-2",
+    credentialMode: "role",
+    roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
     prefix: "traces/",
     service: "my-svc",
     hosts: ["host-a", "host-b"],
@@ -419,6 +418,8 @@ assertEq(
   assertEq(encoded.get("max_files"), "80", "encodeState: refinement depth");
   assertEq(encoded.get("bucket"), "my-bucket", "encodeState: bucket");
   assertEq(encoded.get("aws_region"), "us-west-2", "encodeState: region");
+  assertEq(encoded.get("credential_mode"), "role", "encodeState: credential mode");
+  assertEq(encoded.get("aws_role_arn"), state.roleArn, "encodeState: role ARN");
   assertEq(encoded.get("span_type_uid"), state.span_type_uid, "encodeState: span_type_uid");
   assertEq(encoded.get("min_span_ns"), "1000000", "encodeState: min_span_ns");
   assertEq(encoded.getAll("host").length, 2, "encodeState: hosts repeatable");
@@ -427,6 +428,8 @@ assertEq(
   assertEq(decoded.data_dir, "/tmp/dial9-traces", "decodeState: local data_dir");
   assertEq(decoded.max_files, 80, "decodeState: refinement depth");
   assertEq(decoded.bucket, "my-bucket", "decodeState: bucket");
+  assertEq(decoded.credentialMode, "role", "decodeState: credential mode");
+  assertEq(decoded.roleArn, state.roleArn, "decodeState: role ARN");
   assertEq(decoded.span_type_uid, state.span_type_uid, "decodeState: span_type_uid");
   assertEq(decoded.min_span_ns, 1000000, "decodeState: min_span_ns");
   assertEq(decoded.hosts.length, 2, "decodeState: hosts");
@@ -439,6 +442,7 @@ assertEq(
     max_files: 80,
     bucket: "bkt",
     region: null,
+    credentialMode: "ambient",
     prefix: null,
     service: "svc",
     hosts: ["h1"],
@@ -452,6 +456,7 @@ assertEq(
   assert(cpuUrl.includes("data_dir=%2Ftmp%2Fdial9-traces"), "flamegraphUrl: carries local data_dir");
   assert(cpuUrl.includes("max_files=80"), "flamegraphUrl: carries refinement depth");
   assert(cpuUrl.includes("source=cpu"), "flamegraphUrl: on_cpu → source=cpu");
+  assert(cpuUrl.includes("credential_mode=ambient"), "flamegraphUrl: carries ambient mode");
   assert(cpuUrl.includes("span_type_uid=aabb"), "flamegraphUrl: carries span_type_uid");
   assert(cpuUrl.includes("min_span_ns=1000"), "flamegraphUrl: carries min_span_ns");
   assert(cpuUrl.startsWith("flamegraph.html?"), "flamegraphUrl: points at flamegraph.html");
@@ -462,7 +467,14 @@ assertEq(
 
 // ── exemplarViewerUrl ──
 {
-  const scope = { bucket: "my-bucket", region: "us-west-2", service: "my-svc", spanName: "/jobs/next" };
+  const scope = {
+    bucket: "my-bucket",
+    region: "us-west-2",
+    credentialMode: "role",
+    roleArn: "arn:aws:iam::123456789012:role/Dial9TraceReader",
+    service: "my-svc",
+    spanName: "/jobs/next",
+  };
   const exemplar = {
     elapsed_ns: 5000000,
     span_uid: "deadbeef",
@@ -484,6 +496,8 @@ assertEq(
   assertEq(qs.get("svc"), "my-svc", "exemplarViewerUrl: carries svc");
   assertEq(qs.get("host"), "host-7", "exemplarViewerUrl: uses the exemplar's own host");
   assertEq(qs.get("aws_region"), "us-west-2", "exemplarViewerUrl: carries region");
+  assertEq(qs.get("credential_mode"), "role", "exemplarViewerUrl: carries role mode");
+  assertEq(qs.get("aws_role_arn"), scope.roleArn, "exemplarViewerUrl: carries role ARN");
   assertEq(qs.get("focus_start"), String(exemplar.start_ns), "exemplarViewerUrl: focus_start from start_ns");
   assertEq(qs.get("focus_end"), String(exemplar.end_ns), "exemplarViewerUrl: focus_end from end_ns");
   assertEq(qs.get("focus_span_name"), "/jobs/next", "exemplarViewerUrl: forwards focus_span_name from scope");
@@ -543,6 +557,25 @@ assertEq(
     { bucket: "b" }
   );
   assertEq(url, "", "exemplarViewerUrl: no source_key → empty string");
+}
+
+{
+  // Raw mode already has the original trace URL, so it does not need a
+  // backend source_key to build a focused viewer link.
+  const url = SE.exemplarViewerUrl(
+    { elapsed_ns: 1000, start_ns: 10, end_ns: 20 },
+    { trace: "demo-trace.bin", region: "us-west-2", spanName: "RecordMetric" }
+  );
+  const qs = new URLSearchParams(url.slice("viewer.html?".length));
+  assertEq(qs.get("trace"), "demo-trace.bin", "exemplarViewerUrl: raw trace is reused");
+  assertEq(qs.get("focus_start"), "10", "exemplarViewerUrl: raw trace focus_start");
+  assertEq(qs.get("focus_end"), "20", "exemplarViewerUrl: raw trace focus_end");
+  assertEq(qs.get("aws_region"), "us-west-2", "exemplarViewerUrl: raw trace region");
+  assertEq(
+    qs.get("focus_span_name"),
+    "RecordMetric",
+    "exemplarViewerUrl: raw trace forwards span name"
+  );
 }
 
 {
@@ -750,133 +783,6 @@ assertEq(SE.TIME_CATEGORIES.length, 5, "TIME_CATEGORIES: five categories");
 assertEq(SE.TIME_CATEGORIES[0].key, "on_cpu", "TIME_CATEGORIES: first is on_cpu");
 assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown");
 
-// ── parseSpanEventName ──
-{
-  const r1 = SE.parseSpanEventName("SpanEnter:metrics_service::buffer::flush_to_ddb:examples/metrics-service/src/buffer.rs:55");
-  assert(r1 != null, "parseSpanEventName: parses valid SpanEnter");
-  assertEq(r1.target, "metrics_service::buffer", "parseSpanEventName: target");
-  assertEq(r1.name, "flush_to_ddb", "parseSpanEventName: name");
-  assertEq(r1.file, "examples/metrics-service/src/buffer.rs", "parseSpanEventName: file");
-  assertEq(r1.line, 55, "parseSpanEventName: line");
-
-  const r2 = SE.parseSpanEventName("SpanExit:metrics_service::routes::record_metric:examples/metrics-service/src/routes.rs:26");
-  assert(r2 != null, "parseSpanEventName: parses SpanExit");
-  assertEq(r2.name, "record_metric", "parseSpanEventName: SpanExit name");
-
-  const r3 = SE.parseSpanEventName("SpanCloseEvent");
-  assertEq(r3, null, "parseSpanEventName: SpanClose → null");
-
-  const r4 = SE.parseSpanEventName("SpanEnter__CustomStruct");
-  assert(r4 != null, "parseSpanEventName: parses SpanEnter__ struct schema");
-  assertEq(r4.name, "CustomStruct", "parseSpanEventName: __ suffix is the type discriminator");
-  assertEq(r4.target, "", "parseSpanEventName: __ target is unavailable");
-  assertEq(r4.file, null, "parseSpanEventName: __ file is unavailable");
-  assertEq(r4.line, null, "parseSpanEventName: __ line is unavailable");
-
-  const r4Exit = SE.parseSpanEventName("SpanExit__CustomStruct");
-  assertEq(r4Exit.name, "CustomStruct", "parseSpanEventName: parses SpanExit__ struct schema");
-
-  const r5 = SE.parseSpanEventName("SomeOtherEvent");
-  assertEq(r5, null, "parseSpanEventName: unrelated event → null");
-}
-
-// ── buildLogHistogram ──
-{
-  const durations = [100, 200, 300, 1000, 2000, 5000, 10000];
-  const hist = SE.buildLogHistogram(durations, 100, 10000);
-  assert(hist.length > 0, "buildLogHistogram: produces bins");
-  const totalCount = hist.reduce((s, b) => s + b.count, 0);
-  assertEq(totalCount, 7, "buildLogHistogram: total count matches input");
-  assert(hist[0].lo_ns <= 100, "buildLogHistogram: first bin starts at or below min");
-  assert(hist[hist.length - 1].hi_ns >= 10000, "buildLogHistogram: last bin covers max");
-  for (const b of hist) {
-    assert(b.hi_ns > b.lo_ns, "buildLogHistogram: every bin has hi > lo");
-    assert(b.count >= 0, "buildLogHistogram: no negative counts");
-  }
-}
-
-{
-  // Edge case: single duration
-  const hist = SE.buildLogHistogram([500], 500, 500);
-  assert(hist.length > 0, "buildLogHistogram: single value produces bins");
-  const totalCount = hist.reduce((s, b) => s + b.count, 0);
-  assertEq(totalCount, 1, "buildLogHistogram: single value total count = 1");
-}
-
-// ── buildSpanCatalog (synthetic) ──
-{
-  const customEvents = [
-    { name: "SpanEnter:myapp::handler::do_stuff:src/handler.rs:10", timestamp: 100, fields: { span_id: "1", span_name: "do_stuff", worker_id: 0 } },
-    { name: "SpanExit:myapp::handler::do_stuff:src/handler.rs:10", timestamp: 200, fields: { span_id: "1", span_name: "do_stuff", worker_id: 0 } },
-    { name: "SpanCloseEvent", timestamp: 201, fields: { span_id: "1" } },
-    { name: "SpanEnter:myapp::handler::do_stuff:src/handler.rs:10", timestamp: 300, fields: { span_id: "2", span_name: "do_stuff", worker_id: 0 } },
-    { name: "SpanExit:myapp::handler::do_stuff:src/handler.rs:10", timestamp: 500, fields: { span_id: "2", span_name: "do_stuff", worker_id: 0 } },
-    { name: "SpanCloseEvent", timestamp: 501, fields: { span_id: "2" } },
-    { name: "SpanEnter:myapp::db::query:src/db.rs:42", timestamp: 150, fields: { span_id: "3", span_name: "query", worker_id: 1 } },
-    { name: "SpanExit:myapp::db::query:src/db.rs:42", timestamp: 350, fields: { span_id: "3", span_name: "query", worker_id: 1 } },
-    { name: "SpanCloseEvent", timestamp: 351, fields: { span_id: "3" } },
-  ];
-
-  // Use the buildSpanData from trace_analysis if available, otherwise mock
-  let buildSpanData;
-  try {
-    buildSpanData = require("./trace_analysis.js").buildSpanData;
-  } catch (e) {
-    // Fallback: provide minimal implementation
-    buildSpanData = null;
-  }
-
-  if (buildSpanData) {
-    const { allSpans } = buildSpanData(customEvents);
-    const catalog = SE.buildSpanCatalog(allSpans, customEvents);
-
-    assertEq(catalog.length, 2, "buildSpanCatalog: 2 span types from synthetic data");
-
-    const doStuff = catalog.find(c => c.name === "do_stuff");
-    assert(doStuff != null, "buildSpanCatalog: found do_stuff type");
-    assertEq(doStuff.count, 2, "buildSpanCatalog: do_stuff has 2 instances");
-    assertEq(doStuff.target, "myapp::handler", "buildSpanCatalog: do_stuff target");
-    assertEq(doStuff.callsite_file, "src/handler.rs", "buildSpanCatalog: do_stuff file");
-    assertEq(doStuff.callsite_line, 10, "buildSpanCatalog: do_stuff line");
-    assertEq(doStuff.kind, "tracing", "buildSpanCatalog: kind is tracing");
-    assert(doStuff.p50_ns > 0, "buildSpanCatalog: do_stuff p50 > 0");
-    assert(doStuff.histogram.length > 0, "buildSpanCatalog: do_stuff has histogram");
-    assertEq(doStuff.details_complete_count, 0, "buildSpanCatalog: quality 0 complete");
-    assertEq(doStuff.partial_count, 2, "buildSpanCatalog: quality 2 partial");
-
-    const query = catalog.find(c => c.name === "query");
-    assert(query != null, "buildSpanCatalog: found query type");
-    assertEq(query.count, 1, "buildSpanCatalog: query has 1 instance");
-    assertEq(query.callsite_line, 42, "buildSpanCatalog: query line = 42");
-
-    // Verify composition is null (all-Unknown fallback)
-    assertEq(doStuff.composition, null, "buildSpanCatalog: composition is null (raw mode)");
-    // Verify computeTimeComposition falls back correctly
-    const comp = SE.computeTimeComposition(doStuff);
-    assertEq(comp.categories.length, 1, "buildSpanCatalog+composition: single Unknown");
-    assertEq(comp.categories[0].key, "unknown", "buildSpanCatalog+composition: key is unknown");
-  }
-}
-
-{
-  const allSpans = [
-    { spanId: "1", start: 100, spanName: "shared", activeNs: 10 },
-    { spanId: "2", start: 200, spanName: "shared", activeNs: 20 },
-  ];
-  const customEvents = [
-    { name: "SpanEnter__FirstOperation", timestamp: 100, fields: { span_id: "1", span_name: "shared" } },
-    { name: "SpanEnter__SecondOperation", timestamp: 200, fields: { span_id: "2", span_name: "shared" } },
-  ];
-  const catalog = SE.buildSpanCatalog(allSpans, customEvents);
-  assertEq(catalog.length, 2, "buildSpanCatalog: distinct __ schemas do not collapse by runtime span_name");
-  assert(catalog.some((entry) => entry.name === "FirstOperation"), "buildSpanCatalog: keeps first __ type suffix");
-  assert(catalog.some((entry) => entry.name === "SecondOperation"), "buildSpanCatalog: keeps second __ type suffix");
-  assert(
-    catalog[0].span_type_uid !== catalog[1].span_type_uid,
-    "buildSpanCatalog: __ schema types receive distinct callsite keys",
-  );
-}
-
 // ── Attribute filters ──
 {
   // parse: split on first '=', drop malformed (no '=' or empty key)
@@ -918,90 +824,5 @@ assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown
   assertEq(parsed.length, 2, "attr filter helpers do not mutate input");
 }
 
-// ── Demo trace integration test ──
-async function testDemoTrace() {
-  // The demo trace moved under public/ when the UI became a Vite build.
-  const tracePath = path.join(__dirname, "public", "demo-trace.bin");
-
-  // The page's request/URL wiring used to be pinned here by grepping the
-  // inline page script out of span_explorer.html. That script is gone - the
-  // page is a Vite entry whose behavior lives in src/pages/span-explorer - so
-  // those assertions now live as real unit tests in
-  // src/pages/span-explorer/scope.test.ts. The `<script src>` ordering
-  // assertions retired with the inline page: module order is the bundler's job.
-
-  if (!fs.existsSync(tracePath)) {
-    console.log("· demo-trace.bin absent — skipping demo trace integration tests");
-    return;
-  }
-
-  const { parseTrace } = require("./trace_parser.js");
-  const { buildSpanData } = require("./trace_analysis.js");
-
-  const buf = fs.readFileSync(tracePath);
-  const parsed = await parseTrace(buf);
-
-  assert(parsed.customEvents.length > 0, "demo trace: has customEvents");
-
-  const { allSpans } = buildSpanData(parsed.customEvents);
-  assert(allSpans.length > 0, "demo trace: buildSpanData produces spans");
-
-  const catalog = SE.buildSpanCatalog(allSpans, parsed.customEvents);
-  assert(catalog.length > 0, "demo trace: buildSpanCatalog produces span types");
-
-  // Known span types from the demo metrics-service trace
-  const names = catalog.map(c => c.name);
-  assert(names.includes("record_metric"), "demo trace: contains record_metric span type");
-  assert(names.includes("query_metric"), "demo trace: contains query_metric span type");
-  assert(names.includes("flush_to_ddb"), "demo trace: contains flush_to_ddb span type");
-
-  // Verify counts are nonzero
-  for (const entry of catalog) {
-    assert(entry.count > 0, `demo trace: ${entry.name} count > 0 (got ${entry.count})`);
-    assert(entry.p50_ns >= 0, `demo trace: ${entry.name} p50_ns >= 0`);
-    assert(entry.max_ns >= entry.p50_ns, `demo trace: ${entry.name} max >= p50`);
-    assert(entry.histogram.length > 0, `demo trace: ${entry.name} has histogram bins`);
-
-    // Histogram total count must equal entry count
-    const histTotal = entry.histogram.reduce((s, b) => s + b.count, 0);
-    assertEq(histTotal, entry.count, `demo trace: ${entry.name} histogram total matches count`);
-
-    // All bins must be valid
-    for (const bin of entry.histogram) {
-      assert(bin.hi_ns > bin.lo_ns, `demo trace: ${entry.name} bin hi > lo`);
-      assert(bin.count >= 0, `demo trace: ${entry.name} bin count >= 0`);
-    }
-  }
-
-  // Verify callsite info is populated
-  const recordMetric = catalog.find(c => c.name === "record_metric");
-  assert(recordMetric.target != null, "demo trace: record_metric has target");
-  assert(recordMetric.callsite_file != null, "demo trace: record_metric has callsite_file");
-  assert(recordMetric.callsite_line > 0, "demo trace: record_metric has callsite_line");
-  assert(recordMetric.target.includes("metrics_service"), "demo trace: record_metric target contains metrics_service");
-
-  // Verify quality fields (raw mode = all partial)
-  for (const entry of catalog) {
-    assertEq(entry.details_complete_count, 0, `demo trace: ${entry.name} details_complete = 0 (raw)`);
-    assertEq(entry.partial_count, entry.count, `demo trace: ${entry.name} partial = count (raw)`);
-    const q = SE.spanTypeQuality(entry);
-    assertEq(q, 0, `demo trace: ${entry.name} quality = 0 (all partial)`);
-  }
-
-  // Verify computeTimeComposition on catalog entries falls back to Unknown
-  for (const entry of catalog) {
-    const comp = SE.computeTimeComposition(entry);
-    assert(comp.total_ns > 0, `demo trace: ${entry.name} composition total_ns > 0`);
-    assertEq(comp.categories.length, 1, `demo trace: ${entry.name} composition is single Unknown`);
-    assertEq(comp.categories[0].key, "unknown", `demo trace: ${entry.name} composition key = unknown`);
-  }
-}
-
-// Run async tests then print summary
-testDemoTrace().then(() => {
-  console.log(`\n${failed === 0 ? "All tests passed" : `${failed} test(s) FAILED`} (${passed} passed)`);
-  process.exit(failed === 0 ? 0 : 1);
-}).catch(err => {
-  console.error("Test runner error:", err);
-  process.exit(1);
-});
+console.log(`\n${failed === 0 ? "All tests passed" : `${failed} test(s) FAILED`} (${passed} passed)`);
+process.exit(failed === 0 ? 0 : 1);

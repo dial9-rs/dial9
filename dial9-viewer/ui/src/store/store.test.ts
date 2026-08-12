@@ -60,6 +60,7 @@ function initialViewerState(): StoreState {
       trackOrder: [],
       collapsed: {},
       collapsedRuntimes: {},
+      collapsedRuntimeMetrics: {},
       sidebarWidth: 320,
       lanesViewportHeight: 200,
       lanesScrollTop: 0,
@@ -72,6 +73,7 @@ function initialViewerState(): StoreState {
       stacksAsFlamegraph: false,
     },
     view: {
+      fieldCharts: [],
       inspectorTab: "task",
       expandedPollGroups: new Set(),
       pollFlamegraphSection: "cpu",

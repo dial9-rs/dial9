@@ -1,9 +1,16 @@
 // The page's URL contract: pure functions over the query string so the
 // round-trip (parse -> sync) is Node-testable.
 
+import {
+  EMPTY_SOURCE_SCOPE,
+  readPlainSourceScope,
+  writeUrlParams,
+} from "../../lib/trace/index.js";
+import type { SourceScope } from "../../lib/trace/index.js";
+
 /** Scope params, read once from the URL and never edited in-page. */
 export interface ScopeParams {
-  bucket: string | null;
+  source: SourceScope;
   prefix: string | null;
   service: string | null;
   /** Repeatable `host` param, in order (getAll semantics). */
@@ -17,9 +24,12 @@ export interface PeriodBounds {
 }
 
 /** Pull the scope dimensions out of a query params bag (page scope, or a diff side). */
-export function scopeFromParams(params: URLSearchParams): ScopeParams {
+export function scopeFromParams(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): ScopeParams {
   return {
-    bucket: params.get("bucket"),
+    source: readPlainSourceScope(params, fallback),
     prefix: params.get("prefix"),
     service: params.get("service"),
     host: params.getAll("host"),
@@ -27,8 +37,11 @@ export function scopeFromParams(params: URLSearchParams): ScopeParams {
 }
 
 /** Read the page scope params once. Values are preserved verbatim by sync. */
-export function readScope(params: URLSearchParams): ScopeParams {
-  return scopeFromParams(params);
+export function readScope(
+  params: URLSearchParams,
+  fallback: SourceScope = EMPTY_SOURCE_SCOPE,
+): ScopeParams {
+  return scopeFromParams(params, fallback);
 }
 
 /**
@@ -69,7 +82,11 @@ export function buildSyncQuery(
   periods: readonly PeriodBounds[],
 ): string {
   const u = new URLSearchParams();
-  if (scope.bucket) u.set("bucket", scope.bucket);
+  // Address-bar link: bucket + aws_region + aws_role_arn, so a fresh tab opened
+  // from it restores the identity at boot. The role rides only here, never on
+  // the /api/tokio-stats request URL (writeShareableParams vs the request built
+  // in main.ts, which omits the role).
+  writeUrlParams(u, scope.source);
   if (scope.prefix) u.set("prefix", scope.prefix);
   if (scope.service) u.set("service", scope.service);
   for (const h of scope.host) u.append("host", h);

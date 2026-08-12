@@ -171,6 +171,60 @@ jobs:
           --exclude metrics-service
           --exclude simple-local
           --exclude-features _shuttle
+      - name: Test viewer without S3
+        run: cargo test -p dial9-viewer --no-default-features --lib
+      - name: Check local-only viewer excludes AWS dependencies
+        run: |
+          cargo tree -p dial9-viewer --no-default-features \
+            --target all --edges normal --prefix none --format '{p}' \
+            > /tmp/dial9-viewer-local-tree.txt
+          if grep -E '^(aws-|s3s)' /tmp/dial9-viewer-local-tree.txt; then
+            echo "AWS SDK/S3 dependencies found in the local-only viewer graph"
+            exit 1
+          fi
+      - name: Check S3 CLI includes the AWS SDK
+        run: |
+          cargo tree -p dial9 --no-default-features --features cli \
+            --target all --edges normal --prefix none --format '{p}' \
+            > /tmp/dial9-cli-s3-tree.txt
+          if ! grep -qE '^aws-sdk-s3 ' /tmp/dial9-cli-s3-tree.txt; then
+            echo "S3 CLI no longer includes aws-sdk-s3"
+            exit 1
+          fi
+
+  no-tokio-unstable:
+    name: Build without tokio_unstable
+    runs-on: ubuntu-latest
+    # Drops the cfg but keeps the frame pointers the repo config also sets,
+    # since env RUSTFLAGS replaces [build] rustflags wholesale.
+    env:
+      RUSTFLAGS: "-C force-frame-pointers=yes"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ env.STABLE_TOOLCHAIN }}
+      - uses: taiki-e/install-action@184183c2401be73c3bf42c2e61268aa5855379c1 # v2
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Enable perf_event_open and kallsyms for tests
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.kptr_restrict=0
+      # `__nonlinux_all_features` is every feature except `taskdump`, which
+      # forwards to tokio/taskdump and is a hard compile error without the cfg.
+      - name: Test dial9-tokio-telemetry
+        run: |
+          # Raise locked-memory limit for large perf ring buffers, as the
+          # rust-build action does. Without it perf_event_open cannot map its
+          # ring and the profiler falls back to ctimer.
+          sudo prlimit --pid $$ --memlock=unlimited:unlimited
+          cargo nextest run -p dial9-tokio-telemetry --features __nonlinux_all_features
+      - name: Check the facade
+        run: cargo check -p dial9 --features tokio,analysis,cpu-profiling
 
   check-docs:
     name: Check docs.rs
@@ -345,8 +399,9 @@ jobs:
             -p dial9-trace-format \
             -p dial9-perf-self-profile \
             -p dial9-macro \
+            -p dial9-utils \
             -p dial9-tokio-telemetry \
-            -p dial9-metrique
+            -p dial9-metrique \
             -p dial9-destinations-s3
 
   package:
@@ -396,7 +451,7 @@ jobs:
   ci-pass:
     name: CI Pass
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, build, android-aarch64-build, feature-check, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle, package, doctests]
+    needs: [fmt, clippy, build, android-aarch64-build, feature-check, no-tokio-unstable, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle, package, doctests]
     if: always()
     steps:
       - run: |

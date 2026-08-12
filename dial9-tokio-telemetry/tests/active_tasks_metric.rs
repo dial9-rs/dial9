@@ -1,5 +1,5 @@
-//! Tests that `QueueSampleEvent.active_tasks` reflects the number of alive tasks
-//! via `RuntimeMetrics::num_alive_tasks()`.
+//! Tests that `RuntimeMetricsEvent.alive_tasks` reflects the number of alive
+//! tasks via `RuntimeMetrics::num_alive_tasks()`.
 
 mod common;
 
@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Barrier;
 
-/// Spawn a known number of long-lived tasks, verify that `QueueSampleEvent`
-/// reports at least that many active via `RuntimeMetrics::num_alive_tasks()`.
+/// Spawn a known number of long-lived tasks, verify that `RuntimeMetricsEvent`
+/// reports at least that many alive via `RuntimeMetrics::num_alive_tasks()`.
 #[test]
 fn active_tasks_reflects_spawned_tasks_via_runtime_metrics() {
     let (capture, batches) = capture_processor();
@@ -61,15 +61,15 @@ fn active_tasks_reflects_spawned_tasks_via_runtime_metrics() {
     let max_active = events
         .iter()
         .filter_map(|e| match e {
-            Dial9Event::QueueSampleEvent(ev) => ev.active_tasks,
+            Dial9Event::RuntimeMetricsEvent(ev) => Some(u64::from(ev.alive_tasks)),
             _ => None,
         })
         .max()
-        .expect("expected at least one QueueSampleEvent with active_tasks");
+        .expect("expected at least one RuntimeMetricsEvent with alive_tasks");
 
     assert!(
         max_active >= num_tasks as u64,
-        "expected at least {num_tasks} active tasks in some QueueSampleEvent, \
+        "expected at least {num_tasks} alive tasks in some RuntimeMetricsEvent, \
          but max observed was {max_active}"
     );
 }
@@ -115,14 +115,14 @@ fn active_tasks_decreases_after_tasks_complete() {
     let active_tasks_values: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
-            Dial9Event::QueueSampleEvent(ev) => ev.active_tasks,
+            Dial9Event::RuntimeMetricsEvent(ev) => Some(u64::from(ev.alive_tasks)),
             _ => None,
         })
         .collect();
 
     assert!(
         !active_tasks_values.is_empty(),
-        "expected at least one QueueSampleEvent with active_tasks"
+        "expected at least one RuntimeMetricsEvent with alive_tasks"
     );
 
     // After all spawned tasks have completed and the runtime is dropped,

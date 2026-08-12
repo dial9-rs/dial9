@@ -11,7 +11,13 @@ import {
   buildWorkerSpans,
   canStreamDecode,
   Dial9Creds,
+  Dial9Session,
+  applyToCreds,
+  isSourceShareable,
   loadTraceInWorker,
+  readNamespacedSourceScope,
+  readPlainSourceScope,
+  sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import type { ParsedTrace, TraceSliceStore } from "../../lib/trace/index.js";
 import { createFlamegraph, filterCpuSamples } from "../../lib/canvas/index.js";
@@ -26,15 +32,22 @@ export async function runExactMode(
   params: URLSearchParams,
   els: PageEls
 ): Promise<void> {
-  // Mounted before the load so a share is possible even from the loading/error
-  // states. The zoom->URL sync exists only once the widget renders, hence the
-  // late-bound flush.
+  const fallbackSource = sourceScopeFromStored("", Dial9Creds.get());
+  const source = params.has("s_bucket") || params.has("s_credential_mode")
+    ? readNamespacedSourceScope(params, fallbackSource)
+    : readPlainSourceScope(params, fallbackSource);
+  applyToCreds(source, Dial9Creds);
+
+  // Mounted before load so ambient/role errors remain shareable. Literal mode
+  // keeps the control node but hides built-in sharing.
   let flushUrlState: (() => void) | null = null;
-  mountCopyLink(els.headerEl, {
+  const copyLink = mountCopyLink(els.headerEl, {
     beforeCopy: () => {
       flushUrlState?.();
+      return true;
     },
   });
+  copyLink.el.style.display = isSourceShareable(source) ? "" : "none";
 
   // `trace` is repeatable - each value is a separate (possibly gzipped)
   // component to fetch and concatenate.
@@ -57,7 +70,7 @@ export async function runExactMode(
 
   // Same-origin credential headers: resolved on the main thread; the core's
   // isSameOrigin withholding still applies per URL in the worker.
-  const credHeaders = Dial9Creds.headers();
+  const credHeaders = Dial9Session.headers(Dial9Creds.headers());
 
   // Loading label: the worker picks stream vs buffered itself with the same
   // canStreamDecode rule, so the main-thread answer sets the initial label;

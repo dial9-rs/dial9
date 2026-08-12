@@ -1,75 +1,77 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 14220,
+  "total_samples": 13090,
   "by_source": {
-    "0": 141,
-    "1": 14079
+    "0": 116,
+    "1": 12974
   },
   "on_off_all": {
-    "on_runtime": 14196,
-    "off_runtime": 24
+    "on_runtime": 13080,
+    "off_runtime": 10
   },
   "on_off_by_source": {
     "0": {
-      "on": 117,
-      "off": 24
+      "on": 106,
+      "off": 10
     },
     "1": {
-      "on": 14079,
+      "on": 12974,
       "off": 0
     }
   },
   "worker_set": [
     0,
-    1
+    1,
+    2,
+    3
   ],
   "cpu_profile": {
-    "count": 141,
-    "distinct_stacks": 118,
-    "stack_sig_digest": "a60a449ebb3e28c2",
-    "ts_count": 141,
-    "ts_span_ns": 4415479824,
-    "ts_delta_digest": "80459a0a2506e18b",
+    "count": 116,
+    "distinct_stacks": 109,
+    "stack_sig_digest": "5205b06ca07fe93d",
+    "ts_count": 116,
+    "ts_span_ns": 3866002419,
+    "ts_delta_digest": "4b3158d4832e70f5",
     "top_stacks": [
       {
-        "count": 11,
-        "depth": 1,
-        "leaf": "__libc_write"
-      },
-      {
-        "count": 4,
-        "depth": 1,
-        "leaf": "_int_malloc"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__malloc"
+        "count": 2,
+        "depth": 99,
+        "leaf": "writev"
       },
       {
         "count": 2,
-        "depth": 23,
-        "leaf": "std::thread::local::LocalKey<T>::with"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8c24de8c"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "[unknown] 0x7f5143ce9392"
+        "depth": 107,
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "__pthread_mutex_unlock_usercnt"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff8c24de58"
       },
       {
         "count": 2,
-        "depth": 23,
-        "leaf": "std::io::Write::write_all"
+        "depth": 89,
+        "leaf": "_Unwind_Find_FDE"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "pthread_mutex_lock"
+        "depth": 98,
+        "leaf": "<F as axum::handler::Handler<(M,T1,T2),S>>::call::{{closure}}"
+      },
+      {
+        "count": 2,
+        "depth": 113,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 1,
+        "depth": 140,
+        "leaf": "<time::offset_date_time::OffsetDateTime as core::ops::arith::Add<core::time::Duration>>::add"
       }
     ]
   }

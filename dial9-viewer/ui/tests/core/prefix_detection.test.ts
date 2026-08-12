@@ -14,8 +14,9 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 
-const { isDateLayer } = require("../../prefix_detect.js") as {
+const { isDateLayer, preferredPrefix } = require("../../prefix_detect.js") as {
   isDateLayer: (children: string[]) => boolean;
+  preferredPrefix: (children: string[]) => string | undefined;
 };
 
 describe("isDateLayer", () => {
@@ -84,5 +85,36 @@ describe("isDateLayer", () => {
   // Things that merely start with digits but aren't dates.
   it("partial date-like segments -> not a date layer", () => {
     expect(isDateLayer(["2026/", "2026-06/"])).toBe(false);
+  });
+});
+
+describe("preferredPrefix", () => {
+  // Empty / missing listings have nothing to pre-select.
+  it("empty list -> undefined", () => {
+    expect(preferredPrefix([])).toBeUndefined();
+    expect(preferredPrefix(undefined as unknown as string[])).toBeUndefined();
+  });
+
+  // A single prefix is auto-selected (trailing slash stripped).
+  it("single prefix -> that prefix", () => {
+    expect(preferredPrefix(["traces/"])).toBe("traces");
+    expect(preferredPrefix(["checkout-api"])).toBe("checkout-api");
+  });
+
+  // With several prefixes and no dial9-traces among them, stay neutral.
+  it("multiple non-default prefixes -> undefined", () => {
+    expect(preferredPrefix(["traces/", "checkout-api/"])).toBeUndefined();
+  });
+
+  // dial9-traces wins whenever it's one of the offered prefixes.
+  it("dial9-traces present among many -> dial9-traces", () => {
+    expect(
+      preferredPrefix(["checkout-api/", "dial9-traces/", "other/"]),
+    ).toBe("dial9-traces");
+  });
+
+  // Even as the sole prefix, dial9-traces comes back without its slash.
+  it("dial9-traces alone -> dial9-traces", () => {
+    expect(preferredPrefix(["dial9-traces/"])).toBe("dial9-traces");
   });
 });

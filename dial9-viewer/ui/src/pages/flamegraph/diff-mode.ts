@@ -7,7 +7,14 @@
 
 import { createDiffView, parseDiff } from "../../lib/canvas/index.js";
 import type { DiffViewHandle, DiffViewState } from "../../lib/canvas/index.js";
-import { Dial9Creds } from "../../lib/trace/index.js";
+import {
+  Dial9Creds,
+  Dial9Session,
+  applyToCreds,
+  isSourceShareable,
+  readPlainSourceScope,
+  sourceScopeFromStored,
+} from "../../lib/trace/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
 import { readDiffState, writeDiffState } from "./diff-state.js";
@@ -47,15 +54,24 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
   els.loadingEl.classList.add("hidden");
   els.containerEl.style.display = "flex";
 
-  // The diff view persists onChange synchronously, so the URL is always current
-  // for a copy-link.
-  mountCopyLink(els.headerEl);
+  const sourceParams = params.has("credential_mode") ? params : diffParsed.a;
+  const source = readPlainSourceScope(
+    sourceParams,
+    sourceScopeFromStored("", Dial9Creds.get()),
+  );
+  applyToCreds(source, Dial9Creds);
+
+  // The diff view persists onChange synchronously, so the URL is always current.
+  const copyLink = mountCopyLink(els.headerEl);
+  copyLink.el.style.display = isSourceShareable(source) ? "" : "none";
 
   // Per-side credentials: both default to this tab's session creds; `credsB`
   // overrides B once supplied (held in memory for this tab only).
   let credsB: SideBCreds | null = null;
   const headersFor = (side: "a" | "b"): Record<string, string> =>
-    side === "b" && credsB !== null ? credsToHeaders(credsB) : Dial9Creds.headers();
+    Dial9Session.headers(
+      side === "b" && credsB !== null ? credsToHeaders(credsB) : Dial9Creds.headers(),
+    );
 
   let view: DiffViewHandle | null = null;
   let bCredsPrompted = false;
@@ -68,7 +84,10 @@ export function runDiffMode(params: URLSearchParams, els: PageEls): void {
   ): Promise<{ ok: boolean; region?: string | null; error?: string }> {
     const url =
       "/api/credentials/check" + (bBucket ? "?bucket=" + encodeURIComponent(bBucket) : "");
-    const resp = await fetch(url, { method: "POST", headers: credsToHeaders(creds) });
+    const resp = await Dial9Session.fetch(url, {
+      method: "POST",
+      headers: credsToHeaders(creds),
+    });
     if (!resp.ok) {
       return { ok: false, error: await resp.text().catch(() => "check failed") };
     }

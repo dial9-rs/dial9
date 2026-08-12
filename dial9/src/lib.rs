@@ -85,8 +85,8 @@ pub use dial9_tokio_telemetry::{TracedFuture, block_on, spawn, spawn_in};
 pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
-    AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, RecorderPipelineExt, TaskDumpConfig,
-    TokioAttachOptions, TokioHooks,
+    AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, JoinSetExt, RecorderPipelineExt,
+    TaskDumpConfig, TokioAttachOptions, TokioHooks,
 };
 
 /// Offline trace reading and analysis.
@@ -144,10 +144,6 @@ pub mod socket {
     pub use dial9_perf_self_profile::SocketAcceptQueuesSource;
     pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
 }
-
-// Tracing-subscriber layer.
-#[cfg(feature = "tracing-layer")]
-pub use dial9_tokio_telemetry::tracing_layer;
 
 // Metrique unit-of-work entry sink.
 #[cfg(feature = "metrique-sink")]

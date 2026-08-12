@@ -31,6 +31,9 @@ enum TimedEvent {
     QueueSampleEvent {
         timestamp_ns: u64,
     },
+    RuntimeMetricsEvent {
+        timestamp_ns: u64,
+    },
     TaskSpawnEvent {
         timestamp_ns: u64,
     },
@@ -70,6 +73,7 @@ impl TimedEvent {
             | Self::WorkerParkEvent { timestamp_ns }
             | Self::WorkerUnparkEvent { timestamp_ns }
             | Self::QueueSampleEvent { timestamp_ns }
+            | Self::RuntimeMetricsEvent { timestamp_ns }
             | Self::TaskSpawnEvent { timestamp_ns }
             | Self::TaskTerminateEvent { timestamp_ns }
             | Self::CpuSampleEvent { timestamp_ns }
@@ -93,6 +97,7 @@ impl TimedEvent {
             Self::WorkerParkEvent { .. } => "WorkerPark",
             Self::WorkerUnparkEvent { .. } => "WorkerUnpark",
             Self::QueueSampleEvent { .. } => "QueueSample",
+            Self::RuntimeMetricsEvent { .. } => "RuntimeMetrics",
             Self::TaskSpawnEvent { .. } => "TaskSpawn",
             Self::TaskTerminateEvent { .. } => "TaskTerminate",
             Self::CpuSampleEvent { .. } => "CpuSample",

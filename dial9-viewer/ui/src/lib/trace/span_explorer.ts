@@ -1,8 +1,6 @@
 // Typed seam over the frozen span_explorer.js: catalog sorting/labelling,
 // log-duration histogram geometry, percentile estimation, the five-way time
 // composition, attribute filters, and the flamegraph/viewer deep-link builders.
-// Shared verbatim with the raw-trace path so the catalog a client builds from
-// trace bytes and the one the server aggregates cannot drift.
 //
 // lib/trace is the sanctioned frozen-core import boundary; the Span Explorer
 // page consumes all of this through the barrel.
@@ -11,8 +9,6 @@ export {
   TIME_CATEGORIES,
   addAttrFilter,
   bandComposition,
-  buildLogHistogram,
-  buildSpanCatalog,
   classifyExemplarSnapshot,
   collectExemplarAttributeKeys,
   columnIsDegenerate,
@@ -34,7 +30,6 @@ export {
   mergeSelectedExemplarSnapshot,
   normalizeSpanHistogram,
   parseAttrFilterParams,
-  parseSpanEventName,
   percentileForDuration,
   removeAttrFilter,
   sameSpanCatalogStatistics,
@@ -57,7 +52,6 @@ export type {
   DurationBand,
   ExemplarLinkScope,
   HistogramBarLike,
-  ParsedSpanEventName,
   SpanExplorerState,
   SpanHistogramBar,
   SpanHistogramColumn,

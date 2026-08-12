@@ -25,6 +25,7 @@ export {
   SEGMENT_SERVICE_KEY,
   readKeyDerivedIdentity,
   readSegmentIdentity,
+  readSegmentMetadataEntries,
   reconcileIdentity,
 } from "./segment-metadata.js";
 export type { IdentityField, ReconciledIdentity } from "./segment-metadata.js";
@@ -33,7 +34,7 @@ export type { IdentityField, ReconciledIdentity } from "./segment-metadata.js";
 export { formatFieldValue } from "./format.js";
 
 // prefixes.ts - S3 prefix-discovery heuristics (frozen prefix_detect.js).
-export { isDateLayer, lastSegment } from "./prefixes.js";
+export { isDateLayer, lastSegment, preferredPrefix } from "./prefixes.js";
 
 // load.ts - load orchestration + the trace_parser.js surface.
 export {
@@ -42,6 +43,7 @@ export {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
+  fetchTraceBytes,
   formatFrame,
   loadTrace,
   loadTraceBuffered,
@@ -69,8 +71,10 @@ export type {
   ParseProgress,
   ParsedTrace,
   SampleGroup,
+  SingleEventSpan,
   SymbolFrame,
   TaskDump,
+  TidWorkerBinding,
   TraceEvent,
   TraceSliceStore,
   WorkerLoadOptions,
@@ -193,8 +197,10 @@ export {
   filterPointsOfInterest,
   flattenFlamegraph,
   getTraceTimeRange,
+  globalQueueSeries,
   hasCpuProfileSamples,
   selectSpanRenderSet,
+  sumGlobalQueueByCycle,
 } from "./analysis.js";
 export type {
   ActiveSpan,
@@ -245,6 +251,10 @@ export type {
   StoredCredentials,
 } from "./creds.js";
 
+// session.ts - opaque tab-scoped request correlation for same-origin APIs.
+export { Dial9Session } from "./session.js";
+export type { Dial9SessionApi, SessionStorageLike } from "./session.js";
+
 // api_format.ts - aggregated-mode (`?api=1`) display/format helpers,
 // re-exported from the legacy-shared flamegraph_api.js (+
 // formatHumanDuration from the frozen format.js) so both UI generations
@@ -283,16 +293,51 @@ export {
 } from "./trace_scope.js";
 export type { EncodeScopeOptions, EncodedScope, TraceScope } from "./trace_scope.js";
 
+// source-scope.ts - canonical bucket+region+credential identity and the safe
+// projections used by browser URLs, built-in sharing, and API requests.
+export {
+  AMBIENT_CREDENTIALS,
+  EMPTY_LITERAL_CREDENTIALS,
+  EMPTY_SOURCE_SCOPE,
+  applyToCreds,
+  credentialHeadersForSource,
+  credentialMode,
+  isLiteralConfigured,
+  isSourceShareable,
+  makeSourceScope,
+  readNamespacedSourceScope,
+  readPlainSourceScope,
+  sourceScopeFromStored,
+  toShareableSourceScope,
+  toUrlSourceScope,
+  writeNamespacedParams,
+  writeNamespacedUrlParams,
+  writeRequestParams,
+  writeShareableParams,
+  writeUrlParams,
+} from "./source-scope.js";
+export type {
+  AmbientCredentials,
+  LiteralCredentials,
+  RoleCredentials,
+  Shareability,
+  ShareableSourceScope,
+  SourceCredentials,
+  SourceScope,
+  SourceScopeCredentials,
+  StoredSourceCredentials,
+  UrlCredentials,
+  UrlSourceScope,
+} from "./source-scope.js";
+
 // aggregates.ts - server aggregate wire types (/api/flamegraph +
 // /api/tokio-stats), the tokio-stats URL builder, and the coverage
 // full/partial/none fallback signal. (Both endpoints stream over SSE now, so
 // the old client-side fetch/refine loop is gone.)
 export {
-  SPAN_STATS_ENDPOINT,
   TOKIO_STATS_ENDPOINT,
   coverageSignal,
   isCoverageFrozen,
-  spanStatsUrl,
   tokioStatsUrl,
 } from "./aggregates.js";
 export type {
@@ -309,27 +354,27 @@ export type {
   FlamegraphResponse,
   PollDurationBar,
   PollExemplar,
+  SchedulingDelay,
+  SchedulingDelayCoverage,
+  SchedulingDelayKind,
   ScopeEcho,
   SpanDurationBucket,
-  SpanStatsQuery,
   SpanStatsResponse,
   SpanTypeStats,
   SpawnLocStats,
   TimeComposition,
   TokioStatsQuery,
   TokioStatsResponse,
+  WorkerStats,
 } from "./aggregates.js";
 
 // span_explorer.ts - the frozen Span Explorer helpers: catalog sorting, the
 // log-duration histogram geometry + percentile estimation, the five-way time
-// composition, attribute filters, and the flamegraph/viewer deep links. Shared
-// with the raw-trace path so a client-built catalog matches the aggregated one.
+// composition, attribute filters, and the flamegraph/viewer deep links.
 export {
   TIME_CATEGORIES,
   addAttrFilter,
   bandComposition,
-  buildLogHistogram,
-  buildSpanCatalog,
   classifyExemplarSnapshot,
   collectExemplarAttributeKeys,
   columnIsDegenerate,
@@ -351,7 +396,6 @@ export {
   mergeSelectedExemplarSnapshot,
   normalizeSpanHistogram,
   parseAttrFilterParams,
-  parseSpanEventName,
   percentileForDuration,
   removeAttrFilter,
   sameSpanCatalogStatistics,
@@ -373,7 +417,6 @@ export type {
   DurationBand,
   ExemplarLinkScope,
   HistogramBarLike,
-  ParsedSpanEventName,
   SpanExplorerState,
   SpanHistogramBar,
   SpanHistogramColumn,

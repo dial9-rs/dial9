@@ -94,6 +94,10 @@ export interface QueueTrackController {
 
 export function createQueueTrack(store: ViewerStore): QueueTrackController {
   // Trace-invariant queue series: recomputed only when the trace slice changes.
+  // The global line is the process-wide queue depth (per-runtime RuntimeMetrics
+  // summed per cycle, or the legacy pre-summed QueueSample series). Per-runtime
+  // queue/task detail lives in the lanes track (a summary lane closing each
+  // runtime's group), not here.
   const queueData = store.derived(["trace"], (s) => computeQueueData(s.trace.trace));
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
@@ -157,9 +161,9 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     const canvasH = Math.max(0, trackHeight - LEGEND_H);
     const ctx = sizer.ensure(drawW, canvasH, dpr);
     const s = state();
+    const window = deriveQueueWindow(s);
     const data = queueData();
     const model = renderModel(data, viewStart, viewEnd, drawW);
-    const window = deriveQueueWindow(s);
     drawQueueCanvas(ctx, model, window, drawW, canvasH);
     lastPaint = { canvas, drawW, canvasH, dpr, viewStart, viewEnd, model, window };
     // If a drag is in flight (a store tick landed mid-drag), re-overlay the band.
@@ -194,10 +198,14 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
   /** The in-track legend, swatch encodings matching the draw. */
   function legendTemplate(): TemplateResult {
+    // Drop the local series when the trace has no per-worker depth.
+    const entries = queueData().hasLocalQueueDepth
+      ? QUEUE_LEGEND
+      : QUEUE_LEGEND.filter((e) => e.key !== "local");
     return html`
       <ul class="d9-queue-legend" aria-label="Queue depth legend">
         ${repeat(
-          QUEUE_LEGEND,
+          entries,
           (e) => e.label,
           (e) => html`
             <li class="d9-queue-legend-row">
@@ -437,15 +445,18 @@ export function drawQueueCanvas(
   ctx.stroke();
 
   // ── Max local queue as a step line ──────────────────────────────────────
-  ctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const y = queueScaleY(model.local[i]!, maxQ, chartTop, chartH);
-    if (i === 0) ctx.moveTo(i, y);
-    else ctx.lineTo(i, y);
+  // Empty when the trace carries no per-worker queue depth.
+  if (model.local.length > 0) {
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const y = queueScaleY(model.local[i]!, maxQ, chartTop, chartH);
+      if (i === 0) ctx.moveTo(i, y);
+      else ctx.lineTo(i, y);
+    }
+    ctx.strokeStyle = LOCAL_STROKE;
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
-  ctx.strokeStyle = LOCAL_STROKE;
-  ctx.lineWidth = 1;
-  ctx.stroke();
 
   // ── Y-axis labels (max at top, 0 at the visible baseline) ───────────────
   ctx.fillStyle = AXIS_LABEL;

@@ -1,3 +1,5 @@
+#![cfg(tokio_unstable)]
+
 mod common;
 
 use common::decode_file;

@@ -11,6 +11,7 @@ import {
   type LanesRenderInput,
 } from "./render.js";
 import { laneRowLayout } from "../../../lib/canvas/layout.js";
+import { EMPTY_RUNTIME_METRICS } from "../../../lib/trace/runtime-metrics-model.js";
 import { resolveLaneClick } from "./click.js";
 import { assembleLaneHover } from "./hover.js";
 import type { PollSpan, TracingSpan, WorkerLane } from "../../../types/trace.js";
@@ -91,12 +92,16 @@ function baseInput(over: Partial<LanesRenderInput>): LanesRenderInput {
   return {
     workerIds: [0],
     workerSpans: { 0: emptyLane() },
+    runtimeMetrics: EMPTY_RUNTIME_METRICS,
+    laneIdentity: new Map(),
+    runtimeAccents: new Map(),
     workerQueueSamples: {},
     wakesByWorker: {},
     spansById: new Map(),
     blockInPlaceGaps: [],
     hasCpuTime: false,
     hasSchedWait: false,
+    hasLocalQueueDepth: true,
     viewStart: 0,
     viewEnd: 1000,
     selectedTaskId: null,
@@ -253,6 +258,38 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     expect(qLabelCount(rec.fillTexts)).toBe(2);
   });
 
+  // A stable-tokio trace carries local_queue 0 on every event. Zeros still
+  // plot (a flat line at the baseline plus a q: label), so the capability
+  // flag is what has to suppress the series, not the values.
+  it("drops the queue step line when the trace has no local-queue depth", () => {
+    const ids = [10, 11];
+    const sentinels = Object.fromEntries(
+      ids.map((id) => [
+        id,
+        [
+          { t: 0, local: 0 },
+          { t: 1000, local: 0 },
+        ],
+      ]),
+    );
+    const render = (hasLocalQueueDepth: boolean): Recording => {
+      const rec = recordingCtx();
+      renderLanes(
+        rec.ctx,
+        { ...workersInput(ids), workerQueueSamples: sentinels, hasLocalQueueDepth },
+        {
+          time: layout(0, 1000, 300),
+          height: ids.length * LANE_ROW_H,
+          rowLayout: flatRows(ids),
+          scrollTop: 0,
+        },
+      );
+      return rec;
+    };
+    expect(qLabelCount(render(true).fillTexts)).toBe(2);
+    expect(qLabelCount(render(false).fillTexts)).toBe(0);
+  });
+
   it("draws a runtime header band with name + worker count per group", () => {
     const rows = laneRowLayout(
       [
@@ -274,7 +311,74 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     expect(rec.fillTexts).toContain("2 workers");
     expect(rec.fillTexts).toContain("1 worker");
   });
+
+  it("draws a runtime-metrics lane with its runtime name + current/peak values", () => {
+    const rows = metricsRows(false);
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, { ...workersInput([0]), runtimeMetrics: metricsFixture() }, {
+      time: layout(0, 1000, 300),
+      height: 300,
+      rowLayout: rows,
+      scrollTop: 0,
+    });
+    expect(rec.fillTexts).toContain("main runtime metrics");
+    // The point reading is the level at the view's right edge - the LAST sample
+    // (q 7 / 194 tasks) - and the trace peak rides alongside it.
+    expect(rec.fillTexts).toContain("global queue: 7 at view end \u00b7 peak 7");
+    expect(rec.fillTexts).toContain("alive tasks: 194 at view end \u00b7 peak 194");
+  });
+
+  it("a folded runtime-metrics lane keeps its numbers and drops the chart", () => {
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, { ...workersInput([0]), runtimeMetrics: metricsFixture() }, {
+      time: layout(0, 1000, 300),
+      height: 300,
+      rowLayout: metricsRows(true),
+      scrollTop: 0,
+    });
+    // The headline numbers survive the fold - that is the point of the strip.
+    expect(rec.fillTexts).toContain("global queue: 7 at view end \u00b7 peak 7");
+    expect(rec.fillTexts).toContain("alive tasks: 194 at view end \u00b7 peak 194");
+    // The title is NOT repeated: one line has no room for both, and the label
+    // gutter names the row (labels.test.ts pins that).
+    expect(rec.fillTexts).not.toContain("main runtime metrics");
+  });
 });
+
+/** Layout with a summary lane for the inferred "main" group, folded or not. */
+function metricsRows(collapsed: boolean) {
+  return laneRowLayout(
+    [{ name: "main", inferred: true, workerIds: [0] }],
+    LANE_ROW_H,
+    RUNTIME_HEADER_H,
+    {},
+    { runtimes: new Set(["main"]), collapsed: { main: collapsed } },
+  );
+}
+
+/** Two samples for the unnamed default runtime (the "main" group's wire key). */
+function metricsFixture() {
+  const mk = (t: number, q: number, tasks: number) => ({
+    t,
+    runtimeName: "",
+    globalQueue: q,
+    aliveTasks: tasks,
+  });
+  return {
+    present: true,
+    summedGlobalQueue: [],
+    byRuntime: new Map([
+      [
+        "",
+        {
+          samples: [mk(100, 5, 190), mk(500, 7, 194)],
+          maxAliveTasks: 194,
+          maxGlobalQueue: 7,
+        },
+      ],
+    ]),
+  };
+}
 
 describe("sharedVisibleMaxQueue", () => {
   it("is the max local depth over the visible window, min 1", () => {
@@ -403,6 +507,7 @@ describe("assembleLaneHover", () => {
       hasCpuTime: true,
       hasSchedWait: true,
       hasTaskTracking: true,
+      hasLocalQueueDepth: true,
     });
     expect(data.state).toBe("polling");
     expect(data.poll?.taskId).toBe(0x1a);
@@ -412,6 +517,32 @@ describe("assembleLaneHover", () => {
     expect(data.globalQueue).toBe(3);
     expect(data.localQueue).toBe(1);
     expect(data.activeTaskCount).toBe(5);
+  });
+
+  // Task ids and queue depth are independent capabilities: a reduced-fidelity
+  // trace still carries task ids on its poll spans.
+  it("keeps the task id when only queue depth is unavailable", () => {
+    const p = poll(0, 100, 0x2b);
+    const lane: WorkerLane = { ...emptyLane(), polls: [p] };
+    const data = assembleLaneHover({
+      workerId: 1,
+      ns: 50,
+      spans: lane,
+      allSpans: [],
+      queueSamples: [{ t: 40, global: 3 }],
+      localQueueSamples: [{ t: 40, local: 0 }],
+      activeTaskSamples: [],
+      blockInPlaceGaps: [],
+      hasCpuTime: true,
+      hasSchedWait: true,
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    });
+    expect(data.poll?.taskId).toBe(0x2b);
+    // The 0 on the wire is a sentinel, not a measurement.
+    expect(data.localQueue).toBeNull();
+    // Global queue has a stable source, so it survives.
+    expect(data.globalQueue).toBe(3);
   });
 
   it("reports parked state with kernel sched delay", () => {
@@ -431,6 +562,7 @@ describe("assembleLaneHover", () => {
       hasCpuTime: false,
       hasSchedWait: true,
       hasTaskTracking: false,
+      hasLocalQueueDepth: false,
     });
     expect(data.state).toBe("parked");
     expect(data.parkDurationNs).toBe(500);

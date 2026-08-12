@@ -15,11 +15,7 @@
 
 import { makeTimePanelLayout } from "../../../panel_layout.js";
 import type { TimePanelLayout } from "../../../panel_layout.js";
-import type {
-  LaneGeometry,
-  PanelGeometry,
-  PanelKind,
-} from "../../types/state.js";
+import type { PanelGeometry, PanelKind } from "../../types/state.js";
 import type { RuntimeGroup } from "../../types/trace.js";
 
 export type { TimePanelLayout };
@@ -111,23 +107,6 @@ export function panelGeometry(opts: PanelGeometryOpts): PanelGeometry {
   };
 }
 
-/**
- * Geometry of the worker-lane rows as a vertical stack: row `i` sits at
- * y = i * laneHeight, in the order `workerIds` is given. `y` is
- * lanes-local (before scroll offset).
- */
-export function laneStackGeometry(
-  workerIds: readonly number[],
-  laneHeight: number,
-): LaneGeometry[] {
-  return workerIds.map((workerId, index) => ({
-    workerId,
-    index,
-    y: index * laneHeight,
-    height: laneHeight,
-  }));
-}
-
 /** A row in the vertical lanes stack: a fixed-height worker row, or a runtime
  *  group header band. `y`/`height` are lanes-local CSS px (before scroll). */
 export type LaneRow =
@@ -150,6 +129,23 @@ export type LaneRow =
       collapsed: boolean;
       y: number;
       height: number;
+    }
+  | {
+      /** A per-runtime summary lane (global queue + alive tasks for the
+       *  runtime), rendered as the group's FOOTER - directly under its worker
+       *  rows - and folded away with the runtime. Emitted only for groups named
+       *  in `metrics.runtimes`. */
+      kind: "runtime-metrics";
+      /** Group name, used to look up the runtime's metric series. */
+      name: string;
+      /** True for the inferred default ("main") runtime (its metrics are keyed
+       *  under the empty wire name). */
+      inferred: boolean;
+      /** True when the user folded this summary lane down to its one-line
+       *  strip (independently of the runtime's own fold). */
+      collapsed: boolean;
+      y: number;
+      height: number;
     };
 
 export interface LaneRowLayout {
@@ -159,24 +155,49 @@ export interface LaneRowLayout {
   contentHeight: number;
 }
 
+/** Which runtimes get a summary lane, and which of those the user has folded to
+ *  the one-line strip. Passed as one object so the two always travel together
+ *  (a name in `collapsed` but not `runtimes` has no lane to fold). */
+export interface MetricsLaneOpts {
+  /** Group names that have a metric series, so a summary lane is emitted. */
+  runtimes: ReadonlySet<string>;
+  /** Group name -> true when the user folded that runtime's summary lane to its
+   *  one-line strip. Absent/false = the full chart. */
+  collapsed?: Readonly<Record<string, boolean>>;
+}
+
+/** Height (CSS px) of a summary lane folded to its one-line strip: the title +
+ *  the headline numbers, no chart. */
+export const METRICS_LANE_COLLAPSED_H = 18;
+
 /**
  * The runtime-aware vertical layout of the lanes stack: each runtime group emits
  * a header row (only when there is MORE than one group - the single-runtime
- * common case stays header-free) followed by its workers at fixed `rowH`.
+ * common case stays header-free), then its workers at fixed `rowH`, then - for a
+ * group with a metric series - its summary lane as the group's FOOTER.
  * Cumulative `y` runs top to bottom. This is the ONE source of lane vertical
  * geometry - the renderer draws from it and both hit-tests resolve against it,
  * so a fixed row height + headers can never drift between draw and click.
  *
+ * The summary lane sits UNDER its workers (not above): it is a per-runtime
+ * total, so it reads as the group's bottom line, and a reader scanning the
+ * worker rows meets the runtime's aggregate right where the group ends rather
+ * than before its detail.
+ *
  * A group named in `collapsed` (only honoured when headers are shown) keeps its
- * header but omits its worker rows, so a folded runtime takes only header
- * height. The flat worker `index` counts emitted rows only, so it stays a dense,
- * unique per-frame batcher key regardless of which groups are folded.
+ * header but omits both its worker rows and its summary lane, so a folded
+ * runtime takes only header height. A summary lane named in
+ * `metrics.collapsed` shrinks to {@link METRICS_LANE_COLLAPSED_H} instead of
+ * disappearing, so its headline numbers stay readable. The flat worker `index`
+ * counts emitted rows only, so it stays a dense, unique per-frame batcher key
+ * regardless of which groups are folded.
  */
 export function laneRowLayout(
   groups: readonly RuntimeGroup[],
   rowH: number,
   headerH: number,
   collapsed: Readonly<Record<string, boolean>> = {},
+  metrics: MetricsLaneOpts = EMPTY_METRICS_LANES,
 ): LaneRowLayout {
   const rows: LaneRow[] = [];
   const showHeaders = groups.length > 1;
@@ -202,9 +223,26 @@ export function laneRowLayout(
       y += rowH;
       index++;
     }
+    // The group's footer: its runtime summary lane, folded away with the runtime
+    // and independently foldable to a one-line strip. Only for groups that
+    // actually have a metric series.
+    if (metrics.runtimes.has(g.name)) {
+      const laneCollapsed = metrics.collapsed?.[g.name] === true;
+      rows.push({
+        kind: "runtime-metrics",
+        name: g.name,
+        inferred: g.inferred,
+        collapsed: laneCollapsed,
+        y,
+        height: laneCollapsed ? METRICS_LANE_COLLAPSED_H : rowH,
+      });
+      y += laneCollapsed ? METRICS_LANE_COLLAPSED_H : rowH;
+    }
   }
   return { rows, contentHeight: y };
 }
+
+const EMPTY_METRICS_LANES: MetricsLaneOpts = { runtimes: new Set() };
 
 /**
  * Resolve a lanes-local y (client y minus the viewport top PLUS the box
@@ -233,6 +271,25 @@ export function headerAtLaneY(rowLayout: LaneRowLayout, localY: number): string 
   for (const row of rowLayout.rows) {
     if (localY < row.y || localY >= row.y + row.height) continue;
     return row.kind === "header" ? row.name : null;
+  }
+  return null;
+}
+
+/**
+ * Resolve a lanes-local y to the runtime NAME whose summary lane contains it, or
+ * null when the point is over a worker row / header / past the content. The
+ * third member of the same family as workerAtLaneY + headerAtLaneY over the same
+ * geometry, so one point resolves to exactly one target: a worker select, a
+ * runtime fold, or a summary-lane fold.
+ */
+export function metricsLaneAtLaneY(
+  rowLayout: LaneRowLayout,
+  localY: number,
+): string | null {
+  if (localY < 0) return null;
+  for (const row of rowLayout.rows) {
+    if (localY < row.y || localY >= row.y + row.height) continue;
+    return row.kind === "runtime-metrics" ? row.name : null;
   }
   return null;
 }
