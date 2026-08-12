@@ -83,7 +83,7 @@ async fn checkout(Path(order_id): Path<u64>) -> String {
     // cancelled. Fields are captured at the call site by the macro; u64/Display
     // values need no `.to_string()`.
     let order = load_order(order_id)
-        .instrument(dial9_span!("db.load_order", order_id = order_id))
+        .instrument(dial9_span!("db.load_order", order_id: u64 = order_id))
         .await;
 
     // A name-only span (no fields) needs no macro — `Dial9Span::new` builds one
@@ -97,7 +97,7 @@ async fn checkout(Path(order_id): Path<u64>) -> String {
     // held across .await — for async, use `.instrument` above. The macro's
     // fields ride every segment, including the exit.
     let quote = {
-        let span = dial9_span!("pricing.compute", order_id = order_id);
+        let span = dial9_span!("pricing.compute", order_id: u64 = order_id);
         let _entered = span.enter();
         compute_quote(&order, rate) // pure CPU
     }; // exit + close here
@@ -107,7 +107,7 @@ async fn checkout(Path(order_id): Path<u64>) -> String {
     // everything above. A spawned task can outlive this request, so
     // containment breaks — link it explicitly instead. `span.id()` is the
     // only handle that crosses the task boundary.
-    let charge_span = dial9_span!("payment.charge", order_id = order_id);
+    let charge_span = dial9_span!("payment.charge", order_id: u64 = order_id);
     let audit = Dial9Span::new("audit.emit").with_parent_id(charge_span.id());
     tokio::spawn(emit_audit_record(order_id).instrument(audit));
 
@@ -128,7 +128,7 @@ async fn settlement_worker() {
     loop {
         let batch = next_settlement_batch().await;
         settle(&batch)
-            .instrument(dial9_span!("settlement.run", batch_len = batch.len() as u64))
+            .instrument(dial9_span!("settlement.run", batch_len: u64 = batch.len() as u64))
             .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
     }

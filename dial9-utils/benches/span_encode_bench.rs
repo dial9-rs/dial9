@@ -111,7 +111,7 @@ fn hand_span(x: u64, y: u64) {
 //    drop span (emit close). Same three events, typed fields. ──
 
 fn macro_span(x: u64, y: u64) {
-    let span = dial9_span!("handbench", x = x, y = y);
+    let span = dial9_span!("handbench", x: u64 = x, y: u64 = y);
     let entered = span.enter();
     drop(entered);
     // `span` drops here → close.

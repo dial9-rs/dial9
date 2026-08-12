@@ -23,7 +23,7 @@ use tower_service::Service;
 /// # use dial9_utils::tower::Dial9SpanLayer;
 /// # use dial9_utils::dial9_span;
 /// // Per-request fields:
-/// let layer = Dial9SpanLayer::new(|req: &u64| dial9_span!("rpc", id = *req));
+/// let layer = Dial9SpanLayer::new(|req: &u64| dial9_span!("rpc", id: u64 = *req));
 /// // Or a fixed name, ignoring the request:
 /// let fixed = Dial9SpanLayer::new(|_req: &u64| dial9_span!("http_request"));
 /// ```

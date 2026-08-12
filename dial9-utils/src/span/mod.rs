@@ -10,7 +10,7 @@
 //!
 //! # Zero-cost
 //!
-//! [`dial9_span!`] generates a monomorphized [`TraceEvent`](dial9_trace_format::TraceEvent)
+//! [`dial9_span!`] generates a dedicated (non-generic) [`TraceEvent`](dial9_trace_format::TraceEvent)
 //! per call site with **typed** fields, and emits through the encoder's direct
 //! typed path — no runtime schema map, no per-emit `format!`, no boxed
 //! closures, and numeric fields ride the wire as `Varint`s. The result compiles
@@ -30,23 +30,23 @@
 //! async {
 //!     // ... do work ...
 //! }
-//! .instrument(dial9_span!("handle_request", request_id = req))
+//! .instrument(dial9_span!("handle_request", request_id: u32 = req))
 //! .await
 //! # }
 //! ```
 //!
 //! # Fields
 //!
-//! The [`dial9_span!`] macro captures typed key/value fields with
-//! `tracing`-style syntax: a bare value keeps its type (a `u64` is a `Varint`
-//! on the wire), `%` formats via [`Display`] and `?` via [`Debug`] (both
-//! producing a `String`):
+//! The [`dial9_span!`] macro captures typed key/value fields: an eager field is
+//! written `key: Type = value` and keeps its type (a `u64` is a `Varint` on the
+//! wire); `%` formats via [`Display`] and `?` via [`Debug`] (both producing a
+//! `String`):
 //!
 //! ```no_run
 //! # use dial9_utils::dial9_span;
 //! # let retries = 1u32; let path = "/x";
 //! # #[derive(Debug)] struct Cfg; let cfg = Cfg;
-//! let span = dial9_span!("load", retries = retries, path = %path, config = ?cfg);
+//! let span = dial9_span!("load", retries: u32 = retries, path = %path, config = ?cfg);
 //! ```
 //!
 //! # Instrumenting a synchronous scope
@@ -409,11 +409,9 @@ impl<T> fmt::Debug for Slot<T> {
 /// Construct a span, capturing the call site and typed fields.
 ///
 /// This is the ergonomic, zero-cost way to create a span: it generates a
-/// monomorphized [`TraceEvent`](dial9_trace_format::TraceEvent) per call site,
-/// so emitting is as cheap as a hand-written event and numeric fields stay
-/// numeric on the wire.
-///
-/// Field syntax mirrors `tracing`:
+/// dedicated (non-generic) [`TraceEvent`](dial9_trace_format::TraceEvent) type
+/// per call site, so emitting is as cheap as a hand-written event and numeric
+/// fields stay numeric on the wire.
 ///
 /// ```
 /// use dial9_utils::dial9_span;
@@ -421,20 +419,24 @@ impl<T> fmt::Debug for Slot<T> {
 /// // Just a name:
 /// let span = dial9_span!("load_config");
 ///
-/// // Typed fields — bare keeps the type (Varint), `%` is Display, `?` is Debug:
+/// // Typed fields — `key: Type = value` keeps the type (Varint), `%` is
+/// // Display, `?` is Debug:
 /// # let retries = 3u32;
 /// # let path = "/etc/app.toml";
-/// let span = dial9_span!("load_config", retries = retries, path = %path);
+/// let span = dial9_span!("load_config", retries: u32 = retries, path = %path);
 /// # #[derive(Debug)] struct Cfg;
 /// # let cfg = Cfg;
 /// let span = dial9_span!("validate", config = ?cfg);
 /// ```
 ///
-/// A bare value keeps its Rust type, so it must implement
+/// An eager field is written `name: Type = value` and keeps its Rust type on
+/// the wire, so the type must implement
 /// [`TraceField`](dial9_trace_format::TraceField) (`u64`, `i64`, `bool`, `f64`,
-/// `String`, …) and be `'static`; use `%`/`?` to render any `Display`/`Debug`
-/// value to an owned `String`. The span name must be a `&'static str`
-/// expression (for a runtime name, use [`Dial9Span::new`](span::Dial9Span::new)).
+/// `String`, …). The type is required — it makes the generated event struct
+/// concrete rather than generic. Use `%`/`?` to render any `Display`/`Debug`
+/// value to an owned `String` without naming a type. The span name must be a
+/// `&'static str` expression (for a runtime name, use
+/// [`Dial9Span::new`](span::Dial9Span::new)).
 ///
 /// ## Late fields
 ///
@@ -449,7 +451,7 @@ impl<T> fmt::Debug for Slot<T> {
 /// use dial9_utils::span::Instrument as _;
 /// # async fn handle() -> u16 { 200 }
 /// # async fn demo() {
-/// let (span, slots) = dial9_span!("request", route = "/checkout", status: u16);
+/// let (span, slots) = dial9_span!("request", route: &'static str = "/checkout", status: u16);
 /// async move {
 ///     let code = handle().await;
 ///     slots.status.set(code); // recorded on completion
@@ -473,8 +475,11 @@ macro_rules! dial9_span {
 }
 
 /// Token-muncher that sorts each field into one of two accumulators: eager
-/// `(key : value_expr)` pairs (handling the `%`/`?`/bare sigils) and late
-/// `(key : type)` pairs (declared as `key: Type`). The build step reads both.
+/// `(key : type = value)` triples (from `key: Type = value`, or the `%`/`?`
+/// sigils which capture an owned `String`) and late `(key : type)` pairs
+/// (declared as `key: Type`). The build step reads both. Each eager field
+/// carries its declared type, so the generated event structs are concrete —
+/// no generic type parameters.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __dial9_span_munch {
@@ -486,36 +491,39 @@ macro_rules! __dial9_span_munch {
     ($name:expr; [$($eager:tt)*] ; [$($late:tt)+] ; ) => {
         $crate::__dial9_span_build_late!($name; [$($eager)*] ; [$($late)+])
     };
+    // Eager typed field: `key: Type = value`. Keeps its declared type on the
+    // wire (a `u64` stays a `Varint`). The type is required so the event struct
+    // field is concrete rather than a generic parameter.
+    ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident : $ty:ty = $val:expr $(, $($rest:tt)*)?) => {
+        $crate::__dial9_span_munch!(
+            $name; [$($eager)* ($key : $ty = $val)] ; [$($late)*] ; $($($rest)*)?
+        )
+    };
     // Late field: `key: Type` (a type, no `= value`).
     ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident : $ty:ty $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
             $name; [$($eager)*] ; [$($late)* ($key : $ty)] ; $($($rest)*)?
         )
     };
-    // Eager `%` (Display), `?` (Debug), or bare (keeps its Rust type).
+    // Eager `%` (Display) / `?` (Debug): captured as an owned `String`.
     ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident = %$val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($eager)* ($key : ::std::string::ToString::to_string(&$val))] ; [$($late)*] ; $($($rest)*)?
+            $name; [$($eager)* ($key : ::std::string::String = ::std::string::ToString::to_string(&$val))] ; [$($late)*] ; $($($rest)*)?
         )
     };
     ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident = ?$val:expr $(, $($rest:tt)*)?) => {
         $crate::__dial9_span_munch!(
-            $name; [$($eager)* ($key : ::std::format!("{:?}", $val))] ; [$($late)*] ; $($($rest)*)?
-        )
-    };
-    ($name:expr; [$($eager:tt)*] ; [$($late:tt)*] ; $key:ident = $val:expr $(, $($rest:tt)*)?) => {
-        $crate::__dial9_span_munch!(
-            $name; [$($eager)* ($key : $val)] ; [$($late)*] ; $($($rest)*)?
+            $name; [$($eager)* ($key : ::std::string::String = ::std::format!("{:?}", $val))] ; [$($late)*] ; $($($rest)*)?
         )
     };
 }
 
-/// Build step: define the per-call-site monomorphized span + enter/exit
+/// Build step: define the per-call-site concrete span + enter/exit
 /// [`TraceEvent`](dial9_trace_format::TraceEvent) structs and construct the span.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __dial9_span_build {
-    ($name:expr; [$( ($key:ident : $val:expr) )*]) => {{
+    ($name:expr; [$( ($key:ident : $ty:ty = $val:expr) )*]) => {{
         // The span name must be a `&'static str` so it is baked into the
         // generated code rather than stored — a runtime name needs `Dial9Span`.
         const __DIAL9_NAME: &str = $name;
@@ -524,17 +532,18 @@ macro_rules! __dial9_span_build {
         const __DIAL9_LOCATION: &str =
             ::core::concat!(::core::file!(), ":", ::core::line!());
 
-        // Each field's identifier doubles as its own type parameter (fields and
-        // type params live in separate namespaces), so the field keeps its
-        // concrete inferred type — a `u64` stays a `u64`/`Varint`, not a string.
-        // The wire schema name is per call site (`SpanEnter:<file>:<line>:<col>`),
-        // which the viewer groups on by its `SpanEnter:` prefix.
+        // Each eager field carries its declared type (`key: Type = value`), so
+        // the event structs are concrete — no generic parameters — and each
+        // field keeps its type on the wire (a `u64` stays a `Varint`, not a
+        // string). The wire schema name is per call site
+        // (`SpanEnter:<file>:<line>:<col>`), which the viewer groups on by its
+        // `SpanEnter:` prefix.
         #[derive($crate::span::__rt::TraceEvent)]
         #[traceevent(name = ::core::concat!(
             "SpanEnter:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
         ))]
         #[allow(non_camel_case_types, non_snake_case)]
-        struct __Dial9Enter<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+        struct __Dial9Enter {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
@@ -543,7 +552,7 @@ macro_rules! __dial9_span_build {
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             location: $crate::span::__rt::InternedString,
-            $( $key: $key, )*
+            $( $key: $ty, )*
         }
 
         #[derive($crate::span::__rt::TraceEvent)]
@@ -551,7 +560,7 @@ macro_rules! __dial9_span_build {
             "SpanExit:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
         ))]
         #[allow(non_camel_case_types, non_snake_case)]
-        struct __Dial9Exit<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+        struct __Dial9Exit {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
@@ -564,19 +573,18 @@ macro_rules! __dial9_span_build {
             idle_ns: u64,
             poll_count: u64,
             completed: bool,
-            $( $key: $key, )*
+            $( $key: $ty, )*
         }
 
         #[allow(non_camel_case_types, non_snake_case)]
-        struct __Dial9Span<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+        struct __Dial9Span {
             span_id: $crate::span::__rt::SpanId,
             parent_span_id: ::core::option::Option<$crate::span::__rt::SpanId>,
-            $( $key: $key, )*
+            $( $key: $ty, )*
         }
 
         #[allow(non_camel_case_types, non_snake_case)]
-        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
-            $crate::span::__rt::Span for __Dial9Span<$($key),*>
+        impl $crate::span::__rt::Span for __Dial9Span
         {
             fn id(&self) -> $crate::span::__rt::SpanId {
                 self.span_id
@@ -631,8 +639,7 @@ macro_rules! __dial9_span_build {
         }
 
         #[allow(non_camel_case_types, non_snake_case)]
-        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
-            ::core::ops::Drop for __Dial9Span<$($key),*>
+        impl ::core::ops::Drop for __Dial9Span
         {
             fn drop(&mut self) {
                 $crate::span::__rt::emit_close(self.span_id);
@@ -658,7 +665,7 @@ macro_rules! __dial9_span_build {
 macro_rules! __dial9_span_build_late {
     (
         $name:expr;
-        [$( ($key:ident : $val:expr) )*] ;
+        [$( ($key:ident : $ty:ty = $val:expr) )*] ;
         [$( ($lkey:ident : $lty:ty) )+]
     ) => {{
         const __DIAL9_NAME: &str = $name;
@@ -673,7 +680,7 @@ macro_rules! __dial9_span_build_late {
             "SpanEnter:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
         ))]
         #[allow(non_camel_case_types, non_snake_case)]
-        struct __Dial9Enter<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+        struct __Dial9Enter {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
@@ -682,7 +689,7 @@ macro_rules! __dial9_span_build_late {
             #[traceevent(role = "span.name")]
             span_name: $crate::span::__rt::InternedString,
             location: $crate::span::__rt::InternedString,
-            $( $key: $key, )*
+            $( $key: $ty, )*
         }
 
         // Exit: eager fields, then each late field as `Option<Type>`.
@@ -691,7 +698,7 @@ macro_rules! __dial9_span_build_late {
             "SpanExit:", ::core::file!(), ":", ::core::line!(), ":", ::core::column!()
         ))]
         #[allow(non_camel_case_types, non_snake_case)]
-        struct __Dial9Exit<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+        struct __Dial9Exit {
             #[traceevent(timestamp)]
             timestamp_ns: u64,
             worker_id: ::core::option::Option<u64>,
@@ -704,21 +711,20 @@ macro_rules! __dial9_span_build_late {
             idle_ns: u64,
             poll_count: u64,
             completed: bool,
-            $( $key: $key, )*
+            $( $key: $ty, )*
             $( $lkey: ::core::option::Option<$lty>, )+
         }
 
         #[allow(non_camel_case_types, non_snake_case)]
-        struct __Dial9Span<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*> {
+        struct __Dial9Span {
             span_id: $crate::span::__rt::SpanId,
             parent_span_id: ::core::option::Option<$crate::span::__rt::SpanId>,
-            $( $key: $key, )*
+            $( $key: $ty, )*
             $( $lkey: $crate::span::__rt::Arc<$crate::span::__rt::OnceLock<$lty>>, )+
         }
 
         #[allow(non_camel_case_types, non_snake_case)]
-        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
-            $crate::span::__rt::Span for __Dial9Span<$($key),*>
+        impl $crate::span::__rt::Span for __Dial9Span
         {
             fn id(&self) -> $crate::span::__rt::SpanId {
                 self.span_id
@@ -774,8 +780,7 @@ macro_rules! __dial9_span_build_late {
         }
 
         #[allow(non_camel_case_types, non_snake_case)]
-        impl<$($key: $crate::span::__rt::TraceField + ::core::clone::Clone + 'static),*>
-            ::core::ops::Drop for __Dial9Span<$($key),*>
+        impl ::core::ops::Drop for __Dial9Span
         {
             fn drop(&mut self) {
                 $crate::span::__rt::emit_close(self.span_id);

@@ -84,14 +84,14 @@ close, two typed `u64` fields), and they land within measurement noise
 (~325 ns vs ~323 ns for the macro vs the hand-written span). What makes that
 possible:
 
-- **Typed, monomorphized events.** `dial9_span!(...)` expands, at each call site,
+- **Typed, concrete events.** `dial9_span!(...)` expands, at each call site,
   to a pair of generated `#[derive(TraceEvent)]` structs (`SpanEnter:<file>:<line>:<col>`
   and the matching `SpanExit`) whose user fields keep their concrete Rust types.
-  Each field's identifier doubles as its own type parameter (fields and type
-  params are separate namespaces), so `order_id = 7u64` stores a `u64` and rides
-  the wire as a `Varint` — no `format!`, no string, no `Vec`. Emitting is a
-  direct `enc.encode(&Enter { … })`, monomorphized and inlinable — no boxed
-  closure or function-pointer indirection.
+  Each eager field carries its declared type (`order_id: u64 = 7u64`), so the
+  structs are concrete — no generic type parameters — and `order_id` stores a
+  `u64` and rides the wire as a `Varint`: no `format!`, no string, no `Vec`.
+  Emitting is a direct `enc.encode(&Enter { … })`, inlinable — no boxed closure
+  or function-pointer indirection.
 - **No runtime schema map, lock-free registration.** The generated types carry
   their schema (name + typed `field_defs`) at compile time. Registration on the
   wire goes through the encoder's normal per-type cache — a lock-free
@@ -117,7 +117,7 @@ emit). `Copy`/numeric fields are allocation-free.
 
 ### Enabling changes to the derive / trace-format
 
-Three small, general, additive changes outside the `span` module let the derive
+Two small, general, additive changes outside the `span` module let the derive
 work for the generated types:
 
 1. `#[traceevent(name = <expr>)]` on the `TraceEvent` derive: overrides the
@@ -125,13 +125,12 @@ work for the generated types:
    generated type can name itself `concat!("SpanEnter:", file!(), ":", line!(),
    ":", column!())`. Evaluated at the derive site, so the builtins resolve to the
    user's callsite.
-2. Generics propagation in the derive (`split_for_impl`), so `#[derive(TraceEvent)]`
-   works on the generic generated event structs. The generated impl also carries
-   `#[allow(non_camel_case_types, non_snake_case)]` because the type params are
-   named after user field idents.
-3. `impl TraceField for &str` in `dial9-trace-format`, so a bare string-literal
-   field (`service = "checkout"`, a `&'static str`) is zero-cost (stored as a
+2. `impl TraceField for &str` in `dial9-trace-format`, so a string-literal field
+   (`service: &'static str = "checkout"`) is zero-cost (stored as a
    `&'static str`, no `String` allocation).
+
+The generated event structs are concrete (each eager field declares its type),
+so the derive needs no generic-parameter support for this feature.
 
 ## API surface
 
@@ -144,12 +143,12 @@ The core (macro + guard + future combinator) depends only on `dial9-core` +
 small `tower-service` / `tower-layer` trait crates, not `tower` itself).
 
 ```rust
-// Build a span, capturing the callsite and typed fields. tracing-style syntax:
-//   bare  → keeps the Rust type (u64 → Varint); must be `TraceField + 'static`
-//   %expr → Display-format to an owned String
-//   ?expr → Debug-format to an owned String
+// Build a span, capturing the callsite and typed fields. Field syntax:
+//   key: Type = value → keeps the Rust type (u64 → Varint); Type must be `TraceField`
+//   key = %expr       → Display-format to an owned String
+//   key = ?expr       → Debug-format to an owned String
 // Returns an opaque per-callsite type implementing `Span`.
-dial9_span!("db.load", order_id = id, retries = n, path = %p, cfg = ?c) -> impl Span;
+dial9_span!("db.load", order_id: u64 = id, retries: u32 = n, path = %p, cfg = ?c) -> impl Span;
 
 pub trait Span: Sized {
     fn id(&self) -> SpanId;                              // for explicit parenting
@@ -194,10 +193,11 @@ Dial9SpanLayerWithResponse::new(|req: &Req| {
 
 **Field names are macro identifiers; values keep their type.** Names become
 wire-schema field names, so they are fixed per callsite by construction — the
-low-cardinality property the schema story needs. A bare value keeps its Rust
-type (so it must be `TraceField + Clone + 'static`); `%`/`?` render any
-`Display`/`Debug` value to an owned `String`. This replaces the earlier
-stringify-everything approach and is what makes numeric fields zero-cost.
+low-cardinality property the schema story needs. An eager field is written
+`key: Type = value` and keeps its Rust type (the type must be `TraceField +
+Clone`); `%`/`?` render any `Display`/`Debug` value to an owned `String`. The
+required type is what keeps the generated event struct concrete (no generics)
+while still zero-cost — numeric fields ride the wire as their native type.
 
 **The future combinator emits one enter + one completion exit, not a pair per
 poll.** `Instrumented` emits `SpanEnter` on the first poll, then times each poll
@@ -251,7 +251,7 @@ Declaring at least one late field changes the macro's return from a bare span
 to `(span, slots)`:
 
 ```rust
-let (span, slots) = dial9_span!("request", route = "/checkout", status: u16, bytes: u64);
+let (span, slots) = dial9_span!("request", route: &'static str = "/checkout", status: u16, bytes: u64);
 async move {
     let resp = handle().await;
     slots.status.set(resp.status);   // recorded on completion
@@ -395,8 +395,8 @@ home (feature-gating S3, or a dedicated crate) is a possible follow-up.
 - `tower` feature (`dial9-utils`): gates `Dial9SpanLayer`/`Dial9SpanService`
   (+ `tower-layer` dep; `tower-service` was already present). Mirrored as a
   passthrough `tower` feature on `dial9`.
-- Derive / trace-format changes (`name = <expr>`, generics propagation,
-  `TraceField for &str`) are additive and have no effect on existing events.
+- Derive / trace-format changes (`name = <expr>`, `TraceField for &str`) are
+  additive and have no effect on existing events.
 - No trace-format *wire* changes: only new instances of the existing
   self-describing span schemas. Old JS viewers render new traces unchanged.
 

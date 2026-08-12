@@ -209,7 +209,7 @@ fn span_off_runtime_omits_worker_id() {
 #[test]
 fn sync_guard_emits_one_pair_and_closes() {
     let events = run_traced(1, || async {
-        let span = dial9_span!("pricing.compute", order_id = 7u64, total_cents = 4950u64);
+        let span = dial9_span!("pricing.compute", order_id: u64 = 7u64, total_cents: u64 = 4950u64);
         let entered = span.enter();
         // pretend CPU work
         let _total: u64 = (0..100).sum();
@@ -287,7 +287,7 @@ fn instrumented_future_emits_enter_and_completion() {
             tokio::task::yield_now().await; // forces a second poll
         }
         two_polls()
-            .instrument(dial9_span!("db.query", table = "orders", rows = 3u64))
+            .instrument(dial9_span!("db.query", table: &'static str = "orders", rows: u64 = 3u64))
             .await;
     });
 
@@ -374,9 +374,11 @@ fn name_only_and_macro_schemas() {
 #[test]
 fn distinct_callsites_get_distinct_schemas() {
     let events = run_traced(1, || async {
-        async {}.instrument(dial9_span!("op.a", base = 1u64)).await;
         async {}
-            .instrument(dial9_span!("op.b", base = 1u64, extra = 2u64))
+            .instrument(dial9_span!("op.a", base: u64 = 1u64))
+            .await;
+        async {}
+            .instrument(dial9_span!("op.b", base: u64 = 1u64, extra: u64 = 2u64))
             .await;
     });
 
@@ -403,7 +405,7 @@ fn distinct_callsites_get_distinct_schemas() {
 #[test]
 fn explicit_parent_across_spawn() {
     let events = run_traced(2, || async {
-        let parent = dial9_span!("payment.charge", order_id = 1u64);
+        let parent = dial9_span!("payment.charge", order_id: u64 = 1u64);
         let parent_id = parent.id();
         // `id()`/`with_parent_id()` are `Span`-trait methods, so parenting works
         // on a macro span exactly as on `Dial9Span::new`.
@@ -443,7 +445,7 @@ fn off_runtime_is_silent_noop() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         // Sync guard off-runtime.
-        let span = dial9_span!("x", k = "v");
+        let span = dial9_span!("x", k: &'static str = "v");
         let entered = span.enter();
         drop(entered);
         drop(span);
@@ -494,7 +496,7 @@ fn typed_and_display_fields_roundtrip() {
     let events = run_traced(1, || async {
         let id = "req-abc123";
         async {}
-            .instrument(dial9_span!("request", request_id = %id, attempt = 2u64))
+            .instrument(dial9_span!("request", request_id = %id, attempt: u64 = 2u64))
             .await;
     });
     assert!(
@@ -549,7 +551,7 @@ fn tower_layer_wraps_request() {
     let events = run_traced(1, || async {
         use tower_layer::Layer;
         // `make_span` receives the request, so the span can carry request fields.
-        let layer = Dial9SpanLayer::new(|n: &u32| dial9_span!("request", n = *n));
+        let layer = Dial9SpanLayer::new(|n: &u32| dial9_span!("request", n: u32 = *n));
         let mut svc = layer.layer(Doubler);
         let out = svc.call(21).await.unwrap();
         assert_eq!(out, 42);
@@ -614,7 +616,7 @@ fn tower_response_layer_records_late_field() {
         // `n` is request-derived (eager); `doubled` is response-derived (late),
         // set by the finish callback that captures the span's slots.
         let layer = Dial9SpanLayerWithResponse::new(|n: &u32| {
-            let (span, slots) = dial9_span!("request", n = *n, doubled: u64);
+            let (span, slots) = dial9_span!("request", n: u32 = *n, doubled: u64);
             (span, move |resp: &u32| slots.doubled.set(*resp as u64))
         });
         let mut svc = layer.layer(Doubler);
@@ -716,7 +718,8 @@ fn completion_reports_idle_for_awaiting_future() {
 #[test]
 fn late_field_lands_on_exit_only() {
     let events = run_traced(2, || async {
-        let (span, slots) = dial9_span!("request", route = "/checkout", status: u16, bytes: u64);
+        let (span, slots) =
+            dial9_span!("request", route: &'static str = "/checkout", status: u16, bytes: u64);
         async move {
             tokio::time::sleep(Duration::from_millis(2)).await;
             slots.status.set(200u16);
@@ -785,7 +788,7 @@ fn late_field_unset_is_none_on_exit() {
 #[test]
 fn late_field_with_sync_guard() {
     let events = run_traced(1, || async {
-        let (span, slots) = dial9_span!("pricing", order_id = 7u64, tax_cents: u64);
+        let (span, slots) = dial9_span!("pricing", order_id: u64 = 7u64, tax_cents: u64);
         let entered = span.enter();
         slots.tax_cents.set(123u64);
         drop(entered); // exit reads the slot

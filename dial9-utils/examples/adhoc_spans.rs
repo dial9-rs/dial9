@@ -40,7 +40,8 @@ async fn checkout(order_id: u64) {
     //    the call site — it's only known once the order loads — so it's
     //    declared as `total_cents: u64` and set through `slots` inside the body.
     //    It rides the completion event, not the enter event.
-    let (load_span, slots) = dial9_span!("db.load_order", order_id = order_id, total_cents: u64);
+    let (load_span, slots) =
+        dial9_span!("db.load_order", order_id: u64 = order_id, total_cents: u64);
     let order = async {
         let order = load_order(order_id).await;
         slots.total_cents.set(order.total_cents);
@@ -52,7 +53,7 @@ async fn checkout(order_id: u64) {
     // 2. Sync RAII guard for a blocking/CPU section. The macro captures fields
     //    at construction; they ride every segment.
     let tax = {
-        let span = dial9_span!("pricing.compute_tax", order_id = order_id);
+        let span = dial9_span!("pricing.compute_tax", order_id: u64 = order_id);
         let _entered = span.enter();
         compute_tax(&order)
     }; // exit + close here
@@ -61,7 +62,7 @@ async fn checkout(order_id: u64) {
     //    containment, which breaks when a task outlives its parent, so link the
     //    audit span explicitly. `id()`/`with_parent_id()` are `Span` methods, so
     //    they work on a `dial9_span!` span just like `Dial9Span::new`.
-    let charge_span = dial9_span!("payment.charge", order_id = order_id, tax_cents = tax);
+    let charge_span = dial9_span!("payment.charge", order_id: u64 = order_id, tax_cents: u64 = tax);
     let audit = dial9_span!("audit.emit").with_parent_id(charge_span.id());
     let audit_task = tokio::spawn(
         async {
@@ -81,7 +82,7 @@ async fn settlement_worker() {
         async {
             tokio::time::sleep(Duration::from_millis(6)).await;
         }
-        .instrument(dial9_span!("settlement.run", batch = batch))
+        .instrument(dial9_span!("settlement.run", batch: u64 = batch))
         .await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -122,7 +123,7 @@ async fn tower_demo() {
     // span's slots and sets it from the response, and it rides the completion
     // event.
     let layer = Dial9SpanLayerWithResponse::new(|order_id: &u64| {
-        let (span, slots) = dial9_span!("checkout", order_id = *order_id, status: u16);
+        let (span, slots) = dial9_span!("checkout", order_id: u64 = *order_id, status: u16);
         (span, move |status: &u16| slots.status.set(*status))
     });
 
