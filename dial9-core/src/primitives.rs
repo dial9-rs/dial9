@@ -143,7 +143,11 @@ pub use crate::define_thread_local as thread_local;
 /// ```
 ///
 /// Add `, should_panic` after `depth = $depth` to document a known,
-/// reproduced bug instead of asserting correctness.
+/// reproduced bug instead of asserting correctness. Add
+/// `, verify_faults_triggered` instead to also assert that
+/// `primitives::fs::take_faults_triggered()` saw at least one fault during
+/// the run, so a scenario that injects faults can't silently stop
+/// exercising its error path without failing.
 /// Do not use this macro for a scenario that touches real
 /// global `static` state — the generated `pct`/`determinism` tests run
 /// concurrently and would corrupt shuttle's own per-primitive bookkeeping if
@@ -185,6 +189,45 @@ macro_rules! shuttle_test {
             #[should_panic]
             fn determinism() {
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+            }
+        }
+    };
+    // Same as the plain form, but also asserts that
+    // `primitives::fs::take_faults_triggered()` saw at least one fault
+    // across the whole batch of iterations, so a broken fault-visibility
+    // thread-local (or any other regression that silently stops fault
+    // injection from reaching the flush thread) fails loudly instead of
+    // leaving the scenario exercising no error path at all. Checked in the
+    // same `pct`/`determinism` runs, not separate tests, so the shuttle
+    // exploration isn't run twice per scenario.
+    (num_iters = $num_iters:expr, depth = $depth:expr, verify_faults_triggered; fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            fn $name() $body
+
+            fn assert_faults_were_triggered() {
+                assert!(
+                    $crate::primitives::fs::take_faults_triggered() > 0,
+                    "no run across {} iterations triggered a single fault; fault injection is \
+                     not reaching the flush thread (e.g. a broken fault-visibility thread-local), \
+                     so this test is not exercising any error path.",
+                    $num_iters,
+                );
+            }
+
+            #[test]
+            fn pct() {
+                $crate::primitives::fs::take_faults_triggered(); // drain any count left over from an earlier test
+                shuttle::check_pct($name, $num_iters, $depth);
+                assert_faults_were_triggered();
+            }
+
+            #[test]
+            fn determinism() {
+                $crate::primitives::fs::take_faults_triggered(); // drain any count left over from an earlier test
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+                assert_faults_were_triggered();
             }
         }
     };

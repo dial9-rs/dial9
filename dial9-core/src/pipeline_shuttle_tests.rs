@@ -438,33 +438,20 @@ fn determinism_check_fs_fault_visible() {
     shuttle::check_uncontrolled_nondeterminism(fs_fault_visible_across_threads, 100);
 }
 
-/// Runs `body` under `shuttle::check_pct`/`check_uncontrolled_nondeterminism`
-/// (via `run_iters`), then asserts at least one of the `num_iters` runs
-/// actually triggered a real fault via `fs::take_faults_triggered()`.
-///
-/// Deliberately does *not* assert on the WARN/ERROR log count for this:
-/// `rate_limited!` gates on real wall-clock time with a `static` keyed by
-/// call site, shared by every shuttle iteration *and* every other test in
-/// the same test binary that hits the same call site. A whole 10,000
-/// iteration batch finishes in well under the 60s window, so only the
-/// first-ever occurrence across the *entire test process* might log — a
-/// perfectly healthy run can still see zero WARN/ERROR events logged.
-/// `fs::take_faults_triggered()` counts actual fault occurrences, upstream
-/// of that log-rate gate, so it isn't subject to this cross-test coupling.
-fn assert_fault_injection_reaches_flush_thread(num_iters: usize, run_iters: impl FnOnce(usize)) {
-    fs::take_faults_triggered(); // drain any count left over from an earlier test
-    run_iters(num_iters);
-    assert!(
-        fs::take_faults_triggered() > 0,
-        "no run across {num_iters} iterations triggered a single fault; fault injection is \
-         not reaching the flush thread (e.g. a broken fault-visibility thread-local), so this \
-         test is not exercising any error path."
-    );
-}
+// Both scenarios below also assert that fault injection actually reached
+// the flush thread at least once across the batch (`verify_faults_triggered`
+// on `shuttle_test!`), so a broken fault-visibility thread-local can't
+// silently leave 10,000 iterations exercising no error path at all.
+// Deliberately not asserted via the WARN/ERROR log count: `rate_limited!`
+// gates on real wall-clock time with a `static` keyed by call site, shared
+// by every shuttle iteration *and* every other test in the same test binary
+// that hits the same call site, so a perfectly healthy run can still log
+// zero WARN/ERROR events. `take_faults_triggered()` counts actual fault
+// occurrences, upstream of that log-rate gate, so it isn't subject to this
+// cross-test coupling.
 
-mod test_core_erroring_pipeline {
-    use super::*;
-
+crate::shuttle_test! {
+    num_iters = 10_000, depth = 3, verify_faults_triggered;
     fn test_core_erroring_pipeline() {
         let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
         assert!(
@@ -474,35 +461,10 @@ mod test_core_erroring_pipeline {
              A `rate_limited!` wrapper has likely been removed from a tight loop."
         );
     }
-
-    #[test]
-    fn pct() {
-        shuttle::check_pct(test_core_erroring_pipeline, 10_000, 3);
-    }
-
-    #[test]
-    fn determinism() {
-        shuttle::check_uncontrolled_nondeterminism(test_core_erroring_pipeline, 10_000);
-    }
-
-    #[test]
-    fn triggers_faults_pct() {
-        assert_fault_injection_reaches_flush_thread(10_000, |n| {
-            shuttle::check_pct(test_core_erroring_pipeline, n, 3)
-        });
-    }
-
-    #[test]
-    fn triggers_faults_determinism() {
-        assert_fault_injection_reaches_flush_thread(10_000, |n| {
-            shuttle::check_uncontrolled_nondeterminism(test_core_erroring_pipeline, n)
-        });
-    }
 }
 
-mod test_core_probabilistic_fs_faults {
-    use super::*;
-
+crate::shuttle_test! {
+    num_iters = 10_000, depth = 3, verify_faults_triggered;
     fn test_core_probabilistic_fs_faults() {
         let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
         assert!(
@@ -510,29 +472,5 @@ mod test_core_probabilistic_fs_faults {
             "rate limiting failed under probabilistic fs faults: observed {total} \
              WARN/ERROR events, expected <= 10."
         );
-    }
-
-    #[test]
-    fn pct() {
-        shuttle::check_pct(test_core_probabilistic_fs_faults, 10_000, 3);
-    }
-
-    #[test]
-    fn determinism() {
-        shuttle::check_uncontrolled_nondeterminism(test_core_probabilistic_fs_faults, 10_000);
-    }
-
-    #[test]
-    fn triggers_faults_pct() {
-        assert_fault_injection_reaches_flush_thread(10_000, |n| {
-            shuttle::check_pct(test_core_probabilistic_fs_faults, n, 3)
-        });
-    }
-
-    #[test]
-    fn triggers_faults_determinism() {
-        assert_fault_injection_reaches_flush_thread(10_000, |n| {
-            shuttle::check_uncontrolled_nondeterminism(test_core_probabilistic_fs_faults, n)
-        });
     }
 }
