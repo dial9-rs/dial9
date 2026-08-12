@@ -22,3 +22,7 @@ run_shuttle_tests dial9-core \
 run_shuttle_tests dial9-tokio-telemetry \
   env RUSTFLAGS="--cfg tokio_unstable --cfg shuttle" \
   cargo test -p dial9-tokio-telemetry --lib --features _shuttle -- shuttle "$@"
+
+run_shuttle_tests dial9-utils \
+  env RUSTFLAGS="--cfg tokio_unstable --cfg shuttle" \
+  cargo test -p dial9-utils --lib --features _shuttle -- shuttle "$@"

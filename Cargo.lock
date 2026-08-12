@@ -2066,6 +2066,7 @@ dependencies = [
  "hyper-util",
  "iai-callgrind",
  "pin-project-lite",
+ "shuttle",
  "tempfile",
  "tokio",
  "tower",
