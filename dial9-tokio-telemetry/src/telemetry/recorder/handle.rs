@@ -133,7 +133,12 @@ impl Dial9TokioHandle {
     /// # }
     /// ```
     ///
+    /// The recorded spawn location is the `spawn_fn` call site under
+    /// `--cfg tokio_unstable`, and this method's call site without it. An
+    /// inline closure like the one above puts both at the same line.
+    ///
     /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
+    #[track_caller]
     pub fn spawn_with<F, S>(
         &self,
         future: F,

@@ -7,7 +7,8 @@
 //   2. Missing wake events (tasks not instrumented)
 //   3. Missing debug symbols (no source locations)
 //   4. No scheduling events (informational)
-//   5. Runtime activity but no task polls (Runtime::block_on instead of dial9::block_on)
+//   5. Recorded without tokio_unstable (poll events cover only dial9 spawns)
+//   6. Runtime activity but no task polls (Runtime::block_on instead of dial9::block_on)
 "use strict";
 
 const fs = require('fs');
@@ -31,8 +32,16 @@ async function diagnoseSetup(tracePath) {
   let totalWakeEvents = 0, totalTaskSpawns = 0;
   let totalPollStarts = 0, totalUnparks = 0;
   let uniqueAddresses = new Set();
+  let builtWithoutTokioUnstable = false;
 
   for await (const trace of parseTrace(tracePath)) {
+    // How the trace was built. The fix for thin poll data is a build flag, so
+    // this check reads the build fact rather than the coverage it implies.
+    // Absent on traces written before the key existed, which all had the hooks.
+    if (trace.segmentMetadata?.get('tokio.unstable') === 'false') {
+      builtWithoutTokioUnstable = true;
+    }
+
     // Wake events
     totalWakeEvents += trace.events.filter(e => e.eventType === EVENT_TYPES.WakeEvent).length;
     totalTaskSpawns += trace.taskSpawnTimes.size;
@@ -147,9 +156,27 @@ use spawn_blocking instead of running on the async runtime.`,
     });
   }
 
-  // ── Check 5: Runtime woke up repeatedly but never polled a task ──
+  // ── Check 5: Recorded without tokio_unstable ──
+  if (builtWithoutTokioUnstable) {
+    findings.push({
+      severity: 'warning',
+      check: 'no-tokio-unstable',
+      message: `This trace was recorded without --cfg tokio_unstable. Poll events cover only tasks spawned through dial9's own helpers, and task lifetimes and per-worker queue depth are unavailable.`,
+      fix: `Add to .cargo/config.toml:
+
+[build]
+rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
+
+Then rebuild. Tokio gates its poll and task hooks behind this flag; without it
+dial9 only sees tasks spawned through its own helpers (spawn, spawn_in,
+block_on, spawn_with).`,
+    });
+  }
+
+  // ── Check 6: Runtime woke up repeatedly but never polled a task ──
   // An idle runtime parks and stays parked; repeated unparks mean it had work.
-  if (totalUnparks > 10 && totalPollStarts === 0) {
+  // Skipped without tokio_unstable, where check 5 already explains the gap.
+  if (!builtWithoutTokioUnstable && totalUnparks > 10 && totalPollStarts === 0) {
     findings.push({
       severity: 'warning',
       check: 'no-task-polls',
@@ -173,6 +200,7 @@ awaited inline under it never reach the trace. dial9::block_on spawns it first.
   console.log(`${'='.repeat(60)}`);
   console.log(`CPU samples: ${totalOnCpu} on-CPU, ${totalOffCpu} off-CPU`);
   console.log(`Tasks spawned: ${totalTaskSpawns}, Wake events: ${totalWakeEvents}, Task polls: ${totalPollStarts}`);
+  console.log(`Worker unparks: ${totalUnparks}`);
   console.log(`Symbols: ${totalSymbols} resolved (${symbolsWithLocation} with source locations)`);
   console.log();
 

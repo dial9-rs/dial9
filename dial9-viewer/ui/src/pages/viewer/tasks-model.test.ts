@@ -114,6 +114,39 @@ describe("deriveTaskViewModel", () => {
     expect(vm.rows).toEqual([]);
   });
 
+  // The empty state must tell "this trace has no tasks" apart from "coverage
+  // is partial", so it reads coverage rather than whether task data exists.
+  // A blank lifetime column means "not recorded", not "instant tasks", so the
+  // model has to carry that apart from coverage.
+  it("carries lifetime availability separately from coverage", () => {
+    const noLifetimes = {
+      ...trace,
+      hasFullTaskCoverage: true,
+      hasTaskLifetimes: false,
+    } as unknown as typeof trace;
+    const vm = deriveTaskViewModel(noLifetimes, POI);
+    expect(vm.hasFullTaskCoverage).toBe(true);
+    expect(vm.taskLifetimeCoverage).toBe("none");
+
+    // With spawn events present, coverage comes from the rows: "all" when
+    // every row has a lifetime, "partial" when some were not captured.
+    const withLifetimes = deriveTaskViewModel(trace, POI);
+    const anyBlank = withLifetimes.sorted.some((t) => t.lifetimeNs === null);
+    expect(withLifetimes.taskLifetimeCoverage).toBe(anyBlank ? "partial" : "all");
+  });
+
+  it("carries task coverage, not task-data existence", () => {
+    expect(deriveTaskViewModel(trace, POI).hasFullTaskCoverage).toBe(
+      trace.hasFullTaskCoverage,
+    );
+
+    const partial = {
+      ...trace,
+      hasFullTaskCoverage: false,
+    } as unknown as typeof trace;
+    expect(deriveTaskViewModel(partial, POI).hasFullTaskCoverage).toBe(false);
+  });
+
   it("reports the full task count and formats at most a window of rows", () => {
     const vm = deriveTaskViewModel(trace, POI);
     expect(vm.total).toBe(taskIndexFor(trace).rows.length);

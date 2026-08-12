@@ -49,6 +49,8 @@
 //! runtime-drop-before-shutdown ordering for you.
 
 use super::register_runtime_hooks;
+#[cfg(not(tokio_unstable))]
+use super::runtime_context::RuntimeContext;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
@@ -193,6 +195,10 @@ pub struct TokioAttachOptions {
     #[builder(default = true)]
     tokio_instrumentation_enabled: bool,
     /// Record task spawn/terminate events for this runtime. Default `false`.
+    ///
+    /// These come from Tokio's task hooks, which need `--cfg tokio_unstable`.
+    /// Without it no task spawn/terminate events are recorded regardless of what this is
+    /// set to.
     #[builder(default)]
     task_tracking_enabled: bool,
     /// Async-backtrace capture config (requires the `taskdump` feature).
@@ -379,6 +385,11 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // Publish attach state only after a successful build.
         // `TokioRuntimesSource` picks the runtime up from the registry on its
         // next flush.
+        //
+        // Bind first: without tokio's task hooks the polls come from the
+        // `WakeTraced` wrapper, which finds this context by the runtime id it
+        // is running on.
+        ctx.bind_runtime(runtime.handle().id());
         registry.lock().unwrap().push(ctx);
         // The current-thread driver does not fire `on_thread_start`, so without
         // this the tracing layer and `dial9::spawn` find no handle until the
@@ -392,6 +403,24 @@ impl Dial9HandleTokioExt for Dial9Handle {
         register_runtime_metrics(shared, runtime_name, runtime.handle().metrics());
         Ok(runtime)
     }
+}
+
+/// The context instrumenting the tokio runtime this thread is currently
+/// running on, if dial9 is attached to it. Resolved by runtime id, so a thread
+/// that drives several runtimes gets the right one every time.
+#[cfg(not(tokio_unstable))]
+pub(crate) fn current_runtime_ctx(shared: &Arc<SharedState>) -> Option<Arc<RuntimeContext>> {
+    let id = tokio::runtime::Handle::try_current().ok()?.id();
+    if let Some(ctx) = super::runtime_context::cached_runtime_ctx(id) {
+        return Some(ctx);
+    }
+    let registry = runtime_registry(shared)?;
+    let ctx = {
+        let registry = registry.lock().ok()?;
+        registry.iter().find(|c| c.is_runtime(id)).cloned()?
+    };
+    super::runtime_context::cache_runtime_ctx(id, &ctx);
+    Some(ctx)
 }
 
 /// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that

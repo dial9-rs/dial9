@@ -1,5 +1,6 @@
 //! Integration tests for the custom-spawn tracing API:
 //! - [`Dial9TokioHandle::spawn_with`]
+#![cfg_attr(not(tokio_unstable), allow(unused_imports))]
 
 mod common;
 
@@ -86,6 +87,7 @@ fn spawn_with_joinset_emits_wake_events() {
 /// performed inside the closure, AND because `JoinSet::spawn` is called
 /// from that closure, its `#[track_caller]` resolves `spawn_loc` to the
 /// closure call site (NOT the library).
+#[cfg(tokio_unstable)]
 #[test]
 fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let dir = tempfile::tempdir().unwrap();
@@ -145,7 +147,13 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
         instrumented_user_loc, 1,
         "expected 1 instrumented TaskSpawn pointing to the closure call site"
     );
+    // Raw `tokio::spawn` tasks are only visible through tokio's spawn hook.
+    // Without it the wrapper sees dial9-spawned tasks only, so there is no
+    // uninstrumented spawn to count.
+    #[cfg(tokio_unstable)]
     assert!(raw >= 1, "expected at least 1 raw TaskSpawn, got {raw}");
+    #[cfg(not(tokio_unstable))]
+    let _ = raw;
 }
 
 /// `spawn_with` returns whatever the closure returns.
@@ -174,6 +182,7 @@ fn spawn_with_returns_closure_value() {
 
 /// `Dial9TokioHandle::spawn_with` composes with `JoinSet::spawn_on`
 /// to target a specific runtime.
+#[cfg(tokio_unstable)]
 #[test]
 fn runtime_handle_spawn_with_targets_correct_runtime() {
     let (capture, batches) = capture_processor();

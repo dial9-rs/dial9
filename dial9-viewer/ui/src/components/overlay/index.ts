@@ -242,6 +242,7 @@ export function mountOverlay(
               hasCpuTime: data.hasCpuTime,
               hasSchedWait: data.hasSchedWait,
               hasTaskTracking: data.hasTaskTracking,
+              hasLocalQueueDepth: data.hasLocalQueueDepth,
             };
             const hover = assembleLaneHover(input);
             const coverage = coverageAt(state.segments.segments, req.ns);

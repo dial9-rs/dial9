@@ -183,6 +183,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       blockInPlaceGaps: state.trace.trace ? state.trace.trace.blockInPlaceGaps : [],
       hasCpuTime: data.hasCpuTime,
       hasSchedWait: data.hasSchedWait,
+      hasLocalQueueDepth: data.hasLocalQueueDepth,
       viewStart: state.viewport.viewStart,
       viewEnd: state.viewport.viewEnd,
       selectedTaskId: sel.selectedTaskId,
