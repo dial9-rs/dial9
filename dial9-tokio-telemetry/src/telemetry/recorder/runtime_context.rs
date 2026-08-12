@@ -1046,7 +1046,10 @@ mod tests {
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
+    use dial9_core::shuttle_test;
 
+    shuttle_test! {
+        num_iters = 5_000, depth = 3;
     /// Multiple runtimes attach concurrently while a reader concurrently
     /// scans it via `segment_metadata`, mirroring how `TokioRuntimesSource`
     /// is read from the flush thread while attaches race it from arbitrary
@@ -1057,54 +1060,45 @@ mod shuttle_tests {
     /// `OnceLock`/`std::sync::RwLock` (not shuttle-swapped) and only ever
     /// populated from a live Tokio runtime thread, so they're out of scope
     /// here.
-    fn scenario_concurrent_attach() {
-        const ATTACHERS: usize = 3;
-        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        fn shuttle_concurrent_attach() {
+            const ATTACHERS: usize = 3;
+            let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
 
-        let attachers: Vec<_> = (0..ATTACHERS)
-            .map(|i| {
+            let attachers: Vec<_> = (0..ATTACHERS)
+                .map(|i| {
+                    let contexts = contexts.clone();
+                    crate::primitives::thread::spawn(move || {
+                        let ctx = Arc::new(RuntimeContext::new(
+                            Some(format!("runtime-{i}")),
+                            Dial9Handle::disabled(),
+                        ));
+                        contexts.lock().unwrap().push(ctx);
+                    })
+                })
+                .collect();
+
+            let reader = {
                 let contexts = contexts.clone();
                 crate::primitives::thread::spawn(move || {
-                    let ctx = Arc::new(RuntimeContext::new(
-                        Some(format!("runtime-{i}")),
-                        Dial9Handle::disabled(),
-                    ));
-                    contexts.lock().unwrap().push(ctx);
+                    let mut source = TokioRuntimesSource::new(contexts);
+                    let mut out = Vec::new();
+                    for _ in 0..ATTACHERS {
+                        out.clear();
+                        source.segment_metadata(&mut out);
+                    }
                 })
-            })
-            .collect();
+            };
 
-        let reader = {
-            let contexts = contexts.clone();
-            crate::primitives::thread::spawn(move || {
-                let mut source = TokioRuntimesSource::new(contexts);
-                let mut out = Vec::new();
-                for _ in 0..ATTACHERS {
-                    out.clear();
-                    source.segment_metadata(&mut out);
-                }
-            })
-        };
+            for attacher in attachers {
+                attacher.join().unwrap();
+            }
+            reader.join().unwrap();
 
-        for attacher in attachers {
-            attacher.join().unwrap();
+            assert_eq!(
+                contexts.lock().unwrap().len(),
+                ATTACHERS,
+                "every concurrent attach must be observed exactly once"
+            );
         }
-        reader.join().unwrap();
-
-        assert_eq!(
-            contexts.lock().unwrap().len(),
-            ATTACHERS,
-            "every concurrent attach must be observed exactly once"
-        );
-    }
-
-    #[test]
-    fn shuttle_concurrent_attach_pct() {
-        shuttle::check_pct(scenario_concurrent_attach, 5_000, 3);
-    }
-
-    #[test]
-    fn shuttle_concurrent_attach_determinism() {
-        shuttle::check_uncontrolled_nondeterminism(scenario_concurrent_attach, 5_000);
     }
 }
