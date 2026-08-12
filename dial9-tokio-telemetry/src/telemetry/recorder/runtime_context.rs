@@ -810,6 +810,30 @@ mod tests {
     }
 
     #[test]
+    fn segment_metadata_reports_capabilities() {
+        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        let mut source = TokioRuntimesSource::new(contexts);
+
+        let mut out = Vec::new();
+        source.segment_metadata(&mut out);
+        let value = |key: &str| {
+            out.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_else(|| panic!("first call emits {key}"))
+        };
+
+        let (coverage, local_queue, unstable) = if cfg!(tokio_unstable) {
+            ("all", "true", "true")
+        } else {
+            ("dial9-spawns-only", "false", "false")
+        };
+        assert_eq!(value("tokio.poll_coverage"), coverage);
+        assert_eq!(value("tokio.local_queue"), local_queue);
+        assert_eq!(value("tokio.unstable"), unstable);
+    }
+
+    #[test]
     fn park_counter_samples_one_in_n() {
         // rate == 1: every park samples.
         let mut counter = 0u64;
