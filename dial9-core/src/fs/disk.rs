@@ -523,3 +523,103 @@ mod tests {
         check!(strip_active_suffix(p) == PathBuf::from("/tmp/trace.0.bin"));
     }
 }
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use crate::primitives::sync::Arc;
+    use crate::primitives::sync::atomic::AtomicUsize;
+
+    const COUNT: u32 = 3;
+    const SCANS: usize = 3;
+
+    fn seal_one(disk: &DiskFs, dir: &Path, stem: &str, index: u32) {
+        let active_path = dir.join(format!("{stem}.{index}.bin.active"));
+        let handle = disk.create_segment(&active_path).unwrap();
+        disk.seal(handle, &active_path, index).unwrap();
+    }
+
+    /// `take_files` is documented single-caller-only (its claim snapshot is
+    /// taken outside the lock on the assumption nothing else inserts new
+    /// claims concurrently), but a concurrent `remove_sealed` from a
+    /// downstream "processing done" thread is explicitly supported.
+    /// This test exercises one claimer thread scans+claims repeatedly while a
+    /// remover thread deletes each claimed segment (and its claim entry) as
+    /// soon as it's handed off, mirroring the real worker. Every sealed segment
+    /// must be claimed exactly once.
+    ///
+    /// KNOWN BUG: `take_files` takes the disk scan and the `already_claimed` snapshot
+    /// at two different times. If a concurrent `remove_sealed(idx)`
+    /// completes entirely between those two reads, the disk scan's stale
+    /// view still lists `idx` but the claimed-set snapshot no longer has it.
+    fn scenario_claim_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = "trace";
+        let disk = Arc::new(DiskFs::new(dir.path(), stem));
+
+        for i in 0..COUNT {
+            seal_one(&disk, dir.path(), stem, i);
+        }
+
+        let (tx, rx) = crate::primitives::sync::mpsc::sync_channel::<SegmentRef>(COUNT as usize);
+        let dispatched = Arc::new(AtomicUsize::new(0));
+
+        let claimer = {
+            let disk = disk.clone();
+            let dispatched = dispatched.clone();
+            crate::primitives::thread::spawn(move || {
+                // Scan repeatedly, not just until every segment is claimed,
+                // so a concurrent remove_sealed can race a later scan too
+                // (the very first scan claims everything at once, since all
+                // segments were sealed up front).
+                for _ in 0..SCANS {
+                    let taken = disk.take_files();
+                    for seg in taken.segments {
+                        dispatched.fetch_add(1, Ordering::Relaxed);
+                        tx.send(seg.seg_ref).unwrap();
+                    }
+                    shuttle::thread::yield_now();
+                }
+            })
+        };
+
+        let remover = crate::primitives::thread::spawn(move || {
+            let mut removed = 0usize;
+            while removed < COUNT as usize {
+                let seg_ref = rx.recv().unwrap();
+                disk.remove_sealed(&seg_ref, RemoveReason::Terminal);
+                removed += 1;
+            }
+            removed
+        });
+
+        claimer.join().unwrap();
+        let removed_total = remover.join().unwrap();
+
+        assert_eq!(
+            dispatched.load(Ordering::Relaxed),
+            COUNT as usize,
+            "every sealed segment must be claimed exactly once, never twice"
+        );
+        assert_eq!(removed_total, COUNT as usize);
+    }
+
+    // Both checks below document a known, reproduced dedup bug rather
+    // than assert correctness. Once the bug is fixed, flip these back to
+    // plain `#[test]` — a `#[should_panic]` test that stops panicking fails,
+    // so this pair will visibly break the moment the fix lands.
+
+    #[test]
+    #[should_panic]
+    fn shuttle_claim_dedup_pct() {
+        // Real filesystem I/O in every iteration (unlike MemFs's in-memory
+        // equivalent), so keep the iteration count small.
+        shuttle::check_pct(scenario_claim_dedup, 200, 3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn shuttle_claim_dedup_determinism() {
+        shuttle::check_uncontrolled_nondeterminism(scenario_claim_dedup, 200);
+    }
+}
