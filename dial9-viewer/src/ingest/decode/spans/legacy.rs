@@ -1,9 +1,10 @@
 //! Legacy span adapter: reconstructs spans from old-producer format events
 //! into [`SpanCandidate`]s via the unified interval pairer.
 //!
-//! Old producers emit:
-//! - `SpanEnter:{target}::{name}:{file}:{line}` with fields: worker_id, span_id, span_name, ...
-//! - `SpanExit:{target}::{name}:{file}:{line}` with fields: worker_id, span_id, span_name, ...
+//! Tracing-layer producers emit:
+//! - `SpanEnter:{target}::{name}:{file}:{line}` with fields:
+//!   dial9.tokio.task_id (current) or worker_id (legacy), span_id, span_name, ...
+//! - `SpanExit:{target}::{name}:{file}:{line}` with the corresponding fields
 //! - `SpanCloseEvent` with only: span_id
 //!
 //! Reconstruction strategy:
@@ -21,9 +22,10 @@
 //! - Parse target/name/file/line from the SpanEnter schema name.
 //! - Lifecycle start = first observed enter (conservative).
 //! - details_complete = false, identity_quality = "legacy".
-//! - When the span's owning Tokio task can be resolved (the poll on the enter
-//!   worker covering the enter timestamp), split the entered wall time into
-//!   estimated on-CPU (poll overlap) vs async wait (in-task gaps between polls).
+//! - Prefer the producer-recorded Tokio task ID. For old traces, resolve the
+//!   owning task from the poll on the enter worker covering the enter timestamp.
+//!   Then split entered wall time into estimated on-CPU (poll overlap) vs async
+//!   wait (in-task gaps between polls).
 
 use rustc_hash::FxHashMap;
 
@@ -405,16 +407,16 @@ pub(crate) fn resolve_legacy_spans(
             let mut resolved_task = None;
             let mut task_is_unambiguous = ivs.len() == enter_sequences.len();
             for enter_sequence in enter_sequences {
-                let task_id = enters_by_sequence
-                    .get(enter_sequence)
-                    .and_then(|enter| {
-                        polls_by_worker
-                            .get(&enter.worker_id)
-                            .map(|polls| (*enter, polls))
+                let task_id = enters_by_sequence.get(enter_sequence).and_then(|enter| {
+                    enter.task_id.filter(|&task_id| task_id != 0).or_else(|| {
+                        enter
+                            .worker_id
+                            .and_then(|worker_id| polls_by_worker.get(&worker_id))
+                            .and_then(|worker_polls| {
+                                resolve_span_task(worker_polls, MonoNs(enter.timestamp_ns))
+                            })
                     })
-                    .and_then(|(enter, worker_polls)| {
-                        resolve_span_task(worker_polls, MonoNs(enter.timestamp_ns))
-                    });
+                });
                 match (resolved_task, task_id) {
                     (None, Some(task_id)) => resolved_task = Some(task_id),
                     (Some(existing), Some(task_id)) if existing == task_id => {}
@@ -458,7 +460,7 @@ pub(crate) fn resolve_legacy_spans(
         let candidate = SpanCandidate {
             boot_id: boot_id.to_string(),
             instance_id,
-            kind: "tracing",
+            kind: "tracing".to_string(),
             name,
             type_name,
             target,
@@ -579,7 +581,8 @@ mod tests {
             SCHEMA.to_string(),
             LegacySpanEnterEvent {
                 timestamp_ns,
-                worker_id,
+                worker_id: Some(worker_id),
+                task_id: None,
                 span_id,
                 parent_span_id,
                 span_name: Some(value.to_string()),
@@ -599,7 +602,8 @@ mod tests {
             SCHEMA.replacen("SpanEnter", "SpanExit", 1),
             LegacySpanExitEvent {
                 timestamp_ns,
-                worker_id: 0,
+                worker_id: Some(0),
+                task_id: None,
                 span_id,
                 span_name: Some("operation".to_string()),
                 decode_sequence,
@@ -681,6 +685,92 @@ mod tests {
     }
 
     #[test]
+    fn direct_task_id_takes_precedence_over_worker_correlation() {
+        let mut direct = enter(100, 0, 1, 1, None, "direct");
+        direct.1.task_id = Some(22);
+        let polls = vec![
+            PollRecord {
+                start: MonoNs(0),
+                end: MonoNs(110),
+                worker_id: 1,
+                task_id: 11,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
+            PollRecord {
+                start: MonoNs(0),
+                end: MonoNs(300),
+                worker_id: 2,
+                task_id: 22,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
+        ];
+        let resolution = resolve(
+            &[direct],
+            &[exit(250, 1, 1, "direct")],
+            &[close(300, 2, 1)],
+            &polls,
+        );
+
+        let span = &resolution.spans[0];
+        assert_eq!(span.on_cpu_ns_est, Some(150));
+        assert_eq!(span.async_wait_ns, Some(0));
+        assert_eq!(span.attribution_flags & 0b0100, 0);
+    }
+
+    #[test]
+    fn legacy_worker_correlation_remains_the_fallback() {
+        let polls = vec![PollRecord {
+            start: MonoNs(0),
+            end: MonoNs(300),
+            worker_id: 1,
+            task_id: 11,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        }];
+        let resolution = resolve(
+            &[enter(100, 0, 1, 1, None, "legacy")],
+            &[exit(250, 1, 1, "legacy")],
+            &[close(300, 2, 1)],
+            &polls,
+        );
+
+        let span = &resolution.spans[0];
+        assert_eq!(span.on_cpu_ns_est, Some(150));
+        assert_eq!(span.async_wait_ns, Some(0));
+    }
+
+    #[test]
+    fn missing_task_and_worker_does_not_assume_worker_zero() {
+        let mut uncorrelated = enter(100, 0, 0, 1, None, "outside-task");
+        uncorrelated.1.worker_id = None;
+        let polls = vec![PollRecord {
+            start: MonoNs(0),
+            end: MonoNs(300),
+            worker_id: 0,
+            task_id: 99,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        }];
+        let resolution = resolve(
+            &[uncorrelated],
+            &[exit(250, 1, 1, "outside-task")],
+            &[close(300, 2, 1)],
+            &polls,
+        );
+
+        let span = &resolution.spans[0];
+        assert_eq!(span.on_cpu_ns_est, None);
+        assert_eq!(span.async_wait_ns, None);
+        assert_ne!(span.attribution_flags & 0b0100, 0);
+    }
+
+    #[test]
     fn intervals_from_multiple_tasks_remain_ambiguous() {
         let enters = vec![
             enter(100, 0, 1, 1, None, "outer"),
@@ -694,6 +784,8 @@ mod tests {
                 worker_id: 1,
                 task_id: 11,
                 spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
             },
             PollRecord {
                 start: MonoNs(0),
@@ -701,6 +793,8 @@ mod tests {
                 worker_id: 2,
                 task_id: 22,
                 spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
             },
         ];
         let resolution = resolve(&enters, &exits, &[close(300, 4, 1)], &polls);

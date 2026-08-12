@@ -26,8 +26,10 @@ export {
   filterPointsOfInterest,
   flattenFlamegraph,
   getTraceTimeRange,
+  globalQueueSeries,
   hasCpuProfileSamples,
   selectSpanRenderSet,
+  sumGlobalQueueByCycle,
 } from "../../../trace_analysis.js";
 
 // buildWorkerSpans is DISPATCHED, not a pure re-export: the frozen core version

@@ -22,6 +22,7 @@ import {
   type TaskDetailTrackController,
 } from "./task-detail-track.js";
 import { createEventsTrack, type EventsTrackController } from "./events-track.js";
+import { createFieldChartTrack } from "./field-chart-track.js";
 import { createToolbar, type ToolbarController, type ToolbarDeps } from "./toolbar.js";
 import { createIssuesRail, type IssuesRailController } from "./issues-rail.js";
 import {
@@ -58,6 +59,14 @@ const HINT_CHIPS: readonly string[] = [
   "? help",
 ];
 
+const SHELL_RENDER_SLICES = [
+  "trace",
+  "viewport",
+  "selection",
+  "poi",
+  "uiPrefs",
+] as const;
+
 /** Build the view model for a render pass from the current store state. */
 function viewModel(state: StoreState): TracksViewModel {
   const trace = state.trace.trace;
@@ -82,6 +91,7 @@ function viewModel(state: StoreState): TracksViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu,
+    fieldCharts: state.view.fieldCharts,
     emptyTracks,
     // Track management: the order + collapse map the track column reads.
     trackOrder: state.uiPrefs.trackOrder,
@@ -260,9 +270,10 @@ export interface MountedShell {
 
 /**
  * Mount the shell into `root`, wired to `store`. Subscribes to the slice set
- * that changes the chrome (trace/viewport/selection/uiPrefs) and renders +
- * sizes track canvases each frame INSIDE the store's notification tick (the
- * scheduler is the only place renders run and layout reads are batched).
+ * that changes the chrome (trace/viewport/selection/poi/uiPrefs or the
+ * dynamic chart list) and renders + sizes track canvases each frame INSIDE the
+ * store's notification tick (the scheduler is the only place renders run and
+ * layout reads are batched).
  * Returns handles the entry needs (toast region, teardown).
  */
 export function mountShell(
@@ -284,6 +295,7 @@ export function mountShell(
   // rendered while a task is selected.
   const taskDetailTrack = createTaskDetailTrack(store);
   const eventsTrack = createEventsTrack(store);
+  const fieldChartTrack = createFieldChartTrack(store);
   // Toolbar (file info / analysis / time) and the issues rail: store-wired
   // controllers filling the toolbar slots + the body's left column.
   const toolbar = createToolbar(store, deps);
@@ -292,10 +304,12 @@ export function mountShell(
   // track column bind to. Persistence (hydrate on boot + save on change) is
   // wired at the page entry (main.ts) so the store itself stays pure.
   const trackActions = createTrackManageActions(store);
+  let renderedFieldCharts = store.getState().view.fieldCharts;
 
   function renderPass(): void {
     const state = store.getState();
     const vm = viewModel(state);
+    fieldChartTrack.reconcile(vm.fieldCharts);
     render(
       shellTemplate(
         vm,
@@ -313,16 +327,32 @@ export function mountShell(
     );
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm, spansTrack, taskDetailTrack, eventsTrack, queueTrack);
+      sizeTracks(
+        column,
+        vm,
+        spansTrack,
+        taskDetailTrack,
+        eventsTrack,
+        queueTrack,
+        fieldChartTrack,
+      );
     }
+    renderedFieldCharts = vm.fieldCharts;
   }
 
-  // Render the chrome whenever any chrome-affecting slice changes. The shell is
-  // chrome, so it renders declaratively from state; track/inspector content
-  // components add their own slice subscriptions against this store.
+  // Most `view` updates belong only to inspector/popout content. Subscribe so
+  // dynamic charts still appear immediately, but do not resize every canvas
+  // unless that specific list changed.
   const unsubscribe = store.subscribe(
-    ["trace", "viewport", "selection", "poi", "uiPrefs"],
-    () => renderPass(),
+    [...SHELL_RENDER_SLICES, "view"],
+    (state, changed) => {
+      if (
+        state.view.fieldCharts !== renderedFieldCharts ||
+        SHELL_RENDER_SLICES.some((slice) => changed.has(slice))
+      ) {
+        renderPass();
+      }
+    },
   );
 
   // Resize reflow: re-render on window resize so the track canvases refit.
@@ -362,6 +392,7 @@ export function mountShell(
       queueTrack.dispose();
       taskDetailTrack.dispose();
       eventsTrack.dispose();
+      fieldChartTrack.dispose();
       toolbar.dispose();
       rail.dispose();
     },

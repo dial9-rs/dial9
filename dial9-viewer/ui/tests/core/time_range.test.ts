@@ -22,6 +22,10 @@ interface TraceEvent {
 
 interface ParseResult {
   events: TraceEvent[];
+  customEvents: Array<{
+    name: string;
+    singleEventSpan?: { start: number; end: number; name: string } | null;
+  }>;
   truncated: boolean;
   timeFiltered: boolean;
   filterStartTime?: number;
@@ -73,6 +77,41 @@ describe("parseTrace time-range filtering", () => {
     expect(full.timeFiltered, "Full parse should not be time-filtered").toBe(
       false,
     );
+  });
+
+  it("uses half-open overlap for completed single-event spans", async () => {
+    const target = full.customEvents.find(
+      (event) =>
+        event.singleEventSpan != null &&
+        event.singleEventSpan.start < event.singleEventSpan.end,
+    )?.singleEventSpan;
+    expect(target, "demo trace has no non-empty single-event span").toBeDefined();
+
+    const atEnd = await parseTrace(buf, {
+      startTime: target!.end,
+      endTime: target!.end,
+    });
+    expect(
+      atEnd.customEvents.some(
+        (event) =>
+          event.singleEventSpan?.start === target!.start &&
+          event.singleEventSpan?.end === target!.end &&
+          event.singleEventSpan?.name === target!.name,
+      ),
+    ).toBe(false);
+
+    const atStart = await parseTrace(buf, {
+      startTime: target!.start,
+      endTime: target!.start,
+    });
+    expect(
+      atStart.customEvents.some(
+        (event) =>
+          event.singleEventSpan?.start === target!.start &&
+          event.singleEventSpan?.end === target!.end &&
+          event.singleEventSpan?.name === target!.name,
+      ),
+    ).toBe(true);
   });
 
   it("halves are time-filtered, in range, and cover the full parse", async () => {

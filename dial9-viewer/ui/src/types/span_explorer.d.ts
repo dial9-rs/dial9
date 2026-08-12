@@ -99,6 +99,8 @@ declare module "*/span_explorer.js" {
     max_files?: number | null;
     bucket?: string | null;
     region?: string | null;
+    credentialMode?: "ambient" | "literal" | "role" | null;
+    roleArn?: string | null;
     prefix?: string | null;
     service?: string | null;
     hosts?: readonly string[] | null;
@@ -115,6 +117,8 @@ declare module "*/span_explorer.js" {
     max_files: number | null;
     bucket: string | null;
     region: string | null;
+    credentialMode: string | null;
+    roleArn: string | null;
     prefix: string | null;
     service: string | null;
     hosts: string[];
@@ -127,20 +131,15 @@ declare module "*/span_explorer.js" {
 
   /** Scope for exemplarViewerUrl; the exemplar's own host wins over any here. */
   export interface ExemplarLinkScope {
+    /** Original source URL in raw mode; avoids requiring a backend source key. */
+    trace?: string | null;
     bucket?: string | null;
     region?: string | null;
+    credentialMode?: "ambient" | "literal" | "role" | null;
+    roleArn?: string | null;
     service?: string | null;
     /** Forwarded as `focus_span_name` so the viewer selects the exact span. */
     spanName?: string | null;
-  }
-
-  /** A parsed `SpanEnter:`/`SpanExit:` schema name. */
-  export interface ParsedSpanEventName {
-    target: string;
-    name: string;
-    /** null for struct-derived schemas, which carry no callsite. */
-    file: string | null;
-    line: number | null;
   }
 
   /** Which stream a snapshot arrived on. */
@@ -405,10 +404,10 @@ declare module "*/span_explorer.js" {
   ): string;
 
   /**
-   * Viewer deep link onto one exemplar: an `/api/object` trace component plus
-   * NON-DESTRUCTIVE `focus_*` params. Never emits `start`/`end`, which the
-   * viewer treats as a hard parse filter that would drop every surrounding
-   * event. Empty string when the exemplar has no `source_key`.
+   * Viewer deep link onto one exemplar: the raw trace or an `/api/object`
+   * component plus NON-DESTRUCTIVE `focus_*` params. Never emits `start`/`end`,
+   * which the viewer treats as a hard parse filter that would drop every
+   * surrounding event. Empty string when neither source is available.
    */
   export function exemplarViewerUrl(
     exemplar:
@@ -423,34 +422,4 @@ declare module "*/span_explorer.js" {
     scope: ExemplarLinkScope | null | undefined,
   ): string;
 
-  // ── Raw-trace catalog (client-side, no backend) ──
-
-  /** Parse a `SpanEnter:`/`SpanExit:` schema name; null when unrecognized. */
-  export function parseSpanEventName(evName: string): ParsedSpanEventName | null;
-
-  /**
-   * Build a SpanTypeStats-shaped catalog from buildSpanData's output, grouping
-   * by callsite so two struct-derived types sharing a runtime `span_name` stay
-   * distinct. Sorted by instance count, descending.
-   */
-  export function buildSpanCatalog(
-    allSpans: readonly {
-      spanId?: unknown;
-      start?: number;
-      spanName?: string;
-      activeNs: number;
-    }[],
-    customEvents: readonly {
-      name: string;
-      timestamp: number;
-      fields?: Record<string, unknown>;
-    }[],
-  ): Record<string, any>[];
-
-  /** ~20 log-spaced bins over sorted durations; collapsed bins are deduped. */
-  export function buildLogHistogram(
-    sortedDurations: readonly number[],
-    minNs: number,
-    maxNs: number,
-  ): SpanHistogramBar[];
 }

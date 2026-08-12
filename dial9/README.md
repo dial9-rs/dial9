@@ -24,17 +24,22 @@ If you are integrating dial9 into a production service, see the [`production_use
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
-Tokio relies on `tokio_unstable` for Tokio runtime hooks and frame pointers for efficient profiling.
+dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes
+under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime:
+poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
 
 ```toml
 # .cargo/config.toml
 [build]
 rustflags = [
   "--cfg", "tokio_unstable",
-  # For profiling, you also need:
+  # Required by the cpu-profiling and memory-profiling features:
   "-C", "force-frame-pointers=yes"
 ]
 ```
+
+The Tokio instrumentation still works without the flag, with narrower task coverage.
+CPU profiling, worker timelines, wake causality, memory and application events are unaffected. What narrows is task visibility: poll events come from dial9's own spawn helpers rather than the runtime, so they cover tasks started with `dial9::spawn`, `spawn_in`, `block_on` or `spawn_with` and miss the rest. Task spawn and terminate events and per-worker queue depth are not accessible without the flag.
 
 ```rust,no_run
 use std::io;
@@ -135,7 +140,7 @@ async fn main() {
 | Name | Default | Meaning |
 | --- | --- | --- |
 | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
-| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
+| `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. Each process writes into its own `{boot_id}/` subdirectory, where `boot_id` is `{4-alpha}-{pid}`. |
 | `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
 | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
 | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
@@ -212,7 +217,6 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 - [Socket accept queues](#socket-accept-queues-linux-only): dial9 can sample pending TCP listener connections and backlog limits on Linux
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
-- [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
 - [Metrique metrics](#metrique-metrics-opt-in): dial9 can record metrique unit-of-work metric entries alongside your EMF/JSON pipeline
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace
@@ -429,6 +433,13 @@ dial9 can sample heap allocations using [probabilistic sampling](https://github.
 dial9 = { version = "0.5", features = ["memory-profiling"] }
 ```
 
+**Enable frame pointers** (allocation stacks are captured with a frame-pointer unwinder):
+```toml
+# .cargo/config.toml
+[build]
+rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
+```
+
 **Install the allocator and profiler:**
 
 ```rust,no_run
@@ -477,33 +488,6 @@ When `track_liveset(true)` is set, dial9 records every deallocation so it can de
 Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
 
 `dial9::recorder_from_env` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
-
-### Tracing span events (opt-in)
-
-**Enable the `tracing-layer` feature:**
-```toml
-[dependencies]
-dial9 = { version = "0.5", features = ["tracing-layer"] }
-```
-
-**Use tracing_subscriber to connect the `Dial9TracingLayer`:**
-```rust
-use dial9::tracing_layer::Dial9TracingLayer;
-use tracing_subscriber::prelude::*;
-
-tracing_subscriber::registry()
-    .with(tracing_subscriber::fmt::layer())
-    .with(
-        Dial9TracingLayer::new().with_filter(
-            tracing_subscriber::filter::Targets::new()
-                .with_target("my_app", tracing::Level::TRACE)
-                .with_default(tracing::Level::ERROR),
-        ),
-    )
-    .init();
-```
-
-Careful filtering of the data you send to dial9 strongly recommended. dial9 doesn't need _all_ the data, only enough to correlate with other data sources. Libraries like the AWS SDK emit many internal spans that can produce over 100K events per second. The example above captures only spans from my_app. Each span enter+exit costs roughly 650-800ns total on a modern server core, most of which is dial9 encoding (the same span through a bare `tracing` registry costs ~100-200ns).
 
 ### Metrique metrics (opt-in)
 
@@ -571,7 +555,7 @@ Field units (from `#[metrics(unit = ..)]` or the value type) are carried into th
 
 `dial9` can capture async backtraces at yield points. This is the Tokio equivalent of scheduling events: You can see the stack trace your future was at when it went idle.
 
-> Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64). Enabling it on other targets is a hard compile error from Tokio.
+> Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64) and only under `--cfg tokio_unstable`. Enabling it on another target, or without the flag, is a hard compile error from Tokio.
 
 ```rust,no_run
 use std::io;
@@ -623,6 +607,7 @@ struct RequestCompleted {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     status_code: u32,
+    #[traceevent(unit = "us", kind = "gauge")]
     latency_us: u64,
     /// Optional fields use 1 byte on the wire when absent.
     error_message: Option<String>,
@@ -855,6 +840,9 @@ Pre-built binaries are available from [GitHub Releases](https://github.com/dial9
 ```bash
 # From source via crates.io (the viewer/CLI is behind the `cli` feature)
 cargo install --locked dial9 --features cli
+
+# Or install the local-filesystem-only viewer without S3 or the AWS SDK
+cargo install --locked dial9-viewer --no-default-features
 
 # Or with cargo-binstall (downloads a pre-built binary, faster)
 cargo binstall dial9

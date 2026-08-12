@@ -1,6 +1,6 @@
 [package]
 name = "dial9-tokio-telemetry"
-version = "0.5.0-rc1"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,6 +19,7 @@ all-features = true
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(shuttle)",
     "cfg(iai_enabled)",
+    "cfg(tokio_unstable)",
 ] }
 missing_debug_implementations = "warn"
 
@@ -50,9 +51,6 @@ dial9-trace-format = { workspace = true, features = [
     "serde-deserialize",
 ] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
-    "registry",
-] }
 hostname = "0.4"
 bon = "3"
 aws-sdk-s3 = { version = "1", default-features = false, optional = true, features = [
@@ -99,7 +97,6 @@ _shuttle = [
 ## compile on other targets. Enabling this feature on an unsupported target
 ## is a hard compile error from tokio.
 taskdump = ["tokio/taskdump"]
-tracing-layer = ["dep:tracing-subscriber"]
 ## Sampled memory allocation profiling via ring buffers.
 memory-profiling = [
     "dep:dial9-perf-self-profile",
@@ -121,7 +118,6 @@ __nonlinux_all_features = [
     "memory-profiling",
     "process-resource",
     "linux-socket",
-    "tracing-layer",
     "worker-s3",
 ]
 
@@ -131,7 +127,6 @@ dial9-tokio-telemetry = { path = ".", features = [
     "memory-profiling",
     "process-resource",
     "linux-socket",
-    "tracing-layer",
     "unstable-events",
     "worker-s3",
 ] }
@@ -173,8 +168,6 @@ dial9-tokio-telemetry = { path = ".", features = [
     "memory-profiling",
     "worker-s3",
     "analysis",
-    "taskdump",
-    "tracing-layer",
     "linux-socket",
 ] }
 nix = { version = "0.29", features = ["process"] }
@@ -198,16 +191,6 @@ harness = false
 required-features = ["cpu-profiling"]
 
 [[bench]]
-name = "tracing_layer_bench"
-harness = false
-required-features = ["tracing-layer"]
-
-[[bench]]
-name = "tracing_layer_iai"
-harness = false
-required-features = ["tracing-layer"]
-
-[[bench]]
 name = "writer_encode_iai"
 harness = false
 
@@ -217,4 +200,8 @@ harness = false
 
 [[bench]]
 name = "writer_write_encoded_iai"
+harness = false
+
+[[bench]]
+name = "traced_poll_iai"
 harness = false

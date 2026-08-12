@@ -23,6 +23,7 @@ export interface LegendEntry {
  * to match a reader scanning a lane top -> bottom.
  */
 export const LANES_LEGEND: readonly LegendEntry[] = [
+  { swatch: "#5c9dff", label: "left rail = the lane's runtime (named in the gutter)", shape: "box" },
   { swatch: "linear-gradient(90deg,#0a1a3a,#00bcd4,#ff9800,#f44336)", label: "poll (short -> long)", shape: "gradient" },
   { swatch: "#ffeb3b", label: "selected task / span", shape: "box" },
   { swatch: "#ff8a65", label: "waker task", shape: "box" },
@@ -34,6 +35,9 @@ export const LANES_LEGEND: readonly LegendEntry[] = [
   { swatch: "#ff2222", label: "sched (blocking)", shape: "triangle" },
   { swatch: "#66bb6a", label: "wake", shape: "triangle" },
   { swatch: "rgba(255,200,50,0.8)", label: "local queue (q:NN)", shape: "line" },
+  // The runtime summary lane ("<name> runtime metrics"), each runtime's footer.
+  { swatch: "#4fc3f7", label: "runtime metrics: global queue", shape: "box" },
+  { swatch: "#81c784", label: "runtime metrics: alive tasks", shape: "line" },
 ];
 
 /** The lanes track's canvas wrap (statically templated by the shell). */

@@ -1,12 +1,14 @@
 // Credentialed fetch for the browser page. Wraps fetch to attach the
 // bring-your-own-credentials headers (if any are stored) to every /api/*
 // request. No-op when no creds are stored.
-
 import { buildBrowseUrl } from "./browse-query.js";
 
+import { Dial9Creds } from "../../lib/trace/creds.js";
+import { Dial9Session } from "../../lib/trace/session.js";
+
 export function apiFetch(url: string, opts: RequestInit = {}): Promise<Response> {
-  const credHeaders = window.Dial9Creds ? window.Dial9Creds.headers() : {};
-  return fetch(url, {
+  const credHeaders = Dial9Creds.headers();
+  return Dial9Session.fetch(url, {
     ...opts,
     headers: { ...(opts.headers ?? {}), ...credHeaders },
   });

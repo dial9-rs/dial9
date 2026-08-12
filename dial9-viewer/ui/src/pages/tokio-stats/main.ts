@@ -3,7 +3,15 @@
 // pushes a fresh full snapshot as each source file folds and closes at the cap.
 // The server owns the refine/stop loop; the page just renders each snapshot.
 
-import { Dial9Creds, nextMaxFiles, openSse, tokioStatsUrl } from "../../lib/trace/index.js";
+import {
+  Dial9Creds,
+  Dial9Session,
+  applyToCreds,
+  nextMaxFiles,
+  openSse,
+  sourceScopeFromStored,
+  tokioStatsUrl,
+} from "../../lib/trace/index.js";
 import type { TokioStatsQuery, TokioStatsResponse } from "../../lib/trace/index.js";
 import { pageEls } from "./dom.js";
 import { formatDuration, datetimeToNs, thresholdNs } from "./format.js";
@@ -14,8 +22,11 @@ import {
   renderSinglePeriod,
   renderNotLoaded,
   renderDiff,
+  type RowLimits,
   type Tab,
+  type WorkerActivityState,
 } from "./render.js";
+import type { WorkerSortKey } from "./stats.js";
 import {
   readScope,
   scopeFromParams,
@@ -48,10 +59,19 @@ if (window.D9UiSwitch) {
 // URL params are read ONCE: the scope is fixed for the page's lifetime, and
 // auto-load checks the ORIGINAL query before syncUrl rewrites it.
 const originalParams = new URLSearchParams(window.location.search);
-const scope = readScope(originalParams);
 // Diff mode (?diff=1&a=<b64>&b=<b64>): two sides, each its own independent scope.
 const diffParsed = parseDiff(originalParams);
+const fallbackSource = sourceScopeFromStored("", Dial9Creds.get());
+const scope = readScope(diffParsed?.a ?? originalParams, fallbackSource);
 const diffMode = diffParsed !== null;
+
+// Restore the link's reader-role (and region) into the creds store so this tab
+// has an identity to read the bucket with. The role then rides as a HEADER on
+// every /api/tokio-stats request; the request query below carries aws_region
+// but NOT aws_role_arn (a role on both header and query is the server's
+// ConflictingCredentials 400). In diff mode each side carries its own scope in
+// the b64 payload, but the shared identity is the page scope's.
+applyToCreds(scope.source, Dial9Creds);
 
 /** The scope a period streams against: its own (diff side) or the page scope. */
 function effectiveScope(period: Period): ScopeParams {
@@ -161,8 +181,62 @@ function setTab(tab: string): void {
   renderFromCache();
 }
 
+// Each rollup table owns its own row cap, changed via a selector in the table
+// header. Re-rendering after a change keeps the two independent.
+let longPollsLimit = 10;
+let schedulingDelaysLimit = 10;
+
+/** The per-table limits + change handlers handed to renderSinglePeriod. */
+function rowLimits(): RowLimits {
+  return {
+    longPolls: longPollsLimit,
+    onLongPollsChange: (n: number) => {
+      longPollsLimit = n;
+      renderFromCache();
+    },
+    schedulingDelays: schedulingDelaysLimit,
+    onSchedulingDelaysChange: (n: number) => {
+      schedulingDelaysLimit = n;
+      renderFromCache();
+    },
+  };
+}
+
+// "Worker activity" sort + expansion state. Host rows sort by pooled busyness
+// descending until the user picks another column.
+let workerSortKey: WorkerSortKey = "busyPct";
+let workerSortDesc = true;
+const expandedHosts = new Set<string>();
+
+/** The worker-activity state + handlers handed to renderSinglePeriod. */
+function workerActivity(): WorkerActivityState {
+  return {
+    sortKey: workerSortKey,
+    sortDesc: workerSortDesc,
+    expandedHosts,
+    onSort: (key: WorkerSortKey) => {
+      // Re-clicking the active column flips direction; a new column starts
+      // descending (largest first is the useful default for every metric here).
+      if (workerSortKey === key) {
+        workerSortDesc = !workerSortDesc;
+      } else {
+        workerSortKey = key;
+        workerSortDesc = true;
+      }
+      renderFromCache();
+    },
+    onToggleHost: (host: string) => {
+      if (expandedHosts.has(host)) expandedHosts.delete(host);
+      else expandedHosts.add(host);
+      renderFromCache();
+    },
+  };
+}
+
 function renderFromCache(): void {
   const threshNs = thresholdNs(els.slider.value);
+  const limits = rowLimits();
+  const workers = workerActivity();
   const stats = periods.map((p) => computeStats(p.data, threshNs));
   if (stats.every((s) => !s)) return;
 
@@ -186,8 +260,10 @@ function renderFromCache(): void {
       s,
       data,
       threshNs,
-      scope.bucket,
+      scope.source.bucket,
       openExemplar,
+      limits,
+      workers,
     );
     return;
   }
@@ -202,8 +278,10 @@ function renderFromCache(): void {
       s,
       withData.data,
       threshNs,
-      scope.bucket,
+      scope.source.bucket,
       openExemplar,
+      limits,
+      workers,
     );
     return;
   }
@@ -222,7 +300,10 @@ async function loadPeriod(period: Period): Promise<void> {
   // owns the fold loop.
   const es = effectiveScope(period);
   const query: TokioStatsQuery = { host: es.host };
-  if (es.bucket) query.bucket = es.bucket;
+  if (es.source.bucket) query.bucket = es.source.bucket;
+  // Region on the request URL is required for ambient cross-region reads. Role
+  // and literal credentials remain header-only.
+  if (es.source.region) query.aws_region = es.source.region;
   if (es.prefix) query.prefix = es.prefix;
   if (es.service) query.service = es.service;
   if (period.startNs) query.start_ns = period.startNs;
@@ -234,7 +315,7 @@ async function loadPeriod(period: Period): Promise<void> {
   // loadAll's catch paints the status line red.
   let streamErr: Error | null = null;
   await openSse(tokioStatsUrl(query), {
-    headers: Dial9Creds.headers(),
+    headers: Dial9Session.headers(Dial9Creds.headers()),
     onEvent: (obj) => {
       period.data = obj as TokioStatsResponse;
       renderFromCache();

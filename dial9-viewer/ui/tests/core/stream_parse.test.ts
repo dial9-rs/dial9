@@ -122,6 +122,8 @@ function canonical(trace: ParsedTraceLoose): unknown {
         callframeSymbols: asMap(trace["callframeSymbols"]),
         threadNames: asMap(trace["threadNames"]),
         tidToWorker: asMap(trace["tidToWorker"]),
+        stableTidToWorker: asMap(trace["stableTidToWorker"]),
+        tidBindings: asMap(trace["tidBindings"]),
         runtimeWorkers: asMap(trace["runtimeWorkers"]),
         taskDumps: asMap(trace["taskDumps"]),
       },

@@ -5,7 +5,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+//! use dial9_utils::tracing_layer::Dial9TracingLayer;
 //! use tracing_subscriber::prelude::*;
 //!
 //! tracing_subscriber::registry()
@@ -13,8 +13,10 @@
 //!     .init();
 //! ```
 //!
-//! The layer emits events only on threads owned by a dial9-traced runtime.
-//! On other threads, span enter/exit is silently skipped.
+//! The layer emits events only on threads with an enabled dial9 handle. The
+//! Tokio runtime integration installs that handle on its runtime threads.
+//! Events carry the current Tokio task ID when available; outside a Tokio task,
+//! the task ID is explicitly absent.
 //!
 //! # High-frequency spans
 //!
@@ -29,7 +31,7 @@
 //! unaffected while controlling trace volume:
 //!
 //! ```ignore
-//! use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+//! use dial9_utils::tracing_layer::Dial9TracingLayer;
 //! use tracing_subscriber::prelude::*;
 //!
 //! tracing_subscriber::registry()
@@ -59,7 +61,8 @@
 //! with nesting depth, so the layer is suitable for production use with
 //! appropriate span filtering.
 
-use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::handle::Dial9Handle;
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;
@@ -70,6 +73,8 @@ use std::sync::Mutex;
 use tracing::callsite::Identifier;
 use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
+
+const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
 
 /// Emitted once when a span closes, so the viewer can recycle its id. Mirrors
 /// the `SpanCloseEvent` the ad-hoc span wrappers emit (same schema, distinct
@@ -101,13 +106,13 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
 
     // Base fields present on all span events
     let mut enter_fields = vec![
-        FieldDef::new("worker_id", FieldType::Varint),
+        FieldDef::new(TOKIO_TASK_ID_FIELD, FieldType::OptionalVarint),
         FieldDef::new("span_id", FieldType::Varint),
         FieldDef::new("parent_span_id", FieldType::OptionalVarint),
         FieldDef::new("span_name", FieldType::PooledString),
     ];
     let mut exit_fields = vec![
-        FieldDef::new("worker_id", FieldType::Varint),
+        FieldDef::new(TOKIO_TASK_ID_FIELD, FieldType::OptionalVarint),
         FieldDef::new("span_id", FieldType::Varint),
         FieldDef::new("span_name", FieldType::PooledString),
     ];
@@ -196,7 +201,7 @@ impl FieldVisitor<'_> {
 /// # Setup
 ///
 /// ```ignore
-/// use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+/// use dial9_utils::tracing_layer::Dial9TracingLayer;
 /// use tracing_subscriber::prelude::*;
 ///
 /// tracing_subscriber::registry()
@@ -245,6 +250,35 @@ fn field_value<'a>(fields: &'a [(&str, String)], name: &str) -> Option<&'a str> 
         .map(|(_, v)| v.as_str())
 }
 
+/// The current Tokio task id, converted to the same `u64` used by dial9's
+/// runtime poll events. `tokio::task::Id` is intentionally opaque, but its
+/// `Hash` implementation writes the underlying id as one `u64`.
+fn current_task_id() -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    struct U64Extractor(u64);
+
+    impl Hasher for U64Extractor {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+
+        fn write(&mut self, _bytes: &[u8]) {
+            debug_assert!(false, "tokio task id hashed as bytes")
+        }
+
+        fn write_u64(&mut self, value: u64) {
+            self.0 = value;
+        }
+    }
+
+    tokio::task::try_id().map(|id| {
+        let mut extractor = U64Extractor(0);
+        id.hash(&mut extractor);
+        extractor.finish()
+    })
+}
+
 impl<S> Layer<S> for Dial9TracingLayer
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
@@ -289,7 +323,7 @@ where
             return;
         }
         handle.with_encoder(|enc| {
-            let worker_id = current_worker_id();
+            let task_id = current_task_id();
             let span_id = id.into_u64();
             let ts = clock_monotonic_ns();
 
@@ -312,7 +346,10 @@ where
             // Encode directly into the thread-local buffer (no clone needed)
             let mut values = Vec::with_capacity(5 + schemas.field_names.len());
             values.push(FieldValue::Varint(ts));
-            values.push(FieldValue::Varint(worker_id.as_u64()));
+            match task_id {
+                Some(task_id) => values.push(FieldValue::Varint(task_id)),
+                None => values.push(FieldValue::None),
+            }
             values.push(FieldValue::Varint(span_id));
             match parent_span_id {
                 Some(pid) => values.push(FieldValue::Varint(pid)),
@@ -326,7 +363,7 @@ where
                 }
             }
             if let Err(e) = enc.write_event(&schemas.enter, &values) {
-                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                dial9_core::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::error!(span = %span_name, "dropping span-enter event: {e}");
                 });
             }
@@ -339,7 +376,7 @@ where
             return;
         }
         handle.with_encoder(|enc| {
-            let worker_id = current_worker_id();
+            let task_id = current_task_id();
             let span_id = id.into_u64();
             let ts = clock_monotonic_ns();
 
@@ -354,7 +391,10 @@ where
 
             let mut values = Vec::with_capacity(4 + schemas.field_names.len());
             values.push(FieldValue::Varint(ts));
-            values.push(FieldValue::Varint(worker_id.as_u64()));
+            match task_id {
+                Some(task_id) => values.push(FieldValue::Varint(task_id)),
+                None => values.push(FieldValue::None),
+            }
             values.push(FieldValue::Varint(span_id));
             values.push(FieldValue::PooledString(enc.intern_string(span_name)));
             for &name in &schemas.field_names {
@@ -364,7 +404,7 @@ where
                 }
             }
             if let Err(e) = enc.write_event(&schemas.exit, &values) {
-                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                dial9_core::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::error!(span = %span_name, "dropping span-exit event: {e}");
                 });
             }

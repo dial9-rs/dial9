@@ -194,13 +194,17 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
+  // Re-measured after the combined multi-runtime/task-ID demo regen. The old
+  // anchors reproduce exactly against both parent traces, ruling out a search
+  // regression. This capture has healthy unwind depth: 104 of its 106 worker
+  // CPU samples reach depth >= 16.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 100, "71.8"],
-    ["tokio", 127, "71.8"],
-    ["axum", 20, "63.2"],
-    ["dispatcher", 33, "61.5"],
-    ["framebuf", 3, "4.3"],
-    ["spawn", 2, "71.8"],
+    ["poll", 145, "100.0"],
+    ["tokio", 218, "100.0"],
+    ["axum", 25, "85.8"],
+    ["dispatcher", 31, "70.8"],
+    ["framebuf", 10, "47.2"],
+    ["spawn", 2, "100.0"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {

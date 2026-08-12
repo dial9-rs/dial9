@@ -189,7 +189,9 @@ function nodeAtPath(root, path) {
 // prefix / max_files — see updateBrowserUrl in flamegraph.html), so a copied
 // address-bar URL cannot refetch the aggregate. A "scope link" instead carries
 // the COMPLETE set of params needed to re-run the server-side refinement loop.
-// AWS credentials are NEVER part of a scope link.
+// Literal AWS credential values are NEVER part of a scope link. The explicit
+// mode marker and a role ARN are safe: the ARN grants nothing without backend
+// permission and is required to reproduce an assume-role read.
 //
 // `params` is a URLSearchParams (or anything with get/getAll). Returns a fresh
 // URLSearchParams containing only the allowlisted scope keys that are present.
@@ -200,6 +202,8 @@ const SCOPE_KEYS_SINGLE = [
   // The bucket's region (a property of the bucket, not a credential), so a
   // scope/diff link signs the right regional S3 endpoint on its own.
   "aws_region",
+  "credential_mode",
+  "aws_role_arn",
   "prefix",
   "service",
   "thread_class",

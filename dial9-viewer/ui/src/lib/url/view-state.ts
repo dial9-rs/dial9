@@ -34,6 +34,8 @@
 // This module is PURE (no window/history/DOM): the browser side lives in
 // sync.ts, so the codec is property-testable under plain Node.
 
+import type { FieldChartSpec } from "../../types/state.js";
+
 /** Current schema version. Bump ONLY on incompatible reinterpretation. */
 export const VIEW_STATE_VERSION = 1;
 
@@ -86,6 +88,8 @@ export interface ViewState {
   trackOrder?: readonly string[];
   /** Ids of the collapsed tracks, when any. */
   collapsed?: readonly string[];
+  /** URL-defined custom-event numeric-field tracks. */
+  fieldCharts?: readonly FieldChartSpec[];
   /** Focused span id (re-resolved to the span + highlight chain on load). */
   selectedSpanId?: string;
   /**
@@ -122,6 +126,8 @@ export interface ViewState {
   taskIndex?: number;
   /** Runtime groups hidden in the worker lanes. */
   collapsedRuntimes?: readonly string[];
+  /** Runtimes whose summary lane is folded to its one-line strip. */
+  collapsedRuntimeMetrics?: readonly string[];
   /** Shareable layout geometry and vertical lane position. */
   inspectorWidth?: number;
   lanesHeight?: number;

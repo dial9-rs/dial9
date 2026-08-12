@@ -43,6 +43,7 @@
 </style>
 </head>
 <body>
+<script src="session.js"></script>
 <script src="creds.js"></script>
 <script src="format.js"></script>
 <script src="flamegraph_diff.js"></script>
@@ -79,9 +80,21 @@
   // signed for the server's default region and the listing comes back empty.
   // No-op when no creds are stored (region is header-only).
   const urlRegion = params.get("aws_region");
-  if (urlRegion && window.Dial9Creds) {
-    const stored = Dial9Creds.get();
-    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+  const urlMode = params.get("credential_mode");
+  const urlRoleArn = params.get("aws_role_arn");
+  if (window.__Dial9CredentialStore) {
+    if (urlMode === "ambient") __Dial9CredentialStore.setAmbient();
+    else if (urlMode === "literal" && __Dial9CredentialStore.get().kind !== "literal") {
+      __Dial9CredentialStore.setLiteralMode();
+    } else if ((urlMode === "role" || (!urlMode && urlRoleArn)) && urlRoleArn) {
+      __Dial9CredentialStore.setRoleArn(urlRoleArn, urlRegion ? { region: urlRegion } : undefined);
+    } else if (!urlMode && !urlRoleArn && __Dial9CredentialStore.get().kind !== "literal") {
+      __Dial9CredentialStore.setAmbient();
+    }
+  }
+  if (urlRegion && window.__Dial9CredentialStore) {
+    const stored = __Dial9CredentialStore.get();
+    if (stored && stored.region !== urlRegion) __Dial9CredentialStore.setRegion(urlRegion);
   }
 
   // Periods: each has {id, startNs, endNs, data (cached response), scope?, label?}.
@@ -97,6 +110,20 @@
   // consumes. Seeded from the landing page's "Add to diff" tray.
   const diffParsed = (typeof FlamegraphDiff !== "undefined") ? FlamegraphDiff.parseDiff(params) : null;
   const diffMode = !!diffParsed;
+  if (diffParsed) {
+    const sideMode = diffParsed.a.get("credential_mode");
+    const sideRoleArn = diffParsed.a.get("aws_role_arn");
+    const sideRegion = diffParsed.a.get("aws_region");
+    if (sideMode === "ambient") __Dial9CredentialStore.setAmbient();
+    else if (sideMode === "literal" && __Dial9CredentialStore.get().kind !== "literal") {
+      __Dial9CredentialStore.setLiteralMode();
+    } else if (sideMode === "role" && sideRoleArn) {
+      __Dial9CredentialStore.setRoleArn(
+        sideRoleArn,
+        sideRegion ? { region: sideRegion } : undefined,
+      );
+    }
+  }
 
   // `max_files` ceiling override, raised by the "Load more" button. null lets
   // the backend pick its own (default) sampling cap. Seeded from the URL so a
@@ -259,6 +286,11 @@
     }
     const u = new URLSearchParams();
     for (const k of ["bucket", "aws_region", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
+    const activeCredentials = __Dial9CredentialStore.get();
+    u.set("credential_mode", activeCredentials.kind);
+    if (activeCredentials.kind === "role") {
+      u.set("aws_role_arn", activeCredentials.roleArn);
+    }
     for (const h of params.getAll("host")) u.append("host", h);
     periods.forEach((p, i) => {
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
@@ -704,7 +736,9 @@
     if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
 
     period.refining = true;
-    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    const credHeaders = Dial9Session.headers(
+      window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}
+    );
     return new Promise((resolve, reject) => {
       Dial9Sse.openSse(u, {
         headers: credHeaders,

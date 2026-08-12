@@ -11,6 +11,7 @@ const require = createRequire(import.meta.url);
 interface UrlStateShape {
   bucket?: string;
   region?: string;
+  credentialMode?: "ambient" | "literal" | "role";
   roleArn?: string;
   prefix?: string;
   service?: string;
@@ -169,9 +170,15 @@ describe("UrlState.serialize", () => {
 
   it("writes roleArn as aws_role_arn", () => {
     const arn = "arn:aws:iam::123456789012:role/dial9-reader";
-    const qs = UrlState.serialize({ bucket: "b", region: "us-west-2", roleArn: arn });
+    const qs = UrlState.serialize({
+      bucket: "b",
+      region: "us-west-2",
+      credentialMode: "role",
+      roleArn: arn,
+    });
     expect(qs).toBe(
-      "bucket=b&aws_region=us-west-2&aws_role_arn=" + encodeURIComponent(arn),
+      "bucket=b&aws_region=us-west-2&credential_mode=role&aws_role_arn=" +
+        encodeURIComponent(arn),
     );
     // Empty roleArn is omitted (static-BYOC / ambient path carries none).
     expect(UrlState.serialize({ bucket: "b", roleArn: "" })).toBe("bucket=b");
@@ -202,7 +209,7 @@ describe("UrlState.serialize", () => {
 
 describe("UrlState round-trips", () => {
   it("relative quick range", () => {
-    const state = {
+    const state: UrlStateShape = {
       bucket: "b",
       prefix: "traces",
       service: "checkout-api",
@@ -221,7 +228,7 @@ describe("UrlState round-trips", () => {
   });
 
   it("precise window in raw tab, local tz", () => {
-    const state = {
+    const state: UrlStateShape = {
       bucket: "b",
       prefix: "traces",
       tab: "raw",
@@ -235,7 +242,7 @@ describe("UrlState round-trips", () => {
   });
 
   it("cross-region bucket carries aws_region", () => {
-    const state = {
+    const state: UrlStateShape = {
       bucket: "b",
       region: "ap-southeast-2",
       prefix: "traces",
@@ -246,9 +253,10 @@ describe("UrlState round-trips", () => {
   });
 
   it("assume-role link carries aws_role_arn", () => {
-    const state = {
+    const state: UrlStateShape = {
       bucket: "b",
       region: "us-east-1",
+      credentialMode: "role",
       roleArn: "arn:aws:iam::123456789012:role/dial9-reader",
       prefix: "dial9-traces",
       last: 1,

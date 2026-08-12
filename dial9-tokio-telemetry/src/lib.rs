@@ -28,9 +28,4 @@ pub(crate) mod traced;
 #[cfg(feature = "taskdump")]
 pub(crate) mod unwind;
 
-#[cfg(feature = "tracing-layer")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
-/// Tracing subscriber layer for emitting span events into dial9 traces.
-pub mod tracing_layer;
-
 pub use telemetry::{TracedFuture, block_on, spawn, spawn_in};

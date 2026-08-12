@@ -102,7 +102,7 @@
       const r = respFor(isB ? "b" : "a");
       return { ok: true, status: 200, async json() { return r; }, async text() { return ""; } };
     };
-    window.Dial9Creds = window.Dial9Creds || { headers: () => ({}) };
+    window.__Dial9CredentialStore = window.__Dial9CredentialStore || { headers: () => ({}) };
   }
 
   function reportLayout() {
@@ -134,7 +134,7 @@
       } catch (e) { diag.textContent = "bad URL: " + e.message; return; }
       scopeA = parsed.a; scopeB = parsed.b;
       // Use the real browser creds (whatever you applied on the home page).
-      headersFor = function () { return window.Dial9Creds ? Dial9Creds.headers() : {}; };
+      headersFor = function () { return window.__Dial9CredentialStore ? __Dial9CredentialStore.headers() : {}; };
       // Do NOT stub fetch in live mode — hit the real server.
     } else {
       installSyntheticFetch(mode === "deep" ? deepResp : shallowResp);

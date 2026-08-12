@@ -11,6 +11,10 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// with the viewer's `formatFieldValue` (dial9-viewer/ui/format.js).
 const SUPPORTED_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes"];
 
+/// Metric interpretations accepted by `#[traceevent(kind = "...")]`. Must stay
+/// in sync with the viewer's `FieldChartKind`.
+const SUPPORTED_KINDS: &[&str] = &["gauge", "counter", "updown-counter"];
+
 /// Annotation key for `#[traceevent(role = "...")]`. Mirrors
 /// `dial9_core::schema_extensions::ROLE_KEY`, which this crate cannot depend on.
 const ROLE_ANNOTATION_KEY: &str = "dial9.role";
@@ -24,6 +28,8 @@ struct FieldAttrs {
     unit: Option<syn::LitStr>,
     /// `role = "..."`: structural role for this field (`dial9.role`).
     role: Option<syn::LitStr>,
+    /// `kind = "..."`: metric interpretation for this field.
+    kind: Option<syn::LitStr>,
 }
 
 /// Parse one field's `#[traceevent(...)]` keys. Malformed or unknown keys are
@@ -41,10 +47,12 @@ fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
                 parsed.unit = Some(meta.value()?.parse::<syn::LitStr>()?);
             } else if meta.path.is_ident("role") {
                 parsed.role = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else if meta.path.is_ident("kind") {
+                parsed.kind = Some(meta.value()?.parse::<syn::LitStr>()?);
             } else {
                 return Err(meta.error(
                     "unrecognized `traceevent` field attribute; expected `timestamp`, \
-                     `unit = \"...\"` or `role = \"...\"`",
+                     `unit = \"...\"`, `role = \"...\"` or `kind = \"...\"`",
                 ));
             }
             Ok(())
@@ -147,6 +155,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                      event header, not as a schema field",
                 ));
             }
+            if let Some(kind) = &attrs.kind {
+                return Err(syn::Error::new_spanned(
+                    kind,
+                    "the timestamp field cannot carry a kind annotation: it is encoded in the \
+                     event header, not as a schema field",
+                ));
+            }
             continue;
         }
         if let Some(unit) = unit {
@@ -175,6 +190,24 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                     #ROLE_ANNOTATION_KEY,
                     #role,
                 )
+            });
+        }
+        // `kind = "..."` is emitted as a "kind" schema annotation telling the
+        // viewer how to chart the field (gauge / counter / updown-counter).
+        if let Some(kind) = &attrs.kind {
+            if !SUPPORTED_KINDS.contains(&kind.value().as_str()) {
+                return Err(syn::Error::new_spanned(
+                    kind,
+                    format!(
+                        "unsupported kind \"{}\"; supported kinds: {}",
+                        kind.value(),
+                        SUPPORTED_KINDS.join(", ")
+                    ),
+                ));
+            }
+            let idx = field_def_tokens.len() as u16;
+            annotation_tokens.push(quote! {
+                ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "kind", #kind)
             });
         }
 
@@ -244,9 +277,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     };
 
     Ok(quote! {
-        // A generated struct (e.g. the ad-hoc span macro's) may carry a
-        // non-snake field name; silence the casing lints on the generated impl.
-        #[allow(non_camel_case_types, non_snake_case)]
         impl ::dial9_trace_format::TraceEvent for #name {
             fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
@@ -288,16 +318,15 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   annotation, telling consumers what the field *is* structurally (e.g.
 ///   `"span.name"`). The vocabulary lives in
 ///   `dial9_core::schema_extensions::roles`.
+/// - `#[traceevent(kind = "...")]` (field): attaches a `kind` schema annotation
+///   telling the viewer how to chart the field. Supported values: `"gauge"`,
+///   `"counter"`, `"updown-counter"`. Any other value is a compile error, as is
+///   placing `kind` on the timestamp field.
 ///
-/// A malformed or unrecognized `traceevent` key is a compile error.
+/// A malformed or unrecognized `traceevent` key is a compile error. Only structs
+/// with named fields are supported; the derive does not support generic structs.
 ///
-/// # Generic event structs
-///
-/// Lifetimes and type parameters are carried onto the generated impl. Note that
-/// the wire event name is per type, not per monomorphization: a generic event
-/// must therefore have a single instantiation per `name`, as generated
-/// per-call-site structs do. Instantiating one generic event with different
-/// field types under the same name registers conflicting schemas for that name.
+/// # Example
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
@@ -439,6 +468,55 @@ mod tests {
     }
 
     #[test]
+    fn kind_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct Metrics {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(unit = "ns", kind = "counter")]
+                cpu_time_ns: u64,
+                #[traceevent(kind = "gauge")]
+                queue_depth: u64,
+                #[traceevent(kind = "updown-counter")]
+                active_requests: i64,
+            }
+        }));
+    }
+
+    #[test]
+    fn invalid_kind_rejected() {
+        let err = expand_err(quote! {
+            struct BadKind {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(kind = "histogram")]
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unsupported kind \"histogram\"; supported kinds: gauge, counter, updown-counter"
+        );
+    }
+
+    #[test]
+    fn kind_on_timestamp_rejected() {
+        let err = expand_err(quote! {
+            struct TimestampKind {
+                #[traceevent(timestamp)]
+                #[traceevent(kind = "counter")]
+                timestamp_ns: u64,
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "the timestamp field cannot carry a kind annotation: it is encoded in the \
+             event header, not as a schema field"
+        );
+    }
+
+    #[test]
     fn invalid_unit_rejected() {
         let err = expand_err(quote! {
             struct BadUnit {
@@ -526,8 +604,8 @@ mod tests {
         });
         assert_eq!(
             err.to_string(),
-            "unrecognized `traceevent` field attribute; expected `timestamp`, `unit = \"...\"` \
-             or `role = \"...\"`"
+            "unrecognized `traceevent` field attribute; expected `timestamp`, `unit = \"...\"`, \
+             `role = \"...\"` or `kind = \"...\"`"
         );
     }
 

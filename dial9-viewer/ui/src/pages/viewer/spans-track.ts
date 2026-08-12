@@ -556,7 +556,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
           ? html`<div>
               <span class="tt-k">Fields:</span>
               ${fields
-                .map(([k, v]) => `${k}=${formatFieldValue(v)}`)
+                .map(([k, v]) => `${k}=${formatFieldValue(v, rep.units?.[k])}`)
                 .join(", ")}
             </div>`
           : nothing}
@@ -704,16 +704,19 @@ export function drawSpansCanvas(
     }
     if (ticks.length < 2) {
       ticks.length = 0;
-      ticks.push(model.minDur, model.maxDur);
+      ticks.push(model.minDur);
+      if (model.maxDur !== model.minDur) ticks.push(model.maxDur);
     }
     for (const dur of ticks) {
       const norm = (Math.log(dur) - minL) / range;
       const y = PAD_TOP + (1 - norm) * usableH;
-      if (y < 2 || y > canvasH - 8) continue;
       ctx.globalAlpha = 0.4;
       ctx.fillRect(0, y, drawW, 0.5);
       ctx.globalAlpha = 0.7;
-      ctx.fillText(formatHumanDuration(dur), 2, y - 2);
+      // Fallback ticks sit on the scale endpoints. Keep their baselines inside
+      // the canvas or a sub-decade range loses every visible axis label.
+      const labelY = Math.max(0, Math.min(canvasH - 2, Math.max(9, y - 2)));
+      ctx.fillText(formatHumanDuration(dur), 2, labelY);
     }
     ctx.globalAlpha = 1;
   }

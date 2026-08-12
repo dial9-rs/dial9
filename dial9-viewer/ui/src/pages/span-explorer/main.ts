@@ -1,10 +1,8 @@
 // The Span Explorer page entry.
 //
 // Two sources feed the same catalog:
-//   RAW  (`?trace=`)  - the trace is fetched and parsed in the browser, and the
-//                       catalog is built client-side. No exemplars, no
-//                       flamegraph links, no attribute filtering: all three need
-//                       the aggregation backend.
+//   RAW  (`?trace=`)  - the browser fetches the trace, then POSTs its bytes to
+//                       /api/span-stats for one server-side Rust decode.
 //   AGGREGATE (`?api=1` / `?bucket=` / `?data_dir=`) - /api/span-stats streams
 //                       server-computed statistics over SSE.
 //
@@ -17,15 +15,15 @@
 
 import {
   Dial9Creds,
+  Dial9Session,
   addAttrFilter,
-  buildSpanCatalog,
+  applyToCreds,
   classifyExemplarSnapshot,
   completeExemplarRefresh,
-  buildSpanData,
   exemplarRequestMatches,
   formatCoverageBadge,
   hasAttrFilter,
-  loadTrace,
+  isSourceShareable,
   mergeSelectedExemplarSnapshot,
   nextMaxFiles,
   nsToPickerUtc,
@@ -35,6 +33,7 @@ import {
   refinementWorkDepth,
   removeAttrFilter,
   shouldAdoptCatalogSnapshot,
+  sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import type {
   AttrFilter,
@@ -63,14 +62,20 @@ import {
   setOverride,
   type ColumnOverrides,
 } from "./columns.js";
+import { fetchRawTraceBytes, rawStatsSummary, requestRawSpanStats } from "./raw.js";
 
 const els = pageEls();
 
 // URL params are read ONCE: the load scope is fixed for the page's lifetime.
 const params = new URLSearchParams(window.location.search);
-const scope = readScope(params);
+const scope = readScope(params, sourceScopeFromStored("", Dial9Creds.get()));
 const aggregate = isAggregateMode(params, scope);
 const rawMode = scope.trace != null;
+
+applyToCreds(scope.source, Dial9Creds);
+// Keep the static node and ID for the private userscript's page marker, but hide
+// built-in sharing whenever literal credentials are active.
+els.btnCopyLink.style.display = isSourceShareable(scope.source) ? "" : "none";
 
 // ── Mutable page state ──
 
@@ -120,8 +125,12 @@ function linkState(): SpanExplorerState | null {
   return {
     data_dir: scope.dataDir,
     max_files: maxFiles,
-    bucket: scope.bucket,
-    region: scope.region,
+    bucket: scope.source.bucket || null,
+    region: scope.source.region || null,
+    credentialMode: scope.source.credentials.kind,
+    ...(scope.source.credentials.kind === "role"
+      ? { roleArn: scope.source.credentials.roleArn }
+      : {}),
     prefix: scope.prefix,
     service: scope.service,
     hosts: scope.hosts,
@@ -163,6 +172,8 @@ function renderDetailNow(): void {
     exemplarRefreshPending,
     exemplarPreviewAvailable,
     linkState: linkState(),
+    rawTrace: scope.trace,
+    rawRegion: scope.source.region || null,
     onBand: applyBand,
     onClearBand: () => applyBand({ min_ns: null, max_ns: null }),
     onToggleFilter: toggleAttrFilter,
@@ -307,7 +318,7 @@ function startStreaming(mode: StreamMode): void {
     exemplarRequestMatches(requestUid, requestScopeKey, selectedUid, exemplarScopeKey(view()));
 
   void openSse(buildApiUrl(mode, scope, view(), window.location.origin), {
-    headers: Dial9Creds.headers(),
+    headers: Dial9Session.headers(Dial9Creds.headers()),
     signal: abortCtl.signal,
     onEvent: (obj) => {
       if (token !== streamToken || !stillCurrent()) return;
@@ -454,14 +465,15 @@ if (rawMode && scope.trace != null) {
   els.stats.textContent = "📂 Raw trace mode — loading…";
   void (async () => {
     try {
-      const { trace } = await loadTrace(scope.trace as string);
-      const { allSpans } = buildSpanData(trace.customEvents);
-      spanTypes = buildSpanCatalog(allSpans, trace.customEvents) as SpanTypeStats[];
+      const traceBytes = await fetchRawTraceBytes(
+        scope.trace as string,
+        window.location.origin,
+        Dial9Session.headers(Dial9Creds.headers()),
+      );
+      const response = await requestRawSpanStats(traceBytes, window.location.origin);
+      spanTypes = response.span_types;
       els.loading.classList.add("hidden");
-      const total = spanTypes.reduce((s, t) => s + t.count, 0);
-      els.stats.textContent =
-        `📂 Raw trace mode · ${spanTypes.length} span types · ` +
-        `${total.toLocaleString()} instances`;
+      els.stats.textContent = `📂 Server-decoded raw trace · ${rawStatsSummary(response)}`;
       renderCatalogNow();
       renderDetailNow();
     } catch (e) {

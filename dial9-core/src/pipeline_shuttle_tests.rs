@@ -230,9 +230,8 @@ use std::sync::atomic::{AtomicU64 as StdAtomicU64, Ordering as StdOrdering};
 //
 // A minimal `tracing::Subscriber` that increments a shared counter
 // on every WARN or ERROR event. We use `tracing::subscriber::with_default`
-// to scope it to a single test invocation. We deliberately avoid
-// depending on `tracing-subscriber` since that crate is gated behind
-// the `tracing-layer` feature and isn't enabled under `_shuttle`.
+// to scope it to a single test invocation. We deliberately avoid adding a
+// `tracing-subscriber` dependency just for this `_shuttle` test.
 
 struct CountingSubscriber {
     warn_or_error_count: StdArc<StdAtomicU64>,

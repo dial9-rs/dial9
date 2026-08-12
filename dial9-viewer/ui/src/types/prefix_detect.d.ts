@@ -17,4 +17,14 @@ declare module "*/prefix_detect.js" {
   export function isDateLayer(
     prefixes: readonly string[] | null | undefined
   ): boolean;
+
+  /**
+   * The prefix to pre-select from a discovered listing, or `undefined` when
+   * the user should choose. Returns `dial9-traces` when the listing offers it
+   * (the conventional default), otherwise the sole prefix when there is
+   * exactly one. Trailing slashes are stripped from the result.
+   */
+  export function preferredPrefix(
+    prefixes: readonly string[] | null | undefined
+  ): string | undefined;
 }

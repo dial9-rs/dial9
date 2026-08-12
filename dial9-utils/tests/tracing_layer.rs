@@ -3,15 +3,43 @@
 // Only one test per process can do this. All other tests must use `set_default`
 // (thread-local) instead.
 
-mod common;
-
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, TokioAttachOptions, recorder};
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+use dial9_core::buffer::DiskBuffer;
+use dial9_core::recorder::recorder;
+use dial9_core::recording::Recorder;
+use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
 use dial9_trace_format::types::FieldValueRef;
+use dial9_utils::tracing_layer::Dial9TracingLayer;
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
+
+const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
+
+fn attach(
+    recorder: &Recorder,
+    workers: usize,
+    options: TokioAttachOptions,
+) -> tokio::runtime::Runtime {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(workers);
+    recorder
+        .handle()
+        .attach_tokio_runtime(builder, options)
+        .expect("build tokio runtime")
+}
+
+fn attach_current_thread(
+    recorder: &Recorder,
+    options: TokioAttachOptions,
+) -> tokio::runtime::Runtime {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    recorder
+        .handle()
+        .attach_tokio_runtime(builder, options)
+        .expect("build tokio runtime")
+}
 
 /// Helper: decode span events from a sealed trace file.
 struct SpanEvents {
@@ -25,8 +53,14 @@ struct SpanEvents {
     exit_fields: Vec<(String, String)>,
     /// Whether any enter event had a non-zero parent_span_id.
     saw_parent_span_id: bool,
-    /// Worker IDs seen on enter events.
-    worker_ids: HashSet<u64>,
+    /// Tokio task IDs seen on span enter and exit events.
+    enter_task_ids: HashSet<u64>,
+    exit_task_ids: HashSet<u64>,
+    /// Span events recorded while outside a Tokio task.
+    enters_without_task_id: u32,
+    exits_without_task_id: u32,
+    /// Tokio task IDs recorded by the runtime's poll events.
+    poll_task_ids: HashSet<u64>,
     /// Unique schema names seen for enter events.
     enter_schema_names: HashSet<String>,
     /// Unique span IDs seen on enter events.
@@ -47,7 +81,11 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
         enter_fields: Vec::new(),
         exit_fields: Vec::new(),
         saw_parent_span_id: false,
-        worker_ids: HashSet::new(),
+        enter_task_ids: HashSet::new(),
+        exit_task_ids: HashSet::new(),
+        enters_without_task_id: 0,
+        exits_without_task_id: 0,
+        poll_task_ids: HashSet::new(),
         enter_schema_names: HashSet::new(),
         entered_span_ids: HashSet::new(),
         closed_span_ids: HashSet::new(),
@@ -55,7 +93,16 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
 
     decoder
         .for_each_event(|ev| {
-            if ev.name.starts_with("SpanEnter:") {
+            if ev.name == "PollStartEvent" {
+                for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
+                    if field_def.name() == "task_id"
+                        && let FieldValueRef::Varint(task_id) = field_val
+                        && *task_id != 0
+                    {
+                        result.poll_task_ids.insert(*task_id);
+                    }
+                }
+            } else if ev.name.starts_with("SpanEnter:") {
                 result.enter_count += 1;
                 result.enter_schema_names.insert(ev.name.to_owned());
                 for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
@@ -76,14 +123,23 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
                     {
                         result.saw_parent_span_id = true;
                     }
-                    if field_def.name() == "worker_id"
-                        && let FieldValueRef::Varint(v) = field_val
-                    {
-                        result.worker_ids.insert(*v);
+                    if field_def.name() == TOKIO_TASK_ID_FIELD {
+                        match field_val {
+                            FieldValueRef::Varint(task_id) if *task_id != 0 => {
+                                result.enter_task_ids.insert(*task_id);
+                            }
+                            FieldValueRef::None => result.enters_without_task_id += 1,
+                            _ => {}
+                        }
                     }
                     // User-defined fields are optional pooled strings
-                    if !["worker_id", "span_id", "parent_span_id", "span_name"]
-                        .contains(&field_def.name())
+                    if ![
+                        TOKIO_TASK_ID_FIELD,
+                        "span_id",
+                        "parent_span_id",
+                        "span_name",
+                    ]
+                    .contains(&field_def.name())
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(v) = ev.string_pool.get(*id)
                     {
@@ -95,7 +151,16 @@ fn decode_span_events(path: &std::path::Path) -> SpanEvents {
             } else if ev.name.starts_with("SpanExit:") {
                 result.exit_count += 1;
                 for (field_def, field_val) in ev.schema.fields().iter().zip(ev.fields.iter()) {
-                    if !["worker_id", "span_id", "span_name"].contains(&field_def.name())
+                    if field_def.name() == TOKIO_TASK_ID_FIELD {
+                        match field_val {
+                            FieldValueRef::Varint(task_id) if *task_id != 0 => {
+                                result.exit_task_ids.insert(*task_id);
+                            }
+                            FieldValueRef::None => result.exits_without_task_id += 1,
+                            _ => {}
+                        }
+                    }
+                    if ![TOKIO_TASK_ID_FIELD, "span_id", "span_name"].contains(&field_def.name())
                         && let FieldValueRef::PooledString(id) = field_val
                         && let Some(v) = ev.string_pool.get(*id)
                     {
@@ -129,7 +194,7 @@ fn span_events_appear_in_trace() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let runtime = common::attach(&recorder, 4, TokioAttachOptions::default());
+    let runtime = attach(&recorder, 4, TokioAttachOptions::default());
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set global subscriber");
@@ -137,7 +202,11 @@ fn span_events_appear_in_trace() {
     runtime.block_on(async {
         // Test on_record: span with an empty field filled in later
         async fn late_record_span() {
-            let span = tracing::info_span!("late_fields", answer = tracing::field::Empty);
+            let span = tracing::info_span!(
+                "late_fields",
+                answer = tracing::field::Empty,
+                task_id = "application-task"
+            );
             span.record("answer", 42);
             let _enter = span.enter();
         }
@@ -158,8 +227,8 @@ fn span_events_appear_in_trace() {
 
         // Spawn across multiple workers for concurrency coverage. Two of the
         // tasks share a blocking Barrier so they are guaranteed to run on two
-        // distinct workers (see handle_request), making the multi-worker
-        // assertion deterministic rather than dependent on scheduler placement.
+        // distinct workers (see handle_request), exercising the shared layer
+        // concurrently rather than depending on scheduler placement.
         let barrier = Arc::new(Barrier::new(2));
         let mut handles = Vec::new();
         for i in 0..10 {
@@ -252,6 +321,20 @@ fn span_events_appear_in_trace() {
             .any(|(k, v)| k == "user_id" && v == "42"),
         "missing user_id=42 field on exit"
     );
+    assert!(
+        events
+            .enter_fields
+            .iter()
+            .any(|(k, v)| k == "task_id" && v == "application-task"),
+        "application task_id field collided with dial9's Tokio task ID"
+    );
+    assert!(
+        events
+            .exit_fields
+            .iter()
+            .any(|(k, v)| k == "task_id" && v == "application-task"),
+        "application task_id field collided with dial9's Tokio task ID on exit"
+    );
 
     // Fields from on_record (late recording)
     assert!(
@@ -288,12 +371,22 @@ fn span_events_appear_in_trace() {
         "missing instrument_parent span"
     );
 
-    // Multi-worker: span events should come from more than one worker
+    // Every span task ID must use the same representation as the runtime's
+    // PollStart events, so readers can join the two directly.
     assert!(
-        events.worker_ids.len() > 1,
-        "expected span events from multiple workers, got {:?}",
-        events.worker_ids
+        events.enter_task_ids.len() >= 10,
+        "expected task IDs from the spawned request tasks, got {:?}",
+        events.enter_task_ids
     );
+    assert_eq!(events.enter_task_ids, events.exit_task_ids);
+    assert!(
+        events.enter_task_ids.is_subset(&events.poll_task_ids),
+        "span task IDs {:?} were not all present in PollStart events {:?}",
+        events.enter_task_ids,
+        events.poll_task_ids
+    );
+    assert_eq!(events.enters_without_task_id, 0);
+    assert_eq!(events.exits_without_task_id, 0);
 
     // Callsite schema dedup: multiple calls to the same #[instrument] function
     // should share a single schema. We have handle_request, inner_op,
@@ -341,7 +434,7 @@ fn span_events_on_current_thread_runtime() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let recorder = recorder(writer).build();
-    let runtime = common::attach_current_thread(&recorder, TokioAttachOptions::default());
+    let runtime = attach_current_thread(&recorder, TokioAttachOptions::default());
 
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _sub_guard = tracing::subscriber::set_default(subscriber);
@@ -379,4 +472,10 @@ fn span_events_on_current_thread_runtime() {
         events.entered_span_ids, events.closed_span_ids,
         "every entered span should have a matching close event on current_thread runtime"
     );
+    // A future driven directly by Runtime::block_on is not a Tokio task. The
+    // layer still emits its span and represents the missing task explicitly.
+    assert!(events.enter_task_ids.is_empty());
+    assert!(events.exit_task_ids.is_empty());
+    assert!(events.enters_without_task_id >= 1);
+    assert!(events.exits_without_task_id >= 1);
 }

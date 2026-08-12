@@ -48,8 +48,9 @@ pub use format::{
 #[cfg(feature = "worker-s3")]
 pub use recorder::RecorderS3ClientExt;
 pub use recorder::{
-    AttachedRuntime, Dial9Handle, Dial9HandleTokioExt, Dial9TokioHandle, RecorderPipelineExt,
-    TokioAttachOptions, TokioHooks, block_on, current_worker_id, spawn, spawn_in,
+    AttachedRuntime, Dial9Handle, Dial9HandleTokioExt, Dial9TokioHandle, JoinSetExt,
+    RecorderPipelineExt, TokioAttachOptions, TokioHooks, block_on, current_worker_id, spawn,
+    spawn_in,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

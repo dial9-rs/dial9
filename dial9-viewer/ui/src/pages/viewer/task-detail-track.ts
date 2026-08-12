@@ -55,6 +55,7 @@ const LIFESPAN_BORDER = "rgba(129,199,132,0.3)";
 const LIFESPAN_EDGE = "#81c784";
 const LEGEND_LABEL = "#aaa";
 const CROSSHATCH = "rgba(140,120,255,0.35)";
+const LIFESPAN_LABEL_Y = BAND_TOP - 18;
 
 /**
  * The store-cached task-detail derivation. Keyed on ["trace", "selection"] so a
@@ -376,9 +377,10 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
 
 /**
  * Draw the task-detail timeline into `ctx` (already DPR-scaled + sized to
- * drawW x height), in order: background, wake->poll delay bands, lifespan bar,
- * poll bars / coverage histogram, idle gaps, legend, then the window markers on
- * top. Draw-area-relative coordinates (the model's x's already omit LABEL_W).
+ * drawW x height), in order: background, lifespan bar, scheduling-delay bands,
+ * poll bars / coverage histogram, idle gaps, legend, then the window markers
+ * on top. Draw-area-relative coordinates (the model's x's already omit
+ * LABEL_W).
  */
 export function drawTaskDetailCanvas(
   ctx: CanvasRenderingContext2D,
@@ -394,51 +396,6 @@ export function drawTaskDetailCanvas(
   if (drawW <= 0 || height <= 0) return;
 
   ctx.font = "9px monospace";
-
-  // ── Wake->poll delay bands + waker labels ────────────────────────────
-  for (const band of model.wakeBands) {
-    const w = band.x2 - band.x1;
-    ctx.fillStyle =
-      band.severity === "high"
-        ? "rgba(255,50,50,0.3)"
-        : band.severity === "mid"
-          ? "rgba(255,150,50,0.3)"
-          : "rgba(100,200,100,0.15)";
-    ctx.fillRect(band.x1, BAND_TOP, w, BAND_H);
-
-    ctx.strokeStyle =
-      band.severity === "high" ? "#ff4444" : band.severity === "mid" ? "#ff8a65" : "#555";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([2, 2]);
-    ctx.strokeRect(band.x1, BAND_TOP, w, BAND_H);
-    ctx.setLineDash([]);
-
-    if (band.showDelayLabel) {
-      ctx.fillStyle =
-        band.severity === "high" ? "#ff4444" : band.severity === "mid" ? "#ff8a65" : "#888";
-      ctx.textAlign = "center";
-      ctx.fillText(formatHumanDuration(band.delayNs), band.x1 + w / 2, BAND_TOP - 6);
-    }
-
-    // Wake marker (triangle) at the band's left edge.
-    const wx = band.x1;
-    ctx.fillStyle = WAKE_TRIANGLE;
-    ctx.beginPath();
-    ctx.moveTo(wx, BAND_TOP + BAND_H + 2);
-    ctx.lineTo(wx - 4, BAND_TOP + BAND_H + 9);
-    ctx.lineTo(wx + 4, BAND_TOP + BAND_H + 9);
-    ctx.closePath();
-    ctx.fill();
-
-    if (band.showWakerLabel) {
-      const isHovered = hoveredWakerTaskId === band.wakerTaskId;
-      ctx.fillStyle = isHovered ? "#fff" : "#66bb6a";
-      ctx.font = isHovered ? "bold 8px monospace" : "8px monospace";
-      ctx.textAlign = "left";
-      ctx.fillText("⬆ " + band.wakerLabel, wx, BAND_TOP + BAND_H + 20);
-      ctx.font = "9px monospace";
-    }
-  }
 
   // ── Task lifespan bar ────────────────────────────────────────────────
   if (model.lifespan !== null) {
@@ -463,7 +420,7 @@ export function drawTaskDetailCanvas(
       ctx.fillStyle = LIFESPAN_EDGE;
       ctx.font = "8px monospace";
       ctx.textAlign = "left";
-      ctx.fillText("spawn▸", l.x1 + 2, BAND_TOP - 8);
+      ctx.fillText("spawn▸", l.x1 + 2, LIFESPAN_LABEL_Y);
     }
     if (l.showDone) {
       ctx.strokeStyle = LIFESPAN_EDGE;
@@ -474,9 +431,56 @@ export function drawTaskDetailCanvas(
       ctx.fillStyle = LIFESPAN_EDGE;
       ctx.font = "8px monospace";
       ctx.textAlign = "right";
-      ctx.fillText("◂done", l.x2 - 2, BAND_TOP - 8);
+      ctx.fillText("◂done", l.x2 - 2, LIFESPAN_LABEL_Y);
     }
     ctx.font = "9px monospace";
+  }
+
+  // ── Scheduling-delay bands + wake labels ────────────────────────────
+  for (const band of model.schedulingBands) {
+    const w = band.x2 - band.x1;
+    ctx.fillStyle =
+      band.severity === "high"
+        ? "rgba(255,50,50,0.3)"
+        : band.severity === "mid"
+          ? "rgba(255,150,50,0.3)"
+          : "rgba(100,200,100,0.15)";
+    ctx.fillRect(band.x1, BAND_TOP, w, BAND_H);
+
+    ctx.strokeStyle =
+      band.severity === "high" ? "#ff4444" : band.severity === "mid" ? "#ff8a65" : "#555";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.strokeRect(band.x1, BAND_TOP, w, BAND_H);
+    ctx.setLineDash([]);
+
+    if (band.showDelayLabel) {
+      ctx.fillStyle =
+        band.severity === "high" ? "#ff4444" : band.severity === "mid" ? "#ff8a65" : "#888";
+      ctx.textAlign = "center";
+      ctx.fillText(formatHumanDuration(band.delayNs), band.x1 + w / 2, BAND_TOP - 6);
+    }
+
+    if (band.kind !== "wake") continue;
+
+    // Wake marker (triangle) at the band's left edge.
+    const wx = band.x1;
+    ctx.fillStyle = WAKE_TRIANGLE;
+    ctx.beginPath();
+    ctx.moveTo(wx, BAND_TOP + BAND_H + 2);
+    ctx.lineTo(wx - 4, BAND_TOP + BAND_H + 9);
+    ctx.lineTo(wx + 4, BAND_TOP + BAND_H + 9);
+    ctx.closePath();
+    ctx.fill();
+
+    if (band.showWakerLabel) {
+      const isHovered = hoveredWakerTaskId === band.wakerTaskId;
+      ctx.fillStyle = isHovered ? "#fff" : "#66bb6a";
+      ctx.font = isHovered ? "bold 8px monospace" : "8px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText("⬆ " + band.wakerLabel, wx, BAND_TOP + BAND_H + 20);
+      ctx.font = "9px monospace";
+    }
   }
 
   // ── Polling sections: coverage histogram or per-poll bars ────────────

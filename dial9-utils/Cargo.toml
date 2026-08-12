@@ -1,24 +1,31 @@
 [package]
 name = "dial9-utils"
-version = "0.5.0-rc0"
+version = "0.5.0-rc2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Opt-in integrations for dial9"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(shuttle)",
+    "cfg(iai_enabled)",
+] }
 missing_debug_implementations = "warn"
 
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
 pin-project-lite = "0.2"
-# `rt` is needed for `tokio::runtime::worker_index()` (the span `worker_id`).
-tokio = { version = "1", features = [
-    "rt",
-], default-features = false, optional = true }
+tokio = { version = "1.52.0", default-features = false }
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+    "registry",
+] }
 axum-0-7 = { package = "axum", version = "0.7", optional = true }
 axum-core-0-4 = { package = "axum-core", version = "0.4", optional = true }
 axum-0-8 = { package = "axum", version = "0.8", optional = true }
@@ -34,6 +41,12 @@ tower-service = { version = "0.3", optional = true }
 tower-layer = { version = "0.3", optional = true }
 
 [features]
+## Tracing-subscriber layer that emits span events into dial9 traces.
+tracing-layer = [
+    "dep:dial9-trace-format",
+    "dep:tracing-subscriber",
+    "tokio/rt",
+]
 ## A traced replacement for `axum::serve` from Axum 0.7.
 axum-07 = [
     "dep:dial9-trace-format",
@@ -61,8 +74,9 @@ axum-08 = [
     "dep:tower-service",
 ]
 ## Ad-hoc span wrappers (`span` module: the `dial9_span!` macro, the future
-## combinator, and the sync guard). Independent of any async runtime.
-span = ["dep:dial9-trace-format", "dep:tokio"]
+## combinator, and the sync guard). `tokio/rt` powers the span `worker_id` via
+## `tokio::runtime::worker_index()`.
+span = ["dep:dial9-trace-format", "tokio/rt"]
 ## Tower middleware for ad-hoc spans (`span::Dial9SpanLayer`). Implies `span`.
 tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
@@ -70,10 +84,13 @@ tower = ["span", "dep:tower-service", "dep:tower-layer"]
 # The `adhoc_spans` example sets its runtime up through the `dial9` facade, the
 # way a user would. Nothing in the `dial9` tree depends on `dial9-utils`, so
 # this is not a cycle.
-dial9 = { version = "0.5.0-rc1", path = "../dial9", features = ["tokio"] }
+dial9 = { path = "../dial9", features = ["tokio"] }
 dial9-core = { workspace = true, features = ["pipeline"] }
+dial9-tokio-telemetry = { path = "../dial9-tokio-telemetry" }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+dial9-utils = { path = ".", features = ["tracing-layer"] }
 criterion = "0.5"
+iai-callgrind = "=0.16.1"
 tempfile = "3"
 tokio = { version = "1.52.0", features = [
     "rt",
@@ -92,3 +109,17 @@ required-features = ["span"]
 name = "span_encode_bench"
 harness = false
 required-features = ["span"]
+
+[[bench]]
+name = "tracing_layer_bench"
+harness = false
+required-features = ["tracing-layer"]
+
+[[bench]]
+name = "tracing_layer_iai"
+harness = false
+required-features = ["tracing-layer"]
+
+[[example]]
+name = "tracing_sleep"
+required-features = ["tracing-layer"]

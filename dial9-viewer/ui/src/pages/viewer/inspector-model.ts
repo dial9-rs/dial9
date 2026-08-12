@@ -12,6 +12,10 @@ import {
   formatFieldValue,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
+import {
+  isChartableNumericValue,
+  isFieldChartNameSupported,
+} from "./field-chart-model.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type {
@@ -23,7 +27,6 @@ import type {
   SymbolFrame,
   TaskDump,
   TracingSpan,
-  WorkerLane,
 } from "../../lib/trace/index.js";
 import type {
   PinnedCustomEvent,
@@ -182,7 +185,7 @@ export function buildPollDetail(
 
 // ── Event detail ──────────────────────────────────────────────────────────
 
-/** One key/value detail row; `corrVal` non-null offers correlation. */
+/** One key/value detail row; correlation/chart actions are opt-in per field. */
 export interface KvRow {
   key: string;
   /** Display value (unit-formatted for a single event). */
@@ -191,6 +194,17 @@ export interface KvRow {
    *  nowhere (cluster rows, the `@`/`Task` rows, or a value unique to one
    *  event). */
   corrVal: string | null;
+  /** Whether this row can open a numeric-field chart. */
+  chart: boolean;
+}
+
+function kvRow(
+  key: string,
+  value: string,
+  corrVal: string | null = null,
+  chart = false,
+): KvRow {
+  return { key, value, corrVal, chart };
 }
 
 /** The Event tab view: kv rows + the resolved task (single or cluster). */
@@ -254,25 +268,29 @@ export function buildEventDetail(
       const corrVal = String(v);
       const display = formatFieldValue(v, ev.units?.[k]);
       const shared = countWithField(allEvents, k, corrVal) > 1;
-      rows.push({ key: k, value: display, corrVal: shared ? corrVal : null });
+      const chartable =
+        isChartableNumericValue(v) &&
+        isFieldChartNameSupported(ev.name) &&
+        isFieldChartNameSupported(k);
+      rows.push(kvRow(k, display, shared ? corrVal : null, chartable));
     }
-    rows.push({ key: "@", value: fmtTs(ev.timestamp), corrVal: null });
+    rows.push(kvRow("@", fmtTs(ev.timestamp)));
   } else {
     const first = events[0]!;
     const last = events[events.length - 1]!;
     title = `Cluster · ${events.length} events`;
-    rows.push({ key: "Cluster", value: `${events.length} events`, corrVal: null });
-    rows.push({ key: "Types", value: topEventNames(events), corrVal: null });
+    rows.push(kvRow("Cluster", `${events.length} events`));
+    rows.push(kvRow("Types", topEventNames(events)));
     const range =
       last.timestamp !== first.timestamp
         ? `${fmtTs(first.timestamp)} – ${fmtTs(last.timestamp)}`
         : fmtTs(first.timestamp);
-    rows.push({ key: "@", value: range, corrVal: null });
+    rows.push(kvRow("@", range));
   }
 
   if (pinned.taskId != null) {
     const hex = "0x" + pinned.taskId.toString(16);
-    rows.push({ key: "Task", value: `${hex} (selected)`, corrVal: null });
+    rows.push(kvRow("Task", `${hex} (selected)`));
   }
   return { title, rows, taskId: pinned.taskId, isSingle };
 }
@@ -666,12 +684,4 @@ export function hasNoSelection(sel: SelectionSlice): boolean {
     sel.spawnedTasksRange === null &&
     sel.sidebarRange === null
   );
-}
-
-// ── Worker-lane bundle for task resolution ──
-
-/** The trace-invariant lanes the Related task resolver reads. */
-export interface InspectorLaneData {
-  lanes: Record<number, WorkerLane>;
-  workerIds: readonly number[];
 }

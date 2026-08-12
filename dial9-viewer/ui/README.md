@@ -249,6 +249,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `span-filter` | string | Span text filter. |
 | `track-order` | comma-separated track ids | Analysis-track order. |
 | `collapsed` | comma-separated track ids | Collapsed analysis tracks. |
+| `field-chart` | **repeatable** `<id>,<event>,<field>,<kind>` | Numeric custom-event chart definitions; event and field names containing commas are unsupported. `kind` is `gauge`, `counter`, or `updown-counter`. Dynamic ids may also appear in `track-order`/`collapsed`. |
 | `span` | span id | Lane-highlighted span (ancestor chain is re-derived). |
 | `span-focus` | span id | Span-panel subtree root. |
 | `poll` | `<startNs>:<taskId>` | Poll-detail anchor. |
@@ -266,6 +267,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `task-sort` | `<id\|loc\|polls\|total\|longest\|lifetime>,<asc\|desc>` | Tasks ordering. |
 | `task-index` | non-negative integer | Current Tasks cursor. |
 | `runtime-collapsed` | `v1:` + TAB-joined names | Folded runtime groups. |
+| `runtime-metrics-collapsed` | `v1:` + TAB-joined names | Runtimes whose summary lane is folded to its one-line strip. |
 | `inspector-width` | positive CSS pixels | Inspector width. |
 | `lanes-height` | positive CSS pixels | Worker-lanes viewport height. |
 | `lanes-scroll` | non-negative CSS pixels | Worker-lanes vertical position. |

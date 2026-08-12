@@ -22,6 +22,9 @@ export interface BrowserEls {
   // Credentials panel
   credsPanel: HTMLDivElement;
   credsClose: HTMLButtonElement;
+  credsModeSummary: HTMLSpanElement;
+  credsUseLiteral: HTMLButtonElement;
+  credsLiteralFields: HTMLDivElement;
   credsPaste: HTMLTextAreaElement;
   credsPasteFill: HTMLButtonElement;
   credsAkid: HTMLInputElement;
@@ -89,6 +92,9 @@ export function queryEls(): BrowserEls {
     credsBtnLabel: byId("creds-btn-label"),
     credsPanel: byId("creds-panel"),
     credsClose: byId("creds-close"),
+    credsModeSummary: byId("creds-mode-summary"),
+    credsUseLiteral: byId("creds-use-literal"),
+    credsLiteralFields: byId("creds-literal-fields"),
     credsPaste: byId("creds-paste"),
     credsPasteFill: byId("creds-paste-fill"),
     credsAkid: byId("creds-akid"),

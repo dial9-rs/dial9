@@ -245,6 +245,8 @@ assertEq(
   src.set("api", "1");
   src.set("bucket", "my-bucket");
   src.set("aws_region", "us-west-2");
+  src.set("credential_mode", "role");
+  src.set("aws_role_arn", "arn:aws:iam::123456789012:role/Dial9TraceReader");
   src.set("prefix", "traces/svc");
   src.set("service", "svc");
   src.append("host", "h1");
@@ -262,6 +264,9 @@ assertEq(
   const out = fullScopeQuery(src);
   assertEq(out.get("bucket"), "my-bucket", "bucket survives (fixes lossy address bar)");
   assertEq(out.get("aws_region"), "us-west-2", "region survives (cross-region bucket link)");
+  assertEq(out.get("credential_mode"), "role", "credential mode survives");
+  assertEq(out.get("aws_role_arn"),
+    "arn:aws:iam::123456789012:role/Dial9TraceReader", "role ARN survives");
   assertEq(out.get("prefix"), "traces/svc", "prefix survives");
   assertEq(out.get("max_files"), "256", "max_files survives");
   assertEq(out.getAll("host").join(","), "h1,h2", "repeatable host set survives in order");

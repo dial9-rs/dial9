@@ -16,7 +16,12 @@ import { repeat } from "lit-html/directives/repeat.js";
 import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, lanesScrollbarWidth, trackGeometry } from "../../lib/canvas/track-layout.js";
-import type { TrackId, TrackSpec } from "../../lib/canvas/track-layout.js";
+import {
+  isFieldChartTrackId,
+  type TrackId,
+  type TrackSpec,
+} from "../../lib/canvas/track-layout.js";
+import type { FieldChartSpec } from "../../types/state.js";
 import {
   COLLAPSED_TRACK_H,
   isCollapsed,
@@ -26,11 +31,17 @@ import {
 } from "./track-management.js";
 import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "../../lib/canvas/track-renderers.js";
-import { renderCpuTrack, type CpuInputs } from "./cpu.js";
+import {
+  CPU_CAPACITY_STROKE,
+  renderCpuTrack,
+  type CpuInputs,
+} from "./cpu.js";
 import type { SpansTrackController } from "./spans-track.js";
 import type { QueueTrackController } from "./queue-track.js";
 import type { TaskDetailTrackController } from "./task-detail-track.js";
 import type { EventsTrackController } from "./events-track.js";
+import { fieldChartTrackSpecs } from "./field-chart-model.js";
+import type { FieldChartTrackController } from "./field-chart-track.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -49,6 +60,8 @@ export interface TracksViewModel {
    * it from the store via `deriveCpuInputs`; other tracks ignore it.
    */
   cpu: CpuInputs;
+  /** URL-defined numeric-field charts appended to the manageable catalogue. */
+  fieldCharts: readonly FieldChartSpec[];
   /**
    * Track management, lifted from uiPrefs by the shell. `trackOrder` reorders the
    * manageable analysis tracks; `collapsed` overrides a track's height to
@@ -81,7 +94,10 @@ export interface TracksViewModel {
  * (label-only) - collapse is a height override, not a hide.
  */
 export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
-  return orderedTracks(vm.trackOrder).filter((t) => {
+  return orderedTracks(
+    vm.trackOrder,
+    fieldChartTrackSpecs(vm.fieldCharts),
+  ).filter((t) => {
     if (t.selectionOnly && !vm.taskSelected) return false;
     if (vm.hasTrace && vm.emptyTracks.has(t.id)) return false;
     return true;
@@ -177,24 +193,28 @@ function innerRow(
     return taskDetailTrack.rowTemplate(t);
   }
   if (t.id === "events" && eventsTrack !== undefined) return eventsTrack.rowTemplate(t);
-  return defaultTrackRow(t);
+  return defaultTrackRow(t, t.id === "cpu" ? vm.cpu.capacity : undefined);
 }
 
 /**
  * The worker-lanes row: a fixed-height scroll box the user can drag-resize. The
- * "Workers" label sits in the LABEL_W gutter; the box (`.d9-lanes-viewport`)
- * holds the sticky lanes canvas over a `.d9-lanes-spacer` whose height (set by
- * the lanes mount) makes the box scroll when the stacked rows exceed the box.
- * The `.d9-track-canvas-wrap` wrapper is the legend's overlay anchor (kept so
- * the legend pins to the box bottom, not the scrolling content), and the bottom
- * `.d9-lanes-resize` gutter is the drag target the lanes mount wires.
+ * "Workers" label sits in the LABEL_W gutter, above a PER-ROW label canvas the
+ * lanes mount paints from the same row layout + scrollTop as the lanes canvas
+ * (so every lane is named in the gutter instead of in the data area). The box
+ * (`.d9-lanes-viewport`) holds the sticky lanes canvas over a
+ * `.d9-lanes-spacer` whose height (set by the lanes mount) makes the box scroll
+ * when the stacked rows exceed the box. The `.d9-track-canvas-wrap` wrapper is
+ * the legend's overlay anchor (kept so the legend pins to the box bottom, not
+ * the scrolling content), and the bottom `.d9-lanes-resize` gutter is the drag
+ * target the lanes mount wires.
  */
 function lanesTrackRow(t: TrackSpec, viewportHeight: number): TemplateResult {
   return html`
     <div class="d9-track d9-track--lanes" data-track-id=${t.id}>
       <div class="d9-lanes-head">
-        <div class="d9-track-label" id="d9-track-label-lanes">
+        <div class="d9-track-label d9-lanes-label" id="d9-track-label-lanes">
           <span class="d9-track-name">${t.label}</span>
+          <canvas class="d9-lanes-label-canvas" aria-hidden="true"></canvas>
         </div>
         <div class="d9-track-canvas-wrap">
           <div class="d9-lanes-viewport" style="height:${viewportHeight}px">
@@ -219,13 +239,14 @@ function lanesTrackRow(t: TrackSpec, viewportHeight: number): TemplateResult {
   `;
 }
 
-// ── Track management overlay: collapse caret + reorder grip ────────────────
+// ── Track management overlay: collapse, reorder, dynamic close ─────────────
 //
 // The affordances are shell-owned and sit in a reserved strip over the LEFT
 // edge of the label gutter (CSS `.d9-track-manage-strip`), so the per-track
 // labels (the spans/queue/events controllers render their own) are never
-// modified. The strip is pointer-events:none except the two controls, so the
-// rest of the label (e.g. the spans copy buttons) stays interactive.
+// modified. The strip itself is pointer-events:none, while its controls accept
+// pointer input, so the rest of the label (e.g. spans copy buttons) stays
+// interactive.
 
 // Id of the track whose grip is being dragged; module-level so `drop` can
 // read it without relying on DataTransfer (jsdom/older browsers vary). Set on
@@ -279,7 +300,8 @@ function manageWrapper(
   const collapsed = isCollapsed(vm.collapsed, t.id);
   return html`
     <div
-      class="d9-track-manage ${collapsed ? "is-collapsed" : ""}"
+      class="d9-track-manage ${collapsed ? "is-collapsed" : ""}
+        ${isFieldChartTrackId(t.id) ? "is-dynamic" : ""}"
       data-track-manage=${t.id}
       @dragover=${(e: DragEvent) => onRowDragOver(e, t.id)}
       @drop=${(e: DragEvent) => onRowDrop(e, t.id, actions)}
@@ -306,20 +328,55 @@ function manageWrapper(
           @dragstart=${(e: DragEvent) => onGripDragStart(e, t.id)}
           @dragend=${onGripDragEnd}
         ></span>
+        ${isFieldChartTrackId(t.id)
+          ? html`
+              <button
+                type="button"
+                class="d9-track-close"
+                aria-label=${`Close ${t.label} track`}
+                title="Close chart"
+                @click=${() => actions.close(t.id)}
+              >
+                &times;
+              </button>
+            `
+          : null}
       </div>
       ${inner}
     </div>
   `;
 }
 
-/** The uniform placeholder row: label gutter + canvas host. */
-function defaultTrackRow(t: TrackSpec): TemplateResult {
+/** The default track row: label gutter + canvas host. */
+function defaultTrackRow(
+  t: TrackSpec,
+  cpuCapacity?: number | null,
+): TemplateResult {
+  const isCpu = cpuCapacity !== undefined;
   return html`
     <div class="d9-track" data-track-id=${t.id} style="height:${t.height}px">
       <div class="d9-track-label" id="d9-track-label-${t.id}">
         <span class="d9-track-name">${t.label}</span>
       </div>
       <div class="d9-track-canvas-wrap">
+        ${isCpu
+          ? html`
+              <div class="d9-cpu-header">
+                ${cpuCapacity !== null
+                  ? html`
+                      <span
+                        class="d9-cpu-capacity"
+                        style="color:${CPU_CAPACITY_STROKE}"
+                      >
+                        <span class="d9-cpu-capacity-swatch" aria-hidden="true"></span>
+                        <span>available parallelism</span>
+                      </span>
+                    `
+                  : null}
+                <span class="d9-cpu-readout"></span>
+              </div>
+            `
+          : null}
         <canvas
           class="d9-track-canvas"
           data-track-canvas=${t.id}
@@ -358,6 +415,7 @@ export function sizeTracks(
   taskDetailTrack?: TaskDetailTrackController,
   eventsTrack?: EventsTrackController,
   queueTrack?: QueueTrackController,
+  fieldChartTrack?: FieldChartTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
   // Full column width and the LANES-BOX scrollbar gutter, so every track's draw
@@ -439,6 +497,21 @@ export function sizeTracks(
       out.push({ id: track.id, drawW, height: track.height });
       continue;
     }
+    if (isFieldChartTrackId(track.id) && fieldChartTrack !== undefined) {
+      const spec = vm.fieldCharts.find((chart) => chart.id === track.id);
+      if (spec !== undefined) {
+        fieldChartTrack.paint(
+          canvas,
+          geometry,
+          spec,
+          vm.viewStart,
+          vm.viewEnd,
+        );
+        canvas.dataset["drawW"] = String(Math.round(drawW));
+        out.push({ id: track.id, drawW, height: track.height });
+        continue;
+      }
+    }
     let sizer = sizers.get(canvas);
     if (!sizer) {
       sizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
@@ -448,7 +521,7 @@ export function sizeTracks(
     // Tracks with landed content render it; the rest stay empty placeholders.
     //  - timeline: the time-axis ruler.
     //  - cpu: the avg-cores bar chart; its render returns the info readout,
-    //    mirrored into a DOM attribute for tests.
+    //    mirrored into the DOM header and an attribute for tests.
     if (track.id === "timeline") {
       renderTimeAxis(ctx, geometry, vm.viewStart, vm.viewEnd, vm.axis, vm.hasTrace);
     } else if (track.id === "cpu") {
@@ -461,6 +534,10 @@ export function sizeTracks(
         vm.hasTrace,
       );
       canvas.dataset["cpuReadout"] = readout;
+      const readoutEl = canvas.parentElement?.querySelector<HTMLElement>(
+        ".d9-cpu-readout",
+      ) ?? null;
+      if (readoutEl !== null) readoutEl.textContent = readout;
     } else {
       paintPlaceholder(ctx, drawW, track.height, vm.hasTrace);
     }

@@ -4,9 +4,10 @@
 //
 // Issue #282: a 0-valued global-queue area rendered as a 1px stroke fused to
 // the axis, indistinguishable from "no data" (invisible at zero). `queueScaleY`
-// reserves ZERO_BASELINE_PX below the lowest data so a 0-valued series maps to
-// a VISIBLE flat line a fixed distance above the axis. The underlying numbers
-// are unchanged - only the y-mapping does.
+// (lib/canvas/zero-baseline.ts, re-exported below) reserves ZERO_BASELINE_PX
+// below the lowest data so a 0-valued series maps to a VISIBLE flat line a fixed
+// distance above the axis. The underlying numbers are unchanged - only the
+// y-mapping does.
 //
 // The three series (global injection queue, max per-worker local queue,
 // active-task count) share ONE explicit zero baseline even though the
@@ -16,7 +17,11 @@
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
 import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
-import { deriveWorkerIds, sharedWorkerSpans } from "../../lib/trace/derived.js";
+import {
+  deriveRuntimeMetrics,
+  deriveWorkerIds,
+  sharedWorkerSpans,
+} from "../../lib/trace/derived.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
 
@@ -63,6 +68,7 @@ export interface QueueData {
   spawnLocations: ReadonlyMap<string, string>;
   /** True when the trace carries the active-task timeline. */
   hasTaskTracking: boolean;
+  hasLocalQueueDepth: boolean;
 }
 
 /** The empty (no-trace) queue data. */
@@ -75,6 +81,7 @@ export const EMPTY_QUEUE_DATA: QueueData = {
   taskSpawnLocs: new Map(),
   spawnLocations: new Map(),
   hasTaskTracking: false,
+  hasLocalQueueDepth: false,
 };
 
 /**
@@ -87,30 +94,41 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
   if (trace === null || trace.maxTs === null) return EMPTY_QUEUE_DATA;
   const workerIds = deriveWorkerIds(trace);
   const spanResult = sharedWorkerSpans(trace);
+  const runtimeMetrics = deriveRuntimeMetrics(trace);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,
   );
+  // The global-queue series comes from per-runtime RuntimeMetrics (summed per
+  // cycle) when the trace has them; otherwise fall back to the legacy
+  // pre-summed QueueSample series that buildWorkerSpans extracts.
+  const queueSamples = runtimeMetrics.present
+    ? runtimeMetrics.summedGlobalQueue
+    : spanResult.queueSamples;
 
   // Merge every worker's local-queue series into one t-sorted timeline, built
-  // ONCE here so the per-frame render never re-merges.
+  // ONCE here so the per-frame render never re-merges. Skipped when the trace
+  // has no local-queue measurements (the per-event values are sentinel zeros).
   const merged: MergedLocalSample[] = [];
-  for (const w of workerIds) {
-    const samples = spanResult.workerQueueSamples[w];
-    if (!samples) continue;
-    for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+  if (trace.hasLocalQueueDepth) {
+    for (const w of workerIds) {
+      const samples = spanResult.workerQueueSamples[w];
+      if (!samples) continue;
+      for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+    }
+    merged.sort((a, b) => a.t - b.t);
   }
-  merged.sort((a, b) => a.t - b.t);
 
   return {
     workerIds,
-    queueSamples: spanResult.queueSamples,
+    queueSamples,
     mergedLocalSamples: merged,
     activeTaskSamples: timeline.activeTaskSamples,
     taskFirstPoll: timeline.taskFirstPoll,
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,
     hasTaskTracking: trace.hasTaskTracking,
+    hasLocalQueueDepth: trace.hasLocalQueueDepth,
   };
 }
 
@@ -123,48 +141,16 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
  */
 
 // ── The scale function ───────────────────────────────────────────────────
+//
+// Lives in lib/canvas/zero-baseline.ts, shared with the lanes' per-runtime
+// summary lane (which plots the same kind of series and must agree on where zero
+// is). Re-exported here so this module stays the queue track's one model import.
 
-/**
- * Pixels reserved between the chart's true bottom (the axis) and the y a value
- * of 0 maps to, so a 0-valued series renders as a VISIBLE flat line this far
- * above the axis instead of a stroke fused to it. Small enough to cost almost
- * no vertical range, large enough to read as a distinct line.
- */
-export const ZERO_BASELINE_PX = 3;
-
-/**
- * Map a queue-series value in [0, max] to a y coordinate inside the chart band
- * [chartTop, chartTop + chartH]. The bottom ZERO_BASELINE_PX is reserved so
- * value 0 lands a visible distance ABOVE the axis (the explicit zero baseline):
- * `queueScaleY(0, ...)` is strictly less than `chartTop + chartH`. `max` <= 0
- * pins everything to that baseline. The result is clamped into the band.
- *
- * This is the single scale every series (global, max-local, active-task) runs
- * through, so a 0-valued global renders a visible flat line.
- */
-export function queueScaleY(
-  value: number,
-  max: number,
-  chartTop: number,
-  chartH: number,
-  baselinePx: number = ZERO_BASELINE_PX,
-): number {
-  const reserve = Math.min(Math.max(0, baselinePx), chartH);
-  const usableH = chartH - reserve;
-  const baselineY = chartTop + chartH - reserve;
-  if (!(max > 0) || usableH <= 0) return baselineY;
-  const norm = value <= 0 ? 0 : value >= max ? 1 : value / max;
-  return baselineY - norm * usableH;
-}
-
-/** The y a value of 0 maps to (the visible zero baseline). */
-export function queueBaselineY(
-  chartTop: number,
-  chartH: number,
-  baselinePx: number = ZERO_BASELINE_PX,
-): number {
-  return chartTop + chartH - Math.min(Math.max(0, baselinePx), chartH);
-}
+export {
+  ZERO_BASELINE_PX,
+  queueBaselineY,
+  queueScaleY,
+} from "../../lib/canvas/zero-baseline.js";
 
 // ── Per-frame render model (bucketing) ───────────────────────────────────
 
@@ -187,7 +173,10 @@ export interface QueueRenderModel {
   numBuckets: number;
   /** Plotted global value per pixel column (carry-forward step). */
   global: readonly number[];
-  /** Plotted max-local value per pixel column (carry-forward step). */
+  /**
+   * Plotted max-local value per pixel column (carry-forward step). Empty when
+   * the trace has no per-worker queue depth.
+   */
   local: readonly number[];
   /** Shared magnitude for the global + local series (>= 1). */
   maxQ: number;
@@ -326,7 +315,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   const viewDur = viewEnd - viewStart;
 
   if (numBuckets === 0 || viewDur <= 0) {
-    return { numBuckets, global, local, maxQ: 1, activeTask: null, hasData: false };
+    return {
+      numBuckets,
+      global,
+      local: data.hasLocalQueueDepth ? local : [],
+      maxQ: 1,
+      activeTask: null,
+      hasData: false,
+    };
   }
 
   let hasData = false;
@@ -352,25 +348,30 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   }
 
   // ── Local queue: single pass over the merged timeline ───────────────────
-  const merged = data.mergedLocalSamples;
-  runningMax.reset(data.workerIds);
-  // Seed each worker from the sample just before viewStart.
-  const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
-  for (let i = mergeStart; i < merged.length; i++) {
-    const s = merged[i]!;
-    if (s.t >= viewStart) break;
-    runningMax.set(s.w, s.local);
-  }
-  let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
-  for (let bi = 0; bi < numBuckets; bi++) {
-    const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
-    while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
-      const s = merged[sampleIdx++]!;
+  // Only when the trace measures local depth: without the flag, local-queue
+  // values are sentinel zeros, not measurements, and must not mark buckets as
+  // having data. bucketLocal stays all-zero (ensureScratch).
+  if (data.hasLocalQueueDepth) {
+    const merged = data.mergedLocalSamples;
+    runningMax.reset(data.workerIds);
+    // Seed each worker from the sample just before viewStart.
+    const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
+    for (let i = mergeStart; i < merged.length; i++) {
+      const s = merged[i]!;
+      if (s.t >= viewStart) break;
       runningMax.set(s.w, s.local);
-      bucketHasData[bi] = 1;
-      hasData = true;
     }
-    bucketLocal[bi] = runningMax.value();
+    let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
+    for (let bi = 0; bi < numBuckets; bi++) {
+      const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
+      while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
+        const s = merged[sampleIdx++]!;
+        runningMax.set(s.w, s.local);
+        bucketHasData[bi] = 1;
+        hasData = true;
+      }
+      bucketLocal[bi] = runningMax.value();
+    }
   }
 
   // maxQ across visible buckets, and the carry-forward that makes
@@ -394,7 +395,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   const activeTask = buildActiveTaskModel(data, viewStart, viewEnd, viewDur, drawW);
   if (activeTask !== null) hasData = true;
 
-  return { numBuckets, global, local, maxQ, activeTask, hasData };
+  return {
+    numBuckets,
+    global,
+    local: data.hasLocalQueueDepth ? local : [],
+    maxQ,
+    activeTask,
+    hasData,
+  };
 }
 
 /**
@@ -498,6 +506,8 @@ export function computeSpawnedTasks(
 
 /** One queue-legend entry: a swatch encoding + its meaning (matches the draw). */
 export interface QueueLegendEntry {
+  /** Which series this explains, so a caller can drop the ones it will not draw. */
+  key: "global" | "local" | "activeTask";
   /** Swatch fill (CSS color). */
   swatch: string;
   label: string;
@@ -511,9 +521,9 @@ export interface QueueLegendEntry {
  * -> active-task, the draw order.
  */
 export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
-  { swatch: "#4fc3f7", label: "Global queue", shape: "area" },
-  { swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
-  { swatch: "#81c784", label: "Active tasks", shape: "line" },
+  { key: "global", swatch: "#4fc3f7", label: "Global queue", shape: "area" },
+  { key: "local", swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
+  { key: "activeTask", swatch: "#81c784", label: "Active tasks", shape: "line" },
 ];
 
 export {

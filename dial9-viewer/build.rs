@@ -15,6 +15,7 @@ fn main() {
     println!("cargo::rerun-if-changed=skills");
     println!("cargo::rerun-if-changed=ui");
     println!("cargo::rerun-if-changed=skill-source.md");
+    println!("cargo::rerun-if-changed=tracing-layer-skill-source.md");
 
     let skills_dir = manifest_dir.join("skills");
     let mut skills: Vec<SkillInfo> = Vec::new();
@@ -63,11 +64,11 @@ fn main() {
         }
     }
 
-    // Generate the setup skill from README
-    let setup_body = generate_setup_from_readme(&manifest_dir, &out_dir);
+    // Generate the setup skill from the facade and integration READMEs.
+    let setup_body = generate_setup_from_sources(&manifest_dir, &out_dir);
     skills.push(SkillInfo {
         name: "dial9-setup".to_string(),
-        description: "How to instrument your app with dial9-tokio-telemetry. Covers prerequisites, macro and manual setup, the tracing layer, and wake event tracking.".to_string(),
+        description: "How to instrument your app with dial9 and dial9-utils. Covers prerequisites, macro and manual setup, the tracing layer, and wake event tracking.".to_string(),
         body: setup_body,
         files: vec![("SKILL.md".to_string(), RelReference::OutRel(PathBuf::from("dial9-setup-SKILL.md")))],
     });
@@ -289,31 +290,38 @@ fn generate_header(skills: &[SkillInfo]) -> String {
     out
 }
 
-/// Sections from the dial9-tokio-telemetry README to include in the setup skill.
-const SETUP_SECTIONS: &[&str] = &[
-    "Quick Start",
-    "Tokio events",
-    "Tracing span events (opt-in)",
-];
+/// Sections from the dial9 facade README to include in the setup skill.
+const DIAL9_SETUP_SECTIONS: &[&str] = &["Quick Start", "Tokio events"];
 
-/// Generate the setup skill from the crate README.
-fn generate_setup_from_readme(manifest_dir: &Path, out_dir: &Path) -> String {
-    let readme_path = manifest_dir.join("skill-source.md");
-    let readme = fs::read_to_string(&readme_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", readme_path.display()));
+/// Sections from the dial9-utils README to include in the setup skill.
+const UTILS_SETUP_SECTIONS: &[&str] = &["Tracing span events (opt-in)"];
+
+/// Generate the setup skill from the facade and integration READMEs.
+fn generate_setup_from_sources(manifest_dir: &Path, out_dir: &Path) -> String {
+    let dial9_readme_path = manifest_dir.join("skill-source.md");
+    let dial9_readme = fs::read_to_string(&dial9_readme_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", dial9_readme_path.display()));
+    let utils_readme_path = manifest_dir.join("tracing-layer-skill-source.md");
+    let utils_readme = fs::read_to_string(&utils_readme_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", utils_readme_path.display()));
 
     let mut body = String::from("# Instrumenting your app with dial9\n\n");
 
-    for &heading in SETUP_SECTIONS {
-        let section = extract_section(&readme, heading)
-            .unwrap_or_else(|| panic!("README section '{heading}' not found; was it renamed?"));
-        body.push_str(&section);
-        body.push('\n');
+    for (readme, sections) in [
+        (&dial9_readme, DIAL9_SETUP_SECTIONS),
+        (&utils_readme, UTILS_SETUP_SECTIONS),
+    ] {
+        for &heading in sections {
+            let section = extract_section(readme, heading)
+                .unwrap_or_else(|| panic!("README section '{heading}' not found; was it renamed?"));
+            body.push_str(&section);
+            body.push('\n');
+        }
     }
 
     // Write the full SKILL.md (with frontmatter) for the unpack command
     let mut full = String::from(
-        "---\nname: dial9-setup\ndescription: How to instrument your app with dial9-tokio-telemetry. Covers quick start, Tokio events, and the tracing layer.\n---\n\n",
+        "---\nname: dial9-setup\ndescription: How to instrument your app with dial9 and dial9-utils. Covers quick start, Tokio events, and the tracing layer.\n---\n\n",
     );
     full.push_str(&body);
 

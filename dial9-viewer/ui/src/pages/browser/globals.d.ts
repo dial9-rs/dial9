@@ -8,7 +8,7 @@
 //   shared verbatim with the legacy page).
 // - ui-switch.js publishes window.D9UiSwitch (dual-UI switch).
 
-import type { Dial9CredsApi } from "../../../creds.js";
+import type { Dial9CredsUserscriptApi } from "../../../creds.js";
 
 /**
  * The URL-state shape url_state.js parses/serializes (its header comment is
@@ -19,9 +19,9 @@ export interface UrlStateFields {
   bucket?: string;
   /** Serialized as `aws_region` (matches the backend's query param). */
   region?: string;
-  /** IAM role the server should assume; serialized as `aws_role_arn`. The
-   * linkable assume-role read path (a role ARN is not a secret, unlike the
-   * static BYOC keys, which are header-only and never in the URL). */
+  /** Explicit frontend credential source. */
+  credentialMode?: "ambient" | "literal" | "role";
+  /** IAM role the server should assume; serialized only in role mode. */
   roleArn?: string;
   prefix?: string;
   /** Optional service filter for Browse mode. */
@@ -49,10 +49,8 @@ export interface D9UiSwitchApi {
 
 declare global {
   interface Window {
-    /** Present when creds.js is loaded (always on this page). Optional in
-     * the type because the legacy code guards every access with
-     * `window.Dial9Creds ? ... : ...`, and this port preserves that. */
-    Dial9Creds?: Dial9CredsApi;
+    /** Exact stable facade used by the private credential-loader userscript. */
+    Dial9Creds?: Dial9CredsUserscriptApi;
     Dial9UrlState: Dial9UrlStateApi;
     D9UiSwitch?: D9UiSwitchApi;
   }

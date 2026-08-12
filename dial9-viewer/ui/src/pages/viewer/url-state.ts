@@ -17,11 +17,21 @@ import type {
   TaskSortKey,
   InspectorTab,
   RegionAnalysisMode,
+  FieldChartSpec,
 } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
 import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
 import { POI_FILTERS } from "./poi.js";
+import {
+  FIELD_CHART_KINDS,
+  FIELD_CHART_URL_SEPARATOR,
+  isFieldChartNameSupported,
+} from "./field-chart-model.js";
+import {
+  FIELD_CHART_TRACK_ID_PREFIX,
+  isFieldChartTrackId,
+} from "../../lib/canvas/track-layout.js";
 
 const P_START = "start";
 const P_END = "end";
@@ -29,6 +39,7 @@ const P_TASK = "task";
 const P_SPAN_FILTER = "span-filter";
 const P_TRACK_ORDER = "track-order";
 const P_COLLAPSED = "collapsed";
+const P_FIELD_CHART = "field-chart";
 const P_SPAN = "span";
 const P_SPAN_FOCUS = "span-focus";
 const P_POLL = "poll";
@@ -46,6 +57,7 @@ const P_RAIL_TAB = "rail";
 const P_TASK_SORT = "task-sort";
 const P_TASK_INDEX = "task-index";
 const P_RUNTIME_COLLAPSED = "runtime-collapsed";
+const P_RUNTIME_METRICS_COLLAPSED = "runtime-metrics-collapsed";
 const P_INSPECTOR_WIDTH = "inspector-width";
 const P_LANES_HEIGHT = "lanes-height";
 const P_LANES_SCROLL = "lanes-scroll";
@@ -134,6 +146,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     trackOrder: url(P_TRACK_ORDER),
     collapsed: url(P_COLLAPSED),
     collapsedRuntimes: url(P_RUNTIME_COLLAPSED),
+    collapsedRuntimeMetrics: url(P_RUNTIME_METRICS_COLLAPSED),
     sidebarWidth: url(P_INSPECTOR_WIDTH),
     lanesViewportHeight: url(P_LANES_HEIGHT),
     lanesScrollTop: url(P_LANES_SCROLL),
@@ -146,6 +159,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     stacksAsFlamegraph: url(P_STACK_VIEW),
   },
   view: {
+    fieldCharts: url(P_FIELD_CHART),
     inspectorTab: url(P_INSPECTOR_TAB),
     expandedPollGroups: url(P_POLL_EXPANDED),
     pollFlamegraphSection: url(P_POLL_SECTION),
@@ -238,6 +252,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
     (id) => state.uiPrefs.collapsed[id] === true,
   ).sort();
   if (collapsed.length > 0) vs.collapsed = collapsed;
+  if (state.view.fieldCharts.length > 0) {
+    vs.fieldCharts = state.view.fieldCharts;
+  }
   if (sel.focusedSpanId !== null) vs.focusedSpanId = sel.focusedSpanId;
   // Issues rail: only the deltas from the resting defaults (filter "sched",
   // sort duration/desc, no current POI) so a pristine rail keeps the URL clean.
@@ -264,6 +281,12 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
     .filter((name) => state.uiPrefs.collapsedRuntimes[name] === true)
     .sort();
   if (runtimeCollapsed.length > 0) vs.collapsedRuntimes = runtimeCollapsed;
+  const runtimeMetricsCollapsed = Object.keys(state.uiPrefs.collapsedRuntimeMetrics)
+    .filter((name) => state.uiPrefs.collapsedRuntimeMetrics[name] === true)
+    .sort();
+  if (runtimeMetricsCollapsed.length > 0) {
+    vs.collapsedRuntimeMetrics = runtimeMetricsCollapsed;
+  }
   if (state.uiPrefs.sidebarWidth !== DEFAULT_INSPECTOR_WIDTH) {
     vs.inspectorWidth = state.uiPrefs.sidebarWidth;
   }
@@ -337,6 +360,11 @@ export function mirrorViewerToQuery(
   set(params, P_SPAN_FILTER, vs.spanFilter && vs.spanFilter.length > 0 ? vs.spanFilter : null);
   set(params, P_TRACK_ORDER, vs.trackOrder && vs.trackOrder.length > 0 ? vs.trackOrder.join(",") : null);
   set(params, P_COLLAPSED, vs.collapsed && vs.collapsed.length > 0 ? vs.collapsed.join(",") : null);
+  params.delete(P_FIELD_CHART);
+  for (const chart of vs.fieldCharts ?? []) {
+    const encoded = encodeFieldChart(chart);
+    if (encoded !== null) params.append(P_FIELD_CHART, encoded);
+  }
   set(params, P_SPAN, vs.selectedSpanId ?? null);
   set(params, P_SPAN_FOCUS, vs.focusedSpanId ?? null);
   set(params, P_POLL, vs.pollAnchor ?? null);
@@ -354,6 +382,7 @@ export function mirrorViewerToQuery(
   set(params, P_TASK_SORT, vs.taskSort ?? null);
   set(params, P_TASK_INDEX, finiteString(vs.taskIndex));
   set(params, P_RUNTIME_COLLAPSED, encodeList(vs.collapsedRuntimes));
+  set(params, P_RUNTIME_METRICS_COLLAPSED, encodeList(vs.collapsedRuntimeMetrics));
   set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
   set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
   set(params, P_LANES_SCROLL, finiteString(vs.lanesScrollTop));
@@ -415,6 +444,7 @@ export interface ViewerUrlState {
   spanFilter?: string;
   trackOrder?: string[];
   collapsed?: string[];
+  fieldCharts?: FieldChartSpec[];
   /** Canvas-selection anchors, re-resolved against the loaded trace on load. */
   selectedSpanId?: string;
   focusedSpanId?: string;
@@ -434,6 +464,7 @@ export interface ViewerUrlState {
   taskSort?: { key: TaskSortKey; dir: "asc" | "desc" };
   taskIndex?: number;
   collapsedRuntimes?: string[];
+  collapsedRuntimeMetrics?: string[];
   inspectorWidth?: number;
   lanesHeight?: number;
   lanesScrollTop?: number;
@@ -488,6 +519,11 @@ export function hydrateViewerStore(
       urlView.collapsedRuntimes.map((name) => [name, true]),
     );
   }
+  if (urlView.collapsedRuntimeMetrics !== undefined) {
+    uiPrefs.collapsedRuntimeMetrics = Object.fromEntries(
+      urlView.collapsedRuntimeMetrics.map((name) => [name, true]),
+    );
+  }
   if (urlView.inspectorWidth !== undefined) {
     uiPrefs.sidebarWidth = urlView.inspectorWidth;
   }
@@ -503,6 +539,9 @@ export function hydrateViewerStore(
   if (Object.keys(uiPrefs).length > 0) store.update("uiPrefs", uiPrefs);
 
   const view: Partial<StoreState["view"]> = {};
+  if (urlView.fieldCharts !== undefined) {
+    view.fieldCharts = urlView.fieldCharts;
+  }
   if (urlView.inspectorTab !== undefined) view.inspectorTab = urlView.inspectorTab;
   if (urlView.pollSection !== undefined) {
     view.pollFlamegraphSection = urlView.pollSection;
@@ -586,6 +625,16 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (col != null && col.length > 0) {
     out.collapsed = col.split(",").filter((s) => s.length > 0);
   }
+  const fieldCharts: FieldChartSpec[] = [];
+  const fieldChartIds = new Set<string>();
+  for (const value of p.getAll(P_FIELD_CHART)) {
+    const chart = decodeFieldChart(value);
+    if (chart !== null && !fieldChartIds.has(chart.id)) {
+      fieldCharts.push(chart);
+      fieldChartIds.add(chart.id);
+    }
+  }
+  if (fieldCharts.length > 0) out.fieldCharts = fieldCharts;
   const span = p.get(P_SPAN);
   if (span != null && span.length > 0) out.selectedSpanId = span;
   const spanFocus = p.get(P_SPAN_FOCUS);
@@ -635,6 +684,10 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (taskIndex !== null) out.taskIndex = taskIndex;
   const collapsedRuntimes = decodeList(p.get(P_RUNTIME_COLLAPSED));
   if (collapsedRuntimes !== null) out.collapsedRuntimes = collapsedRuntimes;
+  const collapsedRuntimeMetrics = decodeList(p.get(P_RUNTIME_METRICS_COLLAPSED));
+  if (collapsedRuntimeMetrics !== null) {
+    out.collapsedRuntimeMetrics = collapsedRuntimeMetrics;
+  }
   const inspectorWidth = positiveInt(p.get(P_INSPECTOR_WIDTH));
   if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
   const lanesHeight = positiveInt(p.get(P_LANES_HEIGHT));
@@ -706,6 +759,55 @@ export function readViewerUrlState(search: string): ViewerUrlState {
     }
   }
   return out;
+}
+
+interface EncodedFieldChart {
+  id: string;
+  eventName: string;
+  fieldName: string;
+  kind: string;
+}
+
+function isValidFieldChart(chart: EncodedFieldChart): chart is FieldChartSpec {
+  return (
+    isValidFieldChartTrackId(chart.id) &&
+    isFieldChartNameSupported(chart.eventName) &&
+    isFieldChartNameSupported(chart.fieldName) &&
+    (FIELD_CHART_KINDS as readonly string[]).includes(chart.kind)
+  );
+}
+
+function encodeFieldChart(chart: FieldChartSpec): string | null {
+  if (!isValidFieldChart(chart)) return null;
+  return [
+    chart.id,
+    chart.eventName,
+    chart.fieldName,
+    chart.kind,
+  ].join(FIELD_CHART_URL_SEPARATOR);
+}
+
+function decodeFieldChart(value: string): FieldChartSpec | null {
+  const parts = value.split(FIELD_CHART_URL_SEPARATOR);
+  if (parts.length !== 4) return null;
+  const chart: EncodedFieldChart = {
+    id: parts[0]!,
+    eventName: parts[1]!,
+    fieldName: parts[2]!,
+    kind: parts[3]!,
+  };
+  return isValidFieldChart(chart) ? chart : null;
+}
+
+const FIELD_CHART_TRACK_ID_SUFFIX = /^[A-Za-z0-9_-]+$/;
+
+function isValidFieldChartTrackId(id: string): boolean {
+  return (
+    isFieldChartTrackId(id) &&
+    FIELD_CHART_TRACK_ID_SUFFIX.test(
+      id.slice(FIELD_CHART_TRACK_ID_PREFIX.length),
+    )
+  );
 }
 
 /** Decode the modern marked list, falling back to the previously emitted

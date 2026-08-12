@@ -14,6 +14,7 @@
 use std::time::{Duration, SystemTime};
 
 use axum::extract::{MatchedPath, Request};
+use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 use metrique::ServiceMetrics;
@@ -26,6 +27,8 @@ use metrique::writer::sink::AttachHandle;
 use metrique::writer::{AttachGlobalEntrySinkExt, FormatExt};
 
 const CLOUDWATCH_NAMESPACE: &str = "dial9_viewer";
+const SESSION_ID_HEADER: &str = "x-dial9-session-id";
+const UUID_TEXT_LEN: usize = 36;
 
 /// Operation label used when a request did not match any registered route
 /// (e.g. a stray request that fell through to the API router). Keeps the
@@ -46,6 +49,11 @@ struct RequestMetrics {
     /// not a metric or dimension: it's there for CloudWatch Logs Insights /
     /// Contributor Insights without fragmenting the `fault`/`error` counts.
     status_code: String,
+
+    /// Opaque, tab-scoped UUID supplied by the viewer. Plain log field only:
+    /// deliberately neither a metric nor a dimension, so it can support
+    /// privacy-preserving session counts without creating metric cardinality.
+    session_id: Option<String>,
 
     /// Always `1`. The request-rate denominator.
     #[metrics(unit = Count)]
@@ -654,11 +662,13 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
         .get::<MatchedPath>()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| UNMATCHED_OPERATION.to_string());
+    let session_id = validated_session_id(req.headers());
 
     let mut metrics = RequestMetrics {
         timestamp: SystemTime::now(),
         operation,
         status_code: String::new(),
+        session_id,
         count: 1,
         fault: 0,
         error: 0,
@@ -690,6 +700,21 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
     metrics.op_detail = response.extensions_mut().remove::<OperationMetrics>();
 
     response
+}
+
+/// Read only canonical, lower-case UUID text from the session header. Invalid
+/// or missing values are omitted from the log entry; they never reject the
+/// request. Checking the exact byte length before parsing bounds allocation and
+/// prevents arbitrary high-cardinality or log-injection content from reaching
+/// structured logs.
+fn validated_session_id(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(SESSION_ID_HEADER)?.as_bytes();
+    if raw.len() != UUID_TEXT_LEN {
+        return None;
+    }
+    let text = std::str::from_utf8(raw).ok()?;
+    let parsed = uuid::Uuid::parse_str(text).ok()?;
+    (parsed.hyphenated().to_string() == text).then(|| text.to_string())
 }
 
 /// Attach the process-global [`ServiceMetrics`] sink for request metrics, once,
@@ -730,7 +755,12 @@ mod tests {
     /// Drive one request through the middleware against a test sink installed
     /// on the current (single-threaded) tokio runtime, and return the single
     /// captured entry. The runtime-scoped guard keeps parallel tests isolated.
-    async fn run(route: &str, uri: &str, status: StatusCode) -> metrique::test_util::TestEntry {
+    async fn run_with_session(
+        route: &str,
+        uri: &str,
+        status: StatusCode,
+        session_id: Option<&str>,
+    ) -> metrique::test_util::TestEntry {
         let TestEntrySink { inspector, sink } = test_entry_sink();
         let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
 
@@ -738,8 +768,12 @@ mod tests {
             .route(route, get(move || async move { status }))
             .layer(axum::middleware::from_fn(record_request_metrics));
 
+        let mut request = Request::builder().uri(uri);
+        if let Some(session_id) = session_id {
+            request = request.header(SESSION_ID_HEADER, session_id);
+        }
         let resp = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), status);
@@ -747,6 +781,10 @@ mod tests {
         let entries = inspector.entries();
         assert_eq!(entries.len(), 1, "exactly one metric entry per request");
         entries.into_iter().next().unwrap()
+    }
+
+    async fn run(route: &str, uri: &str, status: StatusCode) -> metrique::test_util::TestEntry {
+        run_with_session(route, uri, status, None).await
     }
 
     #[tokio::test]
@@ -781,6 +819,38 @@ mod tests {
         assert_eq!(e.metrics["fault"].as_u64(), 0);
         assert_eq!(e.metrics["error"].as_u64(), 0);
         assert_eq!(e.metrics["count"].as_u64(), 1);
+    }
+
+    #[tokio::test]
+    async fn valid_session_id_is_a_plain_log_field() {
+        let session_id = "123e4567-e89b-42d3-a456-426614174000";
+        let e = run_with_session("/x", "/x", StatusCode::OK, Some(session_id)).await;
+        assert_eq!(e.values["session_id"], session_id);
+        assert!(!e.metrics.contains_key("session_id"));
+    }
+
+    #[tokio::test]
+    async fn missing_or_invalid_session_id_is_accepted_and_omitted() {
+        let missing = run("/x", "/x", StatusCode::OK).await;
+        assert!(!missing.values.contains_key("session_id"));
+
+        let invalid = run_with_session(
+            "/x",
+            "/x",
+            StatusCode::OK,
+            Some("00000000-0000-0000-0000-00000000000z"),
+        )
+        .await;
+        assert!(!invalid.values.contains_key("session_id"));
+
+        let oversized = run_with_session(
+            "/x",
+            "/x",
+            StatusCode::OK,
+            Some("123e4567-e89b-42d3-a456-426614174000-extra"),
+        )
+        .await;
+        assert!(!oversized.values.contains_key("session_id"));
     }
 
     #[tokio::test]
