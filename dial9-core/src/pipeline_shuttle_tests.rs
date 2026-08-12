@@ -120,6 +120,22 @@ impl Source for MockSource {
     // tests include a Tokio runtime.
 }
 
+/// A Source whose `flush` always panics. Used to check whether the flush
+/// loop contains a panicking source the way `worker::process_segments`
+/// contains a panicking `SegmentProcessor` (via `catch_unwind`), or whether
+/// it takes the whole flush thread down with it.
+struct PanickingSource;
+
+impl Source for PanickingSource {
+    fn flush(&mut self, _ctx: &FlushContext<'_>) {
+        panic!("PanickingSource intentionally panics for shuttle coverage");
+    }
+
+    fn name(&self) -> &'static str {
+        "panicking"
+    }
+}
+
 // ── Test body ───────────────────────────────────────────────────────
 
 fn test_core_pipeline() {
@@ -215,6 +231,92 @@ fn determinism_check() {
 #[test]
 fn pct_real_pipeline() {
     shuttle::check_pct(test_core_pipeline, 10000, 3);
+}
+
+// ── Panic injection ─────────────────────────────────────────────────
+//
+// `worker::process_segments` wraps each `SegmentProcessor` call in
+// `catch_unwind` specifically so one processor's panic can't take down the
+// whole worker. `SharedState::flush_sources` (called from the flush loop)
+// has no equivalent guard around `Source::flush`. This checks what actually
+// happens to a sibling source's data and the flush thread itself when one
+// registered source panics.
+
+/// `flush_sources` has no `catch_unwind`, so the panic propagates out of the
+/// flush thread's main loop and kills it — no cycle ever completes, so
+/// nothing the collector queued ever reaches the writer.
+fn test_source_panic_does_not_wedge_pipeline() {
+    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+    ));
+
+    let writer = MemoryBuffer::builder()
+        .max_total_size(100 * 1024 * 1024)
+        .max_segment_size(256)
+        .build()
+        .unwrap();
+    let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+    let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+    shared.push_source(Box::new(PanickingSource));
+    shared.push_source(Box::new(MockSource::new(source_pending.clone())));
+    let mut recorder = Recorder::start(shared, writer, None, || || {});
+    recorder.handle().enable();
+    let handle = recorder.handle().clone();
+
+    let healthy_source_event = ValidationEvent {
+        timestamp_ns: 1,
+        thread_id: 0,
+        seq: 0,
+        id: 0,
+    };
+    source_pending
+        .lock()
+        .unwrap()
+        .push(healthy_source_event.clone());
+    let tl_buffer_event = ValidationEvent {
+        timestamp_ns: 2,
+        thread_id: 0,
+        seq: 1,
+        id: 1,
+    };
+    handle.record_event(tl_buffer_event.clone());
+
+    recorder.stop_flush_thread();
+
+    let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+    loop {
+        let taken = fs.take_files();
+        if taken.segments.is_empty() {
+            break;
+        }
+        for seg in taken.segments {
+            let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+            all_decoded.extend(decode_validation_events(&payload.into_vec()));
+        }
+    }
+
+    assert!(
+        all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
+        "TL-buffer event must survive a sibling source's panic"
+    );
+    assert!(
+        all_decoded.iter().any(|e| e.id == healthy_source_event.id),
+        "healthy source's event must survive a sibling source's panic"
+    );
+}
+
+#[test]
+#[should_panic]
+fn shuttle_source_panic_pct() {
+    shuttle::check_pct(test_source_panic_does_not_wedge_pipeline, 500, 3);
+}
+
+#[test]
+#[should_panic]
+fn shuttle_source_panic_determinism() {
+    shuttle::check_uncontrolled_nondeterminism(test_source_panic_does_not_wedge_pipeline, 500);
 }
 
 // ── Error injection ─────────────────────────────────────────────────
