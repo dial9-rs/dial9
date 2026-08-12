@@ -534,3 +534,103 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+
+    // Fixed by choice, not a shuttle limitation -- shuttle::rand can
+    // randomize a scenario's shape too (see pipeline_shuttle_tests.rs's
+    // per-writer rng.gen_range(3..=10)). Kept small here because shuttle's
+    // search cost grows with interleaving space, while a real-thread
+    // proptest case costs about the same at any size. A bug needing more
+    // than EVENTS_PER_WRITER events per buffer is unreachable at this fixed
+    // size; widening these constants (or using shuttle::rand) would catch
+    // it, at the cost of searching fewer schedules per iteration.
+    const WRITERS: usize = 3;
+    const EVENTS_PER_WRITER: u64 = 3;
+    const DRAIN_TICKS: usize = 3;
+
+    fn sample_event() -> crate::format::ClockSyncEvent {
+        crate::format::ClockSyncEvent {
+            timestamp_ns: 1000,
+            realtime_ns: 2000,
+        }
+    }
+
+    fn enabled_shared_state() -> SharedState {
+        let ss = SharedState::new(0);
+        ss.enable();
+        ss
+    }
+
+    /// Shuttle counterpart of `concurrent_record_and_drain_preserves_event_count`:
+    /// writer threads record events while a drainer thread concurrently bumps
+    /// the drain epoch and intrusively drains, searching interleavings at a
+    /// fixed workload shape instead of sampling both interleaving and
+    /// workload shape the way the real-thread proptest does. Every
+    /// recorded event must reach the collector exactly once, regardless of
+    /// schedule.
+    fn scenario_concurrent_record_and_drain() {
+        let ss = Arc::new(enabled_shared_state());
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                let ss = ss.clone();
+                crate::primitives::thread::spawn(move || {
+                    for _ in 0..EVENTS_PER_WRITER {
+                        ss.record_encodable_event(&sample_event());
+                    }
+                })
+            })
+            .collect();
+
+        let drainer = {
+            let ss = ss.clone();
+            crate::primitives::thread::spawn(move || {
+                for _ in 0..DRAIN_TICKS {
+                    ss.bump_drain_epoch();
+                    // Grace period for an in-flight writer to self-flush
+                    // before the intrusive drain locks its buffer
+                    shuttle::thread::yield_now();
+                    ss.drain_all_tl_buffers();
+                }
+            })
+        };
+
+        for w in writers {
+            w.join().unwrap();
+        }
+        drainer.join().unwrap();
+
+        // Writers have exited, so their TLB `Drop` impls flushed any
+        // remaining events. Final bump+drain prunes dead handles.
+        ss.bump_drain_epoch();
+        ss.drain_all_tl_buffers();
+
+        let mut total: u64 = 0;
+        while let Some(batch) = ss.collector.next() {
+            total += batch.event_count();
+        }
+        assert_eq!(
+            ss.collector.take_dropped_batches(),
+            0,
+            "collector must not evict a batch under this workload"
+        );
+        assert_eq!(
+            total,
+            WRITERS as u64 * EVENTS_PER_WRITER,
+            "every recorded event must reach the collector exactly once"
+        );
+    }
+
+    #[test]
+    fn shuttle_concurrent_record_and_drain_pct() {
+        shuttle::check_pct(scenario_concurrent_record_and_drain, 5_000, 3);
+    }
+
+    #[test]
+    fn shuttle_concurrent_record_and_drain_determinism() {
+        shuttle::check_uncontrolled_nondeterminism(scenario_concurrent_record_and_drain, 5_000);
+    }
+}
