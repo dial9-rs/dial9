@@ -525,7 +525,49 @@ body {
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
-.d9-field-chart-canvas { cursor: crosshair; }
+
+/* CPU guide + visible-window summary share a real DOM header so they cannot
+   overlap. The guide swatch mirrors the canvas line's 4px/3px dash pattern. */
+.d9-cpu-header {
+    position: absolute;
+    top: 4px;
+    left: 6px;
+    right: 6px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    font: 10px monospace;
+    pointer-events: none;
+}
+.d9-cpu-capacity {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.d9-cpu-capacity > :last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.d9-cpu-capacity-swatch {
+    width: 14px;
+    height: 1px;
+    flex: none;
+    background: repeating-linear-gradient(
+        to right,
+        currentColor 0 4px,
+        transparent 4px 7px
+    );
+}
+.d9-cpu-readout {
+    margin-left: auto;
+    flex: none;
+    color: #aaa;
+    white-space: nowrap;
+}
 
 /* ── Worker-lanes box: fixed-height rows in a resizeable inner-scroll box ── */
 /* The lanes track stacks its label + scroll box in a row, then a resize gutter

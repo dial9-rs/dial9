@@ -22,8 +22,13 @@ import { mountLoadChrome } from "./load-chrome.js";
 import { mountInspector } from "./inspector.js";
 import { createRegionAnalysis } from "./region-analysis.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
-import { mountOverlay } from "../../components/overlay/index.js";
+import { mountOverlay, tooltipRowsTemplate } from "../../components/overlay/index.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
+import {
+  cpuIntervalAt,
+  cpuIntervalTooltip,
+  cpuSeriesFor,
+} from "./cpu.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
 import {
   Dial9Creds,
@@ -207,8 +212,22 @@ function boot(): void {
   // subscriber runs LAST each frame - it re-ensures the overlay canvas after
   // any shell re-render that would clobber it, and reads column geometry only
   // after the shell's writes have settled.
-  const overlay = mountOverlay(root, shell.trackColumn, store, (state, ns) =>
-    fmtAxisTick(deriveAxisInputs(state), ns, false),
+  const overlay = mountOverlay(
+    root,
+    shell.trackColumn,
+    store,
+    (state, ns) => fmtAxisTick(deriveAxisInputs(state), ns, false),
+    (trackId, state, ns) => {
+      if (trackId !== "cpu" || state.trace.trace === null) return null;
+      const series = cpuSeriesFor(state.trace.trace);
+      const interval = cpuIntervalAt(series.intervals, ns);
+      if (interval === null) return null;
+      return tooltipRowsTemplate(
+        cpuIntervalTooltip(interval, series.availableParallelism).map((row) => [
+          { label: `${row.label}:`, value: row.value },
+        ]),
+      );
+    },
   );
 
   // Persistent inspector sidebar: tabs (Task/Poll/Event/Related/Stack), the

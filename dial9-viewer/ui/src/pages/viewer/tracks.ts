@@ -31,7 +31,11 @@ import {
 } from "./track-management.js";
 import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "../../lib/canvas/track-renderers.js";
-import { renderCpuTrack, type CpuInputs } from "./cpu.js";
+import {
+  CPU_CAPACITY_STROKE,
+  renderCpuTrack,
+  type CpuInputs,
+} from "./cpu.js";
 import type { SpansTrackController } from "./spans-track.js";
 import type { QueueTrackController } from "./queue-track.js";
 import type { TaskDetailTrackController } from "./task-detail-track.js";
@@ -189,7 +193,7 @@ function innerRow(
     return taskDetailTrack.rowTemplate(t);
   }
   if (t.id === "events" && eventsTrack !== undefined) return eventsTrack.rowTemplate(t);
-  return defaultTrackRow(t);
+  return defaultTrackRow(t, t.id === "cpu" ? vm.cpu.capacity : undefined);
 }
 
 /**
@@ -343,18 +347,38 @@ function manageWrapper(
   `;
 }
 
-/** The uniform placeholder row: label gutter + canvas host. */
-function defaultTrackRow(t: TrackSpec): TemplateResult {
+/** The default track row: label gutter + canvas host. */
+function defaultTrackRow(
+  t: TrackSpec,
+  cpuCapacity?: number | null,
+): TemplateResult {
+  const isCpu = cpuCapacity !== undefined;
   return html`
     <div class="d9-track" data-track-id=${t.id} style="height:${t.height}px">
       <div class="d9-track-label" id="d9-track-label-${t.id}">
         <span class="d9-track-name">${t.label}</span>
       </div>
       <div class="d9-track-canvas-wrap">
+        ${isCpu
+          ? html`
+              <div class="d9-cpu-header">
+                ${cpuCapacity !== null
+                  ? html`
+                      <span
+                        class="d9-cpu-capacity"
+                        style="color:${CPU_CAPACITY_STROKE}"
+                      >
+                        <span class="d9-cpu-capacity-swatch" aria-hidden="true"></span>
+                        <span>available parallelism</span>
+                      </span>
+                    `
+                  : null}
+                <span class="d9-cpu-readout"></span>
+              </div>
+            `
+          : null}
         <canvas
-          class="d9-track-canvas ${isFieldChartTrackId(t.id)
-            ? "d9-field-chart-canvas"
-            : ""}"
+          class="d9-track-canvas"
           data-track-canvas=${t.id}
           aria-labelledby="d9-track-label-${t.id}"
           role="img"
@@ -497,7 +521,7 @@ export function sizeTracks(
     // Tracks with landed content render it; the rest stay empty placeholders.
     //  - timeline: the time-axis ruler.
     //  - cpu: the avg-cores bar chart; its render returns the info readout,
-    //    mirrored into a DOM attribute for tests.
+    //    mirrored into the DOM header and an attribute for tests.
     if (track.id === "timeline") {
       renderTimeAxis(ctx, geometry, vm.viewStart, vm.viewEnd, vm.axis, vm.hasTrace);
     } else if (track.id === "cpu") {
@@ -510,6 +534,10 @@ export function sizeTracks(
         vm.hasTrace,
       );
       canvas.dataset["cpuReadout"] = readout;
+      const readoutEl = canvas.parentElement?.querySelector<HTMLElement>(
+        ".d9-cpu-readout",
+      ) ?? null;
+      if (readoutEl !== null) readoutEl.textContent = readout;
     } else {
       paintPlaceholder(ctx, drawW, track.height, vm.hasTrace);
     }

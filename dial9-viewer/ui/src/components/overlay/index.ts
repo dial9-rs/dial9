@@ -19,6 +19,7 @@
 
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, TimePanelLayout } from "../../types/state.js";
+import type { TemplateResult } from "lit-html";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../canvas/lanes/render.js";
@@ -31,6 +32,24 @@ import { computeAtCursorReadout, coverageAt } from "./readout.js";
 import { buildLaneTooltip, createTooltip, type TooltipHandle } from "./tooltip.js";
 
 const OVERLAY_CLASS = "d9-crosshair-overlay";
+
+/** Resolve a track tooltip without coupling the overlay to a page track. */
+export type TrackTooltipAt = (
+  trackId: string,
+  state: StoreState,
+  ns: number,
+) => TemplateResult | null;
+
+/** Resolve tooltip content only when the event originated on a track canvas. */
+export function trackTooltipAtTarget(
+  target: EventTarget | null,
+  state: StoreState,
+  ns: number,
+  tooltipAt: TrackTooltipAt,
+): TemplateResult | null {
+  const trackId = (target as HTMLElement | null)?.dataset?.["trackCanvas"];
+  return typeof trackId === "string" ? tooltipAt(trackId, state, ns) : null;
+}
 
 export interface MountedOverlay {
   /** Tear down subscriptions, listeners, and the overlay DOM. */
@@ -112,6 +131,7 @@ export function mountOverlay(
   trackColumn: HTMLElement,
   store: ViewerStore,
   formatTimestamp: FormatTimestamp,
+  trackTooltipAt: TrackTooltipAt,
 ): MountedOverlay {
   // Frame-invariant hover data, recomputed only when the trace slice is
   // replaced. Null until a trace loads.
@@ -127,7 +147,19 @@ export function mountOverlay(
   // Consumed-once tooltip request set by mousemove; a pan/select frame leaves
   // it null so the tooltip is not rebuilt (its content is unchanged at the
   // same ns). Hide is a separate one-shot flag (mouseleave / drag).
-  let pendingTooltip: { cursor: { clientX: number; clientY: number }; workerId: number; ns: number } | null = null;
+  let pendingTooltip:
+    | {
+        kind: "lane";
+        cursor: { clientX: number; clientY: number };
+        workerId: number;
+        ns: number;
+      }
+    | {
+        kind: "track";
+        cursor: { clientX: number; clientY: number };
+        content: TemplateResult;
+      }
+    | null = null;
   let hidePending = false;
 
   /** Create the overlay canvas once and (idempotently) keep it attached. */
@@ -189,28 +221,34 @@ export function mountOverlay(
       tooltip.hide();
       hidePending = false;
     } else if (pendingTooltip !== null) {
-      const data = overlayData();
-      if (data) {
-        const req = pendingTooltip;
-        const spans = data.workerSpans[req.workerId];
-        if (spans) {
-          const input: LaneHoverInput = {
-            workerId: req.workerId,
-            ns: req.ns,
-            spans,
-            allSpans: data.allSpans,
-            columnarSpans: data.columnarSpans,
-            queueSamples: data.queueSamples,
-            localQueueSamples: data.workerQueueSamples[req.workerId] ?? [],
-            activeTaskSamples: data.activeTaskSamples,
-            blockInPlaceGaps: data.blockInPlaceGaps,
-            hasCpuTime: data.hasCpuTime,
-            hasSchedWait: data.hasSchedWait,
-            hasTaskTracking: data.hasTaskTracking,
-          };
-          const hover = assembleLaneHover(input);
-          const coverage = coverageAt(state.segments.segments, req.ns);
-          tooltip.show(buildLaneTooltip(hover, { formatTs, coverage }), req.cursor, 130);
+      const req = pendingTooltip;
+      if (req.kind === "track") {
+        tooltip.show(req.content, req.cursor);
+      } else {
+        const data = overlayData();
+        if (data) {
+          const spans = data.workerSpans[req.workerId];
+          if (spans) {
+            const input: LaneHoverInput = {
+              workerId: req.workerId,
+              ns: req.ns,
+              spans,
+              allSpans: data.allSpans,
+              columnarSpans: data.columnarSpans,
+              queueSamples: data.queueSamples,
+              localQueueSamples: data.workerQueueSamples[req.workerId] ?? [],
+              activeTaskSamples: data.activeTaskSamples,
+              blockInPlaceGaps: data.blockInPlaceGaps,
+              hasCpuTime: data.hasCpuTime,
+              hasSchedWait: data.hasSchedWait,
+              hasTaskTracking: data.hasTaskTracking,
+            };
+            const hover = assembleLaneHover(input);
+            const coverage = coverageAt(state.segments.segments, req.ns);
+            tooltip.show(buildLaneTooltip(hover, { formatTs, coverage }), req.cursor, 130);
+          } else {
+            tooltip.hide();
+          }
         } else {
           tooltip.hide();
         }
@@ -269,13 +307,26 @@ export function mountOverlay(
     );
     store.update("transient", { mouseNs: ns, atCursor: readout });
 
-    // Only queue the rich lane tooltip when the cursor is over a worker row.
+    // Worker rows get their rich lane tooltip; other canvases may supply a
+    // page-owned track tooltip (currently the process-CPU chart).
     if (workerId !== null) {
-      pendingTooltip = { cursor: { clientX: e.clientX, clientY: e.clientY }, workerId, ns };
+      pendingTooltip = {
+        kind: "lane",
+        cursor: { clientX: e.clientX, clientY: e.clientY },
+        workerId,
+        ns,
+      };
       hidePending = false;
     } else {
-      pendingTooltip = null;
-      hidePending = true;
+      const content = trackTooltipAtTarget(e.target, state, ns, trackTooltipAt);
+      pendingTooltip = content === null
+        ? null
+        : {
+            kind: "track",
+            cursor: { clientX: e.clientX, clientY: e.clientY },
+            content,
+          };
+      hidePending = content === null;
     }
   }
 
@@ -318,6 +369,7 @@ export {
   laneTooltipModel,
   buildLaneTooltip,
   createTooltip,
+  tooltipRowsTemplate,
 } from "./tooltip.js";
 export type { TooltipHandle, TooltipRow, TooltipSegment } from "./tooltip.js";
 export { computeAtCursorReadout, coverageAt } from "./readout.js";
