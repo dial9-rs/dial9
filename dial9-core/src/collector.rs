@@ -133,3 +133,79 @@ mod tests {
         assert_eq!(drained[1].len(), 3);
     }
 }
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use crate::primitives::sync::Arc;
+
+    const PUSHERS: usize = 3;
+    const BATCHES_PER_PUSHER: u64 = 3;
+    /// Tight enough that the writer threads outrun the popper and force
+    /// `BoundedQueue::force_push`'s evict-oldest path under contention.
+    const CAPACITY: usize = 2;
+
+    crate::shuttle_test! {
+        num_iters = 5_000, depth = 3;
+        // Multiple pusher threads race a popper thread against a tight capacity.
+        // Every pushed batch must be either popped or evicted exactly once.
+        fn shuttle_collector_eviction_accounting() {
+            let collector = Arc::new(CentralCollector::with_capacity(CAPACITY));
+
+            let pushers: Vec<_> = (0..PUSHERS)
+                .map(|p| {
+                    let collector = collector.clone();
+                    crate::primitives::thread::spawn(move || {
+                        for i in 0..BATCHES_PER_PUSHER {
+                            let id = p as u64 * BATCHES_PER_PUSHER + i;
+                            collector.accept_flush(Batch {
+                                encoded_bytes: Vec::new(),
+                                event_count: id,
+                            });
+                        }
+                    })
+                })
+                .collect();
+
+            let popper_collector = collector.clone();
+            let popper = crate::primitives::thread::spawn(move || {
+                let mut popped = Vec::new();
+                // A few opportunistic pops racing the pushers; whatever
+                // survives the race is swept by the final drain below.
+                for _ in 0..BATCHES_PER_PUSHER {
+                    if let Some(batch) = popper_collector.next() {
+                        popped.push(batch.event_count());
+                    }
+                    shuttle::thread::yield_now();
+                }
+                popped
+            });
+
+            for p in pushers {
+                p.join().unwrap();
+            }
+            let mut popped = popper.join().unwrap();
+            // Pushers are done, so nothing more will ever be pushed: this
+            // drain is final and race-free.
+            while let Some(batch) = collector.next() {
+                popped.push(batch.event_count());
+            }
+
+            let evicted = collector.take_dropped_batches() as u64;
+            let total = PUSHERS as u64 * BATCHES_PER_PUSHER;
+            assert_eq!(
+                popped.len() as u64 + evicted,
+                total,
+                "every pushed batch must be either popped or evicted exactly once"
+            );
+            let mut sorted = popped.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                popped.len(),
+                "a batch id was popped more than once"
+            );
+        }
+    }
+}
