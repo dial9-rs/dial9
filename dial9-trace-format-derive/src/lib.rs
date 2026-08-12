@@ -243,25 +243,11 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         }
     };
 
-    // Propagate any generics/lifetimes on the struct onto the impl, so the
-    // derive works on generic event structs (e.g. an event that borrows
-    // typed, generically-parameterized fields).
-    //
-    // Caveat for type parameters: `event_name()` is per *type*, not per
-    // monomorphization, so all instantiations of a generic event share one wire
-    // schema. That is sound only when a name maps to a single set of field
-    // types, which is how `dial9_span!` uses it: each call site declares its
-    // own struct with a call-site-unique `name = ...`, so it is instantiated
-    // exactly once. Two instantiations with different field types under one
-    // name would register conflicting schemas for that name.
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
     Ok(quote! {
-        // The generic params may be named after user fields (e.g. the ad-hoc
-        // span macro uses the field ident as its type param), so silence the
-        // casing lints on the generated impl.
+        // A generated struct (e.g. the ad-hoc span macro's) may carry a
+        // non-snake field name; silence the casing lints on the generated impl.
         #[allow(non_camel_case_types, non_snake_case)]
-        impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
+        impl ::dial9_trace_format::TraceEvent for #name {
             fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
@@ -496,21 +482,6 @@ mod tests {
             }
         });
         assert!(err.to_string().contains("unsupported unit \"µs\""));
-    }
-
-    /// A generic event carries its params onto the impl; the schema name comes
-    /// from the per-instantiation `name = ...`, not from the type parameters.
-    #[test]
-    fn generic_event() {
-        assert_snapshot!(expand_to_string(quote! {
-            #[traceevent(name = concat!("SpanEnter:", file!(), ":", line!()))]
-            struct GenericEvent<'a, T: TraceField + Clone + 'static> {
-                #[traceevent(timestamp)]
-                timestamp_ns: u64,
-                name: &'a str,
-                value: T,
-            }
-        }));
     }
 
     #[test]
