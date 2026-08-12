@@ -506,6 +506,8 @@ export function computeSpawnedTasks(
 
 /** One queue-legend entry: a swatch encoding + its meaning (matches the draw). */
 export interface QueueLegendEntry {
+  /** Which series this explains, so a caller can drop the ones it will not draw. */
+  key: "global" | "local" | "activeTask";
   /** Swatch fill (CSS color). */
   swatch: string;
   label: string;
@@ -519,9 +521,9 @@ export interface QueueLegendEntry {
  * -> active-task, the draw order.
  */
 export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
-  { swatch: "#4fc3f7", label: "Global queue", shape: "area" },
-  { swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
-  { swatch: "#81c784", label: "Active tasks", shape: "line" },
+  { key: "global", swatch: "#4fc3f7", label: "Global queue", shape: "area" },
+  { key: "local", swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
+  { key: "activeTask", swatch: "#81c784", label: "Active tasks", shape: "line" },
 ];
 
 export {

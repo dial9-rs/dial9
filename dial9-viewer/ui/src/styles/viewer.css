@@ -353,6 +353,7 @@ body {
 .d9-rail-sort:hover { color: var(--d9-fg); }
 .d9-rail-sort.on { color: var(--d9-accent); }
 .d9-rail-sort:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-rail-sort.d9-col-unrecorded { font-style: italic; }
 
 .d9-rail-row { cursor: pointer; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
 .d9-rail-row:hover { background: #1c1c40; }

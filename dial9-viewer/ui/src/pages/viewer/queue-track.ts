@@ -198,10 +198,14 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
   /** The in-track legend, swatch encodings matching the draw. */
   function legendTemplate(): TemplateResult {
+    // Drop the local series when the trace has no per-worker depth.
+    const entries = queueData().hasLocalQueueDepth
+      ? QUEUE_LEGEND
+      : QUEUE_LEGEND.filter((e) => e.key !== "local");
     return html`
       <ul class="d9-queue-legend" aria-label="Queue depth legend">
         ${repeat(
-          QUEUE_LEGEND,
+          entries,
           (e) => e.label,
           (e) => html`
             <li class="d9-queue-legend-row">

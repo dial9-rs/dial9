@@ -513,8 +513,10 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
               const coverage =
                 col.key === "lifetime" ? vm.taskLifetimeCoverage : "all";
               const unrecorded = coverage === "none";
+              // Availability comes from whether spawn events are present, so
+              // this is about what reached the view, not what the trace holds.
               const title = unrecorded
-                ? "Task lifetimes were not recorded for this trace"
+                ? "No task lifetimes in view (task tracking off, or nothing spawned in the window)"
                 : coverage === "partial"
                   ? "Task lifetimes were not captured for every task (untracked runtime, or spawned before the capture window)"
                   : col.title;
