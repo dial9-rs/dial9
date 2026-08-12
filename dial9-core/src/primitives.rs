@@ -281,6 +281,23 @@ pub mod fs {
         }
     }
 
+    /// Count of fault checks that actually failed, independent of
+    /// `rate_limited!`'s real-wall-clock gate on the resulting log line (that
+    /// gate is a `static` keyed by call site, shared by every shuttle
+    /// iteration *and* every test in the same test binary — a burst of
+    /// iterations within its 60s window can log only the first occurrence).
+    /// Lets a test assert "fault injection actually reached the flush
+    /// thread" without depending on whether a warning happened to get past
+    /// that unrelated, real-time-gated layer.
+    #[cfg(test)]
+    pub(crate) static FAULTS_TRIGGERED: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    #[cfg(test)]
+    pub(crate) fn take_faults_triggered() -> u64 {
+        FAULTS_TRIGGERED.swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn check() -> io::Result<()> {
         let fail = match FAULT.with(|f| f.get()) {
             FaultPolicy::None => false,
@@ -288,6 +305,8 @@ pub mod fs {
             FaultPolicy::FailProb(p) => shuttle::rand::thread_rng().gen_bool(p),
         };
         if fail {
+            #[cfg(test)]
+            FAULTS_TRIGGERED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(io::Error::from(ErrorKind::PermissionDenied))
         } else {
             Ok(())
