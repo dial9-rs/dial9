@@ -104,17 +104,17 @@ describe("URL contract: schema version", () => {
 describe("URL contract: README tables match the recorded fixtures", () => {
   it("exact-mode table = flamegraph fixture exact params + viewer-only prof", () => {
     const documented = tableNames(subsection("Query params - viewer.html"));
-    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.mode === "exact").map(
-      (p) => p.param,
-    );
+    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter(
+      (p) => p.mode === "exact" || p.mode === "both",
+    ).map((p) => p.param);
     expect(sorted(documented)).toEqual(sorted([...fixture, "prof"]));
   });
 
   it("api-mode table = flamegraph fixture api params", () => {
     const documented = tableNames(subsection("Query params - flamegraph.html"));
-    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.mode === "api").map(
-      (p) => p.param,
-    );
+    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter(
+      (p) => p.mode === "api" || p.mode === "both",
+    ).map((p) => p.param);
     expect(sorted(documented)).toEqual(sorted(fixture));
   });
 
