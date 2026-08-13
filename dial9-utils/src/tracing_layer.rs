@@ -421,6 +421,40 @@ where
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn callsite_a() -> &'static tracing::Metadata<'static> {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("callsite_a", field_a = 1, field_b = 2);
+            span.metadata().expect("span carries its callsite metadata")
+        })
+    }
+
+    fn callsite_b() -> &'static tracing::Metadata<'static> {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("callsite_b", field_c = 3);
+            span.metadata().expect("span carries its callsite metadata")
+        })
+    }
+
+    /// Each unique callsite gets its own wire schema. The shuttle test
+    /// exercises one callsite (it's checking the lock, not the
+    /// keying), so this is the only test that would catch the cache
+    /// collapsing two distinct callsites into one entry.
+    #[test]
+    fn get_schemas_is_keyed_per_callsite() {
+        let layer = Dial9TracingLayer::new();
+        let a = layer.get_schemas(callsite_a());
+        let b = layer.get_schemas(callsite_b());
+
+        assert_ne!(a.enter.name(), b.enter.name());
+        assert_ne!(a.exit.name(), b.exit.name());
+        assert_ne!(a.field_names, b.field_names);
+    }
+}
+
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
