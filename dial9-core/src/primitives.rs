@@ -142,29 +142,26 @@ pub use crate::define_thread_local as thread_local;
 /// }
 /// ```
 ///
-/// Add `, should_panic` after `depth = $depth` to document a known,
-/// reproduced bug instead of asserting correctness. Add
-/// `, verify_faults_triggered` instead to also assert that
-/// `primitives::fs::take_faults_triggered()` saw at least one fault during
-/// the run, so a scenario that injects faults can't silently stop
-/// exercising its error path without failing.
+/// Add `, should_panic` after `depth = $depth` to document a known bug
+/// instead of asserting correctness. If the scenario's `determinism` test is
+/// also confirmed to sometimes abort the process under shuttle (see the
+/// comment on that arm below), add `, flaky_sigabrt_determinism_only` too --
+/// only for scenarios that actually hit it, not every `should_panic`
+/// scenario. Add `, verify_faults_triggered` instead to also assert
+/// `primitives::fs::take_faults_triggered() > 0`, so fault injection can't
+/// silently stop exercising its error path.
 ///
 /// For a scenario with no real concurrency to explore (e.g. a deterministic
-/// data-structure property like eviction order, or a fork-then-immediately-join
-/// pattern with no overlapping-runnable window) use `num_iters = $num_iters,
-/// determinism_only;` instead of `num_iters/depth` — `check_pct` panics
-/// ("test closure did not exercise any concurrency") on a closure like that,
-/// so only `check_uncontrolled_nondeterminism` is generated. Still needs to
-/// run inside shuttle's harness (not a plain `#[test]`) whenever the scenario
-/// touches a shuttle-swapped primitive (`primitives::sync::Mutex`, a
-/// shuttle-only stand-in like `BoundedQueue`, etc.) — those crash immediately
-/// outside shuttle's scheduler regardless of whether real concurrency is
-/// involved.
-/// Do not use this macro for a scenario that touches real
-/// global `static` state — the generated `pct`/`determinism` tests run
-/// concurrently and would corrupt shuttle's own per-primitive bookkeeping if
-/// they shared such state; write those by hand, serialized behind a real
-/// `std::sync::Mutex`.
+/// data-structure property, or a fork-then-immediately-join with no
+/// overlapping-runnable window), use `num_iters = $num_iters,
+/// determinism_only;` instead -- `check_pct` panics on a closure like that.
+/// Still needs shuttle's harness whenever the scenario touches a
+/// shuttle-swapped primitive.
+///
+/// Don't use this macro for a scenario touching real global `static` state --
+/// the generated `pct`/`determinism` tests run concurrently and would
+/// corrupt shuttle's own bookkeeping; write those by hand instead, behind a
+/// real `std::sync::Mutex`.
 #[cfg(shuttle)]
 #[macro_export]
 macro_rules! shuttle_test {
@@ -217,6 +214,42 @@ macro_rules! shuttle_test {
 
             #[test]
             #[should_panic]
+            fn determinism() {
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+            }
+        }
+    };
+    // Same as plain `should_panic`, but `#[ignore]`s just `determinism`
+    // (`pct` is unaffected). Use only for a scenario whose `determinism`
+    // test is *confirmed* to sometimes abort the process under shuttle.
+    //
+    // Root cause: `check_uncontrolled_nondeterminism` runs a scenario's
+    // schedule twice per iteration (record, then replay, to verify the same
+    // tasks are runnable each time) -- `check_pct` doesn't. If a
+    // not-yet-finished task still holds a shuttle-primitive-backed
+    // `ThreadLocalBuffer` when an uncaught panic unwinds through shuttle's
+    // `Execution::run`, that buffer's `Drop` runs after shuttle's own
+    // `EXECUTION_STATE` is already unset and panics itself -- a second panic
+    // mid-unwind, which aborts (SIGABRT) rather than failing normally.
+    //
+    // Don't use defensively for a new `should_panic` scenario; confirm its
+    // `determinism` test actually crashes first (run it alone, repeatedly)
+    // and use plain `should_panic` otherwise. Still fully runnable manually.
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only; fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            fn $name() $body
+
+            #[test]
+            #[should_panic]
+            fn pct() {
+                shuttle::check_pct($name, $num_iters, $depth);
+            }
+
+            #[test]
+            #[should_panic]
+            #[ignore = "can SIGABRT the whole process under shuttle -- see shuttle_test!'s flaky_sigabrt_determinism_only arm; run manually with --ignored"]
             fn determinism() {
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
             }

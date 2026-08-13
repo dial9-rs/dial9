@@ -227,17 +227,12 @@ crate::shuttle_test! {
 }
 
 // ── Panic injection ─────────────────────────────────────────────────
-//
-// `worker::process_segments` wraps each `SegmentProcessor` call in
-// `catch_unwind` specifically so one processor's panic can't take down the
-// whole worker. `SharedState::flush_sources` (called from the flush loop)
-// has no equivalent guard around `Source::flush`. This checks what actually
-// happens to a sibling source's data and the flush thread itself when one
-// registered source panics.
 
 // `flush_sources` has no `catch_unwind`, so the panic propagates out of the
 // flush thread's main loop and kills it — no cycle ever completes, so
-// nothing the collector queued ever reaches the writer.
+// nothing the collector queued ever reaches the writer. No `ThreadLocalBuffer`
+// write happens here, so there's no live per-thread buffer state for
+// shuttle's own teardown to trip over -- see the companion scenario below.
 crate::shuttle_test! {
     num_iters = 500, depth = 3, should_panic;
     fn test_source_panic_does_not_wedge_pipeline() {
@@ -258,7 +253,6 @@ crate::shuttle_test! {
         shared.push_source(Box::new(MockSource::new(source_pending.clone())));
         let mut recorder = Recorder::start(shared, writer, None, || || {});
         recorder.handle().enable();
-        let handle = recorder.handle().clone();
 
         let healthy_source_event = ValidationEvent {
             timestamp_ns: 1,
@@ -270,6 +264,55 @@ crate::shuttle_test! {
             .lock()
             .unwrap()
             .push(healthy_source_event.clone());
+
+        recorder.stop_flush_thread();
+
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
+
+        assert!(
+            all_decoded.iter().any(|e| e.id == healthy_source_event.id),
+            "healthy source's event must survive a sibling source's panic"
+        );
+    }
+}
+
+// Companion to the scenario above: a plain thread-local buffer write is exposed to
+// the same missing-containment gap, since it's drained by the same unguarded
+// flush cycle.
+// Kept as its own scenario because the live `ThreadLocalBuffer`
+// this leaves behind at panic time is what makes `determinism` crash.
+// 16/30 crashes with the write, 0/30 without. That's why this scenario needs
+// `flaky_sigabrt_determinism_only`.
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only;
+    fn test_source_panic_does_not_lose_tl_buffer_write() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(PanickingSource));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
+
         let tl_buffer_event = ValidationEvent {
             timestamp_ns: 2,
             thread_id: 0,
@@ -295,10 +338,6 @@ crate::shuttle_test! {
         assert!(
             all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
             "TL-buffer event must survive a sibling source's panic"
-        );
-        assert!(
-            all_decoded.iter().any(|e| e.id == healthy_source_event.id),
-            "healthy source's event must survive a sibling source's panic"
         );
     }
 }
