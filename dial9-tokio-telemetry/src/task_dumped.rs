@@ -33,17 +33,16 @@
 
 use crate::sampling::SplitMix64;
 use crate::telemetry::format::TaskDumpEvent;
-use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::{Encodable, ThreadLocalEncoder};
+use dial9_core::handle::Dial9Handle;
 use pin_project_lite::pin_project;
 use smallvec::SmallVec;
 use std::cell::Cell;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Initial heap reservation for the instruction-pointer buffer on first capture.
@@ -76,7 +75,7 @@ pin_project! {
     pub(crate) struct TaskDumped<F> {
         #[pin]
         inner: F,
-        shared: Arc<SharedState>,
+        handle: Dial9Handle,
         task_id: TaskId,
         frames: FrameBuf,
         // Monotonic nanoseconds when the frames in `frames` were captured.
@@ -105,11 +104,11 @@ pin_project! {
 }
 
 impl<F> TaskDumped<F> {
-    pub(crate) fn new(inner: F, shared: Arc<SharedState>, task_id: TaskId) -> Self {
+    pub(crate) fn new(inner: F, handle: Dial9Handle, task_id: TaskId) -> Self {
         // Config is read lazily on the first poll.
         Self {
             inner,
-            shared,
+            handle,
             task_id,
             frames: FrameBuf::new(),
             pending_capture_ts: None,
@@ -153,7 +152,7 @@ impl<F: Future> Future for TaskDumped<F> {
 
         // Fast path: forward without any capture work when either task dumps
         // are disabled, or telemetry as a whole is paused.
-        if !enabled || !this.shared.is_enabled() {
+        if !enabled || !this.handle.is_enabled() {
             if this.frames.has_data() {
                 this.frames.clear();
                 *this.pending_capture_ts = None;
@@ -180,7 +179,7 @@ impl<F: Future> Future for TaskDumped<F> {
                 .pending_capture_ts
                 .expect("checked in match above")
                 .get();
-            this.frames.emit(this.shared, *this.task_id, ts);
+            this.frames.emit(this.handle, *this.task_id, ts);
             *this.next_sample_ns = this.rng.draw_exponential(*this.sample_mean_ns) as i64;
         }
         match &result {
@@ -256,28 +255,26 @@ impl FrameBuf {
     /// Emit one `TaskDumpEvent` per recorded callchain, then clear.
     /// Trimming via `_Unwind_FindEnclosingFunction` happens here (emit path)
     /// rather than during capture, keeping the hot path lock-free.
-    fn emit(&mut self, shared: &SharedState, task_id: TaskId, capture_ts: u64) {
-        shared.if_enabled(|buf| {
-            for (i, meta) in self.chains.iter().enumerate() {
-                let ip_end = self
-                    .chains
-                    .get(i + 1)
-                    .map(|next| next.ip_start)
-                    .unwrap_or(self.ips.len());
-                let raw = &self.ips[meta.ip_start..ip_end];
-                let chain = match meta.leaf_addr {
-                    Some(leaf) => crate::unwind::trim_frames(raw, meta.root_addr, leaf),
-                    None => &[],
-                };
-                if !chain.is_empty() {
-                    buf.record_encodable_event(&TaskDumpData {
-                        timestamp_ns: capture_ts,
-                        task_id,
-                        callchain: chain,
-                    });
-                }
+    fn emit(&mut self, handle: &Dial9Handle, task_id: TaskId, capture_ts: u64) {
+        for (i, meta) in self.chains.iter().enumerate() {
+            let ip_end = self
+                .chains
+                .get(i + 1)
+                .map(|next| next.ip_start)
+                .unwrap_or(self.ips.len());
+            let raw = &self.ips[meta.ip_start..ip_end];
+            let chain = match meta.leaf_addr {
+                Some(leaf) => crate::unwind::trim_frames(raw, meta.root_addr, leaf),
+                None => &[],
+            };
+            if !chain.is_empty() {
+                handle.record_event_with(|| TaskDumpData {
+                    timestamp_ns: capture_ts,
+                    task_id,
+                    callchain: chain,
+                });
             }
-        });
+        }
         self.clear();
     }
 
