@@ -11,7 +11,7 @@ crate::primitives::thread_local! {
 /// The handle to instrument with, or `None` when it is not connected to a
 /// recorder.
 pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<Dial9Handle> {
-    handle.shared().is_some().then(|| handle.clone())
+    handle.is_connected().then(|| handle.clone())
 }
 
 /// Tokio handle for spawning instrumented tasks.

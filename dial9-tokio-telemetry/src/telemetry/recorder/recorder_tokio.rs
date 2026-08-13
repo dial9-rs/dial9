@@ -59,7 +59,6 @@ use dial9_core::buffer::BufferMode;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::RecorderBuilder;
 use dial9_core::recording::Recorder;
-use dial9_core::shared_state::SharedState;
 #[cfg(feature = "worker-s3")]
 use dial9_destinations_s3::S3Config;
 use std::io;
@@ -348,10 +347,10 @@ impl Dial9HandleTokioExt for Dial9Handle {
         mut builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime> {
-        let Some(shared) = self.shared() else {
+        if !self.is_connected() {
             return builder.build();
-        };
-        if shared.is_stopped() {
+        }
+        if self.is_stopped() {
             return Err(io::Error::other(
                 "recorder has shut down; attach runtimes before graceful_shutdown",
             ));
@@ -359,7 +358,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if !options.tokio_instrumentation_enabled {
             return builder.build();
         }
-        let Some(registry) = runtime_registry(shared) else {
+        let Some(registry) = runtime_registry(self) else {
             return Err(io::Error::other(
                 "dial9 source registry unavailable; Tokio runtime not attached",
             ));
@@ -399,7 +398,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if let Some(config) = task_dump_config {
             crate::task_dumped::set_taskdump_config(config);
         }
-        register_runtime_metrics(shared, runtime_name, runtime.handle().metrics());
+        register_runtime_metrics(self, runtime_name, runtime.handle().metrics());
         Ok(runtime)
     }
 }
@@ -413,7 +412,7 @@ pub(crate) fn current_runtime_ctx(handle: &Dial9Handle) -> Option<Arc<RuntimeCon
     if let Some(ctx) = super::runtime_context::cached_runtime_ctx(id) {
         return Some(ctx);
     }
-    let registry = runtime_registry(handle.shared()?)?;
+    let registry = runtime_registry(handle)?;
     let ctx = {
         let registry = registry.lock().ok()?;
         registry.iter().find(|c| c.is_runtime(id)).cloned()?
@@ -426,22 +425,9 @@ pub(crate) fn current_runtime_ctx(handle: &Dial9Handle) -> Option<Arc<RuntimeCon
 /// owns it on first use. Find-or-insert under one lock, so racing attaches share
 /// one source. `None` if the source lock is poisoned or the recorder has shut
 /// down.
-pub(crate) fn runtime_registry(shared: &Arc<SharedState>) -> Option<RuntimeContextRegistry> {
-    shared
-        .with_sources_vec(|sources| {
-            if shared.is_stopped() {
-                return None;
-            }
-            let existing = sources.iter_mut().find_map(|source| {
-                let any: &mut dyn std::any::Any = &mut **source;
-                any.downcast_mut::<TokioRuntimesSource>()
-            });
-            if let Some(source) = existing {
-                return Some(source.registry().clone());
-            }
-            let registry: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
-            sources.push(Box::new(TokioRuntimesSource::new(registry.clone())));
-            Some(registry)
-        })
-        .flatten()
+pub(crate) fn runtime_registry(handle: &Dial9Handle) -> Option<RuntimeContextRegistry> {
+    handle.with_source_or_insert(
+        || TokioRuntimesSource::new(Arc::new(Mutex::new(Vec::new()))),
+        |source| source.registry().clone(),
+    )
 }

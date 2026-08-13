@@ -1,8 +1,17 @@
 use crate::encoder::{Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
+use crate::source::Source;
 use crate::thread::ThreadTrackingGuard;
+use std::any::Any;
 use std::cell::RefCell;
+
+/// First registered source of type `T`, if any.
+fn find_source<T: Source>(sources: &mut [Box<dyn Source>]) -> Option<&mut T> {
+    sources
+        .iter_mut()
+        .find_map(|source| (&mut **source as &mut dyn Any).downcast_mut::<T>())
+}
 
 crate::primitives::thread_local! {
     /// Per-thread [`Dial9Handle`], populated via [`set_tl_handle`] and cleared
@@ -82,16 +91,16 @@ impl Dial9Handle {
     /// skipped, exactly as if it had arrived a moment earlier or later).
     ///
     /// To ask only whether the handle is connected at all, regardless of
-    /// pause state, use [`shared`](Self::shared)`().is_some()`.
+    /// pause state, use [`is_connected`](Self::is_connected).
     pub fn is_enabled(&self) -> bool {
         self.inner.as_ref().is_some_and(|i| i.shared.is_enabled())
     }
 
-    /// Access this handle's [`SharedState`].
-    ///
-    /// You can use it to subscribe new sources via [`push_source`](SharedState::push_source)
-    pub fn shared(&self) -> Option<&Arc<SharedState>> {
-        self.inner.as_ref().map(|i| &i.shared)
+    crate::test_util_pub! {
+        /// Access this handle's [`SharedState`].
+        fn shared(&self) -> Option<&Arc<SharedState>> {
+            self.inner.as_ref().map(|i| &i.shared)
+        }
     }
 
     pub(crate) fn control_tx(
@@ -208,6 +217,70 @@ impl Dial9Handle {
             Some(Err(e)) => Err(e),
             None => Err(std::io::Error::other("dial9: sources lock poisoned")),
         }
+    }
+
+    /// Whether this handle is wired to a recorder at all, regardless of whether
+    /// recording is currently paused.
+    ///
+    /// [`is_enabled`](Self::is_enabled) answers the narrower question of whether
+    /// a record right now would land.
+    pub fn is_connected(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Reserve `count` consecutive global worker IDs.
+    ///
+    /// IDs are unique across every runtime attached to this recorder, so each
+    /// runtime can hand its workers a block of its own. `None` on a disabled
+    /// handle, which has no counter to draw from.
+    pub fn reserve_worker_ids(&self, count: u64) -> Option<u64> {
+        Some(self.inner.as_ref()?.shared.reserve_worker_ids(count))
+    }
+
+    /// Whether the recorder behind this handle has shut down.
+    ///
+    /// Terminal: a stopped recorder never records again. Returns `false` for a
+    /// handle that is merely paused (see [`disable`](Self::disable)) and for a
+    /// disabled handle, neither of which is stopped.
+    pub fn is_stopped(&self) -> bool {
+        self.inner.as_ref().is_some_and(|i| i.shared.is_stopped())
+    }
+
+    /// Run `f` against this recorder's source of type `T`.
+    ///
+    /// `None` when the handle is disabled, no `T` is registered, or the source
+    /// lock is poisoned.
+    pub fn with_source<T: Source, R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let inner = self.inner.as_ref()?;
+        inner
+            .shared
+            .with_sources_mut(|sources| Some(f(find_source::<T>(sources)?)))
+            .flatten()
+    }
+
+    /// Run `f` against this recorder's source of type `T`, registering the one
+    /// `make` builds if there is not one yet.
+    ///
+    /// `None` when the handle is disabled, the recorder has shut down, or the
+    /// source lock is poisoned.
+    pub fn i<T: Source, R>(
+        &self,
+        make: impl FnOnce() -> T,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Option<R> {
+        let inner = self.inner.as_ref()?;
+        inner
+            .shared
+            .with_sources_vec(|sources| {
+                if inner.shared.is_stopped() {
+                    return None;
+                }
+                if find_source::<T>(sources).is_none() {
+                    sources.push(Box::new(make()));
+                }
+                Some(f(find_source::<T>(sources).expect("just registered")))
+            })
+            .flatten()
     }
 
     /// Record a custom event into the trace.

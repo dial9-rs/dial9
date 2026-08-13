@@ -1,4 +1,3 @@
-use super::SharedState;
 use super::source::{FlushContext, Source};
 #[cfg(not(tokio_unstable))]
 use crate::primitives::sync::Weak;
@@ -115,13 +114,12 @@ fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
 /// there rather than reusing the one it holds in another runtime's block.
 #[cfg(not(tokio_unstable))]
 fn claim_thread_worker_id(ctx: &RuntimeContext) -> Option<u64> {
-    let shared = ctx.recorder_handle.shared()?;
     CLAIMED_WORKER_IDS.with(|claimed| {
         let mut claimed = claimed.borrow_mut();
         if let Some((_, id)) = claimed.iter().find(|(owner, _)| *owner == ctx.id) {
             return Some(*id);
         }
-        let id = shared.reserve_worker_ids(1);
+        let id = ctx.recorder_handle.reserve_worker_ids(1)?;
         claimed.push((ctx.id, id));
         Some(id)
     })
@@ -265,21 +263,14 @@ impl TokioRuntimesSource {
 ///
 /// Called once per attach, after the caller's runtime exists.
 pub(crate) fn register_runtime_metrics(
-    shared: &SharedState,
+    handle: &Dial9Handle,
     runtime_name: Option<String>,
     metrics: RuntimeMetrics,
 ) {
-    let mut entry = Some((runtime_name, metrics));
-    shared.with_sources_mut(|sources| {
-        for source in sources.iter_mut() {
-            let any: &mut dyn std::any::Any = &mut **source;
-            if let Some(source) = any.downcast_mut::<TokioRuntimesSource>() {
-                source.runtime_metrics.extend(entry.take());
-                return;
-            }
-        }
+    let registered = handle.with_source(|source: &mut TokioRuntimesSource| {
+        source.runtime_metrics.push((runtime_name, metrics));
     });
-    if entry.is_some() {
+    if registered.is_none() {
         tracing::warn!("Tokio source missing; queue depth will not be sampled");
     }
 }
@@ -494,10 +485,16 @@ impl RuntimeContext {
     #[cfg(tokio_unstable)]
     fn claim_worker_id(&self) -> Option<u64> {
         let local_index = tokio::runtime::worker_index()?;
-        let shared = self.recorder_handle.shared()?;
+        // Checked up front so the `OnceLock` init below stays infallible and
+        // the whole runtime's block is reserved exactly once.
+        if !self.recorder_handle.is_connected() {
+            return None;
+        }
         let base = self.worker_id_base.get_or_init(|| {
             let num_workers = worker_metrics(|m| m.num_workers()) as u64;
-            shared.reserve_worker_ids(num_workers)
+            self.recorder_handle
+                .reserve_worker_ids(num_workers)
+                .expect("handle checked above")
         });
         Some(base + local_index as u64)
     }
