@@ -415,27 +415,28 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
     warn_count.load(StdOrdering::Relaxed)
 }
 
-/// The fault is armed on the test thread but read on the flush thread,
-/// this proves it crosses that boundary.
-fn fs_fault_visible_across_threads() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("fault_probe");
-    std::fs::write(&path, b"x").unwrap();
+// The fault is armed on the test thread but read on a spawned thread, this
+// proves it crosses that boundary. No `pct`: the spawning thread parks on
+// `.join()` immediately with no other work in between, so the two threads
+// are never simultaneously runnable.
+crate::shuttle_test! {
+    num_iters = 100, determinism_only;
+    fn fs_fault_visible_across_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fault_probe");
+        std::fs::write(&path, b"x").unwrap();
 
-    let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
-    let observed_fault = crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
-        .join()
-        .unwrap();
+        let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
+        let observed_fault =
+            crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
+                .join()
+                .unwrap();
 
-    assert!(
-        observed_fault,
-        "fault armed on the test thread was not observed on a spawned thread"
-    );
-}
-
-#[test]
-fn determinism_check_fs_fault_visible() {
-    shuttle::check_uncontrolled_nondeterminism(fs_fault_visible_across_threads, 100);
+        assert!(
+            observed_fault,
+            "fault armed on the test thread was not observed on a spawned thread"
+        );
+    }
 }
 
 // Both scenarios below also assert that fault injection actually reached

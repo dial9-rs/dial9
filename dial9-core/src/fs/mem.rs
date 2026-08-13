@@ -607,48 +607,42 @@ mod shuttle_tests {
     // concurrency to explore -- `shuttle_eviction_accounting` above only
     // verifies aggregate counts (consumed + dropped == count), which can't
     // distinguish correct FIFO eviction from e.g. evicting the newest
-    // segment instead of the oldest. Not wrapped in `shuttle_test!`:
-    // `check_pct` requires the closure to exercise some concurrency and
-    // panics otherwise ("test closure did not exercise any concurrency"),
-    // which a single-threaded scenario never will. Still needs
-    // `check_uncontrolled_nondeterminism`'s shuttle execution context,
-    // though, since `MemFs` is backed by `shuttle::sync::Mutex` under
-    // `--cfg shuttle`.
-    fn shuttle_eviction_is_fifo() {
-        // Budget for exactly 3 16-byte segments; sealing 5 must evict the
-        // 2 oldest (indices 0 and 1).
-        let mem = MemFs::with_capacity(48, 16).unwrap();
-        for i in 0..5u32 {
-            seal_one(&mem, i, 16);
-        }
-        mem.mark_writer_done();
-
-        let mut popped = Vec::new();
-        let mut dropped = 0u64;
-        loop {
-            let taken = mem.take_files();
-            dropped += taken.segments_dropped;
-            if taken.segments.is_empty() {
-                break;
+    // segment instead of the oldest. Still needs to run inside shuttle's
+    // harness, though, since `MemFs` is backed by `shuttle::sync::Mutex`
+    // under `--cfg shuttle`.
+    crate::shuttle_test! {
+        num_iters = 100, determinism_only;
+        fn shuttle_eviction_is_fifo() {
+            // Budget for exactly 3 16-byte segments; sealing 5 must evict the
+            // 2 oldest (indices 0 and 1).
+            let mem = MemFs::with_capacity(48, 16).unwrap();
+            for i in 0..5u32 {
+                seal_one(&mem, i, 16);
             }
-            for seg in taken.segments {
-                popped.push(seg.seg_ref.index());
-            }
-        }
-        assert_eq!(
-            dropped, 2,
-            "the two oldest segments should have been evicted"
-        );
-        assert_eq!(
-            popped,
-            vec![2, 3, 4],
-            "surviving segments must be the newest, popped oldest-remaining-first -- \
-             eviction must drop the oldest segment first, not just any two"
-        );
-    }
+            mem.mark_writer_done();
 
-    #[test]
-    fn eviction_is_fifo() {
-        shuttle::check_uncontrolled_nondeterminism(shuttle_eviction_is_fifo, 100);
+            let mut popped = Vec::new();
+            let mut dropped = 0u64;
+            loop {
+                let taken = mem.take_files();
+                dropped += taken.segments_dropped;
+                if taken.segments.is_empty() {
+                    break;
+                }
+                for seg in taken.segments {
+                    popped.push(seg.seg_ref.index());
+                }
+            }
+            assert_eq!(
+                dropped, 2,
+                "the two oldest segments should have been evicted"
+            );
+            assert_eq!(
+                popped,
+                vec![2, 3, 4],
+                "surviving segments must be the newest, popped oldest-remaining-first -- \
+                 eviction must drop the oldest segment first, not just any two"
+            );
+        }
     }
 }

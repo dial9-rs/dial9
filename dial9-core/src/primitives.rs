@@ -148,6 +148,18 @@ pub use crate::define_thread_local as thread_local;
 /// `primitives::fs::take_faults_triggered()` saw at least one fault during
 /// the run, so a scenario that injects faults can't silently stop
 /// exercising its error path without failing.
+///
+/// For a scenario with no real concurrency to explore (e.g. a deterministic
+/// data-structure property like eviction order, or a fork-then-immediately-join
+/// pattern with no overlapping-runnable window) use `num_iters = $num_iters,
+/// determinism_only;` instead of `num_iters/depth` — `check_pct` panics
+/// ("test closure did not exercise any concurrency") on a closure like that,
+/// so only `check_uncontrolled_nondeterminism` is generated. Still needs to
+/// run inside shuttle's harness (not a plain `#[test]`) whenever the scenario
+/// touches a shuttle-swapped primitive (`primitives::sync::Mutex`, a
+/// shuttle-only stand-in like `BoundedQueue`, etc.) — those crash immediately
+/// outside shuttle's scheduler regardless of whether real concurrency is
+/// involved.
 /// Do not use this macro for a scenario that touches real
 /// global `static` state — the generated `pct`/`determinism` tests run
 /// concurrently and would corrupt shuttle's own per-primitive bookkeeping if
@@ -166,6 +178,24 @@ macro_rules! shuttle_test {
             fn pct() {
                 shuttle::check_pct($name, $num_iters, $depth);
             }
+
+            #[test]
+            fn determinism() {
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+            }
+        }
+    };
+    // No `pct`: `check_pct` panics on a closure with no real concurrency to
+    // schedule between (either genuinely single-threaded, or a fork
+    // immediately followed by a join with no overlapping-runnable window).
+    // Still runs inside shuttle's harness via `check_uncontrolled_nondeterminism`,
+    // which every scenario touching a shuttle-swapped primitive needs
+    // regardless of whether there's anything to interleave.
+    (num_iters = $num_iters:expr, determinism_only; fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            fn $name() $body
 
             #[test]
             fn determinism() {
