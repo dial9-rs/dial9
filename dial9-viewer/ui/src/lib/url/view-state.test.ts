@@ -212,17 +212,17 @@ describe("versioning and tolerant-reader rules", () => {
 });
 
 describe("recorded legacy-param fixture", () => {
-  it("enumerates exactly two view-state params, both replaceState/exact", () => {
+  it("records exact-mode zoom and cross-mode inspection as view state", () => {
     const vs = FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.viewState);
-    expect(vs.map((p) => p.param).sort()).toEqual(["offworker-zoom", "worker-zoom"]);
+    expect(vs.map((p) => p.param).sort()).toEqual([
+      "inspect",
+      "inspect_full",
+      "offworker-zoom",
+      "worker-zoom",
+    ]);
     for (const p of vs) {
-      expect(p.mode).toBe("exact");
       expect(p.mechanism).toBe("replaceState");
     }
-    // API mode has NO view-state params by design (zoom is not synced there).
-    expect(
-      FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.mode === "api" && p.viewState),
-    ).toEqual([]);
   });
 
   it("resolves each fixture URL identically to the legacy reader", () => {
@@ -233,8 +233,13 @@ describe("recorded legacy-param fixture", () => {
       const p = new URLSearchParams(search);
       const wz = p.get("worker-zoom");
       const oz = p.get("offworker-zoom");
+      const inspect = p.get("inspect");
       expect(resolved.fgWorkerZoom).toEqual(wz === null ? undefined : wz.split("\t"));
       expect(resolved.fgOffworkerZoom).toEqual(oz === null ? undefined : oz.split("\t"));
+      expect(resolved.fgInspect).toBe(inspect || undefined);
+      expect(resolved.fgInspectFull).toBe(
+        inspect ? p.get("inspect_full") || inspect : undefined,
+      );
       // No fixture URL smuggles in hash state.
       expect(resolved.timeMode).toBeUndefined();
       expect(resolved.timeZone).toBeUndefined();

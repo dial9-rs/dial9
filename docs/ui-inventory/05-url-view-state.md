@@ -82,10 +82,10 @@ links must keep working, on both page generations:
 - **Read:** legacy query params are the base; v=1 hash fields override
   **per field**; legacy fills the gaps. (They only diverge on hand-edited
   URLs: the writer always emits them together.)
-- **Write:** the migrated page mirrors zoom state into the legacy params
+- **Write:** exact mode mirrors its flamegraph view state into the legacy params
   AND the hash in the same replaceState, so an address-bar copy still
-  opens correctly on the legacy page. The mirror touches ONLY the two
-  zoom params; every other query param is preserved verbatim (F153).
+  opens correctly on the legacy page. The mirror touches ONLY its view-state
+  params; every other query param is preserved verbatim (F153).
 - The legacy page itself ignores the hash entirely (verified: it loads
   and simply isn't zoomed), consistent with the raw-switch policy.
 
@@ -110,8 +110,8 @@ links must keep working, on both page generations:
 | --- | --- | --- |
 | browser page (index.html) | `bucket`, `aws_region`, `prefix`, `tab`, `tz`, `last`, `from`, `to`, `q` (query) | `url_state.js` (#585), untouched by the codec. Its `tz` is a QUERY param on a different page; the codec's `tz` is a HASH key - no interference, vocabulary deliberately identical. If the migrated browser page ever needs view state beyond url_state.js's set, it adopts the hash codec additively; url_state.js params are never migrated into the hash. |
 | flamegraph exact mode | `trace`, `start`, `end`, `svc`, `host`, `segs`, `from`, `to` (query) | page-owned LOAD SCOPE, read-only, preserved verbatim by every codec write |
-| flamegraph exact mode | `worker-zoom`, `offworker-zoom` (query) | legacy view state; codec-mirrored (see precedence above) |
-| flamegraph api mode | `api`, `data_dir`, `bucket`, `prefix`, `service`, `host`*, `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`, `max_files` (query) | page-owned scope/facets, `pushState` on Apply/facet change (F180); canvas zoom NOT URL-synced in this mode by legacy design - the codec stays out |
+| flamegraph exact mode | `worker-zoom`, `offworker-zoom`, `inspect`, `inspect_full` (query) | legacy view state; codec-mirrored (see precedence above) |
+| flamegraph api mode | `api`, `data_dir`, `bucket`, `prefix`, `service`, `host`*, `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`, `max_files`, `inspect`, `inspect_full` (query) | scope/facets use `pushState`; inspection uses `replaceState` and survives scope changes (F180). Canvas zoom remains URL-silent. |
 | migrated trace viewer (`new/viewer.html`) | viewport, selection, filters, rail/cursors, runtime folds, layout/lanes, URL-defined numeric field charts, inspector/disclosures/correlation, region modes, embedded zoom paths, and `data-start`/`data-end` (query) | page-owned readable durable state in `src/pages/viewer/url-state.ts`; the exact registry is `VIEWER_VIEW_QUERY_PARAMS` and is contract-pinned to the README table. Defaults omitted, unordered values sorted, invalid known values dropped, unknown params preserved, and settled updates use debounced `replaceState`. `start`/`end` are viewport bounds; `data-start`/`data-end` are parse bounds. |
 | all pages | `ui` (query) | ui-switch.js (T38); the switch preserves the query minus `ui` and DROPS the hash (raw switch, recorded maintainer policy) |
 | all migrated pages | the hash | this codec, exclusively - EXCEPT foreign hashes, which are left alone |
