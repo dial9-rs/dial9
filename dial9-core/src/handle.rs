@@ -263,7 +263,7 @@ impl Dial9Handle {
     ///
     /// `None` when the handle is disabled, the recorder has shut down, or the
     /// source lock is poisoned.
-    pub fn i<T: Source, R>(
+    pub fn with_source_or_insert<T: Source, R>(
         &self,
         make: impl FnOnce() -> T,
         f: impl FnOnce(&mut T) -> R,
