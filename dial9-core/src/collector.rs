@@ -208,4 +208,47 @@ mod shuttle_tests {
             );
         }
     }
+
+    // Deterministic, single-threaded: `BoundedQueue::force_push`'s eviction
+    // *order* (not just count) is a property of the data structure, not a
+    // race, so no concurrency to explore -- `shuttle_collector_eviction_accounting`
+    // above only verifies aggregate counts (pushed == popped + evicted, no
+    // double-pop), which can't distinguish correct FIFO eviction from e.g.
+    // evicting the newest batch instead of the oldest. Not wrapped in
+    // `shuttle_test!`: `check_pct` requires the closure to exercise some
+    // concurrency and panics otherwise ("test closure did not exercise any
+    // concurrency"), which a single-threaded scenario never will. Still
+    // needs `check_uncontrolled_nondeterminism`'s shuttle execution context,
+    // though, since `BoundedQueue` is backed by `shuttle::sync::Mutex` under
+    // `--cfg shuttle`.
+    fn shuttle_collector_eviction_is_fifo() {
+        const CAPACITY: usize = 3;
+        let collector = CentralCollector::with_capacity(CAPACITY);
+        for id in 0..(CAPACITY as u64 + 2) {
+            collector.accept_flush(Batch {
+                encoded_bytes: Vec::new(),
+                event_count: id,
+            });
+        }
+        assert_eq!(
+            collector.take_dropped_batches(),
+            2,
+            "the two oldest batches should have been evicted"
+        );
+        let mut remaining = Vec::new();
+        while let Some(batch) = collector.next() {
+            remaining.push(batch.event_count());
+        }
+        assert_eq!(
+            remaining,
+            vec![2, 3, 4],
+            "surviving batches must be the newest CAPACITY, in push order -- eviction \
+             must drop the oldest batch first, not just any two"
+        );
+    }
+
+    #[test]
+    fn collector_eviction_is_fifo() {
+        shuttle::check_uncontrolled_nondeterminism(shuttle_collector_eviction_is_fifo, 100);
+    }
 }
