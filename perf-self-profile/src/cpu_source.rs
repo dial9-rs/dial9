@@ -566,7 +566,7 @@ mod cpu_sample_round_trip_tests {
 
     /// Encode a `CpuSampleEvent` with the given `cpu` and decode it back to the
     /// event frame's `(timestamp, field values)`.
-    fn round_trip(cpu: Option<u64>) -> (Option<u64>, Vec<FieldValue>) {
+    fn round_trip(cpu: Option<u64>) -> (u64, Vec<FieldValue>) {
         let mut enc = Encoder::new();
         let thread_name = enc.intern_string("tokio-runtime-worker").unwrap();
         let callchain = enc
@@ -602,7 +602,7 @@ mod cpu_sample_round_trip_tests {
     #[test]
     fn cpu_sample_event_round_trips_with_cpu() {
         let (timestamp_ns, values) = round_trip(Some(3));
-        assert_eq!(timestamp_ns, Some(7_000_000));
+        assert_eq!(timestamp_ns, 7_000_000);
         assert_eq!(values[1], FieldValue::Varint(9999)); // tid
         // `cpu` is the last field; `Some(3)` encodes as an OptionalVarint.
         assert_eq!(*values.last().unwrap(), FieldValue::Varint(3));

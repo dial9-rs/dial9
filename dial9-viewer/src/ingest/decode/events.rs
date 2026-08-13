@@ -275,8 +275,6 @@ struct TimingField {
 struct TimingLayout {
     start: Option<TimingField>,
     duration: Option<TimingField>,
-    /// The packed event timestamp is available as the end (in ns).
-    packed_end: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -397,10 +395,9 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
         None => None,
     };
     // A span is placed from any two of {start, duration, end}. The end is the
-    // packed event timestamp, so verify at least two are available.
-    let packed_end = schema.has_timestamp();
-    let quantities =
-        usize::from(start.is_some()) + usize::from(duration.is_some()) + usize::from(packed_end);
+    // packed event timestamp (always present), so we need at least one of
+    // start or duration.
+    let quantities = usize::from(start.is_some()) + usize::from(duration.is_some()) + 1;
     if quantities < 2 {
         return CompiledSingleEventSpan::Invalid(
             "single-event span schema needs two of span.start, span.duration, and the packed \
@@ -409,11 +406,7 @@ fn compile_single_event_span(schema: &SchemaEntry) -> CompiledSingleEventSpan {
         );
     }
 
-    let timing = TimingLayout {
-        start,
-        duration,
-        packed_end,
-    };
+    let timing = TimingLayout { start, duration };
 
     if let Some(index) = name_index
         && !is_string_field(schema.fields()[index].field_type())
@@ -543,10 +536,10 @@ impl TimingLayout {
     }
 
     /// Resolve `(start_ns, end_ns)` from any two of start, duration, and end,
-    /// where the end is the packed event timestamp. The compiler has already
-    /// guaranteed at least two quantities are present in the schema; this
-    /// handles a value being absent at runtime (optional field) and the
-    /// arithmetic.
+    /// where the end is the packed event timestamp (always present). The
+    /// compiler has already guaranteed at least one of start/duration is
+    /// present in the schema; this handles a value being absent at runtime
+    /// (optional field) and the arithmetic.
     fn resolve(&self, ev: &RawEvent<'_, '_>) -> Result<(u64, u64), &'static str> {
         let start = match self.start {
             Some(field) => Self::read(field, ev)?,
@@ -556,16 +549,12 @@ impl TimingLayout {
             Some(field) => Self::read(field, ev)?,
             None => None,
         };
-        let end = if self.packed_end {
-            ev.timestamp_ns
-        } else {
-            None
-        };
+        let end = ev.timestamp_ns;
 
-        match (start, duration, end) {
+        match (start, duration) {
             // Start + end (the common metrique-style case uses end + duration
             // below; this covers a start field with the packed end).
-            (Some(start), _, Some(end)) => {
+            (Some(start), _) => {
                 if start > end {
                     return Err("single-event span start follows its end");
                 }
@@ -573,17 +562,10 @@ impl TimingLayout {
             }
             // End + duration: derive start. Duration is unsigned, so a start
             // after end is unrepresentable; saturate rather than underflow.
-            (None, Some(duration), Some(end)) => Ok((end.saturating_sub(duration), end)),
-            // Start + duration, no end available: derive end.
-            (Some(start), Some(duration), None) => {
-                let end = start
-                    .checked_add(duration)
-                    .ok_or("single-event span end overflows nanoseconds")?;
-                Ok((start, end))
-            }
-            // Fewer than two quantities resolvable at runtime (an optional
-            // timing field was absent on this event).
-            _ => Err("single-event span is missing a required timing value"),
+            (None, Some(duration)) => Ok((end.saturating_sub(duration), end)),
+            // Neither start nor duration resolvable at runtime (both optional
+            // timing fields were absent on this event).
+            (None, None) => Err("single-event span is missing a required timing value"),
         }
     }
 }
@@ -1041,7 +1023,6 @@ mod tests {
     ) -> SchemaEntry {
         SchemaEntry::with_annotations(
             name,
-            true,
             fields
                 .into_iter()
                 .map(|(name, field_type)| FieldDef::new(name, field_type)),
@@ -1080,8 +1061,8 @@ mod tests {
         encoder
             .write_event(
                 &current_schema,
+                100,
                 &[
-                    FieldValue::Varint(100),
                     FieldValue::Varint(42),
                     FieldValue::Varint(1),
                     FieldValue::None,
@@ -1093,8 +1074,8 @@ mod tests {
         encoder
             .write_event(
                 &legacy_schema,
+                200,
                 &[
-                    FieldValue::Varint(200),
                     FieldValue::Varint(7),
                     FieldValue::Varint(2),
                     FieldValue::None,
@@ -1168,7 +1149,6 @@ mod tests {
         assert_eq!(layout.timing.start.map(|f| f.index), Some(0));
         assert_eq!(layout.timing.start.map(|f| f.multiplier), Some(1_000_000));
         assert!(layout.timing.duration.is_none());
-        assert!(layout.timing.packed_end);
         assert_eq!(layout.name_index, Some(1));
         assert_eq!(layout.span_type, "test-producer");
         assert_eq!(layout.attribute_indices, vec![1, 2, 3]);
@@ -1193,19 +1173,15 @@ mod tests {
         assert_eq!(layout.timing.duration.map(|f| f.index), Some(0));
         assert_eq!(layout.timing.duration.map(|f| f.multiplier), Some(1));
         assert!(layout.timing.start.is_none());
-        assert!(layout.timing.packed_end);
         assert_eq!(layout.name_index, Some(1));
     }
 
     #[test]
-    fn start_plus_duration_compiles_without_a_packed_timestamp() {
-        // Two explicit timing quantities are enough to place a span even with
-        // no packed end. (Every event the encoder writes carries a packed
-        // timestamp, so at decode time `resolve` derives end from start+end;
-        // this guards the schema-compile side of the start+duration path.)
-        let no_packed = SchemaEntry::with_annotations(
+    fn start_plus_duration_compiles() {
+        // Two explicit timing quantities plus the packed end: all three timing
+        // sources are available.
+        let schema = SchemaEntry::with_annotations(
             "producer:StartDur",
-            /* has_timestamp */ false,
             [
                 FieldDef::new("start", FieldType::Varint),
                 FieldDef::new("dur", FieldType::Varint),
@@ -1215,20 +1191,18 @@ mod tests {
                 FieldAnnotation::new(1, schema_extensions::ROLE_KEY, roles::SPAN_DURATION),
             ],
         );
-        let CompiledSingleEventSpan::Layout(layout) = compile_single_event_span(&no_packed) else {
-            panic!("start + duration must compile even without a packed timestamp");
+        let CompiledSingleEventSpan::Layout(layout) = compile_single_event_span(&schema) else {
+            panic!("start + duration must compile");
         };
         assert_eq!(layout.timing.start.map(|f| f.index), Some(0));
         assert_eq!(layout.timing.duration.map(|f| f.index), Some(1));
-        assert!(!layout.timing.packed_end);
-        // The start+duration -> end derivation is exercised end-to-end by the
-        // packed-timestamp span tests above; here we only assert that two
-        // explicit quantities are accepted without a packed end.
     }
 
     #[test]
-    fn single_timing_quantity_without_packed_end_is_invalid() {
-        // A duration with no packed end cannot place a span.
+    fn single_duration_with_packed_end_is_valid() {
+        // With packed_end always true (all events carry a timestamp),
+        // duration + packed end gives two quantities, which is enough to
+        // place a span.
         let schema = schema(
             "producer:OnlyDuration",
             [("dur", FieldType::Varint)],
@@ -1238,17 +1212,11 @@ mod tests {
                 roles::SPAN_DURATION,
             )],
         );
-        // The `schema` helper sets has_timestamp = true, so build one without.
-        let no_packed = SchemaEntry::with_annotations(
-            "producer:OnlyDuration",
-            /* has_timestamp */ false,
-            schema.fields().to_vec(),
-            schema.annotations().to_vec(),
-        );
-        assert!(matches!(
-            compile_single_event_span(&no_packed),
-            CompiledSingleEventSpan::Invalid(_)
-        ));
+        let CompiledSingleEventSpan::Layout(layout) = compile_single_event_span(&schema) else {
+            panic!("duration + packed end should be valid");
+        };
+        assert_eq!(layout.timing.duration.map(|f| f.index), Some(0));
+        assert!(layout.timing.start.is_none());
     }
 
     #[test]
@@ -1281,7 +1249,7 @@ mod tests {
         ));
         let mut encoder = Encoder::new();
         encoder
-            .write_event(&schema, &[FieldValue::Varint(500), FieldValue::Varint(120)])
+            .write_event(&schema, 500, &[FieldValue::Varint(120)])
             .unwrap();
         let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
         assert_eq!(decoded.single_event_spans.len(), 1);
@@ -1304,7 +1272,7 @@ mod tests {
         ));
         let mut encoder = Encoder::new();
         encoder
-            .write_event(&schema, &[FieldValue::Varint(100), FieldValue::Varint(999)])
+            .write_event(&schema, 100, &[FieldValue::Varint(999)])
             .unwrap();
         let decoded = decode_trace(&encoder.into_inner(), "source").unwrap();
         assert_eq!(decoded.single_event_spans.len(), 1);
@@ -1389,11 +1357,8 @@ mod tests {
         encoder
             .write_event(
                 &schema,
-                &[
-                    FieldValue::Varint(200),
-                    FieldValue::Varint(100),
-                    FieldValue::Varint(42),
-                ],
+                200,
+                &[FieldValue::Varint(100), FieldValue::Varint(42)],
             )
             .unwrap();
 
@@ -1428,8 +1393,8 @@ mod tests {
             encoder
                 .write_event(
                     &schema,
+                    200,
                     &[
-                        FieldValue::Varint(200),
                         FieldValue::Varint(100),
                         FieldValue::Varint(1_000),
                         FieldValue::Varint(200),

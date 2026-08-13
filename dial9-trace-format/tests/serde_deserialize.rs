@@ -71,11 +71,8 @@ fn varint_round_trip() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(1_000_000_000),
-            FieldValue::Varint(7),
-            FieldValue::Varint(42),
-        ],
+        1_000_000_000,
+        &[FieldValue::Varint(7), FieldValue::Varint(42)],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -109,14 +106,8 @@ fn pooled_string_resolves_to_string() {
             vec![FieldDef::new("label", FieldType::PooledString)],
         )
         .unwrap();
-    enc.write_event(
-        &schema,
-        &[
-            FieldValue::Varint(2_000),
-            FieldValue::PooledString(interned),
-        ],
-    )
-    .unwrap();
+    enc.write_event(&schema, 2_000, &[FieldValue::PooledString(interned)])
+        .unwrap();
     let bytes = enc.finish();
 
     let event: WithPool = decode_first(&bytes);
@@ -144,14 +135,8 @@ fn pooled_stack_frames_resolve_to_vec_u64() {
             vec![FieldDef::new("callchain", FieldType::PooledStackFrames)],
         )
         .unwrap();
-    enc.write_event(
-        &schema,
-        &[
-            FieldValue::Varint(5_000),
-            FieldValue::PooledStackFrames(stack),
-        ],
-    )
-    .unwrap();
+    enc.write_event(&schema, 5_000, &[FieldValue::PooledStackFrames(stack)])
+        .unwrap();
     let bytes = enc.finish();
 
     let event: WithStack = decode_first(&bytes);
@@ -172,10 +157,8 @@ fn inline_stack_frames_deserialize_as_vec_u64() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(6_000),
-            FieldValue::StackFrames(StackFrames::from(vec![1u64, 2, 3])),
-        ],
+        6_000,
+        &[FieldValue::StackFrames(StackFrames::from(vec![1u64, 2, 3]))],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -204,10 +187,8 @@ fn bytes_field_round_trip() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(6_500),
-            FieldValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
-        ],
+        6_500,
+        &[FieldValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -241,11 +222,8 @@ fn optional_fields_present() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(7_000),
-            FieldValue::PooledString(pooled),
-            FieldValue::Varint(99),
-        ],
+        7_000,
+        &[FieldValue::PooledString(pooled), FieldValue::Varint(99)],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -268,15 +246,8 @@ fn optional_fields_absent() {
             ],
         )
         .unwrap();
-    enc.write_event(
-        &schema,
-        &[
-            FieldValue::Varint(8_000),
-            FieldValue::None,
-            FieldValue::None,
-        ],
-    )
-    .unwrap();
+    enc.write_event(&schema, 8_000, &[FieldValue::None, FieldValue::None])
+        .unwrap();
     let bytes = enc.finish();
 
     let event: WithOption = decode_first(&bytes);
@@ -389,18 +360,12 @@ fn serde_other_catches_unknown_events() {
 
     enc.write_event(
         &known,
-        &[
-            FieldValue::Varint(10_000),
-            FieldValue::Varint(0),
-            FieldValue::Varint(1),
-        ],
+        10_000,
+        &[FieldValue::Varint(0), FieldValue::Varint(1)],
     )
     .unwrap();
-    enc.write_event(
-        &unknown,
-        &[FieldValue::Varint(11_000), FieldValue::Varint(99)],
-    )
-    .unwrap();
+    enc.write_event(&unknown, 11_000, &[FieldValue::Varint(99)])
+        .unwrap();
     let bytes = enc.finish();
 
     let events: Vec<OnlyKnown> = decode_all(&bytes);
@@ -445,11 +410,8 @@ fn missing_required_field_errors() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(12_000),
-            FieldValue::Varint(0),
-            FieldValue::Varint(1),
-        ],
+        12_000,
+        &[FieldValue::Varint(0), FieldValue::Varint(1)],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -556,8 +518,8 @@ fn float_bool_signed_round_trip() {
         .unwrap();
     enc.write_event(
         &schema,
+        13_000,
         &[
-            FieldValue::Varint(13_000),
             FieldValue::F64(std::f64::consts::PI),
             FieldValue::Bool(true),
             FieldValue::I64(-9_999),
@@ -599,11 +561,8 @@ fn option_field_absent_from_schema_defaults_to_none() {
             vec![FieldDef::new("worker_id", FieldType::Varint)],
         )
         .unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+        .unwrap();
     let bytes = enc.finish();
 
     let event: NewerStruct = decode_first(&bytes);
@@ -626,10 +585,8 @@ fn pooled_string_miss_returns_error() {
     // Write an event referencing pool ID 999 which was never interned.
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(1_000),
-            FieldValue::PooledString(InternedString::from_raw(999)),
-        ],
+        1_000,
+        &[FieldValue::PooledString(InternedString::from_raw(999))],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -660,10 +617,10 @@ fn pooled_stack_frames_miss_returns_error() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(2_000),
-            FieldValue::PooledStackFrames(InternedStackFrames::from_raw(999)),
-        ],
+        2_000,
+        &[FieldValue::PooledStackFrames(
+            InternedStackFrames::from_raw(999),
+        )],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -698,11 +655,8 @@ fn type_coercion_bool_from_varint_returns_error() {
         .register_schema("WantsBool", vec![FieldDef::new("flag", FieldType::Varint)])
         .unwrap();
     // Wire has a varint where the struct expects a bool.
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+        .unwrap();
     let bytes = enc.finish();
 
     let mut dec = Decoder::new(&bytes).expect("valid header");
@@ -739,13 +693,11 @@ fn dynamic_list_deserializes_to_vec() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(1_000),
-            FieldValue::List(vec![
-                FieldValue::String("hello".into()),
-                FieldValue::String("world".into()),
-            ]),
-        ],
+        1_000,
+        &[FieldValue::List(vec![
+            FieldValue::String("hello".into()),
+            FieldValue::String("world".into()),
+        ])],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -776,13 +728,11 @@ fn string_map_deserializes_to_hashmap() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(2_000),
-            FieldValue::StringMap(vec![
-                ("content-type".into(), "application/json".into()),
-                ("x-request-id".into(), "abc123".into()),
-            ]),
-        ],
+        2_000,
+        &[FieldValue::StringMap(vec![
+            ("content-type".into(), "application/json".into()),
+            ("x-request-id".into(), "abc123".into()),
+        ])],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -814,13 +764,11 @@ fn dynamic_map_deserializes_to_hashmap() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(3_000),
-            FieldValue::Map(vec![
-                (FieldValue::String("reads".into()), FieldValue::Varint(100)),
-                (FieldValue::String("writes".into()), FieldValue::Varint(42)),
-            ]),
-        ],
+        3_000,
+        &[FieldValue::Map(vec![
+            (FieldValue::String("reads".into()), FieldValue::Varint(100)),
+            (FieldValue::String("writes".into()), FieldValue::Varint(42)),
+        ])],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -858,16 +806,14 @@ fn dynamic_map_deserializes_to_struct() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(4_000),
-            FieldValue::Map(vec![
-                (FieldValue::String("status".into()), FieldValue::Varint(200)),
-                (
-                    FieldValue::String("path".into()),
-                    FieldValue::String("/api/users".into()),
-                ),
-            ]),
-        ],
+        4_000,
+        &[FieldValue::Map(vec![
+            (FieldValue::String("status".into()), FieldValue::Varint(200)),
+            (
+                FieldValue::String("path".into()),
+                FieldValue::String("/api/users".into()),
+            ),
+        ])],
     )
     .unwrap();
     let bytes = enc.finish();
@@ -907,13 +853,11 @@ fn string_map_deserializes_to_vec_of_tuples() {
         .unwrap();
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(5_000),
-            FieldValue::StringMap(vec![
-                ("content-type".into(), "application/json".into()),
-                ("x-request-id".into(), "abc123".into()),
-            ]),
-        ],
+        5_000,
+        &[FieldValue::StringMap(vec![
+            ("content-type".into(), "application/json".into()),
+            ("x-request-id".into(), "abc123".into()),
+        ])],
     )
     .unwrap();
     let bytes = enc.finish();

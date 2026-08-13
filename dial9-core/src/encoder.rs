@@ -68,8 +68,8 @@ impl ThreadLocalEncoder<'_> {
 
     /// Write an event with a dynamically-registered schema.
     ///
-    /// The first element of `values` must be `FieldValue::Varint(timestamp_ns)`.
-    /// The remaining values must match the schema's field definitions in order.
+    /// `timestamp_ns` is the event's monotonic clock timestamp.
+    /// `values` must match the schema's field definitions in order (excluding the timestamp).
     /// The schema is auto-registered on first use per buffer flush cycle.
     ///
     /// # Example
@@ -77,13 +77,11 @@ impl ThreadLocalEncoder<'_> {
     /// ```ignore
     /// use dial9_trace_format::types::FieldValue;
     ///
-    /// enc.write_event(&schema, &[
-    ///     FieldValue::Varint(timestamp_ns),  // must be first
+    /// enc.write_event(&schema, timestamp_ns, &[
     ///     FieldValue::Varint(worker_id),
     ///     FieldValue::PooledString(enc.intern_string("hello")),
     /// ]);
     /// ```
-    // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
     #[doc(hidden)]
     /// Errors on validation failure; the event is dropped and the calling
     /// thread is never panicked. The caller decides whether and how to
@@ -92,9 +90,10 @@ impl ThreadLocalEncoder<'_> {
     pub fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
+        timestamp_ns: u64,
         values: &[dial9_trace_format::types::FieldValue],
     ) -> std::io::Result<()> {
-        self.encoder.write_event(schema, values)?;
+        self.encoder.write_event(schema, timestamp_ns, values)?;
         *self.events_written += 1;
         Ok(())
     }

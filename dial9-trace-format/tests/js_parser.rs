@@ -46,8 +46,9 @@ fn js_decodes_all_field_types() {
     let pool_id = enc.intern_string("hello").unwrap();
     enc.write_event(
         &tid,
+        1_000_000,
         &[
-            FieldValue::Varint(1_000_000), // timestamp
+            // timestamp
             FieldValue::Varint(42),
             FieldValue::I64(-7),
             FieldValue::F64(std::f64::consts::PI),
@@ -82,8 +83,9 @@ fn js_decodes_all_field_types() {
             .unwrap();
         ext.write_event(
             &sym_schema,
+            0,
             &[
-                FieldValue::Varint(0), // timestamp
+                // timestamp
                 FieldValue::Varint(0x1000),
                 FieldValue::Varint(256),
                 FieldValue::PooledString(pool_id),
@@ -139,11 +141,8 @@ fn js_decodes_truncated_trace_gracefully() {
         .unwrap();
     // Write two events so the first one is fully decodable.
     for i in 0..2u64 {
-        enc.write_event(
-            &tid,
-            &[FieldValue::Varint(i * 1_000_000), FieldValue::Varint(i)],
-        )
-        .unwrap();
+        enc.write_event(&tid, i * 1_000_000, &[FieldValue::Varint(i)])
+            .unwrap();
     }
     let full = enc.finish();
 
@@ -173,14 +172,8 @@ fn js_decodes_multiple_events() {
         .register_schema("Tick", vec![FieldDef::new("ts", FieldType::Varint)])
         .unwrap();
     for i in 0..5u64 {
-        enc.write_event(
-            &tid,
-            &[
-                FieldValue::Varint(i * 1_000_000),
-                FieldValue::Varint(i * 1000),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&tid, i * 1_000_000, &[FieldValue::Varint(i * 1000)])
+            .unwrap();
     }
     let data = enc.finish();
     let json = js_decode(&data);
@@ -209,24 +202,14 @@ fn js_decodes_optional_pooled_string() {
     let name_id = enc.intern_string("hello").unwrap();
     enc.write_event(
         &tid,
-        &[
-            FieldValue::Varint(1_000_000),
-            FieldValue::Varint(42),
-            FieldValue::PooledString(name_id),
-        ],
+        1_000_000,
+        &[FieldValue::Varint(42), FieldValue::PooledString(name_id)],
     )
     .unwrap();
 
     // Event with None
-    enc.write_event(
-        &tid,
-        &[
-            FieldValue::Varint(2_000_000),
-            FieldValue::Varint(99),
-            FieldValue::None,
-        ],
-    )
-    .unwrap();
+    enc.write_event(&tid, 2_000_000, &[FieldValue::Varint(99), FieldValue::None])
+        .unwrap();
 
     let data = enc.finish();
     let json = js_decode(&data);
@@ -262,8 +245,8 @@ fn js_decodes_pooled_stack_frames() {
 
     enc.write_event(
         &tid,
+        1_000_000,
         &[
-            FieldValue::Varint(1_000_000),
             FieldValue::Varint(1),
             FieldValue::PooledStackFrames(stack_a),
         ],
@@ -271,8 +254,8 @@ fn js_decodes_pooled_stack_frames() {
     .unwrap();
     enc.write_event(
         &tid,
+        2_000_000,
         &[
-            FieldValue::Varint(2_000_000),
             FieldValue::Varint(2),
             FieldValue::PooledStackFrames(stack_b),
         ],
@@ -280,8 +263,8 @@ fn js_decodes_pooled_stack_frames() {
     .unwrap();
     enc.write_event(
         &tid,
+        3_000_000,
         &[
-            FieldValue::Varint(3_000_000),
             FieldValue::Varint(3),
             FieldValue::PooledStackFrames(stack_a),
         ],
@@ -337,15 +320,9 @@ fn js_decodes_optional_pooled_stack_frames() {
         .unwrap();
 
     let stack = enc.intern_stack_frames(&[0xAAAA, 0xBBBB]).unwrap();
-    enc.write_event(
-        &tid,
-        &[
-            FieldValue::Varint(1_000_000),
-            FieldValue::PooledStackFrames(stack),
-        ],
-    )
-    .unwrap();
-    enc.write_event(&tid, &[FieldValue::Varint(2_000_000), FieldValue::None])
+    enc.write_event(&tid, 1_000_000, &[FieldValue::PooledStackFrames(stack)])
+        .unwrap();
+    enc.write_event(&tid, 2_000_000, &[FieldValue::None])
         .unwrap();
 
     let data = enc.finish();
@@ -386,8 +363,7 @@ fn js_decodes_dynamic_list_and_map() {
         FieldValue::String("key".into()),
         FieldValue::Varint(99),
     )]);
-    enc.write_event(&tid, &[FieldValue::Varint(1000), list, map])
-        .unwrap();
+    enc.write_event(&tid, 1000, &[list, map]).unwrap();
 
     let data = enc.finish();
     let json = js_decode(&data);

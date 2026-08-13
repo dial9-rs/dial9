@@ -58,7 +58,7 @@ impl<E: fmt::Display + fmt::Debug> std::error::Error for TryForEachError<E> {}
 pub struct RawEvent<'a, 'f> {
     pub type_id: WireTypeId,
     pub name: &'f str,
-    pub timestamp_ns: Option<u64>,
+    pub timestamp_ns: u64,
     pub fields: &'f [FieldValueRef<'a>],
     pub schema: &'f SchemaEntry,
     pub string_pool: &'f StringPool,
@@ -77,8 +77,7 @@ impl<'a, 'f> RawEvent<'a, 'f> {
     ///
     /// 1. `"event"` → the schema name (the discriminant for
     ///    `#[serde(tag = "event")]`).
-    /// 2. `"timestamp_ns"` → the absolute frame-header timestamp (only if
-    ///    the schema has `has_timestamp = true`).
+    /// 2. `"timestamp_ns"` → the absolute frame-header timestamp.
     /// 3. One entry per schema field, keyed by field name.
     ///
     /// Pool-resolved values appear as their resolved form: `PooledString`
@@ -166,8 +165,8 @@ pub enum DecodedFrame {
     Schema(SchemaEntry),
     Event {
         type_id: WireTypeId,
-        /// Absolute timestamp in nanoseconds, if the schema has `has_timestamp`.
-        timestamp_ns: Option<u64>,
+        /// Absolute timestamp in nanoseconds.
+        timestamp_ns: u64,
         values: Vec<crate::types::FieldValue>,
     },
     StringPool(Vec<PoolEntry>),
@@ -184,7 +183,7 @@ pub enum DecodedFrameRef<'a> {
     Schema(SchemaEntry),
     Event {
         type_id: WireTypeId,
-        timestamp_ns: Option<u64>,
+        timestamp_ns: u64,
         values: Vec<FieldValueRef<'a>>,
     },
     StringPool(Vec<PoolEntryRef<'a>>),
@@ -199,6 +198,8 @@ struct SchemaCache {
     entry: SchemaEntry,
     /// Raw field type tags for fast decode (avoids re-extracting from entry.fields).
     field_tags: Vec<u8>,
+    /// Whether the on-wire schema byte indicated a packed timestamp.
+    has_timestamp_on_wire: bool,
 }
 
 /// Streaming trace file decoder.
@@ -308,11 +309,16 @@ impl<'a> Decoder<'a> {
             .and_then(|s| s.as_ref())
             .map(|c| SchemaInfo {
                 field_tags: &c.field_tags,
-                has_timestamp: c.entry.has_timestamp,
+                has_timestamp_on_wire: c.has_timestamp_on_wire,
             })
     }
 
-    fn register_schema(&mut self, type_id: WireTypeId, entry: SchemaEntry) -> Result<(), String> {
+    fn register_schema(
+        &mut self,
+        type_id: WireTypeId,
+        entry: SchemaEntry,
+        has_timestamp_on_wire: bool,
+    ) -> Result<(), String> {
         let idx = type_id.0 as usize;
         if idx >= self.schema_cache.len() {
             self.schema_cache.resize_with(idx + 1, || None);
@@ -320,6 +326,7 @@ impl<'a> Decoder<'a> {
         self.schema_cache[idx] = Some(SchemaCache {
             field_tags: entry.fields.iter().map(|f| f.field_type as u8).collect(),
             entry: entry.clone(),
+            has_timestamp_on_wire,
         });
         self.registry.register(type_id, entry)
     }
@@ -343,9 +350,13 @@ impl<'a> Decoder<'a> {
             };
         self.pos += consumed;
         match frame {
-            Frame::Schema { type_id, entry } => {
+            Frame::Schema {
+                type_id,
+                entry,
+                has_timestamp_on_wire,
+            } => {
                 let result = DecodedFrame::Schema(entry.clone());
-                self.register_schema(type_id, entry)
+                self.register_schema(type_id, entry, has_timestamp_on_wire)
                     .map_err(|msg| DecodeError {
                         pos: self.pos,
                         message: msg,
@@ -357,9 +368,7 @@ impl<'a> Decoder<'a> {
                 timestamp_ns,
                 values,
             } => {
-                if let Some(ts) = timestamp_ns {
-                    self.timestamp_base_ns = ts;
-                }
+                self.timestamp_base_ns = timestamp_ns;
                 Ok(Some(DecodedFrame::Event {
                     type_id,
                     timestamp_ns,
@@ -435,9 +444,13 @@ impl<'a> Decoder<'a> {
             };
         self.pos += consumed;
         match frame {
-            FrameRef::Schema { type_id, entry } => {
+            FrameRef::Schema {
+                type_id,
+                entry,
+                has_timestamp_on_wire,
+            } => {
                 let result = DecodedFrameRef::Schema(entry.clone());
-                self.register_schema(type_id, entry)
+                self.register_schema(type_id, entry, has_timestamp_on_wire)
                     .map_err(|msg| DecodeError {
                         pos: self.pos,
                         message: msg,
@@ -449,9 +462,7 @@ impl<'a> Decoder<'a> {
                 timestamp_ns,
                 values,
             } => {
-                if let Some(ts) = timestamp_ns {
-                    self.timestamp_base_ns = ts;
-                }
+                self.timestamp_base_ns = timestamp_ns;
                 Ok(Some(DecodedFrameRef::Event {
                     type_id,
                     timestamp_ns,
@@ -573,11 +584,11 @@ impl<'a> Decoder<'a> {
                         }
                     };
 
-                    let timestamp_ns = if cache.entry.has_timestamp {
+                    let timestamp_ns = if cache.has_timestamp_on_wire {
                         match codec::decode_u24_le(&remaining[pos..]) {
                             Some(delta) => {
                                 pos += 3;
-                                Some(self.timestamp_base_ns + delta as u64)
+                                self.timestamp_base_ns + delta as u64
                             }
                             None => {
                                 return Err(TryForEachError::Decode(DecodeError {
@@ -587,7 +598,8 @@ impl<'a> Decoder<'a> {
                             }
                         }
                     } else {
-                        None
+                        // Legacy schema without packed timestamp: use the current base.
+                        self.timestamp_base_ns
                     };
 
                     values_buf.clear();
@@ -657,9 +669,7 @@ impl<'a> Decoder<'a> {
                             ..
                         } = self;
                         *self_pos += pos;
-                        if let Some(ts) = timestamp_ns {
-                            *timestamp_base_ns = ts;
-                        }
+                        *timestamp_base_ns = timestamp_ns;
                     }
                     f(RawEvent {
                         type_id,
@@ -787,11 +797,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+            .unwrap();
         let data = enc.finish();
 
         let mut dec = Decoder::new(&data).unwrap();
@@ -828,11 +835,8 @@ mod tests {
             )
             .unwrap();
         for i in 0..10u64 {
-            enc.write_event(
-                &schema,
-                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
-            )
-            .unwrap();
+            enc.write_event(&schema, i * 1000, &[FieldValue::Varint(i)])
+                .unwrap();
         }
         let data = enc.finish();
 
@@ -859,11 +863,8 @@ mod tests {
             )
             .unwrap();
         for i in 0..3u64 {
-            enc.write_event(
-                &schema,
-                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
-            )
-            .unwrap();
+            enc.write_event(&schema, i * 1000, &[FieldValue::Varint(i)])
+                .unwrap();
         }
         let data = enc.finish();
 
@@ -888,11 +889,8 @@ mod tests {
             )
             .unwrap();
         for i in 0..10u64 {
-            enc.write_event(
-                &schema,
-                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
-            )
-            .unwrap();
+            enc.write_event(&schema, i * 1000, &[FieldValue::Varint(i)])
+                .unwrap();
         }
         let data = enc.finish();
 
@@ -917,16 +915,10 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-        )
-        .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(2_000), FieldValue::Varint(99)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+            .unwrap();
+        enc.write_event(&schema, 2_000, &[FieldValue::Varint(99)])
+            .unwrap();
         let data = enc.finish();
 
         let mut dec = Decoder::new(&data).unwrap();
@@ -951,11 +943,8 @@ mod tests {
             )
             .unwrap();
         for i in 0..5u64 {
-            enc.write_event(
-                &schema,
-                &[FieldValue::Varint(i * 1000), FieldValue::Varint(i)],
-            )
-            .unwrap();
+            enc.write_event(&schema, i * 1000, &[FieldValue::Varint(i)])
+                .unwrap();
         }
         let data = enc.finish();
 

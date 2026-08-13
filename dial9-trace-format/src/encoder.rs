@@ -118,7 +118,6 @@ impl Schema {
         Self {
             entry: Arc::new(SchemaEntry {
                 name: name.to_string(),
-                has_timestamp: true,
                 fields,
                 annotations: Vec::new(),
             }),
@@ -391,10 +390,6 @@ impl<W: Write> Encoder<W> {
     /// passed to [`write_event`](Self::write_event) (on this or any other
     /// encoder).
     ///
-    /// All schemas have timestamps. When writing events, the first element of
-    /// `values` must be `FieldValue::Varint(timestamp_ns)`. It is extracted and
-    /// encoded in the event header (not as a regular field).
-    ///
     /// Eagerly writes the schema frame. Idempotent if the definition matches.
     pub fn register_schema(
         &mut self,
@@ -416,9 +411,9 @@ impl<W: Write> Encoder<W> {
 
     /// Write an event for a schema.
     ///
-    /// The first element of `values` must be `FieldValue::Varint(timestamp_ns)`
-    /// — it is extracted and encoded in the event header, not as a regular
-    /// field. The remaining values must match the schema's field count.
+    /// `timestamp_ns` is the event's monotonic nanosecond timestamp, encoded
+    /// in the event frame header. `values` must match the schema's field count
+    /// exactly — the timestamp is not included in values.
     ///
     /// If this encoder hasn't seen `schema` before, it is auto-registered
     /// (the schema frame is written before the event).
@@ -431,42 +426,30 @@ impl<W: Write> Encoder<W> {
     pub fn write_event(
         &mut self,
         schema: &Schema,
+        timestamp_ns: u64,
         values: &[crate::types::FieldValue],
     ) -> io::Result<()> {
-        use crate::types::FieldValue;
-
         let type_id = self.ensure_registered(schema)?;
         let expected_fields = schema.entry.fields.len();
 
-        let ts_ns = match values.first() {
-            Some(FieldValue::Varint(ns)) => *ns,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "first value must be FieldValue::Varint(timestamp_ns)",
-                ));
-            }
-        };
-        let field_values = &values[1..];
-
-        if field_values.len() != expected_fields {
+        if values.len() != expected_fields {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "value count ({}) does not match schema field count ({}) for schema '{}'",
-                    field_values.len(),
+                    values.len(),
                     expected_fields,
                     schema.name(),
                 ),
             ));
         }
 
-        let ts_delta = self.state.encode_timestamp_delta(ts_ns)?;
+        let ts_delta = self.state.encode_timestamp_delta(timestamp_ns)?;
         self.state.writer.write_all(&[codec::TAG_EVENT])?;
         self.state.writer.write_all(&type_id.0.to_le_bytes())?;
         codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
         let mut enc = EventEncoder::new(&mut self.state);
-        for (i, v) in field_values.iter().enumerate() {
+        for (i, v) in values.iter().enumerate() {
             enc.write_field_value(v, schema.entry.fields[i].field_type)?;
         }
         Ok(())
@@ -693,11 +676,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+            .unwrap();
         let data = enc.finish();
         assert!(data.len() > 5);
     }
@@ -750,11 +730,8 @@ mod tests {
 
         // Write to an encoder that hasn't seen this schema — auto-registers
         let mut enc = Encoder::new();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+            .unwrap();
 
         let bytes = enc.finish();
         let mut dec = Decoder::new(&bytes).unwrap();
@@ -781,12 +758,12 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc1.write_event(&schema, &[FieldValue::Varint(1_000), FieldValue::Varint(1)])
+        enc1.write_event(&schema, 1_000, &[FieldValue::Varint(1)])
             .unwrap();
 
         // Pass the same Schema to a different encoder
         let mut enc2 = Encoder::new();
-        enc2.write_event(&schema, &[FieldValue::Varint(2_000), FieldValue::Varint(2)])
+        enc2.write_event(&schema, 2_000, &[FieldValue::Varint(2)])
             .unwrap();
 
         // Both encoders produce valid output
@@ -868,14 +845,8 @@ mod tests {
             .unwrap();
         let stack: &[u64] = &[0x1234, 0x5678, 0x9abc];
         let id = enc.intern_stack_frames(stack).unwrap();
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(1_000_000),
-                FieldValue::PooledStackFrames(id),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000_000, &[FieldValue::PooledStackFrames(id)])
+            .unwrap();
         let bytes = enc.finish();
 
         let mut dec = Decoder::new(&bytes).unwrap();
@@ -983,13 +954,13 @@ mod tests {
         let ts2 = 50_000u64;
         let ts3 = 200_000_000u64;
         let ts4 = 100_000_000u64;
-        enc.write_event(&schema, &[FieldValue::Varint(ts1), FieldValue::Varint(1)])
+        enc.write_event(&schema, ts1, &[FieldValue::Varint(1)])
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(ts2), FieldValue::Varint(2)])
+        enc.write_event(&schema, ts2, &[FieldValue::Varint(2)])
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(ts3), FieldValue::Varint(3)])
+        enc.write_event(&schema, ts3, &[FieldValue::Varint(3)])
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(ts4), FieldValue::Varint(4)])
+        enc.write_event(&schema, ts4, &[FieldValue::Varint(4)])
             .unwrap();
 
         let bytes = enc.finish();
@@ -1008,13 +979,13 @@ mod tests {
             .collect();
 
         assert_eq!(events.len(), 4);
-        assert_eq!(events[0].0, Some(ts1));
+        assert_eq!(events[0].0, ts1);
         assert_eq!(events[0].1, vec![FieldValue::Varint(1)]);
-        assert_eq!(events[1].0, Some(ts2));
+        assert_eq!(events[1].0, ts2);
         assert_eq!(events[1].1, vec![FieldValue::Varint(2)]);
-        assert_eq!(events[2].0, Some(ts3));
+        assert_eq!(events[2].0, ts3);
         assert_eq!(events[2].1, vec![FieldValue::Varint(3)]);
-        assert_eq!(events[3].0, Some(ts4));
+        assert_eq!(events[3].0, ts4);
         assert_eq!(events[3].1, vec![FieldValue::Varint(4)]);
     }
 
@@ -1042,7 +1013,7 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(1_000), FieldValue::Varint(1)])
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(1)])
             .unwrap();
         let base = enc.finish();
 
@@ -1052,7 +1023,7 @@ mod tests {
         let mut output = Vec::new();
         let mut ext = decoder.into_encoder(&mut output);
         // Schema "Ev" is already known — no duplicate schema frame emitted
-        ext.write_event(&schema, &[FieldValue::Varint(2_000), FieldValue::Varint(2)])
+        ext.write_event(&schema, 2_000, &[FieldValue::Varint(2)])
             .unwrap();
         drop(ext);
 
@@ -1073,8 +1044,8 @@ mod tests {
             })
             .collect();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0, Some(1_000));
-        assert_eq!(events[1].0, Some(2_000));
+        assert_eq!(events[0].0, 1_000);
+        assert_eq!(events[1].0, 2_000);
     }
 
     #[test]
@@ -1151,11 +1122,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(
-            &dynamic,
-            &[FieldValue::Varint(2_000), FieldValue::Varint(1)],
-        )
-        .unwrap();
+        enc.write_event(&dynamic, 2_000, &[FieldValue::Varint(1)])
+            .unwrap();
         let bytes = enc.finish();
 
         let mut dec = Decoder::new(&bytes).unwrap();
@@ -1198,11 +1166,8 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(1_000_000),
-                FieldValue::Varint(42),
-                FieldValue::String("hello".into()),
-            ],
+            1_000_000,
+            &[FieldValue::Varint(42), FieldValue::String("hello".into())],
         )
         .unwrap();
 
@@ -1221,7 +1186,7 @@ mod tests {
             })
             .collect();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, Some(1_000_000));
+        assert_eq!(events[0].0, 1_000_000);
         assert_eq!(events[0].1[0], FieldValue::Varint(42));
         assert_eq!(events[0].1[1], FieldValue::String("hello".into()));
     }
@@ -1260,14 +1225,7 @@ mod tests {
             )
             .unwrap();
         // Pass 3 values (ts + 2 fields) for a 1-field schema
-        let result = enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(0),
-                FieldValue::Varint(1),
-                FieldValue::Varint(2),
-            ],
-        );
+        let result = enc.write_event(&schema, 0, &[FieldValue::Varint(1), FieldValue::Varint(2)]);
         assert!(result.is_err());
     }
 
@@ -1290,9 +1248,9 @@ mod tests {
 
         let ts1 = 12_000_000u64;
         let ts2 = 24_000_000u64;
-        enc.write_event(&schema, &[FieldValue::Varint(ts1), FieldValue::Varint(1)])
+        enc.write_event(&schema, ts1, &[FieldValue::Varint(1)])
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(ts2), FieldValue::Varint(2)])
+        enc.write_event(&schema, ts2, &[FieldValue::Varint(2)])
             .unwrap();
 
         let bytes = enc.finish();
@@ -1308,7 +1266,7 @@ mod tests {
             .decode_all()
             .into_iter()
             .filter_map(|f| match f {
-                DecodedFrame::Event { timestamp_ns, .. } => timestamp_ns,
+                DecodedFrame::Event { timestamp_ns, .. } => Some(timestamp_ns),
                 _ => None,
             })
             .collect();
@@ -1344,11 +1302,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+            .unwrap();
         let _s = enc.intern_string("hello").unwrap();
 
         let old_bytes_written = enc.bytes_written();
@@ -1382,11 +1337,8 @@ mod tests {
 
         // Invariant 3: schemas are cleared — same schema must re-register
         // (write_event auto-registers, so we verify a new schema frame appears)
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(2_000), FieldValue::Varint(99)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 2_000, &[FieldValue::Varint(99)])
+            .unwrap();
 
         // Invariant 4: string pool is cleared — re-interning emits a new pool frame
         let _s2 = enc.intern_string("hello").unwrap();
@@ -1421,7 +1373,7 @@ mod tests {
                 _ => None,
             })
             .expect("new trace must contain event");
-        assert_eq!(*event.0, Some(2_000));
+        assert_eq!(*event.0, 2_000);
         assert_eq!(event.1[0], FieldValue::Varint(99));
     }
 
@@ -1437,11 +1389,8 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-        )
-        .unwrap();
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+            .unwrap();
 
         let bytes_before = enc.bytes_written();
         assert!(bytes_before > 0);
@@ -1486,14 +1435,14 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(1_000), FieldValue::Varint(1)])
+        enc.write_event(&schema, 1_000, &[FieldValue::Varint(1)])
             .unwrap();
 
         // Build a raw batch with the same schema
         let raw_batch = {
             let mut batch_enc = Encoder::new();
             batch_enc
-                .write_event(&schema, &[FieldValue::Varint(2_000), FieldValue::Varint(2)])
+                .write_event(&schema, 2_000, &[FieldValue::Varint(2)])
                 .unwrap();
             batch_enc.finish()
         };
@@ -1517,9 +1466,9 @@ mod tests {
             .collect();
 
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0, Some(1_000));
+        assert_eq!(events[0].0, 1_000);
         assert_eq!(events[0].1, vec![FieldValue::Varint(1)]);
-        assert_eq!(events[1].0, Some(2_000));
+        assert_eq!(events[1].0, 2_000);
         assert_eq!(events[1].1, vec![FieldValue::Varint(2)]);
     }
 }
@@ -1533,7 +1482,6 @@ mod dynamic_schema_cache_tests {
     fn schema(name: &str) -> Schema {
         Schema::from_entry(SchemaEntry::new(
             name,
-            /* has_timestamp */ true,
             vec![FieldDef::new("v", FieldType::Varint)],
         ))
     }
@@ -1580,11 +1528,8 @@ mod dynamic_schema_cache_tests {
         for i in 0..(DYNAMIC_SCHEMA_CACHE_LIMIT + 3) {
             let s = schema("Ev");
             // Timestamp plus the one schema field.
-            enc.write_event(
-                &s,
-                &[FieldValue::Varint(i as u64), FieldValue::Varint(i as u64)],
-            )
-            .unwrap();
+            enc.write_event(&s, i as u64, &[FieldValue::Varint(i as u64)])
+                .unwrap();
         }
         let data = enc.finish();
         let mut decoder = crate::decoder::Decoder::new(&data).unwrap();
