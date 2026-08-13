@@ -351,6 +351,18 @@ impl MemFs {
         }
     }
 
+    /// Test-only: override the creation epoch of a queued slot so tests can
+    /// pin a deterministic value instead of whatever real time `seal()`
+    /// stamped it with (needed for shuttle's determinism replay, which
+    /// requires every value a scenario branches on to be reproducible).
+    #[cfg(all(test, feature = "pipeline"))]
+    pub(super) fn set_epoch_secs_for_test(&self, index: u32, epoch_secs: u64) {
+        let mut q = self.channel.queue.lock().unwrap();
+        for s in q.segments.iter_mut().filter(|s| s.index == index) {
+            s.epoch_secs = epoch_secs;
+        }
+    }
+
     pub(super) fn mark_writer_done(&self) {
         self.channel.writer_done.store(true, Ordering::Release);
         self.channel.notify.notify_one();

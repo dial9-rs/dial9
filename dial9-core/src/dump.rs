@@ -222,6 +222,30 @@ impl DumpTrigger {
         self.request(Lookback::Window(lookback), lookforward)
     }
 
+    /// Test-only: like [`dump_current_data`](Self::dump_current_data), but
+    /// with an explicit `triggered_at` instead of the real clock. Needed for
+    /// shuttle's determinism replay, which requires every value a scenario
+    /// branches on (here, the epoch-window match) to be reproducible --
+    /// skips the debounce gate too, since it isn't exercised by anything
+    /// that currently needs this.
+    #[cfg(test)]
+    pub(crate) fn dump_current_data_at_for_test(&self, triggered_at: SystemTime) -> DumpRun<'_> {
+        let (receipt_tx, receipt_rx) = oneshot::channel();
+        DumpRun {
+            request: Some(DumpRequest {
+                id: DumpId::new(),
+                triggered_at,
+                lookback: Lookback::Unbounded,
+                lookforward: Duration::ZERO,
+                metadata: Vec::new(),
+                receipt_tx,
+            }),
+            tx: &self.tx,
+            receipt_rx: Some(receipt_rx),
+            preempt: None,
+        }
+    }
+
     fn request(&self, lookback: Lookback, lookforward: Duration) -> DumpRun<'_> {
         let id = DumpId::new();
 

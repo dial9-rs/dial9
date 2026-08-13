@@ -36,6 +36,16 @@ impl SegmentProcessor for CountingProcessor {
 const WRITERS: usize = 3;
 const SEGMENTS_PER_WRITER: u32 = 2;
 
+/// Fixed creation epoch every `spawn_writers` segment gets pinned to via
+/// `set_epoch_secs_for_test`, so scenarios matching segments against a dump
+/// window (epoch-based) get a reproducible value instead of whatever real
+/// time `seal()` stamped it with -- shuttle's determinism replay requires
+/// every value a scenario branches on to be reproducible. Only
+/// `shuttle_dump_resolves_exactly_once` reads this; `shuttle_worker_handoff`
+/// never looks at a segment's epoch at all, so pinning it there too is a
+/// no-op for that scenario.
+const FIXED_EPOCH_SECS_FOR_TEST: u64 = 1_000;
+
 /// Spawns `WRITERS` threads, each sealing `SEGMENTS_PER_WRITER` segments
 /// into `fs` with globally unique indices. Shared by every scenario in this
 /// module that needs writer threads racing a worker/trigger. Takes the
@@ -51,6 +61,7 @@ fn spawn_writers(fs: Arc<Fs>) -> Vec<crate::primitives::thread::JoinHandle<()>> 
                     let mut h = fs.create_segment(Path::new("trace")).unwrap();
                     h.write_all(b"x").unwrap();
                     fs.seal(h, Path::new("trace"), index).unwrap();
+                    fs.set_epoch_secs_for_test(index, FIXED_EPOCH_SECS_FOR_TEST);
                 }
             })
         })
@@ -130,6 +141,12 @@ crate::shuttle_test! {
     // seal segments concurrently with a single on-demand dump request; the dump
     // must resolve exactly once, whether or not any segments landed in its
     // window before the worker matched it.
+    //
+    // `dump_current_data_at_for_test`/`set_epoch_secs_for_test` pin `triggered_at`
+    // and every segment's epoch to the same fixed value instead of reading the
+    // real clock, which shuttle's determinism replay requires. That means this
+    // scenario verifies the resolve-exactly-once race itself, not the real
+    // clock-read/epoch-stamping code path under concurrency.
     fn shuttle_dump_resolves_exactly_once() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
         let processed = Arc::new(AtomicUsize::new(0));
@@ -144,7 +161,9 @@ crate::shuttle_test! {
         // relies on that to know no more requests are ever coming.
         let trigger_handle = crate::primitives::thread::spawn(move || {
             shuttle::future::block_on(async move {
-                let receipt = trigger.dump_current_data().await;
+                let triggered_at = std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(FIXED_EPOCH_SECS_FOR_TEST);
+                let receipt = trigger.dump_current_data_at_for_test(triggered_at).await;
                 assert!(
                     receipt.is_ok(),
                     "an on-demand dump request must resolve successfully: {receipt:?}"

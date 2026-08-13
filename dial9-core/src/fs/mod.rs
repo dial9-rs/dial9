@@ -455,6 +455,16 @@ impl Fs {
             Fs::Disk(_) => panic!("set_seal_secs_for_test is memory-only"),
         }
     }
+
+    /// Test-only: override the creation epoch of a queued memory slot --
+    /// see `MemFs::set_epoch_secs_for_test`.
+    #[cfg(all(test, feature = "pipeline"))]
+    pub(crate) fn set_epoch_secs_for_test(&self, index: u32, epoch_secs: u64) {
+        match self {
+            Fs::Mem(m) => m.set_epoch_secs_for_test(index, epoch_secs),
+            Fs::Disk(_) => panic!("set_epoch_secs_for_test is memory-only"),
+        }
+    }
 }
 
 #[cfg(all(test, feature = "pipeline"))]
