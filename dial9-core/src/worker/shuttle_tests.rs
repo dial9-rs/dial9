@@ -36,6 +36,27 @@ impl SegmentProcessor for CountingProcessor {
 const WRITERS: usize = 3;
 const SEGMENTS_PER_WRITER: u32 = 2;
 
+/// Spawns `WRITERS` threads, each sealing `SEGMENTS_PER_WRITER` segments
+/// into `fs` with globally unique indices. Shared by every scenario in this
+/// module that needs writer threads racing a worker/trigger. Takes the
+/// `Arc<Fs>` by value (callers pass a clone) rather than by reference, so
+/// each iteration's `fs.clone()` unambiguously bumps the `Arc` refcount.
+fn spawn_writers(fs: Arc<Fs>) -> Vec<crate::primitives::thread::JoinHandle<()>> {
+    (0..WRITERS)
+        .map(|w| {
+            let fs = fs.clone();
+            crate::primitives::thread::spawn(move || {
+                for i in 0..SEGMENTS_PER_WRITER {
+                    let index = w as u32 * SEGMENTS_PER_WRITER + i;
+                    let mut h = fs.create_segment(Path::new("trace")).unwrap();
+                    h.write_all(b"x").unwrap();
+                    fs.seal(h, Path::new("trace"), index).unwrap();
+                }
+            })
+        })
+        .collect()
+}
+
 crate::shuttle_test! {
     num_iters = 2_000, depth = 3;
     // Multiple writer threads seal segments into an in-memory `Fs`
@@ -46,19 +67,7 @@ crate::shuttle_test! {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
         let processed = Arc::new(AtomicUsize::new(0));
 
-        let writers: Vec<_> = (0..WRITERS)
-            .map(|w| {
-                let fs = fs.clone();
-                crate::primitives::thread::spawn(move || {
-                    for i in 0..SEGMENTS_PER_WRITER {
-                        let index = w as u32 * SEGMENTS_PER_WRITER + i;
-                        let mut h = fs.create_segment(Path::new("trace")).unwrap();
-                        h.write_all(b"x").unwrap();
-                        fs.seal(h, Path::new("trace"), index).unwrap();
-                    }
-                })
-            })
-            .collect();
+        let writers = spawn_writers(fs.clone());
 
         let worker_fs = fs.clone();
         let worker_processed = processed.clone();
@@ -125,19 +134,7 @@ crate::shuttle_test! {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
         let processed = Arc::new(AtomicUsize::new(0));
 
-        let writers: Vec<_> = (0..WRITERS)
-            .map(|w| {
-                let fs = fs.clone();
-                crate::primitives::thread::spawn(move || {
-                    for i in 0..SEGMENTS_PER_WRITER {
-                        let index = w as u32 * SEGMENTS_PER_WRITER + i;
-                        let mut h = fs.create_segment(Path::new("trace")).unwrap();
-                        h.write_all(b"x").unwrap();
-                        fs.seal(h, Path::new("trace"), index).unwrap();
-                    }
-                })
-            })
-            .collect();
+        let writers = spawn_writers(fs.clone());
 
         let (trigger, rx) = crate::dump::channel();
 
