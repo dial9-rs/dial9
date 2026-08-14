@@ -29,18 +29,15 @@ pub use recorder_tokio::{
 use handle::InstrumentedSpawnGuard;
 
 use dial9_core::handle::{clear_tl_handle, set_tl_handle};
-use runtime_context::{make_worker_park, make_worker_unpark};
 
 use crate::primitives::sync::Arc;
-#[cfg(tokio_unstable)]
-use crate::telemetry::format::TaskTerminateEvent;
 #[cfg(tokio_unstable)]
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(tokio_unstable)]
 use handle::INSTRUMENTED_SPAWN;
 #[cfg(not(tokio_unstable))]
 pub(crate) use recorder_tokio::current_runtime_ctx;
-pub(crate) use runtime_context::{clear_poll_span, make_poll_end, make_poll_start, poll_span_open};
+pub(crate) use runtime_context::{clear_poll_span, poll_span_open};
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -75,12 +72,13 @@ macro_rules! register_hook {
 }
 
 /// Register telemetry callbacks on a runtime builder.
-/// Closures capture `Arc<RuntimeContext>` (runtime-specific) and `Arc<SharedState>` (recording core).
+/// Closures capture `Arc<RuntimeContext>`, which owns both the runtime-specific
+/// state and the handle events are recorded through.
 ///
 /// # Worker ID resolution
 ///
 /// `WORKER_ID` TLS is populated lazily on the first `on_thread_unpark` / `on_before_task_poll`
-/// call via [`resolve_worker_id`](runtime_context::resolve_worker_id), not in `on_thread_start`.
+/// call via `RuntimeContext::resolve_worker`, not in `on_thread_start`.
 /// This is intentional: `on_thread_start` fires before `RuntimeMetrics` is available, so we
 /// cannot yet call `metrics.worker_thread_id(i)` to determine which worker index we are.
 /// By the time any waker calls `current_worker_id()`, at least one unpark or poll has occurred
@@ -88,7 +86,6 @@ macro_rules! register_hook {
 fn register_hooks(
     builder: &mut tokio::runtime::Builder,
     ctx: &Arc<RuntimeContext>,
-    shared: &Arc<SharedState>,
     handle: &Dial9Handle,
     #[cfg_attr(not(tokio_unstable), allow(unused_variables))] task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
@@ -96,33 +93,19 @@ fn register_hooks(
         crate::telemetry::task_dump_config::TaskDumpConfig,
     >,
 ) {
-    // TODO: these should rely on public APIs instead of utilizing `SharedState`
-
     let c1 = ctx.clone();
-    let s1 = shared.clone();
     let c2 = ctx.clone();
-    let s2 = shared.clone();
     #[cfg(tokio_unstable)]
     let c3 = ctx.clone();
     #[cfg(tokio_unstable)]
-    let s3 = shared.clone();
-    #[cfg(tokio_unstable)]
     let c4 = ctx.clone();
-    #[cfg(tokio_unstable)]
-    let s4 = shared.clone();
 
     register_hook!(builder, on_thread_park, tokio_hooks.on_thread_park, {
-        s1.if_enabled(|buf| {
-            let event = make_worker_park(&c1, &s1);
-            buf.record_encodable_event(&event);
-        })
+        c1.record_worker_park()
     });
 
     register_hook!(builder, on_thread_unpark, tokio_hooks.on_thread_unpark, {
-        s2.if_enabled(|buf| {
-            let event = make_worker_unpark(&c2, &s2);
-            buf.record_encodable_event(&event);
-        })
+        c2.record_worker_unpark()
     });
 
     #[cfg(tokio_unstable)]
@@ -130,14 +113,7 @@ fn register_hooks(
         meta: builder,
         on_before_task_poll,
         tokio_hooks.on_before_task_poll,
-        |meta| {
-            s3.if_enabled(|buf| {
-                let task_id = TaskId::from(meta.id());
-                let location = meta.spawned_at();
-                let event = make_poll_start(Some(&c3), &s3, location, task_id);
-                buf.record_encodable_event(&event);
-            })
-        }
+        |meta| { c3.record_poll_start(meta.spawned_at(), TaskId::from(meta.id())) }
     );
 
     #[cfg(tokio_unstable)]
@@ -145,45 +121,25 @@ fn register_hooks(
         meta: builder,
         on_after_task_poll,
         tokio_hooks.on_after_task_poll,
-        |_meta| {
-            s4.if_enabled(|buf| {
-                let event = make_poll_end(Some(&c4), &s4);
-                buf.record_encodable_event(&event);
-            })
-        }
+        |_meta| { c4.record_poll_end() }
     );
 
     #[cfg(tokio_unstable)]
     if task_tracking_enabled {
-        let s5 = shared.clone();
+        let c5 = ctx.clone();
         register_hook!(meta: builder, on_task_spawn, tokio_hooks.on_task_spawn, |meta| {
-            s5.if_enabled(|buf| {
-                let task_id = TaskId::from(meta.id());
-                let location = meta.spawned_at();
-                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get()) > 0;
-                let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
-                buf.record_encodable_event(&runtime_context::TaskSpawn {
-                    timestamp_ns,
-                    task_id,
-                    location,
-                    instrumented,
-                });
-            })
+            c5.record_task_spawn(
+                meta.spawned_at(),
+                TaskId::from(meta.id()),
+                INSTRUMENTED_SPAWN.with(|f| f.get()) > 0,
+            )
         });
-        let s6 = shared.clone();
+        let c6 = ctx.clone();
         register_hook!(
             meta: builder,
             on_task_terminate,
             tokio_hooks.on_task_terminate,
-            |meta| {
-                s6.if_enabled(|buf| {
-                    let task_id = TaskId::from(meta.id());
-                    buf.record_encodable_event(&TaskTerminateEvent {
-                        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
-                        task_id,
-                    });
-                })
-            }
+            |meta| { c6.record_task_terminate(TaskId::from(meta.id())) }
         );
     } else {
         // When task tracking is disabled, still register user hooks if provided
@@ -247,7 +203,6 @@ fn register_hooks(
 /// Register telemetry hooks and return a runtime context.
 /// Worker IDs are reserved lazily on the first poll.
 fn register_runtime_hooks(
-    shared: &Arc<SharedState>,
     builder: &mut tokio::runtime::Builder,
     runtime_name: Option<String>,
     handle: &Dial9Handle,
@@ -259,7 +214,6 @@ fn register_runtime_hooks(
     register_hooks(
         builder,
         &ctx,
-        shared,
         handle,
         task_tracking_enabled,
         tokio_hooks,
@@ -310,7 +264,6 @@ mod tests {
         let mut builder = tokio::runtime::Builder::new_current_thread();
 
         let ctx = register_runtime_hooks(
-            &shared,
             &mut builder,
             Some("aborted".to_string()),
             rec.handle(),
@@ -482,6 +435,56 @@ mod tests {
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
         let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
+    }
+
+    /// A paused recorder does none of the work a recorded poll needs: no worker
+    /// ID reserved, no poll span left open. Building the event before the
+    /// enabled check would do both with nothing to show for it.
+    #[test]
+    fn paused_recorder_does_no_poll_work() {
+        use std::collections::HashSet;
+
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        rec.disable();
+
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all().worker_threads(1);
+        let rt = rec
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder()
+                    .runtime_name("paused")
+                    .task_tracking_enabled(true)
+                    .build(),
+            )
+            .unwrap();
+
+        // Read the marker on the worker thread itself: it is thread-local.
+        let span_open = rt.block_on(async {
+            crate::telemetry::spawn(async { poll_span_open() })
+                .await
+                .unwrap()
+        });
+        assert!(!span_open, "a paused recorder should not open a poll span");
+
+        let reserved: HashSet<u64> = {
+            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+                .expect("enabled recorder has a context registry");
+            let registry = registry.lock().unwrap();
+            registry
+                .iter()
+                .find(|c| c.runtime_name.as_deref() == Some("paused"))
+                .map(|c| c.worker_ids.lock().unwrap().iter().copied().collect())
+                .unwrap_or_default()
+        };
+        assert!(
+            reserved.is_empty(),
+            "a paused recorder should not resolve workers: {reserved:?}"
+        );
+
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(1));
     }
 
     /// A disabled recorder attaches inertly: the runtime you build is a plain

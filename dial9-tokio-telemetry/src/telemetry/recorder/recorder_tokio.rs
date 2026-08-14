@@ -371,7 +371,6 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // runtime's samples with its identity.
         let runtime_name = options.runtime_name.clone();
         let ctx = register_runtime_hooks(
-            shared,
             &mut builder,
             options.runtime_name,
             self,
