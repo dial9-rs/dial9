@@ -23,9 +23,6 @@ struct SharedState {
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
-    /// Global worker ID counter. Each runtime reserves a contiguous block
-    /// via `fetch_add(num_workers)` so worker IDs don't collide.
-    pub(crate) next_worker_id: AtomicU64,
     /// Epoch counter bumped by the flush thread every ~30s. Thread-local
     /// buffers stamp this value on each self-flush so the flush thread can
     /// skip busy workers when draining.
@@ -59,7 +56,6 @@ impl SharedState {
                 state: AtomicU8::new(State::Disabled as u8),
                 collector: Arc::new(CentralCollector::new()),
                 start_time_ns,
-                next_worker_id: AtomicU64::new(0),
                 drain_epoch: AtomicU64::new(0),
                 tl_buffers: Mutex::new(Vec::new()),
                 sources: Mutex::new(Vec::new()),
@@ -112,11 +108,6 @@ impl SharedState {
     /// Trace-start `CLOCK_MONOTONIC` timestamp.
     pub(crate) fn start_time_ns(&self) -> u64 {
         self.start_time_ns
-    }
-
-    /// Reserve a contiguous block of `count` worker IDs, returning the first.
-    pub(crate) fn reserve_worker_ids(&self, count: u64) -> u64 {
-        self.next_worker_id.fetch_add(count, Ordering::Relaxed)
     }
 
     crate::test_util_pub! {

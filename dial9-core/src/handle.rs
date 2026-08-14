@@ -228,15 +228,6 @@ impl Dial9Handle {
         self.inner.is_some()
     }
 
-    /// Reserve `count` consecutive global worker IDs.
-    ///
-    /// IDs are unique across every runtime attached to this recorder, so each
-    /// runtime can hand its workers a block of its own. `None` on a disabled
-    /// handle, which has no counter to draw from.
-    pub fn reserve_worker_ids(&self, count: u64) -> Option<u64> {
-        Some(self.inner.as_ref()?.shared.reserve_worker_ids(count))
-    }
-
     /// Whether the recorder behind this handle has shut down.
     ///
     /// Terminal: a stopped recorder never records again. Returns `false` for a

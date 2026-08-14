@@ -119,7 +119,7 @@ fn claim_thread_worker_id(ctx: &RuntimeContext) -> Option<u64> {
         if let Some((_, id)) = claimed.iter().find(|(owner, _)| *owner == ctx.id) {
             return Some(*id);
         }
-        let id = ctx.recorder_handle.reserve_worker_ids(1)?;
+        let id = reserve_worker_ids(&ctx.recorder_handle, 1)?;
         claimed.push((ctx.id, id));
         Some(id)
     })
@@ -236,6 +236,9 @@ pub(crate) struct TokioRuntimesSource {
     /// never change, so they are emitted exactly once (the writer keeps them in
     /// its merged cache and re-emits them on every rotation).
     fixed_metadata_emitted: bool,
+    /// Next unclaimed global worker ID. Every runtime on a recorder shares this
+    /// source, so it is what keeps their worker-ID blocks from overlapping.
+    next_worker_id: AtomicU64,
 }
 
 impl TokioRuntimesSource {
@@ -247,6 +250,7 @@ impl TokioRuntimesSource {
             sample_interval: Duration::from_millis(10),
             last_fingerprint: 0,
             fixed_metadata_emitted: false,
+            next_worker_id: AtomicU64::new(0),
         }
     }
 
@@ -255,6 +259,17 @@ impl TokioRuntimesSource {
     pub(crate) fn registry(&self) -> &RuntimeContextRegistry {
         &self.contexts
     }
+}
+
+/// Reserve `count` consecutive global worker IDs, returning the first.
+///
+/// The counter lives on this recorder's [`TokioRuntimesSource`], which every
+/// attached runtime shares, so blocks handed to different runtimes never
+/// overlap. `None` before the source exists, or on a handle with no recorder.
+fn reserve_worker_ids(handle: &Dial9Handle, count: u64) -> Option<u64> {
+    handle.with_source(|source: &mut TokioRuntimesSource| {
+        source.next_worker_id.fetch_add(count, Ordering::Relaxed)
+    })
 }
 
 /// Give the source the metrics of a freshly built runtime (paired with its
@@ -485,17 +500,16 @@ impl RuntimeContext {
     #[cfg(tokio_unstable)]
     fn claim_worker_id(&self) -> Option<u64> {
         let local_index = tokio::runtime::worker_index()?;
-        // Checked up front so the `OnceLock` init below stays infallible and
-        // the whole runtime's block is reserved exactly once.
-        if !self.recorder_handle.is_connected() {
-            return None;
-        }
-        let base = self.worker_id_base.get_or_init(|| {
-            let num_workers = worker_metrics(|m| m.num_workers()) as u64;
-            self.recorder_handle
-                .reserve_worker_ids(num_workers)
-                .expect("handle checked above")
-        });
+        let base = match self.worker_id_base.get() {
+            Some(base) => *base,
+            // Reserving is fallible, so it happens outside `get_or_init`, which
+            // then settles any race by handing every caller the winner's block.
+            None => {
+                let num_workers = worker_metrics(|m| m.num_workers()) as u64;
+                let reserved = reserve_worker_ids(&self.recorder_handle, num_workers)?;
+                *self.worker_id_base.get_or_init(|| reserved)
+            }
+        };
         Some(base + local_index as u64)
     }
 }
