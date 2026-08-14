@@ -408,12 +408,12 @@ impl Dial9HandleTokioExt for Dial9Handle {
 /// running on, if dial9 is attached to it. Resolved by runtime id, so a thread
 /// that drives several runtimes gets the right one every time.
 #[cfg(not(tokio_unstable))]
-pub(crate) fn current_runtime_ctx(shared: &Arc<SharedState>) -> Option<Arc<RuntimeContext>> {
+pub(crate) fn current_runtime_ctx(handle: &Dial9Handle) -> Option<Arc<RuntimeContext>> {
     let id = tokio::runtime::Handle::try_current().ok()?.id();
     if let Some(ctx) = super::runtime_context::cached_runtime_ctx(id) {
         return Some(ctx);
     }
-    let registry = runtime_registry(shared)?;
+    let registry = runtime_registry(handle.shared()?)?;
     let ctx = {
         let registry = registry.lock().ok()?;
         registry.iter().find(|c| c.is_runtime(id)).cloned()?

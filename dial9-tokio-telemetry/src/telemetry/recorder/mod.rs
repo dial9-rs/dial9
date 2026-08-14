@@ -1875,9 +1875,10 @@ mod tests {
 
         // Drain thread-local buffers before shutdown.
         test_util::drain_thread_local(
-            &traced_handle(rec.handle())
-                .expect("enabled handle must yield a TracedHandle")
-                .shared,
+            traced_handle(rec.handle())
+                .expect("enabled recorder must yield a handle")
+                .shared()
+                .unwrap(),
         );
 
         drop(runtime);

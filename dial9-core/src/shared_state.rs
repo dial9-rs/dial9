@@ -162,11 +162,11 @@ impl SharedState {
 
     /// Check whether recording is currently enabled.
     ///
-    /// Prefer [`if_enabled`](Self::if_enabled) for event-recording paths — it
-    /// provides an [`EventBuffer`] that makes it structurally impossible to
-    /// record without checking first. Use `is_enabled()` only for
-    /// control-flow decisions that don't directly record events (e.g.
-    /// deciding whether to wrap a waker in wake-tracking polls).
+    /// For recording paths prefer
+    /// [`Dial9Handle::record_event_with`](crate::handle::Dial9Handle::record_event_with),
+    /// which builds the event inside the check. Use `is_enabled()` for
+    /// control-flow decisions that don't record, such as whether to wrap a
+    /// waker in wake-tracking polls.
     pub fn is_enabled(&self) -> bool {
         self.state.load(Ordering::Relaxed) == State::Enabled as u8
     }
@@ -174,7 +174,7 @@ impl SharedState {
     /// Run `f` only when recording is enabled, passing an [`EventBuffer`]
     /// that provides `record_event` / `record_encodable_event`. Returns
     /// `None` when disabled (no work is done).
-    pub fn if_enabled<R>(&self, f: impl FnOnce(&EventBuffer<'_>) -> R) -> Option<R> {
+    pub(crate) fn if_enabled<R>(&self, f: impl FnOnce(&EventBuffer<'_>) -> R) -> Option<R> {
         if !self.is_enabled() {
             return None;
         }
@@ -291,12 +291,11 @@ impl SharedState {
 /// Handle provided by [`SharedState::if_enabled`] that proves recording is
 /// active. All event-recording calls should go through this type so that
 /// callers cannot accidentally emit events without an enabled check.
-#[doc(hidden)]
 #[derive(Debug)]
-pub struct EventBuffer<'a>(&'a SharedState);
+pub(crate) struct EventBuffer<'a>(&'a SharedState);
 
 impl EventBuffer<'_> {
-    pub fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
+    pub(crate) fn record_encodable_event(&self, event: &dyn encoder::Encodable) {
         if let Some(handle) =
             encoder::record_encodable_event(event, &self.0.collector, &self.0.drain_epoch)
         {
@@ -304,7 +303,7 @@ impl EventBuffer<'_> {
         }
     }
 
-    pub fn with_encoder(&self, f: impl FnOnce(&mut encoder::ThreadLocalEncoder<'_>)) {
+    pub(crate) fn with_encoder(&self, f: impl FnOnce(&mut encoder::ThreadLocalEncoder<'_>)) {
         if let Some(handle) = encoder::with_encoder(f, &self.0.collector, &self.0.drain_epoch) {
             self.0.tl_buffers.lock().unwrap().push(handle);
         }
