@@ -146,8 +146,15 @@ pub use crate::define_thread_local as thread_local;
 /// instead of asserting correctness. Add `, expected = "..."` after
 /// `should_panic` (or `flaky_sigabrt_determinism_only`) to pin the specific
 /// panic message, like `#[should_panic(expected = "...")]` -- otherwise the
-/// test passes on any panic, including an unrelated one. If the scenario's
-/// `determinism` test is
+/// test passes on any panic, including an unrelated one. Add `, replay =
+/// "<schedule>"` to also check in a `replay_known_failure` test that pins
+/// the exact captured failing schedule down deterministically (get the
+/// schedule string from a `pct` run's printed "failing schedule" -- not
+/// `determinism`'s "failing seed", which `shuttle::replay` can't take).
+/// Standing practice: check one of these in whenever a shuttle test finds a
+/// new failure, so it's a permanent, exact reproduction instead of relying
+/// on `pct`/`determinism`'s exploration to stumble onto it again. If the
+/// scenario's `determinism` test is
 /// also confirmed to sometimes abort the process under shuttle (see the
 /// comment on that arm below), add `, flaky_sigabrt_determinism_only` too --
 /// only for scenarios that actually hit it, not every `should_panic`
@@ -232,7 +239,7 @@ macro_rules! shuttle_test {
             }
         }
     };
-    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic $(, expected = $msg:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic $(, expected = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
@@ -250,6 +257,20 @@ macro_rules! shuttle_test {
             fn determinism() {
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
             }
+
+            $(
+                /// Checked-in replay of a captured failing schedule, so
+                /// this exact failure reproduces deterministically instead
+                /// of relying on `pct`/`determinism`'s exploration to find
+                /// it again. No `expected` pin needed here -- a fixed
+                /// replayed schedule can't turn up an unrelated panic the
+                /// way random exploration could.
+                #[test]
+                #[should_panic]
+                fn replay_known_failure() {
+                    shuttle::replay($name, $schedule);
+                }
+            )?
         }
     };
     // Same as plain `should_panic`, but `#[ignore]`s just `determinism`
@@ -268,7 +289,7 @@ macro_rules! shuttle_test {
     // Don't use defensively for a new `should_panic` scenario; confirm its
     // `determinism` test actually crashes first (run it alone, repeatedly)
     // and use plain `should_panic` otherwise. Still fully runnable manually.
-    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expected = $msg:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expected = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
@@ -287,6 +308,20 @@ macro_rules! shuttle_test {
             fn determinism() {
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
             }
+
+            $(
+                /// Checked-in replay of a captured failing schedule, so
+                /// this exact failure reproduces deterministically instead
+                /// of relying on `pct`/`determinism`'s exploration to find
+                /// it again. No `expected` pin needed here -- a fixed
+                /// replayed schedule can't turn up an unrelated panic the
+                /// way random exploration could.
+                #[test]
+                #[should_panic]
+                fn replay_known_failure() {
+                    shuttle::replay($name, $schedule);
+                }
+            )?
         }
     };
     // Same as the plain form, but also asserts that
