@@ -1,9 +1,9 @@
 "use strict";
 
-// Pure helpers for the two-sided differential flamegraph (the `diff=1` branch
-// of flamegraph.html). Kept DOM-free and CommonJS-exported so the whole diff
-// core — tree merge, color mapping, and the scope-link codec — is unit-testable
-// under Node. In the browser these attach as globals via the top-level
+// Pure helpers for the two-sided differential flamegraph (`diff=1` mode). Kept
+// DOM-free and CommonJS-exported so the whole diff core — tree merge, color
+// mapping, and the scope-link codec — is unit-testable under Node. In the
+// browser these attach as globals via the top-level
 // `function` declarations.
 //
 // The comparison is "two-sided": side A is drawn on the left, side B on the
@@ -185,10 +185,8 @@ function nodeAtPath(root, path) {
 // Scope-link codec
 // ---------------------------------------------------------------------------
 
-// The flamegraph tab's address bar is intentionally lossy (it drops bucket /
-// prefix / max_files — see updateBrowserUrl in flamegraph.html), so a copied
-// address-bar URL cannot refetch the aggregate. A "scope link" instead carries
-// the COMPLETE set of params needed to re-run the server-side refinement loop.
+// A scope link carries the complete allowlisted set of params needed to rerun
+// the server-side refinement loop.
 // Literal AWS credential values are NEVER part of a scope link. The explicit
 // mode marker and a role ARN are safe: the ARN grants nothing without backend
 // permission and is required to reproduce an assume-role read.
@@ -395,8 +393,7 @@ function chooseTarget(kind, opts) {
 // Capture-tray state machine (in-page "Add to diff")
 // ---------------------------------------------------------------------------
 
-// The in-page "Add to diff" tray (flamegraph.html's aggregate toolbar, and the
-// landing page's heatmap tray) captures two scopes — A (left) and B (right) —
+// The in-page "Add to diff" trays capture two scopes — A (left) and B (right) —
 // then launches a two-sided diff. State is `{ a, b }` where each side is a
 // scope (URLSearchParams) or null. These three transitions keep the invariant
 // "A fills before B" so there is never a B-without-A hole. Pure/DOM-free so the

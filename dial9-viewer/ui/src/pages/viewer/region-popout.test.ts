@@ -16,8 +16,8 @@ describe("region flamegraph pop-out", () => {
     );
 
     expect(href).not.toBeNull();
-    const url = new URL(href!, "https://viewer.example/new/viewer.html");
-    expect(url.pathname).toBe("/new/flamegraph.html");
+    const url = new URL(href!, "https://viewer.example/viewer.html");
+    expect(url.pathname).toBe("/flamegraph.html");
     expect(url.searchParams.getAll("trace")).toEqual([
       "traces/a.bin",
       "/api/object?key=b.bin",

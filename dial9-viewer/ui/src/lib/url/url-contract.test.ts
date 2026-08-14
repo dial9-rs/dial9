@@ -139,13 +139,9 @@ describe("URL contract: README tables match the recorded fixtures", () => {
     expect(sorted(documented)).toEqual(sorted(wire));
   });
 
-  it("every-page table is exactly the ui switch param", () => {
-    expect(tableNames(subsection("Query params - every page"))).toEqual(["ui"]);
-  });
-
-  it("new-viewer durable-state table = viewer URL registry", () => {
+  it("viewer durable-state table = viewer URL registry", () => {
     const documented = tableNames(
-      subsection("Query params - new/viewer.html durable view state"),
+      subsection("Query params - viewer.html durable view state"),
     );
     expect(sorted(documented)).toEqual(sorted(VIEWER_VIEW_QUERY_PARAMS));
   });

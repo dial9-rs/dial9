@@ -48,14 +48,6 @@ interface Period {
   scope?: ScopeParams;
 }
 
-// Render the "Switch to legacy UI" control. The ui-switch.js <head> auto-boot
-// is a no-op on this off-root path.
-if (window.D9UiSwitch) {
-  window.D9UiSwitch.mount({ side: "new" });
-} else {
-  console.warn("ui-switch.js is not loaded; the UI switch control is unavailable");
-}
-
 // URL params are read ONCE: the scope is fixed for the page's lifetime, and
 // auto-load checks the ORIGINAL query before syncUrl rewrites it.
 const originalParams = new URLSearchParams(window.location.search);

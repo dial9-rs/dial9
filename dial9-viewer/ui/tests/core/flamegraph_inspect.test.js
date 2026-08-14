@@ -1,11 +1,13 @@
-#!/usr/bin/env node
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // Tests for the pure inspect/butterfly (#652) and search-results (#653) tree
-// builders in flamegraph.js. These are DOM-free, so they run under plain node.
+// builders in flamegraph.js. These are DOM-free.
 
-const { assert, test, summarize } = require("./test_harness.js");
-const FG = require("./flamegraph.js");
+const FG = require("../../flamegraph.js");
 
 // Build a flamegraph-tree node in the shape trace_analysis.buildFlamegraphTree
 // produces: { name, fullName, count, self, children: Map }. Enforces the tree
@@ -207,5 +209,3 @@ test("buildInspect + search span multiple roots (worker + off-worker lanes)", ()
   assert.strictEqual(results[0].total, 40, "search total spans both lanes");
   assert.strictEqual(results[0].sites, 2, "one site per lane");
 });
-
-summarize();

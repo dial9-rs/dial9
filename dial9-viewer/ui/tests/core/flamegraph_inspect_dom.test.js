@@ -1,13 +1,15 @@
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // DOM-level smoke test for the inspect/butterfly UI (#652) and the search
-// results dropdown (#653). The repo has no jsdom, so — like
-// test_flamegraph_setdirect_export.js — we install a minimal DOM. This stub is
+// results dropdown (#653). The repo has no jsdom, so this installs a minimal
+// DOM. The stub is
 // richer: elements record event listeners and can dispatch synthetic events, so
 // the test can drive the real event handlers (right-click → context menu →
 // Inspect, plain click → re-pivot, Esc → exit) end to end through the renderer.
-
-const { assert, test, summarize } = require("./test_harness.js");
 
 function makeCtx() {
   return {
@@ -156,7 +158,7 @@ function fire(el, type, props) {
 test("right-click → Inspect enters butterfly; Esc exits (#652)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const container = dom.makeEl();
     const fg = createFlamegraph(container);
     fg.setTreeDirect(sampleTree(), 15);
@@ -198,7 +200,7 @@ test("right-click → Inspect enters butterfly; Esc exits (#652)", () => {
 test("search dropdown lists matches with sizes and hides when cleared (#653)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
@@ -225,7 +227,7 @@ test("search dropdown lists matches with sizes and hides when cleared (#653)", (
 test("re-pivot: clicking a caller frame on the canvas while inspecting", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
@@ -252,5 +254,3 @@ test("re-pivot: clicking a caller frame on the canvas while inspecting", () => {
     dom.restore();
   }
 });
-
-summarize();

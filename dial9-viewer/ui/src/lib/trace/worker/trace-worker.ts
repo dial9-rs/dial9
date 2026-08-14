@@ -9,10 +9,9 @@ import { TraceDecoder } from "../../../../decode.js";
 import { createWorkerBody } from "./body.js";
 import type { TraceWorkerRequest } from "./protocol.js";
 
-// The bundled core resolves its decoder via `typeof require` (Node) or
-// the TraceDecoder browser global that the legacy pages establish with
-// <script src="decode.js"> ordering (trace_parser.js getTraceDecoder).
-// Inside a bundled module worker there is neither: seed the global from
+// The shared core resolves its decoder through `require` in Node or a
+// `TraceDecoder` global in classic scripts. A bundled module worker has
+// neither, so seed the global from
 // the bundled decode.js before any parse message can arrive. The require
 // branch is kept genuinely unreachable in bundles by
 // commonjsOptions.ignoreDynamicRequires (vite.config.ts); the Node and

@@ -1,15 +1,17 @@
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // Deep-link support: the flamegraph's view state (zoom path + inspect focus)
 // must be readable and restorable so a shared URL reproduces the exact focus
-// position. This exercises the renderer API that flamegraph.html serializes
+// position. This exercises the renderer API that the page serializes
 // to/from the URL: getZoomPath/zoomToPath and getInspectFocus/focusInspectByKey,
 // plus the onZoomChange callback firing on inspect enter/exit.
 //
-// The repo has no jsdom, so — like test_flamegraph_inspect_dom.js — we install a
-// minimal DOM that records listeners and can dispatch synthetic events.
-
-const { assert, test, summarize } = require("./test_harness.js");
+// The repo has no jsdom, so this installs a minimal DOM that records listeners
+// and can dispatch synthetic events.
 
 function makeCtx() {
   return {
@@ -151,14 +153,14 @@ function fire(el, type, props) {
 test("zoom path round-trips through zoomToPath/getZoomPath", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
     // Nothing zoomed initially.
     assert.deepStrictEqual(fg.getZoomPath().worker, [], "no zoom initially");
 
-    // Restore a nested zoom the way flamegraph.html does from the URL.
+    // Restore a nested zoom from the URL.
     fg.zoomToPath("worker", ["a", "mid", "leaf"]);
     assert.deepStrictEqual(
       fg.getZoomPath().worker, ["a", "mid", "leaf"],
@@ -172,7 +174,7 @@ test("zoom path round-trips through zoomToPath/getZoomPath", () => {
 test("restoring a structural zoom path keeps one visible breadcrumb target", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
@@ -192,13 +194,13 @@ test("restoring a structural zoom path keeps one visible breadcrumb target", () 
 test("inspect focus round-trips through focusInspectByKey/getInspectFocus", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
     assert.strictEqual(fg.getInspectFocus(), null, "no inspect focus initially");
 
-    // Restore inspect focus the way flamegraph.html does from the ?inspect= key.
+    // Restore inspect focus from the ?inspect= key.
     const ok = fg.focusInspectByKey("mid");
     assert.strictEqual(ok, true, "focusInspectByKey found the frame");
     assert.strictEqual(fg.getInspectFocus(), "mid", "getInspectFocus reports the restored focus");
@@ -220,7 +222,7 @@ test("inspect focus round-trips through focusInspectByKey/getInspectFocus", () =
 test("focusInspectByKey is a no-op for an absent frame", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
     assert.strictEqual(fg.focusInspectByKey("does-not-exist"), false, "returns false");
@@ -234,7 +236,7 @@ test("focusInspectByKey is a no-op for an absent frame", () => {
 test("onZoomChange fires on inspect enter and exit (URL stays in sync)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     let calls = 0;
     const fg = createFlamegraph(dom.makeEl(), () => { calls++; });
     fg.setTreeDirect(sampleTree(), 15);
@@ -254,7 +256,7 @@ test("onZoomChange fires on inspect enter and exit (URL stays in sync)", () => {
 test("resetView clears zoom + inspect without firing the change callback", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     let calls = 0;
     const fg = createFlamegraph(dom.makeEl(), () => { calls++; });
     fg.setTreeDirect(sampleTree(), 15);
@@ -275,11 +277,11 @@ test("resetView clears zoom + inspect without firing the change callback", () =>
 test("resetView makes repeated zoom restore idempotent (streaming retry safety)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
-    // Simulate flamegraph.html retrying restore over several streamed snapshots:
+    // Simulate retrying restore over several streamed snapshots:
     // reset-then-apply each time must converge to the exact path, never append.
     for (let i = 0; i < 3; i++) {
       fg.resetView();
@@ -293,14 +295,14 @@ test("resetView makes repeated zoom restore idempotent (streaming retry safety)"
   }
 });
 
-// --- getViewState / applyViewState: the bridge flamegraph.html uses with the
-// flamegraph_view_state.js URL codec. These pin the object shape the codec
-// reads/writes and the restore semantics (silent, full-restore, retry-safe). ---
+// --- getViewState / applyViewState: the bridge the page uses with the
+// URL codec. These pin its object shape and restore semantics (silent,
+// full-restore, retry-safe). ---
 
 test("getViewState reports the live zoom + inspect focus in codec shape", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
@@ -321,7 +323,7 @@ test("getViewState reports the live zoom + inspect focus in codec shape", () => 
 test("applyViewState restores zoom + inspect and is silent (no URL churn)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     let calls = 0;
     const fg = createFlamegraph(dom.makeEl(), () => { calls++; });
     fg.setTreeDirect(sampleTree(), 15);
@@ -336,35 +338,10 @@ test("applyViewState restores zoom + inspect and is silent (no URL churn)", () =
   }
 });
 
-test("getViewState → applyViewState round-trips through the codec", () => {
-  const dom = makeDom();
-  try {
-    const { createFlamegraph } = require("./flamegraph.js");
-    const VS = require("./flamegraph_view_state.js");
-    const fg = createFlamegraph(dom.makeEl());
-    fg.setTreeDirect(sampleTree(), 15);
-
-    fg.zoomToPath("worker", ["a", "mid"]);
-    fg.focusInspectByKey("leaf");
-
-    // Serialize to a URL and back exactly as flamegraph.html does.
-    const params = VS.writeState(new URLSearchParams(), fg.getViewState());
-
-    const fg2 = createFlamegraph(dom.makeEl());
-    fg2.setTreeDirect(sampleTree(), 15);
-    fg2.applyViewState(VS.readState(params));
-
-    assert.deepStrictEqual(fg2.getZoomPath().worker, ["a", "mid"], "zoom survived the URL round-trip");
-    assert.strictEqual(fg2.getInspectFocus(), "leaf", "inspect survived the URL round-trip");
-  } finally {
-    dom.restore();
-  }
-});
-
 test("applyViewState is a full restore: absent fields are cleared", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
@@ -381,11 +358,11 @@ test("applyViewState is a full restore: absent fields are cleared", () => {
 test("repeated applyViewState converges (streamed-snapshot retry safety)", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
 
-    // flamegraph.html re-applies the URL state on each streamed snapshot until
+    // The page re-applies URL state on each streamed snapshot until
     // the focus lands; that must be idempotent (no duplicated zoom frames).
     for (let i = 0; i < 3; i++) {
       fg.applyViewState({ workerZoom: ["a", "mid", "leaf"] });
@@ -400,14 +377,14 @@ test("repeated applyViewState converges (streamed-snapshot retry safety)", () =>
 test("captured full view state survives replacement with duplicate terminal names", () => {
   const dom = makeDom();
   try {
-    const { createFlamegraph } = require("./flamegraph.js");
+    const { createFlamegraph } = require("../../flamegraph.js");
     const fg = createFlamegraph(dom.makeEl());
     fg.setTreeDirect(sampleTree(), 15);
     fg.zoomToPath("worker", ["a", "mid", "leaf"]);
     const preserved = fg.getViewState();
 
     // Put branch b first. setTreeDirect's best-effort terminal-name retention
-    // may choose b/…/leaf, but flamegraph.html reapplies this captured full path.
+    // may choose b/…/leaf, but the page reapplies this captured full path.
     const reordered = sampleTree();
     fg.setTreeDirect(
       tree("", 15, 0, [reordered.children.get("b"), reordered.children.get("a")]),
@@ -424,5 +401,3 @@ test("captured full view state survives replacement with duplicate terminal name
     dom.restore();
   }
 });
-
-summarize();

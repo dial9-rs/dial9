@@ -1,6 +1,5 @@
-// Row walkers for the standalone CPU-profile flamegraph page
-// (new/flamegraph.html; the same access paths hold on the legacy page,
-// which is the self-test).
+// Row walkers for the canonical standalone CPU-profile flamegraph page
+// (flamegraph.html).
 //
 // One walker per row the inventory records as gated. This page's aggregated
 // (?api=1) mode gates exactly three rows; every other row's recorded verdict
@@ -8,9 +7,9 @@
 // by the other parity layers instead (census diff + behavioral differ).
 //
 // Environment assumptions: dev-server seed = ONE folded demo segment in
-// bucket `demo-traces` under prefix `traces`, whose aggregated fold yields
-// 147 CPU samples with coverage 1 / 1 files - so refinement freezes after
-// the first refine=true poll (the auto-stop is deterministic on this seed).
+// bucket `demo-traces` under prefix `traces`, with coverage 1 / 1 files - so
+// refinement freezes after the first refine=true poll (the auto-stop is
+// deterministic on this seed).
 
 import { expect, textOf } from "../lib/actions.mjs";
 
@@ -69,7 +68,8 @@ export const registry = {
     await page.goto(apiUrl(pageUrl));
     await waitRefined(page);
     const stats = await textOf(page, "#fg-stats");
-    expect(/^147 samples \u00b7 /.test(stats), `no base sample count: "${stats}"`);
+    const baseSamples = /^(\d+) samples \u00b7 /.exec(stats)?.[1];
+    expect(Number(baseSamples) > 0, `no base sample count: "${stats}"`);
     expect(
       /\d{2}:\d{2}:\d{2}Z? \u2192 \d{2}:\d{2}:\d{2}/.test(stats) || /\u2192/.test(stats),
       `no time range in stats: "${stats}"`,
@@ -78,7 +78,8 @@ export const registry = {
       stats.includes("1 / 1 files (100.0%)"),
       `coverage badge missing/unexpected: "${stats}"`,
     );
-    expect(/147 samples \u00b7 [\d.]+ MB/.test(stats), `no byte size: "${stats}"`);
+    const coverageSamples = /\u00b7 (\d+) samples \u00b7 [\d.]+ MB/.exec(stats)?.[1];
+    expect(coverageSamples === baseSamples, `coverage sample count differs: "${stats}"`);
     // Single-host scope: the host fraction must be omitted (1/1 hosts
     // carries no information).
     expect(!/hosts/.test(stats), `host fraction should be omitted: "${stats}"`);

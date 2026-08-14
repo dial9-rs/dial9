@@ -1,4 +1,8 @@
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // Tests for trace_scope.js — the compact, stateless scope that replaces
 // one-`trace=`-per-file in the viewer/flamegraph navigation URL. The point is a
@@ -6,15 +10,12 @@
 // CloudFront's 8192-byte request-URI cap, and re-resolves in any browser so
 // deep links stay portable.
 
-const { test, testAsync, summarize, assert } = require("./test_harness.js");
-const scope = require("./trace_scope.js");
+const scope = require("../../trace_scope.js");
 
 const CLOUDFRONT_URI_LIMIT = 8192;
 
 // trace_scope.js is the single source of truth for parseKey/extractPrefix; the
-// page scripts (index.html / viewer.html / flamegraph.html) delegate to it, so
-// these tests are the canonical coverage for both layouts (they absorbed the
-// old standalone test_parse_key.js fixtures).
+// page scripts delegate to it, so these are the canonical fixtures.
 
 // A realistic key in the boot_id layout.
 function key(host, epoch, i) {
@@ -302,9 +303,7 @@ test("scopeFromKeys returns null when no window and no parseable epochs", () => 
   assert.strictEqual(s.to, 1782760800);
 });
 
-const asyncTests = [];
-
-asyncTests.push(testAsync("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
+test("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
   const s = {
     bucket: "bkt",
     prefix: "traces",
@@ -333,9 +332,9 @@ asyncTests.push(testAsync("resolveScope lists the window, filters to the host se
   assert.strictEqual(urls.length, 1, "only the in-window h1 object survives");
   assert.ok(urls[0].startsWith("/api/object?"), "maps to /api/object");
   assert.ok(urls[0].includes(encodeURIComponent(key("h1", 1782760100, 1))), "carries the right key");
-}));
+});
 
-asyncTests.push(testAsync("resolveScope uses half-open boundaries for adjacent segments", async () => {
+test("resolveScope uses half-open boundaries for adjacent segments", async () => {
   const s = {
     bucket: "bkt",
     prefix: "traces",
@@ -373,9 +372,9 @@ asyncTests.push(testAsync("resolveScope uses half-open boundaries for adjacent s
     new URL(urls[0], "http://dial9.test").searchParams.get("key"),
     selected,
   );
-}));
+});
 
-asyncTests.push(testAsync("resolveScope sends an encoded service and retains client-side service filtering", async () => {
+test("resolveScope sends an encoded service and retains client-side service filtering", async () => {
   const service = "checkout api+canary?";
   const s = {
     bucket: "bkt",
@@ -415,9 +414,9 @@ asyncTests.push(testAsync("resolveScope sends an encoded service and retains cli
   const objectParams = new URL(urls[0], "http://dial9.test").searchParams;
   assert.strictEqual(objectParams.get("bucket"), "bkt");
   assert.strictEqual(objectParams.get("key"), matchingKey);
-}));
+});
 
-asyncTests.push(testAsync("resolveScope with an empty host set keeps all in-window hosts", async () => {
+test("resolveScope with an empty host set keeps all in-window hosts", async () => {
   const s = { bucket: "bkt", prefix: "traces", service: "", hosts: [], from: 1782760000, to: 1782760800 };
   const browse = {
     objects: [
@@ -427,6 +426,4 @@ asyncTests.push(testAsync("resolveScope with an empty host set keeps all in-wind
   };
   const urls = await scope.resolveScope(s, async () => browse);
   assert.strictEqual(urls.length, 2, "empty host set = all hosts in window");
-}));
-
-Promise.all(asyncTests).then(summarize);
+});

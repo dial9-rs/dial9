@@ -21,7 +21,7 @@
 export const RENDER_SOURCES = {
   stub: {
     description:
-      "placeholder source: reports render counters as unavailable (legacy pages expose no render-invocation hook)",
+      "placeholder source: reports render counters as unavailable",
     async install() {},
     async reset() {},
     async collect() {

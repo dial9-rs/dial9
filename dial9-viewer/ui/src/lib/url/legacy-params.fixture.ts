@@ -1,14 +1,5 @@
-// src/lib/url/legacy-params.fixture.ts - the codec's legacy-param fixture:
-// the enumerated, RECORDED inventory of every URL param the flamegraph page
-// reads or writes today, from reading the legacy bootstrap (flamegraph.html)
-// + flamegraph.js.
-//
-// This is a TEST FIXTURE, imported only by *.test.ts (it ships in no page
-// bundle). Its role: pin the legacy URL contract so the codec's bridge
-// functions are tested against the recorded reality, not against what the
-// codec wishes were true. The parity-level twin lives in the parity journeys
-// (parity/journeys.mjs), which loads a recorded legacy zoom URL on both
-// page generations and diffs the readouts.
+// Test-only inventory of recorded flamegraph query parameters, used to verify
+// that codec changes preserve the established URL contract.
 
 /** How a param reaches the URL. */
 export type LegacyParamMechanism =

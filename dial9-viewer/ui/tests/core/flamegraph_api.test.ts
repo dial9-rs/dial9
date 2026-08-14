@@ -1,8 +1,8 @@
 // Unit tests for the API-mode flamegraph refinement helpers in
 // flamegraph_api.js: coverage-badge formatting, freeze detection, and the
 // "Fetch more" max_files computation. These are the pure pieces of the
-// poll loop in flamegraph.html, factored out so they can be tested without a
-// browser DOM.
+// flamegraph polling loop, factored out so they can be tested without a browser
+// DOM.
 //
 // Migrated from test_flamegraph_api.js (T11); frozen core loaded via
 // createRequire (see format.test.ts for the rationale).
@@ -353,19 +353,6 @@ describe("data-driven facet options", () => {
 });
 
 describe("flamegraph refinement wiring", () => {
-  it("persists max_files and preserves the live view during refinement", () => {
-    const html = readFileSync(
-      fileURLToPath(new URL("../../flamegraph.html", import.meta.url)),
-      "utf8",
-    );
-    expect(html).toContain('if (maxFiles != null) p.set("max_files", String(maxFiles));');
-    expect(html).toContain("shouldAdoptRefinementSnapshot(");
-    expect(html).toContain("if (preserveSplit) {");
-    expect(html).toContain("const preservedView = preserveSplit && viewRestored");
-    expect(html).toContain("fg.applyViewState(preservedView);");
-    expect(html).toContain("updateBrowserUrl();\n                        startStreaming(true)");
-  });
-
   it("publishes refinement helpers through the browser namespace", () => {
     const browserGlobal: {
       window?: unknown;

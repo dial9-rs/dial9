@@ -191,7 +191,7 @@ export async function runExactMode(
   els.containerEl.style.display = "flex";
 
   // View -> URL sync: one debounced replaceState per change burst, touching the
-  // legacy view query params (every other param survives) and carrying the
+  // stable view query params (every other param survives) and carrying the
   // versioned view-state hash. The lazy getViewState closure resolves the widget
   // created on the next line.
   const urlSync = createFgUrlSync(() => fg.getViewState());

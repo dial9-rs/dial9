@@ -1,12 +1,10 @@
-// Window globals the browser page consumes. These come from the two
-// plain <script src> includes in new/index.html:
+// Window globals the browser page consumes. These come from the two plain
+// <script src> includes in index.html:
 //
 // - creds.js publishes window.Dial9Creds - the page's STABLE USERSCRIPT
 //   contract, typed by src/types/creds.d.ts (type-only
 //   import below; .d.ts files are exempt from the core-import boundary).
-// - url_state.js publishes window.Dial9UrlState (#585 URL-state semantics,
-//   shared verbatim with the legacy page).
-// - ui-switch.js publishes window.D9UiSwitch (dual-UI switch).
+// - url_state.js publishes window.Dial9UrlState (#585 URL-state semantics).
 
 import type { Dial9CredsUserscriptApi } from "../../../creds.js";
 
@@ -43,15 +41,10 @@ export interface Dial9UrlStateApi {
   serialize(state: UrlStateFields): string;
 }
 
-export interface D9UiSwitchApi {
-  mount(opts?: { side?: "new" | "legacy"; page?: string | null }): void;
-}
-
 declare global {
   interface Window {
     /** Exact stable facade used by the private credential-loader userscript. */
     Dial9Creds?: Dial9CredsUserscriptApi;
     Dial9UrlState: Dial9UrlStateApi;
-    D9UiSwitch?: D9UiSwitchApi;
   }
 }

@@ -1,4 +1,8 @@
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { afterAll, test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // Diff-view URL state wiring: createDiffView(onChange/initialState). The diff
 // view is normally browser-only (it owns DOM + live SSE streams), so this test
@@ -7,12 +11,10 @@
 //   1. initialState { zoom, search } seeds the view (deep-link restore).
 //   2. onChange fires with { zoom, search } on user zoom / highlight (persist).
 // The zoom path is root-inclusive (element 0 is the merged root), matching the
-// flamegraph_view_state.js diff codec contract.
-
-const { assert, test, summarize } = require("./test_harness.js");
+// canonical URL codec contract.
 
 // --- Stub the SSE module so each side "streams" one fixed tree, synchronously.
-const sse = require("./sse.js");
+const sse = require("../../sse.js");
 const realOpenSse = sse.openSse;
 // tree: (all) → runtime → poll(leaf). Server JSON shape {name,count,self,children}.
 function serverTree() {
@@ -124,14 +126,44 @@ function makeDom() {
 }
 
 const {
+  apiUrlFor,
   createDiffView,
   browserApi,
+  isSearchFocusKey,
   refinementLifecycleBadge,
-} = require("./flamegraph_diff_view.js");
+  scopeLabel,
+} = require("../../flamegraph_diff_view.js");
 
 function scopes() {
   return { a: new URLSearchParams("service=svc-a"), b: new URLSearchParams("service=svc-b") };
 }
+
+test("apiUrlFor forwards server scope and strips client-only flags", () => {
+  const scope = new URLSearchParams(
+    "api=1&bucket=b&aws_region=us-west-2&service=svc&host=h1&host=h2&max_files=64",
+  );
+  const url = apiUrlFor({
+    scope,
+    origin: "https://viewer.example.com",
+    maxFiles: 8,
+  });
+  assert.strictEqual(url.pathname, "/api/flamegraph");
+  assert.strictEqual(url.searchParams.get("aws_region"), "us-west-2");
+  assert.deepStrictEqual(url.searchParams.getAll("host"), ["h1", "h2"]);
+  assert.strictEqual(url.searchParams.get("max_files"), "8");
+  assert.strictEqual(url.searchParams.get("api"), null);
+});
+
+test("scope labels and search shortcuts describe the current diff side", () => {
+  assert.strictEqual(
+    scopeLabel(new URLSearchParams("service=svc&host=a&host=b"), "A"),
+    "svc @ 2 hosts",
+  );
+  assert.strictEqual(scopeLabel(new URLSearchParams("host=h1"), "B"), "B @ h1");
+  assert.strictEqual(isSearchFocusKey({ key: "/" }, false), true);
+  assert.strictEqual(isSearchFocusKey({ key: "/" }, true), false);
+  assert.strictEqual(isSearchFocusKey({ key: "f", ctrlKey: true }, false), true);
+});
 
 test("seeded zoom SURVIVES the empty initial render and lands once data arrives", () => {
   const dom = makeDom();
@@ -379,7 +411,6 @@ test("diff lifecycle formatter removes stale markers around fold warnings", () =
   );
 });
 
-// Restore the real SSE fn so requiring this module elsewhere is side-effect free.
-sse.openSse = realOpenSse;
-
-summarize();
+afterAll(() => {
+  sse.openSse = realOpenSse;
+});

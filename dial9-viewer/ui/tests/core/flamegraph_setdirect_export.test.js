@@ -1,4 +1,8 @@
-"use strict";
+import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { test } from "vitest";
+
+const require = createRequire(import.meta.url);
 
 // Regression test for #625: the Export button must be enabled on aggregated
 // (API-mode) flamegraphs. Those go through createFlamegraph().setTreeDirect(),
@@ -10,8 +14,6 @@
 // (DOM-heavy) flamegraph. Every element is a Proxy that returns sensible
 // defaults and no-op methods; querySelector resolves against a per-graph
 // registry keyed by selector so the test can inspect the export button object.
-
-const { assert, test, summarize } = require("./test_harness.js");
 
 function makeCtx() {
   return {
@@ -79,7 +81,7 @@ function newGraph() {
   global.devicePixelRatio = 1;
 
   // Load lazily so the globals above are in place before module init.
-  const { createFlamegraph } = require("./flamegraph.js");
+  const { createFlamegraph } = require("../../flamegraph.js");
   const fg = createFlamegraph(makeEl());
 
   // Restore globals; the renderer already captured what it needs.
@@ -114,5 +116,3 @@ test("setTreeDirect keeps Export disabled on an empty aggregated tree", () => {
   fg.setTreeDirect(tree("", 0, 0, []), 0);
   assert.strictEqual(exportBtn.disabled, true, "button must stay disabled when there are no samples");
 });
-
-summarize();

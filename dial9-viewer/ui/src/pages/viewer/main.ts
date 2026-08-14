@@ -56,15 +56,6 @@ import { poiJump } from "./poi.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
 import { mountFieldChartDialog } from "./field-chart-dialog.js";
 
-// Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
-// <head> auto-boot is a no-op on this off-root new-UI path.
-if (window.D9UiSwitch) {
-  window.D9UiSwitch.mount({ side: "new" });
-} else {
-  // One-time load-order/serving problem, not a loop - log it loudly.
-  console.warn("ui-switch.js is not loaded; the UI switch control is unavailable");
-}
-
 boot();
 
 function boot(): void {

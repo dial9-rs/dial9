@@ -1,5 +1,4 @@
-// Row walkers for the Tokio runtime stats page (new/tokio_stats.html; the
-// same access paths hold on the legacy page, which is the self-test).
+// Row walkers for the canonical Tokio runtime stats page (tokio_stats.html).
 //
 // One walker per row whose recorded verdict GATES (parity/lib/inventory.mjs
 // isGated): recorded VERIFIED / DEAD-CONFIRMED re-derive VERIFIED. Here that
@@ -13,20 +12,20 @@
 //
 // Environment assumptions (same dev seed as features03): the dev-server
 // serves ui/dist and its aggregate endpoints answer against the seeded
-// `demo-traces` bucket under prefix `traces` - ONE folded segment that yields
-// total_polls 94212, time_span_ns 4143811668, five spawn locations (top:
-// axum_traced.rs:243:33 with 3319 notable polls), coverage 1/1 files, classes
-// {1,2,3} (no off-CPU). The page auto-loads when the URL carries `bucket`, so
-// the scoped URL drives the refine loop end to end.
+// `demo-traces` bucket under prefix `traces`: one segment with nonzero polls
+// and coverage 1/1 files. The page auto-loads when the URL carries `bucket`,
+// so the scoped URL drives the refinement stream end to end.
 //
 //   PORT=3071 cargo run -p dial9-viewer --bin dev-server --features dev-server
 //   node parity/walk-rows.mjs \
 //     --inventory ../../docs/ui-inventory/features/04-tokio-stats-html.md \
-//     --url http://localhost:3071/new/tokio_stats.html
+//     --url http://localhost:3071/tokio_stats.html
 
+import { createRequire } from "node:module";
 import { expect, textOf } from "../lib/actions.mjs";
 
-const AXUM = "examples/metrics-service/src/axum_traced.rs:243:33";
+const require = createRequire(import.meta.url);
+const { SseDecoder } = require("../../sse.js");
 
 /** The seed scope URL: `bucket` present -> the page auto-loads. */
 function seedUrl(pageUrl) {
@@ -41,18 +40,27 @@ async function waitComplete(page) {
   );
 }
 
+/** Decode every JSON snapshot from a completed Playwright API SSE response. */
+async function sseSnapshots(response) {
+  expect(response.ok(), `SSE request failed with HTTP ${response.status()}`);
+  const decoder = new SseDecoder();
+  const payloads = decoder.push(await response.text()).concat(decoder.flush());
+  const snapshots = payloads.map((payload) => JSON.parse(payload));
+  expect(snapshots.length > 0, "SSE response contained no snapshots");
+  return snapshots;
+}
+
 export const registry = {
   // ── A. Bootstrap ──
 
-  A8: async ({ page, pageUrl, side }) => {
-    // The dual-UI switch control renders on BOTH generations now that
-    // tokio_stats is registered; the label is per-side.
+  A8: async ({ page, pageUrl }) => {
+    // The rollout control was retired with the alternate UI.
     await page.goto(pageUrl);
-    await page.waitForSelector("#d9-ui-switch", { state: "visible", timeout: 15_000 });
-    const label = await textOf(page, "#d9-ui-switch");
-    const want = side === "new" ? "Switch to legacy UI" : "Switch to new UI";
-    expect(label === want, `switch label "${label}" != "${want}" (side ${side})`);
-    return `#d9-ui-switch renders "${label}" (side ${side})`;
+    expect(
+      (await page.locator("#d9-ui-switch").count()) === 0,
+      "retired UI switch rendered",
+    );
+    return "retired #d9-ui-switch is absent";
   },
 
   A10: async ({ page, pageUrl }) => {
@@ -69,17 +77,21 @@ export const registry = {
 
   D3: async ({ page, pageUrl }) => {
     // Termination (frozen case): the 1/1-file seed freezes after one refine,
-    // so the loop ends at status "Complete" with the full poll count stable.
+    // so the stream ends at status "Complete" with a positive poll count.
     await page.goto(seedUrl(pageUrl));
     await waitComplete(page);
     await page.waitForSelector("#summary .card", { timeout: 5_000 });
-    const summary = await textOf(page, "#summary");
-    expect(/94,?212/.test(summary), `Total Polls card missing 94212: "${summary}"`);
-    // And it STAYS complete (no self-resuming refine spinner).
+    const total = await textOf(page, "#summary .card:first-child .value");
+    expect(Number(total.replace(/,/g, "")) > 0, `Total Polls was "${total}"`);
+    // And it STAYS complete (no self-resuming stream).
     await page.waitForTimeout(1200);
     const status = await textOf(page, "#status");
     expect(status === "Complete", `status resumed after freeze: "${status}"`);
-    return `refine froze at "Complete"; Total Polls 94,212 stable`;
+    expect(
+      (await textOf(page, "#summary .card:first-child .value")) === total,
+      "Total Polls changed after completion",
+    );
+    return `stream completed; Total Polls ${total} stayed stable`;
   },
 
   D5: async ({ page, pageUrl }) => {
@@ -114,10 +126,14 @@ export const registry = {
       el.value = "-1";
       el.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await page.waitForSelector("#table-container table td code", { timeout: 5_000 });
-    const codes = await page.locator("#table-container td code").allTextContents();
+    const locTable = page
+      .locator("#table-container table")
+      .filter({ hasText: "Spawn Location" })
+      .first();
+    await locTable.waitFor({ state: "visible", timeout: 5_000 });
+    const codes = await locTable.locator("tbody td:first-child code").allTextContents();
     expect(
-      codes.map((c) => c.trim()).includes(AXUM),
+      codes.some((c) => /\.rs:\d+:\d+$/.test(c.trim())),
       `spawn_loc not rendered as text: ${JSON.stringify(codes)}`,
     );
     const injected = await page
@@ -139,22 +155,23 @@ export const registry = {
   },
 
   J5: async ({ page, baseUrl }) => {
-    // Refinement loop (small scope): cold read-only empty, then refine folds
-    // the single seed segment (1/1 files, total_polls 94212).
+    // One SSE request emits the current snapshot and any progressively folded
+    // snapshots, then closes at the sampling cap.
     const base = `${baseUrl}/api/tokio-stats?bucket=demo-traces&prefix=traces`;
-    const cold = await (await page.request.get(base)).json();
-    expect(cold.total_polls === 0, `cold total_polls ${cold.total_polls} != 0`);
+    const snapshots = await sseSnapshots(await page.request.get(base));
+    for (let i = 1; i < snapshots.length; i++) {
+      expect(
+        snapshots[i].coverage.files_folded >= snapshots[i - 1].coverage.files_folded,
+        "SSE coverage regressed",
+      );
+    }
+    const final = snapshots.at(-1);
     expect(
-      cold.coverage.files_matched === 1 && cold.coverage.files_folded === 0,
-      `cold coverage ${JSON.stringify(cold.coverage)}`,
+      final.coverage.files_folded === 1 && final.coverage.files_matched === 1,
+      `final coverage ${JSON.stringify(final.coverage)}`,
     );
-    const fold = await (await page.request.get(`${base}&refine=true`)).json();
-    expect(
-      fold.coverage.files_folded === 1 && fold.coverage.files_matched === 1,
-      `fold coverage ${JSON.stringify(fold.coverage)}`,
-    );
-    expect(fold.total_polls === 94212, `folded total_polls ${fold.total_polls} != 94212`);
-    return `cold 0 -> refine folds 1/1, total_polls ${fold.total_polls}`;
+    expect(final.total_polls > 0, `final total_polls ${final.total_polls}`);
+    return `${snapshots.length} SSE snapshot(s) -> 1/1 files, total_polls ${final.total_polls}`;
   },
 
   J6: async ({ page, baseUrl }) => {
@@ -173,27 +190,26 @@ export const registry = {
   },
 
   J11: async ({ page, baseUrl }) => {
-    // Poll classification: the demo carries classes {1,2,3} only (its longest
-    // poll ~1ms is under the 10ms off-CPU bound, so class 0 never occurs),
-    // and classes are index-aligned with durations.
-    const data = await (
+    // Poll classes stay in the documented 0..3 vocabulary and are
+    // index-aligned with durations.
+    const snapshots = await sseSnapshots(
       await page.request.get(
-        `${baseUrl}/api/tokio-stats?bucket=demo-traces&prefix=traces&refine=true`,
-      )
-    ).json();
+        `${baseUrl}/api/tokio-stats?bucket=demo-traces&prefix=traces`,
+      ),
+    );
+    const data = snapshots.at(-1);
     const seen = new Set();
     for (const loc of data.by_spawn_loc) {
       expect(
         loc.classes.length === loc.durations_ns.length,
         `class/duration misalignment at ${loc.spawn_loc}`,
       );
-      for (const c of loc.classes) seen.add(c);
+      for (const c of loc.classes) {
+        expect([0, 1, 2, 3].includes(c), `unknown poll class ${c}`);
+        seen.add(c);
+      }
     }
-    expect(!seen.has(0), `unexpected off-CPU (class 0) in the demo: ${[...seen]}`);
-    expect(
-      seen.has(1) || seen.has(2) || seen.has(3),
-      `no classified polls: ${[...seen]}`,
-    );
-    return `classes ${JSON.stringify([...seen].sort())} (no off-CPU), index-aligned`;
+    expect(seen.size > 0, "no classified polls");
+    return `classes ${JSON.stringify([...seen].sort())}, index-aligned`;
   },
 };

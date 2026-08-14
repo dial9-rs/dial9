@@ -1,15 +1,15 @@
-// Ad-hoc shell verification (dev-only): loads the migrated viewer shell,
+// Ad-hoc shell verification (dev-only): loads the canonical viewer shell,
 // waits for the demo trace, then dumps the relevant observations - track
 // slots (label + canvas drawW sized by layout), landmark/tab order
 // (toolbar -> minimap -> tracks -> inspector), help-overlay toggle, and a
 // toast round-trip. Run against a dev-server serving ui/dist:
-//   node parity/verify-viewer-shell.mjs --url http://localhost:3210/new/viewer.html
+//   node parity/verify-viewer-shell.mjs --url http://localhost:3210/viewer.html
 import { chromium } from "playwright";
 
 const url =
   process.argv.includes("--url")
     ? process.argv[process.argv.indexOf("--url") + 1]
-    : "http://localhost:3210/new/viewer.html";
+    : "http://localhost:3210/viewer.html";
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });

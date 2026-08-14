@@ -11,14 +11,6 @@
 //   NOT-TRIGGERABLE — the row's recorded verdict maps outside the gated set:
 //                     listed, not driven.
 //
-// Per-side walks: amended rows diverge by design between the two UI
-// generations — the migrated page carries the amended contract while the
-// legacy page keeps the pre-amendment behavior (e.g. a dead sort).
-// Walkers receive `side` ("new" when the page URL lives under /new/, else
-// "legacy") and the amended rows' walkers branch on it, asserting the amended
-// behavior on the new page and the preserved legacy behavior on the legacy
-// page. Both sides therefore stay green against the ONE inventory.
-//
 // Usage:
 //   node parity/walk-rows.mjs \
 //     --inventory ../../docs/ui-inventory/features/01-index-html.md \
@@ -62,7 +54,7 @@ const REGISTRIES = {
     fixedClock: true,
   },
   "03-flamegraph-html.md": { walkers: features03, fixedClock: false },
-  // The migrated Tokio Stats page. Its scope is bucket/prefix (not the
+  // Tokio Stats uses a bucket/prefix scope (not the
   // browser page's relative time windows), so no pinned clock is needed.
   "04-tokio-stats-html.md": { walkers: features04, fixedClock: false },
 };
@@ -116,9 +108,6 @@ async function main() {
   const only = opts.rows ? new Set(opts.rows.split(",").map((s) => s.trim())) : null;
   const pageUrl = opts.url;
   const baseUrl = new URL(pageUrl).origin;
-  // Which UI generation this walk targets (see the per-side note above).
-  // The migrated entries are served under /new/ (vite.config.ts inputs).
-  const side = new URL(pageUrl).pathname.startsWith("/new/") ? "new" : "legacy";
   await assertServerReady(baseUrl);
 
   // Fixture mode: preflight every fixture family the selected rows need, so
@@ -194,7 +183,7 @@ async function main() {
       const started = Date.now();
       try {
         const evidence = await withTimeout(
-          walker({ page, context, browser, baseUrl, pageUrl, side }),
+          walker({ page, context, browser, baseUrl, pageUrl }),
           WALKER_TIMEOUT_MS,
           `walker ${row.id}`,
         );

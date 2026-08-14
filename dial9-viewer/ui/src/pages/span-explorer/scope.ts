@@ -114,9 +114,8 @@ export function buildApiUrl(
 /**
  * The shareable address-bar query for the current view.
  *
- * RAW mode keeps its `trace` param and never gains `api=1`: the legacy page
- * dropped both on the first selection, so reloading or sharing the resulting
- * URL landed in aggregate mode with no scope.
+ * RAW mode keeps its `trace` param and never gains `api=1`, so reloading or
+ * sharing the URL preserves the selected trace and mode.
  */
 export function buildBrowserQuery(scope: PageScope, view: ViewState): string {
   const p = new URLSearchParams();

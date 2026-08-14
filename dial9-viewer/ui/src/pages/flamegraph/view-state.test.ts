@@ -214,7 +214,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
 
   it("restore-on-load produces ZERO url writes (like legacy)", () => {
     const url: UrlParts = {
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=t.bin&worker-zoom=main%09poll",
       hash: "",
     };
@@ -227,7 +227,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
 
   it("a user zoom after restore writes legacy params + hash, once", () => {
     const { fg, raf, timer, host, sync } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=t.bin&worker-zoom=main",
       hash: "",
     });
@@ -238,7 +238,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual([
-      "/new/flamegraph.html?trace=t.bin&worker-zoom=main%09poll%09do_work" +
+      "/flamegraph.html?trace=t.bin&worker-zoom=main%09poll%09do_work" +
         "#v=1&fg.w=main%09poll%09do_work",
     ]);
   });
@@ -291,7 +291,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
   it("preserves every non-view context param on write", () => {
     const fixture = LEGACY_FIXTURE_URLS.find((url) => url.includes("trace=t/a.bin"))!;
     const { fg, raf, timer, host, sync } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: fixture,
       hash: "",
     });
@@ -357,7 +357,7 @@ describe("createApiInspectSync", () => {
   it("writes only inspection to the current api URL and removes it on exit", () => {
     const fg = fakeApiFg();
     const host = fakeHost({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?api=1&bucket=b",
       hash: "#foreign",
     });
@@ -375,19 +375,19 @@ describe("createApiInspectSync", () => {
     });
     sync.onViewChange();
     expect(host.writes).toEqual([
-      "/new/flamegraph.html?api=1&bucket=b&inspect=poll&inspect_full=core%3A%3Apoll#foreign",
+      "/flamegraph.html?api=1&bucket=b&inspect=poll&inspect_full=core%3A%3Apoll#foreign",
     ]);
 
     fg.setState({});
     sync.onViewChange();
-    expect(host.writes.at(-1)).toBe("/new/flamegraph.html?api=1&bucket=b#foreign");
+    expect(host.writes.at(-1)).toBe("/flamegraph.html?api=1&bucket=b#foreign");
   });
 
   it("retries URL restoration without clearing zoom or search", () => {
     const fg = fakeApiFg();
     fg.setState({ workerZoom: ["main"], search: "tokio" });
     const host = fakeHost({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?api=1&inspect=poll&inspect_full=core%3A%3Apoll",
       hash: "",
     });
@@ -411,7 +411,7 @@ describe("createApiInspectSync", () => {
   it("carries live inspection through a scope change", () => {
     const fg = fakeApiFg();
     const host = fakeHost({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?api=1",
       hash: "",
     });
