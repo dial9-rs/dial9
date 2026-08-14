@@ -227,8 +227,10 @@ impl DumpTrigger {
     /// shuttle's determinism replay, which requires every value a scenario
     /// branches on (here, the epoch-window match) to be reproducible --
     /// skips the debounce gate too, since it isn't exercised by anything
-    /// that currently needs this.
-    #[cfg(test)]
+    /// that currently needs this. Only shuttle's `worker::shuttle_tests`
+    /// calls this today, hence the `shuttle` cfg -- a non-shuttle caller
+    /// would need it widened back to plain `#[cfg(test)]`.
+    #[cfg(all(test, shuttle))]
     pub(crate) fn dump_current_data_at_for_test(&self, triggered_at: SystemTime) -> DumpRun<'_> {
         let (receipt_tx, receipt_rx) = oneshot::channel();
         DumpRun {

@@ -457,8 +457,9 @@ impl Fs {
     }
 
     /// Test-only: override the creation epoch of a queued memory slot --
-    /// see `MemFs::set_epoch_secs_for_test`.
-    #[cfg(all(test, feature = "pipeline"))]
+    /// see `MemFs::set_epoch_secs_for_test`. Only shuttle's
+    /// `worker::shuttle_tests` calls this today, hence the `shuttle` cfg.
+    #[cfg(all(test, feature = "pipeline", shuttle))]
     pub(crate) fn set_epoch_secs_for_test(&self, index: u32, epoch_secs: u64) {
         match self {
             Fs::Mem(m) => m.set_epoch_secs_for_test(index, epoch_secs),

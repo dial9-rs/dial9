@@ -355,7 +355,9 @@ impl MemFs {
     /// pin a deterministic value instead of whatever real time `seal()`
     /// stamped it with (needed for shuttle's determinism replay, which
     /// requires every value a scenario branches on to be reproducible).
-    #[cfg(all(test, feature = "pipeline"))]
+    /// Only shuttle's `worker::shuttle_tests` calls this today, hence the
+    /// `shuttle` cfg.
+    #[cfg(all(test, feature = "pipeline", shuttle))]
     pub(super) fn set_epoch_secs_for_test(&self, index: u32, epoch_secs: u64) {
         let mut q = self.channel.queue.lock().unwrap();
         for s in q.segments.iter_mut().filter(|s| s.index == index) {
