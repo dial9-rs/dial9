@@ -162,11 +162,11 @@ impl SharedState {
 
     /// Check whether recording is currently enabled.
     ///
-    /// Prefer [`Dial9Handle::record_event_with`](crate::handle::Dial9Handle::record_event_with)
-    /// for event-recording paths — it builds the event only when it will be
-    /// recorded, so a paused recorder pays nothing. Use `is_enabled()` only for
-    /// control-flow decisions that don't directly record events (e.g.
-    /// deciding whether to wrap a waker in wake-tracking polls).
+    /// For recording paths prefer
+    /// [`Dial9Handle::record_event_with`](crate::handle::Dial9Handle::record_event_with),
+    /// which builds the event inside the check. Use `is_enabled()` for
+    /// control-flow decisions that don't record, such as whether to wrap a
+    /// waker in wake-tracking polls.
     pub fn is_enabled(&self) -> bool {
         self.state.load(Ordering::Relaxed) == State::Enabled as u8
     }
