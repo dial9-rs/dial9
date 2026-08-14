@@ -143,7 +143,11 @@ pub use crate::define_thread_local as thread_local;
 /// ```
 ///
 /// Add `, should_panic` after `depth = $depth` to document a known bug
-/// instead of asserting correctness. If the scenario's `determinism` test is
+/// instead of asserting correctness. Add `, expected = "..."` after
+/// `should_panic` (or `flaky_sigabrt_determinism_only`) to pin the specific
+/// panic message, like `#[should_panic(expected = "...")]` -- otherwise the
+/// test passes on any panic, including an unrelated one. If the scenario's
+/// `determinism` test is
 /// also confirmed to sometimes abort the process under shuttle (see the
 /// comment on that arm below), add `, flaky_sigabrt_determinism_only` too --
 /// only for scenarios that actually hit it, not every `should_panic`
@@ -162,13 +166,40 @@ pub use crate::define_thread_local as thread_local;
 /// the generated `pct`/`determinism` tests run concurrently and would
 /// corrupt shuttle's own bookkeeping; write those by hand instead, behind a
 /// real `std::sync::Mutex`.
+///
+/// `default` in place of `num_iters = $num_iters, depth = $depth` picks up
+/// this codebase's established budget (5,000/3 plain, 100
+/// `determinism_only`, 10,000/3 `verify_faults_triggered`). Not offered for
+/// `should_panic`: real scenarios there range 500-5,000 depending on how
+/// narrow the race is, so pick and justify an explicit number instead.
 #[cfg(shuttle)]
 #[macro_export]
 macro_rules! shuttle_test {
-    (num_iters = $num_iters:expr, depth = $depth:expr; fn $name:ident() $body:block) => {
+    // Re-dispatches to the explicit-budget arms below (see doc comment
+    // above), so it can't drift out of sync with them.
+    (default; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        $crate::shuttle_test! {
+            num_iters = 5_000, depth = 3;
+            $(#[$attr])* fn $name() $body
+        }
+    };
+    (default, determinism_only; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        $crate::shuttle_test! {
+            num_iters = 100, determinism_only;
+            $(#[$attr])* fn $name() $body
+        }
+    };
+    (default, verify_faults_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        $crate::shuttle_test! {
+            num_iters = 10_000, depth = 3, verify_faults_triggered;
+            $(#[$attr])* fn $name() $body
+        }
+    };
+    (num_iters = $num_iters:expr, depth = $depth:expr; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
+            $(#[$attr])*
             fn $name() $body
 
             #[test]
@@ -188,10 +219,11 @@ macro_rules! shuttle_test {
     // Still runs inside shuttle's harness via `check_uncontrolled_nondeterminism`,
     // which every scenario touching a shuttle-swapped primitive needs
     // regardless of whether there's anything to interleave.
-    (num_iters = $num_iters:expr, determinism_only; fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, determinism_only; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
+            $(#[$attr])*
             fn $name() $body
 
             #[test]
@@ -200,20 +232,21 @@ macro_rules! shuttle_test {
             }
         }
     };
-    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic; fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic $(, expected = $msg:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
+            $(#[$attr])*
             fn $name() $body
 
             #[test]
-            #[should_panic]
+            #[should_panic $((expected = $msg))?]
             fn pct() {
                 shuttle::check_pct($name, $num_iters, $depth);
             }
 
             #[test]
-            #[should_panic]
+            #[should_panic $((expected = $msg))?]
             fn determinism() {
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
             }
@@ -235,20 +268,21 @@ macro_rules! shuttle_test {
     // Don't use defensively for a new `should_panic` scenario; confirm its
     // `determinism` test actually crashes first (run it alone, repeatedly)
     // and use plain `should_panic` otherwise. Still fully runnable manually.
-    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only; fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expected = $msg:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
+            $(#[$attr])*
             fn $name() $body
 
             #[test]
-            #[should_panic]
+            #[should_panic $((expected = $msg))?]
             fn pct() {
                 shuttle::check_pct($name, $num_iters, $depth);
             }
 
             #[test]
-            #[should_panic]
+            #[should_panic $((expected = $msg))?]
             #[ignore = "can SIGABRT the whole process under shuttle -- see shuttle_test!'s flaky_sigabrt_determinism_only arm; run manually with --ignored"]
             fn determinism() {
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
@@ -263,10 +297,11 @@ macro_rules! shuttle_test {
     // leaving the scenario exercising no error path at all. Checked in the
     // same `pct`/`determinism` runs, not separate tests, so the shuttle
     // exploration isn't run twice per scenario.
-    (num_iters = $num_iters:expr, depth = $depth:expr, verify_faults_triggered; fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, verify_faults_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
+            $(#[$attr])*
             fn $name() $body
 
             fn assert_faults_were_triggered() {

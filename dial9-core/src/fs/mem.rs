@@ -598,7 +598,7 @@ mod shuttle_tests {
     }
 
     crate::shuttle_test! {
-        num_iters = 5_000, depth = 3;
+        default;
         // Budget room for many 16-byte segments; nothing should evict.
         fn shuttle_handoff_no_loss() {
             run_scenario(1 << 16, 16, 3, true);
@@ -606,7 +606,7 @@ mod shuttle_tests {
     }
 
     crate::shuttle_test! {
-        num_iters = 5_000, depth = 3;
+        default;
         // Budget fits ~2 segments; the writer outruns the worker so the
         // byte-budget loop evicts under contention.
         fn shuttle_eviction_accounting() {
@@ -614,16 +614,11 @@ mod shuttle_tests {
         }
     }
 
-    // Deterministic, single-threaded: `MemFs::seal`'s eviction *order* (not
-    // just count) is a property of the data structure, not a race, so no
-    // concurrency to explore -- `shuttle_eviction_accounting` above only
-    // verifies aggregate counts (consumed + dropped == count), which can't
-    // distinguish correct FIFO eviction from e.g. evicting the newest
-    // segment instead of the oldest. Still needs to run inside shuttle's
-    // harness, though, since `MemFs` is backed by `shuttle::sync::Mutex`
-    // under `--cfg shuttle`.
+    // Deterministic: eviction order is a data-structure property, not a
+    // race (the scenario above only checks aggregate counts, not order).
+    // Still needs shuttle's harness since `MemFs` uses `shuttle::sync::Mutex`.
     crate::shuttle_test! {
-        num_iters = 100, determinism_only;
+        default, determinism_only;
         fn shuttle_eviction_is_fifo() {
             // Budget for exactly 3 16-byte segments; sealing 5 must evict the
             // 2 oldest (indices 0 and 1).

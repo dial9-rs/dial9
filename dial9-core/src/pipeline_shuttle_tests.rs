@@ -234,7 +234,7 @@ crate::shuttle_test! {
 // write happens here, so there's no live per-thread buffer state for
 // shuttle's own teardown to trip over -- see the companion scenario below.
 crate::shuttle_test! {
-    num_iters = 500, depth = 3, should_panic;
+    num_iters = 500, depth = 3, should_panic, expected = "PanickingSource intentionally panics for shuttle coverage";
     fn test_source_panic_does_not_wedge_pipeline() {
         let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
@@ -286,15 +286,12 @@ crate::shuttle_test! {
     }
 }
 
-// Companion to the scenario above: a plain thread-local buffer write is exposed to
-// the same missing-containment gap, since it's drained by the same unguarded
-// flush cycle.
-// Kept as its own scenario because the live `ThreadLocalBuffer`
-// this leaves behind at panic time is what makes `determinism` crash.
-// 16/30 crashes with the write, 0/30 without. That's why this scenario needs
-// `flaky_sigabrt_determinism_only`.
+// Companion to the scenario above: a TL-buffer write hits the same
+// unguarded-flush gap. Kept separate because the live buffer left behind at
+// panic time is what makes `determinism` crash (16/30 with the write vs
+// 0/30 without) -- hence `flaky_sigabrt_determinism_only`.
 crate::shuttle_test! {
-    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only;
+    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only, expected = "PanickingSource intentionally panics for shuttle coverage";
     fn test_source_panic_does_not_lose_tl_buffer_write() {
         let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
@@ -459,7 +456,7 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
 // `.join()` immediately with no other work in between, so the two threads
 // are never simultaneously runnable.
 crate::shuttle_test! {
-    num_iters = 100, determinism_only;
+    default, determinism_only;
     fn fs_fault_visible_across_threads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fault_probe");
@@ -478,20 +475,14 @@ crate::shuttle_test! {
     }
 }
 
-// Both scenarios below also assert that fault injection actually reached
-// the flush thread at least once across the batch (`verify_faults_triggered`
-// on `shuttle_test!`), so a broken fault-visibility thread-local can't
-// silently leave 10,000 iterations exercising no error path at all.
-// Deliberately not asserted via the WARN/ERROR log count: `rate_limited!`
-// gates on real wall-clock time with a `static` keyed by call site, shared
-// by every shuttle iteration *and* every other test in the same test binary
-// that hits the same call site, so a perfectly healthy run can still log
-// zero WARN/ERROR events. `take_faults_triggered()` counts actual fault
-// occurrences, upstream of that log-rate gate, so it isn't subject to this
-// cross-test coupling.
+// Both scenarios assert fault injection actually reached the flush thread
+// (`verify_faults_triggered`), not via the WARN/ERROR log count: that's
+// gated by `rate_limited!`'s real-wall-clock, cross-test-shared static, so
+// a healthy run can still log zero events. `take_faults_triggered()` counts
+// occurrences upstream of that gate, avoiding the coupling.
 
 crate::shuttle_test! {
-    num_iters = 10_000, depth = 3, verify_faults_triggered;
+    default, verify_faults_triggered;
     fn test_core_erroring_pipeline() {
         let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
         assert!(
@@ -504,7 +495,7 @@ crate::shuttle_test! {
 }
 
 crate::shuttle_test! {
-    num_iters = 10_000, depth = 3, verify_faults_triggered;
+    default, verify_faults_triggered;
     fn test_core_probabilistic_fs_faults() {
         let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
         assert!(

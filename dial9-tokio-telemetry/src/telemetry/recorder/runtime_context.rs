@@ -1049,7 +1049,7 @@ mod shuttle_tests {
     use dial9_core::shuttle_test;
 
     shuttle_test! {
-        num_iters = 5_000, depth = 3;
+        default;
     /// Multiple runtimes attach concurrently while a reader concurrently
     /// scans it via `segment_metadata`, mirroring how `TokioRuntimesSource`
     /// is read from the flush thread while attaches race it from arbitrary

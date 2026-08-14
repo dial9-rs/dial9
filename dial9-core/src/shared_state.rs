@@ -539,14 +539,11 @@ mod tests {
 mod shuttle_tests {
     use super::*;
 
-    // Fixed by choice, not a shuttle limitation -- shuttle::rand can
-    // randomize a scenario's shape too (see pipeline_shuttle_tests.rs's
-    // per-writer rng.gen_range(3..=10)). Kept small here because shuttle's
-    // search cost grows with interleaving space, while a real-thread
-    // proptest case costs about the same at any size. A bug needing more
-    // than EVENTS_PER_WRITER events per buffer is unreachable at this fixed
-    // size; widening these constants (or using shuttle::rand) would catch
-    // it, at the cost of searching fewer schedules per iteration.
+    // Shuttle's search cost grows with interleaving
+    // space, unlike a real-thread proptest. Widening these (or using
+    // shuttle::rand, as pipeline_shuttle_tests.rs does) would exercise more
+    // events per buffer, at lower coverage density per iteration at this
+    // scenario's `depth = 3` (from `default`).
     const WRITERS: usize = 3;
     const EVENTS_PER_WRITER: u64 = 3;
     const DRAIN_TICKS: usize = 3;
@@ -565,7 +562,7 @@ mod shuttle_tests {
     }
 
     crate::shuttle_test! {
-        num_iters = 5_000, depth = 3;
+        default;
         // Shuttle counterpart of `concurrent_record_and_drain_preserves_event_count`:
         // writer threads record events while a drainer thread concurrently bumps
         // the drain epoch and intrusively drains, exploring interleavings

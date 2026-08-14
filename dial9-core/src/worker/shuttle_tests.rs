@@ -36,14 +36,11 @@ impl SegmentProcessor for CountingProcessor {
 const WRITERS: usize = 3;
 const SEGMENTS_PER_WRITER: u32 = 2;
 
-/// Fixed creation epoch every `spawn_writers` segment gets pinned to via
-/// `set_epoch_secs_for_test`, so scenarios matching segments against a dump
-/// window (epoch-based) get a reproducible value instead of whatever real
-/// time `seal()` stamped it with -- shuttle's determinism replay requires
-/// every value a scenario branches on to be reproducible. Only
-/// `shuttle_dump_resolves_exactly_once` reads this; `shuttle_worker_handoff`
-/// never looks at a segment's epoch at all, so pinning it there too is a
-/// no-op for that scenario.
+/// Fixed creation epoch every `spawn_writers` segment gets pinned to, so
+/// epoch-based window matching stays reproducible under shuttle's
+/// determinism replay instead of using real time. Only
+/// `shuttle_dump_resolves_exactly_once` reads this; a no-op for
+/// `shuttle_worker_handoff`.
 const FIXED_EPOCH_SECS_FOR_TEST: u64 = 1_000;
 
 /// Spawns `WRITERS` threads, each sealing `SEGMENTS_PER_WRITER` segments
@@ -136,17 +133,15 @@ crate::shuttle_test! {
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     // Drives `WorkerLoop`'s triggered-mode dump matching directly, bypassing
-    // `run_triggered`'s outer `tokio::select!`/`sleep_until` loop
-    // (needs a live Tokio reactor shuttle doesn't provide). Multiple writer threads
-    // seal segments concurrently with a single on-demand dump request; the dump
-    // must resolve exactly once, whether or not any segments landed in its
-    // window before the worker matched it.
+    // `run_triggered`'s outer `tokio::select!`/`sleep_until` loop (shuttle
+    // has no live Tokio reactor). Multiple writers seal segments concurrently
+    // with one on-demand dump request; it must resolve exactly once
+    // regardless of whether any segments landed in its window first.
     //
-    // `dump_current_data_at_for_test`/`set_epoch_secs_for_test` pin `triggered_at`
-    // and every segment's epoch to the same fixed value instead of reading the
-    // real clock, which shuttle's determinism replay requires. That means this
-    // scenario verifies the resolve-exactly-once race itself, not the real
-    // clock-read/epoch-stamping code path under concurrency.
+    // `dump_current_data_at_for_test`/`set_epoch_secs_for_test` pin the
+    // clock values instead of reading real time (required for determinism
+    // replay), so this verifies the resolve-exactly-once race, not real
+    // clock-reading.
     fn shuttle_dump_resolves_exactly_once() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
         let processed = Arc::new(AtomicUsize::new(0));

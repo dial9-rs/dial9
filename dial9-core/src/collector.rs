@@ -146,7 +146,7 @@ mod shuttle_tests {
     const CAPACITY: usize = 2;
 
     crate::shuttle_test! {
-        num_iters = 5_000, depth = 3;
+        default;
         // Multiple pusher threads race a popper thread against a tight capacity.
         // Every pushed batch must be either popped or evicted exactly once.
         fn shuttle_collector_eviction_accounting() {
@@ -209,16 +209,11 @@ mod shuttle_tests {
         }
     }
 
-    // Deterministic, single-threaded: `BoundedQueue::force_push`'s eviction
-    // *order* (not just count) is a property of the data structure, not a
-    // race, so no concurrency to explore -- `shuttle_collector_eviction_accounting`
-    // above only verifies aggregate counts (pushed == popped + evicted, no
-    // double-pop), which can't distinguish correct FIFO eviction from e.g.
-    // evicting the newest batch instead of the oldest. Still needs to run
-    // inside shuttle's harness, though, since `BoundedQueue` is backed by
-    // `shuttle::sync::Mutex` under `--cfg shuttle`.
+    // Deterministic: eviction order is a data-structure property, not a
+    // race (the scenario above only checks aggregate counts, not order).
+    // Still needs shuttle's harness since `BoundedQueue` uses `shuttle::sync::Mutex`.
     crate::shuttle_test! {
-        num_iters = 100, determinism_only;
+        default, determinism_only;
         fn shuttle_collector_eviction_is_fifo() {
             const CAPACITY: usize = 3;
             let collector = CentralCollector::with_capacity(CAPACITY);

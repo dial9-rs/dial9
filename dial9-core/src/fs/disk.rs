@@ -539,37 +539,19 @@ mod shuttle_tests {
         disk.seal(handle, &active_path, index).unwrap();
     }
 
-    // `take_files` is documented single-caller-only (its claim snapshot is
-    // taken outside the lock on the assumption nothing else inserts new
-    // claims concurrently), but a concurrent `remove_sealed` from a
-    // downstream "processing done" thread is explicitly supported — see
-    // the "Gauges are best-effort" comment on `take_files`. This exercises
-    // exactly that: one claimer thread scans+claims repeatedly while a
-    // remover thread deletes each claimed segment (and its claim entry) as
-    // soon as it's handed off, mirroring the real worker ->
-    // downstream-processor pipeline. Every sealed segment must be claimed
-    // exactly once, never twice.
+    // `take_files` is single-caller-only, but a concurrent `remove_sealed`
+    // from a downstream "processing done" thread is supported (see "Gauges
+    // are best-effort" on `take_files`). Exercises exactly that: a claimer
+    // scans+claims repeatedly while a remover deletes each claimed segment.
+    // Every segment must be claimed exactly once.
     //
-    // KNOWN BUG (tracking issue TBD — file one referencing this comment):
-    // `take_files` takes the disk scan and the `already_claimed` snapshot
-    // at two different times. If a concurrent `remove_sealed(idx)`
-    // completes entirely between those two reads, the disk scan's stale
-    // view still lists `idx` but the claimed-set snapshot no longer has
-    // it, so `take_files` concludes `idx` is "new" and redispatches an
-    // already-fully-processed segment whose file no longer exists. The
-    // existing "gauges are best-effort" comment undersells this — it's not
-    // just a gauge inaccuracy, it's a dedup violation. This test currently
-    // documents that failure (`should_panic` below) rather than asserting
-    // the (not yet true) fix. Once fixed, drop `, should_panic` from the
-    // macro invocation — a `#[should_panic]` test that stops panicking
-    // fails, so this will visibly break the moment the fix lands.
-    //
-    // Real filesystem I/O in every iteration (unlike `MemFs`'s in-memory
-    // equivalent), so `num_iters` is kept small — matches
-    // `fs_fault_visible_across_threads`'s 100 iterations in
-    // `pipeline_shuttle_tests.rs` for the same reason.
+    // KNOWN BUG (tracking issue #782): `take_files` snapshots the disk scan
+    // and `already_claimed` at two different times. A `remove_sealed(idx)`
+    // completing in between makes `idx` look "new" again, redispatching an
+    // already-processed segment whose file is gone. Documented via `should_panic`
+    // below; drop it once fixed.
     crate::shuttle_test! {
-        num_iters = 200, depth = 3, should_panic;
+        num_iters = 1_000, depth = 3, should_panic, expected = "every sealed segment must be claimed exactly once";
         fn shuttle_claim_dedup() {
             let dir = tempfile::tempdir().unwrap();
             let stem = "trace";
@@ -594,7 +576,11 @@ mod shuttle_tests {
                         let taken = disk.take_files();
                         for seg in taken.segments {
                             dispatched.fetch_add(1, Ordering::Relaxed);
-                            tx.send(seg.seg_ref).unwrap();
+                            // The known bug can cause an extra
+                            // dispatch after `remover` already exited and
+                            // dropped `rx`. `assert_eq!` below is
+                            // where this is meant to surface.
+                            let _ = tx.send(seg.seg_ref);
                         }
                         shuttle::thread::yield_now();
                     }
@@ -617,7 +603,7 @@ mod shuttle_tests {
             assert_eq!(
                 dispatched.load(Ordering::Relaxed),
                 COUNT as usize,
-                "every sealed segment must be claimed exactly once, never twice"
+                "every sealed segment must be claimed exactly once"
             );
             assert_eq!(removed_total, COUNT as usize);
         }
