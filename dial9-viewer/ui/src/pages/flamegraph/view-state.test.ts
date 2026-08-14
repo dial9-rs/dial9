@@ -357,7 +357,7 @@ describe("createApiInspectSync", () => {
   it("writes only inspection to the current api URL and removes it on exit", () => {
     const fg = fakeApiFg();
     const host = fakeHost({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?api=1&bucket=b",
       hash: "#foreign",
     });
@@ -375,19 +375,19 @@ describe("createApiInspectSync", () => {
     });
     sync.onViewChange();
     expect(host.writes).toEqual([
-      "/new/flamegraph.html?api=1&bucket=b&inspect=poll&inspect_full=core%3A%3Apoll#foreign",
+      "/flamegraph.html?api=1&bucket=b&inspect=poll&inspect_full=core%3A%3Apoll#foreign",
     ]);
 
     fg.setState({});
     sync.onViewChange();
-    expect(host.writes.at(-1)).toBe("/new/flamegraph.html?api=1&bucket=b#foreign");
+    expect(host.writes.at(-1)).toBe("/flamegraph.html?api=1&bucket=b#foreign");
   });
 
   it("retries URL restoration without clearing zoom or search", () => {
     const fg = fakeApiFg();
     fg.setState({ workerZoom: ["main"], search: "tokio" });
     const host = fakeHost({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?api=1&inspect=poll&inspect_full=core%3A%3Apoll",
       hash: "",
     });
@@ -411,7 +411,7 @@ describe("createApiInspectSync", () => {
   it("carries live inspection through a scope change", () => {
     const fg = fakeApiFg();
     const host = fakeHost({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?api=1",
       hash: "",
     });
