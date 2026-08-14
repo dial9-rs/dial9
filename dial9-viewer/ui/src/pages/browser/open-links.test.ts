@@ -135,6 +135,8 @@ describe("profile links without a heatmap selection", () => {
       expect(parsed.searchParams.getAll("host")).toEqual(["host-a", "host-b"]);
     }
     expect(String(open.mock.calls[0]![0])).toMatch(/^flamegraph\.html\?/);
+    const flamegraph = new URL(String(open.mock.calls[0]![0]), "https://viewer.example/");
+    expect(flamegraph.searchParams.get("api")).toBe("1");
     expect(String(open.mock.calls[1]![0])).toMatch(/^tokio_stats\.html\?/);
     expect(String(open.mock.calls[2]![0])).toMatch(/^span_explorer\.html\?/);
   });

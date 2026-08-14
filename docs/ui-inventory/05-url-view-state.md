@@ -80,9 +80,9 @@ valid:
 - **Read:** query params are the base; v=1 hash fields override
   **per field**; the query fills the gaps. (They only diverge on hand-edited
   URLs: the writer always emits them together.)
-- **Write:** the page mirrors zoom state into the query params AND the hash
-  in the same replaceState. The mirror touches ONLY the two
-  zoom params; every other query param is preserved verbatim (F153).
+- **Write:** exact mode mirrors its flamegraph view state into the query params
+  AND the hash in the same replaceState. The mirror touches ONLY its view-state
+  params; every other query param is preserved verbatim (F153).
 
 ## Write mechanics (sync.ts)
 
@@ -105,8 +105,8 @@ valid:
 | --- | --- | --- |
 | browser page (index.html) | `bucket`, `aws_region`, `prefix`, `tab`, `tz`, `last`, `from`, `to`, `q` (query) | `url_state.js` (#585), untouched by the codec. Its `tz` is a QUERY param on a different page; the codec's `tz` is a HASH key - no interference, vocabulary deliberately identical. |
 | flamegraph exact mode | `trace`, `start`, `end`, `svc`, `host`, `segs`, `from`, `to` (query) | page-owned LOAD SCOPE, read-only, preserved verbatim by every codec write |
-| flamegraph exact mode | `worker-zoom`, `offworker-zoom` (query) | stable view state; codec-mirrored (see precedence above) |
-| flamegraph api mode | `api`, `data_dir`, `bucket`, `prefix`, `service`, `host`*, `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`, `max_files` (query) | page-owned scope/facets, `pushState` on Apply/facet change (F180); canvas zoom is not URL-synced in this mode |
+| flamegraph exact mode | `worker-zoom`, `offworker-zoom`, `inspect`, `inspect_full` (query) | stable view state; codec-mirrored (see precedence above) |
+| flamegraph api mode | `api`, `data_dir`, `bucket`, `prefix`, `service`, `host`*, `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`, `max_files`, `inspect`, `inspect_full` (query) | scope/facets use `pushState`; inspection uses `replaceState` and survives scope changes (F180). Canvas zoom remains URL-silent. |
 | trace viewer (`viewer.html`) | viewport, selection, filters, rail/cursors, runtime folds, layout/lanes, URL-defined numeric field charts, inspector/disclosures/correlation, region modes, embedded zoom paths, and `data-start`/`data-end` (query) | page-owned readable durable state in `src/pages/viewer/url-state.ts`; the exact registry is `VIEWER_VIEW_QUERY_PARAMS` and is contract-pinned to the README table. Defaults omitted, unordered values sorted, invalid known values dropped, unknown params preserved, and settled updates use debounced `replaceState`. `start`/`end` are viewport bounds; `data-start`/`data-end` are parse bounds. |
 | viewer and flamegraph | the hash | this codec, exclusively - EXCEPT foreign hashes, which are left alone |
 

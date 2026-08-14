@@ -20,11 +20,8 @@ fn dynamic_list_round_trip() {
         FieldValue::String("world".into()),
         FieldValue::Varint(42),
     ];
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1000), FieldValue::List(items.clone())],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1000, &[FieldValue::List(items.clone())])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -58,11 +55,8 @@ fn dynamic_map_round_trip() {
             FieldValue::String("test".into()),
         ),
     ];
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(2000), FieldValue::Map(pairs.clone())],
-    )
-    .unwrap();
+    enc.write_event(&schema, 2000, &[FieldValue::Map(pairs.clone())])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -91,14 +85,10 @@ fn optional_dynamic_list_round_trip() {
 
     // Present
     let items = vec![FieldValue::Varint(1), FieldValue::Varint(2)];
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(3000), FieldValue::List(items.clone())],
-    )
-    .unwrap();
-    // Absent
-    enc.write_event(&schema, &[FieldValue::Varint(3001), FieldValue::None])
+    enc.write_event(&schema, 3000, &[FieldValue::List(items.clone())])
         .unwrap();
+    // Absent
+    enc.write_event(&schema, 3001, &[FieldValue::None]).unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -133,11 +123,8 @@ fn heterogeneous_list_round_trip() {
         FieldValue::F64(1.5),
         FieldValue::I64(-1),
     ];
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(4000), FieldValue::List(items.clone())],
-    )
-    .unwrap();
+    enc.write_event(&schema, 4000, &[FieldValue::List(items.clone())])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -166,11 +153,8 @@ fn nested_list_in_map_round_trip() {
 
     let inner_list = FieldValue::List(vec![FieldValue::Varint(1), FieldValue::Varint(2)]);
     let pairs = vec![(FieldValue::String("nums".into()), inner_list.clone())];
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(5000), FieldValue::Map(pairs.clone())],
-    )
-    .unwrap();
+    enc.write_event(&schema, 5000, &[FieldValue::Map(pairs.clone())])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -202,11 +186,8 @@ fn empty_list_and_map_round_trip() {
 
     enc.write_event(
         &schema,
-        &[
-            FieldValue::Varint(6000),
-            FieldValue::List(vec![]),
-            FieldValue::Map(vec![]),
-        ],
+        6000,
+        &[FieldValue::List(vec![]), FieldValue::Map(vec![])],
     )
     .unwrap();
 

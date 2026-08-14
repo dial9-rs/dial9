@@ -301,29 +301,21 @@ impl<F: Future> Future for WakeTraced<F> {
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
 
-        use crate::telemetry::recorder::{make_poll_start, poll_span_open};
-
         // Only record polls this wrapper owns: a task on a runtime dial9 is not
         // attached to has nothing to attribute them to, and poll events claim
         // worker occupancy, so emitting inside an open span (tokio's hooks, or
         // an outer wrapper) would claim the same time twice.
-        let Some(ctx) = this.runtime_ctx.as_deref().filter(|_| !poll_span_open()) else {
+        let Some(ctx) = this
+            .runtime_ctx
+            .as_deref()
+            .filter(|_| !crate::telemetry::recorder::poll_span_open())
+        else {
             return this.inner.poll(&mut traced_cx);
         };
         // Closes the span on the way out, panic or not. A panicking future
         // unwinds past the rest of this function and tokio catches it above us.
-        let _guard = PollSpanGuard {
-            ctx,
-            shared: &this.waker_data.shared,
-        };
-        this.waker_data.shared.if_enabled(|buf| {
-            buf.record_encodable_event(&make_poll_start(
-                Some(ctx),
-                &this.waker_data.shared,
-                this.spawn_loc,
-                this.waker_data.woken_task_id,
-            ));
-        });
+        let _guard = PollSpanGuard { ctx };
+        ctx.record_poll_start(this.spawn_loc, this.waker_data.woken_task_id);
         this.inner.poll(&mut traced_cx)
     }
 }
@@ -333,17 +325,11 @@ impl<F: Future> Future for WakeTraced<F> {
 /// marker set.
 struct PollSpanGuard<'a> {
     ctx: &'a RuntimeContext,
-    shared: &'a SharedState,
 }
 
 impl Drop for PollSpanGuard<'_> {
     fn drop(&mut self) {
-        self.shared.if_enabled(|buf| {
-            buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
-                Some(self.ctx),
-                self.shared,
-            ));
-        });
+        self.ctx.record_poll_end();
         crate::telemetry::recorder::clear_poll_span();
     }
 }

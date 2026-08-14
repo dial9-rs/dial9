@@ -548,36 +548,26 @@ impl<'a> SegmentWriter<'a> {
                 let loc = self.intern(loc)?;
                 self.enc.write_event(
                     &self.sch.poll_start,
-                    &[
-                        Varint(ts),
-                        Varint(worker),
-                        Varint(0),
-                        Varint(task),
-                        PooledString(loc),
-                    ],
+                    ts,
+                    &[Varint(worker), Varint(0), Varint(task), PooledString(loc)],
                 )?;
             }
             Ev::PollEnd { worker } => {
                 self.enc
-                    .write_event(&self.sch.poll_end, &[Varint(ts), Varint(worker)])?;
+                    .write_event(&self.sch.poll_end, ts, &[Varint(worker)])?;
             }
             Ev::Park { worker, cpu, tid } => {
                 self.enc.write_event(
                     &self.sch.park,
-                    &[
-                        Varint(ts),
-                        Varint(worker),
-                        Varint(0),
-                        Varint(cpu),
-                        Varint(tid),
-                    ],
+                    ts,
+                    &[Varint(worker), Varint(0), Varint(cpu), Varint(tid)],
                 )?;
             }
             Ev::Unpark { worker, cpu, tid } => {
                 self.enc.write_event(
                     &self.sch.unpark,
+                    ts,
                     &[
-                        Varint(ts),
                         Varint(worker),
                         Varint(0),
                         Varint(cpu),
@@ -588,13 +578,14 @@ impl<'a> SegmentWriter<'a> {
             }
             Ev::Queue { depth } => {
                 self.enc
-                    .write_event(&self.sch.queue, &[Varint(ts), Varint(depth)])?;
+                    .write_event(&self.sch.queue, ts, &[Varint(depth)])?;
             }
             Ev::Spawn { task, loc } => {
                 let loc = self.intern(loc)?;
                 self.enc.write_event(
                     &self.sch.task_spawn,
-                    &[Varint(ts), Varint(task), PooledString(loc), Bool(true)],
+                    ts,
+                    &[Varint(task), PooledString(loc), Bool(true)],
                 )?;
             }
         }
@@ -604,7 +595,8 @@ impl<'a> SegmentWriter<'a> {
     fn clock_sync(&mut self, mono_ns: u64, real_ns: u64) -> Result<()> {
         self.enc.write_event(
             &self.sch.clock_sync,
-            &[FieldValue::Varint(mono_ns), FieldValue::Varint(real_ns)],
+            mono_ns,
+            &[FieldValue::Varint(real_ns)],
         )?;
         Ok(())
     }
@@ -614,10 +606,8 @@ impl<'a> SegmentWriter<'a> {
             .iter()
             .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
-        self.enc.write_event(
-            &self.sch.metadata,
-            &[FieldValue::Varint(ts), FieldValue::StringMap(pairs)],
-        )?;
+        self.enc
+            .write_event(&self.sch.metadata, ts, &[FieldValue::StringMap(pairs)])?;
         Ok(())
     }
 

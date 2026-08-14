@@ -30,19 +30,16 @@ fn full_round_trip() {
 
     enc.write_event(
         &poll_id,
-        &[
-            FieldValue::Varint(1_000_000),
-            FieldValue::Varint(0),
-            FieldValue::Varint(42),
-        ],
+        1_000_000,
+        &[FieldValue::Varint(0), FieldValue::Varint(42)],
     )
     .unwrap();
 
     let frames = vec![0x5555_5555_1234u64, 0x5555_5555_0a00, 0x5555_5555_0800];
     enc.write_event(
         &cpu_id,
+        1_000_100,
         &[
-            FieldValue::Varint(1_000_100),
             FieldValue::PooledString(thread_id),
             FieldValue::StackFrames(frames.clone().into()),
         ],
@@ -64,8 +61,8 @@ fn full_round_trip() {
         .unwrap();
     enc.write_event(
         &sym_schema,
+        0,
         &[
-            FieldValue::Varint(0), // timestamp
             FieldValue::Varint(0x5555_5555_0000),
             FieldValue::Varint(0x2000),
             FieldValue::PooledString(sym_name_id),
@@ -137,7 +134,6 @@ fn round_trip_all_field_types() {
 
     let pool_id = enc.intern_string("test").unwrap();
     let values = vec![
-        FieldValue::Varint(1_000_000), // timestamp
         FieldValue::Varint(u64::MAX),
         FieldValue::I64(i64::MIN),
         FieldValue::F64(std::f64::consts::E),
@@ -147,7 +143,7 @@ fn round_trip_all_field_types() {
         FieldValue::PooledString(pool_id),
         FieldValue::StackFrames(vec![0xAAAA, 0xBBBB, 0xCCCC].into()),
     ];
-    enc.write_event(&tid, &values).unwrap();
+    enc.write_event(&tid, 1_000_000, &values).unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();
@@ -162,6 +158,6 @@ fn round_trip_all_field_types() {
     } = event
     {
         // Decoded values don't include the timestamp (it's in the header)
-        assert_eq!(decoded_values, &values[1..]);
+        assert_eq!(decoded_values, &values);
     }
 }

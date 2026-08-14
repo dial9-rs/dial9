@@ -189,6 +189,8 @@ page emits it via `traceTitleParams`/`objectTraceUrls`):
 | `to` | string | Human-readable wall-clock range end, display only. |
 | `worker-zoom` | TAB-joined frame names, root -> target | Flamegraph only: stable worker-tree zoom path (features/03 F148/F150), mirrored with `fg.w` when zoom changes. |
 | `offworker-zoom` | same | Flamegraph only: off-worker-tree zoom path (F149). |
+| `inspect` | frame display name | Flamegraph only: inspected/butterfly focus. |
+| `inspect_full` | full frame symbol | Flamegraph only: inspection identity when it differs from `inspect`; omitted otherwise. |
 | `prof` | `1` | Viewer only, debug: enables the render profiler (features/02 A14). Honored but not part of any UI's emitted links. |
 
 `start`/`end` are ABSOLUTE monotonic nanoseconds, the same values carried by
@@ -283,9 +285,11 @@ change (features/03 F168/F180), so Back walks the filter history:
 | `thread_class` | string | Facet filter. |
 | `spawn_location` | string | Facet filter. |
 | `max_files` | integer | Refinement fold ceiling. |
+| `inspect` | frame display name | Inspected/butterfly focus; replaced in place and preserved across scope changes. |
+| `inspect_full` | full frame symbol | Inspection identity when it differs from `inspect`; omitted otherwise. |
 
-Canvas zoom is deliberately NOT URL-synced in api mode (F180); there are no
-view-state params here.
+Canvas zoom remains deliberately NOT URL-synced in api mode (F180). Inspection
+is restored as aggregate snapshots arrive.
 
 ### Query params - index.html (trace browser)
 

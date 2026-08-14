@@ -178,11 +178,8 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
                         _ => Err(ParseTimestampError::MissingRealtimeField),
                     };
                 }
-                if name == "SegmentMetadataEvent"
-                    && let Some(ts) = timestamp_ns
-                    && ts >= LEGACY_EPOCH_NS_FLOOR
-                {
-                    legacy_fallback = Some(ts);
+                if name == "SegmentMetadataEvent" && timestamp_ns >= LEGACY_EPOCH_NS_FLOOR {
+                    legacy_fallback = Some(timestamp_ns);
                 }
                 if events_seen >= 10 {
                     return legacy_fallback.ok_or(ParseTimestampError::NoAnchorInFirst10Events);

@@ -36,6 +36,7 @@ import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
 import type { FgKeys } from "./fg-keys.js";
 import { createPollMinimap, type PollMinimap } from "./minimap.js";
 import { buildApiUrl, buildBrowserQuery, seedFacetState, type ApiQueryState } from "./query.js";
+import { createApiInspectSync } from "./view-state.js";
 
 /** One accumulated facet: display label + monotonically-unioned values. */
 interface AvailFacet {
@@ -148,10 +149,12 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   }
 
   function updateBrowserUrl(): void {
+    const nextParams = new URLSearchParams(buildBrowserQuery(queryState()));
+    inspectSync.carryTo(nextParams);
     history.pushState(
       null,
       "",
-      window.location.pathname + "?" + buildBrowserQuery(queryState())
+      window.location.pathname + "?" + nextParams.toString()
     );
   }
 
@@ -280,12 +283,13 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     return { name: node.name, count: node.count, self: node.self, children: m };
   }
 
-  // Canvas zoom is not URL-synced in api mode - the browser URL carries the
-  // filter scope instead. The onZoomChange callback records zoom history only
-  // (`z` undo); it never touches the URL.
+  // Canvas zoom is not URL-synced in api mode. Inspection is, using its stable
+  // frame identity so a shared link can restore it as snapshots arrive.
   let keys: FgKeys | null = null;
+  const inspectSync = createApiInspectSync(params, () => fg);
   const fg = createFlamegraph(containerEl, () => {
     keys?.recordZoom();
+    inspectSync.onViewChange();
   });
   // Unified keys: `?` help, `f` fit, `z` zoom-undo. The widget's toolbar +
   // canvases exist as of createFlamegraph, so the root state recorded at mount
@@ -386,6 +390,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // is skipped, and the live zoom/inspect view is restored across the swap.
   // A fresh scope adopts everything and resets.
   function startStreaming(preserveExisting = false): void {
+    inspectSync.preserveForTreeChange();
     const baselineFilesFolded =
       preserveExisting && lastCoverage ? lastCoverage.files_folded : 0;
     stopStreaming();
@@ -423,6 +428,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
         const preservedView = preserveExisting ? fg.getViewState() : null;
         renderEvent(resp);
         if (preservedView) fg.applyViewState(preservedView);
+        inspectSync.restoreAfterTreeChange();
       },
       onClose: () => {
         if (token !== streamToken) return;

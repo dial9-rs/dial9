@@ -9,8 +9,7 @@
 //! The deserializer presents each event as a map with these entries (in order):
 //!
 //! 1. `"event"` → the schema name (the discriminant for `#[serde(tag = "event")]`).
-//! 2. `"timestamp_ns"` → the absolute frame-header timestamp (only if the
-//!    schema has `has_timestamp = true`).
+//! 2. `"timestamp_ns"` → the absolute frame-header timestamp.
 //! 3. One entry per schema field, keyed by field name.
 //!
 //! Pool resolution is automatic:
@@ -106,7 +105,7 @@ pub fn from_raw_event<'a, 'f, T: serde::de::DeserializeOwned>(
 ) -> Result<T, DeserError> {
     T::deserialize(RawEventDeserializer {
         name: raw.name,
-        timestamp_ns: raw.timestamp_ns,
+        timestamp_ns: Some(raw.timestamp_ns),
         fields: raw.fields,
         schema: raw.schema,
         string_pool: raw.string_pool,

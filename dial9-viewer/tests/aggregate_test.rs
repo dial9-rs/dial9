@@ -104,11 +104,8 @@ fn mini_trace() -> (Vec<u8>, MiniCounts) {
     for (ts, worker, tid) in [(10u64, 0u64, 100u64), (11, 1, 101)] {
         enc.write_event(
             &park,
-            &[
-                FieldValue::Varint(ts),
-                FieldValue::Varint(worker),
-                FieldValue::Varint(tid),
-            ],
+            ts,
+            &[FieldValue::Varint(worker), FieldValue::Varint(tid)],
         )
         .unwrap();
     }
@@ -131,8 +128,8 @@ fn mini_trace() -> (Vec<u8>, MiniCounts) {
     for &(ts, tid, source, frames) in events {
         enc.write_event(
             &cpu,
+            ts,
             &[
-                FieldValue::Varint(ts),
                 FieldValue::Varint(tid),
                 FieldValue::Varint(source),
                 FieldValue::StackFrames(frames.to_vec().into()),
@@ -218,31 +215,21 @@ fn poll_trace_gz() -> Vec<u8> {
 
     // Bind tid 100 -> worker 0 early (before any poll), so the binding doesn't
     // close an open poll span. The first varint of every event is its timestamp.
-    enc.write_event(
-        &park,
-        &[
-            FieldValue::Varint(1),
-            FieldValue::Varint(0),
-            FieldValue::Varint(100),
-        ],
-    )
-    .unwrap();
+    enc.write_event(&park, 1, &[FieldValue::Varint(0), FieldValue::Varint(100)])
+        .unwrap();
 
     // Fast poll on worker 0: [1_000_000, 1_500_000) → 500_000 ns (0.5 ms).
     enc.write_event(
         &poll_start,
-        &[
-            FieldValue::Varint(1_000_000),
-            FieldValue::Varint(0),
-            FieldValue::Varint(7),
-        ],
+        1_000_000,
+        &[FieldValue::Varint(0), FieldValue::Varint(7)],
     )
     .unwrap();
     for ts in [1_100_000u64, 1_300_000] {
         enc.write_event(
             &cpu,
+            ts,
             &[
-                FieldValue::Varint(ts),
                 FieldValue::Varint(100),
                 FieldValue::Varint(0),
                 FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
@@ -250,27 +237,21 @@ fn poll_trace_gz() -> Vec<u8> {
         )
         .unwrap();
     }
-    enc.write_event(
-        &poll_end,
-        &[FieldValue::Varint(1_500_000), FieldValue::Varint(0)],
-    )
-    .unwrap();
+    enc.write_event(&poll_end, 1_500_000, &[FieldValue::Varint(0)])
+        .unwrap();
 
     // Slow poll on worker 0: [10_000_000, 60_000_000) → 50_000_000 ns (50 ms).
     enc.write_event(
         &poll_start,
-        &[
-            FieldValue::Varint(10_000_000),
-            FieldValue::Varint(0),
-            FieldValue::Varint(8),
-        ],
+        10_000_000,
+        &[FieldValue::Varint(0), FieldValue::Varint(8)],
     )
     .unwrap();
     for ts in [20_000_000u64, 30_000_000, 40_000_000] {
         enc.write_event(
             &cpu,
+            ts,
             &[
-                FieldValue::Varint(ts),
                 FieldValue::Varint(100),
                 FieldValue::Varint(0),
                 FieldValue::StackFrames(vec![0x1000u64, 0x3000].into()),
@@ -278,18 +259,15 @@ fn poll_trace_gz() -> Vec<u8> {
         )
         .unwrap();
     }
-    enc.write_event(
-        &poll_end,
-        &[FieldValue::Varint(60_000_000), FieldValue::Varint(0)],
-    )
-    .unwrap();
+    enc.write_event(&poll_end, 60_000_000, &[FieldValue::Varint(0)])
+        .unwrap();
 
     // One off-worker sample (tid 999 is never bound) → no enclosing poll, so its
     // poll_duration_ns is null and any band excludes it.
     enc.write_event(
         &cpu,
+        70_000_000,
         &[
-            FieldValue::Varint(70_000_000),
             FieldValue::Varint(999),
             FieldValue::Varint(0),
             FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
