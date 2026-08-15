@@ -10,7 +10,7 @@
 //   viewer-data-window   recipe 1: data-start/data-end filters the data;
 //                        redundant matching viewport params canonicalize out.
 //                        Values are computed from the demo trace in Node.
-//   fg-query-zoom        recipe 2, stable query form: the recorded J9
+//   fg-query-zoom        recipe 2, stable query form: a recorded
 //                        worker-zoom link restores the zoom, zero rewrites.
 //   fg-hash-zoom         recipe 2, hash form: #v=1&fg.w=
 //                        restores the same zoom, zero rewrites; a reserved
@@ -31,10 +31,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { parseArgs, usage } from "./lib/cli.mjs";
 import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
-import { LOADED_WAITS } from "./lib/steps.mjs";
-import { captureReadouts } from "./lib/readouts.mjs";
-import { READOUT_SCHEMA } from "./fixtures/readout-schema.mjs";
-import { JOURNEYS } from "./journeys.mjs";
+import { LOADED_WAITS } from "./lib/pages.mjs";
 
 const require = createRequire(import.meta.url);
 const DEMO_TRACE = fileURLToPath(new URL("../public/demo-trace.bin", import.meta.url));
@@ -44,13 +41,12 @@ const SPEC = {
   json: { help: "write leg results as JSON to this path" },
 };
 
-// The recorded J9 worker-zoom URL against the demo trace is the shared zoom
-// fixture for both forms; reusing it keeps this script in lockstep with the
-// journey.
-const J9_PATH = JOURNEYS.J9.defaultPath;
-const J9_ZOOM_ENCODED = new URL(J9_PATH, "http://x").search.match(
-  /worker-zoom=([^&]*)/,
-)[1];
+// Prefix of a worker-zoom path emitted by the canonical flamegraph for the
+// committed demo trace. Re-record it after regenerating that trace.
+const RECORDED_WORKER_ZOOM =
+  "0xffff9b8cbf1c%090xffff9b862030%09Thread%3A%3Anew%3A%3Athread_start+unix.rs%3A130";
+const RECORDED_ZOOM_PATH =
+  `/flamegraph.html?trace=demo-trace.bin&worker-zoom=${RECORDED_WORKER_ZOOM}`;
 
 /** Parse the viewer's duration readout ("150ms", "4.20s", "980µs") to ms. */
 function durationToMs(text) {
@@ -61,38 +57,69 @@ function durationToMs(text) {
   return n * scale;
 }
 
-/** Load `url`, wait for the page kind's loaded state, capture readouts. */
-async function loadAndCapture(browser, kind, url, { settleMs = 0 } = {}) {
+function requiredMatch(text, pattern, label) {
+  const value = pattern.exec(text)?.[1];
+  if (value === undefined) {
+    throw new Error(`missing ${label} in ${JSON.stringify(text)}`);
+  }
+  return value;
+}
+
+async function optionalText(page, selector) {
+  const element = page.locator(selector).first();
+  if ((await element.count()) === 0) return null;
+  return ((await element.textContent()) ?? "").trim();
+}
+
+function queryAndHash(url) {
+  const u = new URL(url);
+  return u.search + u.hash;
+}
+
+/** Load `url`, wait for the page kind's loaded state, then capture it. */
+async function loadAndCapture(browser, kind, url, capture, { settleMs = 0 } = {}) {
   const { context, page } = await newPage(browser);
   try {
     await page.goto(url);
     await LOADED_WAITS[kind](page);
     if (settleMs > 0) await page.waitForTimeout(settleMs);
-    return await captureReadouts(page, READOUT_SCHEMA[kind]);
+    return await capture(page);
   } finally {
     await context.close();
   }
 }
 
 async function captureViewer(browser, url) {
-  const { context, page } = await newPage(browser);
-  try {
-    await page.goto(url);
-    await LOADED_WAITS.viewer(page);
-    await page.waitForTimeout(250); // trailing URL sync settles at 150ms
-    return {
-      readouts: await captureReadouts(page, READOUT_SCHEMA.viewer),
-      viewLabel: (await page.locator("[data-status-view]").textContent())?.trim() ?? "",
-      clearRangeVisible: await page.locator("#d9-btn-clear-range").isVisible(),
-    };
-  } finally {
-    await context.close();
-  }
+  return loadAndCapture(
+    browser,
+    "viewer",
+    url,
+    async (page) => {
+      const metadata = await optionalText(page, "#toolbar-row-data");
+      if (metadata === null) throw new Error("missing viewer metadata");
+      return {
+        events: requiredMatch(metadata, /([\d,]+) events/, "event count"),
+        duration: requiredMatch(metadata, /workers · ([^·\s]+)/, "trace duration"),
+        urlState: queryAndHash(page.url()),
+        viewLabel: (await optionalText(page, "[data-status-view]")) ?? "",
+        clearRangeVisible: await page.locator("#d9-btn-clear-range").isVisible(),
+      };
+    },
+    { settleMs: 250 }, // trailing URL sync settles at 150ms
+  );
 }
 
-function queryAndHash(url) {
-  const u = new URL(url);
-  return u.search + u.hash;
+async function captureFlamegraph(browser, url) {
+  return loadAndCapture(
+    browser,
+    "flamegraph",
+    url,
+    async (page) => ({
+      breadcrumb: await optionalText(page, ".fg-breadcrumb"),
+      urlState: queryAndHash(page.url()),
+    }),
+    { settleMs: 300 },
+  );
 }
 
 async function main() {
@@ -124,19 +151,20 @@ async function main() {
   const browser = await launchBrowser();
   try {
     const urlFull = `${opts.base}/viewer.html?trace=demo-trace.bin`;
-    const full = await loadAndCapture(browser, "viewer", urlFull);
-    const fullCount = Number((full["events.count"] ?? "").replace(/,/g, ""));
+    const full = await captureViewer(browser, urlFull);
+    const fullCount = Number(full.events.replace(/,/g, ""));
 
     // ── Leg 1: recipe 1, viewport only (all events stay loaded) ──────────
     {
       const url =
         `${opts.base}/viewer.html?trace=demo-trace.bin&start=${startNs}&end=${endNs}`;
       const problems = [];
-      const { readouts, viewLabel, clearRangeVisible } = await captureViewer(browser, url);
+      const { events, urlState, viewLabel, clearRangeVisible } =
+        await captureViewer(browser, url);
       if (clearRangeVisible) {
         problems.push("Clear Range visible without a data filter");
       }
-      const viewCount = Number((readouts["events.count"] ?? "").replace(/,/g, ""));
+      const viewCount = Number(events.replace(/,/g, ""));
       if (viewCount !== fullCount) {
         problems.push(`viewport link filtered events: ${viewCount} vs full ${fullCount}`);
       }
@@ -145,25 +173,25 @@ async function main() {
       if (viewMs === null || viewMs > windowMs * 1.01) {
         problems.push(`viewport readout "${viewLabel}" exceeds the ${windowMs}ms window`);
       }
-      const settled = new URLSearchParams(readouts["url.query"] ?? "");
+      const settled = new URLSearchParams(urlState);
       for (const [key, value] of Object.entries({
         trace: "demo-trace.bin",
         start: String(startNs),
         end: String(endNs),
       })) {
         if (settled.get(key) !== value) {
-          problems.push(`URL lost ${key}=${value}: ${readouts["url.query"]}`);
+          problems.push(`URL lost ${key}=${value}: ${urlState}`);
         }
       }
       if (settled.has("data-start") || settled.has("data-end")) {
-        problems.push(`viewport link gained a data filter: ${readouts["url.query"]}`);
+        problems.push(`viewport link gained a data filter: ${urlState}`);
       }
       legs.push({
         leg: "viewer-viewport",
         url,
         pass: problems.length === 0,
         problems,
-        readouts: { events: readouts["events.count"], viewport: viewLabel },
+        readouts: { events, viewport: viewLabel },
       });
     }
 
@@ -173,26 +201,27 @@ async function main() {
         `${opts.base}/viewer.html?trace=demo-trace.bin` +
         `&data-start=${startNs}&data-end=${endNs}&start=${startNs}&end=${endNs}`;
       const problems = [];
-      const { readouts, clearRangeVisible } = await captureViewer(browser, url);
+      const { events, duration, urlState, clearRangeVisible } =
+        await captureViewer(browser, url);
       if (!clearRangeVisible) {
         problems.push("Clear Range not visible with a data filter");
       }
-      const winCount = Number((readouts["events.count"] ?? "").replace(/,/g, ""));
+      const winCount = Number(events.replace(/,/g, ""));
       if (!(winCount > 0 && winCount < fullCount)) {
         problems.push(
           `windowed event count not a strict subset: ${winCount} vs full ${fullCount}`,
         );
       }
-      const durMs = durationToMs(readouts["trace.duration"]);
+      const durMs = durationToMs(duration);
       // The parsed range is inclusive within [start, end], so the rendered
       // duration must not exceed the requested window (small tolerance for
       // the readout's formatting rounding).
       if (durMs === null || durMs > windowMs * 1.01) {
         problems.push(
-          `duration readout "${readouts["trace.duration"]}" exceeds the ${windowMs}ms window`,
+          `duration readout "${duration}" exceeds the ${windowMs}ms window`,
         );
       }
-      const settled = new URLSearchParams(readouts["url.query"] ?? "");
+      const settled = new URLSearchParams(urlState);
       const expected = {
         trace: "demo-trace.bin",
         "data-start": String(startNs),
@@ -200,13 +229,13 @@ async function main() {
       };
       for (const [key, value] of Object.entries(expected)) {
         if (settled.get(key) !== value) {
-          problems.push(`URL lost ${key}=${value}: ${readouts["url.query"]}`);
+          problems.push(`URL lost ${key}=${value}: ${urlState}`);
         }
       }
       // Once filtered, the requested viewport is the full available extent;
       // the canonical URL therefore omits its redundant start/end pair.
       if (settled.has("start") || settled.has("end")) {
-        problems.push(`redundant viewport did not canonicalize out: ${readouts["url.query"]}`);
+        problems.push(`redundant viewport did not canonicalize out: ${urlState}`);
       }
       legs.push({
         leg: "viewer-data-window",
@@ -214,16 +243,16 @@ async function main() {
         pass: problems.length === 0,
         problems,
         readouts: {
-          fullEvents: full["events.count"],
-          windowEvents: readouts["events.count"],
-          windowDuration: readouts["trace.duration"],
+          fullEvents: full.events,
+          windowEvents: events,
+          windowDuration: duration,
         },
       });
     }
 
     // ── Leg 3: recipe 2 stable query form ───────────────────────────────
     {
-      const url = new URL(J9_PATH, opts.base).href;
+      const url = new URL(RECORDED_ZOOM_PATH, opts.base).href;
       const r = await captureFgLeg(browser, url);
       legs.push({ leg: "fg-query-zoom", url, ...r });
     }
@@ -234,7 +263,7 @@ async function main() {
     {
       const url =
         `${opts.base}/flamegraph.html?trace=demo-trace.bin` +
-        `#v=1&fg.w=${J9_ZOOM_ENCODED}&sel.task=3`;
+        `#v=1&fg.w=${RECORDED_WORKER_ZOOM}&sel.task=3`;
       const r = await captureFgLeg(browser, url);
       legs.push({ leg: "fg-hash-zoom", url, ...r });
     }
@@ -243,18 +272,16 @@ async function main() {
     {
       const url =
         `${opts.base}/flamegraph.html?trace=demo-trace.bin` +
-        `#v=2&fg.w=${J9_ZOOM_ENCODED}`;
-      const readouts = await loadAndCapture(browser, "flamegraph", url, {
-        settleMs: 300,
-      });
+        `#v=2&fg.w=${RECORDED_WORKER_ZOOM}`;
+      const { breadcrumb, urlState } = await captureFlamegraph(browser, url);
       const problems = [];
-      if (readouts["fg.breadcrumb"]) {
+      if (breadcrumb) {
         problems.push(
-          `zoom restored from a FOREIGN version: breadcrumb "${readouts["fg.breadcrumb"]}"`,
+          `zoom restored from a FOREIGN version: breadcrumb "${breadcrumb}"`,
         );
       }
-      if (readouts["url.query"] !== queryAndHash(url)) {
-        problems.push(`foreign hash rewritten: ${readouts["url.query"]}`);
+      if (urlState !== queryAndHash(url)) {
+        problems.push(`foreign hash rewritten: ${urlState}`);
       }
       legs.push({ leg: "fg-foreign-version", url, pass: problems.length === 0, problems });
     }
@@ -289,20 +316,20 @@ async function main() {
 
 /** Shared zoom-leg assertions: breadcrumb shows a zoom, URL is byte-stable. */
 async function captureFgLeg(browser, url) {
-  const readouts = await loadAndCapture(browser, "flamegraph", url, { settleMs: 300 });
+  const { breadcrumb, urlState } = await captureFlamegraph(browser, url);
   const problems = [];
-  if (!readouts["fg.breadcrumb"]) {
+  if (!breadcrumb) {
     problems.push("no breadcrumb: zoom was not restored");
   }
-  if (readouts["url.query"] !== queryAndHash(url)) {
+  if (urlState !== queryAndHash(url)) {
     problems.push(
-      `URL not byte-stable after restore: ${readouts["url.query"]}`,
+      `URL not byte-stable after restore: ${urlState}`,
     );
   }
   return {
     pass: problems.length === 0,
     problems,
-    readouts: { breadcrumb: readouts["fg.breadcrumb"] },
+    readouts: { breadcrumb },
   };
 }
 

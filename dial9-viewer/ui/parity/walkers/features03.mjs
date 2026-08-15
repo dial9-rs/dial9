@@ -3,8 +3,8 @@
 //
 // One walker per row the inventory records as gated. This page's aggregated
 // (?api=1) mode gates exactly three rows; every other row's recorded verdict
-// maps to NOT-TRIGGERABLE: listed, not driven. Exact-mode behavior is gated
-// by the other parity layers instead (census diff + behavioral differ).
+// maps to NOT-TRIGGERABLE: listed, not driven. Exact-mode behavior is covered
+// by focused Vitest suites and the live URL/accessibility checks.
 //
 // Environment assumptions: dev-server seed = ONE folded demo segment in
 // bucket `demo-traces` under prefix `traces`, with coverage 1 / 1 files - so

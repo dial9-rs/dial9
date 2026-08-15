@@ -8,14 +8,14 @@
 // Diff mode exits 0 only on ZERO diff. Two independent contexts capturing
 // the same URL is the self-test: they must produce identical censuses.
 //
-// The page's loaded-wait is inferred from the URL (lib/steps.mjs
+// The page's loaded-wait is inferred from the URL (lib/pages.mjs
 // waitLoadedByUrl); index pages get the pinned dev-seed clock (lib/browser.mjs)
 // so time-derived affordance state can't drift between the two captures.
 
 import process from "node:process";
 import { parseArgs, usage } from "./lib/cli.mjs";
 import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
-import { pageKindFor, waitLoadedByUrl } from "./lib/steps.mjs";
+import { pageKindFor, waitLoadedByUrl } from "./lib/pages.mjs";
 import {
   captureCensus,
   diffCensus,

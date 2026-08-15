@@ -1,6 +1,5 @@
-// Integration tests for the flamegraph page's URL view-state wiring:
-// restore-on-load at the vitest level (the widget is a recording fake; the
-// in-browser twin against the real page is a separate parity journey). Covers:
+// Integration tests for the flamegraph page's URL view-state wiring, using a
+// recording widget fake for restore-on-load. Covers:
 // restore of the FULL view (zoom + inspect + search + filters) from legacy
 // params / hash / both (hash precedence), the timeRangeMatched gate, zero URL
 // writes on restore, the view->URL write carrying legacy params + hash

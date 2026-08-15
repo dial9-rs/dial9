@@ -1,7 +1,7 @@
 // Shared headless-Chromium plumbing for the parity tools.
 //
 // Every tool drives the pages the same way: one chromium instance, a fresh
-// browser context per independent unit of work (walker / journey / scan), a
+// browser context per independent unit of work (walker / contract / scan), a
 // fixed viewport, and — for the S3-browser page — a fixed clock pinned to the
 // dev seed's date (see DEV_SEED_CLOCK below).
 
@@ -15,7 +15,7 @@ export const VIEWPORT = { width: 1440, height: 900 };
 // `traces/2026-04-09/1900/...` (dial9-viewer/src/bin/dev_server.rs). The
 // page's relative time windows ("Last 1hr" quick range, raw search's implicit
 // last-30-days window) are computed from Date.now(), so on a real clock the
-// seeded key drifts out of every reachable window. Walkers and journeys that
+// seeded key drifts out of every reachable window. Checks that
 // target the browser page pin the page's clock (Date only — timers keep
 // running, so debounces behave) to the evening of the seed date. This keeps
 // the recorded 2026-06-30 access paths (search an April window, raw-search

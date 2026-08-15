@@ -1,6 +1,6 @@
 // Shared page actions + assertion helpers for the browser (index.html) page.
 //
-// These encode the access paths the walkers and journeys drive repeatedly:
+// These encode the access paths the inventory walkers drive repeatedly:
 // waiting out the load-time bootstrap (config -> prefix discovery ->
 // auto-search), running the April-window browse search that reaches the dev
 // seed's single segment, and running a raw search that yields rows.
@@ -29,8 +29,7 @@ export async function waitBrowserBootstrap(page) {
   // The auto-search fires on load; let it settle so a walker's own search
   // can't race it. A search that found results HIDES the status element and
   // leaves its text as "Searching…" (index.html search handler), so hidden
-  // counts as settled — this matters when the wait re-runs post-search
-  // (perf-probe storms re-enter the loaded-wait).
+  // counts as settled when another check waits again after a search.
   await page.waitForFunction(
     () => {
       const el = document.getElementById("browse-status");

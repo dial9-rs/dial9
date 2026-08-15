@@ -17,7 +17,7 @@ import process from "node:process";
 import { createRequire } from "node:module";
 import { parseArgs, usage } from "./lib/cli.mjs";
 import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
-import { pageKindFor, waitLoadedByUrl } from "./lib/steps.mjs";
+import { pageKindFor, waitLoadedByUrl } from "./lib/pages.mjs";
 import { writeReport, writeJson } from "./lib/report.mjs";
 
 const SPEC = {

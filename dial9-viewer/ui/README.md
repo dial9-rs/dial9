@@ -386,10 +386,10 @@ The three asks from #303, in contract terms:
   Renaming this section's headings or table param names breaks that test by
   design.
 - `parity/url-contract.mjs` (T12-style, live server) constructs the recipe
-  URLs above and asserts the pages honor them end-to-end; see "Parity gate
-  tooling" below.
+  URLs above and asserts the pages honor them end-to-end; see "Live UI
+  checks" below.
 
-## Parity gate tooling (`parity/`)
+## Live UI checks (`parity/`)
 
 The UI's live regression tools are plain Node scripts, dev-only — `parity/`
 is not a Vite input and never enters `dist/` or the crate package. Run them
@@ -407,8 +407,8 @@ Tools that hit the browser page pin the page clock to the dev seed's date
 (`lib/browser.mjs`) so the seeded April segment stays reachable through
 relative time windows.
 
-**(a) Row-walker** — drives every feature-inventory row's access path, emits
-`VERIFIED` / `FAILED` / `NOT-TRIGGERABLE` per the shared verdict mapping
+**Inventory row-walker** — drives every feature-inventory row's access path,
+emits `VERIFIED` / `FAILED` / `NOT-TRIGGERABLE` per the shared verdict mapping
 (chunk-1 tickets header). Green = zero FAILED; exit 0 only when green.
 Amended rows (T15: features/01 G8/C6/I2/F4/F10) assert the canonical behavior
 recorded by the inventory.
@@ -420,7 +420,7 @@ node parity/walk-rows.mjs \
   [--rows A1,F12] [--json parity/out/walk.json] [--md parity/out/walk.md]
 ```
 
-**(a2) Fixture walk** (ticket T42) — the demo seed is a single segment on a
+**Fixture walk** (ticket T42) — the demo seed is a single segment on a
 single host/boot, so some features/01 rows are recorded `NOT-TRIGGERABLE`
 (boot transitions, seams, coverage gaps, the 200 MB cap, ...). The synthetic
 fixture generator produces what the demo cannot, and `--fixtures` walks
@@ -468,16 +468,7 @@ suites (`src/lib/trace/segments.fixtures.test.ts`, the real-parse anchor in
 T39's reproducible large-trace budget input) is gitignored and regenerable
 byte-identically.
 
-**Journeys J1-J8** (`parity/journeys.mjs`) — the eight expert journeys from
-`docs/ui-inventory/04-ux-findings.md` as declarative step lists
-(`lib/steps.mjs` is the vocabulary). Smoke-run one or all, printing the
-readouts captured at each checkpoint:
-
-```bash
-node parity/run-journey.mjs --base http://localhost:3021 [--journey J2]
-```
-
-**(b) Affordance census** — dump one page's interactive-control census, or
+**Affordance census** — dump one page's interactive-control census, or
 diff two pages' censuses (exit 0 only on ZERO diff):
 
 ```bash
@@ -485,17 +476,7 @@ node parity/census.mjs --url http://localhost:3021/index.html [--json p] [--md p
 node parity/census.mjs --a <pageUrlA> --b <pageUrlB> [--json p] [--md p]
 ```
 
-**(c) Behavioral differ** — same journey on two URLs, field-level exact diff
-of the data readouts at every checkpoint. The readout schema is the fixture
-`parity/fixtures/readout-schema.mjs` (owned by the parity tool; extending it
-is a parity change, not a page change). Bare origins get each journey's
-default path appended. Exit 0 only on zero field diffs:
-
-```bash
-node parity/behavior-diff.mjs --a http://host1 --b http://host2 [--journey J6] [--json p]
-```
-
-**(d) axe + contrast scan** — violation list (impact, rule, node count,
+**axe + contrast scan** — violation list (impact, rule, node count,
 example target) in the shape 04-ux-findings cites, plus a contrast summary
 line. Report producer (exit 0); `--fail-on <impact>` turns it into a gate:
 
@@ -503,18 +484,7 @@ line. Report producer (exit 0); `--fail-on <impact>` turns it into a gate:
 node parity/axe-scan.mjs --url <pageUrl> [--json p] [--md p] [--fail-on serious]
 ```
 
-**(e) Perf probe** — runs a journey to a representative state (defaults
-J6/J1/J5 per page kind), then drives an interaction storm and records painted
-frames, long tasks, total/forced layouts (per frame), and render invocations
-per frame via a pluggable source (`lib/render-sources.mjs`; the default
-`stub` reports unavailable — chunk 2 wires the store scheduler's
-`devRenderAssertStats()` hook as the `store` source):
-
-```bash
-node parity/perf-probe.mjs --url <pageUrl> [--journey J3] [--render-source stub] [--json p]
-```
-
-**(f) URL-contract check** - the live half of the URL contract's
+**URL-contract check** - the live half of the URL contract's
 enforcement (the codec-level pin is `src/lib/url/url-contract.test.ts`):
 constructs the contract section's deep-link recipe URLs in plain Node (no
 browser) and asserts real pages honor them: the viewer opens with an exact
@@ -526,9 +496,9 @@ pass:
 node parity/url-contract.mjs --base http://localhost:3021 [--json p]
 ```
 
-Self-tests (run whenever the tools themselves change): census and behavioral
-differ against the same URL must emit ZERO diff; the row-walker against the
-canonical browser page must stay green (zero FAILED).
+Self-tests (run whenever the tools themselves change): a census diff against
+the same URL must emit ZERO diff; the row-walker against the canonical browser
+page must stay green (zero FAILED).
 
 ## Tests — IMPORTANT for agents
 
