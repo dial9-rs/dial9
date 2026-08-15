@@ -3,7 +3,7 @@
 ///
 /// Usage: cargo run -p dial9-viewer --bin dev-server
 ///
-/// Optional fixture seeding (T42, see ui/README.md "Parity gate tooling"):
+/// Optional fixture seeding (T42, see ui/README.md "Live UI checks"):
 ///   DIAL9_SEED_DIR=<dir>       seed extra buckets from a tree shaped
 ///                              `<dir>/<bucket>/<key path...>`. Each file's
 ///                              mtime is preserved into the fake S3 (s3s-fs
