@@ -306,7 +306,7 @@ Verdict legend: `VERIFIED` (driven + observed) / `DEAD-CONFIRMED` / `PARTIAL` (s
 Method: dev-server on :3001 (same launch command), driven with `curl` for API-backed
 states + code read for pure-UI states. NO browser driver this pass, so DOM-interaction
 verdicts are static-analysis based and marked CODE-READ (weaker than the 2026-06-30
-VERIFIED; re-derivable by the parity row-walker once it exists). Dev-server facts
+VERIFIED; re-derivable by the inventory row-walker once it exists). Dev-server facts
 observed this pass: `/api/config` returns `aggregation_enabled:true`,
 `supports_byo_credentials:true`, `supports_assume_role:false`; `/api/search` -> 404
 (removed); `/api/browse` works (returned the seeded object for a 2026-04-09 window,

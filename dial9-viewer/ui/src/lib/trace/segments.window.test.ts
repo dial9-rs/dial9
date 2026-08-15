@@ -934,7 +934,7 @@ describe("10-segment scenario (DoD)", () => {
 
 // ── Real-parse anchor: accounting tied to actual buffers ─────────────────
 //
-// Runs the generated fixture set (parity/fixtures/segments/, ten real distinct
+// Runs the generated fixture set (live-checks/fixtures/segments/, ten real distinct
 // segments sharing one monotonic clock with planted boundary-spanning polls;
 // manifest.json records the planted facts). Regenerate with:
 //   cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
@@ -951,7 +951,7 @@ interface FixtureManifest {
 }
 
 describe("real-parse anchor (generated fixture set through the real core)", () => {
-  const fixturesDir = new URL("../../../parity/fixtures/segments/", import.meta.url);
+  const fixturesDir = new URL("../../../live-checks/fixtures/segments/", import.meta.url);
   const manifest = JSON.parse(
     readFileSync(fileURLToPath(new URL("manifest.json", fixturesDir)), "utf8")
   ) as FixtureManifest;

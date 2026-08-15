@@ -12,10 +12,10 @@
 //                     listed, not driven.
 //
 // Usage:
-//   node parity/walk-rows.mjs \
+//   node live-checks/walk-rows.mjs \
 //     --inventory ../../docs/ui-inventory/features/01-index-html.md \
 //     --url http://localhost:3021/index.html \
-//     [--rows A1,F12] [--json parity/out/walk.json] [--md parity/out/walk.md]
+//     [--rows A1,F12] [--json live-checks/out/walk.json] [--md live-checks/out/walk.md]
 //
 // Fixture mode: `--fixtures` drives the rows whose recorded verdict is
 // NOT-TRIGGERABLE on the demo seed but which the generated fixture data CAN
@@ -91,7 +91,7 @@ async function main() {
     ({ opts } = parseArgs(process.argv.slice(2), SPEC));
   } catch (e) {
     console.error(String(e.message));
-    console.error(usage("parity/walk-rows.mjs", SPEC));
+    console.error(usage("live-checks/walk-rows.mjs", SPEC));
     process.exit(2);
   }
 
@@ -172,7 +172,7 @@ async function main() {
             id: row.id,
             feature: row.feature,
             verdict: "FAILED",
-            note: `${recNote} but NO WALKER IMPLEMENTED — add one to parity/walkers/`,
+            note: `${recNote} but NO WALKER IMPLEMENTED — add one to live-checks/walkers/`,
           });
           continue;
         }

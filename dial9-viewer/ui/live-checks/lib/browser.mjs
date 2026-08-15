@@ -1,4 +1,4 @@
-// Shared headless-Chromium plumbing for the parity tools.
+// Shared headless-Chromium plumbing for the live UI checks.
 //
 // Every tool drives the pages the same way: one chromium instance, a fresh
 // browser context per independent unit of work (walker / contract / scan), a
@@ -7,7 +7,7 @@
 
 import { chromium } from "playwright";
 
-// Deterministic viewport for every parity run: readouts, censuses, and canvas
+// Deterministic viewport for every live-check run: readouts, censuses, and canvas
 // hit-testing all depend on layout, so the viewport is part of the contract.
 export const VIEWPORT = { width: 1440, height: 900 };
 
@@ -60,7 +60,7 @@ export async function assertServerReady(baseUrl) {
 
 /**
  * Perform `action` and capture the popup it opens. Returns the popup's
- * post-navigation URL and closes the popup (parity assertions only need the
+ * post-navigation URL and closes the popup (these checks only need the
  * URL; letting e.g. the viewer parse a trace would just slow the run down).
  */
 export async function popupUrl(page, action) {

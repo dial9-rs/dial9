@@ -1,4 +1,4 @@
-// Minimal CLI argument parser shared by the parity entry points.
+// Minimal CLI argument parser shared by the live-check entry points.
 //
 // Supports `--flag value` and `--flag` (boolean) forms plus positional
 // arguments. No external dependency by design.

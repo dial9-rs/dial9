@@ -1,4 +1,4 @@
-// Report rendering shared by the parity tools: the verdict table renders one
+// Report rendering shared by the live UI checks: the verdict table renders one
 // markdown row per feature — | Feature | Verdict | Evidence / note |.
 
 import fs from "node:fs";

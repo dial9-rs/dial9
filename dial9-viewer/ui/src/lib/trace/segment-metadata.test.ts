@@ -131,7 +131,7 @@ describe("row-walk against real traces", () => {
   beforeAll(async () => {
     demo = await parseFixture("../../../public/demo-trace.bin");
     windowSeg = await parseFixture(
-      "../../../parity/fixtures/segments/window-00.bin.gz",
+      "../../../live-checks/fixtures/segments/window-00.bin.gz",
     );
   });
 

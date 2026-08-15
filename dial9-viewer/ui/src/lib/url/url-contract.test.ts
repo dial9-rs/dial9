@@ -11,7 +11,7 @@
 //   documented "reserved" are preserved-verbatim-but-not-honored (the
 //   tolerant-reader rule that makes "reserved" an honest status);
 // - the recipe URL shapes resolve at codec level (the live-page twin is
-//   parity/url-contract.mjs, which drives real pages on a dev-server).
+//   live-checks/url-contract.mjs, which drives real pages on a dev-server).
 //
 // The promise this enforces: old params stay valid forever, evolution is
 // additive-only. Removing or renaming ANY name below is a breaking change and

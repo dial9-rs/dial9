@@ -385,13 +385,13 @@ The three asks from #303, in contract terms:
   recorded fixtures (`src/lib/url/legacy-params.fixture.ts`, `url_state.js`).
   Renaming this section's headings or table param names breaks that test by
   design.
-- `parity/url-contract.mjs` (T12-style, live server) constructs the recipe
+- `live-checks/url-contract.mjs` (T12-style, live server) constructs the recipe
   URLs above and asserts the pages honor them end-to-end; see "Live UI
   checks" below.
 
-## Live UI checks (`parity/`)
+## Live UI checks (`live-checks/`)
 
-The UI's live regression tools are plain Node scripts, dev-only — `parity/`
+The UI's live regression tools are plain Node scripts, dev-only — `live-checks/`
 is not a Vite input and never enters `dist/` or the crate package. Run them
 against a live server (the dev-server, or `dial9 serve`; readiness gate:
 `GET /api/config` returns JSON):
@@ -414,10 +414,10 @@ Amended rows (T15: features/01 G8/C6/I2/F4/F10) assert the canonical behavior
 recorded by the inventory.
 
 ```bash
-node parity/walk-rows.mjs \
+node live-checks/walk-rows.mjs \
   --inventory ../../docs/ui-inventory/features/01-index-html.md \
   --url http://localhost:3021/index.html \
-  [--rows A1,F12] [--json parity/out/walk.json] [--md parity/out/walk.md]
+  [--rows A1,F12] [--json live-checks/out/walk.json] [--md live-checks/out/walk.md]
 ```
 
 **Fixture walk** (ticket T42) — the demo seed is a single segment on a
@@ -428,28 +428,28 @@ exactly those rows against a fixture-seeded dev-server:
 
 ```bash
 # 1. Generate (deterministic; ~4 s in release). Writes the committed small
-#    fixtures under parity/fixtures/segments/ (a no-op diff unless the
+#    fixtures under live-checks/fixtures/segments/ (a no-op diff unless the
 #    generator changed) and the UNCOMMITTED seed tree under
-#    parity/fixtures/generated/s3/ (~224 MB; --skip-large omits the
+#    live-checks/fixtures/generated/s3/ (~224 MB; --skip-large omits the
 #    dial9-fixtures-large family and with it the H4 row).
 cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
 
 # 2. Serve it (DIAL9_DEFAULT_PREFIX= empties the default prefix — the
 #    D4/#471 date-root scenario needs discovery to see the date layer).
-DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
+DIAL9_SEED_DIR=dial9-viewer/ui/live-checks/fixtures/generated/s3 \
   DIAL9_DEFAULT_PREFIX= PORT=3022 \
   cargo run -p dial9-viewer --features dev-server --bin dev-server
 
 # 3. Walk. Default row set = the fixture-backed rows; the runner preflights
 #    every fixture family the selected rows need and exits 2 with these
 #    instructions when one is missing.
-node parity/walk-rows.mjs \
+node live-checks/walk-rows.mjs \
   --inventory ../../docs/ui-inventory/features/01-index-html.md \
   --url http://localhost:3022/index.html --fixtures \
-  [--json parity/out/fixture-walk.json]
+  [--json live-checks/out/fixture-walk.json]
 ```
 
-Fixture-backed rows (registry: `parity/walkers/features01.fixtures.mjs`;
+Fixture-backed rows (registry: `live-checks/walkers/features01.fixtures.mjs`;
 fixture geometry mirrors `src/bin/gen_fixtures.rs` — change them together):
 C7, D4, F5, F7, F8, F9, F20, H4. H5's warning text renders only with
 aggregation disabled, and any BYO-creds dev-server (which C7 needs) reports
@@ -460,11 +460,11 @@ The seed tree is `<dir>/<bucket>/<key...>`; file **mtimes are load-bearing**
 (they become S3 `last_modified`, the heatmap's segment end — the seam/gap
 scenarios exist entirely in mtimes), which is why the tree is regenerated
 rather than committed. Size policy: only the small fixtures under
-`parity/fixtures/segments/` (tens of KB: the 10-segment boundary-poll set +
+`live-checks/fixtures/segments/` (tens of KB: the 10-segment boundary-poll set +
 the multi-runtime #596 trace + `manifest.json`) are committed — the vitest
 suites (`src/lib/trace/segments.fixtures.test.ts`, the real-parse anchor in
 `segments.window.test.ts`) consume them hermetically. Everything under
-`parity/fixtures/generated/` (incl. the >200 MB large family, which is also
+`live-checks/fixtures/generated/` (incl. the >200 MB large family, which is also
 T39's reproducible large-trace budget input) is gitignored and regenerable
 byte-identically.
 
@@ -472,8 +472,8 @@ byte-identically.
 diff two pages' censuses (exit 0 only on ZERO diff):
 
 ```bash
-node parity/census.mjs --url http://localhost:3021/index.html [--json p] [--md p]
-node parity/census.mjs --a <pageUrlA> --b <pageUrlB> [--json p] [--md p]
+node live-checks/census.mjs --url http://localhost:3021/index.html [--json p] [--md p]
+node live-checks/census.mjs --a <pageUrlA> --b <pageUrlB> [--json p] [--md p]
 ```
 
 **axe + contrast scan** — violation list (impact, rule, node count,
@@ -481,7 +481,7 @@ example target) in the shape 04-ux-findings cites, plus a contrast summary
 line. Report producer (exit 0); `--fail-on <impact>` turns it into a gate:
 
 ```bash
-node parity/axe-scan.mjs --url <pageUrl> [--json p] [--md p] [--fail-on serious]
+node live-checks/axe-scan.mjs --url <pageUrl> [--json p] [--md p] [--fail-on serious]
 ```
 
 **URL-contract check** - the live half of the URL contract's
@@ -493,7 +493,7 @@ are inert, and a foreign version restores nothing. Exit 0 only when all legs
 pass:
 
 ```bash
-node parity/url-contract.mjs --base http://localhost:3021 [--json p]
+node live-checks/url-contract.mjs --base http://localhost:3021 [--json p]
 ```
 
 Self-tests (run whenever the tools themselves change): a census diff against

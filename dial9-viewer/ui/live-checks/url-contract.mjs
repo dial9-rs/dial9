@@ -23,7 +23,7 @@
 // Usage:
 //   npm run build   # the dev-server serves ui/dist from disk
 //   PORT=3111 cargo run -p dial9-viewer --bin dev-server --features dev-server
-//   node parity/url-contract.mjs --base http://localhost:3111 [--json out.json]
+//   node live-checks/url-contract.mjs --base http://localhost:3111 [--json out.json]
 
 import process from "node:process";
 import * as fs from "node:fs";
@@ -128,7 +128,7 @@ async function main() {
     ({ opts } = parseArgs(process.argv.slice(2), SPEC));
   } catch (e) {
     console.error(String(e.message));
-    console.error(usage("parity/url-contract.mjs", SPEC));
+    console.error(usage("live-checks/url-contract.mjs", SPEC));
     process.exit(2);
   }
   await assertServerReady(opts.base);
