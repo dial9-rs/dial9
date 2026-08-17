@@ -234,7 +234,9 @@ crate::shuttle_test! {
 // write happens here, so there's no live per-thread buffer state for
 // shuttle's own teardown to trip over -- see the companion scenario below.
 crate::shuttle_test! {
-    num_iters = 500, depth = 3, should_panic, expected = "PanickingSource intentionally panics for shuttle coverage";
+    num_iters = 500, depth = 3, should_panic,
+    expected = "PanickingSource intentionally panics for shuttle coverage",
+    replay = "91011be187b1dcc7fc8f9dbc0100000058555515";
     fn test_source_panic_does_not_wedge_pipeline() {
         let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
@@ -291,7 +293,9 @@ crate::shuttle_test! {
 // panic time is what makes `determinism` crash (16/30 with the write vs
 // 0/30 without) -- hence `flaky_sigabrt_determinism_only`.
 crate::shuttle_test! {
-    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only, expected = "PanickingSource intentionally panics for shuttle coverage";
+    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only,
+    expected = "PanickingSource intentionally panics for shuttle coverage",
+    replay = "910124ca81ffb4a781e6ae0a000000006055555555";
     fn test_source_panic_does_not_lose_tl_buffer_write() {
         let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
