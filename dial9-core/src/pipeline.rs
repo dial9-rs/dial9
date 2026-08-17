@@ -201,11 +201,6 @@ impl ProcessError {
         &self.kind
     }
 
-    /// Recover the carried [`SegmentData`].
-    pub fn into_data(self) -> SegmentData {
-        self.data
-    }
-
     /// Recover both the carried [`SegmentData`] and the failure kind.
     pub fn into_parts(self) -> (SegmentData, ProcessErrorKind) {
         (self.data, self.kind)
