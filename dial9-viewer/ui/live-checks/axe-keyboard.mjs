@@ -1,13 +1,13 @@
 // axe scan of the unified keyboard components (search palette + help
 // overlay) in isolation. They have no live-page mount, so this spins up a
 // throwaway Vite dev server (port 0 = OS-assigned) to serve
-// parity/fixtures/keyboard-harness.html, which mounts the REAL components
+// live-checks/fixtures/keyboard-harness.html, which mounts the REAL components
 // from src/ in their open state, and runs axe against that page. Live-page
 // overlay scans stay with axe-scan.mjs (its --press flag opens the overlay
 // on a real page first).
 //
 // Usage:
-//   node parity/axe-keyboard.mjs [--fail-on serious] [--json p] [--md p]
+//   node live-checks/axe-keyboard.mjs [--fail-on serious] [--json p] [--md p]
 //
 // Exit: same contract as axe-scan.mjs (report producer; --fail-on gates).
 
@@ -45,7 +45,7 @@ const SPEC = {
 };
 
 const IMPACT_ORDER = ["critical", "serious", "moderate", "minor"];
-const HARNESS_PATH = "/parity/fixtures/keyboard-harness.html";
+const HARNESS_PATH = "/live-checks/fixtures/keyboard-harness.html";
 
 function axeSource() {
   const require = createRequire(import.meta.url);
@@ -61,7 +61,7 @@ async function main() {
     ({ opts } = parseArgs(process.argv.slice(2), SPEC));
   } catch (e) {
     console.error(String(e.message));
-    console.error(usage("parity/axe-keyboard.mjs", SPEC));
+    console.error(usage("live-checks/axe-keyboard.mjs", SPEC));
     process.exit(2);
   }
   const failOn = opts["fail-on"];
@@ -70,7 +70,7 @@ async function main() {
     process.exit(2);
   }
 
-  // The ui/ package root (parity/ is one level down).
+  // The ui/ package root (live-checks/ is one level down).
   const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const vite = await createServer({
     root: uiRoot,

@@ -385,13 +385,13 @@ The three asks from #303, in contract terms:
   recorded fixtures (`src/lib/url/legacy-params.fixture.ts`, `url_state.js`).
   Renaming this section's headings or table param names breaks that test by
   design.
-- `parity/url-contract.mjs` (T12-style, live server) constructs the recipe
-  URLs above and asserts the pages honor them end-to-end; see "Parity gate
-  tooling" below.
+- `live-checks/url-contract.mjs` (T12-style, live server) constructs the recipe
+  URLs above and asserts the pages honor them end-to-end; see "Live UI
+  checks" below.
 
-## Parity gate tooling (`parity/`)
+## Live UI checks (`live-checks/`)
 
-The UI's live regression tools are plain Node scripts, dev-only — `parity/`
+The UI's live regression tools are plain Node scripts, dev-only — `live-checks/`
 is not a Vite input and never enters `dist/` or the crate package. Run them
 against a live server (the dev-server, or `dial9 serve`; readiness gate:
 `GET /api/config` returns JSON):
@@ -407,20 +407,20 @@ Tools that hit the browser page pin the page clock to the dev seed's date
 (`lib/browser.mjs`) so the seeded April segment stays reachable through
 relative time windows.
 
-**(a) Row-walker** — drives every feature-inventory row's access path, emits
-`VERIFIED` / `FAILED` / `NOT-TRIGGERABLE` per the shared verdict mapping
+**Inventory row-walker** — drives every feature-inventory row's access path,
+emits `VERIFIED` / `FAILED` / `NOT-TRIGGERABLE` per the shared verdict mapping
 (chunk-1 tickets header). Green = zero FAILED; exit 0 only when green.
 Amended rows (T15: features/01 G8/C6/I2/F4/F10) assert the canonical behavior
 recorded by the inventory.
 
 ```bash
-node parity/walk-rows.mjs \
+node live-checks/walk-rows.mjs \
   --inventory ../../docs/ui-inventory/features/01-index-html.md \
   --url http://localhost:3021/index.html \
-  [--rows A1,F12] [--json parity/out/walk.json] [--md parity/out/walk.md]
+  [--rows A1,F12] [--json live-checks/out/walk.json] [--md live-checks/out/walk.md]
 ```
 
-**(a2) Fixture walk** (ticket T42) — the demo seed is a single segment on a
+**Fixture walk** (ticket T42) — the demo seed is a single segment on a
 single host/boot, so some features/01 rows are recorded `NOT-TRIGGERABLE`
 (boot transitions, seams, coverage gaps, the 200 MB cap, ...). The synthetic
 fixture generator produces what the demo cannot, and `--fixtures` walks
@@ -428,28 +428,28 @@ exactly those rows against a fixture-seeded dev-server:
 
 ```bash
 # 1. Generate (deterministic; ~4 s in release). Writes the committed small
-#    fixtures under parity/fixtures/segments/ (a no-op diff unless the
+#    fixtures under live-checks/fixtures/segments/ (a no-op diff unless the
 #    generator changed) and the UNCOMMITTED seed tree under
-#    parity/fixtures/generated/s3/ (~224 MB; --skip-large omits the
+#    live-checks/fixtures/generated/s3/ (~224 MB; --skip-large omits the
 #    dial9-fixtures-large family and with it the H4 row).
 cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
 
 # 2. Serve it (DIAL9_DEFAULT_PREFIX= empties the default prefix — the
 #    D4/#471 date-root scenario needs discovery to see the date layer).
-DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
+DIAL9_SEED_DIR=dial9-viewer/ui/live-checks/fixtures/generated/s3 \
   DIAL9_DEFAULT_PREFIX= PORT=3022 \
   cargo run -p dial9-viewer --features dev-server --bin dev-server
 
 # 3. Walk. Default row set = the fixture-backed rows; the runner preflights
 #    every fixture family the selected rows need and exits 2 with these
 #    instructions when one is missing.
-node parity/walk-rows.mjs \
+node live-checks/walk-rows.mjs \
   --inventory ../../docs/ui-inventory/features/01-index-html.md \
   --url http://localhost:3022/index.html --fixtures \
-  [--json parity/out/fixture-walk.json]
+  [--json live-checks/out/fixture-walk.json]
 ```
 
-Fixture-backed rows (registry: `parity/walkers/features01.fixtures.mjs`;
+Fixture-backed rows (registry: `live-checks/walkers/features01.fixtures.mjs`;
 fixture geometry mirrors `src/bin/gen_fixtures.rs` — change them together):
 C7, D4, F5, F7, F8, F9, F20, H4. H5's warning text renders only with
 aggregation disabled, and any BYO-creds dev-server (which C7 needs) reports
@@ -460,61 +460,31 @@ The seed tree is `<dir>/<bucket>/<key...>`; file **mtimes are load-bearing**
 (they become S3 `last_modified`, the heatmap's segment end — the seam/gap
 scenarios exist entirely in mtimes), which is why the tree is regenerated
 rather than committed. Size policy: only the small fixtures under
-`parity/fixtures/segments/` (tens of KB: the 10-segment boundary-poll set +
+`live-checks/fixtures/segments/` (tens of KB: the 10-segment boundary-poll set +
 the multi-runtime #596 trace + `manifest.json`) are committed — the vitest
 suites (`src/lib/trace/segments.fixtures.test.ts`, the real-parse anchor in
 `segments.window.test.ts`) consume them hermetically. Everything under
-`parity/fixtures/generated/` (incl. the >200 MB large family, which is also
+`live-checks/fixtures/generated/` (incl. the >200 MB large family, which is also
 T39's reproducible large-trace budget input) is gitignored and regenerable
 byte-identically.
 
-**Journeys J1-J8** (`parity/journeys.mjs`) — the eight expert journeys from
-`docs/ui-inventory/04-ux-findings.md` as declarative step lists
-(`lib/steps.mjs` is the vocabulary). Smoke-run one or all, printing the
-readouts captured at each checkpoint:
-
-```bash
-node parity/run-journey.mjs --base http://localhost:3021 [--journey J2]
-```
-
-**(b) Affordance census** — dump one page's interactive-control census, or
+**Affordance census** — dump one page's interactive-control census, or
 diff two pages' censuses (exit 0 only on ZERO diff):
 
 ```bash
-node parity/census.mjs --url http://localhost:3021/index.html [--json p] [--md p]
-node parity/census.mjs --a <pageUrlA> --b <pageUrlB> [--json p] [--md p]
+node live-checks/census.mjs --url http://localhost:3021/index.html [--json p] [--md p]
+node live-checks/census.mjs --a <pageUrlA> --b <pageUrlB> [--json p] [--md p]
 ```
 
-**(c) Behavioral differ** — same journey on two URLs, field-level exact diff
-of the data readouts at every checkpoint. The readout schema is the fixture
-`parity/fixtures/readout-schema.mjs` (owned by the parity tool; extending it
-is a parity change, not a page change). Bare origins get each journey's
-default path appended. Exit 0 only on zero field diffs:
-
-```bash
-node parity/behavior-diff.mjs --a http://host1 --b http://host2 [--journey J6] [--json p]
-```
-
-**(d) axe + contrast scan** — violation list (impact, rule, node count,
+**axe + contrast scan** — violation list (impact, rule, node count,
 example target) in the shape 04-ux-findings cites, plus a contrast summary
 line. Report producer (exit 0); `--fail-on <impact>` turns it into a gate:
 
 ```bash
-node parity/axe-scan.mjs --url <pageUrl> [--json p] [--md p] [--fail-on serious]
+node live-checks/axe-scan.mjs --url <pageUrl> [--json p] [--md p] [--fail-on serious]
 ```
 
-**(e) Perf probe** — runs a journey to a representative state (defaults
-J6/J1/J5 per page kind), then drives an interaction storm and records painted
-frames, long tasks, total/forced layouts (per frame), and render invocations
-per frame via a pluggable source (`lib/render-sources.mjs`; the default
-`stub` reports unavailable — chunk 2 wires the store scheduler's
-`devRenderAssertStats()` hook as the `store` source):
-
-```bash
-node parity/perf-probe.mjs --url <pageUrl> [--journey J3] [--render-source stub] [--json p]
-```
-
-**(f) URL-contract check** - the live half of the URL contract's
+**URL-contract check** - the live half of the URL contract's
 enforcement (the codec-level pin is `src/lib/url/url-contract.test.ts`):
 constructs the contract section's deep-link recipe URLs in plain Node (no
 browser) and asserts real pages honor them: the viewer opens with an exact
@@ -523,12 +493,12 @@ are inert, and a foreign version restores nothing. Exit 0 only when all legs
 pass:
 
 ```bash
-node parity/url-contract.mjs --base http://localhost:3021 [--json p]
+node live-checks/url-contract.mjs --base http://localhost:3021 [--json p]
 ```
 
-Self-tests (run whenever the tools themselves change): census and behavioral
-differ against the same URL must emit ZERO diff; the row-walker against the
-canonical browser page must stay green (zero FAILED).
+Self-tests (run whenever the tools themselves change): a census diff against
+the same URL must emit ZERO diff; the row-walker against the canonical browser
+page must stay green (zero FAILED).
 
 ## Tests — IMPORTANT for agents
 

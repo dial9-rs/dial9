@@ -1,6 +1,6 @@
 // Row walkers for the canonical Tokio runtime stats page (tokio_stats.html).
 //
-// One walker per row whose recorded verdict GATES (parity/lib/inventory.mjs
+// One walker per row whose recorded verdict GATES (live-checks/lib/inventory.mjs
 // isGated): recorded VERIFIED / DEAD-CONFIRMED re-derive VERIFIED. Here that
 // is the set that normalizes to plain VERIFIED (not "VERIFIED (API)", which
 // maps to the listed-not-gated VERIFIED-API token): A8, A10, D3, D5, I1, J3,
@@ -17,7 +17,7 @@
 // so the scoped URL drives the refinement stream end to end.
 //
 //   PORT=3071 cargo run -p dial9-viewer --bin dev-server --features dev-server
-//   node parity/walk-rows.mjs \
+//   node live-checks/walk-rows.mjs \
 //     --inventory ../../docs/ui-inventory/features/04-tokio-stats-html.md \
 //     --url http://localhost:3071/tokio_stats.html
 

@@ -1,13 +1,13 @@
-// Shared headless-Chromium plumbing for the parity tools.
+// Shared headless-Chromium plumbing for the live UI checks.
 //
 // Every tool drives the pages the same way: one chromium instance, a fresh
-// browser context per independent unit of work (walker / journey / scan), a
+// browser context per independent unit of work (walker / contract / scan), a
 // fixed viewport, and — for the S3-browser page — a fixed clock pinned to the
 // dev seed's date (see DEV_SEED_CLOCK below).
 
 import { chromium } from "playwright";
 
-// Deterministic viewport for every parity run: readouts, censuses, and canvas
+// Deterministic viewport for every live-check run: readouts, censuses, and canvas
 // hit-testing all depend on layout, so the viewport is part of the contract.
 export const VIEWPORT = { width: 1440, height: 900 };
 
@@ -15,7 +15,7 @@ export const VIEWPORT = { width: 1440, height: 900 };
 // `traces/2026-04-09/1900/...` (dial9-viewer/src/bin/dev_server.rs). The
 // page's relative time windows ("Last 1hr" quick range, raw search's implicit
 // last-30-days window) are computed from Date.now(), so on a real clock the
-// seeded key drifts out of every reachable window. Walkers and journeys that
+// seeded key drifts out of every reachable window. Checks that
 // target the browser page pin the page's clock (Date only — timers keep
 // running, so debounces behave) to the evening of the seed date. This keeps
 // the recorded 2026-06-30 access paths (search an April window, raw-search
@@ -60,7 +60,7 @@ export async function assertServerReady(baseUrl) {
 
 /**
  * Perform `action` and capture the popup it opens. Returns the popup's
- * post-navigation URL and closes the popup (parity assertions only need the
+ * post-navigation URL and closes the popup (these checks only need the
  * URL; letting e.g. the viewer parse a trace would just slow the run down).
  */
 export async function popupUrl(page, action) {

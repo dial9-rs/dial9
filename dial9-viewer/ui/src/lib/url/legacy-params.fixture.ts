@@ -93,7 +93,6 @@ export const FLAMEGRAPH_LEGACY_PARAMS: readonly LegacyParamRecord[] = [
  * Recorded legacy fixture URLs (query + hash only; origin-independent).
  * Shapes taken from the recorded legacy access paths; the zoom paths are
  * synthetic here (codec-level tests need the FORMAT, not demo-trace truth).
- * The demo-trace-real twin lives in the parity journeys.
  */
 export const LEGACY_FIXTURE_URLS: readonly string[] = [
   // Single-level worker zoom.

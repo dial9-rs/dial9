@@ -9,8 +9,8 @@ in the same PR. Keep the two in lockstep.
 Implementation: `src/lib/url/view-state.ts` (pure codec), `src/lib/url/sync.ts`
 (store->URL binding), `src/lib/url/copy-link.ts` (share button),
 `src/pages/flamegraph/view-state.ts` (first consumer). Tests colocated;
-fixture: `src/lib/url/legacy-params.fixture.ts`; browser twin: parity
-journey J9.
+fixture: `src/lib/url/legacy-params.fixture.ts`; live-page twin:
+`live-checks/url-contract.mjs`.
 
 ## Carrier and format
 
@@ -92,8 +92,8 @@ valid:
   deliberately differs and stays page-owned.
 - **No-op writes are skipped** (the URL already says this), and restore
   paths bypass the store entirely, so restore-on-load produces ZERO
-  writes - a shared link stays byte-stable on open (J9's url.query
-  readout is the regression gate).
+  writes - a shared link stays byte-stable on open
+  (`live-checks/url-contract.mjs` asserts this after restore).
 - **Copy-link** (`mountCopyLink`) flushes the pending debounced write
   before reading `location.href`. Chunk-2's status bar replaces the
   minimal button; it should reuse the same flush-then-read contract
@@ -149,5 +149,5 @@ demo sources rather than copying a URL that cannot reproduce the loaded data.
 5. No version bump. Old links: the field is simply absent - the page
    falls back to its defaults; the JS reader must tolerate absence.
 6. Round-trip cases in the codec property test; a restore case in the
-   owning page's test; extend J9 (or add a page journey) if the state is
-   observable in a readout.
+   owning page's test; add a restore leg to `live-checks/url-contract.mjs`
+   when the state has observable live-page behavior.

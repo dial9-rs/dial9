@@ -5,7 +5,7 @@
      chunk 1 (its page wiring is the chunk-2 viewer), so it cannot
      be scanned on a live page yet; this harness renders the REAL
      component code (imported from src/, transformed by the Vite dev
-     server that parity/axe-keyboard.mjs spins up) - never a replica
+     server that live-checks/axe-keyboard.mjs spins up) - never a replica
      that could drift. NOT a build entry: this file must stay out of
      vite.config.ts rollup inputs (dist/ is embedded wholesale into the
      release binary). -->

@@ -46,7 +46,7 @@ path = "src/bin/dev_server.rs"
 required-features = ["dev-server"]
 
 # T42 test infrastructure: synthetic trace fixture generator (see the file's
-# module docs and ui/README.md "Parity gate tooling"). Gated behind the
+# module docs and ui/README.md "Live UI checks"). Gated behind the
 # dev-server feature and excluded from the published package, like dev-server.
 [[bin]]
 name = "gen-fixtures"

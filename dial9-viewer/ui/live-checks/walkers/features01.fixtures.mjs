@@ -3,7 +3,7 @@
 // generated fixture tree:
 //
 //   cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
-//   DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
+//   DIAL9_SEED_DIR=dial9-viewer/ui/live-checks/fixtures/generated/s3 \
 //     DIAL9_DEFAULT_PREFIX= PORT=3022 \
 //     cargo run -p dial9-viewer --features dev-server --bin dev-server
 //
@@ -102,7 +102,7 @@ export async function preflightFamilies(baseUrl, familyNames) {
         `fixture family "${name}" (${fam.what}) not available at ${baseUrl}: ${e.message}\n` +
           "Generate + serve the fixtures:\n" +
           "  cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures\n" +
-          "  DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \\\n" +
+          "  DIAL9_SEED_DIR=dial9-viewer/ui/live-checks/fixtures/generated/s3 \\\n" +
           "    DIAL9_DEFAULT_PREFIX= PORT=3022 \\\n" +
           "    cargo run -p dial9-viewer --features dev-server --bin dev-server",
       );

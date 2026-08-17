@@ -53,7 +53,7 @@ export const LEGEND_H = 26;
 const CANVAS_BG = "#1a1a2e";
 const EMPTY_TEXT = "#555";
 const PARTIAL_LABEL = "#ffb3b3";
-// The #ce-panel-info text color.
+// Event-summary text color.
 const INFO_FILL = "#aaa";
 
 /** Derived worker lanes + ids for task resolution. */
@@ -212,8 +212,8 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     const hlTask = eventHighlightTask(s.selection);
     const oversized = anyOversized(s.segments.segments);
     drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, s.uiPrefs.selectedEventNames.size > 0);
-    // Mirror the info readout to a DOM-queryable attribute (the `#ce-panel-info`
-    // text) for the row-walker - same as the CPU track's `cpuReadout`.
+    // Mirror the info readout to a DOM-queryable attribute for the row-walker,
+    // matching the CPU track's `cpuReadout`.
     canvas.dataset["eventsInfo"] = model.info;
   }
 
@@ -541,7 +541,7 @@ export function drawEventsCanvas(
   }
   ctx.globalAlpha = 1.0;
 
-  // Info readout, top-right (`#ce-panel-info`: `N events · M markers`).
+  // Info readout, top-right: `N events · M markers`.
   if (model.info.length > 0) {
     ctx.fillStyle = INFO_FILL;
     ctx.font = "10px sans-serif";

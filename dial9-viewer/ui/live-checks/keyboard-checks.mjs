@@ -7,7 +7,7 @@
 //   - flamegraph.html?api=1&...          (flamegraph, aggregated mode)
 //
 // Usage (dev-server serving a BUILT dist, dev seed):
-//   node parity/keyboard-checks.mjs --base http://localhost:3101
+//   node live-checks/keyboard-checks.mjs --base http://localhost:3101
 //
 // Exits 1 on the first page where the overlay fails to open or close.
 
@@ -55,7 +55,7 @@ async function main() {
     ({ opts } = parseArgs(process.argv.slice(2), SPEC));
   } catch (e) {
     console.error(String(e.message));
-    console.error(usage("parity/keyboard-checks.mjs", SPEC));
+    console.error(usage("live-checks/keyboard-checks.mjs", SPEC));
     process.exit(2);
   }
 

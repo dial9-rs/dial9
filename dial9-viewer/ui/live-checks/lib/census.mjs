@@ -7,8 +7,8 @@
 // currently operable (visible/disabled).
 //
 // What it deliberately does NOT capture: styling (classes are not part of the
-// contract), values (behavioral state — the readouts own those), and
-// canvas-internal hit targets (not DOM; covered by row walkers + journeys).
+// contract), values (behavioral state), and canvas-internal hit targets (not
+// DOM; covered by row walkers and focused component tests).
 //
 // Identity for diffing: `#id` when the element has one, else
 // `tag[role]:label`; duplicate identities get a `~n` occurrence suffix (some

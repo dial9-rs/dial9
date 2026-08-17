@@ -1,7 +1,7 @@
 //! Synthetic trace fixture generator (T42, test infrastructure).
 //!
-//! Produces the trace fixtures the demo trace cannot provide, so the parity
-//! gates stop carrying NOT-TRIGGERABLE holes (features/01 "Live validation
+//! Produces the trace fixtures the demo trace cannot provide, so the live
+//! checks stop carrying NOT-TRIGGERABLE holes (features/01 "Live validation
 //! results"):
 //!
 //!   - `dial9-fixtures` (bucket): multi-host / multi-service #225 layouts
@@ -14,7 +14,7 @@
 //!     trips the 200 MB selection cap (H4/H5) and gives T39's "large trace"
 //!     budget run a reproducible >=100 MB-raw input (skippable with
 //!     `--skip-large`);
-//!   - committed small fixtures under `ui/parity/fixtures/segments/`: the
+//!   - committed small fixtures under `ui/live-checks/fixtures/segments/`: the
 //!     10-segment set with controlled boundary-spanning polls (T17) and a
 //!     multi-runtime trace, consumed by the vitest suites. `manifest.json`
 //!     records the planted facts the tests assert.
@@ -34,7 +34,7 @@
 //! ```bash
 //! cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
 //! # then serve it:
-//! DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
+//! DIAL9_SEED_DIR=dial9-viewer/ui/live-checks/fixtures/generated/s3 \
 //!   DIAL9_DEFAULT_PREFIX= PORT=3022 \
 //!   cargo run -p dial9-viewer --features dev-server --bin dev-server
 //! ```
@@ -65,9 +65,9 @@ const MS: u64 = 1_000_000;
 /// the parser's legacy epoch-scale heuristic for `SegmentMetadataEvent`).
 const MONO_BASE_NS: u64 = NS;
 
-/// The fixture day. Every scenario lives on 2026-04-09 so the parity tools'
-/// pinned page clock (`DEV_SEED_CLOCK`, 2026-04-09T21:00Z) reaches it with
-/// the stock "Last 24hr" window.
+/// The fixture day. Every scenario lives on 2026-04-09 so the pinned page
+/// clock used by the live checks (`DEV_SEED_CLOCK`, 2026-04-09T21:00Z)
+/// reaches it with the stock "Last 24hr" window.
 const FIXTURE_YEAR: i32 = 2026;
 const FIXTURE_MONTH: time::Month = time::Month::April;
 const FIXTURE_DAY: u8 = 9;
@@ -100,15 +100,15 @@ fn main() -> Result<()> {
             "--help" | "-h" => {
                 println!(
                     "gen-fixtures [--out <dir>] [--skip-large]\n\
-                     default out: <dial9-viewer>/ui/parity/fixtures"
+                     default out: <dial9-viewer>/ui/live-checks/fixtures"
                 );
                 return Ok(());
             }
             other => bail!("unknown argument: {other} (try --help)"),
         }
     }
-    let out =
-        out.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/parity/fixtures"));
+    let out = out
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/live-checks/fixtures"));
 
     let schemas = Schemas::new();
     let mut sizes: Vec<(String, usize)> = Vec::new();
@@ -911,7 +911,7 @@ fn build_small_layout_segment(
 }
 
 /// The `dial9-fixtures` bucket: one heatmap row per scenario host, all under
-/// `traces/` on the fixture day (reachable from the pinned parity clock).
+/// `traces/` on the fixture day (reachable from the pinned page clock).
 ///
 ///   svc-alt / host-z   one segment, multi-runtime content (F4 multi-service);
 ///   svc-fix / boots    three segments with three boot ids (F5 label, F9

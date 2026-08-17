@@ -960,8 +960,7 @@ body {
    Selection-only track: the label gutter shows the track name + a compact
    task identity (the full textual header is the inspector Task tab); the
    canvas hosts the timeline; a status readout floats top-right over
-   the canvas (updated imperatively on hover, matching the legacy
-   #task-detail-status). */
+   the canvas and updates imperatively on hover. */
 .d9-track--task-detail .d9-track-label { justify-content: center; }
 .d9-task-detail-id {
     font-size: 0.72em;

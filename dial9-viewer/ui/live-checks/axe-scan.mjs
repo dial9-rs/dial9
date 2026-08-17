@@ -4,7 +4,7 @@
 // plus a dedicated contrast summary line.
 //
 // Usage:
-//   node parity/axe-scan.mjs --url <pageUrl> [--json p] [--md p]
+//   node live-checks/axe-scan.mjs --url <pageUrl> [--json p] [--md p]
 //                            [--fail-on serious]
 //
 // The scan is a report producer: it exits 0 on completion regardless of
@@ -17,7 +17,7 @@ import process from "node:process";
 import { createRequire } from "node:module";
 import { parseArgs, usage } from "./lib/cli.mjs";
 import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
-import { pageKindFor, waitLoadedByUrl } from "./lib/steps.mjs";
+import { pageKindFor, waitLoadedByUrl } from "./lib/pages.mjs";
 import { writeReport, writeJson } from "./lib/report.mjs";
 
 const SPEC = {
@@ -58,7 +58,7 @@ async function main() {
     ({ opts } = parseArgs(process.argv.slice(2), SPEC));
   } catch (e) {
     console.error(String(e.message));
-    console.error(usage("parity/axe-scan.mjs", SPEC));
+    console.error(usage("live-checks/axe-scan.mjs", SPEC));
     process.exit(2);
   }
   const failOn = opts["fail-on"];

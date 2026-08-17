@@ -2,20 +2,20 @@
 // censuses (the "nothing missing, nothing mutated" control-surface gate).
 //
 // Usage:
-//   node parity/census.mjs --url <pageUrl> [--json p] [--md p]      # dump
-//   node parity/census.mjs --a <pageUrl> --b <pageUrl> [--json p]   # diff
+//   node live-checks/census.mjs --url <pageUrl> [--json p] [--md p]      # dump
+//   node live-checks/census.mjs --a <pageUrl> --b <pageUrl> [--json p]   # diff
 //
 // Diff mode exits 0 only on ZERO diff. Two independent contexts capturing
 // the same URL is the self-test: they must produce identical censuses.
 //
-// The page's loaded-wait is inferred from the URL (lib/steps.mjs
+// The page's loaded-wait is inferred from the URL (lib/pages.mjs
 // waitLoadedByUrl); index pages get the pinned dev-seed clock (lib/browser.mjs)
 // so time-derived affordance state can't drift between the two captures.
 
 import process from "node:process";
 import { parseArgs, usage } from "./lib/cli.mjs";
 import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
-import { pageKindFor, waitLoadedByUrl } from "./lib/steps.mjs";
+import { pageKindFor, waitLoadedByUrl } from "./lib/pages.mjs";
 import {
   captureCensus,
   diffCensus,
@@ -51,13 +51,13 @@ async function main() {
     ({ opts } = parseArgs(process.argv.slice(2), SPEC));
   } catch (e) {
     console.error(String(e.message));
-    console.error(usage("parity/census.mjs", SPEC));
+    console.error(usage("live-checks/census.mjs", SPEC));
     process.exit(2);
   }
   const diffMode = opts.a || opts.b;
   if (diffMode ? !(opts.a && opts.b) || opts.url : !opts.url) {
     console.error("pass either --url (dump) or both --a and --b (diff)");
-    console.error(usage("parity/census.mjs", SPEC));
+    console.error(usage("live-checks/census.mjs", SPEC));
     process.exit(2);
   }
 
