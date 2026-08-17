@@ -695,13 +695,16 @@ mod tests {
             )
             .unwrap();
 
-        // Run work on both runtimes so workers resolve their identities.
+        // Blocking barrier: pins the second task to the other worker, so both
+        // resolve an ID.
         for rt in [&runtime_a, &runtime_b] {
             rt.block_on(async {
+                let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
                 let mut handles = Vec::new();
-                for _ in 0..20 {
-                    handles.push(tokio::spawn(async {
-                        tokio::task::yield_now().await;
+                for _ in 0..2 {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    handles.push(tokio::spawn(async move {
+                        barrier.wait();
                     }));
                 }
                 for h in handles {
