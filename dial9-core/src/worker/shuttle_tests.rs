@@ -1,12 +1,21 @@
 //! Shuttle coverage for the `WorkerLoop` segment handoff.
 //!
 //! Drives `WorkerLoop` directly via `shuttle::future::block_on` rather than
-//! through `run_background_task`'s real Tokio runtime: `run()`/
-//! `run_continuous()` depend on `tokio::select!`/`tokio::time::sleep`, which
-//! shuttle does not model.
-//! The test-only `process_open_segments()` helper avoids all of that as long as
-//! the processor pipeline itself never takes a retryable-failure path (the
-//! only place `process_segments` awaits a real `tokio::time::sleep`).
+//! through `run_background_task`'s real Tokio runtime.
+//!
+//! `shuttle_worker_handoff` drives the real `run()`/`run_continuous()` path
+//! (not the test-only `process_open_segments()` shortcut): this works for
+//! the in-memory `Fs` backend because `wait_for_more`'s in-memory branch
+//! only awaits `Fs::wait_for_wakeup()` (a plain `tokio::sync::Notify`, no
+//! reactor/timer needed) rather than `tokio::time::sleep` -- that real timer
+//! is only on the disk-backend branch, which this module never uses.
+//!
+//! `shuttle_dump_resolves_exactly_once` still can't drive `run_triggered()`
+//! directly: its outer loop selects on `tokio::time::sleep_until`, a real
+//! timer shuttle doesn't model. It drives `drain_matching`/`resolve_dump` by
+//! hand instead, minus that outer select. The processor pipeline itself
+//! never takes a retryable-failure path in either scenario, which is the
+//! only other place `process_segments` awaits a real `tokio::time::sleep`.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -68,9 +77,7 @@ fn spawn_writers(fs: Arc<Fs>) -> Vec<crate::primitives::thread::JoinHandle<()>> 
 crate::shuttle_test! {
     num_iters = 2_000, depth = 3;
     // Multiple writer threads seal segments into an in-memory `Fs`
-    // concurrently with a worker thread draining+processing them (no real
-    // Tokio runtime — see module doc). Every sealed segment must reach the
-    // processor exactly once.
+    // concurrently with a worker thread draining+processing them
     fn shuttle_worker_handoff() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
         let processed = Arc::new(AtomicUsize::new(0));
@@ -93,26 +100,7 @@ crate::shuttle_test! {
                 .await
                 .expect("initialize worker");
 
-                loop {
-                    let found = worker.process_open_segments().await;
-                    if found {
-                        continue;
-                    }
-                    if !worker_fs.writer_done() {
-                        shuttle::thread::yield_now();
-                        continue;
-                    }
-                    // `found` may predate this writer_done() observation (it
-                    // came from a scan taken before we knew the writer was
-                    // done). Once writer_done() is true, nothing more will ever
-                    // be sealed, so re-scan and use *that* result — mirroring
-                    // run_continuous's drain-to-empty loop, which always scans
-                    // again after observing writer_done rather than reusing a
-                    // stale result.
-                    if !worker.process_open_segments().await {
-                        return;
-                    }
-                }
+                worker.run().await;
             });
         });
 
