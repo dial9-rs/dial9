@@ -211,5 +211,10 @@ crate::shuttle_test! {
         fs.mark_writer_done();
         trigger_handle.join().unwrap();
         worker.join().unwrap();
+
+        assert!(
+            processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
+            "dump must not double-dispatch a segment to the processor"
+        );
     }
 }
