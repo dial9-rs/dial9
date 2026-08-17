@@ -19,6 +19,19 @@ const SUPPORTED_KINDS: &[&str] = &["gauge", "counter", "updown-counter"];
 /// `dial9_core::schema_extensions::ROLE_KEY`, which this crate cannot depend on.
 const ROLE_ANNOTATION_KEY: &str = "dial9.role";
 
+/// Structural roles accepted by `#[traceevent(role = "...")]`. Mirrors the
+/// vocabulary in `dial9_core::schema_extensions::roles`, which this crate cannot
+/// depend on. An unrecognized role would silently decode as no role (turning a
+/// span schema into `NotSpan`), so a typo is rejected at compile time.
+const SUPPORTED_ROLES: &[&str] = &[
+    "span.start",
+    "span.duration",
+    "span.name",
+    "thread_id",
+    "tokio.task_id",
+    "tokio.worker_id",
+];
+
 /// The `#[traceevent(...)]` keys a field may carry.
 #[derive(Default)]
 struct FieldAttrs {
@@ -183,6 +196,16 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             });
         }
         if let Some(role) = &attrs.role {
+            if !SUPPORTED_ROLES.contains(&role.value().as_str()) {
+                return Err(syn::Error::new_spanned(
+                    role,
+                    format!(
+                        "unsupported role \"{}\"; supported roles: {}",
+                        role.value(),
+                        SUPPORTED_ROLES.join(", ")
+                    ),
+                ));
+            }
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
                 ::dial9_trace_format::schema::FieldAnnotation::new(
@@ -317,7 +340,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 /// - `#[traceevent(role = "...")]` (field): attaches a `dial9.role` schema
 ///   annotation, telling consumers what the field *is* structurally (e.g.
 ///   `"span.name"`). The vocabulary lives in
-///   `dial9_core::schema_extensions::roles`.
+///   `dial9_core::schema_extensions::roles`; an unrecognized role is a compile
+///   error (it would otherwise decode as no role).
 /// - `#[traceevent(kind = "...")]` (field): attaches a `kind` schema annotation
 ///   telling the viewer how to chart the field. Supported values: `"gauge"`,
 ///   `"counter"`, `"updown-counter"`. Any other value is a compile error, as is
@@ -496,6 +520,23 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "unsupported kind \"histogram\"; supported kinds: gauge, counter, updown-counter"
+        );
+    }
+
+    #[test]
+    fn invalid_role_rejected() {
+        let err = expand_err(quote! {
+            struct BadRole {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(role = "span.naem")]
+                span_name: InternedString,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unsupported role \"span.naem\"; supported roles: span.start, span.duration, \
+             span.name, thread_id, tokio.task_id, tokio.worker_id"
         );
     }
 
