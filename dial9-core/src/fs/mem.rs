@@ -642,13 +642,12 @@ mod shuttle_tests {
                     popped.push(seg.seg_ref.index());
                 }
             }
-            assert_eq!(
-                dropped, 2,
+            check!(
+                dropped == 2,
                 "the two oldest segments should have been evicted"
             );
-            assert_eq!(
-                popped,
-                vec![2, 3, 4],
+            check!(
+                popped == vec![2, 3, 4],
                 "surviving segments must be the newest, popped oldest-remaining-first -- \
                  eviction must drop the oldest segment first, not just any two"
             );
