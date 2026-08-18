@@ -89,21 +89,15 @@ impl FieldDef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaEntry {
     pub(crate) name: String,
-    pub(crate) has_timestamp: bool,
     pub(crate) fields: Vec<FieldDef>,
     pub(crate) annotations: Vec<FieldAnnotation>,
 }
 
 impl SchemaEntry {
     /// Construct a new schema entry.
-    pub fn new(
-        name: impl Into<String>,
-        has_timestamp: bool,
-        fields: impl IntoIterator<Item = FieldDef>,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, fields: impl IntoIterator<Item = FieldDef>) -> Self {
         Self {
             name: name.into(),
-            has_timestamp,
             fields: fields.into_iter().collect(),
             annotations: Vec::new(),
         }
@@ -112,13 +106,11 @@ impl SchemaEntry {
     /// Construct a schema entry with annotations.
     pub fn with_annotations(
         name: impl Into<String>,
-        has_timestamp: bool,
         fields: impl IntoIterator<Item = FieldDef>,
         annotations: impl IntoIterator<Item = FieldAnnotation>,
     ) -> Self {
         Self {
             name: name.into(),
-            has_timestamp,
             fields: fields.into_iter().collect(),
             annotations: annotations.into_iter().collect(),
         }
@@ -127,11 +119,6 @@ impl SchemaEntry {
     /// Event type name (e.g. `"PollStart"`).
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Whether events of this type carry a packed timestamp in the event header.
-    pub fn has_timestamp(&self) -> bool {
-        self.has_timestamp
     }
 
     /// Ordered list of fields (excluding the timestamp).
@@ -227,7 +214,6 @@ mod tests {
         let id = reg.next_type_id();
         let entry = SchemaEntry {
             name: "PollStart".into(),
-            has_timestamp: true,
             fields: vec![
                 FieldDef {
                     name: "timestamp_ns".into(),
@@ -251,7 +237,6 @@ mod tests {
         let id = reg.next_type_id();
         let entry = SchemaEntry {
             name: "A".into(),
-            has_timestamp: true,
             fields: vec![],
             annotations: Vec::new(),
         };
@@ -267,7 +252,6 @@ mod tests {
             id,
             SchemaEntry {
                 name: "A".into(),
-                has_timestamp: true,
                 fields: vec![],
                 annotations: Vec::new(),
             },
@@ -278,7 +262,6 @@ mod tests {
                 id,
                 SchemaEntry {
                     name: "B".into(),
-                    has_timestamp: true,
                     fields: vec![],
                     annotations: Vec::new(),
                 }
@@ -295,7 +278,6 @@ mod tests {
             id1,
             SchemaEntry {
                 name: "A".into(),
-                has_timestamp: true,
                 fields: vec![],
                 annotations: Vec::new(),
             },
@@ -306,7 +288,6 @@ mod tests {
             id2,
             SchemaEntry {
                 name: "B".into(),
-                has_timestamp: true,
                 fields: vec![],
                 annotations: Vec::new(),
             },

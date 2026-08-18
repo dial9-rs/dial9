@@ -1,6 +1,6 @@
 "use strict";
 
-// Pure helpers for the poll-duration histogram minimap in flamegraph.html.
+// Pure helpers for the poll-duration histogram minimap.
 //
 // The `/api/flamegraph` response carries a sample-weighted, log₂-bucketed
 // poll-duration histogram in `metadata.poll_duration_histogram`: an array of
@@ -10,7 +10,8 @@
 //
 // These functions are DOM-free and CommonJS-exported so they can be unit-tested
 // under Node; in the browser they attach as globals via the top-level `function`
-// declarations. The rendering + brush wiring lives in flamegraph.html.
+// declarations. The rendering and brush wiring live in
+// src/pages/flamegraph/minimap.ts.
 
 // Format a nanosecond duration as a short human string for axis ticks/tooltips:
 //   500000 -> "500µs", 1500000 -> "1.5ms", 50000000 -> "50ms", 2e9 -> "2s".
@@ -137,9 +138,8 @@ var FlamegraphHistogram = {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = FlamegraphHistogram;
 } else if (typeof window !== "undefined") {
-  // Browser: expose as a namespace so flamegraph.html's renderMinimap can find
-  // it. Without this the top-level `function` declarations are globals too, but
-  // renderMinimap calls `FlamegraphHistogram.*`, so the namespace must exist —
-  // otherwise renderEvent throws before it clears the loading spinner.
+  // Browser: expose a namespace for classic-script consumers. The top-level
+  // function declarations are globals too, but callers use
+  // `FlamegraphHistogram.*`.
   window.FlamegraphHistogram = FlamegraphHistogram;
 }

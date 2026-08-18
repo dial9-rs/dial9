@@ -114,7 +114,7 @@ long poll even without reading CPU stacks.
 ## Share the window as a viewer deep link
 
 Every window has a URL. The full interactive viewer honors `?start=`/`?end=`
-(ABSOLUTE monotonic ns, parse-time filters) per the stable URL contract in
+(ABSOLUTE monotonic ns, visible viewport bounds) per the stable URL contract in
 `dial9-viewer/ui/README.md`, section "URL contract (stable deep-link API)".
 `zoom.js` prints this link at the end of every window report; to construct
 it yourself from the relative-ms numbers the aggregate tools print:
@@ -130,9 +130,11 @@ console.log(`viewer.html?trace=<TRACE_URL>&start=${start}&end=${end}`);
 `<TRACE_URL>` is wherever the trace is served over HTTP (a report folder's
 `traces/full.bin`, an `/api/object?...` URL from the S3 browser); the viewer
 cannot fetch `file://` paths. The same `start`/`end` params work on
-`flamegraph.html` for a CPU-profile view of the window. Do not invent other
-params (`?worker=`, `?task=` do not exist); selection/highlight keys are
-reserved in the contract and land with the migrated viewer.
+`flamegraph.html` as parse-time bounds for a CPU-profile view of the window.
+Normally leave the viewer's `data-start`/`data-end` unset so the reader can zoom
+back out; add them only when the link must discard data outside the window. Do
+not invent `?worker=` or `?source=`; use the URL contract for supported
+selection fields such as `?task=`.
 
 ## From window back to cause
 

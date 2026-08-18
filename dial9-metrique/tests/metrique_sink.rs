@@ -143,7 +143,7 @@ fn decode_metrique_events(dir: &std::path::Path) -> Vec<DecodedEvent> {
             }
             events.push(DecodedEvent {
                 schema_name: ev.name.to_owned(),
-                timestamp_ns: ev.timestamp_ns.expect("metrique event missing timestamp"),
+                timestamp_ns: ev.timestamp_ns,
                 fields,
                 field_names,
                 units,

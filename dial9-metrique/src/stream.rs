@@ -265,7 +265,11 @@ impl EntryIoStream for Dial9Stream {
                 }
                 return;
             }
-            match enc.write_event(&plan.schema, values) {
+            let timestamp_ns = match values[0] {
+                FieldValue::Varint(ts) => ts,
+                _ => unreachable!("timestamp slot must be Varint"),
+            };
+            match enc.write_event(&plan.schema, timestamp_ns, &values[1..]) {
                 Ok(()) => emitted = true,
                 Err(e) => {
                     dropped = true;

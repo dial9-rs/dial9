@@ -324,11 +324,8 @@ mod tests {
             )
             .unwrap();
         let id_a = enc1.intern_stack_frames(&[addr_a]).unwrap();
-        enc1.write_event(
-            &schema1,
-            &[FieldValue::Varint(0), FieldValue::PooledStackFrames(id_a)],
-        )
-        .unwrap();
+        enc1.write_event(&schema1, 0, &[FieldValue::PooledStackFrames(id_a)])
+            .unwrap();
         let seg1 = enc1.finish();
 
         // Segment 2: contains addr_b.
@@ -340,11 +337,8 @@ mod tests {
             )
             .unwrap();
         let id_b = enc2.intern_stack_frames(&[addr_b]).unwrap();
-        enc2.write_event(
-            &schema2,
-            &[FieldValue::Varint(0), FieldValue::PooledStackFrames(id_b)],
-        )
-        .unwrap();
+        enc2.write_event(&schema2, 0, &[FieldValue::PooledStackFrames(id_b)])
+            .unwrap();
         let seg2 = enc2.finish();
 
         let mut concatenated = seg1;
@@ -378,14 +372,8 @@ mod tests {
         let schema = enc
             .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(0),
-                FieldValue::StackFrames(vec![addr].into()),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![addr].into())])
+            .unwrap();
         let buf = enc.finish();
 
         let mut output = Vec::new();
@@ -428,14 +416,8 @@ mod tests {
         let schema = enc
             .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(0),
-                FieldValue::StackFrames(vec![addr].into()),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![addr].into())])
+            .unwrap();
         let buf = enc.finish();
 
         let mut output = Vec::new();

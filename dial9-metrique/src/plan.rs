@@ -393,7 +393,6 @@ pub(crate) fn build_plan(
     let schema_name = schema_name(&entry_name, inert, &fields, &annotations, used_names);
     let schema = Schema::from_entry(SchemaEntry::with_annotations(
         schema_name,
-        /* has_timestamp */ true,
         fields,
         annotations,
     ));

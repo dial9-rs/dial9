@@ -16,9 +16,8 @@
 // no longer line up with their corresponding polls, confusing users who are
 // trying to correlate events across panels.
 //
-// Keep this file pure (no DOM access) so it's trivially unit-testable.  The
-// browser-side `timePanelLayout(panel, scrollbarW)` in viewer.html wraps this
-// with DOM-reading and canvas-sizing on top.
+// Keep this file pure (no DOM access) so it's trivially unit-testable. The
+// typed `src/lib/canvas/layout.ts` seam pins the shared gutter width.
 
 (function (exports) {
   "use strict";

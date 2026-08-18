@@ -344,8 +344,7 @@ where
             let span_name = data.meta.name();
 
             // Encode directly into the thread-local buffer (no clone needed)
-            let mut values = Vec::with_capacity(5 + schemas.field_names.len());
-            values.push(FieldValue::Varint(ts));
+            let mut values = Vec::with_capacity(4 + schemas.field_names.len());
             match task_id {
                 Some(task_id) => values.push(FieldValue::Varint(task_id)),
                 None => values.push(FieldValue::None),
@@ -362,7 +361,7 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            if let Err(e) = enc.write_event(&schemas.enter, &values) {
+            if let Err(e) = enc.write_event(&schemas.enter, ts, &values) {
                 dial9_core::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::error!(span = %span_name, "dropping span-enter event: {e}");
                 });
@@ -389,8 +388,7 @@ where
             let schemas = self.get_schemas(data.meta);
             let span_name = data.meta.name();
 
-            let mut values = Vec::with_capacity(4 + schemas.field_names.len());
-            values.push(FieldValue::Varint(ts));
+            let mut values = Vec::with_capacity(3 + schemas.field_names.len());
             match task_id {
                 Some(task_id) => values.push(FieldValue::Varint(task_id)),
                 None => values.push(FieldValue::None),
@@ -403,7 +401,7 @@ where
                     None => values.push(FieldValue::None),
                 }
             }
-            if let Err(e) = enc.write_event(&schemas.exit, &values) {
+            if let Err(e) = enc.write_event(&schemas.exit, ts, &values) {
                 dial9_core::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::error!(span = %span_name, "dropping span-exit event: {e}");
                 });

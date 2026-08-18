@@ -2,11 +2,6 @@
 // narrow browser userscript facade (set/check/setRegion). Runs in Node with an
 // injected fake storage backend.
 //
-// Migrated from test_creds.js (T10): test_harness.js test/testAsync/assert
-// rewritten to describe/it/expect; frozen core loaded via createRequire (see
-// format.test.ts for the rationale). fetch stubbing uses vi.stubGlobal with
-// the same install-in-try / restore-in-finally shape as the original.
-
 import { describe, it, expect, vi } from "vitest";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";

@@ -1,6 +1,5 @@
-/* Browser (S3 trace browser) page styles - ported VERBATIM from the legacy
-   index.html inline <style> (behavior-preserving port).
-   Do not restyle here: visual redesign is out of scope. */
+/* Browser (S3 trace browser) page styles. Keep the established presentation;
+   visual redesign is out of scope. */
 :root {
     /* Width of the heatmap host-label column. Read from JS (see LABEL_W)
        so the timeline axis ticks line up with the canvas left edge. */

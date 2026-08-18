@@ -227,18 +227,6 @@ impl<M: BufferMode> RecorderBuilder<M> {
         self
     }
 
-    /// Hook run once on every recording thread (flush thread and background
-    /// worker) before it starts, returning a teardown run when it stops. Use it
-    /// to register/unregister the thread with a profiler. Defaults to a no-op.
-    pub fn on_recording_thread_start<F, T>(mut self, hook: F) -> Self
-    where
-        F: Fn() -> T + Send + Sync + 'static,
-        T: FnOnce() + Send + 'static,
-    {
-        self.thread_init = Arc::new(move || Box::new(hook()) as Box<dyn FnOnce() + Send>);
-        self
-    }
-
     /// Start the recorder and begin recording.
     ///
     /// Chain [`paused`](Self::paused) beforehand to build without recording, then
@@ -368,6 +356,14 @@ pub trait RecorderSourceExt: Sized {
     /// starts recording.
     fn on_recording_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self;
 
+    /// Register a hook run on each of dial9's own threads (the flush thread and,
+    /// with `pipeline`, the background worker) before it starts, returning a
+    /// teardown run when it stops. Defaults to a no-op.
+    fn on_recording_thread_start<F, T>(self, hook: F) -> Self
+    where
+        F: Fn() -> T + Send + Sync + 'static,
+        T: FnOnce() + Send + 'static;
+
     /// Register a callback that dial9 invokes on the flush thread at the config's
     /// interval to emit custom events. Sugar for [`source`](Self::source) with a
     /// [`CustomEventsSource`](crate::custom_events::CustomEventsSource). Not
@@ -394,6 +390,15 @@ impl<M: BufferMode> RecorderSourceExt for RecorderBuilder<M> {
 
     fn on_recording_start(mut self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
         self.recording_start_hooks.push(Box::new(hook));
+        self
+    }
+
+    fn on_recording_thread_start<F, T>(mut self, hook: F) -> Self
+    where
+        F: Fn() -> T + Send + Sync + 'static,
+        T: FnOnce() + Send + 'static,
+    {
+        self.thread_init = Arc::new(move || Box::new(hook()) as Box<dyn FnOnce() + Send>);
         self
     }
 }
@@ -837,5 +842,45 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .any(|p| p.to_string_lossy().ends_with(".bin.gz"));
         assert!(!written_back, "the terminal stage takes write-back's place");
+    }
+
+    #[test]
+    fn recording_thread_hook_runs_on_dial9_threads() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn build_and_shut_down<M: BufferMode + Send + 'static>(
+            writer: crate::buffer::SegmentWriter<M>,
+        ) -> (usize, usize) {
+            let started = StdArc::new(AtomicUsize::new(0));
+            let stopped = StdArc::new(AtomicUsize::new(0));
+            let (s, t) = (StdArc::clone(&started), StdArc::clone(&stopped));
+
+            let recorder =
+                RecorderSourceExt::on_recording_thread_start(recorder(writer), move || {
+                    s.fetch_add(1, Ordering::SeqCst);
+                    let t = StdArc::clone(&t);
+                    move || {
+                        t.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .build();
+            recorder.graceful_shutdown(Duration::from_secs(5));
+
+            (
+                started.load(Ordering::SeqCst),
+                stopped.load(Ordering::SeqCst),
+            )
+        }
+
+        let (started, stopped) = build_and_shut_down(MemoryBuffer::new(64 * 1024).unwrap());
+        assert!(
+            started >= 1,
+            "the hook should run on the flush thread, ran {started} times"
+        );
+        assert_eq!(
+            started, stopped,
+            "every thread that ran the hook should run its teardown"
+        );
     }
 }

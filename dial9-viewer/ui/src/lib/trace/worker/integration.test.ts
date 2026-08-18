@@ -11,9 +11,8 @@
 //   - load.worker.test.ts: orchestrator contract vs a scripted port.
 //   - THIS FILE: real thread + clone boundary + in-worker fetch + store.
 //   - Browser-only remainder: the Vite `new Worker(new URL(...))` entry
-//     bundling in load.ts's default factory (node has no Web Worker;
-//     verified at build time by the dist worker chunk, exercised live
-//     once a page migrates).
+//     bundling in load.ts's default factory (node has no Web Worker), verified
+//     at build time by the emitted worker chunk.
 
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";

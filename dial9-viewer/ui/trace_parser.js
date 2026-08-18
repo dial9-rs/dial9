@@ -678,8 +678,8 @@
             startTime,
             endTime,
             hasTimeFilter,
-            // Optional pluggable event store. Defaults to a plain array (legacy
-            // behavior). The new viewer passes a columnar sink
+            // Optional pluggable event store. Defaults to a plain array. The
+            // viewer passes a columnar sink
             // (src/lib/trace/columnar-events.ts) whose `.push(event)` writes the
             // event's fields into typed-array columns and drops the object, so a
             // large trace never materializes millions of fat event objects.
@@ -691,8 +691,8 @@
             taskInstrumented: new Map(), // taskId -> bool (true if spawned via TelemetryHandle::spawn)
             callframeSymbols: new Map(),
             // Optional columnar cpu-sample sink (src/lib/trace/columnar-cpu-samples.ts).
-            // Its `.pushSample(...)` stores callchains in a flat pool; without it a
-            // plain array of fat samples (legacy behavior).
+            // Its `.pushSample(...)` stores callchains in a flat pool; without it,
+            // samples remain fat objects in a plain array.
             cpuSamples: (options && options.cpuSampleSink) || [],
             allocEvents: [],
             freeEvents: [],

@@ -1,7 +1,7 @@
 // Parse-cost benchmark for the COLUMNAR sink path.
 //
 // Why this exists separately from bench_parse.js: that script is CommonJS and
-// requires the frozen core directly, so it can only exercise the legacy fat-object
+// requires the frozen core directly, so it can only exercise the plain-array
 // path (`events: []` + per-event objects). Every sink in this directory is
 // TypeScript ESM, so the columnar path - the one the viewer actually runs since
 // the big-traces migration - had no benchmark at all, which is why per-event

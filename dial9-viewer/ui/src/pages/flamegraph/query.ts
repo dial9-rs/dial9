@@ -12,8 +12,7 @@ import type { SourceScope } from "../../lib/trace/index.js";
 /**
  * Resolve each `trace=` component against the origin root. Relative
  * values ("demo-trace.bin") and root-relative values ("/api/object?...")
- * resolve exactly as they do on the root-level legacy page; absolute URLs
- * pass through untouched.
+ * resolve against `/`; absolute URLs pass through untouched.
  */
 export function resolveTraceUrls(
   rawUrls: readonly string[],

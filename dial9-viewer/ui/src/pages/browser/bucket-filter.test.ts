@@ -1,5 +1,4 @@
-// bucket-filter.ts tests: the config-driven predicate that replaces the legacy
-// hardcoded "dial9" bucket filter.
+// bucket-filter.ts tests: the config-driven bucket predicate.
 
 import { describe, expect, it } from "vitest";
 import {
@@ -9,7 +8,7 @@ import {
 } from "./bucket-filter.js";
 
 describe("bucketMatchesFilter", () => {
-  it("matches case-insensitive substrings (legacy predicate shape)", () => {
+  it("matches case-insensitive substrings", () => {
     expect(bucketMatchesFilter("acme-dial9-traces", "dial9")).toBe(true);
     expect(bucketMatchesFilter("ACME-DIAL9", "dial9")).toBe(true);
     expect(bucketMatchesFilter("acme-traces", "dial9")).toBe(false);

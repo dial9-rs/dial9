@@ -2,7 +2,7 @@
 
 use crate::rate_limit::rate_limited;
 use crate::telemetry::format::WakeEventEvent;
-use crate::telemetry::recorder::{RuntimeContext, SharedState};
+use crate::telemetry::recorder::RuntimeContext;
 use crate::telemetry::task_metadata::TaskId;
 use dial9_core::handle::Dial9Handle;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
@@ -13,18 +13,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
-
-/// Handle used by instrumented futures to emit events into the telemetry system.
-#[derive(Clone)]
-pub(crate) struct TracedHandle {
-    pub(crate) shared: Arc<SharedState>,
-}
-
-impl std::fmt::Debug for TracedHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TracedHandle").finish_non_exhaustive()
-    }
-}
 
 #[cfg(feature = "taskdump")]
 type MaybeTaskDumped<F> = crate::task_dumped::TaskDumped<F>;
@@ -59,7 +47,7 @@ impl<F> std::fmt::Debug for TracedFuture<F> {
 enum HandleSource {
     /// Instrument with this handle when a Tokio task context is present.
     /// Captured eagerly at spawn time on the spawning thread.
-    Eager(TracedHandle),
+    Eager(Dial9Handle),
     /// Never instrument, run as a transparent passthrough.
     Passthrough,
     /// Resolve the handle from the polling thread's current dial9 runtime at
@@ -72,7 +60,7 @@ enum HandleSource {
 
 impl<F> TracedFuture<F> {
     #[track_caller]
-    pub(crate) fn new(inner: F, handle: Option<TracedHandle>) -> Self {
+    pub(crate) fn new(inner: F, handle: Option<Dial9Handle>) -> Self {
         let source = match handle {
             Some(handle) => HandleSource::Eager(handle),
             None => HandleSource::Passthrough,
@@ -137,7 +125,7 @@ pin_project! {
 impl<F> WakeTraced<F> {
     pub(crate) fn new(
         inner: F,
-        handle: TracedHandle,
+        handle: Dial9Handle,
         task_id: TaskId,
         spawn_loc: &'static Location<'static>,
     ) -> Self {
@@ -146,11 +134,11 @@ impl<F> WakeTraced<F> {
         #[cfg(tokio_unstable)]
         let runtime_ctx = None;
         #[cfg(not(tokio_unstable))]
-        let runtime_ctx = crate::telemetry::recorder::current_runtime_ctx(&handle.shared);
+        let runtime_ctx = crate::telemetry::recorder::current_runtime_ctx(&handle);
         let waker_data = Arc::new(TracedWakerData {
             inner: AtomicWaker::new(),
             woken_task_id: task_id,
-            shared: handle.shared.clone(),
+            handle: handle.clone(),
         });
         Self {
             inner,
@@ -171,7 +159,7 @@ impl<F> WakeTraced<F> {
 struct TracedWakerData {
     inner: AtomicWaker,
     woken_task_id: TaskId,
-    shared: Arc<SharedState>,
+    handle: Dial9Handle,
 }
 
 impl ArcWake for TracedWakerData {
@@ -182,7 +170,7 @@ impl ArcWake for TracedWakerData {
 }
 
 fn record_wake_event(data: &TracedWakerData) {
-    data.shared.if_enabled(|buf| {
+    data.handle.record_event_with(|| {
         // The worker issuing the wake — not the worker that will execute the woken task
         // (which is unknowable at wake time). Stored in the event as `target_worker`.
         let waking_worker_id = crate::telemetry::recorder::current_worker_id();
@@ -194,13 +182,12 @@ fn record_wake_event(data: &TracedWakerData) {
             255
         };
         let waker_task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-        let event = WakeEventEvent {
+        WakeEventEvent {
             timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
             waker_task_id,
             woken_task_id: data.woken_task_id,
             target_worker: waking_worker_u8,
-        };
-        buf.record_encodable_event(&event);
+        }
     });
 }
 
@@ -210,18 +197,15 @@ fn make_traced_waker(data: Arc<TracedWakerData>) -> Waker {
 
 fn make_instrumented<F>(
     inner: F,
-    handle: TracedHandle,
+    handle: Dial9Handle,
     task_id: TaskId,
     spawn_loc: &'static std::panic::Location<'static>,
 ) -> InstrumentedFuture<F>
 where
     F: Future,
 {
-    let shared = handle.shared.clone();
     #[cfg(feature = "taskdump")]
-    let inner = crate::task_dumped::TaskDumped::new(inner, shared, task_id);
-    #[cfg(not(feature = "taskdump"))]
-    let _ = shared;
+    let inner = crate::task_dumped::TaskDumped::new(inner, handle.clone(), task_id);
 
     WakeTraced::new(inner, handle, task_id, spawn_loc)
 }
@@ -288,7 +272,7 @@ impl<F: Future> Future for WakeTraced<F> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
-        if !this.waker_data.shared.is_enabled() {
+        if !this.waker_data.handle.is_enabled() {
             return this.inner.poll(cx);
         }
 
@@ -301,29 +285,21 @@ impl<F: Future> Future for WakeTraced<F> {
         let traced_waker = make_traced_waker(this.waker_data.clone());
         let mut traced_cx = Context::from_waker(&traced_waker);
 
-        use crate::telemetry::recorder::{make_poll_start, poll_span_open};
-
         // Only record polls this wrapper owns: a task on a runtime dial9 is not
         // attached to has nothing to attribute them to, and poll events claim
         // worker occupancy, so emitting inside an open span (tokio's hooks, or
         // an outer wrapper) would claim the same time twice.
-        let Some(ctx) = this.runtime_ctx.as_deref().filter(|_| !poll_span_open()) else {
+        let Some(ctx) = this
+            .runtime_ctx
+            .as_deref()
+            .filter(|_| !crate::telemetry::recorder::poll_span_open())
+        else {
             return this.inner.poll(&mut traced_cx);
         };
         // Closes the span on the way out, panic or not. A panicking future
         // unwinds past the rest of this function and tokio catches it above us.
-        let _guard = PollSpanGuard {
-            ctx,
-            shared: &this.waker_data.shared,
-        };
-        this.waker_data.shared.if_enabled(|buf| {
-            buf.record_encodable_event(&make_poll_start(
-                Some(ctx),
-                &this.waker_data.shared,
-                this.spawn_loc,
-                this.waker_data.woken_task_id,
-            ));
-        });
+        let _guard = PollSpanGuard { ctx };
+        ctx.record_poll_start(this.spawn_loc, this.waker_data.woken_task_id);
         this.inner.poll(&mut traced_cx)
     }
 }
@@ -333,17 +309,11 @@ impl<F: Future> Future for WakeTraced<F> {
 /// marker set.
 struct PollSpanGuard<'a> {
     ctx: &'a RuntimeContext,
-    shared: &'a SharedState,
 }
 
 impl Drop for PollSpanGuard<'_> {
     fn drop(&mut self) {
-        self.shared.if_enabled(|buf| {
-            buf.record_encodable_event(&crate::telemetry::recorder::make_poll_end(
-                Some(self.ctx),
-                self.shared,
-            ));
-        });
+        self.ctx.record_poll_end();
         crate::telemetry::recorder::clear_poll_span();
     }
 }
@@ -368,7 +338,7 @@ mod tests {
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
         let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
-        let handle = traced_handle(rec.handle()).expect("enabled handle yields TracedHandle");
+        let handle = traced_handle(rec.handle()).expect("enabled recorder yields a handle");
 
         let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
         let waker = noop_waker();
@@ -443,8 +413,8 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = traced_handle(rec.handle()).expect("enabled handle yields TracedHandle");
-        test_util::drain_thread_local(&th.shared);
+        let th = traced_handle(rec.handle()).expect("enabled recorder yields a handle");
+        test_util::drain_thread_local(th.shared().unwrap());
 
         // Dropping the runtime + recorder stops the background flush thread, joins
         // it, then performs a final flush: collector → DiskBuffer → trace file.

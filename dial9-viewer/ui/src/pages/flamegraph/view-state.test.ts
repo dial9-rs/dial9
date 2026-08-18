@@ -1,6 +1,5 @@
-// Integration tests for the flamegraph page's URL view-state wiring:
-// restore-on-load at the vitest level (the widget is a recording fake; the
-// in-browser twin against the real page is a separate parity journey). Covers:
+// Integration tests for the flamegraph page's URL view-state wiring, using a
+// recording widget fake for restore-on-load. Covers:
 // restore of the FULL view (zoom + inspect + search + filters) from legacy
 // params / hash / both (hash precedence), the timeRangeMatched gate, zero URL
 // writes on restore, the view->URL write carrying legacy params + hash
@@ -12,6 +11,7 @@ import type { DebounceTimer, UrlHost, UrlParts } from "../../lib/url/index.js";
 import type { FlamegraphViewState } from "../../lib/canvas/index.js";
 import { LEGACY_FIXTURE_URLS } from "../../lib/url/legacy-params.fixture.js";
 import {
+  createApiInspectSync,
   createFgUrlSync,
   restoreFgStateFromUrl,
 } from "./view-state.js";
@@ -185,6 +185,13 @@ describe("restoreFgStateFromUrl", () => {
       if (wz !== null) expected.workerZoom = wz.split("\t");
       const oz = p.get("offworker-zoom");
       if (oz !== null) expected.offworkerZoom = oz.split("\t");
+      const inspect = p.get("inspect");
+      if (inspect !== null) {
+        expected.inspect = {
+          name: inspect,
+          fullName: p.get("inspect_full") || inspect,
+        };
+      }
       expect(fg.applied, url).toEqual([expected]);
     }
   });
@@ -206,7 +213,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
 
   it("restore-on-load produces ZERO url writes (like legacy)", () => {
     const url: UrlParts = {
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=t.bin&worker-zoom=main%09poll",
       hash: "",
     };
@@ -219,7 +226,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
 
   it("a user zoom after restore writes legacy params + hash, once", () => {
     const { fg, raf, timer, host, sync } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=t.bin&worker-zoom=main",
       hash: "",
     });
@@ -230,7 +237,7 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual([
-      "/new/flamegraph.html?trace=t.bin&worker-zoom=main%09poll%09do_work" +
+      "/flamegraph.html?trace=t.bin&worker-zoom=main%09poll%09do_work" +
         "#v=1&fg.w=main%09poll%09do_work",
     ]);
   });
@@ -281,9 +288,9 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
   });
 
   it("preserves every non-view context param on write", () => {
-    const fixture = LEGACY_FIXTURE_URLS[3]!; // the full context-param fixture URL
+    const fixture = LEGACY_FIXTURE_URLS.find((url) => url.includes("trace=t/a.bin"))!;
     const { fg, raf, timer, host, sync } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: fixture,
       hash: "",
     });
@@ -316,5 +323,109 @@ describe("createFgUrlSync (restore -> view -> share loop)", () => {
     sync.flush();
     expect(host.writes).toEqual(["/p?trace=t.bin&worker-zoom=a#v=1&fg.w=a"]);
     expect(timer.pendingCount()).toBe(0);
+  });
+});
+
+describe("createApiInspectSync", () => {
+  function fakeApiFg() {
+    let live: FlamegraphViewState = {};
+    const available = new Set<string>();
+    const applied: FlamegraphViewState[] = [];
+    return {
+      applied,
+      makeAvailable(key: string) {
+        available.add(key);
+      },
+      setState(state: FlamegraphViewState) {
+        live = state;
+      },
+      getViewState: () => live,
+      getInspectFocus: () => {
+        const focus = live.inspect;
+        return focus ? focus.fullName || focus.name : null;
+      },
+      applyViewState(state: FlamegraphViewState) {
+        applied.push(state);
+        live = { ...state };
+        const focus = live.inspect;
+        if (focus && !available.has(focus.fullName || focus.name)) delete live.inspect;
+      },
+    };
+  }
+
+  it("writes only inspection to the current api URL and removes it on exit", () => {
+    const fg = fakeApiFg();
+    const host = fakeHost({
+      pathname: "/flamegraph.html",
+      search: "?api=1&bucket=b",
+      hash: "#foreign",
+    });
+    const sync = createApiInspectSync(new URLSearchParams(host.read().search), () => fg, {
+      host,
+    });
+
+    fg.setState({ workerZoom: ["main"] });
+    sync.onViewChange();
+    expect(host.writes).toEqual([]);
+
+    fg.setState({
+      workerZoom: ["main"],
+      inspect: { name: "poll", fullName: "core::poll" },
+    });
+    sync.onViewChange();
+    expect(host.writes).toEqual([
+      "/flamegraph.html?api=1&bucket=b&inspect=poll&inspect_full=core%3A%3Apoll#foreign",
+    ]);
+
+    fg.setState({});
+    sync.onViewChange();
+    expect(host.writes.at(-1)).toBe("/flamegraph.html?api=1&bucket=b#foreign");
+  });
+
+  it("retries URL restoration without clearing zoom or search", () => {
+    const fg = fakeApiFg();
+    fg.setState({ workerZoom: ["main"], search: "tokio" });
+    const host = fakeHost({
+      pathname: "/flamegraph.html",
+      search: "?api=1&inspect=poll&inspect_full=core%3A%3Apoll",
+      hash: "",
+    });
+    const sync = createApiInspectSync(new URLSearchParams(host.read().search), () => fg, {
+      host,
+    });
+
+    expect(sync.restoreAfterTreeChange()).toBe(false);
+    expect(fg.getViewState()).toEqual({ workerZoom: ["main"], search: "tokio" });
+
+    fg.makeAvailable("core::poll");
+    expect(sync.restoreAfterTreeChange()).toBe(true);
+    expect(fg.getViewState()).toEqual({
+      workerZoom: ["main"],
+      search: "tokio",
+      inspect: { name: "poll", fullName: "core::poll" },
+    });
+    expect(host.writes).toEqual([]);
+  });
+
+  it("carries live inspection through a scope change", () => {
+    const fg = fakeApiFg();
+    const host = fakeHost({
+      pathname: "/flamegraph.html",
+      search: "?api=1",
+      hash: "",
+    });
+    const sync = createApiInspectSync(new URLSearchParams(host.read().search), () => fg, {
+      host,
+    });
+    fg.setState({ inspect: { name: "poll", fullName: "core::poll" } });
+    sync.preserveForTreeChange();
+    fg.setState({ workerZoom: ["main"] });
+    const rebuilt = new URLSearchParams("api=1&bucket=other");
+
+    sync.carryTo(rebuilt);
+
+    expect(rebuilt.toString()).toBe(
+      "api=1&bucket=other&inspect=poll&inspect_full=core%3A%3Apoll",
+    );
   });
 });

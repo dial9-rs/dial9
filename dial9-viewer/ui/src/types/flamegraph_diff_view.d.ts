@@ -2,15 +2,14 @@
 // diff view that self-mounts its DOM and owns the per-side SSE streams. See
 // src/types/decode.d.ts for the declaration-form rationale.
 //
-// Not frozen core, but loaded as a browser global (CommonJS-guard form) and
-// consumed by typed src/ through the lib/canvas boundary
-// (src/lib/canvas/flamegraph_diff_view.ts) exactly like the core.
+// Not frozen core; CommonJS-guarded and bundled through the typed lib/canvas
+// boundary (src/lib/canvas/flamegraph_diff_view.ts) exactly like the core.
 
 declare module "*/flamegraph_diff_view.js" {
   /**
    * The diff view's persisted state (onChange arg / initialState):
    * `zoom` is the merged-root-inclusive frame path, `search` the highlight
-   * regex. Matches flamegraph_view_state.js readDiffState/writeDiffState.
+   * regex. Matches the canonical page's readDiffState/writeDiffState.
    */
   export interface DiffViewState {
     zoom?: readonly string[];

@@ -179,7 +179,7 @@ describe("longPollsTemplate (Longest polls card)", () => {
     expect(t.leaves).not.toContain(1003);
   });
 
-  it("keeps the legacy heading, emoji included (affordance parity)", () => {
+  it("renders the Longest polls heading, emoji included", () => {
     const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
     expect(t.strings.join("")).toContain("🕒 Longest polls");
   });
@@ -492,9 +492,8 @@ describe("workerActivityTemplate (Worker activity card)", () => {
   });
 
   it("a hostile host name is an interpolated VALUE, never an inline handler", () => {
-    // The legacy page built onclick="toggleWorkerHost('${host}')", so a quote in
-    // a host name could break out into script. lit-html binds a real listener,
-    // so the name is only ever text/attribute data.
+    // lit-html binds a real listener, so the hostile name remains
+    // text/attribute data rather than becoming handler source.
     const t = split(
       workerActivityTemplate(
         data([worker({ host: HOSTILE_TAG })]),

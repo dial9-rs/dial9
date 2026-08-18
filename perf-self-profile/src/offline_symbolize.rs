@@ -571,7 +571,7 @@ mod tests {
         let schema = enc
             .register_schema("Ev", vec![FieldDef::new("count", FieldType::Varint)])
             .unwrap();
-        enc.write_event(&schema, &[FieldValue::Varint(0), FieldValue::Varint(42)])
+        enc.write_event(&schema, 0, &[FieldValue::Varint(42)])
             .unwrap();
         let buf = enc.finish();
 
@@ -592,14 +592,8 @@ mod tests {
         let schema = enc
             .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(0),
-                FieldValue::StackFrames(vec![0x1000].into()),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![0x1000].into())])
+            .unwrap();
         let buf = enc.finish();
 
         let mut output = Vec::new();
@@ -631,14 +625,8 @@ mod tests {
             let schema = enc
                 .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
                 .unwrap();
-            enc.write_event(
-                &schema,
-                &[
-                    FieldValue::Varint(0),
-                    FieldValue::StackFrames(vec![addr].into()),
-                ],
-            )
-            .unwrap();
+            enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![addr].into())])
+                .unwrap();
             segs.push(enc.finish());
         }
 
@@ -674,14 +662,8 @@ mod tests {
             let schema = enc
                 .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
                 .unwrap();
-            enc.write_event(
-                &schema,
-                &[
-                    FieldValue::Varint(0),
-                    FieldValue::StackFrames(vec![addr].into()),
-                ],
-            )
-            .unwrap();
+            enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![addr].into())])
+                .unwrap();
             segs.push(enc.finish());
         }
 
@@ -712,14 +694,8 @@ mod tests {
         let schema = enc
             .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(0),
-                FieldValue::StackFrames(vec![addr].into()),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, 0, &[FieldValue::StackFrames(vec![addr].into())])
+            .unwrap();
         let buf = enc.finish();
 
         let symbolizer = OfflineSymbolizer::new();

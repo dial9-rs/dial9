@@ -248,33 +248,33 @@ fn end_to_end_trace_to_s3_roundtrip() {
         "expected at least one object in S3, got none"
     );
 
-    // Download the first object, decompress, write to temp file, parse
-    let first_key = objects[0].key().unwrap().to_string();
+    // Download every uploaded segment, decompressed.
+    let keys: Vec<String> = objects
+        .iter()
+        .map(|o| o.key().unwrap().to_string())
+        .collect();
 
-    let downloaded_path = trace_dir.path().join("downloaded.bin");
+    let segments: Vec<Vec<u8>> = list_rt.block_on(async {
+        let mut out = Vec::new();
+        for key in &keys {
+            let resp = client
+                .get_object()
+                .bucket("test-bucket")
+                .key(key)
+                .send()
+                .await
+                .unwrap();
 
-    list_rt.block_on(async {
-        let resp = client
-            .get_object()
-            .bucket("test-bucket")
-            .key(&first_key)
-            .send()
-            .await
-            .unwrap();
+            let body = resp.body.collect().await.unwrap().into_bytes();
 
-        let body = resp.body.collect().await.unwrap().into_bytes();
-
-        // Decompress gzip
-        let mut decoder = GzDecoder::new(&body[..]);
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed).unwrap();
-
-        std::fs::write(&downloaded_path, &decompressed).unwrap();
+            // Decompress gzip
+            let mut decoder = GzDecoder::new(&body[..]);
+            let mut decompressed = Vec::new();
+            decoder.read_to_end(&mut decompressed).unwrap();
+            out.push(decompressed);
+        }
+        out
     });
-
-    // Parse the downloaded trace with serde decoder
-    let trace_data = std::fs::read(&downloaded_path).unwrap();
-    let mut dec = Decoder::new(&trace_data).unwrap();
 
     #[derive(Debug, serde::Deserialize)]
     #[allow(dead_code, clippy::enum_variant_names)]
@@ -297,11 +297,14 @@ fn end_to_end_trace_to_s3_roundtrip() {
     }
 
     let mut all_events = Vec::new();
-    dec.for_each_event(|raw| {
-        let ev: S3Event = raw.deserialize().expect("deserialize");
-        all_events.push(ev);
-    })
-    .unwrap();
+    for segment in &segments {
+        let mut dec = Decoder::new(segment).unwrap();
+        dec.for_each_event(|raw| {
+            let ev: S3Event = raw.deserialize().expect("deserialize");
+            all_events.push(ev);
+        })
+        .unwrap();
+    }
 
     let metadata: HashMap<String, String> = all_events
         .iter()
@@ -313,9 +316,23 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .collect();
     assert_eq!(metadata["bucket"], "test-bucket");
     assert_eq!(metadata["service_name"], "test-svc");
-    assert_eq!(
-        metadata["runtime.test-runtime"], "0,1",
-        "expected eagerly populated worker IDs"
+    // Worker IDs resolve on a worker's first park or poll, so which of the two
+    // appear is the scheduler's call. `attach_propagates_second_runtime_metadata`
+    // covers the full mapping.
+    let workers = &metadata["runtime.test-runtime"];
+    let mut worker_ids: Vec<u64> = workers
+        .split(',')
+        .map(|id| id.parse().expect("numeric worker id"))
+        .collect();
+    let claimed = worker_ids.len();
+    worker_ids.dedup();
+    assert!(
+        worker_ids.len() == claimed && (1..=2).contains(&claimed),
+        "expected 1 or 2 distinct ids from this runtime's block, got {workers:?}"
+    );
+    assert!(
+        worker_ids.iter().all(|id| *id < 2),
+        "worker ids should fall in this runtime's block, got {workers:?}"
     );
     assert_eq!(metadata["custom-metadata"], "value");
     let runtime_events: Vec<_> = all_events

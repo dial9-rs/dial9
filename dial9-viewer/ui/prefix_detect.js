@@ -2,8 +2,8 @@
 
 // prefix_detect.js — S3 prefix-discovery heuristics for the trace browser.
 //
-// Shared between index.html (loaded via <script src>) and the unit tests
-// (loaded via require). Keep this dependency-free so both contexts can use it.
+// Bundled into the trace browser through the typed lib/trace seam and loaded
+// via require by unit tests. Keep this dependency-free for both contexts.
 
 // Return the last non-empty path segment of an S3 prefix.
 // e.g. "traces/2026-06-12/" → "2026-06-12", "traces/" → "traces".

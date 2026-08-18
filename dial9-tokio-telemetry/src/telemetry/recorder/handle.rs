@@ -1,5 +1,4 @@
 use crate::TracedFuture;
-use crate::traced::TracedHandle;
 use dial9_core::handle::Dial9Handle;
 use std::cell::Cell;
 
@@ -9,13 +8,10 @@ crate::primitives::thread_local! {
     pub(super) static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Wake-tracking handle for a [`Dial9Handle`], or `None` when the handle is
-/// disabled. The waker wrapping is tokio-specific, so it lives here rather
-/// than on the runtime-agnostic `Dial9Handle`.
-pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<TracedHandle> {
-    handle.shared().map(|shared| TracedHandle {
-        shared: shared.clone(),
-    })
+/// The handle to instrument with, or `None` when it is not connected to a
+/// recorder.
+pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<Dial9Handle> {
+    handle.shared().is_some().then(|| handle.clone())
 }
 
 /// Tokio handle for spawning instrumented tasks.
@@ -31,7 +27,7 @@ pub struct Dial9TokioHandle {
     /// `None` spawns on the current runtime (`tokio::spawn`), `Some` targets a
     /// specific runtime and works from any thread.
     runtime: Option<tokio::runtime::Handle>,
-    traced: Option<TracedHandle>,
+    traced: Option<Dial9Handle>,
 }
 
 impl std::fmt::Debug for Dial9TokioHandle {
@@ -67,7 +63,7 @@ impl Dial9TokioHandle {
     #[cfg(test)]
     pub(crate) fn for_runtime(
         runtime: tokio::runtime::Handle,
-        traced: Option<crate::traced::TracedHandle>,
+        traced: Option<Dial9Handle>,
     ) -> Self {
         Self {
             runtime: Some(runtime),

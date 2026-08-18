@@ -494,9 +494,8 @@ function removeAttrFilter(filters, key, value) {
 
 // ── URL / deep-link helpers ──────────────────────────────────────────────────
 
-// Build the URL params that deep-link the current span explorer state:
-// selected span type, duration band, and scope.
-function encodeSpanExplorerState(state) {
+// Build the server scope for a selected span type and duration band.
+function flamegraphParams(state) {
   const p = new URLSearchParams();
   p.set("api", "1");
   if (state.data_dir) p.set("data_dir", state.data_dir);
@@ -518,47 +517,10 @@ function encodeSpanExplorerState(state) {
   return p;
 }
 
-// Read span explorer state from URL params.
-function decodeSpanExplorerState(params) {
-  return {
-    data_dir: params.get("data_dir") || null,
-    max_files: params.get("max_files") != null ? Number(params.get("max_files")) : null,
-    bucket: params.get("bucket") || null,
-    region: params.get("aws_region") || null,
-    credentialMode: params.get("credential_mode") || null,
-    roleArn: params.get("aws_role_arn") || null,
-    prefix: params.get("prefix") || null,
-    service: params.get("service") || null,
-    hosts: params.getAll("host"),
-    start_ns: params.get("start_ns") || null,
-    end_ns: params.get("end_ns") || null,
-    span_type_uid: params.get("span_type_uid") || null,
-    min_span_ns: params.get("min_span_ns") != null ? Number(params.get("min_span_ns")) : null,
-    max_span_ns: params.get("max_span_ns") != null ? Number(params.get("max_span_ns")) : null,
-  };
-}
-
 // Build the flamegraph URL for a selected span type + duration band.
 // Uses the existing /api/flamegraph endpoint with span_type_uid filter.
 function flamegraphUrl(state, phase) {
-  const p = new URLSearchParams();
-  p.set("api", "1");
-  if (state.data_dir) p.set("data_dir", state.data_dir);
-  setMaxFilesParam(p, state.max_files);
-  if (state.bucket) p.set("bucket", state.bucket);
-  if (state.region) p.set("aws_region", state.region);
-  if (state.credentialMode) p.set("credential_mode", state.credentialMode);
-  if (state.credentialMode === "role" && state.roleArn) {
-    p.set("aws_role_arn", state.roleArn);
-  }
-  if (state.prefix) p.set("prefix", state.prefix);
-  if (state.service) p.set("service", state.service);
-  if (state.hosts) for (const h of state.hosts) p.append("host", h);
-  if (state.start_ns) p.set("start_ns", state.start_ns);
-  if (state.end_ns) p.set("end_ns", state.end_ns);
-  if (state.span_type_uid) p.set("span_type_uid", state.span_type_uid);
-  if (state.min_span_ns != null) p.set("min_span_ns", String(state.min_span_ns));
-  if (state.max_span_ns != null) p.set("max_span_ns", String(state.max_span_ns));
+  const p = flamegraphParams(state);
   // Phase selects the sample source for the flamegraph.
   if (phase === "blocking") {
     p.set("source", "sched");
@@ -621,25 +583,6 @@ function completeExemplarRefresh(currentTypes, currentCoverage, snapshotAdopted)
     coverage: currentCoverage,
     pending: !snapshotAdopted,
   };
-}
-
-// Compare query-independent catalog data while ignoring duration-scoped
-// exemplar fields. Preserve-mode refreshes use this at stream completion to
-// avoid rerendering an already-complete catalog, while still adopting a final
-// snapshot if the previous stream had been interrupted mid-refinement.
-function sameSpanCatalogStatistics(leftTypes, rightTypes) {
-  function normalized(types) {
-    if (!Array.isArray(types)) return [];
-    return types
-      .map((spanType) => {
-        const copy = Object.assign({}, spanType);
-        delete copy.exemplars;
-        delete copy.selected_duration_count;
-        return copy;
-      })
-      .sort((a, b) => String(a.span_type_uid).localeCompare(String(b.span_type_uid)));
-  }
-  return JSON.stringify(normalized(leftTypes)) === JSON.stringify(normalized(rightTypes));
 }
 
 // A preserve-mode response is valid only for the exact type and duration scope
@@ -725,17 +668,13 @@ var SpanExplorer = {
   spanTypeLabel,
   normalizeSpanHistogram,
   spanHistogramLayout,
-  spanPxToNs,
   spanNsToPx,
   spanBrushToBand,
   durationAtPercentile,
   countInBand,
   TIME_CATEGORIES,
   computeTimeComposition,
-  bandComposition,
   spanTypeQuality,
-  encodeSpanExplorerState,
-  decodeSpanExplorerState,
   flamegraphUrl,
   exemplarsInBand,
   percentileForDuration,
@@ -747,7 +686,6 @@ var SpanExplorer = {
   classifyExemplarSnapshot,
   completeExemplarRefresh,
   exemplarRequestMatches,
-  sameSpanCatalogStatistics,
   exemplarViewerUrl,
   parseAttrFilterParams,
   formatAttrFilterParams,

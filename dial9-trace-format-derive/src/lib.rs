@@ -291,7 +291,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             fn schema_entry() -> ::dial9_trace_format::schema::SchemaEntry {
                 ::dial9_trace_format::schema::SchemaEntry::with_annotations(
                     Self::event_name(),
-                    Self::has_timestamp(),
                     Self::field_defs(),
                     vec![#(#annotation_tokens),*],
                 )

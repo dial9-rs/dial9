@@ -71,7 +71,7 @@ function describeEvent(ev: RuntimeEvent): string {
 
 // ── Exhaustive switch over the panel union ──────────────────────────────
 
-/** The DOM element id hosting each panel (viewer.html). */
+/** The DOM element id hosting each viewer panel. */
 function panelElementId(panel: PanelKind): string {
   switch (panel) {
     case "spans":

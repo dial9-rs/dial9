@@ -223,6 +223,20 @@ impl Dial9Handle {
         }
     }
 
+    /// Record an event that is only built when recording is on.
+    ///
+    /// Reach for this over [`record_event`](Self::record_event) when building
+    /// the event costs something you would rather not pay while recording is
+    /// paused, such as a clock read or a lookup. `make` runs only if the event
+    /// will be recorded.
+    pub fn record_event_with<E: Encodable>(&self, make: impl FnOnce() -> E) {
+        if let Some(inner) = &self.inner {
+            inner
+                .shared
+                .if_enabled(|buf| buf.record_encodable_event(&make()));
+        }
+    }
+
     /// Run a closure with direct access to the thread-local encoder.
     ///
     /// The closure is only invoked if telemetry is enabled.

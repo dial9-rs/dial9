@@ -1,10 +1,5 @@
 <!DOCTYPE html>
-<!-- Span Explorer: a Vite entry served at the canonical /span_explorer.html.
-     Unlike the other pages this one has no legacy twin - it was born after the
-     migration - so it is NOT registered in ui-switch.js NEW_UI_ENTRIES and does
-     not load ui-switch.js: there is nothing to switch to, and a switch to
-     nowhere must not render.
-
+<!-- Span Explorer: a Vite entry served at /span_explorer.html.
      Static skeleton + styles only; ALL behavior lives in the module entry
      (src/pages/span-explorer/main.ts), which reaches the frozen core through
      the lib/trace barrel rather than <script src> globals. -->

@@ -1664,9 +1664,7 @@ pub(crate) fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
 
     decoder1
         .try_for_each_event(|ev| {
-            let ts = ev.timestamp_ns.ok_or_else(|| {
-                anyhow::anyhow!("event for schema '{}' has no timestamp", ev.name)
-            })?;
+            let ts = ev.timestamp_ns;
             global_min_ts = Some(global_min_ts.map_or(ts, |m| m.min(ts)));
             global_max_ts = Some(global_max_ts.map_or(ts, |m| m.max(ts)));
             Ok::<(), anyhow::Error>(())
@@ -1775,7 +1773,7 @@ pub(crate) fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
 
                 let shape_schema = ShapeSchema {
                     name: sanitized_name.clone(),
-                    has_timestamp: ev.schema.has_timestamp(),
+                    has_timestamp: true,
                     fields,
                     annotations,
                 };
@@ -1815,9 +1813,7 @@ pub(crate) fn extract_shape(data: &[u8]) -> anyhow::Result<TraceShape> {
             let schema_idx = schema_index_map[original_name];
 
             // Require timestamp
-            let ts = ev.timestamp_ns.ok_or_else(|| {
-                anyhow::anyhow!("event for schema '{}' has no timestamp", original_name)
-            })?;
+            let ts = ev.timestamp_ns;
             let offset = quantize_ns(ts.saturating_sub(source_base_ts));
 
             // Remap field values using active pools from the RawEvent
@@ -3334,8 +3330,7 @@ fn generate_to_writer_with_bases<W: Write>(
                     FieldAnnotation::new(ann.field_index, ann.key.clone(), ann.value.clone())
                 })
                 .collect();
-            let entry =
-                SchemaEntry::with_annotations(&ss.name, ss.has_timestamp, fields, annotations);
+            let entry = SchemaEntry::with_annotations(&ss.name, fields, annotations);
             Schema::from_entry(entry)
         })
         .collect();
@@ -3370,8 +3365,7 @@ fn generate_to_writer_with_bases<W: Write>(
                 .and_then(|timestamp| timestamp.checked_add(time_shift))
                 .ok_or_else(|| anyhow::anyhow!("timestamp overflow at rep={rep}"))?;
 
-            let mut values = Vec::with_capacity(shape_schema.fields.len() + 1);
-            values.push(FieldValue::Varint(ts_ns)); // timestamp as first value
+            let mut values = Vec::with_capacity(shape_schema.fields.len());
 
             for (fi, sv) in event.values.iter().enumerate() {
                 let field = &shape_schema.fields[fi];
@@ -3390,7 +3384,7 @@ fn generate_to_writer_with_bases<W: Write>(
             }
 
             encoder
-                .write_event(schema, &values)
+                .write_event(schema, ts_ns, &values)
                 .with_context(|| format!("write event for schema '{}'", schema.name()))?;
         }
     }
@@ -3686,8 +3680,8 @@ mod tests {
         let spawn_loc = enc.intern_string("test/source.rs").unwrap();
         enc.write_event(
             schema,
+            ts,
             &[
-                FieldValue::Varint(ts),
                 FieldValue::Varint(worker),
                 FieldValue::Varint(0),
                 FieldValue::Varint(task),
@@ -3713,8 +3707,8 @@ mod tests {
         let spawn_loc = enc.intern_string("test/source.rs").unwrap();
         enc.write_event(
             schema,
+            ts,
             &[
-                FieldValue::Varint(ts),
                 FieldValue::Varint(task),
                 FieldValue::PooledString(spawn_loc),
                 FieldValue::Bool(true),
@@ -3757,8 +3751,8 @@ mod tests {
         let spawn_loc = enc.intern_string("private/source.rs").unwrap();
         enc.write_event(
             &poll_start,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(0),
                 FieldValue::Varint(1),
                 FieldValue::Varint(10),
@@ -3766,15 +3760,12 @@ mod tests {
             ],
         )
         .unwrap();
-        enc.write_event(
-            &poll_end,
-            &[FieldValue::Varint(BASE_TS + 50_000), FieldValue::Varint(0)],
-        )
-        .unwrap();
+        enc.write_event(&poll_end, BASE_TS + 50_000, &[FieldValue::Varint(0)])
+            .unwrap();
         enc.write_event(
             &custom,
+            BASE_TS + 100_000,
             &[
-                FieldValue::Varint(BASE_TS + 100_000),
                 FieldValue::String("password-123".into()),
                 FieldValue::Varint(42),
                 FieldValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
@@ -3783,8 +3774,8 @@ mod tests {
         .unwrap();
         enc.write_event(
             &poll_start,
+            BASE_TS + 200_000,
             &[
-                FieldValue::Varint(BASE_TS + 200_000),
                 FieldValue::Varint(1),
                 FieldValue::Varint(2),
                 FieldValue::Varint(11),
@@ -3818,20 +3809,14 @@ mod tests {
 
         enc.write_event(
             &enter,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(7),
-                FieldValue::Varint(999),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(7), FieldValue::Varint(999)],
         )
         .unwrap();
         enc.write_event(
             &exit,
-            &[
-                FieldValue::Varint(BASE_TS + 100_000),
-                FieldValue::Varint(7),
-                FieldValue::Varint(999),
-            ],
+            BASE_TS + 100_000,
+            &[FieldValue::Varint(7), FieldValue::Varint(999)],
         )
         .unwrap();
         enc.finish()
@@ -4019,19 +4004,10 @@ mod tests {
             )
             .unwrap();
 
-        enc.write_event(
-            &spawn,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(100)],
-        )
-        .unwrap();
-        enc.write_event(
-            &spawn,
-            &[
-                FieldValue::Varint(BASE_TS + 10_000),
-                FieldValue::Varint(200),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&spawn, BASE_TS, &[FieldValue::Varint(100)])
+            .unwrap();
+        enc.write_event(&spawn, BASE_TS + 10_000, &[FieldValue::Varint(200)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -4076,8 +4052,8 @@ mod tests {
         let real_addrs = vec![0x7fff_dead_beef_u64, 0x5555_cafe_babe_u64];
         enc.write_event(
             &cpu,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(0),
                 FieldValue::Varint(12345),
                 FieldValue::StackFrames(real_addrs.into()),
@@ -4112,18 +4088,12 @@ mod tests {
             .unwrap();
 
         let real_id = 0xABCD_1234_u64;
-        enc.write_event(
-            &spawn,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(real_id)],
-        )
-        .unwrap();
+        enc.write_event(&spawn, BASE_TS, &[FieldValue::Varint(real_id)])
+            .unwrap();
         enc.write_event(
             &wake,
-            &[
-                FieldValue::Varint(BASE_TS + 10_000),
-                FieldValue::Varint(real_id),
-                FieldValue::Varint(real_id),
-            ],
+            BASE_TS + 10_000,
+            &[FieldValue::Varint(real_id), FieldValue::Varint(real_id)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -4165,10 +4135,10 @@ mod tests {
         // Write event with valid pooled string
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::PooledString(dial9_trace_format::types::InternedString::from_raw(0)),
-            ],
+            BASE_TS,
+            &[FieldValue::PooledString(
+                dial9_trace_format::types::InternedString::from_raw(0),
+            )],
         )
         .unwrap();
         let trace = enc.finish();
@@ -4189,10 +4159,10 @@ mod tests {
         // Write event with pool ID 999 (never interned)
         enc2.write_event(
             &schema2,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::PooledString(dial9_trace_format::types::InternedString::from_raw(999)),
-            ],
+            BASE_TS,
+            &[FieldValue::PooledString(
+                dial9_trace_format::types::InternedString::from_raw(999),
+            )],
         )
         .unwrap();
         let trace2 = enc2.finish();
@@ -4220,21 +4190,12 @@ mod tests {
             .unwrap();
 
         // Events out of order: second event has earliest timestamp
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS + 200_000), FieldValue::Varint(0)],
-        )
-        .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(0)],
-        )
-        .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS + 100_000), FieldValue::Varint(0)],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS + 200_000, &[FieldValue::Varint(0)])
+            .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(0)])
+            .unwrap();
+        enc.write_event(&schema, BASE_TS + 100_000, &[FieldValue::Varint(0)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -4548,20 +4509,14 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(42),
-                FieldValue::None,
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(42), FieldValue::None],
         )
         .unwrap();
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS + 10_000),
-                FieldValue::Varint(7),
-                FieldValue::Varint(99),
-            ],
+            BASE_TS + 10_000,
+            &[FieldValue::Varint(7), FieldValue::Varint(99)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -4601,13 +4556,11 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::StringMap(vec![
-                    (b"key1".to_vec(), b"val1".to_vec()),
-                    (b"secret_key".to_vec(), b"secret_val".to_vec()),
-                ]),
-            ],
+            BASE_TS,
+            &[FieldValue::StringMap(vec![
+                (b"key1".to_vec(), b"val1".to_vec()),
+                (b"secret_key".to_vec(), b"secret_val".to_vec()),
+            ])],
         )
         .unwrap();
         let trace = enc.finish();
@@ -4643,11 +4596,8 @@ mod tests {
             .unwrap();
 
         let real_epoch = 1_700_000_000_000_000_000u64;
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(real_epoch)],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(real_epoch)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -4717,8 +4667,8 @@ mod tests {
         // alloc_timestamp = BASE_TS + 50_000 (same timebase as events)
         enc.write_event(
             &schema,
+            BASE_TS + 100_000,
             &[
-                FieldValue::Varint(BASE_TS + 100_000),
                 FieldValue::Varint(1001),
                 FieldValue::Varint(0xCAFE),
                 FieldValue::Varint(1024),
@@ -4741,9 +4691,7 @@ mod tests {
                     timestamp_ns,
                     ..
                 }) => {
-                    if let Some(ts) = timestamp_ns {
-                        event_ts_values.push(ts);
-                    }
+                    event_ts_values.push(timestamp_ns);
                     // alloc_timestamp_ns is at field index 3 (tid, addr, size, alloc_timestamp_ns)
                     if let Some(FieldValue::Varint(v)) = values.get(3) {
                         alloc_ts_values.push(*v);
@@ -4889,14 +4837,12 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::List(vec![
-                    FieldValue::Varint(1),
-                    FieldValue::String("hello".into()),
-                    FieldValue::Bool(true),
-                ]),
-            ],
+            BASE_TS,
+            &[FieldValue::List(vec![
+                FieldValue::Varint(1),
+                FieldValue::String("hello".into()),
+                FieldValue::Bool(true),
+            ])],
         )
         .unwrap();
         let trace = enc.finish();
@@ -4942,11 +4888,8 @@ mod tests {
         let pooled = enc.intern_stack_frames(&frames).unwrap();
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0),
-                FieldValue::PooledStackFrames(pooled),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(0), FieldValue::PooledStackFrames(pooled)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -4991,11 +4934,8 @@ mod tests {
 
         enc.write_event(
             &sym,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0x1000),
-                FieldValue::Varint(0x100),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(0x1000), FieldValue::Varint(0x100)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -5077,21 +5017,13 @@ mod tests {
 
         // Use a recognizable source realtime
         let source_realtime = 1_700_000_000_123_456_789u64;
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(source_realtime),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(source_realtime)])
+            .unwrap();
         // Second event later
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS + 100_000),
-                FieldValue::Varint(source_realtime + 100_000),
-            ],
+            BASE_TS + 100_000,
+            &[FieldValue::Varint(source_realtime + 100_000)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -5166,8 +5098,8 @@ mod tests {
         let frames = enc.intern_stack_frames(&[0x1000]).unwrap();
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(1001),
                 FieldValue::Varint(1024),
                 FieldValue::Varint(0xCAFE),
@@ -5178,12 +5110,13 @@ mod tests {
         // Free references the alloc_timestamp
         enc.write_event(
             &free_schema,
+            BASE_TS + 50_000,
             &[
-                FieldValue::Varint(BASE_TS + 50_000),
                 FieldValue::Varint(1001),
                 FieldValue::Varint(0xCAFE),
                 FieldValue::Varint(512),
-                FieldValue::Varint(BASE_TS), // alloc_timestamp_ns = BASE_TS (same as alloc event)
+                FieldValue::Varint(BASE_TS),
+                // alloc_timestamp_ns = BASE_TS (same as alloc event),
             ],
         )
         .unwrap();
@@ -5225,11 +5158,8 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -5270,8 +5200,8 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(0),
                 FieldValue::String("John Doe".into()),
                 FieldValue::Varint(12345),
@@ -5303,11 +5233,8 @@ mod tests {
             )
             .unwrap();
         let real_addr = 0x7FFF_DEAD_BEEF_u64;
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(real_addr)],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(real_addr)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -5339,10 +5266,12 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(3), // small value
-                FieldValue::Varint(7), // small value
+                FieldValue::Varint(3),
+                // small value
+                FieldValue::Varint(7),
+                // small value,
             ],
         )
         .unwrap();
@@ -5389,11 +5318,8 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(999),
-                FieldValue::Varint(888),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(999), FieldValue::Varint(888)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -5438,8 +5364,8 @@ mod tests {
             .unwrap();
         enc.write_event(
             &enter,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(0),
                 FieldValue::Varint(42),
                 FieldValue::Varint(0),
@@ -5478,15 +5404,13 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::List(vec![
-                    FieldValue::Varint(42),
-                    FieldValue::PooledString(ps_id),
-                    FieldValue::PooledStackFrames(stack_id),
-                    FieldValue::String("inline_str".into()),
-                ]),
-            ],
+            BASE_TS,
+            &[FieldValue::List(vec![
+                FieldValue::Varint(42),
+                FieldValue::PooledString(ps_id),
+                FieldValue::PooledStackFrames(stack_id),
+                FieldValue::String("inline_str".into()),
+            ])],
         )
         .unwrap();
         let trace = enc.finish();
@@ -5571,19 +5495,17 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Map(vec![
-                    (
-                        FieldValue::PooledString(ps_key),
-                        FieldValue::PooledStackFrames(stack_id),
-                    ),
-                    (
-                        FieldValue::String("inline_key".into()),
-                        FieldValue::PooledString(ps_val),
-                    ),
-                ]),
-            ],
+            BASE_TS,
+            &[FieldValue::Map(vec![
+                (
+                    FieldValue::PooledString(ps_key),
+                    FieldValue::PooledStackFrames(stack_id),
+                ),
+                (
+                    FieldValue::String("inline_key".into()),
+                    FieldValue::PooledString(ps_val),
+                ),
+            ])],
         )
         .unwrap();
         let trace = enc.finish();
@@ -6242,17 +6164,11 @@ mod tests {
 
         // Two sequential polls on worker 0
         write_poll_start(&mut enc, &start, BASE_TS, 0, 1);
-        enc.write_event(
-            &end,
-            &[FieldValue::Varint(BASE_TS + 100_000), FieldValue::Varint(0)],
-        )
-        .unwrap();
+        enc.write_event(&end, BASE_TS + 100_000, &[FieldValue::Varint(0)])
+            .unwrap();
         write_poll_start(&mut enc, &start, BASE_TS + 200_000, 0, 1);
-        enc.write_event(
-            &end,
-            &[FieldValue::Varint(BASE_TS + 400_000), FieldValue::Varint(0)],
-        )
-        .unwrap();
+        enc.write_event(&end, BASE_TS + 400_000, &[FieldValue::Varint(0)])
+            .unwrap();
 
         let trace = enc.finish();
         let shape = extract_shape(&trace).unwrap();
@@ -6288,38 +6204,26 @@ mod tests {
         // Two enter/exit cycles for span 42
         enc.write_event(
             &enter,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
         enc.write_event(
             &exit,
-            &[
-                FieldValue::Varint(BASE_TS + 100_000),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS + 100_000,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
         enc.write_event(
             &enter,
-            &[
-                FieldValue::Varint(BASE_TS + 200_000),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS + 200_000,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
         enc.write_event(
             &exit,
-            &[
-                FieldValue::Varint(BASE_TS + 500_000),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS + 500_000,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
 
@@ -6369,8 +6273,8 @@ mod tests {
         // target_worker=5 should NOT be counted as a worker
         enc.write_event(
             &wake,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(1),
                 FieldValue::Varint(2),
                 FieldValue::Varint(5),
@@ -6402,14 +6306,8 @@ mod tests {
                 vec![FieldDef::new("field_a", FieldType::String)],
             )
             .unwrap();
-        enc1.write_event(
-            &schema1,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::String("hello".into()),
-            ],
-        )
-        .unwrap();
+        enc1.write_event(&schema1, BASE_TS, &[FieldValue::String("hello".into())])
+            .unwrap();
         let part1 = enc1.finish();
 
         let mut enc2 = Encoder::new();
@@ -6419,14 +6317,8 @@ mod tests {
                 vec![FieldDef::new("field_a", FieldType::Varint)],
             )
             .unwrap();
-        enc2.write_event(
-            &schema2,
-            &[
-                FieldValue::Varint(BASE_TS + 100_000),
-                FieldValue::Varint(42),
-            ],
-        )
-        .unwrap();
+        enc2.write_event(&schema2, BASE_TS + 100_000, &[FieldValue::Varint(42)])
+            .unwrap();
         let part2 = enc2.finish();
 
         // Concatenate: simulates a reset (new header mid-stream)
@@ -6459,11 +6351,8 @@ mod tests {
             )
             .unwrap();
         let ps1 = enc1.intern_string("pooled_val").unwrap();
-        enc1.write_event(
-            &schema1,
-            &[FieldValue::Varint(BASE_TS), FieldValue::PooledString(ps1)],
-        )
-        .unwrap();
+        enc1.write_event(&schema1, BASE_TS, &[FieldValue::PooledString(ps1)])
+            .unwrap();
         let part1 = enc1.finish();
 
         let mut enc2 = Encoder::new();
@@ -6477,10 +6366,8 @@ mod tests {
         let ps2 = enc2.intern_string("another_val").unwrap();
         enc2.write_event(
             &schema2,
-            &[
-                FieldValue::Varint(BASE_TS + 100_000),
-                FieldValue::PooledString(ps2),
-            ],
+            BASE_TS + 100_000,
+            &[FieldValue::PooledString(ps2)],
         )
         .unwrap();
         let part2 = enc2.finish();
@@ -6505,16 +6392,10 @@ mod tests {
                 vec![FieldDef::new("worker_id", FieldType::Varint)],
             )
             .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(3)],
-        )
-        .unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS + 10_000), FieldValue::Varint(5)],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(3)])
+            .unwrap();
+        enc.write_event(&schema, BASE_TS + 10_000, &[FieldValue::Varint(5)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -6553,7 +6434,7 @@ mod tests {
             .unwrap();
 
         write_poll_start(&mut enc, &start, BASE_TS, 0, 1);
-        enc.write_event(&end, &[FieldValue::Varint(BASE_TS), FieldValue::Varint(0)])
+        enc.write_event(&end, BASE_TS, &[FieldValue::Varint(0)])
             .unwrap();
 
         let trace = enc.finish();
@@ -6589,20 +6470,14 @@ mod tests {
 
         enc.write_event(
             &enter,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
         enc.write_event(
             &exit,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(0),
-                FieldValue::Varint(42),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(0), FieldValue::Varint(42)],
         )
         .unwrap();
 
@@ -6651,8 +6526,8 @@ mod tests {
         let source_realtime = 1_700_000_000_000_000_000u64;
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(source_realtime),
                 FieldValue::Varint(BASE_TS),
             ],
@@ -6685,14 +6560,8 @@ mod tests {
             .unwrap();
 
         let source_realtime = 1_700_000_000_000_000_000u64;
-        enc.write_event(
-            &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(source_realtime),
-            ],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(source_realtime)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -6769,8 +6638,8 @@ mod tests {
 
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(0),
                 FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
             ],
@@ -6820,8 +6689,8 @@ mod tests {
         let pooled = enc.intern_stack_frames(&[0x1010, 0x1020]).unwrap();
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::List(vec![FieldValue::StackFrames(vec![0x1000, 0x1010].into())]),
                 FieldValue::Map(vec![(
                     FieldValue::String("stack".into()),
@@ -6924,13 +6793,11 @@ mod tests {
 
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::List(vec![FieldValue::StringMap(vec![
-                    (b"key1".to_vec(), b"val1".to_vec()),
-                    (b"key2".to_vec(), b"val2".to_vec()),
-                ])]),
-            ],
+            BASE_TS,
+            &[FieldValue::List(vec![FieldValue::StringMap(vec![
+                (b"key1".to_vec(), b"val1".to_vec()),
+                (b"key2".to_vec(), b"val2".to_vec()),
+            ])])],
         )
         .unwrap();
         let trace = enc.finish();
@@ -7044,8 +6911,8 @@ mod tests {
         let spawn_loc = enc.intern_string("source.rs").unwrap();
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::String("not-a-worker".into()),
                 FieldValue::Varint(1),
                 FieldValue::Varint(2),
@@ -7086,8 +6953,8 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
+            BASE_TS,
             &[
-                FieldValue::Varint(BASE_TS),
                 FieldValue::Varint(0),
                 FieldValue::Varint(100),
                 FieldValue::Varint(500_000),
@@ -7255,14 +7122,12 @@ mod tests {
             .unwrap();
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::List(vec![
-                    FieldValue::Varint(1),
-                    FieldValue::Varint(2),
-                    FieldValue::String("hello".into()),
-                ]),
-            ],
+            BASE_TS,
+            &[FieldValue::List(vec![
+                FieldValue::Varint(1),
+                FieldValue::Varint(2),
+                FieldValue::String("hello".into()),
+            ])],
         )
         .unwrap();
         let trace = enc.finish();
@@ -7433,16 +7298,13 @@ mod tests {
             FieldAnnotation::new(0, "kind", "counter"),
             FieldAnnotation::new(1, "kind", "histogram"),
         ];
-        let entry = SchemaEntry::with_annotations("TestEvent", true, fields, annotations);
+        let entry = SchemaEntry::with_annotations("TestEvent", fields, annotations);
         let schema = dial9_trace_format::encoder::Schema::from_entry(entry);
         enc.register_existing(&schema).unwrap();
         enc.write_event(
             &schema,
-            &[
-                FieldValue::Varint(BASE_TS),
-                FieldValue::Varint(1000),
-                FieldValue::Varint(5),
-            ],
+            BASE_TS,
+            &[FieldValue::Varint(1000), FieldValue::Varint(5)],
         )
         .unwrap();
         let trace = enc.finish();
@@ -7476,14 +7338,11 @@ mod tests {
         let mut enc = Encoder::new();
         let fields = vec![FieldDef::new("timeout_s", FieldType::Varint)];
         let annotations = vec![FieldAnnotation::new(0, "unit", "s")];
-        let entry = SchemaEntry::with_annotations("TestEvent", true, fields, annotations);
+        let entry = SchemaEntry::with_annotations("TestEvent", fields, annotations);
         let schema = dial9_trace_format::encoder::Schema::from_entry(entry);
         enc.register_existing(&schema).unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS), FieldValue::Varint(30)],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::Varint(30)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();
@@ -7763,11 +7622,8 @@ mod tests {
             )
             .unwrap();
         let id = enc.intern_string("test_pool_value").unwrap();
-        enc.write_event(
-            &schema,
-            &[FieldValue::Varint(BASE_TS), FieldValue::PooledString(id)],
-        )
-        .unwrap();
+        enc.write_event(&schema, BASE_TS, &[FieldValue::PooledString(id)])
+            .unwrap();
         let trace = enc.finish();
 
         let shape = extract_shape(&trace).unwrap();

@@ -91,7 +91,6 @@ fn tracepoint_sched_switch_e2e() {
         match frame {
             DecodedFrame::Schema(entry) => {
                 assert_eq!(entry.name(), "sched_switch");
-                assert!(entry.has_timestamp());
                 assert_eq!(entry.fields().len(), tp.fields.len());
                 schema_count += 1;
             }
@@ -100,7 +99,7 @@ fn tracepoint_sched_switch_e2e() {
                 values,
                 ..
             } => {
-                assert!(timestamp_ns.is_some());
+                assert!(*timestamp_ns > 0);
                 assert_eq!(values.len(), tp.fields.len());
                 if values
                     .iter()

@@ -61,13 +61,9 @@ pub trait TraceEvent {
     /// The event type name (used in schema registration).
     fn event_name() -> &'static str;
     /// Field definitions for schema registration.
-    /// When `has_timestamp()` is true, the timestamp is NOT included here —
-    /// it is encoded in the event frame header.
+    /// The timestamp is NOT included here — it is encoded in the event frame
+    /// header.
     fn field_defs() -> Vec<FieldDef>;
-    /// Whether this event type carries a packed timestamp in the event header.
-    fn has_timestamp() -> bool {
-        true
-    }
     /// Return the event's timestamp in nanoseconds.
     fn timestamp(&self) -> u64;
     /// Encode this event's non-timestamp fields into the encoder.
@@ -80,7 +76,6 @@ pub trait TraceEvent {
     fn schema_entry() -> SchemaEntry {
         SchemaEntry {
             name: Self::event_name().to_string(),
-            has_timestamp: Self::has_timestamp(),
             fields: Self::field_defs(),
             annotations: Vec::new(),
         }

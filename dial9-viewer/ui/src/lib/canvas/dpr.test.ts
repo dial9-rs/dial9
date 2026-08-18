@@ -208,7 +208,7 @@ describe("createCanvasSizer (binding)", () => {
   describe("with a live devicePixelRatio global", () => {
     afterEach(() => vi.unstubAllGlobals());
 
-    it("defaults dpr to devicePixelRatio (legacy `devicePixelRatio || 1`)", () => {
+    it("defaults dpr to devicePixelRatio", () => {
       vi.stubGlobal("devicePixelRatio", 2);
       const canvas = makeStubCanvas();
       createCanvasSizer(canvas).ensure(800, 60);
