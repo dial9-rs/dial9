@@ -21,7 +21,11 @@ import type {
 } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
-import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
+import {
+  DEFAULT_INSPECTOR_WIDTH,
+  DEFAULT_LANES_HEIGHT,
+  DEFAULT_RAIL_WIDTH,
+} from "./store.js";
 import { POI_FILTERS } from "./poi.js";
 import {
   FIELD_CHART_KINDS,
@@ -59,6 +63,7 @@ const P_TASK_INDEX = "task-index";
 const P_RUNTIME_COLLAPSED = "runtime-collapsed";
 const P_RUNTIME_METRICS_COLLAPSED = "runtime-metrics-collapsed";
 const P_INSPECTOR_WIDTH = "inspector-width";
+const P_RAIL_WIDTH = "rail-width";
 const P_LANES_HEIGHT = "lanes-height";
 const P_LANES_SCROLL = "lanes-scroll";
 const P_STACK_VIEW = "stack-view";
@@ -148,6 +153,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     collapsedRuntimes: url(P_RUNTIME_COLLAPSED),
     collapsedRuntimeMetrics: url(P_RUNTIME_METRICS_COLLAPSED),
     sidebarWidth: url(P_INSPECTOR_WIDTH),
+    railWidth: url(P_RAIL_WIDTH),
     lanesViewportHeight: url(P_LANES_HEIGHT),
     lanesScrollTop: url(P_LANES_SCROLL),
     selectedSpanNames: url(P_SPAN_NAMES),
@@ -290,6 +296,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (state.uiPrefs.sidebarWidth !== DEFAULT_INSPECTOR_WIDTH) {
     vs.inspectorWidth = state.uiPrefs.sidebarWidth;
   }
+  if (state.uiPrefs.railWidth !== DEFAULT_RAIL_WIDTH) {
+    vs.railWidth = state.uiPrefs.railWidth;
+  }
   if (state.uiPrefs.lanesViewportHeight !== DEFAULT_LANES_HEIGHT) {
     vs.lanesHeight = state.uiPrefs.lanesViewportHeight;
   }
@@ -384,6 +393,7 @@ export function mirrorViewerToQuery(
   set(params, P_RUNTIME_COLLAPSED, encodeList(vs.collapsedRuntimes));
   set(params, P_RUNTIME_METRICS_COLLAPSED, encodeList(vs.collapsedRuntimeMetrics));
   set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
+  set(params, P_RAIL_WIDTH, finiteString(vs.railWidth));
   set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
   set(params, P_LANES_SCROLL, finiteString(vs.lanesScrollTop));
   set(params, P_STACK_VIEW, vs.stackView ?? null);
@@ -466,6 +476,7 @@ export interface ViewerUrlState {
   collapsedRuntimes?: string[];
   collapsedRuntimeMetrics?: string[];
   inspectorWidth?: number;
+  railWidth?: number;
   lanesHeight?: number;
   lanesScrollTop?: number;
   stacksAsFlamegraph?: boolean;
@@ -526,6 +537,9 @@ export function hydrateViewerStore(
   }
   if (urlView.inspectorWidth !== undefined) {
     uiPrefs.sidebarWidth = urlView.inspectorWidth;
+  }
+  if (urlView.railWidth !== undefined) {
+    uiPrefs.railWidth = urlView.railWidth;
   }
   if (urlView.lanesHeight !== undefined) {
     uiPrefs.lanesViewportHeight = urlView.lanesHeight;
@@ -690,6 +704,8 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   }
   const inspectorWidth = positiveInt(p.get(P_INSPECTOR_WIDTH));
   if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
+  const railWidth = positiveInt(p.get(P_RAIL_WIDTH));
+  if (railWidth !== null) out.railWidth = railWidth;
   const lanesHeight = positiveInt(p.get(P_LANES_HEIGHT));
   if (lanesHeight !== null) out.lanesHeight = lanesHeight;
   const lanesScrollTop = nonNegativeInt(p.get(P_LANES_SCROLL));

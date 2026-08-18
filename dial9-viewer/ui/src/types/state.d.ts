@@ -290,6 +290,8 @@ export interface UiPrefsSlice {
   collapsedRuntimeMetrics: Readonly<Record<string, boolean>>;
   /** Stack-sidebar width in CSS px (drag-resizable). */
   sidebarWidth: number;
+  /** Issues/Tasks rail width in CSS px (drag-resizable via its right edge). */
+  railWidth: number;
   /**
    * Height in CSS px of the worker-lanes box (the scroll container holding the
    * fixed-height worker rows). Drag-resizable via the lanes bottom gutter and

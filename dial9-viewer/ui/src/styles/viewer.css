@@ -254,8 +254,10 @@ body {
 
 /* ── Issues rail (concept-2, replaces the "0/74" stepper) ────────────── */
 
+/* Width is bound inline by the rail template (uiPrefs.railWidth, default
+   DEFAULT_RAIL_WIDTH) and drag-resizable via the .d9-rail-resize handle. */
 .d9-rail {
-    width: 300px;
+    position: relative;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
@@ -263,6 +265,17 @@ body {
     background: #151530;
     border-right: 1px solid var(--d9-border);
 }
+.d9-rail-resize {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+}
+.d9-rail-resize:hover { background: var(--d9-accent); }
 /* Issues/Tasks tab strip: pinned above the per-tab head. */
 .d9-rail-tabs {
     flex-shrink: 0;

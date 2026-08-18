@@ -224,15 +224,17 @@ export function toggleRuntimeMetricsCollapsed(store: ViewerStore, name: string):
 export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
 
 /** The persisted shape: the manageable order + the collapse map + the two
- *  per-runtime fold maps (runtime, summary lane) + the lanes box height. Every
- *  field but `trackOrder`/`collapsed` is optional so prefs written before it
- *  existed still parse (the store keeps its default when absent). */
+ *  per-runtime fold maps (runtime, summary lane) + the lanes box height + the
+ *  issues-rail width. Every field but `trackOrder`/`collapsed` is optional so
+ *  prefs written before it existed still parse (the store keeps its default
+ *  when absent). */
 export interface TrackPrefs {
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
   collapsedRuntimes?: Readonly<Record<string, boolean>>;
   collapsedRuntimeMetrics?: Readonly<Record<string, boolean>>;
   lanesHeight?: number;
+  railWidth?: number;
 }
 
 /** Coerce an unknown value into a `Record<string, boolean>`, keeping only the
@@ -296,12 +298,15 @@ export function loadTrackPrefs(): TrackPrefs | null {
     const collapsedRuntimeMetrics = crm !== undefined ? parseBoolMap(crm) : undefined;
     const lh = (obj as { lanesHeight?: unknown }).lanesHeight;
     const lanesHeight = typeof lh === "number" && Number.isFinite(lh) && lh > 0 ? lh : undefined;
+    const rw = (obj as { railWidth?: unknown }).railWidth;
+    const railWidth = typeof rw === "number" && Number.isFinite(rw) && rw > 0 ? rw : undefined;
     return {
       trackOrder,
       collapsed,
       ...(collapsedRuntimes !== undefined ? { collapsedRuntimes } : {}),
       ...(collapsedRuntimeMetrics !== undefined ? { collapsedRuntimeMetrics } : {}),
       ...(lanesHeight !== undefined ? { lanesHeight } : {}),
+      ...(railWidth !== undefined ? { railWidth } : {}),
     };
   } catch {
     return null;
@@ -309,7 +314,7 @@ export function loadTrackPrefs(): TrackPrefs | null {
 }
 
 /** Persist track prefs (order + collapse map + the two runtime fold maps + lanes
- *  box height) to localStorage. */
+ *  box height + issues-rail width) to localStorage. */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
   const trackOrder = prefs.trackOrder.filter((id) => !isFieldChartTrackId(id));
   const collapsed = Object.fromEntries(
@@ -329,6 +334,7 @@ export function saveTrackPrefs(prefs: TrackPrefs): void {
         ? { collapsedRuntimeMetrics: prefs.collapsedRuntimeMetrics }
         : {}),
       ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
+      ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
     }),
   );
 }
@@ -354,6 +360,7 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
       ? { collapsedRuntimeMetrics: prefs.collapsedRuntimeMetrics }
       : {}),
     ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
+    ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
   });
 }
 
@@ -372,6 +379,7 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       collapsedRuntimes,
       collapsedRuntimeMetrics,
       lanesViewportHeight,
+      railWidth,
     } = state.uiPrefs;
     saveTrackPrefs({
       trackOrder,
@@ -379,6 +387,7 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       collapsedRuntimes,
       collapsedRuntimeMetrics,
       lanesHeight: lanesViewportHeight,
+      railWidth,
     });
   });
 }

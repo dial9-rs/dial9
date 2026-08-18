@@ -65,6 +65,24 @@ const TASK_COLUMNS: readonly TaskColumn[] = [
   { key: "lifetime", label: "life", title: "Sort by lifetime", defaultDir: "desc" },
 ];
 
+/** Clamp bounds for the rail's resize drag: never narrower than a usable
+ *  table, never wider than 60% of the viewport (the track column must stay
+ *  workable). */
+const MIN_RAIL_WIDTH = 220;
+const MAX_RAIL_VW = 0.6;
+
+/**
+ * Clamp a dragged rail width to [MIN_RAIL_WIDTH, MAX_RAIL_VW * viewport],
+ * rounded to whole px. Exported for the bounds test; the drag handler calls
+ * it with the live window.innerWidth.
+ */
+export function clampRailWidth(width: number, viewportWidth: number): number {
+  const maxW = Number.isFinite(viewportWidth)
+    ? viewportWidth * MAX_RAIL_VW
+    : Infinity;
+  return Math.round(Math.max(MIN_RAIL_WIDTH, Math.min(maxW, width)));
+}
+
 export interface IssuesRailController {
   /** The rail template for one render pass (reads live store state). */
   template(state: StoreState): TemplateResult;
@@ -224,6 +242,54 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     store.update("poi", { sortKey: col.key, sortDir: dir, index: -1 });
   }
 
+  // ── Resize drag (the rail's right-edge handle) ──────────────────────────
+  // Width lives in uiPrefs.railWidth: the shell re-renders the rail (and
+  // re-sizes the track canvases) on every uiPrefs change, and the trackPrefs
+  // subscriber persists it. The imperative style write below only pre-empts
+  // the store-driven render within the same frame so the drag never lags.
+
+  let dragHost: HTMLElement | null = null;
+  let dragLeft = 0;
+
+  function applyWidth(width: number): void {
+    const clamped = clampRailWidth(width, window.innerWidth);
+    if (dragHost !== null) dragHost.style.width = `${clamped}px`;
+    if (clamped !== store.getState().uiPrefs.railWidth) {
+      store.update("uiPrefs", { railWidth: clamped });
+      // Poke the viewport channel so the track-CONTENT controllers redraw at
+      // the new column width in real time: lanes/spans/cpu/... subscribe to
+      // `viewport`, not `uiPrefs`, so a bare railWidth change re-renders the
+      // shell chrome + resizes the canvases but leaves their pixels stale.
+      store.update("viewport", {});
+    }
+  }
+
+  function onResizeDown(e: MouseEvent): void {
+    const host = (e.currentTarget as HTMLElement).closest<HTMLElement>(".d9-rail");
+    if (host === null) return;
+    e.preventDefault();
+    dragHost = host;
+    dragLeft = host.getBoundingClientRect().left;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onResizeMove);
+    window.addEventListener("mouseup", onResizeUp);
+  }
+  function onResizeMove(e: MouseEvent): void {
+    if (dragHost === null) return;
+    // The rail is on the left; dragging its right handle sets the width from
+    // the aside's left edge to the pointer.
+    applyWidth(e.clientX - dragLeft);
+  }
+  function onResizeUp(): void {
+    if (dragHost === null) return;
+    dragHost = null;
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    window.removeEventListener("mousemove", onResizeMove);
+    window.removeEventListener("mouseup", onResizeUp);
+  }
+
   const keyBindings: readonly KeyBinding[] = [
     { key: "n", onKey: () => step(1) },
     { key: "p", onKey: () => step(-1) },
@@ -241,13 +307,14 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
         tab === "issues" ? viewModel(state) : derivePoiViewModel(null, state.poi, 0);
       const taskVm =
         tab === "tasks" ? taskViewModel(state) : deriveTaskViewModel(null, state.poi);
-      return railTemplate(tab, poiVm, taskVm, {
+      return railTemplate(tab, poiVm, taskVm, state.uiPrefs.railWidth, {
         setTab,
         setFilter,
         sortByColumn,
         jumpTo,
         sortTaskByColumn,
         jumpToTask,
+        onResizeDown,
       });
     },
     keyBindings,
@@ -258,6 +325,9 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       cacheVm = null;
       taskCacheVm = null;
       revealWorker = () => {};
+      // A dispose mid-drag must not leave window listeners or the forced
+      // cursor behind.
+      onResizeUp();
     },
   };
 }
@@ -297,6 +367,7 @@ interface RailHandlers {
   jumpTo(index: number): void;
   sortTaskByColumn(col: TaskColumn): void;
   jumpToTask(index: number): void;
+  onResizeDown(e: MouseEvent): void;
 }
 
 /** The tab strip switching Issues vs Tasks. */
@@ -320,10 +391,16 @@ function railTemplate(
   tab: RailTab,
   vm: PoiViewModel,
   taskVm: TaskViewModel,
+  width: number,
   h: RailHandlers,
 ): TemplateResult {
   return html`
-    <aside class="d9-rail" role="region" aria-label="Issues and tasks">
+    <aside
+      class="d9-rail"
+      role="region"
+      aria-label="Issues and tasks"
+      style="width:${width}px"
+    >
       ${railTabs(tab, h)}
       ${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
       ${tab === "tasks"
@@ -340,6 +417,14 @@ function railTemplate(
         : vm.total === 0
           ? html`<p class="d9-rail-empty">No issues match this filter.</p>`
           : railTable(vm, h)}
+      <div
+        class="d9-rail-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize issues rail"
+        title="Drag to resize; widen to read full spawn locations"
+        @mousedown=${h.onResizeDown}
+      ></div>
     </aside>
   `;
 }

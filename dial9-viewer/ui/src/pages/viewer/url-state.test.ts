@@ -273,6 +273,7 @@ describe("viewer URL state: complete durable view", () => {
         uiPrefs: {
           collapsedRuntimes: { beta: true, alpha: true },
           sidebarWidth: 444,
+          railWidth: 460,
           lanesViewportHeight: 280,
           lanesScrollTop: 96,
           stacksAsFlamegraph: true,
@@ -297,6 +298,7 @@ describe("viewer URL state: complete durable view", () => {
     );
 
     expect(params.get("rail")).toBe("tasks");
+    expect(params.get("rail-width")).toBe("460");
     expect(params.get("task-sort")).toBe("lifetime,asc");
     expect(params.get("runtime-collapsed")).toBe("v1:alpha\tbeta");
     expect(params.get("poll-worker-zoom")).toBe("root\tpoll");
@@ -307,6 +309,7 @@ describe("viewer URL state: complete durable view", () => {
       taskIndex: 7,
       collapsedRuntimes: ["alpha", "beta"],
       inspectorWidth: 444,
+      railWidth: 460,
       lanesHeight: 280,
       lanesScrollTop: 96,
       stacksAsFlamegraph: true,

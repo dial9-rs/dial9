@@ -208,6 +208,7 @@ describe("viewer deep-link reconstruction", () => {
       collapsedRuntimes: { runtime_a: true },
       collapsedRuntimeMetrics: { runtime_b: true },
       sidebarWidth: 444,
+      railWidth: 460,
       lanesViewportHeight: 280,
       lanesScrollTop: 96,
       selectedSpanNames: new Set(["http, request", "poll"]),

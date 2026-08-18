@@ -189,6 +189,7 @@ const initialState: StoreState = {
     collapsedRuntimes: { "blocking pool": true },
     collapsedRuntimeMetrics: { main: true },
     sidebarWidth: 400,
+    railWidth: 320,
     lanesViewportHeight: 220,
     lanesScrollTop: 40,
     selectedSpanNames: new Set(),
