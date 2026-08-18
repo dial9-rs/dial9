@@ -83,15 +83,24 @@ export function clampRailWidth(width: number, viewportWidth: number): number {
   return Math.round(Math.max(MIN_RAIL_WIDTH, Math.min(maxW, width)));
 }
 
-/** The narrowest a Tasks-table column can be dragged: enough for a short
- *  number and the sort caret to stay legible. No upper bound - the table
- *  scrolls horizontally inside the rail. */
-const MIN_TASK_COL_WIDTH = 40;
+/** Absolute column floor, used when the header measurement is degenerate
+ *  (missing button, zero-width text). */
+const MIN_TASK_COL_WIDTH = 24;
 
-/** Clamp a dragged Tasks-table column width, rounded to whole px. Exported
- *  for the bounds test. */
-export function clampTaskColWidth(width: number): number {
-  return Math.round(Math.max(MIN_TASK_COL_WIDTH, width));
+/**
+ * Clamp a dragged Tasks-table column width, rounded to whole px.
+ *
+ * The floor is the column HEADER's measured content width (passed by the
+ * drag handler), so shrinking stops where the label would start to clip;
+ * never below MIN_TASK_COL_WIDTH. No upper bound - the table scrolls
+ * horizontally inside the rail. Exported for the bounds test.
+ */
+export function clampTaskColWidth(width: number, headerMinWidth: number): number {
+  const floor = Math.max(
+    MIN_TASK_COL_WIDTH,
+    Number.isFinite(headerMinWidth) ? headerMinWidth : 0,
+  );
+  return Math.round(Math.max(floor, width));
 }
 
 /** The per-column widths map the Tasks table renders from (uiPrefs slice). */
@@ -312,6 +321,23 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
   let colDragKey: TaskSortKey | null = null;
   let colDragStartX = 0;
   let colDragStartWidth = 0;
+  let colDragMinWidth = MIN_TASK_COL_WIDTH;
+
+  /** The header label's rendered width (text + button padding): the shrink
+   *  floor, so a drag can never clip the label. Measured with a Range - the
+   *  button itself is width:100%, so its own box tells nothing. */
+  function headerContentWidth(th: HTMLElement): number {
+    const button = th.querySelector<HTMLElement>(".d9-rail-sort");
+    if (button === null) return 0;
+    const range = th.ownerDocument.createRange();
+    range.selectNodeContents(button);
+    const text = range.getBoundingClientRect().width;
+    const style = th.ownerDocument.defaultView?.getComputedStyle(button);
+    const pad = style
+      ? parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+      : 0;
+    return Math.ceil(text + pad);
+  }
 
   function onColResizeDown(e: MouseEvent, key: TaskSortKey): void {
     const th = (e.currentTarget as HTMLElement).closest("th");
@@ -319,8 +345,9 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     if (th == null || table == null) return;
     e.preventDefault();
     e.stopPropagation();
-    // First drag: seed EVERY column from its rendered width, so switching to
-    // fixed layout changes only the dragged column, not the whole table.
+    // First drag: seed EVERY column from its exact rendered width, so
+    // switching to fixed layout changes only the dragged column - the table
+    // does not shift at all until the pointer moves.
     let widths = store.getState().uiPrefs.taskColWidths;
     if (Object.keys(widths).length === 0) {
       const seeded: Record<string, number> = {};
@@ -328,7 +355,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       TASK_COLUMNS.forEach((col, i) => {
         const header = ths[i];
         if (header !== undefined) {
-          seeded[col.key] = clampTaskColWidth(header.getBoundingClientRect().width);
+          seeded[col.key] = Math.round(header.getBoundingClientRect().width);
         }
       });
       store.update("uiPrefs", { taskColWidths: seeded });
@@ -336,8 +363,8 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     }
     colDragKey = key;
     colDragStartX = e.clientX;
-    colDragStartWidth =
-      widths[key] ?? clampTaskColWidth(th.getBoundingClientRect().width);
+    colDragStartWidth = widths[key] ?? Math.round(th.getBoundingClientRect().width);
+    colDragMinWidth = headerContentWidth(th);
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
     window.addEventListener("mousemove", onColResizeMove);
@@ -345,7 +372,10 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
   }
   function onColResizeMove(e: MouseEvent): void {
     if (colDragKey === null) return;
-    const width = clampTaskColWidth(colDragStartWidth + (e.clientX - colDragStartX));
+    const width = clampTaskColWidth(
+      colDragStartWidth + (e.clientX - colDragStartX),
+      colDragMinWidth,
+    );
     const cur = store.getState().uiPrefs.taskColWidths;
     if (cur[colDragKey] !== width) {
       store.update("uiPrefs", {

@@ -407,6 +407,10 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+/* A user-widened column would leave its label stranded at the far left, so
+   resized headers center in their column. Default (content-fit) headers stay
+   left-aligned. */
+.d9-cols-fixed .d9-rail-sort { text-align: center; }
 .d9-cols-fixed .d9-task-loc { max-width: none; width: auto; }
 /* The column divider: a drag strip on each header's right edge. The sticky
    th is the containing block (position: sticky positions descendants). */

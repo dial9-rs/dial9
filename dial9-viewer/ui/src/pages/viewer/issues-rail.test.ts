@@ -113,9 +113,15 @@ describe("rail width clamp (resize drag bounds)", () => {
 });
 
 describe("task column width clamp (per-column resize bounds)", () => {
-  it("floors at the minimum readable column width, rounded", () => {
-    expect(clampTaskColWidth(4)).toBe(40);
-    expect(clampTaskColWidth(63.7)).toBe(64);
-    expect(clampTaskColWidth(260)).toBe(260);
+  it("floors at the column header's measured width so the label never clips", () => {
+    expect(clampTaskColWidth(10, 64)).toBe(64);
+    expect(clampTaskColWidth(100, 64)).toBe(100);
+    expect(clampTaskColWidth(63.4, 20)).toBe(63);
+  });
+
+  it("keeps the absolute floor when the header measure is degenerate", () => {
+    expect(clampTaskColWidth(4, 0)).toBe(24);
+    expect(clampTaskColWidth(4, Number.NaN)).toBe(24);
+    expect(clampTaskColWidth(4, -10)).toBe(24);
   });
 });
