@@ -129,6 +129,10 @@ export interface ViewState {
   collapsedRuntimeMetrics?: readonly string[];
   /** Shareable layout geometry and vertical lane position. */
   inspectorWidth?: number;
+  railWidth?: number;
+  /** Rail-table column widths (px by column key), when user-resized. */
+  taskColWidths?: Record<string, number>;
+  issueColWidths?: Record<string, number>;
   lanesHeight?: number;
   lanesScrollTop?: number;
   /** Stack sample presentation shared by poll and blocking analyses. */
