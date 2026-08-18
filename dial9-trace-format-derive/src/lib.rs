@@ -15,9 +15,67 @@ const SUPPORTED_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes"];
 /// in sync with the viewer's `FieldChartKind`.
 const SUPPORTED_KINDS: &[&str] = &["gauge", "counter", "updown-counter"];
 
+/// Annotation key for `#[traceevent(role = "...")]`. Mirrors
+/// `dial9_core::schema_extensions::ROLE_KEY`, which this crate cannot depend on.
+const ROLE_ANNOTATION_KEY: &str = "dial9.role";
+
+/// Structural roles accepted by `#[traceevent(role = "...")]`. Mirrors the
+/// vocabulary in `dial9_core::schema_extensions::roles`, which this crate cannot
+/// depend on. An unrecognized role would silently decode as no role (turning a
+/// span schema into `NotSpan`), so a typo is rejected at compile time.
+const SUPPORTED_ROLES: &[&str] = &[
+    "span.start",
+    "span.duration",
+    "span.name",
+    "thread_id",
+    "tokio.task_id",
+    "tokio.worker_id",
+];
+
+/// The `#[traceevent(...)]` keys a field may carry.
+#[derive(Default)]
+struct FieldAttrs {
+    /// `timestamp`: this field is the event timestamp (header, not a column).
+    timestamp: bool,
+    /// `unit = "..."`: rendering unit for this field.
+    unit: Option<syn::LitStr>,
+    /// `role = "..."`: structural role for this field (`dial9.role`).
+    role: Option<syn::LitStr>,
+    /// `kind = "..."`: metric interpretation for this field.
+    kind: Option<syn::LitStr>,
+}
+
+/// Parse one field's `#[traceevent(...)]` keys. Malformed or unknown keys are
+/// compile errors rather than being silently ignored.
+fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
+    let mut parsed = FieldAttrs::default();
+    for attr in &field.attrs {
+        if !attr.path().is_ident("traceevent") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("timestamp") {
+                parsed.timestamp = true;
+            } else if meta.path.is_ident("unit") {
+                parsed.unit = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else if meta.path.is_ident("role") {
+                parsed.role = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else if meta.path.is_ident("kind") {
+                parsed.kind = Some(meta.value()?.parse::<syn::LitStr>()?);
+            } else {
+                return Err(meta.error(
+                    "unrecognized `traceevent` field attribute; expected `timestamp`, \
+                     `unit = \"...\"`, `role = \"...\"` or `kind = \"...\"`",
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(parsed)
+}
+
 fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     let name = &input.ident;
-    let name_str = name.to_string();
 
     // Support borrowed event structs like `Event<'a> { data: &'a str }`. We
     // allow at most one lifetime and no type/const parameters; generic event
@@ -41,33 +99,58 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         _ => panic!("TraceEvent can only be derived for structs"),
     };
 
-    // Parse struct-level #[traceevent(wire_slot)]: opt this type into the
-    // encoder's inline fast path (a global slot doubling as wire id). Off by
-    // default.
+    // Parse struct-level attributes:
+    // - `wire_slot`: opt this type into the encoder's inline fast path (a global
+    //   slot doubling as wire id). Off by default.
+    // - `name = <expr>`: override the wire event name (defaults to the struct
+    //   name). Accepts any `&'static str` expression, not just a string literal,
+    //   so callers can build a per-call-site-unique name, e.g.
+    //   `concat!("SpanEnter:", file!(), ":", line!())`. Used to give generated
+    //   structs a name the viewer recognizes (e.g. `"SpanEnter:..."`).
     let mut wire_slot = false;
+    let mut name_override: Option<syn::Expr> = None;
     for attr in &input.attrs {
         if attr.path().is_ident("traceevent") {
-            let _ = attr.parse_nested_meta(|meta| {
+            // Propagated, not swallowed: a malformed attribute (e.g. `name`
+            // without a value) must be a compile error, not silently ignored.
+            attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("wire_slot") {
                     wire_slot = true;
+                } else if meta.path.is_ident("name") {
+                    name_override = Some(meta.value()?.parse::<syn::Expr>()?);
+                } else {
+                    return Err(meta.error(
+                        "unrecognized `traceevent` attribute; expected `wire_slot` or `name = ...`",
+                    ));
                 }
                 Ok(())
-            });
+            })?;
         }
     }
+    // The wire event name expression returned by `event_name()`: either the
+    // `name = ...` override (evaluated at the override's call site, so builtins
+    // like `file!()`/`line!()` resolve there) or the struct name as a literal.
+    let event_name_expr = match &name_override {
+        Some(expr) => quote! { #expr },
+        None => {
+            let name_str = name.to_string();
+            quote! { #name_str }
+        }
+    };
+
+    // Every key of a field's `#[traceevent(...)]` is parsed in one pass: the
+    // callback must consume each key's value, so a pass that recognized only
+    // some keys would choke on the ones it skipped.
+    let field_attrs = fields
+        .iter()
+        .map(parse_field_attrs)
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
-    for field in fields.iter() {
-        for attr in &field.attrs {
-            if attr.path().is_ident("traceevent") {
-                let _ = attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("timestamp") {
-                        timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
-                    }
-                    Ok(())
-                });
-            }
+    for (field, attrs) in fields.iter().zip(&field_attrs) {
+        if attrs.timestamp {
+            timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
         }
     }
 
@@ -75,25 +158,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     let mut encode_tokens = Vec::new();
     let mut annotation_tokens = Vec::new();
 
-    for field in fields.iter() {
+    for (field, attrs) in fields.iter().zip(&field_attrs) {
         let field_name = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        // Parse field metadata into schema annotations for the viewer.
-        let mut unit: Option<syn::LitStr> = None;
-        let mut kind: Option<syn::LitStr> = None;
-        for attr in &field.attrs {
-            if attr.path().is_ident("traceevent") {
-                attr.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("unit") {
-                        unit = Some(meta.value()?.parse::<syn::LitStr>()?);
-                    } else if meta.path.is_ident("kind") {
-                        kind = Some(meta.value()?.parse::<syn::LitStr>()?);
-                    }
-                    Ok(())
-                })?;
-            }
-        }
+        // `unit = "..."` is emitted as a "unit" schema annotation so viewers can
+        // render the field in that unit.
+        let unit = attrs.unit.clone();
 
         // Skip the timestamp field in schema/encode — it's in the event header
         if timestamp_field_name.as_ref() == Some(field_name) {
@@ -104,18 +175,22 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                      event header (always nanoseconds), not as a schema field",
                 ));
             }
-            if let Some(kind) = kind {
+            if let Some(role) = &attrs.role {
                 return Err(syn::Error::new_spanned(
-                    &kind,
+                    role,
+                    "the timestamp field cannot carry a role annotation: it is encoded in the \
+                     event header, not as a schema field",
+                ));
+            }
+            if let Some(kind) = &attrs.kind {
+                return Err(syn::Error::new_spanned(
+                    kind,
                     "the timestamp field cannot carry a kind annotation: it is encoded in the \
                      event header, not as a schema field",
                 ));
             }
             continue;
         }
-        // field_index matches the position in field_defs(), which excludes the
-        // timestamp field.
-        let idx = field_def_tokens.len() as u16;
         if let Some(unit) = unit {
             if !SUPPORTED_UNITS.contains(&unit.value().as_str()) {
                 return Err(syn::Error::new_spanned(
@@ -127,14 +202,39 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                     ),
                 ));
             }
+            // field_index matches the position in field_defs(), which
+            // excludes the timestamp field.
+            let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
                 ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "unit", #unit)
             });
         }
-        if let Some(kind) = kind {
+        if let Some(role) = &attrs.role {
+            if !SUPPORTED_ROLES.contains(&role.value().as_str()) {
+                return Err(syn::Error::new_spanned(
+                    role,
+                    format!(
+                        "unsupported role \"{}\"; supported roles: {}",
+                        role.value(),
+                        SUPPORTED_ROLES.join(", ")
+                    ),
+                ));
+            }
+            let idx = field_def_tokens.len() as u16;
+            annotation_tokens.push(quote! {
+                ::dial9_trace_format::schema::FieldAnnotation::new(
+                    #idx,
+                    #ROLE_ANNOTATION_KEY,
+                    #role,
+                )
+            });
+        }
+        // `kind = "..."` is emitted as a "kind" schema annotation telling the
+        // viewer how to chart the field (gauge / counter / updown-counter).
+        if let Some(kind) = &attrs.kind {
             if !SUPPORTED_KINDS.contains(&kind.value().as_str()) {
                 return Err(syn::Error::new_spanned(
-                    &kind,
+                    kind,
                     format!(
                         "unsupported kind \"{}\"; supported kinds: {}",
                         kind.value(),
@@ -142,6 +242,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                     ),
                 ));
             }
+            let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
                 ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "kind", #kind)
             });
@@ -213,7 +314,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 
     Ok(quote! {
         impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
-            fn event_name() -> &'static str { #name_str }
+            fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
@@ -237,23 +338,40 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   header, not as a regular field.
 /// - `#[traceevent(wire_slot)]` (struct): opts the type into the encoder's
 ///   inline fast path by claiming a static wire-ID slot.
+/// - `#[traceevent(name = <expr>)]` (struct): overrides the wire event name
+///   (defaults to the struct name). Accepts any `&'static str` expression, not
+///   just a string literal, so callers can build a per-call-site-unique name —
+///   e.g. `concat!("SpanEnter:", file!(), ":", line!())`. Useful for generated
+///   structs that need a name the viewer recognizes (e.g. `"SpanEnter:..."`),
+///   which cannot be a valid Rust identifier.
 /// - `#[traceevent(unit = "...")]` (field): attaches a `unit` schema
 ///   annotation so viewers render the field in that unit. Supported values:
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile
 ///   error, as is placing `unit` on the timestamp field (the timestamp is
 ///   encoded in the event header and is always nanoseconds).
-/// - `#[traceevent(kind = "...")]` (field): attaches a `kind` schema
-///   annotation so viewers can interpret the field without prompting.
-///   Supported values are `"gauge"`, `"counter"`, and `"updown-counter"`.
-///   Any other value is a compile error, as is placing `kind` on the timestamp
-///   field.
+///
+/// - `#[traceevent(role = "...")]` (field): attaches a `dial9.role` schema
+///   annotation, telling consumers what the field *is* structurally (e.g.
+///   `"span.name"`). The vocabulary lives in
+///   `dial9_core::schema_extensions::roles`; an unrecognized role is a compile
+///   error (it would otherwise decode as no role).
+/// - `#[traceevent(kind = "...")]` (field): attaches a `kind` schema annotation
+///   telling the viewer how to chart the field. Supported values: `"gauge"`,
+///   `"counter"`, `"updown-counter"`. Any other value is a compile error, as is
+///   placing `kind` on the timestamp field.
+///
+/// A malformed or unrecognized `traceevent` key is a compile error. Only structs
+/// with named fields and at most one lifetime parameter are supported; type and
+/// const parameters are rejected.
+///
+/// # Example
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
 /// struct RequestCompleted {
 ///     #[traceevent(timestamp)]
 ///     timestamp_ns: u64,
-///     #[traceevent(unit = "us", kind = "gauge")]
+///     #[traceevent(unit = "us")]
 ///     latency_us: u64,
 ///     status_code: u32,
 /// }
@@ -374,6 +492,35 @@ mod tests {
     }
 
     #[test]
+    fn role_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct SpanEnter {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(role = "span.name")]
+                span_name: InternedString,
+                #[traceevent(unit = "ns")]
+                active_ns: u64,
+            }
+        }));
+    }
+
+    /// `name = <expr>` overrides `event_name()` with the given expression
+    /// (evaluated at the caller's site), so a generated struct can build a
+    /// per-call-site-unique name via `file!()`/`line!()`.
+    #[test]
+    fn name_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(name = concat!("SpanEnter:", file!(), ":", line!()))]
+            struct Renamed {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                value: u64,
+            }
+        }));
+    }
+
+    #[test]
     fn kind_attribute() {
         assert_snapshot!(expand_to_string(quote! {
             struct Metrics {
@@ -387,6 +534,56 @@ mod tests {
                 active_requests: i64,
             }
         }));
+    }
+
+    #[test]
+    fn invalid_kind_rejected() {
+        let err = expand_err(quote! {
+            struct BadKind {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(kind = "histogram")]
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unsupported kind \"histogram\"; supported kinds: gauge, counter, updown-counter"
+        );
+    }
+
+    #[test]
+    fn invalid_role_rejected() {
+        let err = expand_err(quote! {
+            struct BadRole {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(role = "span.naem")]
+                span_name: InternedString,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unsupported role \"span.naem\"; supported roles: span.start, span.duration, \
+             span.name, thread_id, tokio.task_id, tokio.worker_id"
+        );
+    }
+
+    #[test]
+    fn kind_on_timestamp_rejected() {
+        let err = expand_err(quote! {
+            struct TimestampKind {
+                #[traceevent(timestamp)]
+                #[traceevent(kind = "counter")]
+                timestamp_ns: u64,
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "the timestamp field cannot carry a kind annotation: it is encoded in the \
+             event header, not as a schema field"
+        );
     }
 
     #[test]
@@ -423,39 +620,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_kind_rejected() {
-        let err = expand_err(quote! {
-            struct BadKind {
-                #[traceevent(timestamp)]
-                timestamp_ns: u64,
-                #[traceevent(kind = "histogram")]
-                value: u64,
-            }
-        });
-        assert_eq!(
-            err.to_string(),
-            "unsupported kind \"histogram\"; supported kinds: gauge, counter, updown-counter"
-        );
-    }
-
-    #[test]
-    fn kind_on_timestamp_rejected() {
-        let err = expand_err(quote! {
-            struct TimestampKind {
-                #[traceevent(timestamp)]
-                #[traceevent(kind = "counter")]
-                timestamp_ns: u64,
-                value: u64,
-            }
-        });
-        assert_eq!(
-            err.to_string(),
-            "the timestamp field cannot carry a kind annotation: it is encoded in the event \
-             header, not as a schema field"
-        );
-    }
-
-    #[test]
     fn mu_char_unit_rejected() {
         let err = expand_err(quote! {
             struct MuUnit {
@@ -466,6 +630,21 @@ mod tests {
             }
         });
         assert!(err.to_string().contains("unsupported unit \"µs\""));
+    }
+
+    #[test]
+    fn malformed_name_rejected() {
+        let err = expand_err(quote! {
+            #[traceevent(name)]
+            struct MalformedName {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
+        });
+        assert!(
+            err.to_string().contains("expected `=`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -543,6 +722,38 @@ mod tests {
         assert!(
             err.to_string().contains("no type or const parameters"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_struct_attribute_rejected() {
+        let err = expand_err(quote! {
+            #[traceevent(wire_slots)]
+            struct Typo {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unrecognized `traceevent` attribute; expected `wire_slot` or `name = ...`"
+        );
+    }
+
+    #[test]
+    fn unknown_field_attribute_rejected() {
+        let err = expand_err(quote! {
+            struct Typo {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(units = "ns")]
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "unrecognized `traceevent` field attribute; expected `timestamp`, `unit = \"...\"`, \
+             `role = \"...\"` or `kind = \"...\"`"
         );
     }
 
