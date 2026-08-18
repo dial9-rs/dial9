@@ -122,7 +122,7 @@ fn claim_thread_worker_id(ctx: &RuntimeContext) -> Option<u64> {
         if let Some((_, id)) = claimed.iter().find(|(owner, _)| *owner == ctx.id) {
             return Some(*id);
         }
-        let id = ctx.worker_id_counter.fetch_add(1, Ordering::Relaxed);
+        let id = ctx.reserve_worker_ids(1);
         claimed.push((ctx.id, id));
         Some(id)
     })
@@ -501,6 +501,11 @@ impl RuntimeContext {
         Some(WorkerId::from(global_id as usize))
     }
 
+    /// Reserve a block of `count` global worker IDs, returning the first.
+    fn reserve_worker_ids(&self, count: u64) -> u64 {
+        self.worker_id_counter.fetch_add(count, Ordering::Relaxed)
+    }
+
     /// This thread's global worker ID within this runtime.
     ///
     /// Tokio's `worker_index()` gives the runtime-local slot (0 for a
@@ -513,8 +518,7 @@ impl RuntimeContext {
         // once however many workers resolve at the same moment.
         let base = self.worker_id_base.get_or_init(|| {
             let num_workers = worker_metrics(|m| m.num_workers()) as u64;
-            self.worker_id_counter
-                .fetch_add(num_workers, Ordering::Relaxed)
+            self.reserve_worker_ids(num_workers)
         });
         Some(base + local_index as u64)
     }
