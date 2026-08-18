@@ -58,10 +58,7 @@ impl ThreadLocalEncoder<'_> {
     }
 
     /// Encode a [`TraceEvent`](dial9_trace_format::TraceEvent) struct into the buffer.
-    ///
-    /// The `'static` bound is required because the encoder uses [`TypeId`](std::any::TypeId)
-    /// to cache schema registrations per concrete type.
-    pub fn encode(&mut self, event: &(impl dial9_trace_format::TraceEvent + 'static)) {
+    pub fn encode(&mut self, event: &impl dial9_trace_format::TraceEvent) {
         self.encoder.write_infallible(event);
         *self.events_written += 1;
     }
@@ -164,7 +161,7 @@ pub trait Encodable {
     fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>);
 }
 
-impl<T: dial9_trace_format::TraceEvent + 'static> Encodable for T {
+impl<T: dial9_trace_format::TraceEvent> Encodable for T {
     fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>) {
         encoder.encode(self);
     }
@@ -384,6 +381,13 @@ mod tests {
         }
     }
 
+    #[derive(dial9_trace_format::TraceEvent)]
+    struct BorrowedEvent<'a> {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        value: &'a str,
+    }
+
     #[test]
     fn test_buffer_creation() {
         let buffer = ThreadLocalBuffer::new();
@@ -395,6 +399,19 @@ mod tests {
     fn test_record_event() {
         let mut buffer = ThreadLocalBuffer::new();
         buffer.record_encodable(&sample_event());
+        assert_eq!(buffer.event_count, 1);
+        assert!(buffer.encoder.bytes_written() > 0);
+    }
+
+    #[test]
+    fn borrowed_trace_event_is_encodable() {
+        let value = String::from("borrowed");
+        let event = BorrowedEvent {
+            timestamp_ns: 1000,
+            value: &value,
+        };
+        let mut buffer = ThreadLocalBuffer::new();
+        buffer.record_encodable(&event);
         assert_eq!(buffer.event_count, 1);
         assert!(buffer.encoder.bytes_written() > 0);
     }

@@ -1,0 +1,31 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+expression: "expand_to_string(quote!\n{\n    struct Mixed<'a>\n    {\n        #[traceevent(timestamp)] timestamp_ns: u64, owned: String, borrowed:\n        &'a str, count: u32,\n    }\n})"
+---
+impl<'a> ::dial9_trace_format::TraceEvent for Mixed<'a> {
+    fn event_name() -> &'static str {
+        "Mixed"
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef::new("owned", < String as
+            ::dial9_trace_format::TraceField > ::field_type(),),
+            ::dial9_trace_format::schema::FieldDef::new("borrowed", < & 'a str as
+            ::dial9_trace_format::TraceField > ::field_type(),),
+            ::dial9_trace_format::schema::FieldDef::new("count", < u32 as
+            ::dial9_trace_format::TraceField > ::field_type(),)
+        ]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <String as ::dial9_trace_format::TraceField>::encode(&self.owned, enc)?;
+        <&'a str as ::dial9_trace_format::TraceField>::encode(&self.borrowed, enc)?;
+        <u32 as ::dial9_trace_format::TraceField>::encode(&self.count, enc)?;
+        Ok(())
+    }
+}
