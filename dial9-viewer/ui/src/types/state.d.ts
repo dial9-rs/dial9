@@ -293,6 +293,14 @@ export interface UiPrefsSlice {
   /** Issues/Tasks rail width in CSS px (drag-resizable via its right edge). */
   railWidth: number;
   /**
+   * Tasks-table column widths in CSS px, keyed by column sort key. Empty =
+   * automatic (content-fit) layout. The first divider drag seeds every column
+   * from its measured width and the table switches to fixed layout, so the
+   * dragged column changes while the rest hold; the table scrolls
+   * horizontally inside the rail when the sum exceeds the rail width.
+   */
+  taskColWidths: Readonly<Partial<Record<TaskSortKey, number>>>;
+  /**
    * Height in CSS px of the worker-lanes box (the scroll container holding the
    * fixed-height worker rows). Drag-resizable via the lanes bottom gutter and
    * persisted (dial9.viewer.trackPrefs). Rows are a fixed height and the box

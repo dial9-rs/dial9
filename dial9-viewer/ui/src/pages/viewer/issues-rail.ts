@@ -83,6 +83,20 @@ export function clampRailWidth(width: number, viewportWidth: number): number {
   return Math.round(Math.max(MIN_RAIL_WIDTH, Math.min(maxW, width)));
 }
 
+/** The narrowest a Tasks-table column can be dragged: enough for a short
+ *  number and the sort caret to stay legible. No upper bound - the table
+ *  scrolls horizontally inside the rail. */
+const MIN_TASK_COL_WIDTH = 40;
+
+/** Clamp a dragged Tasks-table column width, rounded to whole px. Exported
+ *  for the bounds test. */
+export function clampTaskColWidth(width: number): number {
+  return Math.round(Math.max(MIN_TASK_COL_WIDTH, width));
+}
+
+/** The per-column widths map the Tasks table renders from (uiPrefs slice). */
+type TaskColWidths = StoreState["uiPrefs"]["taskColWidths"];
+
 export interface IssuesRailController {
   /** The rail template for one render pass (reads live store state). */
   template(state: StoreState): TemplateResult;
@@ -290,6 +304,69 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     window.removeEventListener("mouseup", onResizeUp);
   }
 
+  // ── Per-column resize drag (the Tasks-table header dividers) ────────────
+  // Store-driven only (no imperative style write): nothing outside the rail
+  // depends on column widths, and the store's RAF tick re-renders the table
+  // in the same frame the imperative write would land in.
+
+  let colDragKey: TaskSortKey | null = null;
+  let colDragStartX = 0;
+  let colDragStartWidth = 0;
+
+  function onColResizeDown(e: MouseEvent, key: TaskSortKey): void {
+    const th = (e.currentTarget as HTMLElement).closest("th");
+    const table = th?.closest("table");
+    if (th == null || table == null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // First drag: seed EVERY column from its rendered width, so switching to
+    // fixed layout changes only the dragged column, not the whole table.
+    let widths = store.getState().uiPrefs.taskColWidths;
+    if (Object.keys(widths).length === 0) {
+      const seeded: Record<string, number> = {};
+      const ths = table.querySelectorAll("thead th");
+      TASK_COLUMNS.forEach((col, i) => {
+        const header = ths[i];
+        if (header !== undefined) {
+          seeded[col.key] = clampTaskColWidth(header.getBoundingClientRect().width);
+        }
+      });
+      store.update("uiPrefs", { taskColWidths: seeded });
+      widths = store.getState().uiPrefs.taskColWidths;
+    }
+    colDragKey = key;
+    colDragStartX = e.clientX;
+    colDragStartWidth =
+      widths[key] ?? clampTaskColWidth(th.getBoundingClientRect().width);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onColResizeMove);
+    window.addEventListener("mouseup", onColResizeUp);
+  }
+  function onColResizeMove(e: MouseEvent): void {
+    if (colDragKey === null) return;
+    const width = clampTaskColWidth(colDragStartWidth + (e.clientX - colDragStartX));
+    const cur = store.getState().uiPrefs.taskColWidths;
+    if (cur[colDragKey] !== width) {
+      store.update("uiPrefs", {
+        taskColWidths: { ...cur, [colDragKey]: width },
+      });
+    }
+  }
+  function onColResizeUp(): void {
+    if (colDragKey === null) return;
+    colDragKey = null;
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    window.removeEventListener("mousemove", onColResizeMove);
+    window.removeEventListener("mouseup", onColResizeUp);
+  }
+
+  /** Double-click on any divider: back to automatic content-fit layout. */
+  function onColResetAll(): void {
+    store.update("uiPrefs", { taskColWidths: {} });
+  }
+
   const keyBindings: readonly KeyBinding[] = [
     { key: "n", onKey: () => step(1) },
     { key: "p", onKey: () => step(-1) },
@@ -307,15 +384,24 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
         tab === "issues" ? viewModel(state) : derivePoiViewModel(null, state.poi, 0);
       const taskVm =
         tab === "tasks" ? taskViewModel(state) : deriveTaskViewModel(null, state.poi);
-      return railTemplate(tab, poiVm, taskVm, state.uiPrefs.railWidth, {
-        setTab,
-        setFilter,
-        sortByColumn,
-        jumpTo,
-        sortTaskByColumn,
-        jumpToTask,
-        onResizeDown,
-      });
+      return railTemplate(
+        tab,
+        poiVm,
+        taskVm,
+        state.uiPrefs.railWidth,
+        state.uiPrefs.taskColWidths,
+        {
+          setTab,
+          setFilter,
+          sortByColumn,
+          jumpTo,
+          sortTaskByColumn,
+          jumpToTask,
+          onResizeDown,
+          onColResizeDown,
+          onColResetAll,
+        },
+      );
     },
     keyBindings,
     setRevealWorker(reveal: (workerId: number) => void): void {
@@ -328,6 +414,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       // A dispose mid-drag must not leave window listeners or the forced
       // cursor behind.
       onResizeUp();
+      onColResizeUp();
     },
   };
 }
@@ -368,6 +455,8 @@ interface RailHandlers {
   sortTaskByColumn(col: TaskColumn): void;
   jumpToTask(index: number): void;
   onResizeDown(e: MouseEvent): void;
+  onColResizeDown(e: MouseEvent, key: TaskSortKey): void;
+  onColResetAll(): void;
 }
 
 /** The tab strip switching Issues vs Tasks. */
@@ -392,6 +481,7 @@ function railTemplate(
   vm: PoiViewModel,
   taskVm: TaskViewModel,
   width: number,
+  colWidths: TaskColWidths,
   h: RailHandlers,
 ): TemplateResult {
   return html`
@@ -413,7 +503,7 @@ function railTemplate(
                 through dial9's own helpers are tracked, and this trace has
                 none.
               </p>`
-          : taskTable(taskVm, h)
+          : taskTable(taskVm, colWidths, h)
         : vm.total === 0
           ? html`<p class="d9-rail-empty">No issues match this filter.</p>`
           : railTable(vm, h)}
@@ -581,15 +671,44 @@ function titleWhenClipped(e: Event): void {
   el.title = el.scrollWidth > el.clientWidth ? (el.textContent ?? "") : "";
 }
 
-function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
+function taskTable(
+  vm: TaskViewModel,
+  colWidths: TaskColWidths,
+  h: RailHandlers,
+): TemplateResult {
+  // Fixed layout only once every column has a width (the first divider drag
+  // seeds all six). A partial map (e.g. a hand-edited URL) keeps the table at
+  // 100% width so the unspecified columns absorb the remainder.
+  const widths = TASK_COLUMNS.map((col) => colWidths[col.key]);
+  const fixed = widths.some((w) => w !== undefined);
+  const complete = widths.every((w) => w !== undefined);
+  const tableStyle =
+    fixed && complete
+      ? `width:${widths.reduce((sum, w) => (sum ?? 0) + (w ?? 0), 0)}px`
+      : "";
   return html`
     <div class="d9-rail-list">
       <table
-        class="d9-rail-table d9-task-table"
+        class=${classMap({
+          "d9-rail-table": true,
+          "d9-task-table": true,
+          "d9-cols-fixed": fixed,
+        })}
+        style=${tableStyle}
         role="listbox"
         aria-label="Tasks"
         aria-activedescendant=${vm.index >= 0 ? `d9-task-${vm.index}` : ""}
       >
+        ${fixed
+          ? html`<colgroup>
+              ${TASK_COLUMNS.map((col) => {
+                const w = colWidths[col.key];
+                return w !== undefined
+                  ? html`<col style="width:${w}px" />`
+                  : html`<col />`;
+              })}
+            </colgroup>`
+          : nothing}
         <thead>
           <tr>
             ${TASK_COLUMNS.map((col) => {
@@ -623,6 +742,15 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
                       >`
                     : ""}
                 </button>
+                <span
+                  class="d9-col-resize"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize ${col.label} column"
+                  title="Drag to resize the ${col.label} column; double-click to reset all columns"
+                  @mousedown=${(e: MouseEvent) => h.onColResizeDown(e, col.key)}
+                  @dblclick=${h.onColResetAll}
+                ></span>
               </th>`;
             })}
           </tr>

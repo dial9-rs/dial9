@@ -60,6 +60,7 @@ const P_EVENT_NAMES = "event-names";
 const P_RAIL_TAB = "rail";
 const P_TASK_SORT = "task-sort";
 const P_TASK_INDEX = "task-index";
+const P_TASK_COLS = "task-cols";
 const P_RUNTIME_COLLAPSED = "runtime-collapsed";
 const P_RUNTIME_METRICS_COLLAPSED = "runtime-metrics-collapsed";
 const P_INSPECTOR_WIDTH = "inspector-width";
@@ -154,6 +155,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     collapsedRuntimeMetrics: url(P_RUNTIME_METRICS_COLLAPSED),
     sidebarWidth: url(P_INSPECTOR_WIDTH),
     railWidth: url(P_RAIL_WIDTH),
+    taskColWidths: url(P_TASK_COLS),
     lanesViewportHeight: url(P_LANES_HEIGHT),
     lanesScrollTop: url(P_LANES_SCROLL),
     selectedSpanNames: url(P_SPAN_NAMES),
@@ -299,6 +301,14 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (state.uiPrefs.railWidth !== DEFAULT_RAIL_WIDTH) {
     vs.railWidth = state.uiPrefs.railWidth;
   }
+  const colEntries = Object.entries(state.uiPrefs.taskColWidths).filter(
+    (entry): entry is [string, number] => typeof entry[1] === "number",
+  );
+  if (colEntries.length > 0) {
+    vs.taskColWidths = Object.fromEntries(
+      colEntries.sort(([a], [b]) => a.localeCompare(b)),
+    );
+  }
   if (state.uiPrefs.lanesViewportHeight !== DEFAULT_LANES_HEIGHT) {
     vs.lanesHeight = state.uiPrefs.lanesViewportHeight;
   }
@@ -394,6 +404,17 @@ export function mirrorViewerToQuery(
   set(params, P_RUNTIME_METRICS_COLLAPSED, encodeList(vs.collapsedRuntimeMetrics));
   set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
   set(params, P_RAIL_WIDTH, finiteString(vs.railWidth));
+  set(
+    params,
+    P_TASK_COLS,
+    encodeList(
+      vs.taskColWidths !== undefined
+        ? Object.entries(vs.taskColWidths)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, px]) => `${key},${px}`)
+        : undefined,
+    ),
+  );
   set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
   set(params, P_LANES_SCROLL, finiteString(vs.lanesScrollTop));
   set(params, P_STACK_VIEW, vs.stackView ?? null);
@@ -477,6 +498,7 @@ export interface ViewerUrlState {
   collapsedRuntimeMetrics?: string[];
   inspectorWidth?: number;
   railWidth?: number;
+  taskColWidths?: Record<string, number>;
   lanesHeight?: number;
   lanesScrollTop?: number;
   stacksAsFlamegraph?: boolean;
@@ -540,6 +562,9 @@ export function hydrateViewerStore(
   }
   if (urlView.railWidth !== undefined) {
     uiPrefs.railWidth = urlView.railWidth;
+  }
+  if (urlView.taskColWidths !== undefined) {
+    uiPrefs.taskColWidths = urlView.taskColWidths;
   }
   if (urlView.lanesHeight !== undefined) {
     uiPrefs.lanesViewportHeight = urlView.lanesHeight;
@@ -706,6 +731,21 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
   const railWidth = positiveInt(p.get(P_RAIL_WIDTH));
   if (railWidth !== null) out.railWidth = railWidth;
+  const taskCols = decodeList(p.get(P_TASK_COLS));
+  if (taskCols !== null) {
+    // Tolerant reader: keep only `<known sort key>,<positive px>` entries.
+    const widths: Record<string, number> = {};
+    for (const entry of taskCols) {
+      const comma = entry.lastIndexOf(",");
+      if (comma <= 0) continue;
+      const key = entry.slice(0, comma);
+      const px = positiveInt(entry.slice(comma + 1));
+      if (px !== null && (TASK_SORT_KEYS as readonly string[]).includes(key)) {
+        widths[key] = px;
+      }
+    }
+    if (Object.keys(widths).length > 0) out.taskColWidths = widths;
+  }
   const lanesHeight = positiveInt(p.get(P_LANES_HEIGHT));
   if (lanesHeight !== null) out.lanesHeight = lanesHeight;
   const lanesScrollTop = nonNegativeInt(p.get(P_LANES_SCROLL));

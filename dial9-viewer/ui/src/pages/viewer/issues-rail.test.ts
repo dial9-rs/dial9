@@ -11,7 +11,11 @@ import type { ParsedTrace } from "../../types/trace.js";
 import type { KeyEventLike, KeyBinding } from "../../lib/interact/keyboard.js";
 import { createViewerStore } from "./store.js";
 import type { ViewerStore } from "../../store/store.js";
-import { clampRailWidth, createIssuesRail } from "./issues-rail.js";
+import {
+  clampRailWidth,
+  clampTaskColWidth,
+  createIssuesRail,
+} from "./issues-rail.js";
 
 let trace: ParsedTrace;
 
@@ -105,5 +109,13 @@ describe("rail width clamp (resize drag bounds)", () => {
 
   it("caps at 60% of the viewport so the track column stays usable", () => {
     expect(clampRailWidth(2000, 1200)).toBe(720);
+  });
+});
+
+describe("task column width clamp (per-column resize bounds)", () => {
+  it("floors at the minimum readable column width, rounded", () => {
+    expect(clampTaskColWidth(4)).toBe(40);
+    expect(clampTaskColWidth(63.7)).toBe(64);
+    expect(clampTaskColWidth(260)).toBe(260);
   });
 });

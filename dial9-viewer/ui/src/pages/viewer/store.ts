@@ -68,6 +68,7 @@ export function initialViewerState(): StoreState {
       collapsedRuntimeMetrics: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       railWidth: DEFAULT_RAIL_WIDTH,
+      taskColWidths: {},
       lanesViewportHeight: DEFAULT_LANES_HEIGHT,
       lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
