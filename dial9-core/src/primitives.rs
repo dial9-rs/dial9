@@ -42,6 +42,11 @@ macro_rules! define_thread_local {
 #[cfg(not(shuttle))]
 pub use crate::define_thread_local as thread_local;
 
+#[cfg(all(not(shuttle), feature = "pipeline"))]
+pub mod time {
+    pub use tokio::time::{Instant, sleep, sleep_until};
+}
+
 // ── shuttle path (deterministic testing) ────────────────────────────────────
 
 #[cfg(shuttle)]
@@ -126,6 +131,66 @@ macro_rules! define_thread_local {
 }
 #[cfg(shuttle)]
 pub use crate::define_thread_local as thread_local;
+
+#[cfg(all(shuttle, feature = "pipeline"))]
+pub mod time {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    pub use tokio::time::Instant;
+
+    /// Shuttle has no virtual clock. Like `primitives::thread::sleep`, this
+    /// is a single scheduling point, not a real delay.
+    pub fn sleep(_duration: std::time::Duration) -> Yield {
+        Yield::default()
+    }
+
+    pub fn sleep_until(_deadline: Instant) -> Yield {
+        Yield::default()
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Yield {
+        yielded: bool,
+    }
+
+    impl Future for Yield {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.yielded {
+                Poll::Ready(())
+            } else {
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// `tokio::select!`, `biased;` only under `--cfg shuttle`.
+///
+/// `select!`'s branch tie-break otherwise calls tokio's own internal RNG,
+/// which isn't shuttle-controlled.
+///
+/// Production keeps randomized `select!` unchanged.
+#[cfg(all(shuttle, feature = "pipeline"))]
+#[macro_export]
+macro_rules! shuttle_select {
+    ($($arms:tt)*) => {
+        tokio::select! { biased; $($arms)* }
+    };
+}
+#[cfg(all(not(shuttle), feature = "pipeline"))]
+#[macro_export]
+macro_rules! shuttle_select {
+    ($($arms:tt)*) => {
+        tokio::select! { $($arms)* }
+    };
+}
+#[cfg(feature = "pipeline")]
+pub use crate::shuttle_select;
 
 /// Pairs a shuttle scenario with `check_pct` and `check_uncontrolled_nondeterminism`
 /// Nests the scenario in its own module so `pct`/`determinism` can be fixed leaf names.
