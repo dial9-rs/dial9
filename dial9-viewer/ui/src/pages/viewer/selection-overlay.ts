@@ -38,13 +38,18 @@ export interface SelectionRegion {
  *   1. a live keyboard selection (Shift/Alt + arrows);
  *   2. else a live drag region/zoom that has crossed the 3px intent;
  *   3. else a retained region (selection.sidebarRange) - the persistent
- *      Shift selection that lives until the sidebar closes;
+ *      Shift selection that lives until the sidebar closes - UNLESS it covers
+ *      the whole trace extent: the box exists to distinguish the analyzed
+ *      sub-range, and a whole-trace analysis (the toolbar Flamegraph /
+ *      Blocking Calls / Heap buttons retain [minTs, maxTs]) has no sub-range
+ *      to distinguish - boxing everything just tints the page (issue #796);
  *   4. else nothing (box hidden).
  * A "pan" drag draws no box (it moves the viewport, not a selection).
  */
 export function activeSelectionRegion(
   transient: TransientSlice,
   selection: SelectionSlice,
+  extent: { minTs: number; maxTs: number },
 ): SelectionRegion | null {
   const kb = transient.keyboardSelection;
   if (kb !== null) {
@@ -64,6 +69,9 @@ export function activeSelectionRegion(
   }
   const retained = selection.sidebarRange;
   if (retained !== null) {
+    if (retained.startNs <= extent.minTs && retained.endNs >= extent.maxTs) {
+      return null;
+    }
     return { startNs: retained.startNs, endNs: retained.endNs, mode: "region" };
   }
   return null;
@@ -117,7 +125,11 @@ export function mountSelectionOverlay(
     assertInScheduledRender("selection-overlay render");
     const state = store.getState();
     const el = ensureEl();
-    const region = activeSelectionRegion(state.transient, state.selection);
+    const region = activeSelectionRegion(
+      state.transient,
+      state.selection,
+      state.viewport,
+    );
     if (region === null) {
       el.style.display = "none";
       return;
