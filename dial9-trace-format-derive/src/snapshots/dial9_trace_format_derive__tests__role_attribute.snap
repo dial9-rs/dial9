@@ -17,7 +17,6 @@ impl ::dial9_trace_format::TraceEvent for SpanEnter {
     fn schema_entry() -> ::dial9_trace_format::schema::SchemaEntry {
         ::dial9_trace_format::schema::SchemaEntry::with_annotations(
             Self::event_name(),
-            Self::has_timestamp(),
             Self::field_defs(),
             vec![
                 ::dial9_trace_format::schema::FieldAnnotation::new(0u16, "dial9.role",

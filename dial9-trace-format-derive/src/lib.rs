@@ -490,6 +490,21 @@ mod tests {
         }));
     }
 
+    /// `name = <expr>` overrides `event_name()` with the given expression
+    /// (evaluated at the caller's site), so a generated struct can build a
+    /// per-call-site-unique name via `file!()`/`line!()`.
+    #[test]
+    fn name_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(name = concat!("SpanEnter:", file!(), ":", line!()))]
+            struct Renamed {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                value: u64,
+            }
+        }));
+    }
+
     #[test]
     fn kind_attribute() {
         assert_snapshot!(expand_to_string(quote! {
