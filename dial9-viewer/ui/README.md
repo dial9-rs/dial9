@@ -240,6 +240,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `inspector-width` | positive CSS pixels | Inspector width. |
 | `rail-width` | positive CSS pixels | Issues/Tasks rail width. |
 | `task-cols` | `v1:` + TAB-joined `<id\|loc\|polls\|total\|longest\|lifetime>,<px>` entries | Tasks-table column widths. |
+| `issue-cols` | `v1:` + TAB-joined `<dot\|worker\|kind\|time\|duration>,<px>` entries | Issues-table column widths. |
 | `lanes-height` | positive CSS pixels | Worker-lanes viewport height. |
 | `lanes-scroll` | non-negative CSS pixels | Worker-lanes vertical position. |
 | `stack-view` | `list` \| `flame` | Poll/blocking stack presentation. |

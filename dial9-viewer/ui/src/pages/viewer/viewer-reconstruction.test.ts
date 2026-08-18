@@ -210,6 +210,7 @@ describe("viewer deep-link reconstruction", () => {
       sidebarWidth: 444,
       railWidth: 460,
       taskColWidths: { loc: 260, polls: 48 },
+      issueColWidths: { dot: 14, kind: 120 },
       lanesViewportHeight: 280,
       lanesScrollTop: 96,
       selectedSpanNames: new Set(["http, request", "poll"]),

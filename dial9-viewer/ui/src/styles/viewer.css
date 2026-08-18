@@ -395,12 +395,13 @@ body {
     white-space: nowrap;
     color: var(--d9-fg-muted);
 }
-/* User-resized Tasks columns: fixed layout honors the colgroup widths (set
-   from uiPrefs.taskColWidths; table width = their sum, bound inline). Every
-   cell truncates instead of forcing its column wider - the pointerenter
-   tooltip carries the full text - and the spawn cell drops its auto-layout
-   filler trick, since its col now has an explicit width. */
-.d9-task-table.d9-cols-fixed { table-layout: fixed; }
+/* User-resized rail columns (Tasks and Issues tables): fixed layout honors
+   the colgroup widths (uiPrefs.taskColWidths / issueColWidths; table width =
+   their sum, bound inline). Every cell truncates instead of forcing its
+   column wider - the Tasks pointerenter tooltip / Issues row title carry the
+   full text - and the spawn cell drops its auto-layout filler trick, since
+   its col now has an explicit width. */
+.d9-rail-table.d9-cols-fixed { table-layout: fixed; }
 .d9-cols-fixed td,
 .d9-cols-fixed thead th {
     overflow: hidden;

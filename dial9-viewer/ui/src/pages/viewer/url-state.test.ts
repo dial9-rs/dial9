@@ -44,6 +44,7 @@ function mkState(over: {
       sidebarWidth: 360,
       railWidth: 300,
       taskColWidths: {},
+      issueColWidths: {},
       lanesViewportHeight: 360,
       lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
@@ -277,6 +278,7 @@ describe("viewer URL state: complete durable view", () => {
           sidebarWidth: 444,
           railWidth: 460,
           taskColWidths: { polls: 48, loc: 260 },
+          issueColWidths: { kind: 120, dot: 14 },
           lanesViewportHeight: 280,
           lanesScrollTop: 96,
           stacksAsFlamegraph: true,
@@ -303,6 +305,7 @@ describe("viewer URL state: complete durable view", () => {
     expect(params.get("rail")).toBe("tasks");
     expect(params.get("rail-width")).toBe("460");
     expect(params.get("task-cols")).toBe("v1:loc,260\tpolls,48");
+    expect(params.get("issue-cols")).toBe("v1:dot,14\tkind,120");
     expect(params.get("task-sort")).toBe("lifetime,asc");
     expect(params.get("runtime-collapsed")).toBe("v1:alpha\tbeta");
     expect(params.get("poll-worker-zoom")).toBe("root\tpoll");
@@ -315,6 +318,7 @@ describe("viewer URL state: complete durable view", () => {
       inspectorWidth: 444,
       railWidth: 460,
       taskColWidths: { loc: 260, polls: 48 },
+      issueColWidths: { dot: 14, kind: 120 },
       lanesHeight: 280,
       lanesScrollTop: 96,
       stacksAsFlamegraph: true,

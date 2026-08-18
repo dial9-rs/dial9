@@ -12,8 +12,8 @@ import type { KeyEventLike, KeyBinding } from "../../lib/interact/keyboard.js";
 import { createViewerStore } from "./store.js";
 import type { ViewerStore } from "../../store/store.js";
 import {
+  clampColWidth,
   clampRailWidth,
-  clampTaskColWidth,
   createIssuesRail,
 } from "./issues-rail.js";
 
@@ -112,16 +112,16 @@ describe("rail width clamp (resize drag bounds)", () => {
   });
 });
 
-describe("task column width clamp (per-column resize bounds)", () => {
+describe("column width clamp (per-column resize bounds, both rail tables)", () => {
   it("floors at the column header's measured width so the label never clips", () => {
-    expect(clampTaskColWidth(10, 64)).toBe(64);
-    expect(clampTaskColWidth(100, 64)).toBe(100);
-    expect(clampTaskColWidth(63.4, 20)).toBe(63);
+    expect(clampColWidth(10, 64)).toBe(64);
+    expect(clampColWidth(100, 64)).toBe(100);
+    expect(clampColWidth(63.4, 20)).toBe(63);
   });
 
   it("keeps the absolute floor when the header measure is degenerate", () => {
-    expect(clampTaskColWidth(4, 0)).toBe(24);
-    expect(clampTaskColWidth(4, Number.NaN)).toBe(24);
-    expect(clampTaskColWidth(4, -10)).toBe(24);
+    expect(clampColWidth(4, 0)).toBe(24);
+    expect(clampColWidth(4, Number.NaN)).toBe(24);
+    expect(clampColWidth(4, -10)).toBe(24);
   });
 });

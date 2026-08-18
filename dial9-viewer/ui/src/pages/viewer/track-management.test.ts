@@ -457,6 +457,20 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(loadTrackPrefs()?.taskColWidths).toEqual({ loc: 260 });
   });
 
+  it("persists + restores the issues-table column widths across a fresh store", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    const s1 = manualScheduler();
+    const dispose = mountTrackPrefsPersistence(s1.store);
+    s1.store.update("uiPrefs", { issueColWidths: { dot: 14, kind: 120 } });
+    s1.flush(); // subscriber writes to localStorage
+    dispose();
+
+    const s2 = createViewerStore({ scheduler: () => {} });
+    expect(uiPrefs(s2).issueColWidths).toEqual({}); // fresh default before hydrate
+    hydrateTrackPrefs(s2);
+    expect(uiPrefs(s2).issueColWidths).toEqual({ dot: 14, kind: 120 });
+  });
+
   it("keeps the store default when no column widths were stored", () => {
     const ls = fakeLocalStorage();
     // A pref blob from before taskColWidths existed: order/collapse only.

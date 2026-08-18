@@ -236,6 +236,7 @@ export interface TrackPrefs {
   lanesHeight?: number;
   railWidth?: number;
   taskColWidths?: Readonly<Record<string, number>>;
+  issueColWidths?: Readonly<Record<string, number>>;
 }
 
 /** Coerce an unknown value into a `Record<string, boolean>`, keeping only the
@@ -315,6 +316,8 @@ export function loadTrackPrefs(): TrackPrefs | null {
     const railWidth = typeof rw === "number" && Number.isFinite(rw) && rw > 0 ? rw : undefined;
     const tcw = (obj as { taskColWidths?: unknown }).taskColWidths;
     const taskColWidths = tcw !== undefined ? parseWidthMap(tcw) : undefined;
+    const icw = (obj as { issueColWidths?: unknown }).issueColWidths;
+    const issueColWidths = icw !== undefined ? parseWidthMap(icw) : undefined;
     return {
       trackOrder,
       collapsed,
@@ -323,6 +326,7 @@ export function loadTrackPrefs(): TrackPrefs | null {
       ...(lanesHeight !== undefined ? { lanesHeight } : {}),
       ...(railWidth !== undefined ? { railWidth } : {}),
       ...(taskColWidths !== undefined ? { taskColWidths } : {}),
+      ...(issueColWidths !== undefined ? { issueColWidths } : {}),
     };
   } catch {
     return null;
@@ -352,6 +356,7 @@ export function saveTrackPrefs(prefs: TrackPrefs): void {
       ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
       ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
       ...(prefs.taskColWidths !== undefined ? { taskColWidths: prefs.taskColWidths } : {}),
+      ...(prefs.issueColWidths !== undefined ? { issueColWidths: prefs.issueColWidths } : {}),
     }),
   );
 }
@@ -379,6 +384,7 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
     ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
     ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
     ...(prefs.taskColWidths !== undefined ? { taskColWidths: prefs.taskColWidths } : {}),
+    ...(prefs.issueColWidths !== undefined ? { issueColWidths: prefs.issueColWidths } : {}),
   });
 }
 
@@ -399,6 +405,7 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       lanesViewportHeight,
       railWidth,
       taskColWidths,
+      issueColWidths,
     } = state.uiPrefs;
     saveTrackPrefs({
       trackOrder,
@@ -408,6 +415,7 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       lanesHeight: lanesViewportHeight,
       railWidth,
       taskColWidths,
+      issueColWidths,
     });
   });
 }
