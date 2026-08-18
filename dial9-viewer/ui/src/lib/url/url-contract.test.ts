@@ -11,7 +11,7 @@
 //   documented "reserved" are preserved-verbatim-but-not-honored (the
 //   tolerant-reader rule that makes "reserved" an honest status);
 // - the recipe URL shapes resolve at codec level (the live-page twin is
-//   parity/url-contract.mjs, which drives real pages on a dev-server).
+//   live-checks/url-contract.mjs, which drives real pages on a dev-server).
 //
 // The promise this enforces: old params stay valid forever, evolution is
 // additive-only. Removing or renaming ANY name below is a breaking change and
@@ -104,17 +104,17 @@ describe("URL contract: schema version", () => {
 describe("URL contract: README tables match the recorded fixtures", () => {
   it("exact-mode table = flamegraph fixture exact params + viewer-only prof", () => {
     const documented = tableNames(subsection("Query params - viewer.html"));
-    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.mode === "exact").map(
-      (p) => p.param,
-    );
+    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter(
+      (p) => p.mode === "exact" || p.mode === "both",
+    ).map((p) => p.param);
     expect(sorted(documented)).toEqual(sorted([...fixture, "prof"]));
   });
 
   it("api-mode table = flamegraph fixture api params", () => {
     const documented = tableNames(subsection("Query params - flamegraph.html"));
-    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.mode === "api").map(
-      (p) => p.param,
-    );
+    const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter(
+      (p) => p.mode === "api" || p.mode === "both",
+    ).map((p) => p.param);
     expect(sorted(documented)).toEqual(sorted(fixture));
   });
 
@@ -139,13 +139,9 @@ describe("URL contract: README tables match the recorded fixtures", () => {
     expect(sorted(documented)).toEqual(sorted(wire));
   });
 
-  it("every-page table is exactly the ui switch param", () => {
-    expect(tableNames(subsection("Query params - every page"))).toEqual(["ui"]);
-  });
-
-  it("new-viewer durable-state table = viewer URL registry", () => {
+  it("viewer durable-state table = viewer URL registry", () => {
     const documented = tableNames(
-      subsection("Query params - new/viewer.html durable view state"),
+      subsection("Query params - viewer.html durable view state"),
     );
     expect(sorted(documented)).toEqual(sorted(VIEWER_VIEW_QUERY_PARAMS));
   });

@@ -1,8 +1,8 @@
 "use strict";
 
-// Two-sided differential flamegraph view (the `diff=1` branch of
-// flamegraph.html). Renders side A on the LEFT and side B on the RIGHT, each as
-// its own self-normalized flamegraph; boxes are colored by relative hotness
+// Two-sided differential flamegraph view (`diff=1` mode). Renders side A on the
+// LEFT and side B on the RIGHT, each as its own self-normalized flamegraph;
+// boxes are colored by relative hotness
 // (blue = heavier in A, red = heavier in B) identically in both panels.
 //
 // This module owns the DOM and the per-side SSE streams. All the value-level
@@ -113,7 +113,7 @@
     // Fired whenever the user changes the view (zoom or highlight), so the host
     // can persist { zoom, search } to the URL for a shareable deep link. `zoom`
     // is the full path from the merged root down (root INCLUDED as element 0),
-    // matching flamegraph_view_state.js's readDiffState/writeDiffState contract.
+    // matching the page's readDiffState/writeDiffState contract.
     const onChange = opts.onChange || (() => {});
     // Optional { zoom, search } to seed the view from a shared link.
     const initialState = opts.initialState || {};
@@ -404,9 +404,9 @@
 
     // ── Tooltip ──
     // Split into content (rebuild + remeasure, only when the hovered frame
-    // changes) and position (cheap, on every move). The old code rebuilt
-    // innerHTML AND read offsetWidth/Height on every mousemove, forcing a
-    // synchronous reflow per pixel — the main source of the hover lag.
+    // changes) and position (cheap, on every move). Rebuilding innerHTML and
+    // reading offsetWidth/Height on every mousemove forces a synchronous
+    // reflow per pixel.
     function fmtPct(x) {
       if (!isFinite(x)) return "0%";
       return (x * 100 < 0.01 && x > 0 ? "<0.01" : (x * 100).toFixed(2)) + "%";

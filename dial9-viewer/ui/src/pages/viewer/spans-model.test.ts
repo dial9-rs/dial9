@@ -180,8 +180,7 @@ describe("computeSpanTrackData", () => {
     // a separate store, so a trace of ONLY spans (e.g. a shale trace of just
     // SpanEnter__/SpanExit__) leaves customEvents empty while the authoritative
     // spans live in precomputedSpanData. computeSpanTrackData must NOT bail on
-    // the empty customEvents and discard them (the legacy viewer kept span
-    // events in customEvents, so its guard never tripped - hence the divergence).
+    // the empty customEvents and discard them.
     const a = span("a", "load", 100, 300, { taskId: 7 });
     const b = span("b", "auth", 150, 400);
     const precomputed: SpanData = {

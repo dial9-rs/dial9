@@ -173,7 +173,7 @@ describe("demo-trace anchors (#593 measurements)", () => {
   beforeAll(async () => {
     const trace = await parseTrace(readFileSync(DEMO));
     // Exactly the page's tree build: filterCpuSamples(cpuSamples, null,
-    // null) then the workerId split (flamegraph.html:571 -> applyFilters).
+    // null) followed by the workerId split.
     const samples = trace.cpuSamples.filter(
       (s) => s.callchain.length > 0 && s.source !== 1,
     );

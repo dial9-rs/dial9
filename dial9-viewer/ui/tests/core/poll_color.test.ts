@@ -1,7 +1,7 @@
 // Unit tests for pollHeatmapColor - a continuous, log-scale heatmap mapping
 // poll duration (in nanoseconds) to a hex color string.
 //
-// Used by viewer.html for issue #450 (item 1: poll color heatmap).
+// Used by the viewer's poll-duration heatmap (issue #450).
 //
 // Migrated from test_poll_color.js (T10); frozen core loaded via
 // createRequire (see format.test.ts for the rationale).

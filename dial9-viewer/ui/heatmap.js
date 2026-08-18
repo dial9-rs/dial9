@@ -18,8 +18,8 @@
 // the next start so consecutive segments tile instead of overlap; the leftover
 // holes (genuine missing coverage) are surfaced by segmentGaps().
 //
-// All functions here are pure and unit-tested in test_heatmap.js. Rendering and
-// pointer interaction live in index.html and call into these helpers.
+// All functions here are pure and unit-tested. Rendering and pointer
+// interaction live under src/pages/browser/ and call into these helpers.
 
 // Maximum total bytes we allow opening in the trace viewer at once. Opening a
 // very wide time range would download hundreds of MB and overwhelm the viewer,

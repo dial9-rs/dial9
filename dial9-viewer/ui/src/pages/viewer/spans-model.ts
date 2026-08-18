@@ -92,8 +92,8 @@ export function computeSpanTrackData(
   // ALL spans (e.g. a shale trace of only SpanEnter/SpanExit). In that case the
   // authoritative span data lives in `precomputedSpanData`, so only bail early
   // when there is NEITHER a precomputed result NOR any events to build one from.
-  // (The fat/legacy path keeps span events in `customEvents`, so its guard trips
-  // only for a genuinely span-free trace.)
+  // (The plain-array path keeps span events in `customEvents`, so its guard
+  // trips only for a genuinely span-free trace.)
   if (
     precomputedSpanData === undefined &&
     (customEvents == null || customEvents.length === 0)

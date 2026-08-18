@@ -969,9 +969,7 @@ fn reencode_trace(
 
     decoder
         .try_for_each_event(|event| {
-            let timestamp_ns = event
-                .timestamp_ns
-                .context("demo replay event has no timestamp")?;
+            let timestamp_ns = event.timestamp_ns;
             let timestamp_ns = if let Some(timeline) = timeline {
                 rebase_value(
                     timestamp_ns,
@@ -997,8 +995,7 @@ fn reencode_trace(
                 schema
             };
 
-            let mut values = Vec::with_capacity(event.fields.len() + 1);
-            values.push(FieldValue::Varint(timestamp_ns));
+            let mut values = Vec::with_capacity(event.fields.len());
             for (field, value) in event.schema.fields().iter().zip(event.fields.iter()) {
                 let mut value = if event.name == "SegmentMetadataEvent" && field.name() == "entries"
                 {
@@ -1038,7 +1035,7 @@ fn reencode_trace(
                 values.push(value);
             }
             encoder
-                .write_event(&schema, &values)
+                .write_event(&schema, timestamp_ns, &values)
                 .with_context(|| format!("re-encode demo event '{}'", event.name))
         })
         .map_err(|error| match error {
@@ -1084,7 +1081,6 @@ fn rewrite_boot_id_value(value: &FieldValueRef<'_>, boot_id: &str) -> anyhow::Re
 fn normalized_replay_schema(schema: &SchemaEntry) -> SchemaEntry {
     SchemaEntry::with_annotations(
         schema.name(),
-        schema.has_timestamp(),
         schema.fields().iter().map(|field| {
             FieldDef::new(
                 field.name(),
@@ -1160,9 +1156,7 @@ fn first_clock_sync(raw: &[u8]) -> anyhow::Result<(u64, u64)> {
             if clock.is_some() || event.name != "ClockSyncEvent" {
                 return Ok::<_, anyhow::Error>(());
             }
-            let timestamp_ns = event
-                .timestamp_ns
-                .context("demo ClockSyncEvent has no timestamp")?;
+            let timestamp_ns = event.timestamp_ns;
             let realtime_ns = event
                 .field_names()
                 .zip(event.fields.iter())
@@ -1196,9 +1190,7 @@ fn timestamp_bounds(raw: &[u8]) -> anyhow::Result<(u64, u64)> {
     let mut max = None;
     decoder
         .try_for_each_event(|event| {
-            let timestamp = event
-                .timestamp_ns
-                .ok_or_else(|| anyhow::anyhow!("demo event has no timestamp"))?;
+            let timestamp = event.timestamp_ns;
             if timestamp == 0 {
                 return Ok::<_, anyhow::Error>(());
             }
@@ -1480,7 +1472,7 @@ mod tests {
                     first_clock = event.deserialize::<ClockSync>().ok();
                 }
                 if event.name == "CpuSampleEvent" {
-                    min_cpu_timestamp = min_cpu_timestamp.min(event.timestamp_ns.unwrap());
+                    min_cpu_timestamp = min_cpu_timestamp.min(event.timestamp_ns);
                     cpu_samples += 1;
                 }
                 if event.name.starts_with("SpanEnter:") {

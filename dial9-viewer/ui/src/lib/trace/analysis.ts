@@ -33,10 +33,9 @@ export {
 } from "../../../trace_analysis.js";
 
 // buildWorkerSpans is DISPATCHED, not a pure re-export: the frozen core version
-// retains event objects (incompatible with the columnar event store the new
-// viewer uses), so a columnar `trace.events` is routed to the columnar
-// reimplementation. A fat `events` array (legacy pages, node tests) keeps the
-// byte-identical frozen path.
+// retains event objects (incompatible with the viewer's columnar event store),
+// so a columnar `trace.events` is routed to the columnar reimplementation. A
+// fat `events` array keeps the byte-identical shared-core path.
 import { buildWorkerSpans as frozenBuildWorkerSpans } from "../../../trace_analysis.js";
 import { ColumnarEvents } from "./columnar-events.js";
 import { buildWorkerSpansColumnar } from "./worker-spans-columnar.js";

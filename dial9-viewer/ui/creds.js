@@ -419,9 +419,9 @@
     },
   };
 
-  // Browser: the public userscript contract is intentionally narrow. Shipped
-  // page modules import the full internal store; legacy inline pages use the
-  // explicitly-private compatibility global while they are migrated.
+  // Browser: the public userscript contract is intentionally narrow. Page
+  // modules import the full store; the private global remains for external
+  // compatibility consumers such as diff_test.html.
   if (typeof window !== "undefined") {
     window.Dial9Creds = { set, check, setRegion };
     window.__Dial9CredentialStore = Dial9Creds;

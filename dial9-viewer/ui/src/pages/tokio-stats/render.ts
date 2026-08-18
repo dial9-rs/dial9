@@ -511,9 +511,8 @@ function workerDetailRows(
  * host's busyness POOLS its workers (Σ busy / Σ observed, via the frozen
  * hostBusyPct) so it stays bounded <=100% and weights each worker by observed
  * time. Exported for the XSS regression test: the host name is
- * attacker-influenceable, and unlike the legacy page's `onclick="…('${host}')"`
- * string handler, lit-html binds a real listener so a quote in a host name is
- * structurally inert.
+ * attacker-influenceable, but lit-html binds a listener rather than building
+ * an inline handler, so a quote in a host name is structurally inert.
  */
 export function workerActivityTemplate(
   data: TokioStatsResponse,

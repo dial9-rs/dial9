@@ -941,7 +941,7 @@ mod tests {
             else {
                 continue;
             };
-            let ts = timestamp_ns.unwrap_or(0);
+            let ts = timestamp_ns;
             let name = dec.registry().get(type_id).map(|s| s.name());
             match name {
                 Some("ClockSyncEvent") => {

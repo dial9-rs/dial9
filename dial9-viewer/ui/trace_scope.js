@@ -24,9 +24,9 @@
 // window since it was shared. For a finished trace that is nil; it is the
 // deliberate trade for a portable, length-safe link.
 //
-// `parseKey` / `extractPrefix` live here as the single source of truth (they
-// were inline in index.html) so the browser pages and the Node tests share one
-// implementation. Dependency-free so both contexts can require/script it.
+// `parseKey` / `extractPrefix` live here as the single source of truth so the
+// browser pages and Node tests share one implementation. Dependency-free so
+// both contexts can require/script it.
 
 (function (exports) {
   // Scope params are namespaced `s_*` so they never collide with the viewer's
@@ -142,10 +142,10 @@
   // not a secret (it grants nothing on its own — the server must be allowed to
   // assume it), so it is safe to carry in a shareable URL, exactly as the home
   // page already carries `aws_role_arn`. Optional and trailing; falsy isn't carried.
-  // New callers pass canonical SourceScope as the first argument. The legacy
-  // positional form remains accepted for frozen HTML callers until they are
-  // migrated; both normalize to the same URL-safe scope (literal values never
-  // enter this object, only their mode marker).
+  // Current callers pass canonical SourceScope as the first argument. The
+  // positional form remains accepted for compatibility; both normalize to the
+  // same URL-safe scope (literal values never enter this object, only their
+  // mode marker).
   function scopeFromKeys(sourceOrBucket, keys, t0, t1, region, roleArn, credentialMode) {
     let bucket = sourceOrBucket;
     if (sourceOrBucket && typeof sourceOrBucket === "object") {

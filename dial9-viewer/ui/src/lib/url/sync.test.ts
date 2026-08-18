@@ -92,7 +92,7 @@ function setup(url: UrlParts) {
 describe("bindViewStateToUrl", () => {
   it("writes legacy params AND the versioned hash in one replaceState", () => {
     const { raf, timer, host, store } = setup({
-      pathname: "/new/flamegraph.html",
+      pathname: "/flamegraph.html",
       search: "?trace=demo-trace.bin",
       hash: "",
     });
@@ -100,7 +100,7 @@ describe("bindViewStateToUrl", () => {
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual([
-      "/new/flamegraph.html?trace=demo-trace.bin&worker-zoom=main%09poll#v=1&fg.w=main%09poll",
+      "/flamegraph.html?trace=demo-trace.bin&worker-zoom=main%09poll#v=1&fg.w=main%09poll",
     ]);
   });
 

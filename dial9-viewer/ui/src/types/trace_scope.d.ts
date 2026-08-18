@@ -5,11 +5,10 @@
 // 8192-byte request-URI cap and re-resolves in any browser. See
 // src/types/decode.d.ts for the declaration-form rationale.
 //
-// Not frozen core, but loaded as a browser global (CommonJS-guard form) and
-// consumed by typed src/ through the lib/trace boundary
+// CommonJS-guarded and bundled through the typed lib/trace boundary
 // (src/lib/trace/trace_scope.ts). The landing page shares this exact codec with
-// viewer.html / flamegraph.html and the Node oracle (test_trace_scope.js), so
-// every generation maps a selection to the same scope.
+// viewer.html / flamegraph.html, so every entry maps a selection to the same
+// scope.
 
 declare module "*/trace_scope.js" {
   /**
@@ -92,7 +91,7 @@ declare module "*/trace_scope.js" {
     t1: number | null,
   ): TraceScope | null;
 
-  /** Legacy positional form used by frozen HTML until its next migration. */
+  /** Backward-compatible positional form. */
   export function scopeFromKeys(
     bucket: string,
     keys: readonly string[],

@@ -156,8 +156,8 @@
   // most polls into a single color, or overwhelm the visualization with the
   // hottest few. Log scale gives roughly equal visual weight to each decade.
   //
-  // Anchor stops are pinned to the legend swatches in viewer.html so the
-  // legend stays an honest reference. Stops between anchors are interpolated
+  // Anchor stops are pinned to the viewer legend swatches so the legend stays
+  // an honest reference. Stops between anchors are interpolated
   // linearly in RGB. Inputs below the floor (100ns) clamp to dim navy;
   // inputs above the ceiling (1s) clamp to deep red.
   //
@@ -214,7 +214,7 @@
   }
 
   // Quantize a poll duration to a small fixed set of bucket colors. Used by
-  // the LOD path in viewer.html to merge adjacent polls with identical color
+  // the viewer's LOD path to merge adjacent polls with identical color
   // into a single fillRect; with 16 quantization bins per decade-spanning
   // log scale, runs of "approximately equal" polls still fold into one
   // rectangle, which keeps zoomed-out rendering fast.

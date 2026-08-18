@@ -8,7 +8,7 @@ import type { AtCursorReadout, SegmentEntry } from "../../types/state.js";
 
 // ── computeAtCursorReadout ──────────────────────────────────────────
 
-describe("computeAtCursorReadout (info-panel parity)", () => {
+describe("computeAtCursorReadout", () => {
   const input: AtCursorInput = {
     workerIds: [0, 1],
     queueSamples: [
@@ -46,7 +46,7 @@ describe("computeAtCursorReadout (info-panel parity)", () => {
     });
   });
 
-  it("null series -> null readings (info-panel omits the missing lines)", () => {
+  it("keeps missing series as null readings", () => {
     const empty: AtCursorInput = {
       workerIds: [0],
       queueSamples: [],

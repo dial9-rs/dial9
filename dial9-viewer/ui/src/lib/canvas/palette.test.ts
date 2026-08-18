@@ -47,7 +47,7 @@ describe("makeColorDimmer", () => {
     expect(dim("#000000")).toBe("#000000");
   });
 
-  it("default factor matches the legacy pollColorDim (~0.4)", () => {
+  it("defaults to a 0.4 factor", () => {
     const dim = makeColorDimmer();
     // round(0xff * 0.4) = 102 = 0x66
     expect(dim("#ffffff")).toBe("#666666");

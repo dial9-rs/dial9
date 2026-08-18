@@ -1305,7 +1305,6 @@ mod tests {
         );
         let single_event_schema = Schema::from_entry(SchemaEntry::with_annotations(
             "producer:RequestMetrics",
-            true,
             vec![
                 FieldDef::new("started", FieldType::OptionalVarint),
                 FieldDef::new("os_thread", FieldType::OptionalVarint),
@@ -1334,11 +1333,8 @@ mod tests {
         .unwrap();
         enc.write_event(
             &unpark_schema,
-            &[
-                FieldValue::Varint(50),
-                FieldValue::Varint(3),
-                FieldValue::Varint(500),
-            ],
+            50,
+            &[FieldValue::Varint(3), FieldValue::Varint(500)],
         )
         .unwrap();
 
@@ -1346,18 +1342,12 @@ mod tests {
         for (start, end) in [(90, 120), (180, 220)] {
             enc.write_event(
                 &poll_start_schema,
-                &[
-                    FieldValue::Varint(start),
-                    FieldValue::Varint(3),
-                    FieldValue::Varint(77),
-                ],
+                start,
+                &[FieldValue::Varint(3), FieldValue::Varint(77)],
             )
             .unwrap();
-            enc.write_event(
-                &poll_end_schema,
-                &[FieldValue::Varint(end), FieldValue::Varint(3)],
-            )
-            .unwrap();
+            enc.write_event(&poll_end_schema, end, &[FieldValue::Varint(3)])
+                .unwrap();
         }
 
         // One sample lands in an active poll interval; one lands in the async
@@ -1365,8 +1355,8 @@ mod tests {
         for timestamp in [110, 150] {
             enc.write_event(
                 &sample_schema,
+                timestamp,
                 &[
-                    FieldValue::Varint(timestamp),
                     FieldValue::Varint(500),
                     FieldValue::Varint(SOURCE_CPU_PROFILE as u64),
                     FieldValue::StackFrames(vec![0xabc].into()),
@@ -1380,8 +1370,8 @@ mod tests {
         // field so the delta-encoded timestamp stream stays in emission order.
         enc.write_event(
             &single_event_schema,
+            250,
             &[
-                FieldValue::Varint(250),
                 FieldValue::Varint(100),
                 FieldValue::Varint(500),
                 FieldValue::Varint(77),
@@ -1397,8 +1387,8 @@ mod tests {
         // and cannot be projected as a span.
         enc.write_event(
             &single_event_schema,
+            300,
             &[
-                FieldValue::Varint(300),
                 FieldValue::None,
                 FieldValue::None,
                 FieldValue::None,
@@ -1505,12 +1495,17 @@ mod tests {
         // Enter span_id=1 on worker 0
         enc.write_event(
             &enter_schema,
+            100,
             &[
-                FieldValue::Varint(100),                   // timestamp
-                FieldValue::Varint(0),                     // worker_id
-                FieldValue::Varint(1),                     // span_id
-                FieldValue::None,                          // parent_span_id (absent)
-                FieldValue::String("do_work".to_string()), // span_name
+                // timestamp
+                FieldValue::Varint(0),
+                // worker_id
+                FieldValue::Varint(1),
+                // span_id
+                FieldValue::None,
+                // parent_span_id (absent)
+                FieldValue::String("do_work".to_string()),
+                // span_name,
             ],
         )
         .unwrap();
@@ -1518,11 +1513,15 @@ mod tests {
         // Exit span_id=1 on worker 0
         enc.write_event(
             &exit_schema,
+            200,
             &[
-                FieldValue::Varint(200),                   // timestamp
-                FieldValue::Varint(0),                     // worker_id
-                FieldValue::Varint(1),                     // span_id
-                FieldValue::String("do_work".to_string()), // span_name
+                // timestamp
+                FieldValue::Varint(0),
+                // worker_id
+                FieldValue::Varint(1),
+                // span_id
+                FieldValue::String("do_work".to_string()),
+                // span_name,
             ],
         )
         .unwrap();
@@ -1530,9 +1529,11 @@ mod tests {
         // Close span_id=1
         enc.write_event(
             &close_schema,
+            250,
             &[
-                FieldValue::Varint(250), // timestamp
-                FieldValue::Varint(1),   // span_id
+                // timestamp
+                FieldValue::Varint(1),
+                // span_id,
             ],
         )
         .unwrap();
@@ -1613,34 +1614,33 @@ mod tests {
         .unwrap();
         enc.write_event(
             &enter_schema,
+            100,
             &[
-                FieldValue::Varint(100),
                 FieldValue::Varint(0),
                 FieldValue::Varint(1),
                 FieldValue::None,
                 FieldValue::String("handle".to_string()),
                 FieldValue::String("5d051ec2-999b-4a25-93b6-0f9cf83fa8b2".to_string()),
-                FieldValue::Varint(0), // status not yet known at enter
+                FieldValue::Varint(0),
+                // status not yet known at enter,
             ],
         )
         .unwrap();
         enc.write_event(
             &exit_schema,
+            200,
             &[
-                FieldValue::Varint(200),
                 FieldValue::Varint(0),
                 FieldValue::Varint(1),
                 FieldValue::String("handle".to_string()),
                 FieldValue::String("5d051ec2-999b-4a25-93b6-0f9cf83fa8b2".to_string()),
-                FieldValue::Varint(500), // final status known at exit
+                FieldValue::Varint(500),
+                // final status known at exit,
             ],
         )
         .unwrap();
-        enc.write_event(
-            &close_schema,
-            &[FieldValue::Varint(250), FieldValue::Varint(1)],
-        )
-        .unwrap();
+        enc.write_event(&close_schema, 250, &[FieldValue::Varint(1)])
+            .unwrap();
 
         let (_, _, _, spans) =
             decode_samples(&enc.into_inner(), "2026-07-17/1746/svc/host/boot/0.bin").unwrap();
@@ -1710,8 +1710,8 @@ mod tests {
         .unwrap();
         enc.write_event(
             &exit_schema,
+            100,
             &[
-                FieldValue::Varint(100),
                 FieldValue::Varint(0),
                 FieldValue::Varint(7),
                 FieldValue::String("equal_timestamp".to_string()),
@@ -1720,8 +1720,8 @@ mod tests {
         .unwrap();
         enc.write_event(
             &enter_schema,
+            100,
             &[
-                FieldValue::Varint(100),
                 FieldValue::Varint(0),
                 FieldValue::Varint(7),
                 FieldValue::None,
@@ -1729,11 +1729,8 @@ mod tests {
             ],
         )
         .unwrap();
-        enc.write_event(
-            &close_schema,
-            &[FieldValue::Varint(101), FieldValue::Varint(7)],
-        )
-        .unwrap();
+        enc.write_event(&close_schema, 101, &[FieldValue::Varint(7)])
+            .unwrap();
 
         let (_, _, _, spans) = decode_samples(
             &enc.into_inner(),
@@ -1804,8 +1801,8 @@ mod tests {
         // Enter span_id=42 on worker 3.
         enc.write_event(
             &enter_schema,
+            1000,
             &[
-                FieldValue::Varint(1000),
                 FieldValue::Varint(3),
                 FieldValue::Varint(42),
                 FieldValue::None,
@@ -1818,8 +1815,8 @@ mod tests {
         // Exit span_id=42 on worker 3. Note: NO close event follows.
         enc.write_event(
             &exit_schema,
+            5000,
             &[
-                FieldValue::Varint(5000),
                 FieldValue::Varint(3),
                 FieldValue::Varint(42),
                 FieldValue::String("/jobs/next".to_string()),
@@ -1889,7 +1886,6 @@ mod tests {
         ] {
             let values = if schema.name().starts_with("SpanEnter__") {
                 vec![
-                    FieldValue::Varint(timestamp),
                     FieldValue::Varint(0),
                     FieldValue::Varint(span_id),
                     FieldValue::None,
@@ -1897,13 +1893,12 @@ mod tests {
                 ]
             } else {
                 vec![
-                    FieldValue::Varint(timestamp),
                     FieldValue::Varint(0),
                     FieldValue::Varint(span_id),
                     FieldValue::String("shared-runtime-name".to_string()),
                 ]
             };
-            enc.write_event(schema, &values).unwrap();
+            enc.write_event(schema, timestamp, &values).unwrap();
         }
 
         let (_, _, _, spans) = decode_samples(
@@ -1951,7 +1946,6 @@ mod tests {
         ] {
             let values = if schema.name().starts_with("SpanEnter__") {
                 vec![
-                    FieldValue::Varint(timestamp),
                     FieldValue::Varint(0),
                     FieldValue::Varint(span_id),
                     FieldValue::None,
@@ -1959,13 +1953,12 @@ mod tests {
                 ]
             } else {
                 vec![
-                    FieldValue::Varint(timestamp),
                     FieldValue::Varint(0),
                     FieldValue::Varint(span_id),
                     FieldValue::String(runtime_name.to_string()),
                 ]
             };
-            enc.write_event(schema, &values).unwrap();
+            enc.write_event(schema, timestamp, &values).unwrap();
         }
 
         let (_, _, _, spans) = decode_samples(
@@ -2030,8 +2023,8 @@ mod tests {
         // Enter span_id=42 on worker 3.
         enc.write_event(
             &enter_schema,
+            1000,
             &[
-                FieldValue::Varint(1000),
                 FieldValue::Varint(3),
                 FieldValue::Varint(42),
                 FieldValue::None,
@@ -2042,8 +2035,8 @@ mod tests {
         // Exit span_id=42 on a DIFFERENT worker (7) — the task migrated.
         enc.write_event(
             &exit_schema,
+            5000,
             &[
-                FieldValue::Varint(5000),
                 FieldValue::Varint(7),
                 FieldValue::Varint(42),
                 FieldValue::String("/jobs/next".to_string()),
@@ -2137,13 +2130,19 @@ mod tests {
         // Bind tid 500 → worker 3.
         enc.write_event(
             &unpark_schema,
+            500,
             &[
-                FieldValue::Varint(500), // ts
-                FieldValue::Varint(3),   // worker_id
-                FieldValue::Varint(0),   // local_queue
-                FieldValue::Varint(0),   // cpu_time_ns
-                FieldValue::None,        // sched_wait_ns
-                FieldValue::Varint(500), // tid
+                // ts
+                FieldValue::Varint(3),
+                // worker_id
+                FieldValue::Varint(0),
+                // local_queue
+                FieldValue::Varint(0),
+                // cpu_time_ns
+                FieldValue::None,
+                // sched_wait_ns
+                FieldValue::Varint(500),
+                // tid,
             ],
         )
         .unwrap();
@@ -2151,26 +2150,27 @@ mod tests {
         // Poll of task 77 on worker 3 covering the span's enter: [900, 1100].
         enc.write_event(
             &poll_start_schema,
+            900,
             &[
-                FieldValue::Varint(900), // ts
-                FieldValue::Varint(3),   // worker_id
-                FieldValue::Varint(0),   // local_queue
-                FieldValue::Varint(77),  // task_id
+                // ts
+                FieldValue::Varint(3),
+                // worker_id
+                FieldValue::Varint(0),
+                // local_queue
+                FieldValue::Varint(77),
+                // task_id
                 FieldValue::String("app::handler".to_string()),
             ],
         )
         .unwrap();
-        enc.write_event(
-            &poll_end_schema,
-            &[FieldValue::Varint(1100), FieldValue::Varint(3)],
-        )
-        .unwrap();
+        enc.write_event(&poll_end_schema, 1100, &[FieldValue::Varint(3)])
+            .unwrap();
 
         // Enter span_id=42 on worker 3 at t=1000 (inside poll [900,1100] → task 77).
         enc.write_event(
             &enter_schema,
+            1000,
             &[
-                FieldValue::Varint(1000),
                 FieldValue::Varint(3),
                 FieldValue::Varint(42),
                 FieldValue::None,
@@ -2183,8 +2183,8 @@ mod tests {
         // (Non-overlapping with the first — a worker polls one task at a time.)
         enc.write_event(
             &poll_start_schema,
+            5000,
             &[
-                FieldValue::Varint(5000),
                 FieldValue::Varint(3),
                 FieldValue::Varint(0),
                 FieldValue::Varint(77),
@@ -2192,18 +2192,15 @@ mod tests {
             ],
         )
         .unwrap();
-        enc.write_event(
-            &poll_end_schema,
-            &[FieldValue::Varint(5100), FieldValue::Varint(3)],
-        )
-        .unwrap();
+        enc.write_event(&poll_end_schema, 5100, &[FieldValue::Varint(3)])
+            .unwrap();
 
         // Exit span_id=42 much later at t=9000: the span was entered across a
         // long await; the task was only on-CPU during the two polls above.
         enc.write_event(
             &exit_schema,
+            9000,
             &[
-                FieldValue::Varint(9000),
                 FieldValue::Varint(3),
                 FieldValue::Varint(42),
                 FieldValue::String("/jobs/next".to_string()),
@@ -2292,8 +2289,8 @@ mod tests {
         // First use of span_id=1
         enc.write_event(
             &enter_schema,
+            100,
             &[
-                FieldValue::Varint(100),
                 FieldValue::Varint(0),
                 FieldValue::Varint(1),
                 FieldValue::None,
@@ -2303,19 +2300,16 @@ mod tests {
         .unwrap();
         enc.write_event(
             &exit_schema,
+            200,
             &[
-                FieldValue::Varint(200),
                 FieldValue::Varint(0),
                 FieldValue::Varint(1),
                 FieldValue::String("op".to_string()),
             ],
         )
         .unwrap();
-        enc.write_event(
-            &close_schema,
-            &[FieldValue::Varint(250), FieldValue::Varint(1)],
-        )
-        .unwrap();
+        enc.write_event(&close_schema, 250, &[FieldValue::Varint(1)])
+            .unwrap();
 
         // One enter/exit/close cycle for span_id=1 produces one row.
         let data = enc.into_inner();
@@ -2385,8 +2379,8 @@ mod tests {
         let enter = |enc: &mut Encoder, ts: u64| {
             enc.write_event(
                 &enter_schema,
+                ts,
                 &[
-                    FieldValue::Varint(ts),
                     FieldValue::Varint(0),
                     FieldValue::Varint(1),
                     FieldValue::None,
@@ -2398,8 +2392,8 @@ mod tests {
         let exit = |enc: &mut Encoder, ts: u64| {
             enc.write_event(
                 &exit_schema,
+                ts,
                 &[
-                    FieldValue::Varint(ts),
                     FieldValue::Varint(0),
                     FieldValue::Varint(1),
                     FieldValue::String("handle".to_string()),
@@ -2408,11 +2402,8 @@ mod tests {
             .unwrap();
         };
         let close = |enc: &mut Encoder, ts: u64| {
-            enc.write_event(
-                &close_schema,
-                &[FieldValue::Varint(ts), FieldValue::Varint(1)],
-            )
-            .unwrap();
+            enc.write_event(&close_schema, ts, &[FieldValue::Varint(1)])
+                .unwrap();
         };
 
         enter(&mut enc, 1_000);

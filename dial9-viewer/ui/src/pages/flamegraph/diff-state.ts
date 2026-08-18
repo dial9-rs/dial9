@@ -1,5 +1,5 @@
-// The diff view's URL persistence: the `diff_zoom` / `diff_search` query params
-// (flamegraph_view_state.js readDiffState/writeDiffState). Kept separate from
+// The diff view's URL persistence through the `diff_zoom` / `diff_search`
+// query params. Kept separate from
 // diff-mode.ts (which pulls the DOM-mounting diff view) so the pure codec is
 // unit-testable without a browser. `zoom` is the merged-root-inclusive frame
 // path, TAB-joined; `search` is the highlight regex.

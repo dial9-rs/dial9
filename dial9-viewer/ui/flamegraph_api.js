@@ -1,6 +1,6 @@
 "use strict";
 
-// Pure helpers for the API-mode flamegraph view in flamegraph.html.
+// Pure helpers for the API-mode flamegraph view.
 //
 // The `/api/flamegraph` endpoint streams over Server-Sent Events: one request
 // folds source files up to the sampling cap and pushes a fresh tree + `coverage`

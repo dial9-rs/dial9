@@ -425,8 +425,7 @@ export function loadTraceInWorker(
  * clone; only the raw buffer transfers zero-copy). For a large trace that
  * clone is a second full copy of the object graph and blows the worker's
  * memory budget ("Data cannot be cloned, out of memory"). Parsing here builds
- * the graph in place with ZERO clone - the legacy (pre-worker) behavior - so
- * peak memory is one copy, not two.
+ * the graph in place with ZERO clone, so peak memory is one copy, not two.
  *
  * Responsiveness: the core parser yields to the event loop on a wall-clock
  * paint throttle (~5x/s) while firing onParseProgress, so the progress line

@@ -1,19 +1,3 @@
-// Verify the S3 trace-key parser understands both the new boot_id layout
-// and the legacy (pre-#225) layout.
-//
-// Migrated from test_parse_key.js (T10). Originally extracted parseKey()
-// from the legacy index.html inline script via regex + vm sandbox; T15
-// re-pointed it at the TS port, lib/trace/keys.ts, which the migrated
-// browser page consumes (closing T10's interim note). The legacy inline
-// copy still exists in index.html but is no longer under test here - the
-// typed parser is the single implementation going forward, and the legacy
-// page's recorded behavior is asserted by the parity row-walker instead.
-//
-// The typed parser returns a { layout: "known" | "unknown" } discriminated
-// union (the ADR-0004 section 1 defect fix); the original T10 cases below
-// all target documented layouts, which parse as layout: "known" with the
-// same fields the inline parser produced.
-
 import { describe, it, expect } from "vitest";
 import { parseKey } from "../../src/lib/trace/keys.js";
 

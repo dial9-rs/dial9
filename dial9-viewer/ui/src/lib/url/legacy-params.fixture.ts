@@ -1,14 +1,5 @@
-// src/lib/url/legacy-params.fixture.ts - the codec's legacy-param fixture:
-// the enumerated, RECORDED inventory of every URL param the flamegraph page
-// reads or writes today, from reading the legacy bootstrap (flamegraph.html)
-// + flamegraph.js.
-//
-// This is a TEST FIXTURE, imported only by *.test.ts (it ships in no page
-// bundle). Its role: pin the legacy URL contract so the codec's bridge
-// functions are tested against the recorded reality, not against what the
-// codec wishes were true. The parity-level twin lives in the parity journeys
-// (parity/journeys.mjs), which loads a recorded legacy zoom URL on both
-// page generations and diffs the readouts.
+// Test-only inventory of recorded flamegraph query parameters, used to verify
+// that codec changes preserve the established URL contract.
 
 /** How a param reaches the URL. */
 export type LegacyParamMechanism =
@@ -26,14 +17,14 @@ export interface LegacyParamRecord {
   row: string;
   /** What it carries. */
   role: string;
-  /** True for the zoom-state params the codec unifies. */
+  /** True for params that carry flamegraph view state. */
   viewState: boolean;
 }
 
 /**
  * The flamegraph page's URL params when the codec landed.
  *
- * Only the two `viewState: true` rows are the codec's business. Everything
+ * Only the `viewState: true` rows are the codec's business. Everything
  * else is LOAD SCOPE (what data to show), stays query-based, page-owned,
  * and must be preserved verbatim by any URL rewrite - the codec
  * never touches them.
@@ -64,10 +55,26 @@ export const FLAMEGRAPH_LEGACY_PARAMS: readonly LegacyParamRecord[] = [
     role: "off-worker-tree zoom path, same format and lifecycle as worker-zoom",
     viewState: true,
   },
+  {
+    param: "inspect",
+    mode: "both",
+    mechanism: "replaceState",
+    row: "F147/F180",
+    role: "butterfly focus display name; set on enter/pivot, deleted on exit",
+    viewState: true,
+  },
+  {
+    param: "inspect_full",
+    mode: "both",
+    mechanism: "replaceState",
+    row: "F147/F180",
+    role: "butterfly focus identity; emitted only when it differs from inspect",
+    viewState: true,
+  },
   // -- aggregated api mode (?api=1) --
   // Scope + facet params, rebuilt and PUSHED on Apply/facet change so Back
-  // walks the filter history. Canvas zoom is deliberately NOT URL-synced
-  // in api mode - there is no view-state param to unify here.
+  // walks the filter history. Inspection uses replaceState; canvas zoom stays
+  // deliberately URL-silent.
   { param: "api", mode: "api", mechanism: "load-only", row: "F168", role: "mode switch (api=1)", viewState: false },
   { param: "data_dir", mode: "api", mechanism: "pushState", row: "F168", role: "local-dir scope (alternative to bucket/prefix)", viewState: false },
   { param: "bucket", mode: "api", mechanism: "pushState", row: "F168", role: "S3 scope bucket", viewState: false },
@@ -86,7 +93,6 @@ export const FLAMEGRAPH_LEGACY_PARAMS: readonly LegacyParamRecord[] = [
  * Recorded legacy fixture URLs (query + hash only; origin-independent).
  * Shapes taken from the recorded legacy access paths; the zoom paths are
  * synthetic here (codec-level tests need the FORMAT, not demo-trace truth).
- * The demo-trace-real twin lives in the parity journeys.
  */
 export const LEGACY_FIXTURE_URLS: readonly string[] = [
   // Single-level worker zoom.
@@ -95,8 +101,10 @@ export const LEGACY_FIXTURE_URLS: readonly string[] = [
   "?trace=demo-trace.bin&worker-zoom=main%09poll%09do_work",
   // Off-worker zoom alongside a worker zoom.
   "?trace=demo-trace.bin&worker-zoom=main%09poll&offworker-zoom=blocking%09read",
+  // Butterfly focus, including a distinct full symbol identity.
+  "?trace=demo-trace.bin&inspect=poll&inspect_full=core%3A%3Apoll",
   // Zoom params embedded in the full S3-browser context params.
   "?trace=t/a.bin&trace=t/b.bin&start=1000&end=9000&svc=api&host=h1&segs=2&from=12%3A00&to=12%3A05&worker-zoom=main",
-  // API-mode pushState URL (no view-state params by design).
-  "?api=1&bucket=b&prefix=p&service=svc&host=h1&host=h2&start_ns=1&end_ns=2&source=cpu&max_files=64",
+  // API-mode scope plus its replaceState-carried inspection focus.
+  "?api=1&bucket=b&prefix=p&service=svc&host=h1&host=h2&start_ns=1&end_ns=2&source=cpu&max_files=64&inspect=poll",
 ];
