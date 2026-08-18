@@ -50,12 +50,10 @@ pub mod sync {
     #[allow(unused_imports)]
     pub use shuttle::sync::{Arc, Barrier, Mutex, Weak};
 
-    /// Wrapper around shuttle's mpsc that adds random timeouts to
-    /// `recv_timeout`. Shuttle's built-in `recv_timeout` ignores the
-    /// timeout and blocks unconditionally, which means the flush loop
-    /// never loops. This wrapper randomly returns `Timeout` so shuttle
-    /// can explore interleavings where the flush loop actually runs
-    /// multiple cycles.
+    /// Shuttle's `recv_timeout` ignores the timeout and blocks forever,
+    /// which would stop the flush loop from ever looping. This wraps it to
+    /// randomly return `Timeout` instead, so shuttle can explore multiple
+    /// flush-loop cycles.
     pub mod mpsc {
         pub use shuttle::sync::mpsc::{RecvTimeoutError, SyncSender};
 
@@ -63,8 +61,7 @@ pub mod sync {
             inner: shuttle::sync::mpsc::Receiver<T>,
         }
 
-        // shuttle::sync::mpsc::Receiver is Send but the wrapper needs to be too
-        // SAFETY: shuttle's Receiver<T> is Send when T: Send
+        // SAFETY: shuttle's Receiver<T> is Send when T: Send, so the wrapper can be too.
         unsafe impl<T: Send> Send for Receiver<T> {}
 
         impl<T> Receiver<T> {
@@ -130,10 +127,8 @@ macro_rules! define_thread_local {
 #[cfg(shuttle)]
 pub use crate::define_thread_local as thread_local;
 
-/// Pairs a shuttle scenario with both `check_pct` and
-/// `check_uncontrolled_nondeterminism`, so a new test can't add one without
-/// the other. Nests the scenario in its own module so `pct`/`determinism`
-/// can be fixed leaf names without needing identifier concatenation.
+/// Pairs a shuttle scenario with `check_pct` and `check_uncontrolled_nondeterminism`
+/// Nests the scenario in its own module so `pct`/`determinism` can be fixed leaf names.
 ///
 /// ```ignore
 /// shuttle_test! {
@@ -142,48 +137,40 @@ pub use crate::define_thread_local as thread_local;
 /// }
 /// ```
 ///
-/// Add `, should_panic` after `depth = $depth` to document a known bug
-/// instead of asserting correctness. Add `, expected = "..."` after
-/// `should_panic` (or `flaky_sigabrt_determinism_only`) to pin the specific
-/// panic message, like `#[should_panic(expected = "...")]` -- otherwise the
-/// test passes on any panic, including an unrelated one. Add `, replay =
-/// "<schedule>"` to also check in a `replay_known_failure` test that pins
-/// the exact captured failing schedule down deterministically (get the
-/// schedule string from a `pct` run's printed "failing schedule" -- not
-/// `determinism`'s "failing seed", which `shuttle::replay` can't take).
-/// Standing practice: check one of these in whenever a shuttle test finds a
-/// new failure, so it's a permanent, exact reproduction instead of relying
-/// on `pct`/`determinism`'s exploration to stumble onto it again. If the
-/// scenario's `determinism` test is
-/// also confirmed to sometimes abort the process under shuttle (see the
-/// comment on that arm below), add `, flaky_sigabrt_determinism_only` too --
-/// only for scenarios that actually hit it, not every `should_panic`
-/// scenario. Add `, verify_faults_triggered` instead to also assert
-/// `primitives::fs::take_faults_triggered() > 0`, so fault injection can't
-/// silently stop exercising its error path.
+/// Modifiers, added after `depth = $depth`:
+/// - `should_panic` -- document a known bug instead of asserting
+///   correctness. Add `expected = "..."` to pin the panic message (default: any panic).
+///   Add `replay = "<schedule>"` to also check in a
+///   `replay_known_failure` test pinning one captured failing schedule (from
+///   a `pct` run's "failing schedule" output -- not `determinism`'s "failing
+///   seed", which `shuttle::replay` can't take).
+/// - `should_panic, flaky_sigabrt_determinism_only` -- same, but `#[ignore]`s
+///   `determinism` because it's confirmed to sometimes SIGABRT the process
+///   (see that arm's comment below). Confirm the crash first; don't use
+///   defensively.
+/// - `verify_faults_triggered` -- also asserts
+///   `primitives::fs::take_faults_triggered() > 0`, so fault injection can't
+///   silently stop exercising its error path.
 ///
-/// For a scenario with no real concurrency to explore (e.g. a deterministic
-/// data-structure property, or a fork-then-immediately-join with no
-/// overlapping-runnable window), use `num_iters = $num_iters,
-/// determinism_only;` instead -- `check_pct` panics on a closure like that.
-/// Still needs shuttle's harness whenever the scenario touches a
-/// shuttle-swapped primitive.
+/// Use `num_iters = $num_iters, determinism_only;` instead of `num_iters =
+/// .., depth = ..` for a scenario with no real concurrency to explore
+/// (`check_pct` panics on those). Still needs shuttle's harness whenever the
+/// scenario touches a shuttle-swapped primitive.
 ///
 /// Don't use this macro for a scenario touching real global `static` state --
-/// the generated `pct`/`determinism` tests run concurrently and would
-/// corrupt shuttle's own bookkeeping; write those by hand instead, behind a
-/// real `std::sync::Mutex`.
+/// the generated tests run concurrently and would corrupt shuttle's own
+/// bookkeeping; write those by hand behind a real `std::sync::Mutex`.
 ///
-/// `default` in place of `num_iters = $num_iters, depth = $depth` picks up
-/// this codebase's established budget (5,000/3 plain, 100
-/// `determinism_only`, 10,000/3 `verify_faults_triggered`). Not offered for
-/// `should_panic`: real scenarios there range 500-5,000 depending on how
-/// narrow the race is, so pick and justify an explicit number instead.
+/// `default` in place of `num_iters = .., depth = ..` picks up this
+/// codebase's established budget (5,000/3 plain, 100 `determinism_only`,
+/// 10,000/3 `verify_faults_triggered`). Not offered for `should_panic`: pick
+/// and justify an explicit number, since real scenarios there range
+/// 500-5,000 depending on how narrow the race is.
 #[cfg(shuttle)]
 #[macro_export]
 macro_rules! shuttle_test {
-    // Re-dispatches to the explicit-budget arms below (see doc comment
-    // above), so it can't drift out of sync with them.
+    // Re-dispatches to the explicit-budget arms below, so budgets can't
+    // drift out of sync.
     (default; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         $crate::shuttle_test! {
             num_iters = 5_000, depth = 3;
@@ -220,12 +207,11 @@ macro_rules! shuttle_test {
             }
         }
     };
-    // No `pct`: `check_pct` panics on a closure with no real concurrency to
-    // schedule between (either genuinely single-threaded, or a fork
-    // immediately followed by a join with no overlapping-runnable window).
-    // Still runs inside shuttle's harness via `check_uncontrolled_nondeterminism`,
-    // which every scenario touching a shuttle-swapped primitive needs
-    // regardless of whether there's anything to interleave.
+    // No `pct`: it panics on a closure with no real concurrency to schedule
+    // (single-threaded, or a fork immediately joined with no
+    // overlapping-runnable window). Still needs shuttle's harness via
+    // `check_uncontrolled_nondeterminism` for any scenario touching a
+    // shuttle-swapped primitive.
     (num_iters = $num_iters:expr, determinism_only; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
@@ -259,12 +245,11 @@ macro_rules! shuttle_test {
             }
 
             $(
-                /// Checked-in replay of a captured failing schedule, so
-                /// this exact failure reproduces deterministically instead
-                /// of relying on `pct`/`determinism`'s exploration to find
-                /// it again. No `expected` pin needed here -- a fixed
-                /// replayed schedule can't turn up an unrelated panic the
-                /// way random exploration could.
+                /// Replays a captured failing schedule so this exact
+                /// failure reproduces deterministically, without waiting on
+                /// `pct`/`determinism` exploration to find it again. No
+                /// `expected` pin needed -- a fixed schedule can't surface
+                /// an unrelated panic.
                 #[test]
                 #[should_panic]
                 fn replay_known_failure() {
@@ -273,22 +258,21 @@ macro_rules! shuttle_test {
             )?
         }
     };
-    // Same as plain `should_panic`, but `#[ignore]`s just `determinism`
-    // (`pct` is unaffected). Use only for a scenario whose `determinism`
-    // test is *confirmed* to sometimes abort the process under shuttle.
+    // Same as plain `should_panic`, but `#[ignore]`s only `determinism`
+    // (`pct` is unaffected) -- for a scenario confirmed to sometimes SIGABRT
+    // the process under shuttle.
     //
-    // Root cause: `check_uncontrolled_nondeterminism` runs a scenario's
-    // schedule twice per iteration (record, then replay, to verify the same
-    // tasks are runnable each time) -- `check_pct` doesn't. If a
-    // not-yet-finished task still holds a shuttle-primitive-backed
+    // Root cause: `check_uncontrolled_nondeterminism` runs each schedule
+    // twice (record, then replay) to verify the same tasks stay runnable;
+    // `check_pct` doesn't. If a task still holds a shuttle-backed
     // `ThreadLocalBuffer` when an uncaught panic unwinds through shuttle's
-    // `Execution::run`, that buffer's `Drop` runs after shuttle's own
-    // `EXECUTION_STATE` is already unset and panics itself -- a second panic
-    // mid-unwind, which aborts (SIGABRT) rather than failing normally.
+    // `Execution::run`, its `Drop` runs after shuttle's `EXECUTION_STATE` is
+    // already torn down and panics again mid-unwind -- SIGABRT instead of a
+    // normal test failure.
     //
-    // Don't use defensively for a new `should_panic` scenario; confirm its
-    // `determinism` test actually crashes first (run it alone, repeatedly)
-    // and use plain `should_panic` otherwise. Still fully runnable manually.
+    // Confirm the crash first (run `determinism` alone, repeatedly) before
+    // using this -- don't use it defensively. Still runnable manually with
+    // `--ignored`.
     (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expected = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
@@ -310,12 +294,11 @@ macro_rules! shuttle_test {
             }
 
             $(
-                /// Checked-in replay of a captured failing schedule, so
-                /// this exact failure reproduces deterministically instead
-                /// of relying on `pct`/`determinism`'s exploration to find
-                /// it again. No `expected` pin needed here -- a fixed
-                /// replayed schedule can't turn up an unrelated panic the
-                /// way random exploration could.
+                /// Replays a captured failing schedule so this exact
+                /// failure reproduces deterministically, without waiting on
+                /// `pct`/`determinism` exploration to find it again. No
+                /// `expected` pin needed -- a fixed schedule can't surface
+                /// an unrelated panic.
                 #[test]
                 #[should_panic]
                 fn replay_known_failure() {
@@ -324,14 +307,11 @@ macro_rules! shuttle_test {
             )?
         }
     };
-    // Same as the plain form, but also asserts that
-    // `primitives::fs::take_faults_triggered()` saw at least one fault
-    // across the whole batch of iterations, so a broken fault-visibility
-    // thread-local (or any other regression that silently stops fault
-    // injection from reaching the flush thread) fails loudly instead of
-    // leaving the scenario exercising no error path at all. Checked in the
-    // same `pct`/`determinism` runs, not separate tests, so the shuttle
-    // exploration isn't run twice per scenario.
+    // Same as the plain form, but also asserts
+    // `primitives::fs::take_faults_triggered() > 0` across the whole batch,
+    // so a broken fault-visibility thread-local can't silently stop fault
+    // injection without failing loudly. Checked inside the same
+    // `pct`/`determinism` runs, not separate tests, to avoid exploring twice.
     (num_iters = $num_iters:expr, depth = $depth:expr, verify_faults_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
@@ -457,14 +437,12 @@ pub mod fs {
         }
     }
 
-    /// Count of fault checks that actually failed, independent of
-    /// `rate_limited!`'s real-wall-clock gate on the resulting log line (that
-    /// gate is a `static` keyed by call site, shared by every shuttle
-    /// iteration *and* every test in the same test binary — a burst of
-    /// iterations within its 60s window can log only the first occurrence).
-    /// Lets a test assert "fault injection actually reached the flush
-    /// thread" without depending on whether a warning happened to get past
-    /// that unrelated, real-time-gated layer.
+    /// Count of fault checks that actually failed -- independent of
+    /// `rate_limited!`'s real-wall-clock log gate (a `static` keyed by call
+    /// site, shared across the whole test binary, so a burst of iterations
+    /// can log only the first occurrence). Lets a test assert fault
+    /// injection reached the flush thread without depending on that
+    /// unrelated gate.
     #[cfg(test)]
     pub(crate) static FAULTS_TRIGGERED: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
