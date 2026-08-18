@@ -221,7 +221,7 @@ struct ActiveDump {
     window: EpochWindow,
     /// `Some` iff a non-zero look-forward was requested; the dump stays
     /// registered until this elapses.
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<crate::primitives::time::Instant>,
     metadata: Vec<(String, String)>,
     receipt_tx: Option<tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>>,
     segments_processed: usize,
@@ -249,7 +249,7 @@ impl ActiveDump {
             // Anchor at trigger time so worker pickup latency does not
             // extend the forward window.
             let elapsed = req.triggered_at.elapsed().unwrap_or_default();
-            tokio::time::Instant::now() + req.lookforward.saturating_sub(elapsed)
+            crate::primitives::time::Instant::now() + req.lookforward.saturating_sub(elapsed)
         });
         Self {
             id: req.id,
@@ -267,7 +267,7 @@ impl ActiveDump {
 
     /// Whether the dump can resolve once no matching work remains: no
     /// forward window, or its deadline elapsed.
-    fn due(&self, now: tokio::time::Instant) -> bool {
+    fn due(&self, now: crate::primitives::time::Instant) -> bool {
         self.deadline.is_none_or(|d| now >= d)
     }
 
@@ -450,7 +450,7 @@ impl WorkerLoop {
                 // there keeps everything open until the head of the ring
                 // settles (budget-bounded, brief).
                 let exhaustive = self.fs.take_is_exhaustive();
-                let now = tokio::time::Instant::now();
+                let now = crate::primitives::time::Instant::now();
                 let mut i = 0;
                 while i < dumps.len() {
                     let held = !retry_hold.is_empty()
@@ -481,7 +481,7 @@ impl WorkerLoop {
             }
 
             let min_deadline = dumps.iter().filter_map(|d| d.deadline).min();
-            tokio::select! {
+            crate::shuttle_select! {
                 _ = self.stop.cancelled() => {}
                 req = rx.rx.recv(), if rx_open => {
                     match req {
@@ -491,8 +491,8 @@ impl WorkerLoop {
                         None => rx_open = false,
                     }
                 }
-                _ = tokio::time::sleep_until(
-                    min_deadline.unwrap_or_else(tokio::time::Instant::now)
+                _ = crate::primitives::time::sleep_until(
+                    min_deadline.unwrap_or_else(crate::primitives::time::Instant::now)
                 ), if min_deadline.is_some() => {}
                 _ = Self::wait_for_more(&self.fs, &self.stop, self.poll_interval),
                     if !dumps.is_empty() => {}
@@ -594,12 +594,12 @@ impl WorkerLoop {
         poll_interval: Duration,
     ) {
         if fs.is_disk() {
-            tokio::select! {
+            crate::shuttle_select! {
                 _ = stop.cancelled() => {}
-                _ = tokio::time::sleep(poll_interval) => {}
+                _ = crate::primitives::time::sleep(poll_interval) => {}
             }
         } else {
-            tokio::select! {
+            crate::shuttle_select! {
                 _ = stop.cancelled() => {}
                 _ = fs.wait_for_wakeup() => {}
             }
@@ -819,7 +819,7 @@ impl WorkerLoop {
                                                     record_dump_error(dumps, &matched, err_kind);
                                                 }
                                             } else {
-                                                tokio::time::sleep(self.poll_interval).await;
+                                                crate::primitives::time::sleep(self.poll_interval).await;
                                                 self.fs.release_for_retry(
                                                     data.segment(),
                                                     bytes.clone(),
