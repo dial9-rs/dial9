@@ -40,7 +40,10 @@ impl<T: RecorderSourceExt> RecorderPerfExt for T {
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
         match crate::CpuProfiler::start(config) {
-            Ok(source) => self.source(source),
+            Ok(source) => self.source(source).on_recording_thread_start(|| {
+                let _ = crate::register_current_thread();
+                crate::unregister_current_thread
+            }),
             Err(e) => {
                 rate_limited!(std::time::Duration::from_secs(60), {
                     tracing::warn!("failed to start CPU profiler: {e}");
