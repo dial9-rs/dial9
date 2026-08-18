@@ -28,12 +28,11 @@ runs:
         toolchain: stable
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-
-    - name: Install valgrind
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y valgrind
+    - name: Install valgrind (cached)
+      uses: awalsh128/cache-apt-pkgs-action@2c09a5e66da6c8016428a2172bd76e5e4f14bb17 # latest
+      with:
+        packages: valgrind
+        version: '1.0'
 
     - name: Cache iai-callgrind-runner
       id: runner_cache
