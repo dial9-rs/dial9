@@ -10,12 +10,12 @@
 //! reactor/timer needed) rather than `tokio::time::sleep` -- that real timer
 //! is only on the disk-backend branch, which this module never uses.
 //!
-//! `shuttle_dump_resolves_exactly_once` still can't drive `run_triggered()`
-//! directly: its outer loop selects on `tokio::time::sleep_until`, a real
-//! timer shuttle doesn't model. It drives `drain_matching`/`resolve_dump` by
-//! hand instead, minus that outer select. The processor pipeline itself
-//! never takes a retryable-failure path in either scenario, which is the
-//! only other place `process_segments` awaits a real `tokio::time::sleep`.
+//! `shuttle_dump_resolves_exactly_once` drives the real `run_triggered()`,
+//! including its outer `select!` on stop/`sleep_until`/`wait_for_more` --
+//! `primitives::time` and `shuttle_select!` make both shuttle-safe. The
+//! processor pipeline itself never takes a retryable-failure path in either
+//! scenario, which is the only other place `process_segments` awaits a real
+//! `tokio::time::sleep`.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -170,34 +170,19 @@ crate::shuttle_test! {
                 .await
                 .expect("initialize worker");
 
-                let mut rx = worker.trigger.take().expect("triggered mode");
-                let mut dumps: Vec<ActiveDump> = Vec::new();
-
-                // Mirrors `run_triggered`'s match+resolve step (see that fn),
-                // minus the outer `tokio::select!` on stop/sleep_until/
-                // wait_for_more.
-                while let Some(req) = rx.rx.recv().await {
-                    dumps.push(ActiveDump::register(req));
-                    let retry_hold = worker.drain_matching(&mut dumps).await;
-                    let now = tokio::time::Instant::now();
-                    let mut i = 0;
-                    while i < dumps.len() {
-                        let held = !retry_hold.is_empty() && retry_hold.contains(&dumps[i].id);
-                        if dumps[i].due(now) && !held {
-                            worker.resolve_dump(dumps.swap_remove(i)).await;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                }
+                let rx = worker.trigger.take().expect("triggered mode");
+                worker.run_triggered(rx).await;
             });
         });
 
         for w in writers {
             w.join().unwrap();
         }
-        fs.mark_writer_done();
+        // Must join before marking the writer done: `run_triggered` checks
+        // `writer_done()` at the top of its loop and rejects any
+        // not-yet-registered request with `WorkerStopped`.
         trigger_handle.join().unwrap();
+        fs.mark_writer_done();
         worker.join().unwrap();
 
         assert!(
