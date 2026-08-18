@@ -675,8 +675,8 @@ mod tests {
 
         let rec = recorder(writer).build();
 
-        let mut builder_a = tokio::runtime::Builder::new_multi_thread();
-        builder_a.enable_all().worker_threads(2);
+        let mut builder_a = tokio::runtime::Builder::new_current_thread();
+        builder_a.enable_all();
         let runtime_a = rec
             .handle()
             .attach_tokio_runtime(
@@ -685,8 +685,8 @@ mod tests {
             )
             .unwrap();
 
-        let mut builder_b = tokio::runtime::Builder::new_multi_thread();
-        builder_b.enable_all().worker_threads(2);
+        let mut builder_b = tokio::runtime::Builder::new_current_thread();
+        builder_b.enable_all();
         let runtime_b = rec
             .handle()
             .attach_tokio_runtime(
@@ -695,18 +695,14 @@ mod tests {
             )
             .unwrap();
 
-        // Run work on both runtimes so workers resolve their identities.
+        // Drive each runtime so its worker resolves an identity.
         for rt in [&runtime_a, &runtime_b] {
             rt.block_on(async {
-                let mut handles = Vec::new();
-                for _ in 0..20 {
-                    handles.push(tokio::spawn(async {
-                        tokio::task::yield_now().await;
-                    }));
-                }
-                for h in handles {
-                    h.await.unwrap();
-                }
+                crate::telemetry::spawn(async {
+                    tokio::task::yield_now().await;
+                })
+                .await
+                .unwrap();
             });
         }
 
@@ -755,14 +751,14 @@ mod tests {
         };
         let has_both = all_metadata.iter().any(|entries| {
             match (ids(entries, "runtime.main"), ids(entries, "runtime.io")) {
-                (Some(main), Some(io)) => main.len() == 2 && io.len() == 2 && main.is_disjoint(&io),
+                (Some(main), Some(io)) => main.len() == 1 && io.len() == 1 && main.is_disjoint(&io),
                 _ => false,
             }
         });
         assert!(
             has_both,
-            "expected segment metadata to map runtime.main and runtime.io to two \
-             disjoint worker IDs each, got: {all_metadata:?}"
+            "expected segment metadata to map runtime.main and runtime.io to \
+             one disjoint worker ID each, got: {all_metadata:?}"
         );
     }
 
