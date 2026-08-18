@@ -31,26 +31,32 @@ A report is a **folder**, not a single file:
 ```
 report/
 ├── report.html
-├── viewer.html              # full dial9 viewer
+├── viewer.html              # built canonical viewer entry
+├── flamegraph.html          # built canonical flamegraph entry
 ├── flamegraph.css
+├── assets/                  # Vite bundles used by both entries
 ├── decode.js
 ├── trace_parser.js
 ├── trace_analysis.js
-├── flamegraph.js
-├── format.js                # required by viewer.html
-├── panel_layout.js          # required by viewer.html
+├── flamegraph.js             # root JS files support the standalone recipes
 ├── traces/
 │   └── full.bin             # may also have sliced files
 └── flamegraphs/
     └── finding-1.html       # standalone flamegraph (one per finding)
 ```
 
-Copy viewer and its dependencies from the dial9-viewer `ui/` directory into the report folder:
+Build the UI, copy the canonical entries with their bundles, then copy the
+shared helpers used by the standalone flamegraph recipes below. The source HTML
+entries are not portable by themselves because they import TypeScript that Vite
+must bundle first.
 
 ```bash
-cp dial9-viewer/ui/{viewer,flamegraph}.html report/
-cp dial9-viewer/ui/public/flamegraph.css report/
-cp dial9-viewer/ui/{decode,trace_parser,trace_analysis,flamegraph,format,panel_layout}.js report/
+(cd dial9-viewer/ui && npm ci && npm run build)
+cp dial9-viewer/ui/dist/{viewer,flamegraph}.html report/
+cp dial9-viewer/ui/dist/flamegraph.css report/
+mkdir -p report/assets
+cp -R dial9-viewer/ui/dist/assets/. report/assets/
+cp dial9-viewer/ui/{decode,trace_parser,trace_analysis,flamegraph}.js report/
 ```
 
 Slice traces into `traces/` so the report is portable and small.
@@ -100,7 +106,9 @@ a:hover { text-decoration: underline; }
 
 ## Linking to the full viewer
 
-The report folder includes `viewer.html` and all its dependencies. This lets you deep-link into the full interactive viewer for any time window, served from the same folder.
+The report folder includes the built `viewer.html` and its `assets/`. This lets
+you deep-link into the full interactive viewer for any time window, served from
+the same folder.
 
 ### Canonical link template
 
@@ -143,15 +151,20 @@ into a report keep resolving.
 | Param | Description |
 |-------|-------------|
 | `trace` | Relative path or URL to a `.bin` trace file (fetched via `fetch()`); repeatable, N values parse as one trace |
-| `start` | Start of time range filter (absolute monotonic ns) |
-| `end` | End of time range filter (absolute monotonic ns) |
+| `start` | Visible viewport start (absolute monotonic ns) |
+| `end` | Visible viewport end (absolute monotonic ns) |
+| `data-start` | Optional parse-time lower bound (absolute monotonic ns) |
+| `data-end` | Optional parse-time upper bound (absolute monotonic ns) |
+| `task` | Selected task id (integer or `0x` hex) |
 | `svc` | Service name (display label) |
 | `host` | Host name (display label) |
 | `from` | Human-readable wall-clock start (display only) |
 | `to` | Human-readable wall-clock end (display only) |
 | `segs` | Segment COUNT as an integer string (display only) - NOT a list of segment keys |
 
-**`?worker=`, `?task=`, and `?source=` do NOT exist.** Do not invent them — they will be silently ignored. Selection/highlight params do not exist yet either: the contract reserves hash keys (`sel.*`, `vp`) that land with the migrated viewer; until then a time window is the finest link granularity.
+**`?worker=` and `?source=` do NOT exist.** Do not invent them — they will be
+silently ignored. The viewer supports additional selection and analysis fields;
+use the authoritative URL contract instead of guessing their names.
 
 ### Deep-linking the standalone flamegraph page
 
@@ -169,9 +182,9 @@ than hand-assembling the path; zoom restore requires the same
    target="_blank">CPU flamegraph for this window</a>
 ```
 
-On migrated (chunk-1+) pages the same zoom state also travels in the URL
-hash as `#v=1&fg.w=<path>`; emit the `worker-zoom` query form in reports -
-it works on both page generations.
+The same zoom state can travel in the URL hash as `#v=1&fg.w=<path>`; emit the
+stable `worker-zoom` query form in reports for compatibility with existing
+links.
 
 ### Limitation
 
@@ -522,7 +535,7 @@ a:hover { text-decoration: underline; }
 
 - **Don't inline trace bytes as base64.** Traces are megabytes; use sliced `.bin` files in `traces/`.
 - **Don't render flamegraphs from scratch with CSS bars.** Use the standalone HTML flamegraph pattern — it produces real interactive flamegraphs.
-- **Don't invent viewer URL params.** Only `trace`, `start`, `end`, `svc`, `host`, `from`, `to`, `segs` exist (plus `worker-zoom`/`offworker-zoom` on the flamegraph page). There is no `?worker=`, `?task=`, or `?source=`. The authoritative list is the URL contract in `dial9-viewer/ui/README.md`.
+- **Don't invent viewer URL params.** There is no `?worker=` or `?source=`. The authoritative list, including task and analysis selection fields, is the URL contract in `dial9-viewer/ui/README.md`.
 - **Don't copy the full multi-MB trace into the report folder.** Slice it to the relevant time window.
 - **Don't rely on `file://`.** Reports fetch trace files via HTTP. Tell users to view via `dial9 report serve <folder>` (or `python3 -m http.server`).
-- **Don't omit `viewer.html` + its deps from the report folder if you include viewer deep-links** — the link will 404.
+- **Don't omit the built `viewer.html` + `assets/` from the report folder if you include viewer deep-links** — the page will not load.

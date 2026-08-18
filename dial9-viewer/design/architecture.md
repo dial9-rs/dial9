@@ -9,7 +9,12 @@
 
 ## Web UI
 
-The viewer is a single-page app (`viewer.html`) served by a Rust/Axum HTTP server. The server's role is trace storage and retrieval; all parsing and analysis runs client-side in the browser using the same JS libraries (`trace_parser.js`, `trace_analysis.js`) as the agent toolkit.
+The web UI is a Vite/TypeScript multi-page app served by a Rust/Axum HTTP
+server. Its root HTML files are the canonical entries for the trace browser,
+viewer, flamegraph, Tokio Stats, and Span Explorer. The server's role is trace
+storage and retrieval; parsing and analysis run client-side through typed seams
+over the same shared JS libraries (`trace_parser.js`, `trace_analysis.js`) used
+by the agent toolkit.
 
 The server exposes a REST API under `/api/` for browsing S3 prefixes, searching traces by metadata, and fetching trace binaries. The API is usable independently via `curl` or scripts for automation without the browser.
 
@@ -27,11 +32,19 @@ Every time-based panel in the viewer — timeline header, worker lanes, span pan
 x=0          x=LABEL_W                     x=W-sb    x=W
 ```
 
-`LABEL_W = 100` is the canonical left-gutter width. The invariant is enforced by the shared helper in `ui/panel_layout.js` (`makeTimePanelLayout`), which produces the coordinate-conversion functions (`nsToPanelX`, `panelXToNs`) used by every panel. The browser-side wrapper `timePanelLayout(panel, scrollbarW)` in `viewer.html` adds DOM-reading and canvas-sizing on top.
+`LABEL_W = 100` is the canonical left-gutter width. The shared helper in
+`ui/panel_layout.js` (`makeTimePanelLayout`) owns the coordinate math. Its typed
+wrapper in `ui/src/lib/canvas/layout.ts` is the single geometry producer for the
+canonical viewer; components receive measured widths and use its
+`nsToPanelX`/`panelXToNs` mapping.
 
-Worker lanes are a slight exception: they use a DOM flex layout (`lane-label` div of width `LABEL_W`, then a `lane-content` div hosting the canvas) rather than a single canvas with an internal offset. The end result — time axis starts at x=LABEL_W — is identical; new panels should prefer the `timePanelLayout` pattern.
+Track canvases sit after a DOM label gutter of width `LABEL_W`, while shared
+geometry keeps their draw areas and the worker lanes aligned. New time-based
+components must obtain their mapping from `ui/src/lib/canvas/layout.ts`.
 
-Regression history: the span panel was once built with `padding-left: 200px` instead of `100px`, shifting its time axis ~100px right of every other panel. `ui/tests/core/panel_layout.test.ts` now guards the invariant with unit tests.
+Regression history: the span panel was once built with `padding-left: 200px`
+instead of `100px`, shifting its time axis ~100px right of every other panel.
+`ui/src/lib/canvas/layout.test.ts` guards the invariant with unit tests.
 
 ## Agent skills (steering)
 

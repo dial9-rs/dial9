@@ -1,8 +1,8 @@
 // Browser page entry: the S3 trace browser as a Vite page module.
 //
-// Boot order: dual-UI switch mount, `?trace=` passthrough, state restore
-// from the URL, then the /api/config bootstrap chain (creds UI -> region
-// detect -> prefix discovery -> auto-search).
+// Boot order: `?trace=` passthrough, state restore from the URL, then the
+// /api/config bootstrap chain (creds UI -> region detect -> prefix discovery
+// -> auto-search).
 
 import "../../styles/browser.css";
 import { createActions } from "./actions.js";
@@ -33,10 +33,6 @@ import {
   readPlainSourceScope,
   sourceScopeFromStored,
 } from "../../lib/trace/source-scope.js";
-
-// Dual-UI switch: render the "Switch to legacy UI" control. The
-// ui-switch.js <head> auto-boot is a no-op on this off-root path.
-window.D9UiSwitch?.mount({ side: "new" });
 
 // `?trace=` passthrough - redirect to the viewer preserving all params
 // (including repeated `trace=` components). Relative target resolves to

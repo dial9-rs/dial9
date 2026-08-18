@@ -68,6 +68,7 @@ export interface QueueData {
   spawnLocations: ReadonlyMap<string, string>;
   /** True when the trace carries the active-task timeline. */
   hasTaskTracking: boolean;
+  hasLocalQueueDepth: boolean;
 }
 
 /** The empty (no-trace) queue data. */
@@ -80,6 +81,7 @@ export const EMPTY_QUEUE_DATA: QueueData = {
   taskSpawnLocs: new Map(),
   spawnLocations: new Map(),
   hasTaskTracking: false,
+  hasLocalQueueDepth: false,
 };
 
 /**
@@ -105,14 +107,17 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     : spanResult.queueSamples;
 
   // Merge every worker's local-queue series into one t-sorted timeline, built
-  // ONCE here so the per-frame render never re-merges.
+  // ONCE here so the per-frame render never re-merges. Skipped when the trace
+  // has no local-queue measurements (the per-event values are sentinel zeros).
   const merged: MergedLocalSample[] = [];
-  for (const w of workerIds) {
-    const samples = spanResult.workerQueueSamples[w];
-    if (!samples) continue;
-    for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+  if (trace.hasLocalQueueDepth) {
+    for (const w of workerIds) {
+      const samples = spanResult.workerQueueSamples[w];
+      if (!samples) continue;
+      for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+    }
+    merged.sort((a, b) => a.t - b.t);
   }
-  merged.sort((a, b) => a.t - b.t);
 
   return {
     workerIds,
@@ -123,6 +128,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,
     hasTaskTracking: trace.hasTaskTracking,
+    hasLocalQueueDepth: trace.hasLocalQueueDepth,
   };
 }
 
@@ -167,7 +173,10 @@ export interface QueueRenderModel {
   numBuckets: number;
   /** Plotted global value per pixel column (carry-forward step). */
   global: readonly number[];
-  /** Plotted max-local value per pixel column (carry-forward step). */
+  /**
+   * Plotted max-local value per pixel column (carry-forward step). Empty when
+   * the trace has no per-worker queue depth.
+   */
   local: readonly number[];
   /** Shared magnitude for the global + local series (>= 1). */
   maxQ: number;
@@ -306,7 +315,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   const viewDur = viewEnd - viewStart;
 
   if (numBuckets === 0 || viewDur <= 0) {
-    return { numBuckets, global, local, maxQ: 1, activeTask: null, hasData: false };
+    return {
+      numBuckets,
+      global,
+      local: data.hasLocalQueueDepth ? local : [],
+      maxQ: 1,
+      activeTask: null,
+      hasData: false,
+    };
   }
 
   let hasData = false;
@@ -332,25 +348,30 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   }
 
   // ── Local queue: single pass over the merged timeline ───────────────────
-  const merged = data.mergedLocalSamples;
-  runningMax.reset(data.workerIds);
-  // Seed each worker from the sample just before viewStart.
-  const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
-  for (let i = mergeStart; i < merged.length; i++) {
-    const s = merged[i]!;
-    if (s.t >= viewStart) break;
-    runningMax.set(s.w, s.local);
-  }
-  let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
-  for (let bi = 0; bi < numBuckets; bi++) {
-    const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
-    while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
-      const s = merged[sampleIdx++]!;
+  // Only when the trace measures local depth: without the flag, local-queue
+  // values are sentinel zeros, not measurements, and must not mark buckets as
+  // having data. bucketLocal stays all-zero (ensureScratch).
+  if (data.hasLocalQueueDepth) {
+    const merged = data.mergedLocalSamples;
+    runningMax.reset(data.workerIds);
+    // Seed each worker from the sample just before viewStart.
+    const mergeStart = Math.max(0, lowerBoundT(merged, viewStart) - 1);
+    for (let i = mergeStart; i < merged.length; i++) {
+      const s = merged[i]!;
+      if (s.t >= viewStart) break;
       runningMax.set(s.w, s.local);
-      bucketHasData[bi] = 1;
-      hasData = true;
     }
-    bucketLocal[bi] = runningMax.value();
+    let sampleIdx = Math.max(mergeStart, lowerBoundT(merged, viewStart));
+    for (let bi = 0; bi < numBuckets; bi++) {
+      const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
+      while (sampleIdx < merged.length && merged[sampleIdx]!.t < bucketEnd) {
+        const s = merged[sampleIdx++]!;
+        runningMax.set(s.w, s.local);
+        bucketHasData[bi] = 1;
+        hasData = true;
+      }
+      bucketLocal[bi] = runningMax.value();
+    }
   }
 
   // maxQ across visible buckets, and the carry-forward that makes
@@ -374,7 +395,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
   const activeTask = buildActiveTaskModel(data, viewStart, viewEnd, viewDur, drawW);
   if (activeTask !== null) hasData = true;
 
-  return { numBuckets, global, local, maxQ, activeTask, hasData };
+  return {
+    numBuckets,
+    global,
+    local: data.hasLocalQueueDepth ? local : [],
+    maxQ,
+    activeTask,
+    hasData,
+  };
 }
 
 /**
@@ -478,6 +506,8 @@ export function computeSpawnedTasks(
 
 /** One queue-legend entry: a swatch encoding + its meaning (matches the draw). */
 export interface QueueLegendEntry {
+  /** Which series this explains, so a caller can drop the ones it will not draw. */
+  key: "global" | "local" | "activeTask";
   /** Swatch fill (CSS color). */
   swatch: string;
   label: string;
@@ -491,9 +521,9 @@ export interface QueueLegendEntry {
  * -> active-task, the draw order.
  */
 export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
-  { swatch: "#4fc3f7", label: "Global queue", shape: "area" },
-  { swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
-  { swatch: "#81c784", label: "Active tasks", shape: "line" },
+  { key: "global", swatch: "#4fc3f7", label: "Global queue", shape: "area" },
+  { key: "local", swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
+  { key: "activeTask", swatch: "#81c784", label: "Active tasks", shape: "line" },
 ];
 
 export {

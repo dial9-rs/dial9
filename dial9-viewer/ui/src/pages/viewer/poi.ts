@@ -25,7 +25,7 @@ import type {
 } from "../../types/trace.js";
 import type { PoiSlice, PoiSortKey, ViewportSlice } from "../../types/state.js";
 
-/** The five detector filters, in `#poi-filter` option order. */
+/** The five detector filters, in issues-rail display order. */
 export const POI_FILTERS: readonly PointOfInterestType[] = [
   "sched",
   "long-poll",

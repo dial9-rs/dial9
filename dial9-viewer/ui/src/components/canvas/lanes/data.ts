@@ -71,6 +71,7 @@ export interface LaneData {
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
+  hasLocalQueueDepth: boolean;
 }
 
 /**
@@ -133,5 +134,6 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
     hasCpuTime: trace.hasCpuTime,
     hasSchedWait: trace.hasSchedWait,
     hasTaskTracking: trace.hasTaskTracking,
+    hasLocalQueueDepth: trace.hasLocalQueueDepth,
   };
 }

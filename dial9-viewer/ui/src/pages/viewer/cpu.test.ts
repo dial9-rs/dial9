@@ -1,11 +1,5 @@
-// Tests for the Process CPU usage track. Two checks are asserted mechanically
-// here: (1) the avg/max readout figures match the legacy
-// `visibleCpuStats`/`fmtCpu*`/info-label output to the digit (the
-// behavioral-diff target), and (2) the render obeys the render discipline -
-// bars via the run-length COALESCER (contiguous equal bars fold), grid +
-// capacity via the BATCHED-STROKE path (one stroke() per style, not one per
-// line). The carried obligation (surface a truncated/oversized window, never
-// paint it as complete) is exercised directly on the renderer.
+// Tests for the Process CPU usage track: readout math and formatting, render
+// coalescing/batching, and partial-window reporting.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -58,9 +52,9 @@ function iv(
   } as ProcessCpuUsageInterval;
 }
 
-// ── visibleCpuStats: the exact behavioral-diff core ──────────────────────
+// ── visibleCpuStats ──────────────────────────────────────────────────────
 
-describe("visibleCpuStats (legacy visibleCpuStats, verbatim)", () => {
+describe("visibleCpuStats", () => {
   it("is the overlap-weighted mean and the peak over the visible window", () => {
     // Two equal-length intervals fully in view: mean of 2 and 4 = 3, max 4.
     const intervals = [iv(0, 100, 2), iv(100, 200, 4)];
@@ -96,8 +90,7 @@ describe("visibleCpuStats (legacy visibleCpuStats, verbatim)", () => {
   });
 
   it("binary-searches the left edge (many intervals before a far-right view)", () => {
-    // 1000 contiguous 100ns intervals; the view is the very last one. The old
-    // code skipped all 999 before it each frame; the result must be unchanged.
+    // 1000 contiguous 100ns intervals; the view is the very last one.
     const intervals = Array.from({ length: 1000 }, (_, i) => iv(i * 100, i * 100 + 100, i % 7));
     const stats = visibleCpuStats(intervals, 99_900, 100_000);
     expect(stats.maxCores).toBe(999 % 7);
@@ -107,7 +100,7 @@ describe("visibleCpuStats (legacy visibleCpuStats, verbatim)", () => {
 
 // ── Formatting (fmtCpuCores / fmtCpuPercent) ─────────────────────────────
 
-describe("fmtCpuCores / fmtCpuPercent (verbatim ports)", () => {
+describe("fmtCpuCores / fmtCpuPercent", () => {
   it("fmtCpuCores: 2 decimals under 10, 1 at/above, trailing zeros stripped", () => {
     expect(fmtCpuCores(0)).toBe("0");
     expect(fmtCpuCores(0.5)).toBe("0.5");
@@ -130,27 +123,27 @@ describe("fmtCpuCores / fmtCpuPercent (verbatim ports)", () => {
   });
 });
 
-describe("cpuReadoutText (legacy #cpu-panel-info string, exact)", () => {
-  const DOT = "·"; // middle dot the legacy label joins with
+describe("cpuReadoutText", () => {
+  const DOT = "·";
 
   it("includes the percent clause only when capacity is known", () => {
     const withCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, 4);
-    expect(withCap).toBe(`avg 1.5 cores ${DOT} avg 37.5% ${DOT} max 3`);
+    expect(withCap).toBe(`avg 1.5 ${DOT} avg 37.5% ${DOT} max 3`);
 
     const noCap = cpuReadoutText({ avgCores: 1.5, maxCores: 3 }, null);
-    expect(noCap).toBe(`avg 1.5 cores ${DOT} max 3`);
+    expect(noCap).toBe(`avg 1.5 ${DOT} max 3`);
   });
 
-  it("clamps the percent at 100 (legacy Math.min)", () => {
+  it("clamps the percent at 100", () => {
     // avg 10 cores on a 4-core box = 250% -> clamped to 100.0%.
     const s = cpuReadoutText({ avgCores: 10, maxCores: 12 }, 4);
-    expect(s).toBe(`avg 10 cores ${DOT} avg 100.0% ${DOT} max 12`);
+    expect(s).toBe(`avg 10 ${DOT} avg 100.0% ${DOT} max 12`);
   });
 });
 
 // ── Hover content ────────────────────────────────────────────────────────
 
-describe("cpuIntervalAt (legacy findProcessCpuIntervalAt binary search)", () => {
+describe("cpuIntervalAt", () => {
   const intervals = [iv(0, 100, 1), iv(100, 200, 2), iv(200, 300, 3)];
 
   it("finds the interval spanning a timestamp (edges inclusive)", () => {
@@ -166,7 +159,7 @@ describe("cpuIntervalAt (legacy findProcessCpuIntervalAt binary search)", () => 
   });
 });
 
-describe("cpuIntervalTooltip (legacy cpuIntervalTooltipHtml, structured)", () => {
+describe("cpuIntervalTooltip", () => {
   it("adds the Total CPU row only when capacity is known", () => {
     const interval = iv(0, 100, 2, { totalPercent: 50 });
     const withCap = cpuIntervalTooltip(interval, 4);
@@ -186,7 +179,7 @@ describe("cpuIntervalTooltip (legacy cpuIntervalTooltipHtml, structured)", () =>
 
 // ── Bar colour ramp ──────────────────────────────────────────────────────
 
-describe("cpuBarColor (legacy load ramp, verbatim)", () => {
+describe("cpuBarColor", () => {
   it("ramps blue at zero load to pink/red at capacity", () => {
     expect(cpuBarColor(0, 4, 4)).toBe("rgba(79, 195, 247, 0.42)");
     expect(cpuBarColor(4, 4, 4)).toBe("rgba(255, 115, 97, 0.42)");
@@ -228,7 +221,7 @@ describe("nsToDrawX (alignment invariant)", () => {
 });
 
 // A recording 2D context capturing the ops the CPU render makes (node has no
-// canvas). Enough to assert the stroke batching + coalesced fills.
+// canvas). Enough to assert stroke geometry/batching + coalesced fills.
 interface RectCall {
   x: number;
   y: number;
@@ -240,12 +233,20 @@ interface TextCall {
   x: number;
   y: number;
 }
+interface SegmentCall {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
 interface Recording {
   fillRects: RectCall[];
   strokes: number;
   beginPaths: number;
   labels: TextCall[];
   dashes: number[][];
+  segments: SegmentCall[];
+  strokeWidths: number[];
 }
 function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
   const rec: Recording = {
@@ -254,7 +255,10 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     beginPaths: 0,
     labels: [],
     dashes: [],
+    segments: [],
+    strokeWidths: [],
   };
+  let point: { x: number; y: number } | null = null;
   const ctx = {
     fillStyle: "",
     strokeStyle: "",
@@ -267,11 +271,20 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
     },
     beginPath() {
       rec.beginPaths++;
+      point = null;
     },
-    moveTo() {},
-    lineTo() {},
+    moveTo(x: number, y: number) {
+      point = { x, y };
+    },
+    lineTo(x: number, y: number) {
+      if (point !== null) {
+        rec.segments.push({ x1: point.x, y1: point.y, x2: x, y2: y });
+      }
+      point = { x, y };
+    },
     stroke() {
       rec.strokes++;
+      rec.strokeWidths.push(ctx.lineWidth);
     },
     setLineDash(segments: number[]) {
       rec.dashes.push([...segments]);
@@ -306,23 +319,24 @@ describe("renderCpuTrack", () => {
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs([], null), false);
     expect(rec.fillRects.length).toBe(1); // background only
     expect(rec.strokes).toBe(0);
-    expect(readout).toBe("avg 0 cores · max 0");
+    expect(readout).toBe("avg 0 · max 0");
   });
 
   it("batches the grid + capacity strokes: one stroke() per STYLE", () => {
     const { ctx, rec } = recordingCtx();
-    // 3 grid lines + 1 capacity line = 4 primitives, but 2 styles.
+    // The 3 grid lines + capacity line are 2 reference styles; the bar top is
+    // a third style, still one stroke rather than one per primitive.
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], 4), true);
-    expect(rec.strokes).toBe(2); // NOT 4 - the whole point of the batcher
+    expect(rec.strokes).toBe(3); // grid + capacity + one bar style
     // The capacity line is dashed exactly once, then reset to solid.
     expect(rec.dashes.some((d) => d.length > 0)).toBe(true);
     expect(rec.dashes[rec.dashes.length - 1]).toEqual([]);
   });
 
-  it("draws only the grid stroke when capacity is unknown (no capacity line)", () => {
+  it("omits the capacity stroke when capacity is unknown", () => {
     const { ctx, rec } = recordingCtx();
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], null), true);
-    expect(rec.strokes).toBe(1); // grid only
+    expect(rec.strokes).toBe(2); // grid + one bar style, no capacity line
   });
 
   it("folds contiguous equal bars via the coalescer but keeps distinct ones", () => {
@@ -361,13 +375,45 @@ describe("renderCpuTrack", () => {
     expect(barFills(diff.rec).length).toBe(4);
   });
 
-  it("returns the readout it painted (mirror source)", () => {
+  it("keeps a sub-pixel fill and its outline visible at the baseline", () => {
+    const { ctx, rec } = recordingCtx();
+    renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 0.001)], 11), true);
+
+    const tinyFill = rec.fillRects.find((r) => r.y > 0);
+    expect(tinyFill?.h).toBeGreaterThan(0);
+    expect(tinyFill?.h).toBeLessThan(1);
+    const baseline = geo().height - 8;
+    expect(
+      rec.segments.some((s) => s.y2 < baseline && s.y2 >= baseline - 1),
+    ).toBe(true);
+  });
+
+  it("connects adjacent bar tops as a continuous step outline, but preserves gaps", () => {
+    const render = (intervals: ProcessCpuUsageInterval[]): Recording => {
+      const { ctx, rec } = recordingCtx();
+      renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
+      return rec;
+    };
+    const verticalCount = (rec: Recording) =>
+      rec.segments.filter(
+        (s) => Math.abs(s.x2 - s.x1) < 1e-6 && Math.abs(s.y2 - s.y1) > 1e-6,
+      ).length;
+
+    const adjacent = render([iv(0, 500, 1), iv(500, 1000, 2)]);
+    expect(verticalCount(adjacent)).toBe(1);
+    expect(adjacent.strokeWidths).toContain(1.5);
+
+    const gapped = render([iv(0, 400, 1), iv(600, 1000, 2)]);
+    expect(verticalCount(gapped)).toBe(0);
+  });
+
+  it("returns the readout for the DOM header", () => {
     const { ctx } = recordingCtx();
     const intervals = [iv(0, 500, 2), iv(500, 1000, 4)];
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
     const stats = visibleCpuStats(intervals, 0, 1000);
     expect(readout).toBe(cpuReadoutText(stats, 4));
-    expect(readout).toBe("avg 3 cores · avg 75.0% · max 4");
+    expect(readout).toBe("avg 3 · avg 75.0% · max 4");
   });
 });
 
@@ -397,97 +443,6 @@ describe("renderCpuTrack surfaces a windowed view (windowing obligation)", () =>
     const win: CpuWindow = { truncatedAt: null, oversized: true };
     renderCpuTrack(ctx, geo(), 0, 1000, inputs(trace, 4, win), true);
     expect(rec.labels.some((l) => l.text === "partial window")).toBe(true);
-  });
-});
-
-// ── Behavioral diff: readout EXACT vs legacy ─────────────────────────────
-//
-// The demo trace carries no ProcessResourceUsageEvent data (the legacy CPU
-// panel is hidden for it), and no other repo fixture does either, so a live
-// real-trace diff is not available. Instead this diffs the ported readout
-// against the LEGACY functions copied VERBATIM from viewer.html (fmtCpuCores,
-// fmtCpuPercent, visibleCpuStats, the info string) over a realistic interval
-// series at many viewports. The readout is a pure function of (intervals,
-// viewport, capacity), so this is complete behavioral coverage.
-
-// --- verbatim legacy copies (viewer.html) ---
-function legacyFmtCpuCores(value: number): string {
-  if (!Number.isFinite(value)) return "-";
-  return value
-    .toFixed(value >= 10 ? 1 : 2)
-    .replace(/(\.\d*?)0+$/, "$1")
-    .replace(/\.$/, "");
-}
-function legacyFmtCpuPercent(value: number): string {
-  if (!Number.isFinite(value)) return "-";
-  return `${value.toFixed(1)}%`;
-}
-function legacyVisibleCpuStats(
-  intervals: readonly ProcessCpuUsageInterval[],
-  viewStart: number,
-  viewEnd: number,
-): { avgCores: number; maxCores: number } {
-  let maxCores = 0;
-  let totalOverlapNs = 0;
-  let weightedCoresNs = 0;
-  for (const interval of intervals) {
-    if (interval.end < viewStart) continue;
-    if (interval.start > viewEnd) break;
-    const overlap =
-      Math.min(interval.end, viewEnd) - Math.max(interval.start, viewStart);
-    if (!(overlap > 0)) continue;
-    if (interval.cores > maxCores) maxCores = interval.cores;
-    totalOverlapNs += overlap;
-    weightedCoresNs += interval.cores * overlap;
-  }
-  const avgCores = totalOverlapNs > 0 ? weightedCoresNs / totalOverlapNs : 0;
-  return { avgCores, maxCores };
-}
-function legacyReadout(
-  stats: { avgCores: number; maxCores: number },
-  capacity: number | null,
-): string {
-  // Copied byte-for-byte from viewer.html (the middle dot is the literal
-  // U+00B7 that ships in the legacy label).
-  const avgPct =
-    capacity != null ? Math.min(100, (stats.avgCores / capacity) * 100) : null;
-  const pctText = avgPct != null ? ` · avg ${legacyFmtCpuPercent(avgPct)}` : "";
-  return `avg ${legacyFmtCpuCores(stats.avgCores)} cores${pctText} · max ${legacyFmtCpuCores(stats.maxCores)}`;
-}
-
-describe("readout behavioral diff: ported == legacy, to the digit", () => {
-  // A realistic, contiguous avg-cores series (varying loads incl. >capacity).
-  const series: ProcessCpuUsageInterval[] = [];
-  for (let i = 0; i < 60; i++) {
-    const cores = 0.5 + ((i * 37) % 90) / 10; // 0.5 .. 9.4, non-round
-    series.push(iv(i * 1000, (i + 1) * 1000, cores));
-  }
-  const viewports: Array<[number, number]> = [
-    [0, 60000], // whole
-    [0, 30000], // left half
-    [30000, 60000], // right half
-    [12345, 41000], // arbitrary offset
-    [5000, 5000], // degenerate (zero-span)
-    [59000, 60000], // last interval only
-    [-1000, 1000], // spilling off the left
-    [500, 2500], // straddling three intervals
-  ];
-  const capacities: Array<number | null> = [null, 4, 8, 0.5];
-
-  for (const cap of capacities) {
-    for (const [vs, ve] of viewports) {
-      it(`cap=${cap} view=[${vs},${ve}] matches legacy`, () => {
-        const mine = cpuReadoutText(visibleCpuStats(series, vs, ve), cap);
-        const legacy = legacyReadout(legacyVisibleCpuStats(series, vs, ve), cap);
-        expect(mine).toBe(legacy);
-      });
-    }
-  }
-
-  it("also matches for an empty series (panel-hidden analog)", () => {
-    expect(cpuReadoutText(visibleCpuStats([], 0, 1000), 4)).toBe(
-      legacyReadout(legacyVisibleCpuStats([], 0, 1000), 4),
-    );
   });
 });
 

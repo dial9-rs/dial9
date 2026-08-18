@@ -1,15 +1,18 @@
-// The flamegraph page's URL view-state wiring, in two halves:
+// The flamegraph page's URL view-state wiring:
 //
 // - restoreFgStateFromUrl: on load, resolve the effective view state from the
-//   URL (versioned hash wins per field, legacy query params fill the gaps) and
+//   URL (versioned hash wins per field, stable query params fill the gaps) and
 //   drive the widget's applyViewState (zoom + inspect focus + search + spawn/
 //   runtime filters). Restore is SILENT: the widget suspends its onViewChange
 //   while applying, so restoring produces zero URL writes and keeps a shared
 //   link byte-stable on open.
 //
 // - createFgUrlSync: user view change -> store slice update -> ONE debounced
-//   history.replaceState carrying BOTH the legacy query params and the
+//   history.replaceState carrying BOTH the stable query params and the
 //   versioned hash.
+//
+// - createApiInspectSync: api-mode inspect focus <-> legacy query params,
+//   including retrying restore as aggregate snapshots arrive.
 //
 // Kept DOM-free (URL host, timer and frame scheduler injectable) so the
 // restore-on-load and view->URL paths are integration-testable under plain Node.
@@ -20,6 +23,7 @@ import {
   applyLegacyZoomToQuery,
   bindViewStateToUrl,
   resolveViewState,
+  windowUrlHost,
   type DebounceTimer,
   type UrlHost,
   type ViewState,
@@ -132,6 +136,91 @@ export interface FgUrlSync {
   dispose(): void;
 }
 
+type InspectFocus = NonNullable<FlamegraphViewState["inspect"]>;
+
+interface ApiInspectTarget extends FgStateTarget {
+  getViewState(): FlamegraphViewState;
+  getInspectFocus(): string | null;
+}
+
+function readInspect(params: URLSearchParams): InspectFocus | null {
+  const name = params.get("inspect");
+  if (!name) return null;
+  return { name, fullName: params.get("inspect_full") || name };
+}
+
+function writeInspect(params: URLSearchParams, focus: InspectFocus | null): void {
+  if (!focus) {
+    params.delete("inspect");
+    params.delete("inspect_full");
+    return;
+  }
+  params.set("inspect", focus.name);
+  if (focus.fullName && focus.fullName !== focus.name) {
+    params.set("inspect_full", focus.fullName);
+  } else {
+    params.delete("inspect_full");
+  }
+}
+
+/** Keep api-mode inspection in the query while aggregate trees stream in. */
+export function createApiInspectSync(
+  initialParams: URLSearchParams,
+  getTarget: () => ApiInspectTarget,
+  options: { host?: UrlHost } = {},
+) {
+  const host = options.host ?? windowUrlHost();
+  let pending = readInspect(initialParams);
+
+  function liveFocus(): InspectFocus | null {
+    return getTarget().getViewState().inspect ?? null;
+  }
+
+  function replaceCurrent(focus: InspectFocus | null): void {
+    const current = host.read();
+    const params = new URLSearchParams(current.search);
+    const previousInspect = params.get("inspect");
+    const previousInspectFull = params.get("inspect_full");
+    writeInspect(params, focus);
+    if (
+      params.get("inspect") === previousInspect &&
+      params.get("inspect_full") === previousInspectFull
+    ) {
+      return;
+    }
+    const search = params.toString();
+    const next = current.pathname + (search ? `?${search}` : "") + current.hash;
+    host.replace(next);
+  }
+
+  return {
+    onViewChange(): void {
+      pending = null;
+      replaceCurrent(liveFocus());
+    },
+    carryTo(params: URLSearchParams): void {
+      writeInspect(params, liveFocus() ?? pending);
+    },
+    preserveForTreeChange(): void {
+      pending = liveFocus() ?? pending;
+    },
+    restoreAfterTreeChange(): boolean {
+      if (!pending) return true;
+      const target = getTarget();
+      const key = pending.fullName || pending.name;
+      if (target.getInspectFocus() === key) {
+        pending = null;
+        return true;
+      }
+      const current = target.getViewState();
+      target.applyViewState({ ...current, inspect: pending }, { silent: true });
+      const restored = target.getInspectFocus() === key;
+      if (restored) pending = null;
+      return restored;
+    },
+  };
+}
+
 /**
  * Wire user view changes to the URL through a page-local store slice.
  * `getViewState` is read lazily on each change (the widget's live state is the
@@ -149,7 +238,7 @@ export function createFgUrlSync(
   const binding = bindViewStateToUrl(store, {
     slices: ["fgView"],
     project: (s) => fgViewToViewState(s.fgView),
-    // Keep the legacy params live alongside the hash.
+    // Keep the stable query params live alongside the hash.
     mirrorToQuery: applyLegacyZoomToQuery,
     ...(options.host !== undefined ? { host: options.host } : {}),
     ...(options.timer !== undefined ? { timer: options.timer } : {}),

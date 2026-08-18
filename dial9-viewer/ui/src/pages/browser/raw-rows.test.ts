@@ -11,8 +11,8 @@ import { nextSort, sortRawRows, toRawRow, toRawRows } from "./raw-rows.js";
 
 const KNOWN_KEY =
   "traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz";
-// The dev-server demo key: six components after the date -> unknown layout
-// (the legacy page mislabeled it Service=host-0).
+// The dev-server demo key has six components after the date, so its layout is
+// unknown rather than positionally mislabelled.
 const UNKNOWN_KEY =
   "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224600-0.bin.gz";
 
@@ -37,7 +37,7 @@ describe("toRawRow", () => {
 });
 
 describe("toRawRows", () => {
-  it("orders by trace-start epoch ascending (legacy default)", () => {
+  it("orders by trace-start epoch ascending by default", () => {
     const rows = toRawRows([
       { key: UNKNOWN_KEY, size: 1 }, // epoch 1744224600
       { key: KNOWN_KEY, size: 2 }, // epoch 1744224000
@@ -78,7 +78,7 @@ describe("sorting (amendment)", () => {
   const services = (sorted: ReturnType<typeof sortRawRows>) =>
     sorted.map((r) => r.parsedCols!.service);
 
-  it("null sort keeps the legacy default (epoch ascending)", () => {
+  it("null sort keeps the default epoch-ascending order", () => {
     expect(services(sortRawRows(rows, null))).toEqual(["api", "billing", "checkout"]);
   });
 

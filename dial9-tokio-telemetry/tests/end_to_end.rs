@@ -1,3 +1,5 @@
+#![cfg_attr(not(tokio_unstable), allow(unused_imports))]
+
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
@@ -9,6 +11,7 @@ use std::time::Duration;
 
 /// Run a known workload on an attached runtime, read the trace back, and verify
 /// basic consistency.
+#[cfg(tokio_unstable)]
 #[test]
 fn end_to_end_trace_matches_workload_and_metrics() {
     let dir = tempfile::tempdir().unwrap();
@@ -126,6 +129,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
 
 /// Regression test: TaskSpawn events emitted on the main thread (inside block_on)
 /// must appear in the trace.
+#[cfg(tokio_unstable)]
 #[test]
 fn task_spawn_events_from_main_thread_are_captured() {
     let (capture, batches) = capture_processor();
@@ -169,6 +173,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn task_terminate_events_are_captured() {
     let (capture, batches) = capture_processor();
@@ -258,6 +263,9 @@ fn custom_event_appears_in_trace() {
     assert_eq!(custom_count, 5, "expected 5 MyCustomEvent events in trace");
 }
 
+// The spawn audit is precisely the instrumented-vs-raw distinction, and raw
+// `tokio::spawn` tasks are only visible through tokio's spawn hook.
+#[cfg(tokio_unstable)]
 #[test]
 fn spawn_audit_detects_uninstrumented_spawns() {
     let dir = tempfile::tempdir().unwrap();

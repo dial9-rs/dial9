@@ -1,3 +1,5 @@
+#![cfg_attr(not(tokio_unstable), allow(unused_imports))]
+
 use dial9_tokio_telemetry::telemetry::{TokioAttachOptions, TokioHooks, recorder};
 use std::time::Duration;
 
@@ -57,6 +59,7 @@ fn on_thread_start_and_stop_fire() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn each_runtime_gets_own_hooks() {
     let count_a = Arc::new(AtomicUsize::new(0));
@@ -210,6 +213,7 @@ fn on_thread_unpark_fires() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn task_poll_hooks_fire() {
     let before_count = Arc::new(AtomicUsize::new(0));
@@ -258,6 +262,7 @@ fn task_poll_hooks_fire() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn task_lifecycle_hooks_fire() {
     let spawn_count = Arc::new(AtomicUsize::new(0));
@@ -312,6 +317,7 @@ fn task_lifecycle_hooks_fire() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn task_spawn_hook_fires_when_task_tracking_disabled() {
     let spawn_count = Arc::new(AtomicUsize::new(0));
@@ -356,6 +362,7 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn task_terminate_hook_fires_when_task_tracking_disabled() {
     let terminate_count = Arc::new(AtomicUsize::new(0));
@@ -571,6 +578,7 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
     );
 }
 
+#[cfg(tokio_unstable)]
 #[test]
 fn hook_stacking_task_meta_hooks_fire_in_order() {
     let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));

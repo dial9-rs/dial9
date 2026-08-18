@@ -1,7 +1,5 @@
-// The diff view's diff_zoom/diff_search URL codec. Scenarios mirror the frozen
-// node oracle (test_flamegraph_view_state.js, diff-view section): TAB-joined
-// root-inclusive zoom path, delete-on-absence, disjoint from the single-graph
-// namespace.
+// The diff view's diff_zoom/diff_search URL codec: TAB-joined root-inclusive
+// zoom path, delete-on-absence, and a namespace disjoint from the single graph.
 
 import { describe, it, expect } from "vitest";
 import { readDiffState, writeDiffState } from "./diff-state.js";

@@ -24,7 +24,9 @@ import type { ParsedTrace } from "../../types/trace.js";
 
 // A QueueData with only the fields a test needs; the model reads plain arrays.
 function queueData(over: Partial<QueueData> = {}): QueueData {
-  return { ...EMPTY_QUEUE_DATA, ...over };
+  // EMPTY_QUEUE_DATA is the no-trace default, where queue depth is
+  // unavailable. These fixtures stand in for a real trace, so opt it back on.
+  return { ...EMPTY_QUEUE_DATA, hasLocalQueueDepth: true, ...over };
 }
 
 describe("queueScaleY (#282: 0 must render a visible baseline)", () => {
@@ -65,7 +67,7 @@ describe("queueScaleY (#282: 0 must render a visible baseline)", () => {
   });
 });
 
-describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
+describe("buildQueueRenderModel", () => {
   it("returns no-data on an empty view or degenerate window", () => {
     const m = buildQueueRenderModel({
       data: queueData(),
@@ -126,7 +128,7 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
     expect(Math.max(...m.local)).toBe(7);
   });
 
-  it("reproduces legacy active-task maxTasks / startCount / points", () => {
+  it("tracks active-task start count, in-view peak, and points", () => {
     const m = buildQueueRenderModel({
       data: queueData({
         activeTaskSamples: [
@@ -158,9 +160,8 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
   });
 
   it("active-task window is bounded when panned far right (many samples before view)", () => {
-    // Dense samples before the view (the old code scanned all of them each
-    // frame); the binary-searched window must still seed startCount from the
-    // last pre-view sample and only emit in-view points.
+    // Dense samples before the view; the binary-searched window must still seed
+    // startCount from the last pre-view sample and only emit in-view points.
     const before = Array.from({ length: 1000 }, (_, i) => ({ t: i, count: i % 5 }));
     const inView = [{ t: 5000, count: 42 }, { t: 5050, count: 7 }];
     const m = buildQueueRenderModel({
@@ -176,7 +177,77 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
   });
 });
 
-describe("computeSpawnedTasks (legacy task-finding + grouping)", () => {
+// A sentinel 0 plotted as a real series draws a flat zero line, which reads as
+// "the local queues are empty" rather than "unmeasured".
+describe("local series when queue depth is unavailable", () => {
+  const samples = [
+    { t: 0, w: 0, local: 0 },
+    { t: 50, w: 0, local: 0 },
+  ];
+
+  it("drops the series when hasLocalQueueDepth is false", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        hasLocalQueueDepth: false,
+        workerIds: [0],
+        mergedLocalSamples: samples,
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 10,
+    });
+    expect(m.local).toEqual([]);
+  });
+
+  it("sentinel samples never mark buckets or reset the global carry", () => {
+    // One global sample at t=5, sentinel locals at t=0/50. 10 buckets over
+    // [0,100]: the global value 3 carries to the last bucket; the t=50
+    // sentinel must not zero it from bucket 5 on.
+    const m = buildQueueRenderModel({
+      data: queueData({
+        hasLocalQueueDepth: false,
+        workerIds: [0],
+        queueSamples: [{ t: 5, global: 3 }],
+        mergedLocalSamples: samples,
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 10,
+    });
+    expect(m.global[m.global.length - 1]).toBe(3);
+    expect(m.hasData).toBe(true);
+
+    // Sentinels alone are not data.
+    const empty = buildQueueRenderModel({
+      data: queueData({
+        hasLocalQueueDepth: false,
+        workerIds: [0],
+        mergedLocalSamples: samples,
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 10,
+    });
+    expect(empty.hasData).toBe(false);
+  });
+
+  it("keeps a genuine zero series when the depth is real", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        hasLocalQueueDepth: true,
+        workerIds: [0],
+        mergedLocalSamples: samples,
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 10,
+    });
+    expect(m.local.length).toBeGreaterThan(0);
+    expect(m.local.every((v) => v === 0)).toBe(true);
+  });
+});
+
+describe("computeSpawnedTasks", () => {
   const data = queueData({
     hasTaskTracking: true,
     taskFirstPoll: new Map([
@@ -211,7 +282,7 @@ describe("computeSpawnedTasks (legacy task-finding + grouping)", () => {
     expect(locs).toContain("(unknown)"); // task 0x5 has a null spawn loc
   });
 
-  it("bounds are inclusive on both ends (legacy >= / <=)", () => {
+  it("includes both range bounds", () => {
     const res = computeSpawnedTasks(data, { startNs: 100, endNs: 100 });
     expect(res!.total).toBe(1);
     expect(res!.groups[0]!.tasks[0]!.taskId).toBe(0x1);
@@ -347,6 +418,7 @@ function randomQueueData(seed: number, workerCount: number, samples: number): Qu
 
   return {
     ...EMPTY_QUEUE_DATA,
+    hasLocalQueueDepth: true,
     workerIds,
     mergedLocalSamples: merged,
     queueSamples,
@@ -382,6 +454,7 @@ describe("buildQueueRenderModel equivalence", () => {
     // implementation took its max by iterating workerIds.
     const data: QueueData = {
       ...EMPTY_QUEUE_DATA,
+      hasLocalQueueDepth: true,
       workerIds: [0, 1],
       mergedLocalSamples: [
         { t: 10, w: 0, local: 2 },
@@ -397,10 +470,16 @@ describe("buildQueueRenderModel equivalence", () => {
     // read would show up as one frame's peak bleeding into the next.
     const busy: QueueData = {
       ...EMPTY_QUEUE_DATA,
+      hasLocalQueueDepth: true,
       workerIds: [0],
       mergedLocalSamples: [{ t: 10, w: 0, local: 9 }],
     };
-    const idle: QueueData = { ...EMPTY_QUEUE_DATA, workerIds: [0], mergedLocalSamples: [] };
+    const idle: QueueData = {
+      ...EMPTY_QUEUE_DATA,
+      hasLocalQueueDepth: true,
+      workerIds: [0],
+      mergedLocalSamples: [],
+    };
     buildQueueRenderModel({ data: busy, viewStart: 0, viewEnd: 100, drawW: 20 });
     const second = buildQueueRenderModel({ data: idle, viewStart: 0, viewEnd: 100, drawW: 20 });
     expect(Math.max(...second.local)).toBe(0);

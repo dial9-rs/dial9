@@ -68,11 +68,15 @@ pub(crate) enum Frame {
     Schema {
         type_id: WireTypeId,
         entry: SchemaEntry,
+        /// Whether the wire schema byte indicated a packed timestamp. Always
+        /// true for schemas produced by current encoders.
+        has_timestamp_on_wire: bool,
     },
     Event {
         type_id: WireTypeId,
-        /// Absolute timestamp in nanoseconds, if the schema has `has_timestamp`.
-        timestamp_ns: Option<u64>,
+        /// Absolute timestamp in nanoseconds. For legacy schemas without a
+        /// packed timestamp on the wire, this is the current timestamp base.
+        timestamp_ns: u64,
         values: Vec<FieldValue>,
     },
     StringPool(Vec<PoolEntry>),
@@ -127,10 +131,11 @@ pub(crate) enum FrameRef<'a> {
     Schema {
         type_id: WireTypeId,
         entry: SchemaEntry,
+        has_timestamp_on_wire: bool,
     },
     Event {
         type_id: WireTypeId,
-        timestamp_ns: Option<u64>,
+        timestamp_ns: u64,
         values: Vec<FieldValueRef<'a>>,
     },
     StringPool(Vec<PoolEntryRef<'a>>),
@@ -142,11 +147,15 @@ pub(crate) enum FrameRef<'a> {
     },
 }
 
-/// Schema info needed by the decoder: raw field type tags + has_timestamp flag.
+/// Schema info needed by the decoder: raw field type tags + whether the wire
+/// schema declared a packed timestamp (needed to know how many bytes to read).
 /// Raw tags preserve the optional bit (0x80) for correct decode handling.
 pub(crate) struct SchemaInfo<'a> {
     pub field_tags: &'a [u8],
-    pub has_timestamp: bool,
+    /// Whether the on-wire schema byte indicated a packed timestamp. This is
+    /// always true for schemas produced by current encoders but may be false
+    /// for hypothetical legacy traces.
+    pub has_timestamp_on_wire: bool,
 }
 
 // --- Encoding ---
@@ -166,7 +175,9 @@ pub(crate) fn encode_schema(
     let name_bytes = entry.name.as_bytes();
     w.write_all(&(name_bytes.len() as u16).to_le_bytes())?;
     w.write_all(name_bytes)?;
-    w.write_all(&[if entry.has_timestamp { 1 } else { 0 }])?;
+    // Always write has_timestamp=1. The byte is preserved on the wire for
+    // forward compatibility, but new encoders always produce timestamped events.
+    w.write_all(&[1u8])?;
     w.write_all(&(entry.fields.len() as u16).to_le_bytes())?;
     for f in &entry.fields {
         let fname = f.name.as_bytes();
@@ -286,7 +297,7 @@ fn decode_schema_frame(data: &[u8]) -> Option<(Frame, usize)> {
     pos += 2;
     let name = String::from_utf8(data.get(pos..pos + name_len)?.to_vec()).ok()?;
     pos += name_len;
-    let has_timestamp = *data.get(pos)? != 0;
+    let has_timestamp_on_wire = *data.get(pos)? != 0;
     pos += 1;
     let field_count = u16::from_le_bytes(data.get(pos..pos + 2)?.try_into().ok()?) as usize;
     pos += 2;
@@ -309,10 +320,10 @@ fn decode_schema_frame(data: &[u8]) -> Option<(Frame, usize)> {
             type_id,
             entry: SchemaEntry {
                 name,
-                has_timestamp,
                 fields,
                 annotations: Vec::new(),
             },
+            has_timestamp_on_wire,
         },
         pos,
     ))
@@ -328,12 +339,13 @@ fn decode_event_frame<'s>(
     pos += 2;
     let info = schema_lookup(type_id)?;
 
-    let timestamp_ns = if info.has_timestamp {
+    let timestamp_ns = if info.has_timestamp_on_wire {
         let delta = decode_u24_le(&data[pos..])?;
         pos += 3;
-        Some(timestamp_base_ns.checked_add(delta as u64)?)
+        timestamp_base_ns.checked_add(delta as u64)?
     } else {
-        None
+        // Legacy schema without packed timestamp: use the current base.
+        timestamp_base_ns
     };
 
     let mut values = Vec::with_capacity(info.field_tags.len());
@@ -450,9 +462,18 @@ pub(crate) fn decode_frame_ref<'a, 's>(
         TAG_SCHEMA => {
             let (frame, consumed) = decode_schema_frame(data)?;
             match frame {
-                Frame::Schema { type_id, entry } => {
-                    Some((FrameRef::Schema { type_id, entry }, consumed))
-                }
+                Frame::Schema {
+                    type_id,
+                    entry,
+                    has_timestamp_on_wire,
+                } => Some((
+                    FrameRef::Schema {
+                        type_id,
+                        entry,
+                        has_timestamp_on_wire,
+                    },
+                    consumed,
+                )),
                 _ => unreachable!(),
             }
         }
@@ -493,12 +514,13 @@ fn decode_event_frame_ref<'a, 's>(
     pos += 2;
     let info = schema_lookup(type_id)?;
 
-    let timestamp_ns = if info.has_timestamp {
+    let timestamp_ns = if info.has_timestamp_on_wire {
         let delta = decode_u24_le(&data[pos..])?;
         pos += 3;
-        Some(timestamp_base_ns.checked_add(delta as u64)?)
+        timestamp_base_ns.checked_add(delta as u64)?
     } else {
-        None
+        // Legacy schema without packed timestamp: use the current base.
+        timestamp_base_ns
     };
 
     let mut values = Vec::with_capacity(info.field_tags.len());
@@ -596,7 +618,6 @@ mod tests {
         let type_id = WireTypeId(1);
         let entry = SchemaEntry {
             name: "PollStart".into(),
-            has_timestamp: true,
             fields: vec![FieldDef {
                 name: "worker".into(),
                 field_type: FieldType::Varint,
@@ -608,7 +629,14 @@ mod tests {
         assert_eq!(buf[0], TAG_SCHEMA);
         let (frame, consumed) = decode_frame(&buf, |_| None, 0).unwrap();
         assert_eq!(consumed, buf.len());
-        assert_eq!(frame, Frame::Schema { type_id, entry });
+        assert_eq!(
+            frame,
+            Frame::Schema {
+                type_id,
+                entry,
+                has_timestamp_on_wire: true,
+            }
+        );
     }
 
     #[test]
@@ -616,14 +644,20 @@ mod tests {
         let type_id = WireTypeId(0);
         let entry = SchemaEntry {
             name: "Empty".into(),
-            has_timestamp: false,
             fields: vec![],
             annotations: Vec::new(),
         };
         let mut buf = Vec::new();
         encode_schema(type_id, &entry, &mut buf).unwrap();
         let (frame, _) = decode_frame(&buf, |_| None, 0).unwrap();
-        assert_eq!(frame, Frame::Schema { type_id, entry });
+        assert_eq!(
+            frame,
+            Frame::Schema {
+                type_id,
+                entry,
+                has_timestamp_on_wire: true,
+            }
+        );
     }
 
     // --- Event frame tests ---
@@ -648,7 +682,7 @@ mod tests {
             if id == WireTypeId(1) {
                 Some(SchemaInfo {
                     field_tags: &tags,
-                    has_timestamp: false,
+                    has_timestamp_on_wire: false,
                 })
             } else {
                 None
@@ -660,7 +694,8 @@ mod tests {
             frame,
             Frame::Event {
                 type_id: WireTypeId(1),
-                timestamp_ns: None,
+                // No packed timestamp on wire; uses the base (0).
+                timestamp_ns: 0,
                 values
             }
         );
@@ -677,7 +712,7 @@ mod tests {
             if id == WireTypeId(1) {
                 Some(SchemaInfo {
                     field_tags: &tags,
-                    has_timestamp: true,
+                    has_timestamp_on_wire: true,
                 })
             } else {
                 None
@@ -689,7 +724,7 @@ mod tests {
             frame,
             Frame::Event {
                 type_id: WireTypeId(1),
-                timestamp_ns: Some(5_000_000 + 1_000_000),
+                timestamp_ns: 5_000_000 + 1_000_000,
                 values,
             }
         );
@@ -718,7 +753,7 @@ mod tests {
             if id == WireTypeId(2) {
                 Some(SchemaInfo {
                     field_tags: &tags,
-                    has_timestamp: false,
+                    has_timestamp_on_wire: false,
                 })
             } else {
                 None
@@ -730,7 +765,7 @@ mod tests {
             frame,
             Frame::Event {
                 type_id: WireTypeId(2),
-                timestamp_ns: None,
+                timestamp_ns: 0,
                 values
             }
         );
@@ -780,7 +815,7 @@ mod tests {
             |_| {
                 Some(SchemaInfo {
                     field_tags: &tags,
-                    has_timestamp: false,
+                    has_timestamp_on_wire: false,
                 })
             },
             0,

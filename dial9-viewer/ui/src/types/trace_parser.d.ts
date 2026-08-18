@@ -224,6 +224,18 @@ declare module "*/trace_parser.js" {
     hasCpuTime: boolean;
     hasSchedWait: boolean;
     hasTaskTracking: boolean;
+    /**
+     * False when poll events cover only dial9-spawned tasks rather than every
+     * task on the runtime.
+     */
+    hasFullTaskCoverage: boolean;
+    /** False when per-worker queue depth has no source and records 0. */
+    hasLocalQueueDepth: boolean;
+    /**
+     * False when the trace contains no task spawn events, so task lifetimes
+     * are absent rather than zero-length.
+     */
+    hasTaskLifetimes: boolean;
     spawnLocations: Map<string, string>;
     /** task id -> spawn location (null if unknown). */
     taskSpawnLocs: Map<number, string | null>;
@@ -337,7 +349,7 @@ declare module "*/trace_parser.js" {
     onParseProgress?: (progress: ParseProgress & DirParseProgress) => void;
     /**
      * Optional pluggable event store, used in place of the default plain array
-     * for `state.events`. The new viewer passes a columnar sink
+     * for `state.events`. The viewer passes a columnar sink
      * (src/lib/trace/columnar-events.ts ColumnarEvents) whose `.push(event)`
      * writes fields into typed-array columns and drops the object, so a large
      * trace never materializes millions of fat event objects. A plain

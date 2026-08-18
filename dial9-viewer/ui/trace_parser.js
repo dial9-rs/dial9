@@ -678,8 +678,8 @@
             startTime,
             endTime,
             hasTimeFilter,
-            // Optional pluggable event store. Defaults to a plain array (legacy
-            // behavior). The new viewer passes a columnar sink
+            // Optional pluggable event store. Defaults to a plain array. The
+            // viewer passes a columnar sink
             // (src/lib/trace/columnar-events.ts) whose `.push(event)` writes the
             // event's fields into typed-array columns and drops the object, so a
             // large trace never materializes millions of fat event objects.
@@ -691,8 +691,8 @@
             taskInstrumented: new Map(), // taskId -> bool (true if spawned via TelemetryHandle::spawn)
             callframeSymbols: new Map(),
             // Optional columnar cpu-sample sink (src/lib/trace/columnar-cpu-samples.ts).
-            // Its `.pushSample(...)` stores callchains in a flat pool; without it a
-            // plain array of fat samples (legacy behavior).
+            // Its `.pushSample(...)` stores callchains in a flat pool; without it,
+            // samples remain fat objects in a plain array.
             cpuSamples: (options && options.cpuSampleSink) || [],
             allocEvents: [],
             freeEvents: [],
@@ -1556,6 +1556,24 @@
     }
 
     /**
+     * @private Capability fields from segment metadata and spawn-event
+     * evidence. The NDJSON cache loaders re-derive them for older caches.
+     */
+    function deriveCapabilities(segmentMetadata, taskSpawnTimes) {
+        return {
+            // What the recorder says the trace holds. `dial9-spawns-only` means
+            // poll events cover just the tasks spawned through dial9's own
+            // helpers, and there are no task spawn/terminate events. Traces
+            // predating these keys all carried the full set, so absent means
+            // full.
+            hasFullTaskCoverage: segmentMetadata.get("tokio.poll_coverage") !== "dial9-spawns-only",
+            hasLocalQueueDepth: segmentMetadata.get("tokio.local_queue") !== "false",
+            // false means the lifetime column is "not captured", not "instant tasks".
+            hasTaskLifetimes: taskSpawnTimes.size > 0,
+        };
+    }
+
+    /**
      * @private Run the post-frame-loop passes (clock anchors, tid→worker
      * resolution, block-in-place gaps) and assemble the final `ParsedTrace`.
      * Identical for the whole-buffer and streaming paths. `version` is read from
@@ -1717,6 +1735,7 @@
             hasCpuTime: true,
             hasSchedWait: true,
             hasTaskTracking: true,
+            ...deriveCapabilities(segmentMetadata, taskSpawnTimes),
             spawnLocations,
             taskSpawnLocs,
             taskSpawnTimes,
@@ -2092,6 +2111,17 @@
         raw.events = events;
         raw.cpuSamples = cpuSamples;
         if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
+        // Cache files written before the capability fields were serialized:
+        // re-derive them from the cached metadata and spawn times.
+        if (raw.hasFullTaskCoverage === undefined) {
+            Object.assign(
+                raw,
+                deriveCapabilities(
+                    raw.segmentMetadata,
+                    raw.taskSpawnTimes ?? new Map(),
+                ),
+            );
+        }
         raw.customEvents = customEvents;
         raw.allocEvents = allocEvents;
         raw.freeEvents = freeEvents;
@@ -2460,6 +2490,7 @@
             symbolizeChain,
             deduplicateSamples,
             deriveBlockInPlaceGaps,
+            deriveCapabilities,
             // Exported for unit tests: the single-event span schema compiler
             // and its runtime timing resolution. Not part of the browser API.
             compileSingleEventSpanSchema,

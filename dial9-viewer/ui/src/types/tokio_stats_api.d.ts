@@ -32,13 +32,13 @@ declare module "*/tokio_stats_api.js" {
   /**
    * Severity color for a poll/latency duration (ns): >=3ms red, >=1ms amber,
    * else green, in dial9's palette. Thresholds are pinned by
-   * test_tokio_stats_api.js, so consumers must not re-derive them.
+   * the shared helper tests, so consumers must not re-derive them.
    */
   export function latencyHeat(ns: number): string;
 
   /**
    * Severity color for a worker busyness percentage, in dial9's palette.
-   * Thresholds are pinned by test_tokio_stats_api.js, so consumers must not
+   * Thresholds are pinned by the shared helper tests, so consumers must not
    * re-derive them.
    */
   export function busynessHeat(busyPct: number): string;
@@ -56,6 +56,6 @@ declare module "*/tokio_stats_api.js" {
    * numbers workers 0..N-1, so `total` is derived as max id + 1.
    */
   export function hostWorkerCounts(
-    workers: readonly { worker_id: number }[],
+    workers: readonly { worker_id?: number | null }[],
   ): { active: number; total: number };
 }

@@ -3,7 +3,6 @@ source: dial9-trace-format-derive/src/lib.rs
 expression: "expand_to_string(quote!\n{\n    struct BorrowedStr<'a>\n    { #[traceevent(timestamp)] timestamp_ns: u64, path: &'a str, }\n})"
 ---
 impl<'a> ::dial9_trace_format::TraceEvent for BorrowedStr<'a> {
-    type Id = BorrowedStr<'static>;
     fn event_name() -> &'static str {
         "BorrowedStr"
     }

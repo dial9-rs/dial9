@@ -3,9 +3,9 @@
 node_modules
 dist/*
 !dist/.gitkeep
-# parity tool reports (generated)
-parity/out/
+# live-check reports (generated)
+live-checks/out/
 # regenerable fixture seed tree (incl. the >200 MB large family) — only the
-# small fixtures under parity/fixtures/segments/ are committed (size policy:
-# ui/README.md "Parity gate tooling")
-parity/fixtures/generated/
+# small fixtures under live-checks/fixtures/segments/ are committed (size policy:
+# ui/README.md "Live UI checks")
+live-checks/fixtures/generated/

@@ -20,11 +20,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     let name_str = name.to_string();
 
     // Support borrowed event structs like `Event<'a> { data: &'a str }`. We
-    // allow at most one lifetime and no type/const parameters: type params would
-    // need per-monomorphization schema handling we don't model, and the
-    // encoder's `wire_slot`/`TypeId` fast paths assume a single concrete
-    // `'static` type.
-    let has_lifetime = input.generics.lifetimes().next().is_some();
+    // allow at most one lifetime and no type/const parameters; generic event
+    // schemas are not currently supported.
     if input.generics.type_params().next().is_some()
         || input.generics.const_params().next().is_some()
         || input.generics.lifetimes().count() > 1
@@ -207,7 +204,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             fn schema_entry() -> ::dial9_trace_format::schema::SchemaEntry {
                 ::dial9_trace_format::schema::SchemaEntry::with_annotations(
                     Self::event_name(),
-                    Self::has_timestamp(),
                     Self::field_defs(),
                     vec![#(#annotation_tokens),*],
                 )
@@ -215,18 +211,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         }
     };
 
-    // For the `Id` associated type: owned types use `Self`; borrowed types
-    // (`Event<'a>`) use `Event<'static>` so that all lifetime instantiations
-    // share one TypeId cache entry — the schema is lifetime-independent.
-    let id_type = if has_lifetime {
-        quote! { #name<'static> }
-    } else {
-        quote! { Self }
-    };
-
     Ok(quote! {
         impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
-            type Id = #id_type;
             fn event_name() -> &'static str { #name_str }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {

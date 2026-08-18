@@ -6,14 +6,13 @@
 //
 // Design rules (additive only, old links must keep working):
 //
-// - LEGACY PARAMS ARE UNTOUCHED. The flamegraph page's `worker-zoom` /
-//   `offworker-zoom` QUERY params keep their exact legacy semantics - this
-//   module reads them as a fallback (legacyZoomFromQuery) and mirrors state
-//   back into them (applyLegacyZoomToQuery) so links copied from the address
-//   bar keep working on the legacy page too. The hash is the NEW unified
-//   carrier.
-// - PRECEDENCE: when both the versioned hash and legacy query params carry the
-//   same field, the hash wins PER FIELD; legacy params fill the gaps. The two
+// - STABLE QUERY PARAMS ARE UNTOUCHED. The flamegraph page's `worker-zoom` /
+//   `offworker-zoom` params retain their established semantics. This module
+//   reads them as a fallback (legacyZoomFromQuery) and mirrors state back into
+//   them (applyLegacyZoomToQuery), preserving existing shared links. The hash
+//   is the versioned carrier.
+// - PRECEDENCE: when both the versioned hash and query params carry the same
+//   field, the hash wins PER FIELD; query params fill the gaps. The two
 //   only diverge on hand-edited URLs - the sync layer always writes them
 //   together.
 // - TOLERANT READER: unrecognized keys in a v=1 payload are preserved verbatim
@@ -27,9 +26,9 @@
 //   different version decodes to { version, empty state, no unknowns } -
 //   callers must not restore from it nor overwrite it.
 //
-// Zoom-path values reuse the legacy wire format exactly: frame names joined by
-// TAB (\t), root -> target. Tab therefore cannot appear IN a frame name - the
-// same limitation the legacy params have always had.
+// Zoom-path values reuse the historical wire format exactly: frame names
+// joined by TAB (\t), root -> target. Tab therefore cannot appear IN a frame
+// name - the same limitation the query params have always had.
 //
 // This module is PURE (no window/history/DOM): the browser side lives in
 // sync.ts, so the codec is property-testable under plain Node.
@@ -201,12 +200,11 @@ const KNOWN_KEYS: readonly string[] = [
   KEY_TIME_ZONE,
 ];
 
-/** The legacy flamegraph zoom-state QUERY params. */
+/** The historical flamegraph zoom-state query params. */
 export const LEGACY_WORKER_ZOOM_PARAM = "worker-zoom";
 export const LEGACY_OFFWORKER_ZOOM_PARAM = "offworker-zoom";
-// The legacy flamegraph inspect/search/filter QUERY params (flamegraph_view_state.js
-// STATE_KEYS). Names kept EXACTLY so a link copied from the migrated page
-// restores on the legacy page too.
+// Historical flamegraph inspect/search/filter query names. They stay stable so
+// existing shared links keep restoring in the canonical page.
 export const LEGACY_INSPECT_PARAM = "inspect";
 export const LEGACY_INSPECT_FULL_PARAM = "inspect_full";
 export const LEGACY_SEARCH_PARAM = "search";
@@ -220,7 +218,7 @@ function encodeZoomPath(path: readonly string[]): string {
 
 /**
  * Inverse of encodeZoomPath. An empty or all-empty value means "no path"
- * (null): the legacy page never writes empty segments, so any such value
+ * (null): the writer never emits empty segments, so any such value
  * is hand-mangled and restoring from it would zoom nowhere.
  */
 function decodeZoomPath(value: string): readonly string[] | null {
@@ -328,7 +326,7 @@ export function decodeViewState(hashPayload: string): DecodedViewState | null {
   return { version, state, unknown };
 }
 
-/** The ViewState fields the legacy flamegraph query params mirror. */
+/** The ViewState fields mirrored by the historical flamegraph query params. */
 type LegacyMirroredState = Pick<
   ViewState,
   | "fgWorkerZoom"
@@ -341,10 +339,9 @@ type LegacyMirroredState = Pick<
 >;
 
 /**
- * Read the LEGACY flamegraph view params (zoom, inspect, search, spawn/runtime
- * filters) from a query string, with their exact legacy semantics (see
- * flamegraph_view_state.js readState): absent or empty param = that field is
- * unset. Field names line up with ViewState so the result merges directly.
+ * Read the historical flamegraph view params (zoom, inspect, search,
+ * spawn/runtime filters) from a query string. An absent or empty param means
+ * that field is unset. Field names line up with ViewState for direct merging.
  */
 export function legacyZoomFromQuery(
   search: string | URLSearchParams,
@@ -377,12 +374,9 @@ export function legacyZoomFromQuery(
 }
 
 /**
- * Mirror the flamegraph view fields of `state` into the LEGACY query params,
- * exactly as the legacy page writes them (flamegraph_view_state.js writeState):
- * set when non-empty, DELETE when empty, touch nothing else in `params`.
- * `inspect_full` is emitted only when it differs from `inspect`. Keeping the
- * mirror alive is what makes an address-bar copy from the migrated page open
- * correctly on the legacy page.
+ * Mirror the flamegraph view fields of `state` into the stable query params:
+ * set when non-empty, delete when empty, and touch nothing else in `params`.
+ * `inspect_full` is emitted only when it differs from `inspect`.
  */
 export function applyLegacyZoomToQuery(params: URLSearchParams, state: ViewState): void {
   setOrDelete(
@@ -424,7 +418,7 @@ function setOrDelete(params: URLSearchParams, key: string, value: string | null)
 }
 
 /**
- * Resolve the effective view state of a URL: legacy query params as the
+ * Resolve the effective view state of a URL: historical query params as the
  * base, hash fields (v=1 only) overriding PER FIELD. `search`/`hash` take
  * the window.location forms ("?..."/"#..." or ""); bare strings work too.
  */

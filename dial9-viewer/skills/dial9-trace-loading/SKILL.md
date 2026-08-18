@@ -37,7 +37,10 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   filterEndTime: number|null,            // end of time range filter (ns), null if unfiltered
   hasCpuTime: boolean,                   // trace includes CPU time data
   hasSchedWait: boolean,                 // trace includes kernel scheduling wait data
-  hasTaskTracking: boolean,              // trace includes task spawn/terminate events
+  hasTaskTracking: boolean,              // poll events carry task IDs (always true on current parser); for spawn/terminate checks use hasTaskLifetimes
+  hasFullTaskCoverage: boolean,          // false => only dial9-spawned tasks are covered
+  hasLocalQueueDepth: boolean,           // whether per-worker queue depth is available
+  hasTaskLifetimes: boolean,             // false => no task spawn events in the trace
   taskInstrumented: Map<number, boolean>, // task ID → whether task has tracing instrumentation
   taskDumps: Map<number, [{timestamp, callchain}]>, // task ID → async stack captures (sorted by timestamp); see dial9-tokio-telemetry `taskdump` feature
   allocEvents: AllocEvent[],     // Sampled memory allocations (requires dial9-tokio-telemetry memory-profiling feature)

@@ -173,7 +173,7 @@ describe("demo-trace anchors (#593 measurements)", () => {
   beforeAll(async () => {
     const trace = await parseTrace(readFileSync(DEMO));
     // Exactly the page's tree build: filterCpuSamples(cpuSamples, null,
-    // null) then the workerId split (flamegraph.html:571 -> applyFilters).
+    // null) followed by the workerId split.
     const samples = trace.cpuSamples.filter(
       (s) => s.callchain.length > 0 && s.source !== 1,
     );
@@ -194,17 +194,17 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
-  // Re-measured after the combined multi-runtime/task-ID demo regen. The old
-  // anchors reproduce exactly against both parent traces, ruling out a search
-  // regression. This capture has healthy unwind depth: 104 of its 106 worker
-  // CPU samples reach depth >= 16.
+  // Re-measured after the borrowed-event demo regen. The old anchors reproduce
+  // exactly against origin/main's trace, ruling out a search regression. The
+  // refreshed capture has 145 worker CPU samples (up from 106); the matching
+  // frame counts and inclusive-area shares below reflect its changed workload.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 145, "100.0"],
-    ["tokio", 218, "100.0"],
-    ["axum", 25, "85.8"],
-    ["dispatcher", 31, "70.8"],
-    ["framebuf", 10, "47.2"],
-    ["spawn", 2, "100.0"],
+    ["poll", 132, "62.1"],
+    ["tokio", 115, "62.1"],
+    ["axum", 30, "53.1"],
+    ["dispatcher", 25, "53.1"],
+    ["framebuf", 3, "3.4"],
+    ["spawn", 2, "62.1"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {

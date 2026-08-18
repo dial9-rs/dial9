@@ -6,11 +6,9 @@
 // UI. formatFieldValue routes a field value through the right formatter based
 // on its schema unit annotation.
 //
-// Migrated from test_format.js (T10). The frozen core is loaded via Node's
-// native CJS loader (createRequire) so the module-loading semantics are
-// byte-identical to the legacy `node test_format.js` baseline (constraint H2:
-// the core files keep their guarded module.exports form, which ESM named-import
-// interop cannot statically analyze).
+// The frozen core is loaded through Node's native CJS loader because its
+// guarded module.exports form cannot be statically analyzed by ESM named-import
+// interop.
 
 import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";

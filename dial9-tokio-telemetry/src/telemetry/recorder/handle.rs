@@ -1,5 +1,4 @@
 use crate::TracedFuture;
-use crate::traced::TracedHandle;
 use dial9_core::handle::Dial9Handle;
 use std::cell::Cell;
 
@@ -9,13 +8,10 @@ crate::primitives::thread_local! {
     pub(super) static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Wake-tracking handle for a [`Dial9Handle`], or `None` when the handle is
-/// disabled. The waker wrapping is tokio-specific, so it lives here rather
-/// than on the runtime-agnostic `Dial9Handle`.
-pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<TracedHandle> {
-    handle.shared().map(|shared| TracedHandle {
-        shared: shared.clone(),
-    })
+/// The handle to instrument with, or `None` when it is not connected to a
+/// recorder.
+pub(crate) fn traced_handle(handle: &Dial9Handle) -> Option<Dial9Handle> {
+    handle.shared().is_some().then(|| handle.clone())
 }
 
 /// Tokio handle for spawning instrumented tasks.
@@ -31,7 +27,7 @@ pub struct Dial9TokioHandle {
     /// `None` spawns on the current runtime (`tokio::spawn`), `Some` targets a
     /// specific runtime and works from any thread.
     runtime: Option<tokio::runtime::Handle>,
-    traced: Option<TracedHandle>,
+    traced: Option<Dial9Handle>,
 }
 
 impl std::fmt::Debug for Dial9TokioHandle {
@@ -67,7 +63,7 @@ impl Dial9TokioHandle {
     #[cfg(test)]
     pub(crate) fn for_runtime(
         runtime: tokio::runtime::Handle,
-        traced: Option<crate::traced::TracedHandle>,
+        traced: Option<Dial9Handle>,
     ) -> Self {
         Self {
             runtime: Some(runtime),
@@ -117,22 +113,28 @@ impl Dial9TokioHandle {
     /// [`tokio::task::JoinHandle`], [`tokio::task::AbortHandle`], or whatever
     /// the spawn function returns.
     ///
+    /// For [`tokio::task::JoinSet`], prefer
+    /// [`JoinSetExt::spawn_traced`](crate::telemetry::JoinSetExt::spawn_traced).
+    ///
     /// # Examples
     ///
-    /// Spawn into a [`tokio::task::JoinSet`]:
+    /// Spawn while retaining the task's [`tokio::task::AbortHandle`]:
     ///
     /// ```rust,no_run
     /// # use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
-    /// # use tokio::task::JoinSet;
     /// # async fn work() {}
     /// # async fn demo() {
     /// let handle = Dial9TokioHandle::current();
-    /// let mut set: JoinSet<()> = JoinSet::new();
-    /// handle.spawn_with(work(), |f| set.spawn(f));
+    /// let abort_handle = handle.spawn_with(work(), |f| tokio::spawn(f).abort_handle());
     /// # }
     /// ```
     ///
+    /// The recorded spawn location is the `spawn_fn` call site under
+    /// `--cfg tokio_unstable`, and this method's call site without it. An
+    /// inline closure like the one above puts both at the same line.
+    ///
     /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
+    #[track_caller]
     pub fn spawn_with<F, S>(
         &self,
         future: F,
@@ -149,6 +151,25 @@ impl Dial9TokioHandle {
                 spawn_fn(future)
             }
             None => spawn_fn(future),
+        }
+    }
+
+    #[track_caller]
+    pub(super) fn spawn_in_join_set<F, T>(
+        &self,
+        set: &mut tokio::task::JoinSet<T>,
+        future: F,
+    ) -> tokio::task::AbortHandle
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match &self.traced {
+            Some(traced) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                set.spawn(TracedFuture::new(future, Some(traced.clone())))
+            }
+            None => set.spawn(future),
         }
     }
 }

@@ -48,7 +48,7 @@ describe("epochSeconds (last_modified -> epoch seconds)", () => {
   });
 });
 
-describe("formatSize (legacy thresholds)", () => {
+describe("formatSize", () => {
   it("bytes / KB / MB bands", () => {
     expect(formatSize(0)).toBe("0 B");
     expect(formatSize(1023)).toBe("1023 B");
@@ -62,11 +62,11 @@ describe("formatDate / formatEpochStr", () => {
   it("UTC mode renders ISO-like without the T", () => {
     expect(formatDate("2026-04-09T19:00:05Z", false)).toBe("2026-04-09 19:00:05");
   });
-  it("empty and invalid inputs degrade like legacy", () => {
+  it("returns empty and invalid inputs unchanged", () => {
     expect(formatDate("", false)).toBe("");
     expect(formatDate(undefined, false)).toBe("");
     // An unparseable date makes toISOString throw inside the try, so the
-    // raw string comes back (legacy catch branch).
+    // An invalid value is returned verbatim.
     expect(formatDate("not-a-date", false)).toBe("not-a-date");
   });
   it("epoch 0 renders empty (missing filename epoch, not an error)", () => {

@@ -5,22 +5,12 @@
 //     refinement loop (api-mode.ts);
 //   - exact mode (default): client fetch + decode of `?trace=` components
 //     (exact-mode.ts).
-//
-// The shell loads /ui-switch.js via a plain <script> tag; mounting with side
-// "new" renders the "Switch to legacy UI" pill.
 
 import { parseDiff } from "../../lib/canvas/index.js";
 import { pageEls } from "./dom.js";
 import { runApiMode } from "./api-mode.js";
 import { runDiffMode } from "./diff-mode.js";
 import { runExactMode } from "./exact-mode.js";
-
-if (window.D9UiSwitch) {
-  window.D9UiSwitch.mount({ side: "new" });
-} else {
-  // One-time load-order/serving problem, not a loop - log it loudly.
-  console.warn("ui-switch.js is not loaded; the UI switch control is unavailable");
-}
 
 const params = new URLSearchParams(window.location.search);
 const els = pageEls();

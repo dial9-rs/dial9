@@ -1,9 +1,8 @@
 // The two-sided differential flamegraph mode (`?diff=1&a=..&b=..`): side A
 // (left) and side B (right) are independent aggregate scopes (each a
 // base64url'd query). The frozen createDiffView self-mounts its DOM and owns
-// the per-side SSE streams; this shell wires the credentials, the B-side
-// cross-account re-prompt, and URL persistence, mirroring the legacy diff
-// branch of flamegraph.html.
+// the per-side SSE streams; this shell wires credentials, the B-side
+// cross-account re-prompt, and URL persistence.
 
 import { createDiffView, parseDiff } from "../../lib/canvas/index.js";
 import type { DiffViewHandle, DiffViewState } from "../../lib/canvas/index.js";

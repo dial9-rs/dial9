@@ -200,7 +200,7 @@ function urlOwnedSlices(): StoreSliceName[] {
 /** Store slices that can change the shareable analytical view. */
 export const VIEWER_URL_SLICES: readonly StoreSliceName[] = urlOwnedSlices();
 
-/** Stable readable query vocabulary owned only by `/new/viewer.html`. */
+/** Stable readable query vocabulary owned by `/viewer.html`. */
 export const VIEWER_VIEW_QUERY_PARAMS: readonly string[] = [
   ...new Set(
     Object.values(VIEWER_STATE_OWNERSHIP)

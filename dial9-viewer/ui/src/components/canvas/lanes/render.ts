@@ -103,6 +103,8 @@ export interface LanesRenderInput {
   blockInPlaceGaps: readonly BlockInPlaceGap[];
   hasCpuTime: boolean;
   hasSchedWait: boolean;
+  /** False when `workerQueueSamples` carries sentinel zeros, not measurements. */
+  hasLocalQueueDepth: boolean;
   viewStart: number;
   viewEnd: number;
   /** Selected task -> yellow polls + wake markers. */
@@ -830,6 +832,9 @@ function drawQueueStepLine(
   qH: number,
   sf: number,
 ): void {
+  // The recorded 0 is a sentinel; a step line would read as "the local queues
+  // are empty" rather than "unmeasured".
+  if (!input.hasLocalQueueDepth) return;
   const samples = input.workerQueueSamples[workerId];
   if (!samples || samples.length === 0) return;
   const { viewStart, viewEnd } = input;

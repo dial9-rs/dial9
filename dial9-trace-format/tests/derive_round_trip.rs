@@ -1,6 +1,6 @@
 //! Round-trip tests: encode via derive macro, decode via serde deserializer.
 
-use dial9_trace_format::decoder::Decoder;
+use dial9_trace_format::decoder::{DecodedFrame, Decoder};
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::{InternedString, TraceEvent};
 use serde::Deserialize;
@@ -162,6 +162,49 @@ fn borrowed_event_round_trip() {
             path: "/api/object".into(),
             body: vec![1, 2, 3],
         }
+    );
+}
+
+#[test]
+fn borrowed_event_reuses_schema_across_lifetimes() {
+    let mut enc = Encoder::new_to(Vec::new()).unwrap();
+
+    {
+        let path = String::from("/first");
+        let body = vec![1u8];
+        enc.write_infallible(&BorrowedEvent {
+            timestamp_ns: 5_000_000,
+            path: &path,
+            body: &body,
+        });
+    }
+    {
+        let path = String::from("/second");
+        let body = vec![2u8];
+        enc.write_infallible(&BorrowedEvent {
+            timestamp_ns: 6_000_000,
+            path: &path,
+            body: &body,
+        });
+    }
+
+    let buf = enc.into_inner();
+    let mut dec = Decoder::new(&buf).unwrap();
+    let frames = dec.decode_all();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(frame, DecodedFrame::Schema(schema) if schema.name() == "BorrowedEvent"))
+            .count(),
+        1,
+        "all lifetime instantiations must share one schema"
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(frame, DecodedFrame::Event { .. }))
+            .count(),
+        2
     );
 }
 

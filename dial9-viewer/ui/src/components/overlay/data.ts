@@ -52,6 +52,7 @@ export interface OverlayData {
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
+  hasLocalQueueDepth: boolean;
 }
 
 /**
@@ -91,5 +92,6 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     hasCpuTime: trace.hasCpuTime,
     hasSchedWait: trace.hasSchedWait,
     hasTaskTracking: trace.hasTaskTracking,
+    hasLocalQueueDepth: trace.hasLocalQueueDepth,
   };
 }

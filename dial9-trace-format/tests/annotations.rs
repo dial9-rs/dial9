@@ -9,7 +9,6 @@ fn annotations_round_trip() {
     let mut enc = Encoder::new();
     let entry = SchemaEntry::with_annotations(
         "Latency",
-        true,
         vec![
             FieldDef::new("duration_us", FieldType::Varint),
             FieldDef::new("endpoint", FieldType::PooledString),
@@ -26,8 +25,8 @@ fn annotations_round_trip() {
     let endpoint_id = enc.intern_string("/api/health").unwrap();
     enc.write_event(
         &schema,
+        1_000_000,
         &[
-            FieldValue::Varint(1_000_000),
             FieldValue::Varint(42),
             FieldValue::PooledString(endpoint_id),
         ],
@@ -107,13 +106,11 @@ fn multiple_schemas_with_mixed_annotations() {
 
     let annotated = SchemaEntry::with_annotations(
         "Annotated",
-        true,
         vec![FieldDef::new("val", FieldType::Varint)],
         vec![FieldAnnotation::new(0, "unit", "ms")],
     );
     let plain = SchemaEntry::with_annotations(
         "Plain",
-        true,
         vec![FieldDef::new("val", FieldType::Varint)],
         Vec::new(),
     );
@@ -156,7 +153,6 @@ fn annotations_silent_truncation() {
     let mut enc = Encoder::new();
     let entry = SchemaEntry::with_annotations(
         "Ev",
-        true,
         vec![FieldDef::new("x", FieldType::Varint)],
         vec![FieldAnnotation::new(0, "key", "value")],
     );
@@ -191,11 +187,8 @@ fn annotations_unknown_type_id_skipped() {
         .register_schema("Real", vec![FieldDef::new("x", FieldType::Varint)])
         .unwrap();
 
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000_000), FieldValue::Varint(42)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000_000, &[FieldValue::Varint(42)])
+        .unwrap();
 
     let mut data = enc.finish();
 
@@ -237,17 +230,13 @@ fn annotations_round_trip_ref() {
     let mut enc = Encoder::new();
     let entry = SchemaEntry::with_annotations(
         "Ev",
-        true,
         vec![FieldDef::new("x", FieldType::Varint)],
         vec![FieldAnnotation::new(0, "key", "val")],
     );
     let schema = Schema::from_entry(entry);
     enc.register_existing(&schema).unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000_000), FieldValue::Varint(7)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000_000, &[FieldValue::Varint(7)])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -270,17 +259,13 @@ fn annotations_for_each_event_works() {
     let mut enc = Encoder::new();
     let entry = SchemaEntry::with_annotations(
         "Metric",
-        true,
         vec![FieldDef::new("val", FieldType::Varint)],
         vec![FieldAnnotation::new(0, "unit", "bytes")],
     );
     let schema = Schema::from_entry(entry);
     enc.register_existing(&schema).unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000_000), FieldValue::Varint(1024)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000_000, &[FieldValue::Varint(1024)])
+        .unwrap();
 
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();

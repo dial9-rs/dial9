@@ -31,11 +31,8 @@ fn schema_max_type_id_via_encoder() {
     let mut enc = Encoder::new();
     let fields = vec![FieldDef::new("v", FieldType::Varint)];
     let schema = enc.register_schema("Ev", fields).unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000, &[FieldValue::Varint(42)])
+        .unwrap();
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
@@ -51,7 +48,7 @@ fn schema_max_type_id_via_encoder() {
 fn schema_empty_name_via_encoder() {
     let mut enc = Encoder::new();
     let schema = enc.register_schema("", vec![]).unwrap();
-    enc.write_event(&schema, &[FieldValue::Varint(0)]).unwrap();
+    enc.write_event(&schema, 0, &[]).unwrap();
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
@@ -65,9 +62,8 @@ fn schema_many_fields_via_encoder() {
         .map(|i| FieldDef::new(format!("f{i}"), FieldType::Varint))
         .collect();
     let schema = enc.register_schema("Wide", fields).unwrap();
-    let mut values = vec![FieldValue::Varint(0)]; // timestamp
-    values.extend((0..256).map(FieldValue::Varint));
-    enc.write_event(&schema, &values).unwrap();
+    let values: Vec<FieldValue> = (0..256).map(FieldValue::Varint).collect();
+    enc.write_event(&schema, 0, &values).unwrap();
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
     let frames = dec.decode_all();
@@ -260,14 +256,8 @@ fn multiple_schemas_then_events() {
         })
         .collect();
     for (i, s) in schemas.iter().enumerate() {
-        enc.write_event(
-            s,
-            &[
-                FieldValue::Varint(i as u64 * 1000),
-                FieldValue::Varint(i as u64),
-            ],
-        )
-        .unwrap();
+        enc.write_event(s, i as u64 * 1000, &[FieldValue::Varint(i as u64)])
+            .unwrap();
     }
     let data = enc.finish();
     let mut dec = Decoder::new(&data).unwrap();
@@ -288,17 +278,11 @@ fn interleaved_pool_and_events() {
         .register_schema("Ev", vec![FieldDef::new("s", FieldType::PooledString)])
         .unwrap();
     let id0 = enc.intern_string("first").unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(1_000), FieldValue::PooledString(id0)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 1_000, &[FieldValue::PooledString(id0)])
+        .unwrap();
     let id1 = enc.intern_string("second").unwrap();
-    enc.write_event(
-        &schema,
-        &[FieldValue::Varint(2_000), FieldValue::PooledString(id1)],
-    )
-    .unwrap();
+    enc.write_event(&schema, 2_000, &[FieldValue::PooledString(id1)])
+        .unwrap();
     let data = enc.finish();
 
     let mut dec = Decoder::new(&data).unwrap();

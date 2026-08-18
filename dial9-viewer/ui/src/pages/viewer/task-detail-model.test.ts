@@ -84,7 +84,7 @@ function fakeTrace(o: {
 
 // ── computeTaskDetailData - the collection numbers ────────────────────────
 
-describe("computeTaskDetailData (numbers, exact vs legacy)", () => {
+describe("computeTaskDetailData", () => {
   it("collects a task's polls across workers, sorted, with the exact counts", () => {
     const src = source({
       workerIds: [0, 1],
@@ -379,7 +379,7 @@ describe("hit-region order + status/waker lookups", () => {
   });
   const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
 
-  it("emits hit regions in the legacy scheduled -> polling -> idle order", () => {
+  it("emits hit regions in scheduled -> polling -> idle order", () => {
     const types = m.hitRegions.map((r) => r.type);
     const firstPolling = types.indexOf("polling");
     const firstIdle = types.indexOf("idle");

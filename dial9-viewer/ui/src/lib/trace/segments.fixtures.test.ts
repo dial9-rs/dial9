@@ -1,4 +1,4 @@
-// The committed synthetic segments under parity/fixtures/segments/ parsed
+// The committed synthetic segments under live-checks/fixtures/segments/ parsed
 // through the real core, re-deriving the facts the generator planted in
 // manifest.json:
 //
@@ -64,7 +64,7 @@ interface Manifest {
   };
 }
 
-const fixturesDir = new URL("../../../parity/fixtures/segments/", import.meta.url);
+const fixturesDir = new URL("../../../live-checks/fixtures/segments/", import.meta.url);
 
 function readFixture(name: string): Uint8Array {
   return new Uint8Array(gunzipSync(readFileSync(fileURLToPath(new URL(name, fixturesDir)))));

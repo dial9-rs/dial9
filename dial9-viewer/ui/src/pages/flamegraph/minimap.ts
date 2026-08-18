@@ -3,8 +3,8 @@
 // poll-duration distribution. Drag to select a poll-duration BAND (sets
 // min_poll_ns/max_poll_ns and re-streams); click to move the fast/slow SPLIT
 // (yellow line), then "Diff fast vs slow" opens a two-sided diff of the two
-// halves. Ported from flamegraph.html's inline renderMinimap; the pure math is
-// the frozen flamegraph_histogram.js core (via the lib/canvas seam).
+// halves. The pure math lives in flamegraph_histogram.js via the lib/canvas
+// seam.
 //
 // All the histogram/brush math is DOM-free and unit-tested in the frozen core;
 // this module owns only the DOM + brush wiring. A render failure must never
