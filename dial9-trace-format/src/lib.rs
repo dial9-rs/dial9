@@ -16,6 +16,8 @@
 //! - [`types`]   — field value types, the [`TraceField`]
 //!   trait, and the [`EventEncoder`] used by derived code
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod codec;
 #[cfg(feature = "serde-deserialize")]
 pub mod de;

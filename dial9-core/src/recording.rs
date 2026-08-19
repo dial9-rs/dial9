@@ -200,8 +200,7 @@ impl Recorder {
     /// their thread-local buffers have already been flushed. Consumes the
     /// recorder so `Drop` becomes a no-op.
     ///
-    /// Failures during the drain are logged rather than returned; there is
-    /// nothing a caller can usefully do about them at this point.
+    /// Failures during draining are logged.
     pub fn graceful_shutdown(mut self, timeout: Duration) {
         // `timeout` only bounds the worker drain, which exists under `pipeline`.
         #[cfg(not(feature = "pipeline"))]

@@ -94,8 +94,8 @@ impl<'a, 'f> RawEvent<'a, 'f> {
 /// A map from interned string IDs to their resolved string values.
 ///
 /// Populated automatically by the [`Decoder`] as it processes `StringPool` frames.
-/// Pass a reference to [`crate::TraceEvent::decode`] so that `InternedString` fields
-/// resolve to `&str` in derived `Ref` types.
+/// Each [`RawEvent`] carries a reference to it, so `InternedString` fields
+/// resolve to `&str` when the event is deserialized.
 #[derive(Debug, Default)]
 pub struct StringPool(pub(crate) HashMap<InternedString, String>);
 

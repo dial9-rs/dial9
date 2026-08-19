@@ -127,7 +127,7 @@ fn collect_stack_frame_addresses(
 /// individual symbolize request panics, so transient blazesym errors do
 /// not destroy the cache.
 ///
-/// On non-Linux platforms this type is a no-op shell — [`symbolize`]
+/// On non-Linux platforms this type is a no-op shell — [`symbolize`](Self::symbolize)
 /// always returns `Ok(Vec::new())` without spawning a thread.
 ///
 /// # Example
@@ -176,7 +176,7 @@ impl OfflineSymbolizer {
     /// Zero-copy variant of [`symbolize`](Self::symbolize) that accepts
     /// a [`Bytes`](bytes::Bytes) directly, avoiding a per-segment copy
     /// when the caller already holds reference-counted bytes (e.g. from
-    /// a [`Payload`]).
+    /// a `Payload`).
     ///
     /// On non-Linux platforms this returns `Ok(Vec::new())`.
     pub fn symbolize_bytes(&self, input: bytes::Bytes, maps: &[MapsEntry]) -> io::Result<Vec<u8>> {
@@ -197,7 +197,7 @@ impl OfflineSymbolizer {
     }
 
     /// Number of times this `OfflineSymbolizer`'s worker thread has
-    /// constructed its [`SymbolizeState`] (reusable containers).
+    /// constructed its `SymbolizeState` (reusable containers).
     ///
     /// Should be `0` before the first [`symbolize`](Self::symbolize) call
     /// and `1` for every call thereafter. Tests use this to assert that

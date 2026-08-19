@@ -1,8 +1,10 @@
 //! Segment-processing pipeline contract.
 //!
-//! [`SegmentProcessor`] is the extension point for post-seal segment handling:
+//! [`SegmentProcessor`](crate::pipeline::SegmentProcessor) is the extension point for
+//! post-seal segment handling:
 //! compression, symbolization, upload, and so on. A driver reads each sealed
-//! segment into a [`SegmentData`] and runs it through a sequence of processors.
+//! segment into a [`SegmentData`](crate::pipeline::SegmentData) and runs it through a
+//! sequence of processors.
 
 use crate::fs::SegmentAccounting;
 use std::collections::HashMap;

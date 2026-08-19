@@ -1,4 +1,4 @@
-//! serde [`Deserializer`] for raw trace events.
+//! serde [`Deserializer`](serde::Deserializer) for raw trace events.
 //!
 //! This module presents a [`RawEvent`](crate::decoder::RawEvent) (the
 //! callback type yielded by [`Decoder::for_each_event`](crate::decoder::Decoder::for_each_event))

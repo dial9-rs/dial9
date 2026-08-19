@@ -4,8 +4,8 @@
 //! recorder plus its instrumented Tokio runtime, ready to hand to
 //! `#[dial9::main]`. With `DIAL9_ENABLED` off it returns a writer-free disabled
 //! recorder and a plain Tokio runtime; a writer-setup failure is logged at
-//! `error!` and downgraded the same way, so a bad trace config never takes down
-//! startup. Only a failure to build the Tokio runtime itself surfaces as `Err`.
+//! `error!` and downgraded the same way. Only a failure to build the Tokio
+//! runtime itself surfaces as `Err`.
 
 use std::fmt;
 use std::io;
@@ -452,8 +452,8 @@ fn build_s3_config(config: ResolvedS3Config) -> dial9_destinations_s3::S3Config 
         .build()
 }
 
-/// Build a production-oriented recorder and its instrumented Tokio runtime from
-/// standard `DIAL9_*` environment variables.
+/// Build a recorder and its instrumented Tokio runtime from standard `DIAL9_*`
+/// environment variables.
 ///
 /// Hand it straight to the macro: `#[dial9::main(config = dial9::recorder_from_env)]`.
 ///

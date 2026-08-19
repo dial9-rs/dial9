@@ -85,9 +85,9 @@ pub trait Source: Any + Send {
     /// Append this source's segment-metadata entries to `out` **iff** they have
     /// changed since the last call.
     ///
-    /// Appending nothing on an unchanged cycle is what lets the flush loop skip
-    /// the merge (it merges only when `out` is non-empty), so steady-state
-    /// cycles allocate nothing. The default reports a source with no metadata.
+    /// The flush loop merges only when `out` is non-empty, so appending nothing
+    /// on an unchanged cycle keeps steady-state cycles allocation-free. The
+    /// default reports a source with no metadata.
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
         let _ = out;
     }
@@ -95,8 +95,8 @@ pub trait Source: Any + Send {
     /// A segment-processing stage this source's data needs, folded into the
     /// recorder's default pipeline at build. Called once, at build.
     ///
-    /// A custom pipeline replaces the default outright, so it does not pick
-    /// these up, you must chain the stage yourself in those cases.
+    /// A custom pipeline replaces the default outright and does not pick these
+    /// up; you must chain the stage yourself in those cases.
     #[cfg(feature = "pipeline")]
     fn segment_processor(&mut self) -> Option<Box<dyn crate::pipeline::SegmentProcessor>> {
         None

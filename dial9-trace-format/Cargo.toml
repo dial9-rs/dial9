@@ -7,6 +7,10 @@ repository.workspace = true
 description = "Self-describing binary trace format with schema registry"
 autobenches = false
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 serde = ["dep:serde"]
 # Enables a serde `Deserializer` for trace events. This is gated separately

@@ -6,14 +6,11 @@
 //! This crate relies on `perf_event_paranoid <= 2`.
 //!
 //! Uses kernel frame-pointer-based stack walking
-//! (`PERF_SAMPLE_CALLCHAIN`), so your binary must be compiled with frame pointers:
+//! (`PERF_SAMPLE_CALLCHAIN`), so your binary must be compiled with frame
+//! pointers:
 //!
 //! ```toml
-//! # Cargo.toml or .cargo/config.toml
-//! [profile.release]
-//! debug = true
-//!
-//! # In .cargo/config.toml:
+//! # .cargo/config.toml
 //! [build]
 //! rustflags = ["-C", "force-frame-pointers=yes"]
 //! ```
@@ -44,15 +41,25 @@
 //! and register it with a dial9 recorder via `MemoryProfiler::install`.
 //! Sampled allocations land in the trace as `AllocEvent`/`FreeEvent`.
 //!
-//! ```ignore
+//! ```no_run
+//! # #[cfg(feature = "memory-profiling")]
+//! # mod example {
+//! use dial9_core::buffer::MemoryBuffer;
+//! use dial9_core::recorder::recorder;
 //! use dial9_perf_self_profile::memory_profiling::{Dial9Allocator, MemoryProfiler};
 //!
 //! #[global_allocator]
 //! static ALLOC: Dial9Allocator = Dial9Allocator::system();
 //!
-//! // `handle` is a dial9 handle (dial9_core::handle::Dial9Handle).
-//! MemoryProfiler::with_defaults().install(handle)?;
+//! # pub fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
+//! let _guard = MemoryProfiler::with_defaults().install(rec.handle().clone())?;
+//! # Ok(())
+//! # }
+//! # }
 //! ```
+
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod offline_symbolize;
 mod sampler;
