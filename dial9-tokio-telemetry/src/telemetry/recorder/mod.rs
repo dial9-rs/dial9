@@ -2,6 +2,7 @@ mod handle;
 mod join_set;
 mod recorder_tokio;
 mod runtime_context;
+#[cfg(test)]
 pub(crate) use dial9_core::shared_state::SharedState;
 pub(crate) use dial9_core::source;
 
@@ -206,11 +207,16 @@ fn register_runtime_hooks(
     builder: &mut tokio::runtime::Builder,
     runtime_name: Option<String>,
     handle: &Dial9Handle,
+    worker_ids: runtime_context::WorkerIdCounter,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
     taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
 ) -> Arc<RuntimeContext> {
-    let ctx = Arc::new(RuntimeContext::new(runtime_name, handle.clone()));
+    let ctx = Arc::new(RuntimeContext::new(
+        runtime_name,
+        handle.clone(),
+        worker_ids,
+    ));
     register_hooks(
         builder,
         &ctx,
@@ -259,14 +265,15 @@ mod tests {
     fn runtime_hooks_do_not_publish_before_build() {
         clear_tl_handle();
         let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
-        let shared = rec.shared().unwrap().clone();
-        let registry = recorder_tokio::runtime_registry(&shared).unwrap();
+        let state = recorder_tokio::tokio_attach_state(rec.handle()).unwrap();
+        let registry = state.registry;
         let mut builder = tokio::runtime::Builder::new_current_thread();
 
         let ctx = register_runtime_hooks(
             &mut builder,
             Some("aborted".to_string()),
             rec.handle(),
+            state.worker_ids,
             false,
             TokioHooks::default(),
             None,
@@ -370,7 +377,6 @@ mod tests {
             .unwrap();
 
         assert!(rec.handle().is_enabled());
-        assert!(rec.shared().unwrap().is_enabled());
         let runtime_meta = rec
             .shared()
             .unwrap()
@@ -469,7 +475,8 @@ mod tests {
         assert!(!span_open, "a paused recorder should not open a poll span");
 
         let reserved: HashSet<u64> = {
-            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+            let registry = recorder_tokio::tokio_attach_state(rec.handle())
+                .map(|s| s.registry)
                 .expect("enabled recorder has a context registry");
             let registry = registry.lock().unwrap();
             registry
@@ -944,7 +951,8 @@ mod tests {
         // Blocks are reserved when a runtime's workers first resolve, so which
         // runtime holds the lower block is not fixed.
         let (main_ids, attached_ids) = {
-            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+            let registry = recorder_tokio::tokio_attach_state(rec.handle())
+                .map(|s| s.registry)
                 .expect("enabled recorder has a context registry");
             let registry = registry.lock().unwrap();
             let block = |name: &str| -> std::collections::HashSet<u64> {
@@ -1303,7 +1311,8 @@ mod tests {
         // of assuming absolute ranges: IDs are reserved when a runtime's workers
         // first poll, so the blocks depend on drive order.
         let (main_ids, io_ids) = {
-            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+            let registry = recorder_tokio::tokio_attach_state(rec.handle())
+                .map(|s| s.registry)
                 .expect("enabled recorder has a context registry");
             let registry = registry.lock().unwrap();
             let block = |name: &str| -> HashSet<u64> {
@@ -1429,7 +1438,8 @@ mod tests {
         // Read the worker set before shutdown: the registry goes away with the
         // recorder.
         let enrolled: HashSet<u64> = {
-            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+            let registry = recorder_tokio::tokio_attach_state(rec.handle())
+                .map(|s| s.registry)
                 .expect("enabled recorder has a context registry");
             let registry = registry.lock().unwrap();
             registry
@@ -1518,7 +1528,8 @@ mod tests {
         });
 
         let block = |name: &str| -> HashSet<u64> {
-            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+            let registry = recorder_tokio::tokio_attach_state(rec.handle())
+                .map(|s| s.registry)
                 .expect("enabled recorder has a context registry");
             let registry = registry.lock().unwrap();
             registry
@@ -1579,7 +1590,8 @@ mod tests {
         }
 
         let (main_ids, io_ids) = {
-            let registry = recorder_tokio::runtime_registry(rec.shared().unwrap())
+            let registry = recorder_tokio::tokio_attach_state(rec.handle())
+                .map(|s| s.registry)
                 .expect("enabled recorder has a context registry");
             let registry = registry.lock().unwrap();
             let block = |name: &str| -> HashSet<u64> {
@@ -1827,7 +1839,9 @@ mod tests {
         }
 
         assert_eq!(source_count(), 1, "every attach shares one source");
-        let registry = recorder_tokio::runtime_registry(&shared).expect("registry");
+        let registry = recorder_tokio::tokio_attach_state(rec.handle())
+            .map(|s| s.registry)
+            .expect("registry");
         assert_eq!(
             registry.lock().unwrap().len(),
             3,
