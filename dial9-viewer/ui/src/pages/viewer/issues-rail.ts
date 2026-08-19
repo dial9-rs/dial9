@@ -862,7 +862,7 @@ function taskTable(
                 @click=${() => h.jumpToTask(abs)}
               >
                 <td class="d9-task-id" title="" @pointerenter=${titleWhenClipped}>${row.id}</td>
-                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}>${row.loc}</td>
+                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}><bdi>${row.loc}</bdi></td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.polls}</td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.total}</td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.longest}</td>

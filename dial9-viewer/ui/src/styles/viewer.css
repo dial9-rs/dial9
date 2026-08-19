@@ -394,6 +394,12 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--d9-fg-muted);
+    /* Elide the BEGINNING on overflow: a spawn path's tail (file.rs:line:col)
+       is almost always the relevant part. RTL box direction puts the ellipsis
+       at the left edge; the cell's <bdi> child keeps the path itself in
+       logical LTR order (plain rtl would shuffle trailing digits/colons). */
+    direction: rtl;
+    text-align: left;
 }
 /* User-resized rail columns (Tasks and Issues tables): fixed layout honors
    the colgroup widths (uiPrefs.taskColWidths / issueColWidths; table width =
