@@ -494,6 +494,9 @@ impl WorkerLoop {
                 _ = crate::primitives::time::sleep_until(
                     min_deadline.unwrap_or_else(crate::primitives::time::Instant::now)
                 ), if min_deadline.is_some() => {}
+                //Relies on every caller cancelling `self.stop` right after marking the
+                // writer done, which wakes this select via `stop.cancelled()`
+                // instead -- breaking that ordering can deadlock this loop.
                 _ = Self::wait_for_more(&self.fs, &self.stop, self.poll_interval),
                     if !dumps.is_empty() => {}
             }
@@ -819,7 +822,8 @@ impl WorkerLoop {
                                                     record_dump_error(dumps, &matched, err_kind);
                                                 }
                                             } else {
-                                                crate::primitives::time::sleep(self.poll_interval).await;
+                                                crate::primitives::time::sleep(self.poll_interval)
+                                                    .await;
                                                 self.fs.release_for_retry(
                                                     data.segment(),
                                                     bytes.clone(),

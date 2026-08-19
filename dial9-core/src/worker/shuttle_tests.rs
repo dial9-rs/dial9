@@ -120,11 +120,12 @@ crate::shuttle_test! {
 
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
-    // Drives `WorkerLoop`'s triggered-mode dump matching directly, bypassing
-    // `run_triggered`'s outer `tokio::select!`/`sleep_until` loop (shuttle
-    // has no live Tokio reactor). Multiple writers seal segments concurrently
-    // with one on-demand dump request; it must resolve exactly once
-    // regardless of whether any segments landed in its window first.
+    // Drives the real `run_triggered()`, including its outer `select!` on
+    // stop/`sleep_until`/`wait_for_more` -- `primitives::time` and
+    // `shuttle_select!` make both shuttle-safe (see module doc). Multiple
+    // writers seal segments concurrently with one on-demand dump request; it
+    // must resolve exactly once regardless of whether any segments landed in
+    // its window first.
     //
     // `dump_current_data_at_for_test`/`set_epoch_secs_for_test` pin the
     // clock values instead of reading real time (required for determinism
@@ -154,16 +155,17 @@ crate::shuttle_test! {
             });
         });
 
+        let stop = tokio_util::sync::CancellationToken::new();
         let worker_fs = fs.clone();
         let worker_processed = processed.clone();
+        let worker_stop = stop.clone();
         let worker = crate::primitives::thread::spawn(move || {
             shuttle::future::block_on(async move {
-                let stop = tokio_util::sync::CancellationToken::new();
                 let mut worker = WorkerLoop::new(
                     worker_fs.clone(),
                     Duration::from_millis(1),
                     vec![Box::new(CountingProcessor(worker_processed))],
-                    stop,
+                    worker_stop,
                     metrique::writer::sink::DevNullSink::boxed(),
                     Some(rx),
                 )
@@ -183,6 +185,9 @@ crate::shuttle_test! {
         // not-yet-registered request with `WorkerStopped`.
         trigger_handle.join().unwrap();
         fs.mark_writer_done();
+        // `run_triggered` only notices `writer_done()` while idle if `stop`
+        // is also cancelled -- mirror real callers by doing both.
+        stop.cancel();
         worker.join().unwrap();
 
         assert!(
