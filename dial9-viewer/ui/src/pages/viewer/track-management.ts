@@ -224,15 +224,19 @@ export function toggleRuntimeMetricsCollapsed(store: ViewerStore, name: string):
 export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
 
 /** The persisted shape: the manageable order + the collapse map + the two
- *  per-runtime fold maps (runtime, summary lane) + the lanes box height. Every
- *  field but `trackOrder`/`collapsed` is optional so prefs written before it
- *  existed still parse (the store keeps its default when absent). */
+ *  per-runtime fold maps (runtime, summary lane) + the lanes box height + the
+ *  issues-rail width. Every field but `trackOrder`/`collapsed` is optional so
+ *  prefs written before it existed still parse (the store keeps its default
+ *  when absent). */
 export interface TrackPrefs {
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
   collapsedRuntimes?: Readonly<Record<string, boolean>>;
   collapsedRuntimeMetrics?: Readonly<Record<string, boolean>>;
   lanesHeight?: number;
+  railWidth?: number;
+  taskColWidths?: Readonly<Record<string, number>>;
+  issueColWidths?: Readonly<Record<string, number>>;
 }
 
 /** Coerce an unknown value into a `Record<string, boolean>`, keeping only the
@@ -244,6 +248,18 @@ function parseBoolMap(value: unknown): Record<string, boolean> {
   if (value !== null && typeof value === "object") {
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       if (typeof v === "boolean") out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** Coerce an unknown value into a `Record<string, number>` of positive finite
+ *  widths, dropping everything else. A non-object yields an empty map. */
+function parseWidthMap(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) out[k] = v;
     }
   }
   return out;
@@ -296,12 +312,21 @@ export function loadTrackPrefs(): TrackPrefs | null {
     const collapsedRuntimeMetrics = crm !== undefined ? parseBoolMap(crm) : undefined;
     const lh = (obj as { lanesHeight?: unknown }).lanesHeight;
     const lanesHeight = typeof lh === "number" && Number.isFinite(lh) && lh > 0 ? lh : undefined;
+    const rw = (obj as { railWidth?: unknown }).railWidth;
+    const railWidth = typeof rw === "number" && Number.isFinite(rw) && rw > 0 ? rw : undefined;
+    const tcw = (obj as { taskColWidths?: unknown }).taskColWidths;
+    const taskColWidths = tcw !== undefined ? parseWidthMap(tcw) : undefined;
+    const icw = (obj as { issueColWidths?: unknown }).issueColWidths;
+    const issueColWidths = icw !== undefined ? parseWidthMap(icw) : undefined;
     return {
       trackOrder,
       collapsed,
       ...(collapsedRuntimes !== undefined ? { collapsedRuntimes } : {}),
       ...(collapsedRuntimeMetrics !== undefined ? { collapsedRuntimeMetrics } : {}),
       ...(lanesHeight !== undefined ? { lanesHeight } : {}),
+      ...(railWidth !== undefined ? { railWidth } : {}),
+      ...(taskColWidths !== undefined ? { taskColWidths } : {}),
+      ...(issueColWidths !== undefined ? { issueColWidths } : {}),
     };
   } catch {
     return null;
@@ -309,7 +334,7 @@ export function loadTrackPrefs(): TrackPrefs | null {
 }
 
 /** Persist track prefs (order + collapse map + the two runtime fold maps + lanes
- *  box height) to localStorage. */
+ *  box height + issues-rail width) to localStorage. */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
   const trackOrder = prefs.trackOrder.filter((id) => !isFieldChartTrackId(id));
   const collapsed = Object.fromEntries(
@@ -329,6 +354,9 @@ export function saveTrackPrefs(prefs: TrackPrefs): void {
         ? { collapsedRuntimeMetrics: prefs.collapsedRuntimeMetrics }
         : {}),
       ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
+      ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
+      ...(prefs.taskColWidths !== undefined ? { taskColWidths: prefs.taskColWidths } : {}),
+      ...(prefs.issueColWidths !== undefined ? { issueColWidths: prefs.issueColWidths } : {}),
     }),
   );
 }
@@ -354,6 +382,9 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
       ? { collapsedRuntimeMetrics: prefs.collapsedRuntimeMetrics }
       : {}),
     ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
+    ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
+    ...(prefs.taskColWidths !== undefined ? { taskColWidths: prefs.taskColWidths } : {}),
+    ...(prefs.issueColWidths !== undefined ? { issueColWidths: prefs.issueColWidths } : {}),
   });
 }
 
@@ -372,6 +403,9 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       collapsedRuntimes,
       collapsedRuntimeMetrics,
       lanesViewportHeight,
+      railWidth,
+      taskColWidths,
+      issueColWidths,
     } = state.uiPrefs;
     saveTrackPrefs({
       trackOrder,
@@ -379,6 +413,9 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       collapsedRuntimes,
       collapsedRuntimeMetrics,
       lanesHeight: lanesViewportHeight,
+      railWidth,
+      taskColWidths,
+      issueColWidths,
     });
   });
 }

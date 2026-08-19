@@ -254,8 +254,10 @@ body {
 
 /* ── Issues rail (concept-2, replaces the "0/74" stepper) ────────────── */
 
+/* Width is bound inline by the rail template (uiPrefs.railWidth, default
+   DEFAULT_RAIL_WIDTH) and drag-resizable via the .d9-rail-resize handle. */
 .d9-rail {
-    width: 300px;
+    position: relative;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
@@ -263,6 +265,17 @@ body {
     background: #151530;
     border-right: 1px solid var(--d9-border);
 }
+.d9-rail-resize {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 2;
+}
+.d9-rail-resize:hover { background: var(--d9-accent); }
 /* Issues/Tasks tab strip: pinned above the per-tab head. */
 .d9-rail-tabs {
     flex-shrink: 0;
@@ -322,7 +335,9 @@ body {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.d9-rail-list { flex: 1; overflow-y: auto; min-height: 0; }
+/* overflow-x: user-widened Tasks columns can exceed the rail; scroll rather
+   than squash the other columns. */
+.d9-rail-list { flex: 1; overflow-y: auto; overflow-x: auto; min-height: 0; }
 .d9-rail-empty { padding: 12px 10px; color: var(--d9-fg-muted); font-size: 0.8em; font-style: italic; }
 
 .d9-rail-table {
@@ -379,7 +394,43 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--d9-fg-muted);
+    /* Elide the BEGINNING on overflow: a spawn path's tail (file.rs:line:col)
+       is almost always the relevant part. RTL box direction puts the ellipsis
+       at the left edge; the cell's <bdi> child keeps the path itself in
+       logical LTR order (plain rtl would shuffle trailing digits/colons). */
+    direction: rtl;
+    text-align: left;
 }
+/* User-resized rail columns (Tasks and Issues tables): fixed layout honors
+   the colgroup widths (uiPrefs.taskColWidths / issueColWidths; table width =
+   their sum, bound inline). Every cell truncates instead of forcing its
+   column wider - the Tasks pointerenter tooltip / Issues row title carry the
+   full text - and the spawn cell drops its auto-layout filler trick, since
+   its col now has an explicit width. */
+.d9-rail-table.d9-cols-fixed { table-layout: fixed; }
+.d9-cols-fixed td,
+.d9-cols-fixed thead th {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* A user-widened column would leave its label stranded at the far left, so
+   resized headers center in their column. Default (content-fit) headers stay
+   left-aligned. */
+.d9-cols-fixed .d9-rail-sort { text-align: center; }
+.d9-cols-fixed .d9-task-loc { max-width: none; width: auto; }
+/* The column divider: a drag strip on each header's right edge. The sticky
+   th is the containing block (position: sticky positions descendants). */
+.d9-col-resize {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: col-resize;
+    z-index: 2;
+}
+.d9-col-resize:hover { background: var(--d9-accent); }
 .d9-rail-dot {
     display: inline-block;
     vertical-align: middle;

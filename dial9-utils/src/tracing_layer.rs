@@ -76,6 +76,9 @@ use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 const TOKIO_TASK_ID_FIELD: &str = "dial9.tokio.task_id";
 
+/// Emitted once when a span closes, so the viewer can recycle its id. Mirrors
+/// the `SpanCloseEvent` the ad-hoc span wrappers emit (same schema, distinct
+/// producer).
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
 struct SpanCloseEvent {

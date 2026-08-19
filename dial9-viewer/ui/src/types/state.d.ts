@@ -187,6 +187,9 @@ export interface SelectionSlice {
  */
 export type PoiSortKey = "worker" | "kind" | "time" | "duration";
 
+/** Issues-table columns: the severity dot plus the four sortable columns. */
+export type IssueColKey = "dot" | PoiSortKey;
+
 /** The rail's active tab: the POI issues list or the task index. */
 export type RailTab = "issues" | "tasks";
 
@@ -290,6 +293,23 @@ export interface UiPrefsSlice {
   collapsedRuntimeMetrics: Readonly<Record<string, boolean>>;
   /** Stack-sidebar width in CSS px (drag-resizable). */
   sidebarWidth: number;
+  /** Issues/Tasks rail width in CSS px (drag-resizable via its right edge). */
+  railWidth: number;
+  /**
+   * Tasks-table column widths in CSS px, keyed by column sort key. Empty =
+   * automatic (content-fit) layout. The first divider drag seeds every column
+   * from its measured width and the table switches to fixed layout, so the
+   * dragged column changes while the rest hold; the table scrolls
+   * horizontally inside the rail when the sum exceeds the rail width.
+   */
+  taskColWidths: Readonly<Partial<Record<TaskSortKey, number>>>;
+  /**
+   * Issues-table column widths in CSS px; same mechanics as
+   * {@link taskColWidths}. `dot` is the severity-dot column: seeded and
+   * pinned with the rest so fixed layout holds it steady, but it carries no
+   * drag handle (nothing in it to read).
+   */
+  issueColWidths: Readonly<Partial<Record<IssueColKey, number>>>;
   /**
    * Height in CSS px of the worker-lanes box (the scroll container holding the
    * fixed-height worker rows). Drag-resizable via the lanes bottom gutter and

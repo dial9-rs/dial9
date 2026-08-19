@@ -9,6 +9,22 @@ set -e
 # Determine the target to use based on installed nightly targets
 TARGET=$(rustup target list --installed --toolchain nightly | head -1)
 
+# A packaged crate has its workspace paths rewritten to registry dependencies.
+# Overlay publishable workspace crates so docs checks use the local versions
+# that will be released together, while retaining the packaged crate's isolated
+# feature resolution.
+WORKSPACE_METADATA=$(cargo metadata --no-deps --format-version 1)
+LOCAL_OVERRIDES="$(pwd)/target/docsrs-local-overrides.toml"
+mkdir -p "$(dirname "$LOCAL_OVERRIDES")"
+jq -r '
+    ["[patch.crates-io]"] +
+    [.packages[]
+        | select(.publish == null or (.publish | length) > 0)
+        | "\(.name) = { path = \((.manifest_path | sub("/Cargo.toml$"; "")) | @json) }"
+    ]
+    | .[]
+' <<< "$WORKSPACE_METADATA" > "$LOCAL_OVERRIDES"
+
 check_package() {
     local pkg_name=$1
     local pkg_version=$2
@@ -18,8 +34,12 @@ check_package() {
     # Falls back to building directly from the workspace when cargo package fails
     # (e.g. unpublished crates or features not yet on crates.io).
     if cargo package -p "$pkg_name" --allow-dirty 2>/dev/null; then
-        (cd "target/package/$pkg_name-$pkg_version" && \
-            cargo +nightly docs-rs --target "$TARGET")
+        local package_dir="target/package/$pkg_name-$pkg_version"
+        # cargo-docs-rs launches Cargo again internally, so put the overlays
+        # where that nested invocation discovers them.
+        mkdir -p "$package_dir/.cargo"
+        cp "$LOCAL_OVERRIDES" "$package_dir/.cargo/config.toml"
+        (cd "$package_dir" && cargo +nightly docs-rs --target "$TARGET")
     else
         echo "  ⚠ cargo package failed, falling back to workspace build"
         cargo +nightly docs-rs -p "$pkg_name" --target "$TARGET"
@@ -28,7 +48,7 @@ check_package() {
 
 if [ $# -eq 0 ]; then
     # Run on all workspace packages (skip packages with publish = false)
-    packages=$(cargo metadata --no-deps --format-version 1 | \
+    packages=$(echo "$WORKSPACE_METADATA" | \
         jq -r '.packages[] | select(.publish == null or (.publish | length) > 0) | "\(.name) \(.version)"')
     
     while IFS= read -r line; do
@@ -39,7 +59,7 @@ if [ $# -eq 0 ]; then
 else
     # Run on specific package
     pkg_name=$1
-    pkg_version=$(cargo metadata --no-deps --format-version 1 | \
+    pkg_version=$(echo "$WORKSPACE_METADATA" | \
         jq -r ".packages[] | select(.name == \"$pkg_name\") | .version")
     
     if [ -z "$pkg_version" ]; then

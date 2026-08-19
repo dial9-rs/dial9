@@ -390,6 +390,100 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     vi.stubGlobal("localStorage", ls);
     expect(loadTrackPrefs()?.lanesHeight).toBeUndefined();
   });
+
+  it("persists + restores the rail width across a fresh store", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    const s1 = manualScheduler();
+    const dispose = mountTrackPrefsPersistence(s1.store);
+    s1.store.update("uiPrefs", { railWidth: 420 });
+    s1.flush(); // subscriber writes to localStorage
+    dispose();
+
+    const s2 = createViewerStore({ scheduler: () => {} });
+    expect(uiPrefs(s2).railWidth).toBe(300); // store default before hydrate
+    hydrateTrackPrefs(s2);
+    expect(uiPrefs(s2).railWidth).toBe(420);
+  });
+
+  it("keeps the store default when no rail width was stored", () => {
+    const ls = fakeLocalStorage();
+    // A pref blob from before railWidth existed: order/collapse only.
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({ trackOrder: ["cpu"], collapsed: {} }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    expect(loadTrackPrefs()?.railWidth).toBeUndefined();
+    const store = createViewerStore({ scheduler: () => {} });
+    hydrateTrackPrefs(store);
+    expect(uiPrefs(store).railWidth).toBe(300); // untouched default
+  });
+
+  it("rejects a non-positive stored rail width", () => {
+    const ls = fakeLocalStorage();
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({ trackOrder: [], collapsed: {}, railWidth: 0 }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    expect(loadTrackPrefs()?.railWidth).toBeUndefined();
+  });
+
+  it("persists + restores the tasks-table column widths across a fresh store", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    const s1 = manualScheduler();
+    const dispose = mountTrackPrefsPersistence(s1.store);
+    s1.store.update("uiPrefs", { taskColWidths: { loc: 260, polls: 48 } });
+    s1.flush(); // subscriber writes to localStorage
+    dispose();
+
+    const s2 = createViewerStore({ scheduler: () => {} });
+    expect(uiPrefs(s2).taskColWidths).toEqual({}); // fresh default before hydrate
+    hydrateTrackPrefs(s2);
+    expect(uiPrefs(s2).taskColWidths).toEqual({ loc: 260, polls: 48 });
+  });
+
+  it("drops non-positive and non-numeric stored column widths", () => {
+    const ls = fakeLocalStorage();
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({
+        trackOrder: [],
+        collapsed: {},
+        taskColWidths: { loc: 260, polls: 0, total: "wide", longest: -5 },
+      }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    expect(loadTrackPrefs()?.taskColWidths).toEqual({ loc: 260 });
+  });
+
+  it("persists + restores the issues-table column widths across a fresh store", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    const s1 = manualScheduler();
+    const dispose = mountTrackPrefsPersistence(s1.store);
+    s1.store.update("uiPrefs", { issueColWidths: { dot: 14, kind: 120 } });
+    s1.flush(); // subscriber writes to localStorage
+    dispose();
+
+    const s2 = createViewerStore({ scheduler: () => {} });
+    expect(uiPrefs(s2).issueColWidths).toEqual({}); // fresh default before hydrate
+    hydrateTrackPrefs(s2);
+    expect(uiPrefs(s2).issueColWidths).toEqual({ dot: 14, kind: 120 });
+  });
+
+  it("keeps the store default when no column widths were stored", () => {
+    const ls = fakeLocalStorage();
+    // A pref blob from before taskColWidths existed: order/collapse only.
+    ls.setItem(
+      TRACK_PREFS_STORAGE_KEY,
+      JSON.stringify({ trackOrder: ["cpu"], collapsed: {} }),
+    );
+    vi.stubGlobal("localStorage", ls);
+    expect(loadTrackPrefs()?.taskColWidths).toBeUndefined();
+    const store = createViewerStore({ scheduler: () => {} });
+    hydrateTrackPrefs(store);
+    expect(uiPrefs(store).taskColWidths).toEqual({}); // untouched default
+  });
 });
 
 describe("collapse height + re-expand windowing obligation", () => {

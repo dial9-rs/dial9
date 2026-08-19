@@ -21,7 +21,11 @@ import type {
 } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
-import { DEFAULT_INSPECTOR_WIDTH, DEFAULT_LANES_HEIGHT } from "./store.js";
+import {
+  DEFAULT_INSPECTOR_WIDTH,
+  DEFAULT_LANES_HEIGHT,
+  DEFAULT_RAIL_WIDTH,
+} from "./store.js";
 import { POI_FILTERS } from "./poi.js";
 import {
   FIELD_CHART_KINDS,
@@ -56,9 +60,12 @@ const P_EVENT_NAMES = "event-names";
 const P_RAIL_TAB = "rail";
 const P_TASK_SORT = "task-sort";
 const P_TASK_INDEX = "task-index";
+const P_TASK_COLS = "task-cols";
+const P_ISSUE_COLS = "issue-cols";
 const P_RUNTIME_COLLAPSED = "runtime-collapsed";
 const P_RUNTIME_METRICS_COLLAPSED = "runtime-metrics-collapsed";
 const P_INSPECTOR_WIDTH = "inspector-width";
+const P_RAIL_WIDTH = "rail-width";
 const P_LANES_HEIGHT = "lanes-height";
 const P_LANES_SCROLL = "lanes-scroll";
 const P_STACK_VIEW = "stack-view";
@@ -87,6 +94,8 @@ const POI_SORT_KEYS: readonly PoiSortKey[] = ["worker", "kind", "time", "duratio
 const SPAN_PCTS: readonly number[] = [50, 90, 95, 99];
 
 const TASK_SORT_KEYS: readonly TaskSortKey[] = ["id", "loc", "polls", "total", "longest", "lifetime"];
+/** Valid issue-cols keys: the severity-dot column plus the sortable four. */
+const ISSUE_COL_KEYS: readonly string[] = ["dot", ...POI_SORT_KEYS];
 const INSPECTOR_TABS: readonly InspectorTab[] = ["task", "poll", "event", "related", "stack"];
 const REGION_MODES: readonly RegionAnalysisMode[] = ["cpu", "blocking", "heap"];
 
@@ -148,6 +157,9 @@ export const VIEWER_STATE_OWNERSHIP = {
     collapsedRuntimes: url(P_RUNTIME_COLLAPSED),
     collapsedRuntimeMetrics: url(P_RUNTIME_METRICS_COLLAPSED),
     sidebarWidth: url(P_INSPECTOR_WIDTH),
+    railWidth: url(P_RAIL_WIDTH),
+    taskColWidths: url(P_TASK_COLS),
+    issueColWidths: url(P_ISSUE_COLS),
     lanesViewportHeight: url(P_LANES_HEIGHT),
     lanesScrollTop: url(P_LANES_SCROLL),
     selectedSpanNames: url(P_SPAN_NAMES),
@@ -290,6 +302,17 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (state.uiPrefs.sidebarWidth !== DEFAULT_INSPECTOR_WIDTH) {
     vs.inspectorWidth = state.uiPrefs.sidebarWidth;
   }
+  if (state.uiPrefs.railWidth !== DEFAULT_RAIL_WIDTH) {
+    vs.railWidth = state.uiPrefs.railWidth;
+  }
+  const taskColEntries = sortedWidthEntries(state.uiPrefs.taskColWidths);
+  if (taskColEntries.length > 0) {
+    vs.taskColWidths = Object.fromEntries(taskColEntries);
+  }
+  const issueColEntries = sortedWidthEntries(state.uiPrefs.issueColWidths);
+  if (issueColEntries.length > 0) {
+    vs.issueColWidths = Object.fromEntries(issueColEntries);
+  }
   if (state.uiPrefs.lanesViewportHeight !== DEFAULT_LANES_HEIGHT) {
     vs.lanesHeight = state.uiPrefs.lanesViewportHeight;
   }
@@ -384,6 +407,9 @@ export function mirrorViewerToQuery(
   set(params, P_RUNTIME_COLLAPSED, encodeList(vs.collapsedRuntimes));
   set(params, P_RUNTIME_METRICS_COLLAPSED, encodeList(vs.collapsedRuntimeMetrics));
   set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
+  set(params, P_RAIL_WIDTH, finiteString(vs.railWidth));
+  set(params, P_TASK_COLS, encodeWidthMap(vs.taskColWidths));
+  set(params, P_ISSUE_COLS, encodeWidthMap(vs.issueColWidths));
   set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
   set(params, P_LANES_SCROLL, finiteString(vs.lanesScrollTop));
   set(params, P_STACK_VIEW, vs.stackView ?? null);
@@ -414,6 +440,24 @@ export function mirrorViewerToQuery(
  */
 function encodeList(values?: readonly string[]): string | null {
   return values !== undefined && values.length > 0 ? `v1:${values.join("\t")}` : null;
+}
+
+/** The defined entries of a column-width map, sorted by key for a stable URL. */
+function sortedWidthEntries(
+  widths: Readonly<Partial<Record<string, number>>>,
+): [string, number][] {
+  return Object.entries(widths)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort(([a], [b]) => a.localeCompare(b));
+}
+
+/** Encode a column-width map as a v1 list of `<key>,<px>` entries. */
+function encodeWidthMap(widths?: Record<string, number>): string | null {
+  return encodeList(
+    widths !== undefined
+      ? sortedWidthEntries(widths).map(([key, px]) => `${key},${px}`)
+      : undefined,
+  );
 }
 
 /** Structured Related entries already contain TAB fields, so separate entries
@@ -466,6 +510,9 @@ export interface ViewerUrlState {
   collapsedRuntimes?: string[];
   collapsedRuntimeMetrics?: string[];
   inspectorWidth?: number;
+  railWidth?: number;
+  taskColWidths?: Record<string, number>;
+  issueColWidths?: Record<string, number>;
   lanesHeight?: number;
   lanesScrollTop?: number;
   stacksAsFlamegraph?: boolean;
@@ -526,6 +573,15 @@ export function hydrateViewerStore(
   }
   if (urlView.inspectorWidth !== undefined) {
     uiPrefs.sidebarWidth = urlView.inspectorWidth;
+  }
+  if (urlView.railWidth !== undefined) {
+    uiPrefs.railWidth = urlView.railWidth;
+  }
+  if (urlView.taskColWidths !== undefined) {
+    uiPrefs.taskColWidths = urlView.taskColWidths;
+  }
+  if (urlView.issueColWidths !== undefined) {
+    uiPrefs.issueColWidths = urlView.issueColWidths;
   }
   if (urlView.lanesHeight !== undefined) {
     uiPrefs.lanesViewportHeight = urlView.lanesHeight;
@@ -690,6 +746,15 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   }
   const inspectorWidth = positiveInt(p.get(P_INSPECTOR_WIDTH));
   if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
+  const railWidth = positiveInt(p.get(P_RAIL_WIDTH));
+  if (railWidth !== null) out.railWidth = railWidth;
+  const taskCols = decodeWidthMap(
+    p.get(P_TASK_COLS),
+    TASK_SORT_KEYS as readonly string[],
+  );
+  if (taskCols !== null) out.taskColWidths = taskCols;
+  const issueCols = decodeWidthMap(p.get(P_ISSUE_COLS), ISSUE_COL_KEYS);
+  if (issueCols !== null) out.issueColWidths = issueCols;
   const lanesHeight = positiveInt(p.get(P_LANES_HEIGHT));
   if (lanesHeight !== null) out.lanesHeight = lanesHeight;
   const lanesScrollTop = nonNegativeInt(p.get(P_LANES_SCROLL));
@@ -812,6 +877,25 @@ function isValidFieldChartTrackId(id: string): boolean {
 
 /** Decode the modern marked list, falling back to the previously emitted
  * comma-separated percent-encoded grammar for old links. */
+/** Decode a v1 `<key>,<px>` width list; tolerant reader - unknown keys and
+ *  non-positive widths are dropped, an all-junk value reads as absent. */
+function decodeWidthMap(
+  v: string | null,
+  validKeys: readonly string[],
+): Record<string, number> | null {
+  const entries = decodeList(v);
+  if (entries === null) return null;
+  const widths: Record<string, number> = {};
+  for (const entry of entries) {
+    const comma = entry.lastIndexOf(",");
+    if (comma <= 0) continue;
+    const key = entry.slice(0, comma);
+    const px = positiveInt(entry.slice(comma + 1));
+    if (px !== null && validKeys.includes(key)) widths[key] = px;
+  }
+  return Object.keys(widths).length > 0 ? widths : null;
+}
+
 function decodeList(v: string | null): string[] | null {
   if (v == null || v.length === 0) return null;
   if (v.startsWith("v1:")) {
