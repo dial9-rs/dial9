@@ -128,9 +128,11 @@ impl Recorder {
         self.worker = Some(worker);
     }
 
-    /// The shared recording state.
-    pub fn shared(&self) -> Option<&Arc<SharedState>> {
-        self.handle.shared()
+    crate::test_util_pub! {
+        /// The shared recording state.
+        fn shared(&self) -> Option<&Arc<SharedState>> {
+            self.handle.shared()
+        }
     }
 
     /// Monotonic start time of the recorder in nanoseconds.

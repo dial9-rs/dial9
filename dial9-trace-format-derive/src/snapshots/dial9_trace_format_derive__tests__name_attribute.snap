@@ -1,0 +1,25 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+expression: "expand_to_string(quote!\n{\n    #[traceevent(name = concat!(\"SpanEnter:\", file!(), \":\", line!()))] struct\n    Renamed { #[traceevent(timestamp)] timestamp_ns: u64, value: u64, }\n})"
+---
+impl ::dial9_trace_format::TraceEvent for Renamed {
+    fn event_name() -> &'static str {
+        concat!("SpanEnter:", file!(), ":", line!())
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef::new("value", < u64 as
+            ::dial9_trace_format::TraceField > ::field_type(),)
+        ]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <u64 as ::dial9_trace_format::TraceField>::encode(&self.value, enc)?;
+        Ok(())
+    }
+}

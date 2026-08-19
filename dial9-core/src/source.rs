@@ -55,11 +55,11 @@ impl<'a> FlushContext<'a> {
 /// A data source drained by the flush thread each cycle.
 ///
 /// Implement this trait to feed custom events into the dial9 trace. Register
-/// the source with [`SharedState::push_source`] before starting the flush
+/// the source with [`RecorderBuilder::source`] before starting the flush
 /// thread; the flush thread calls [`flush`] once per cycle.
 ///
 /// [`flush`]: Source::flush
-/// [`SharedState::push_source`]: crate::shared_state::SharedState::push_source
+/// [`RecorderBuilder::source`]: crate::recorder::RecorderBuilder::source
 pub trait Source: Any + Send {
     /// Drain pending data into the trace. Called once per flush cycle.
     fn flush(&mut self, ctx: &FlushContext<'_>);

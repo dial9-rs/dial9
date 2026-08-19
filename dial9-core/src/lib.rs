@@ -69,9 +69,10 @@ pub mod sampling;
 pub mod schema_extensions;
 /// Sealed-segment detection. The segment types are public via [`pipeline`].
 pub(crate) mod sealed;
-/// Runtime-agnostic recording state shared across threads.
-#[doc(hidden)]
-pub mod shared_state;
+test_util_pub! {
+    /// Runtime-agnostic recording state shared across threads.
+    mod shared_state;
+}
 /// `Source` trait: pluggable flush-thread data sources.
 pub mod source;
 /// Test-only record/drain/write helpers.
