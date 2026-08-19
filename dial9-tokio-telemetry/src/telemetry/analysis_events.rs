@@ -7,7 +7,8 @@
 //!
 //! # Backwards Compatibility
 //!
-//! All structs and the [`Dial9Event`] enum are `#[non_exhaustive]`, so new
+//! All structs and the [`Dial9Event`](crate::telemetry::analysis_events::Dial9Event)
+//! enum are `#[non_exhaustive]`, so new
 //! fields and variants can be added without breaking changes. When new fields
 //! are added to the wire format, old traces simply won't have those fields in
 //! their schema — serde will skip them during deserialization.

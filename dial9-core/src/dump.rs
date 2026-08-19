@@ -24,16 +24,18 @@
 //! # Concurrent dumps
 //!
 //! Dumps are independent: triggering two at once registers two dumps, each
-//! with its own [`DumpId`] and (off S3) its own manifest. A segment whose
+//! with its own [`DumpId`](crate::dump::DumpId) and (off S3) its own manifest. A segment whose
 //! span overlaps both windows is captured by both. There is no coordination
 //! by default - this is intentional, so unrelated subsystems can dump
 //! without stepping on each other.
 //!
 //! When a single source fires repeatedly (a watcher that re-trips every
 //! poll, a hot path that dumps on every slow request), configure
-//! [`DumpTriggerConfig::debounce`] to coalesce a burst into one dump: triggers
+//! [`DumpTriggerConfig::debounce`](crate::dump::DumpTriggerConfig::debounce) to coalesce a burst
+//! into one dump: triggers
 //! within the debounce window after a dump dispatched resolve
-//! [`DumpError::Coalesced`], naming the dump they folded into instead of
+//! [`DumpError::Coalesced`](crate::dump::DumpError::Coalesced), naming the dump they folded
+//! into instead of
 //! starting a new one. The gate lives on the trigger stored on the recorder,
 //! so every [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger)
 //! clone shares it. (A *cooldown* that rejects extra triggers outright,

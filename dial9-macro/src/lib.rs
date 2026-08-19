@@ -225,9 +225,9 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Instrument an async main function with dial9 telemetry.
 ///
 /// This macro is a **replacement** for `#[tokio::main]`, not a complement —
-/// do not use both attributes on the same function. Your `config` yields a [`dial9::Recorder`] and its
+/// do not use both attributes on the same function. Your `config` yields a [`dial9::Recorder`](../dial9/struct.Recorder.html) and its
 /// instrumented `tokio::runtime::Runtime`; the macro runs the body on that
-/// runtime as a spawned task via [`dial9::block_on`] (polled directly under
+/// runtime as a spawned task via [`dial9::block_on`](../dial9/fn.block_on.html) (polled directly under
 /// `Runtime::block_on` it would be invisible to the poll hooks), then drops the
 /// runtime (so workers flush) and drains the recorder.
 ///
@@ -236,10 +236,10 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or closure returning
-///   `std::io::Result<`[`dial9::AttachedRuntime`]`>`: a recorder paired with a
+///   `std::io::Result<`[`dial9::AttachedRuntime`](../dial9/type.AttachedRuntime.html)`>`: a recorder paired with a
 ///   runtime attached to it
-///   via [`Dial9HandleTokioExt::attach_tokio_runtime`](dial9::Dial9HandleTokioExt::attach_tokio_runtime).
-///   The macro panics if it is an `Err`. Use [`dial9::recorder_from_env`] for
+///   via [`Dial9HandleTokioExt::attach_tokio_runtime`](../dial9/trait.Dial9HandleTokioExt.html#tymethod.attach_tokio_runtime).
+///   The macro panics if it is an `Err`. Use [`dial9::recorder_from_env`](../dial9/fn.recorder_from_env.html) for
 ///   the env-driven setup. Required.
 /// * `graceful_shutdown` — the drain deadline (a `Duration`); defaults to 1s.
 /// * `disable_graceful_shutdown` — skip the drain; the recorder is just dropped.

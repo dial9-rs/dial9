@@ -424,12 +424,12 @@ impl std::fmt::Display for AssumeRoleError {
 }
 impl std::error::Error for AssumeRoleError {}
 
-/// Production [`RoleAssumer`]: mints credentials via [`AssumeRoleProvider`],
+/// Production [`RoleAssumer`]: mints credentials via [`AssumeRoleProvider`](aws_config::sts::AssumeRoleProvider),
 /// which assumes the role with the process's ambient identity (instance/task
-/// role). Holds the ambient [`SdkConfig`] and builds a provider per request, so
+/// role). Holds the ambient [`SdkConfig`](aws_config::SdkConfig) and builds a provider per request, so
 /// the role ARN can vary per request.
 ///
-/// Building a fresh provider each call forgoes [`AssumeRoleProvider`]'s
+/// Building a fresh provider each call forgoes [`AssumeRoleProvider`](aws_config::sts::AssumeRoleProvider)'s
 /// credential caching across requests — fine while reads are infrequent. When
 /// that matters, cache `SharedCredentialsProvider`s here keyed by (ARN, region)
 /// and reuse them: each then caches and refreshes its own credentials.
@@ -444,7 +444,7 @@ impl StsRoleAssumer {
         Self::from_config(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
     }
 
-    /// Build from an explicit [`SdkConfig`] (test seam / custom base credentials
+    /// Build from an explicit [`SdkConfig`](aws_config::SdkConfig) (test seam / custom base credentials
     /// + STS endpoint).
     pub fn from_config(config: aws_config::SdkConfig) -> Self {
         Self { config }
