@@ -77,6 +77,20 @@ fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
 fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     let name = &input.ident;
 
+    // Support borrowed event structs like `Event<'a> { data: &'a str }`. We
+    // allow at most one lifetime and no type/const parameters; generic event
+    // schemas are not currently supported.
+    if input.generics.type_params().next().is_some()
+        || input.generics.const_params().next().is_some()
+        || input.generics.lifetimes().count() > 1
+    {
+        return Err(syn::Error::new_spanned(
+            &input.generics,
+            "TraceEvent supports at most one lifetime parameter and no type or const parameters",
+        ));
+    }
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(f) => &f.named,
@@ -299,7 +313,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     };
 
     Ok(quote! {
-        impl ::dial9_trace_format::TraceEvent for #name {
+        impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
             fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
@@ -347,7 +361,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   placing `kind` on the timestamp field.
 ///
 /// A malformed or unrecognized `traceevent` key is a compile error. Only structs
-/// with named fields are supported; the derive does not support generic structs.
+/// with named fields and at most one lifetime parameter are supported; type and
+/// const parameters are rejected.
 ///
 /// # Example
 ///
@@ -490,6 +505,21 @@ mod tests {
         }));
     }
 
+    /// `name = <expr>` overrides `event_name()` with the given expression
+    /// (evaluated at the caller's site), so a generated struct can build a
+    /// per-call-site-unique name via `file!()`/`line!()`.
+    #[test]
+    fn name_attribute() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(name = concat!("SpanEnter:", file!(), ":", line!()))]
+            struct Renamed {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                value: u64,
+            }
+        }));
+    }
+
     #[test]
     fn kind_attribute() {
         assert_snapshot!(expand_to_string(quote! {
@@ -613,6 +643,84 @@ mod tests {
         });
         assert!(
             err.to_string().contains("expected `=`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn borrowed_str_event() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct BorrowedStr<'a> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                path: &'a str,
+            }
+        }));
+    }
+
+    #[test]
+    fn borrowed_bytes_event() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct BorrowedBytes<'a> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                body: &'a [u8],
+            }
+        }));
+    }
+
+    #[test]
+    fn mixed_owned_and_borrowed() {
+        assert_snapshot!(expand_to_string(quote! {
+            struct Mixed<'a> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                owned: String,
+                borrowed: &'a str,
+                count: u32,
+            }
+        }));
+    }
+
+    #[test]
+    fn wire_slot_with_lifetime() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(wire_slot)]
+            struct WireSlotBorrowed<'a> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                data: &'a str,
+            }
+        }));
+    }
+
+    #[test]
+    fn two_lifetimes_rejected() {
+        let err = expand_err(quote! {
+            struct TwoLifetimes<'a, 'b> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                a: &'a str,
+                b: &'b str,
+            }
+        });
+        assert!(
+            err.to_string().contains("at most one lifetime"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn type_param_rejected() {
+        let err = expand_err(quote! {
+            struct Generic<T> {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                value: T,
+            }
+        });
+        assert!(
+            err.to_string().contains("no type or const parameters"),
             "unexpected error: {err}"
         );
     }

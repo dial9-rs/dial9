@@ -1220,6 +1220,19 @@ impl TraceField for String {
     }
 }
 
+impl TraceField for Vec<u8> {
+    fn field_type() -> FieldType {
+        FieldType::Bytes
+    }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        enc.write_bytes(self)
+    }
+}
+
+// Borrowed field types for events that borrow their data (e.g.
+// `struct Event<'a> { path: &'a str }`). These encode byte-identically to their
+// owned counterparts (`String` / `Vec<u8>`), so borrowed and owned events
+// produce the same wire output and decode the same way.
 impl TraceField for &str {
     fn field_type() -> FieldType {
         FieldType::String
@@ -1229,7 +1242,7 @@ impl TraceField for &str {
     }
 }
 
-impl TraceField for Vec<u8> {
+impl TraceField for &[u8] {
     fn field_type() -> FieldType {
         FieldType::Bytes
     }

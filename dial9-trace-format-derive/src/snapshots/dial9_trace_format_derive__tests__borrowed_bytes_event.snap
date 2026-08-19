@@ -1,0 +1,25 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+expression: "expand_to_string(quote!\n{\n    struct BorrowedBytes<'a>\n    { #[traceevent(timestamp)] timestamp_ns: u64, body: &'a [u8], }\n})"
+---
+impl<'a> ::dial9_trace_format::TraceEvent for BorrowedBytes<'a> {
+    fn event_name() -> &'static str {
+        "BorrowedBytes"
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef::new("body", < & 'a[u8] as
+            ::dial9_trace_format::TraceField > ::field_type(),)
+        ]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <&'a [u8] as ::dial9_trace_format::TraceField>::encode(&self.body, enc)?;
+        Ok(())
+    }
+}
