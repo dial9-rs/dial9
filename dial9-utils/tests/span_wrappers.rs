@@ -12,6 +12,7 @@ use dial9_trace_format::types::FieldValueRef;
 use dial9_utils::dial9_span;
 use dial9_utils::span::{Dial9Span, Instrument as _, Span as _};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -25,9 +26,9 @@ struct SpanEvents {
     enter_names: Vec<String>,
     enter_fields: Vec<(String, String)>,
     exit_fields: Vec<(String, String)>,
-    /// One entry per `SpanEnter:*`: the `worker_id` it carried, `None` when the
-    /// optional field was absent (span not on a Tokio worker).
-    enter_worker_ids: Vec<Option<u64>>,
+    /// One entry per `SpanEnter:*`: the task id it carried, or `None` when the
+    /// span was opened outside a Tokio task.
+    enter_task_ids: Vec<Option<u64>>,
     parent_span_ids: HashSet<u64>,
     entered_span_ids: HashSet<u64>,
     closed_span_ids: HashSet<u64>,
@@ -69,11 +70,11 @@ fn decode(path: &std::path::Path) -> SpanEvents {
                                 r.enter_names.push(n);
                             }
                         }
-                        ("worker_id", FieldValueRef::Varint(v)) => {
-                            r.enter_worker_ids.push(Some(*v));
+                        ("dial9.tokio.task_id", FieldValueRef::Varint(v)) => {
+                            r.enter_task_ids.push(Some(*v));
                         }
-                        ("worker_id", FieldValueRef::None) => {
-                            r.enter_worker_ids.push(None);
+                        ("dial9.tokio.task_id", FieldValueRef::None) => {
+                            r.enter_task_ids.push(None);
                         }
                         ("span_id", FieldValueRef::Varint(v)) => {
                             r.entered_span_ids.insert(*v);
@@ -82,8 +83,13 @@ fn decode(path: &std::path::Path) -> SpanEvents {
                             r.parent_span_ids.insert(*v);
                         }
                         (name, _)
-                            if !["worker_id", "span_id", "parent_span_id", "span_name"]
-                                .contains(&name) =>
+                            if ![
+                                "dial9.tokio.task_id",
+                                "span_id",
+                                "parent_span_id",
+                                "span_name",
+                            ]
+                            .contains(&name) =>
                         {
                             if let Some(v) = field_string(ev.string_pool, fv) {
                                 r.enter_fields.push((name.to_owned(), v));
@@ -95,7 +101,7 @@ fn decode(path: &std::path::Path) -> SpanEvents {
             } else if ev.name.starts_with("SpanExit:") {
                 r.exit_count += 1;
                 for (fd, fv) in ev.schema.fields().iter().zip(ev.fields.iter()) {
-                    if !["worker_id", "span_id", "span_name"].contains(&fd.name())
+                    if !["dial9.tokio.task_id", "span_id", "span_name"].contains(&fd.name())
                         && let Some(v) = field_string(ev.string_pool, fv)
                     {
                         r.exit_fields.push((fd.name().to_owned(), v));
@@ -179,10 +185,10 @@ fn spans_record_their_call_site() {
     );
 }
 
-/// A span opened off any Tokio runtime carries no `worker_id`: the field is
+/// A span opened outside any Tokio task carries no task id: the field is
 /// optional, so it is absent on the wire rather than holding a sentinel.
 #[test]
-fn span_off_runtime_omits_worker_id() {
+fn span_off_runtime_omits_task_id() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
     let recorder = recorder(writer).build();
@@ -198,9 +204,33 @@ fn span_off_runtime_omits_worker_id() {
 
     assert_eq!(events.enter_count, 1, "one enter");
     assert_eq!(
-        events.enter_worker_ids,
+        events.enter_task_ids,
         vec![None],
-        "no worker_id off a runtime"
+        "no task id off a runtime"
+    );
+}
+
+/// Spans created while polling a spawned Tokio task carry that task's stable id,
+/// allowing the viewer to reconstruct active intervals from its poll timeline.
+#[test]
+fn span_inside_spawn_records_task_id() {
+    let expected_task_id = Arc::new(Mutex::new(None));
+    let task_id_from_task = expected_task_id.clone();
+    let events = run_traced(1, || async move {
+        tokio::spawn(async move {
+            *task_id_from_task.lock().unwrap() = tokio::task::try_id()
+                .map(dial9_tokio_telemetry::telemetry::TaskId::from)
+                .map(|id| id.to_u64());
+            async {}.instrument(dial9_span!("spawned.work")).await;
+        })
+        .await
+        .unwrap();
+    });
+
+    assert_eq!(
+        events.enter_task_ids,
+        vec![*expected_task_id.lock().unwrap()],
+        "span task id must match the id used by Tokio poll telemetry"
     );
 }
 
@@ -354,7 +384,7 @@ fn name_only_and_macro_schemas() {
         events
             .enter_schema_names
             .iter()
-            .any(|n| n.contains("adhoc::runtime")),
+            .any(|n| n == "SpanEnter:dial9_utils::runtime:runtime:0"),
         "schema names: {:?}",
         events.enter_schema_names
     );
@@ -514,6 +544,24 @@ fn typed_and_display_fields_roundtrip() {
             .any(|(k, v)| k == "attempt" && v == "2"),
         "typed numeric field should roundtrip: {:?}",
         events.enter_fields
+    );
+}
+
+/// The macro stores its name through the generic carrier, so call sites may use
+/// an owned runtime name without changing the concrete generated event schema.
+#[test]
+fn owned_span_name_roundtrips() {
+    let events = run_traced(1, || async {
+        let name = format!("request.{}", 42);
+        async {}
+            .instrument(dial9_span!(name, attempt: u64 = 2u64))
+            .await;
+    });
+
+    assert!(
+        events.enter_names.contains(&"request.42".to_string()),
+        "owned span name should roundtrip: {:?}",
+        events.enter_names
     );
 }
 

@@ -20,7 +20,7 @@ missing_debug_implementations = "warn"
 [dependencies]
 dial9-core = { workspace = true, features = ["pipeline"] }
 dial9-trace-format = { workspace = true, optional = true }
-pin-project-lite = "0.2"
+pin-project-lite = { version = "0.2", optional = true }
 tokio = { version = "1.52.0", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
@@ -74,9 +74,9 @@ axum-08 = [
     "dep:tower-service",
 ]
 ## Ad-hoc span wrappers (`span` module: the `dial9_span!` macro, the future
-## combinator, and the sync guard). `tokio/rt` powers the span `worker_id` via
-## `tokio::runtime::worker_index()`.
-span = ["dep:dial9-trace-format", "tokio/rt"]
+## combinator, and the sync guard). `tokio/rt` provides the optional current
+## task id used to correlate spans with Tokio poll events.
+span = ["dep:dial9-trace-format", "dep:pin-project-lite", "tokio/rt"]
 ## Tower middleware for ad-hoc spans (`span::Dial9SpanLayer`). Implies `span`.
 tower = ["span", "dep:tower-service", "dep:tower-layer"]
 
@@ -86,7 +86,7 @@ tower = ["span", "dep:tower-service", "dep:tower-layer"]
 # this is not a cycle.
 dial9 = { path = "../dial9", features = ["tokio"] }
 dial9-core = { workspace = true, features = ["pipeline"] }
-dial9-tokio-telemetry = { path = "../dial9-tokio-telemetry" }
+dial9-tokio-telemetry = { workspace = true }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 dial9-utils = { path = ".", features = ["tracing-layer"] }
 criterion = "0.5"

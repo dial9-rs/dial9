@@ -37,6 +37,8 @@ const SUPPORTED_ROLES: &[&str] = &[
 struct FieldAttrs {
     /// `timestamp`: this field is the event timestamp (header, not a column).
     timestamp: bool,
+    /// `name = "..."`: override this field's wire-schema name.
+    name: Option<syn::LitStr>,
     /// `unit = "..."`: rendering unit for this field.
     unit: Option<syn::LitStr>,
     /// `role = "..."`: structural role for this field (`dial9.role`).
@@ -56,6 +58,8 @@ fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("timestamp") {
                 parsed.timestamp = true;
+            } else if meta.path.is_ident("name") {
+                parsed.name = Some(meta.value()?.parse::<syn::LitStr>()?);
             } else if meta.path.is_ident("unit") {
                 parsed.unit = Some(meta.value()?.parse::<syn::LitStr>()?);
             } else if meta.path.is_ident("role") {
@@ -65,7 +69,7 @@ fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
             } else {
                 return Err(meta.error(
                     "unrecognized `traceevent` field attribute; expected `timestamp`, \
-                     `unit = \"...\"`, `role = \"...\"` or `kind = \"...\"`",
+                     `name = \"...\"`, `unit = \"...\"`, `role = \"...\"` or `kind = \"...\"`",
                 ));
             }
             Ok(())
@@ -155,6 +159,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     }
 
     let mut field_def_tokens = Vec::new();
+    let mut field_def_names = Vec::new();
     let mut encode_tokens = Vec::new();
     let mut annotation_tokens = Vec::new();
 
@@ -168,6 +173,13 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 
         // Skip the timestamp field in schema/encode — it's in the event header
         if timestamp_field_name.as_ref() == Some(field_name) {
+            if let Some(name) = &attrs.name {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "the timestamp field cannot have a wire name: it is encoded in the event \
+                     header, not as a schema field",
+                ));
+            }
             if let Some(unit) = unit {
                 return Err(syn::Error::new_spanned(
                     &unit,
@@ -191,6 +203,17 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             }
             continue;
         }
+        let field_name_lit = attrs.name.clone().unwrap_or_else(|| {
+            syn::LitStr::new(&field_name.to_string(), proc_macro2::Span::call_site())
+        });
+        let field_name_value = field_name_lit.value();
+        if field_def_names.contains(&field_name_value) {
+            return Err(syn::Error::new_spanned(
+                &field_name_lit,
+                format!("duplicate trace event field name \"{field_name_value}\""),
+            ));
+        }
+        field_def_names.push(field_name_value);
         if let Some(unit) = unit {
             if !SUPPORTED_UNITS.contains(&unit.value().as_str()) {
                 return Err(syn::Error::new_spanned(
@@ -248,10 +271,9 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             });
         }
 
-        let field_name_str = field_name.to_string();
         field_def_tokens.push(quote! {
             ::dial9_trace_format::schema::FieldDef::new(
-                #field_name_str,
+                #field_name_lit,
                 <#ty as ::dial9_trace_format::TraceField>::field_type(),
             )
         });
@@ -344,6 +366,9 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   e.g. `concat!("SpanEnter:", file!(), ":", line!())`. Useful for generated
 ///   structs that need a name the viewer recognizes (e.g. `"SpanEnter:..."`),
 ///   which cannot be a valid Rust identifier.
+/// - `#[traceevent(name = "...")]` (field): overrides the field's wire-schema
+///   name. This is useful for canonical names that are not valid Rust
+///   identifiers, such as `"dial9.tokio.task_id"`.
 /// - `#[traceevent(unit = "...")]` (field): attaches a `unit` schema
 ///   annotation so viewers render the field in that unit. Supported values:
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile
@@ -518,6 +543,59 @@ mod tests {
                 value: u64,
             }
         }));
+    }
+
+    #[test]
+    fn field_name_attribute() {
+        let expanded = expand_to_string(quote! {
+            struct TaskEvent {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(name = "dial9.tokio.task_id", role = "tokio.task_id")]
+                task_id: Option<u64>,
+            }
+        });
+        let compact: String = expanded.split_whitespace().collect();
+        assert!(
+            compact.contains("FieldDef::new(\"dial9.tokio.task_id\","),
+            "wire field override missing from expansion:\n{expanded}"
+        );
+        assert!(
+            compact.contains("TraceField>::encode(&self.task_id,enc)?"),
+            "encoding must still read the Rust field:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn duplicate_field_name_rejected() {
+        let err = expand_err(quote! {
+            struct DuplicateName {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                #[traceevent(name = "value")]
+                first: u64,
+                value: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "duplicate trace event field name \"value\""
+        );
+    }
+
+    #[test]
+    fn field_name_on_timestamp_rejected() {
+        let err = expand_err(quote! {
+            struct NamedTimestamp {
+                #[traceevent(timestamp, name = "timestamp")]
+                timestamp_ns: u64,
+            }
+        });
+        assert_eq!(
+            err.to_string(),
+            "the timestamp field cannot have a wire name: it is encoded in the event header, \
+             not as a schema field"
+        );
     }
 
     #[test]
@@ -752,8 +830,8 @@ mod tests {
         });
         assert_eq!(
             err.to_string(),
-            "unrecognized `traceevent` field attribute; expected `timestamp`, `unit = \"...\"`, \
-             `role = \"...\"` or `kind = \"...\"`"
+            "unrecognized `traceevent` field attribute; expected `timestamp`, `name = \"...\"`, \
+             `unit = \"...\"`, `role = \"...\"` or `kind = \"...\"`"
         );
     }
 

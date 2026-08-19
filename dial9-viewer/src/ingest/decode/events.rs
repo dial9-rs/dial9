@@ -1409,4 +1409,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn parses_ad_hoc_span_schema_names() {
+        let macro_span =
+            parse_legacy_span_schema_name("SpanEnter:dial9_utils::adhoc_17:src/service.rs:42")
+                .expect("macro span schema should parse");
+        assert_eq!(macro_span.target, "dial9_utils");
+        assert_eq!(macro_span.name, "adhoc_17");
+        assert_eq!(macro_span.file.as_deref(), Some("src/service.rs"));
+        assert_eq!(macro_span.line, Some(42));
+
+        let runtime_span = parse_legacy_span_schema_name("SpanExit:dial9_utils::runtime:runtime:0")
+            .expect("runtime span schema should parse");
+        assert_eq!(runtime_span.target, "dial9_utils");
+        assert_eq!(runtime_span.name, "runtime");
+        assert_eq!(runtime_span.file.as_deref(), Some("runtime"));
+        assert_eq!(runtime_span.line, Some(0));
+    }
 }

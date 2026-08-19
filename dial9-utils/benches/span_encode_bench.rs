@@ -27,9 +27,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 struct HandEnter {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
-    worker_id: u64,
+    #[traceevent(name = "dial9.tokio.task_id", role = "tokio.task_id")]
+    task_id: Option<u64>,
     span_id: u64,
     parent_span_id: Option<u64>,
+    #[traceevent(role = "span.name")]
     span_name: InternedString,
     x: u64,
     y: u64,
@@ -40,8 +42,10 @@ struct HandEnter {
 struct HandExit {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
-    worker_id: u64,
+    #[traceevent(name = "dial9.tokio.task_id", role = "tokio.task_id")]
+    task_id: Option<u64>,
     span_id: u64,
+    #[traceevent(role = "span.name")]
     span_name: InternedString,
     active_ns: u64,
     idle_ns: u64,
@@ -73,7 +77,7 @@ fn hand_span(x: u64, y: u64) {
         let span_name = enc.intern_string("handbench");
         enc.encode(&HandEnter {
             timestamp_ns: clock_monotonic_ns(),
-            worker_id: u64::MAX, // WORKER_ID_UNKNOWN (bench runs off a tokio runtime)
+            task_id: None,
             span_id,
             parent_span_id: None,
             span_name,
@@ -87,7 +91,7 @@ fn hand_span(x: u64, y: u64) {
         let span_name = enc.intern_string("handbench");
         enc.encode(&HandExit {
             timestamp_ns: clock_monotonic_ns(),
-            worker_id: u64::MAX, // WORKER_ID_UNKNOWN (bench runs off a tokio runtime)
+            task_id: None,
             span_id,
             span_name,
             active_ns,

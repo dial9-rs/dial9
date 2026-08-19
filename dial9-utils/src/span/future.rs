@@ -47,7 +47,7 @@ pin_project! {
                     .saturating_sub(*this.first_enter_ns)
                     .saturating_sub(*this.active_ns);
                 this.span
-                    .__emit_exit(&handle, *this.active_ns, idle_ns, *this.poll_count, false);
+                    .emit_exit(&handle, *this.active_ns, idle_ns, *this.poll_count, false);
             }
         }
     }
@@ -70,7 +70,7 @@ impl<F: Future, S: Span> Future for Instrumented<F, S> {
 
         let t0 = clock_monotonic_ns();
         if !*this.entered {
-            this.span.__emit_enter(&handle);
+            this.span.emit_enter(&handle);
             *this.first_enter_ns = t0;
             *this.entered = true;
         }
@@ -86,7 +86,7 @@ impl<F: Future, S: Span> Future for Instrumented<F, S> {
                 .saturating_sub(*this.first_enter_ns)
                 .saturating_sub(*this.active_ns);
             this.span
-                .__emit_exit(&handle, *this.active_ns, idle_ns, *this.poll_count, true);
+                .emit_exit(&handle, *this.active_ns, idle_ns, *this.poll_count, true);
             *this.exited = true;
         }
 

@@ -4,7 +4,6 @@
 //! [`tracing_layer`] subscriber layer, and (behind the `span` feature) ad-hoc
 //! `span` instrumentation.
 
-#![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(unreachable_pub)]
 
 /// Axum servers that spawn connection and HTTP/2 tasks through a dial9 executor.
@@ -18,7 +17,6 @@ pub mod dial9_axum;
 /// Behind the `span` cargo feature so consumers that don't need spans don't
 /// compile `dial9-trace-format`/`pin-project-lite`.
 #[cfg(feature = "span")]
-#[cfg_attr(docsrs, doc(cfg(feature = "span")))]
 pub mod span;
 
 /// [`tower`](https://docs.rs/tower) middleware that records a span per request,
@@ -26,10 +24,8 @@ pub mod span;
 ///
 /// Behind the `tower` cargo feature.
 #[cfg(feature = "tower")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
 pub mod tower;
 
 /// Tracing subscriber layer for emitting span events into dial9 traces.
 #[cfg(feature = "tracing-layer")]
-#[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
 pub mod tracing_layer;

@@ -79,10 +79,11 @@ async fn checkout(order_id: u64) {
 /// every iteration a span.
 async fn settlement_worker() {
     for batch in 0..3u64 {
+        let span_name = format!("settlement.batch.{batch}");
         async {
             tokio::time::sleep(Duration::from_millis(6)).await;
         }
-        .instrument(dial9_span!("settlement.run", batch: u64 = batch))
+        .instrument(dial9_span!(span_name, batch: u64 = batch))
         .await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

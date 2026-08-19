@@ -4,19 +4,15 @@ Issue: [dial9-rs/dial9#498](https://github.com/dial9-rs/dial9/issues/498)
 
 Status: **implemented.** The code lives in the **`dial9-utils`** crate
 (dial9's runtime-integration utilities) — `dial9-utils/src/span/{mod,future,wire}.rs`
-and the tower layer in `span/tower.rs` (feature `tower`). Used as
+and the tower layer in `dial9-utils/src/tower.rs` (feature `tower`). Used as
 `dial9_utils::span` — deliberately *not* re-exported from the `dial9` umbrella,
 so the umbrella doesn't pull `dial9-utils`'s S3/AWS deps (see *Crate placement*).
 It's built on `dial9-core` + `dial9-trace-format`, so the
-span emit needs **no Tokio runtime** (the `worker_id` field just falls back to
-"unknown" off a runtime). Tests are in `dial9-utils/tests/span_wrappers.rs`, a
-runnable example is `dial9/examples/adhoc_spans.rs`, and a head-to-head benchmark
-is `dial9-utils/benches/span_encode_bench.rs`. This document is the design
+span emit needs **no Tokio runtime** (the optional task-id field is absent
+outside a Tokio task). Tests are in `dial9-utils/tests/span_wrappers.rs`, a
+runnable example is `dial9-utils/examples/adhoc_spans.rs`, and a head-to-head
+benchmark is `dial9-utils/benches/span_encode_bench.rs`. This document is the design
 rationale; the code is the source of truth for the exact signatures.
-
-Companion UX artifact: [`ad-hoc-span-wrappers-example.rs`](./ad-hoc-span-wrappers-example.rs).
-A complete program written against the API, showing it in context on an axum
-stack. Read that file first, then come back here for the mechanics.
 
 ## Motivation
 
@@ -54,21 +50,22 @@ events yourself (see *Zero-cost*).
 
 The viewer already recognizes span events *by schema-name prefix*
 (`trace_analysis.js::buildSpanData`): `SpanEnter:*`, `SpanExit:*`, and
-`SpanCloseEvent`, with base fields `worker_id`, `span_id`, `parent_span_id`,
-`span_name` and arbitrary extra fields. The ad-hoc wrappers emit exactly this
-format:
+`SpanCloseEvent`, with base fields `dial9.tokio.task_id`, `span_id`,
+`parent_span_id`, `span_name` and arbitrary extra fields. The ad-hoc wrappers
+emit exactly this format:
 
 | event | schema name | fields |
 |---|---|---|
-| enter | `SpanEnter:<file>:<line>:<col>` (macro) or `SpanEnter:adhoc::runtime` (name-only) | base + user fields (**typed**) |
-| exit  | `SpanExit:<file>:<line>:<col>` (macro) or `SpanExit:adhoc::runtime` (name-only) | base (minus `parent_span_id`) + `active_ns`, `idle_ns`, `poll_count`, `completed` + user fields |
+| enter | `SpanEnter:dial9_utils::adhoc_<col>:<file>:<line>` (macro) or `SpanEnter:dial9_utils::runtime:runtime:0` (name-only) | base + user fields (**typed**) |
+| exit  | `SpanExit:dial9_utils::adhoc_<col>:<file>:<line>` (macro) or `SpanExit:dial9_utils::runtime:runtime:0` (name-only) | base (minus `parent_span_id`) + `active_ns`, `idle_ns`, `poll_count`, `completed` + user fields |
 | close | `SpanCloseEvent` (existing struct, private copy per producer) | `timestamp_ns`, `span_id` |
 
-The schema id is the callsite (`file:line:col`), not the span name. The name may
-be dynamic, so it rides in the `span_name` field (what the viewer reads), never
-in the schema id. Keying the id on the callsite keeps schema cardinality bounded
-by code, not data. User fields keep their Rust type on the wire — a `u64` is a
-`Varint`, not a stringified pooled value.
+The macro schema id contains the callsite (`file:line:col`), not the span name,
+and follows the viewer's `target::name:file:line` parser. The runtime name rides
+in the `span_name` field (what the viewer reads), never in the schema id. Keying
+the id on the callsite keeps schema cardinality bounded by code, not data. User
+fields keep their Rust type on the wire — a `u64` is a `Varint`, not a
+stringified pooled value.
 
 No viewer changes are required. Old viewers render new traces; new viewers
 render old traces. This satisfies the issue's "standardized format that can be
@@ -85,13 +82,15 @@ close, two typed `u64` fields), and they land within measurement noise
 possible:
 
 - **Typed, concrete events.** `dial9_span!(...)` expands, at each call site,
-  to a pair of generated `#[derive(TraceEvent)]` structs (`SpanEnter:<file>:<line>:<col>`
-  and the matching `SpanExit`) whose user fields keep their concrete Rust types.
+  to a pair of generated `#[derive(TraceEvent)]` structs with matching,
+  callsite-derived `SpanEnter`/`SpanExit` names whose user fields keep their
+  concrete Rust types.
   Each eager field carries its declared type (`order_id: u64 = 7u64`), so the
   structs are concrete — no generic type parameters — and `order_id` stores a
   `u64` and rides the wire as a `Varint`: no `format!`, no string, no `Vec`.
-  Emitting is a direct `enc.encode(&Enter { … })`, inlinable — no boxed closure
-  or function-pointer indirection.
+  Emitting is a direct `enc.encode(&Enter { … })`, inlinable — the library-owned
+  span carrier is generic over zero-sized call-site emitter closures, with no
+  boxing or function-pointer indirection.
 - **No runtime schema map, lock-free registration.** The generated types carry
   their schema (name + typed `field_defs`) at compile time. Registration on the
   wire goes through the encoder's normal per-type cache — a lock-free
@@ -103,8 +102,9 @@ possible:
   path rather than claiming a `wire_slot` fast-path id: those static slots are a
   scarce resource — `STATIC_WIRE_ID_LIMIT` of them — and per-callsite span types
   could exhaust them.)
-- **The literal name is a compile-time constant**, interned from a `const &str`
-  each emit (a pool lookup, same as hand-writing) rather than stored.
+- **The span name retains its input representation.** A string literal is stored
+  as an `&str` with no allocation; an owned runtime `String` is also accepted
+  without another conversion or allocation. Both are interned when emitted.
 - **One handle acquisition per enter/exit pair.** `enter()` fetches
   `Dial9Handle::current()` once and the `!Send` guard reuses it for the matching
   exit (safe: exit runs on the entering thread). The close event, on span drop,
@@ -117,15 +117,18 @@ emit). `Copy`/numeric fields are allocation-free.
 
 ### Enabling changes to the derive / trace-format
 
-Two small, general, additive changes outside the `span` module let the derive
-work for the generated types:
+Three small, general, additive capabilities outside the `span` module let the
+derive work for the generated types:
 
 1. `#[traceevent(name = <expr>)]` on the `TraceEvent` derive: overrides the
    default event name (the struct name) with any `&'static str` expression, so a
    generated type can name itself `concat!("SpanEnter:", file!(), ":", line!(),
    ":", column!())`. Evaluated at the derive site, so the builtins resolve to the
    user's callsite.
-2. `impl TraceField for &str` in `dial9-trace-format`, so a string-literal field
+2. `#[traceevent(name = "...")]` on a field: gives a Rust field a canonical wire
+   name such as `dial9.tokio.task_id`, while encoding still reads the original
+   Rust identifier.
+3. `impl TraceField for &str` in `dial9-trace-format`, so a string-literal field
    (`service: &'static str = "checkout"`) is zero-cost (stored as a
    `&'static str`, no `String` allocation).
 
@@ -147,15 +150,14 @@ small `tower-service` / `tower-layer` trait crates, not `tower` itself).
 //   key: Type = value → keeps the Rust type (u64 → Varint); Type must be `TraceField`
 //   key = %expr       → Display-format to an owned String
 //   key = ?expr       → Debug-format to an owned String
-// Returns an opaque per-callsite type implementing `Span`.
+// Returns an opaque per-callsite type implementing the sealed `Span` trait.
 dial9_span!("db.load", order_id: u64 = id, retries: u32 = n, path = %p, cfg = ?c) -> impl Span;
 
-pub trait Span: Sized {
+pub trait Span: private::SpanImpl + Sized {              // sealed
     fn id(&self) -> SpanId;                              // for explicit parenting
     fn with_parent_id(self, parent_span_id: SpanId) -> Self;
     fn with_parent(self, parent: &impl Span) -> Self;
     fn enter(&self) -> Entered<'_, Self>;               // sync RAII guard
-    // + hidden __set_parent / __emit_enter / __emit_exit (macro-generated)
 }
 
 pub struct Dial9Span;                         // name-only span, runtime name
@@ -170,10 +172,10 @@ pub trait Instrument: Future + Sized {
 pub struct Instrumented<F, S: Span>;          // Future, transparent output
 ```
 
-The span name must be a `&'static str` expression (it is baked in as a `const`);
-for a runtime-chosen name use `Dial9Span::new`, which carries no user fields and
-shares one `adhoc::runtime` schema. Span types are **not** `Clone` — one
-identity, one close.
+The macro accepts any span name implementing `AsRef<str>`, including string
+literals, borrowed strings, and owned runtime `String`s. `Dial9Span::new` is a
+name-only alternative sharing one runtime schema. `Span` is sealed and span
+types are **not** `Clone`: one identity, one close.
 
 Tower layer (feature `tower`):
 
@@ -285,10 +287,10 @@ out directly:
 
 **Mechanics.** The macro's muncher sorts fields into an eager `(key, value)`
 list and a late `(key, type)` list and dispatches on whether the late list is
-empty: empty → the original build (unchanged); non-empty →
-`__dial9_span_build_late!`, which adds one `Option<Type>` column per late field
-to the `SpanExit` struct, one `Arc<OnceLock<Type>>` per late field to the span,
-and a generated `__Dial9Slots` handle. `SpanEnter` is untouched.
+empty: empty → the eager build; non-empty → `__dial9_span_build_late!`, which
+adds one `Option<Type>` column per late field to the `SpanExit` struct, one
+`Arc<OnceLock<Type>>` per late field to the carrier payload, and a generated
+`__Dial9Slots` handle. `SpanEnter` is untouched.
 
 **Backwards compatibility.** Late fields only *add* columns to a callsite's
 `SpanExit` schema — always safe per the trace-format rules (the schema is on
@@ -362,14 +364,11 @@ programs that don't use the Tokio runtime integration. The emit path needs only
 that requires a Tokio *runtime* — so a plain-threads program that installs the
 core recorder can emit spans too.
 
-The one Tokio touch-point is the `worker_id` wire field: `worker_id` is read from
-`tokio::runtime::worker_index()`, which returns `None` off a runtime, so `worker_id`
-falls back to a sentinel (unknown) rather than requiring a Tokio worker. (`worker_index()`
-is a `tokio_unstable` API; the workspace builds with `--cfg tokio_unstable`.)
-`dial9-utils` already depends on `tokio`, so this needs no feature gating. It's a
-deliberately simpler source than the tracing layer's global worker id — `worker_id`
-is nice-to-have metadata, and per-poll worker attribution is recoverable from the
-task's poll events anyway.
+The one Tokio touch-point is the optional `dial9.tokio.task_id` wire field. It
+comes from `tokio::task::try_id()` and is absent outside a Tokio task. The value
+matches dial9's poll events, so the viewer can reconstruct the span's active
+intervals even when the task migrates between workers. The field also carries
+the `dial9.role = tokio.task_id` schema annotation.
 
 `dial9-utils` depends on `dial9-core`, **not** on `dial9-tokio-telemetry` — while
 `dial9-tokio-telemetry` optionally depends on `dial9-utils` (its S3 uploader) — so
@@ -389,9 +388,8 @@ home (feature-gating S3, or a dedicated crate) is a possible follow-up.
 
 - `dial9-utils` span module (macro, guard, future combinator): built on
   `dial9-core` + `dial9-trace-format`. All new API, purely additive.
-- `worker_id` uses `tokio::runtime::worker_index()` unconditionally (`dial9-utils`
-  already depends on `tokio`); it falls back to unknown off a runtime, so no
-  Tokio runtime is required to emit spans.
+- The optional task id uses `tokio::task::try_id()`; it is absent outside a
+  Tokio task, so no Tokio runtime is required to emit spans.
 - `tower` feature (`dial9-utils`): gates `Dial9SpanLayer`/`Dial9SpanService`
   (+ `tower-layer` dep; `tower-service` was already present). Mirrored as a
   passthrough `tower` feature on `dial9`.
