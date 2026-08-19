@@ -811,41 +811,9 @@ mod tests {
     use dial9_core::buffer::DiskBuffer;
     use dial9_core::recorder::recorder;
     use dial9_core::schema_extensions::{ROLE_KEY, SPAN_TYPE_KEY, roles, span_types};
-    use metrique::test_util::{TestEntrySink, test_entry_sink};
+    use metrique::test_util::{TestEntrySink, test_entry_sink, test_metric};
     use std::collections::{HashMap, HashSet};
     use tower::ServiceExt; // for `oneshot`
-
-    struct FieldRecordingStream(std::sync::Arc<std::sync::Mutex<HashSet<String>>>);
-
-    impl EntryIoStream for FieldRecordingStream {
-        fn next(
-            &mut self,
-            entry: &impl metrique::writer::Entry,
-        ) -> Result<(), metrique::writer::IoStreamError> {
-            struct FieldCollector<'a>(&'a mut HashSet<String>);
-
-            impl<'a> metrique::writer::EntryWriter<'a> for FieldCollector<'_> {
-                fn timestamp(&mut self, _timestamp: SystemTime) {}
-
-                fn value(
-                    &mut self,
-                    name: impl Into<std::borrow::Cow<'a, str>>,
-                    _value: &(impl metrique::writer::Value + ?Sized),
-                ) {
-                    self.0.insert(name.into().into_owned());
-                }
-
-                fn config(&mut self, _config: &'a dyn metrique::writer::EntryConfig) {}
-            }
-
-            entry.write(&mut FieldCollector(&mut self.0.lock().unwrap()));
-            Ok(())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
 
     #[test]
     fn viewer_metrics_are_recorded_as_dial9_spans() {
@@ -866,27 +834,32 @@ mod tests {
         let recorder = recorder(DiskBuffer::single_file(&trace_path).unwrap()).build();
         recorder.enable();
 
-        let downstream_fields = std::sync::Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let attached = attach_request_metrics_to_stream(
-            recorder.handle(),
-            FieldRecordingStream(downstream_fields.clone()),
+        let request_metrics = || RequestMetrics {
+            dial9: Dial9Context::capture(),
+            timestamp: SystemTime::now(),
+            operation: "/api/browse".to_string(),
+            status_code: "200".to_string(),
+            session_id: Some("123e4567-e89b-42d3-a456-426614174000".to_string()),
+            count: 1,
+            fault: 0,
+            error: 0,
+            latency: Timer::start_now(),
+            op_detail: None,
+        };
+        let normal_metric = test_metric(request_metrics());
+        assert_eq!(normal_metric.values["operation"], "/api/browse");
+        assert_eq!(
+            normal_metric.values["session_id"],
+            "123e4567-e89b-42d3-a456-426614174000"
         );
 
-        drop(
-            RequestMetrics {
-                dial9: Dial9Context::capture(),
-                timestamp: SystemTime::now(),
-                operation: "/api/browse".to_string(),
-                status_code: "200".to_string(),
-                session_id: Some("123e4567-e89b-42d3-a456-426614174000".to_string()),
-                count: 1,
-                fault: 0,
-                error: 0,
-                latency: Timer::start_now(),
-                op_detail: None,
-            }
-            .append_on_drop(ServiceMetrics::sink_or_discard()),
+        let normal_output = tempfile::NamedTempFile::new().unwrap();
+        let attached = attach_request_metrics_to_stream(
+            recorder.handle(),
+            LocalFormat::new(OutputStyle::Pretty).output_to(normal_output.reopen().unwrap()),
         );
+
+        drop(request_metrics().append_on_drop(ServiceMetrics::sink_or_discard()));
         drop(ObjectStreamMetrics::arm("/api/object"));
         drop(SpanStatsStreamMetrics::arm("/api/span-stats"));
         FoldFileMetricsBuilder::new().emit();
@@ -895,16 +868,15 @@ mod tests {
         drop(attached);
         recorder.graceful_shutdown(Duration::from_secs(5));
 
-        let downstream_fields = downstream_fields.lock().unwrap();
+        let normal_output = std::fs::read_to_string(normal_output.path()).unwrap();
         assert!(
-            downstream_fields.contains("operation") && downstream_fields.contains("session_id"),
-            "ordinary metric fields must reach the non-dial9 stream: {downstream_fields:#?}"
+            normal_output.contains("/api/browse")
+                && normal_output.contains("123e4567-e89b-42d3-a456-426614174000"),
+            "ordinary metric fields must reach the non-dial9 stream: {normal_output}"
         );
         assert!(
-            !downstream_fields
-                .iter()
-                .any(|name| name.starts_with("dial9.")),
-            "dial9 context fields leaked into the normal metric stream: {downstream_fields:#?}"
+            !normal_output.contains("dial9."),
+            "dial9 context fields leaked into the normal metric stream: {normal_output}"
         );
 
         let sealed_trace = std::fs::read_dir(dir.path())
