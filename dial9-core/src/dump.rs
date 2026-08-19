@@ -222,32 +222,6 @@ impl DumpTrigger {
         self.request(Lookback::Window(lookback), lookforward)
     }
 
-    /// Test-only: like [`dump_current_data`](Self::dump_current_data), but
-    /// with an explicit `triggered_at` instead of the real clock. Needed for
-    /// shuttle's determinism replay, which requires every value a scenario
-    /// branches on (here, the epoch-window match) to be reproducible --
-    /// skips the debounce gate too, since it isn't exercised by anything
-    /// that currently needs this. Only shuttle's `worker::shuttle_tests`
-    /// calls this today, hence the `shuttle` cfg -- a non-shuttle caller
-    /// would need it widened back to plain `#[cfg(test)]`.
-    #[cfg(all(test, shuttle))]
-    pub(crate) fn dump_current_data_at_for_test(&self, triggered_at: SystemTime) -> DumpRun<'_> {
-        let (receipt_tx, receipt_rx) = oneshot::channel();
-        DumpRun {
-            request: Some(DumpRequest {
-                id: DumpId::new(),
-                triggered_at,
-                lookback: Lookback::Unbounded,
-                lookforward: Duration::ZERO,
-                metadata: Vec::new(),
-                receipt_tx,
-            }),
-            tx: &self.tx,
-            receipt_rx: Some(receipt_rx),
-            preempt: None,
-        }
-    }
-
     fn request(&self, lookback: Lookback, lookforward: Duration) -> DumpRun<'_> {
         let id = DumpId::new();
 
@@ -652,47 +626,5 @@ mod tests {
 
         let parsed: DumpId = a.to_string().parse().expect("round-trip");
         assert_eq!(parsed, a);
-    }
-}
-
-#[cfg(all(test, shuttle))]
-mod shuttle_tests {
-    use super::*;
-
-    const CALLERS: usize = 4;
-
-    crate::shuttle_test! {
-        num_iters = 2_000, depth = 3;
-        // Multiple threads race a shared, debounced trigger; exactly one
-        // must dispatch a real request (the rest must coalesce into it).
-        fn shuttle_debounce_gate() {
-            let (trigger, mut rx) = channel();
-            let trigger = trigger.with_debounce(Duration::from_secs(60));
-
-            let handles: Vec<_> = (0..CALLERS)
-                .map(|_| {
-                    let trigger = trigger.clone();
-                    crate::primitives::thread::spawn(move || {
-                        // Dropped without awaiting: per `DumpRun`'s `Drop`
-                        // impl, dispatch (or no-op, if coalesced) happens
-                        // right here.
-                        drop(trigger.dump_current_data());
-                    })
-                })
-                .collect();
-
-            for h in handles {
-                h.join().unwrap();
-            }
-
-            let mut dispatched = 0;
-            while rx.rx.try_recv().is_ok() {
-                dispatched += 1;
-            }
-            assert_eq!(
-                dispatched, 1,
-                "exactly one trigger within the debounce window must dispatch a real request"
-            );
-        }
     }
 }
