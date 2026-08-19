@@ -1,4 +1,3 @@
-use super::SharedState;
 use super::source::{FlushContext, Source};
 #[cfg(not(tokio_unstable))]
 use crate::primitives::sync::Weak;
@@ -36,6 +35,9 @@ pub(crate) struct RuntimeContext {
     /// Installed on each of this runtime's threads (TL) so
     /// `Dial9Handle::current()`, the tracing layer, and `dial9::spawn` resolve.
     pub recorder_handle: Dial9Handle,
+    /// Global worker-ID counter, shared with every other runtime on this
+    /// recorder so their blocks never overlap.
+    worker_id_counter: WorkerIdCounter,
     /// Base worker ID for this runtime, reserved on the first worker resolve.
     #[cfg(tokio_unstable)]
     pub worker_id_base: OnceLock<u64>,
@@ -115,13 +117,12 @@ fn worker_metrics<R>(f: impl FnOnce(&RuntimeMetrics) -> R) -> R {
 /// there rather than reusing the one it holds in another runtime's block.
 #[cfg(not(tokio_unstable))]
 fn claim_thread_worker_id(ctx: &RuntimeContext) -> Option<u64> {
-    let shared = ctx.recorder_handle.shared()?;
     CLAIMED_WORKER_IDS.with(|claimed| {
         let mut claimed = claimed.borrow_mut();
         if let Some((_, id)) = claimed.iter().find(|(owner, _)| *owner == ctx.id) {
             return Some(*id);
         }
-        let id = shared.reserve_worker_ids(1);
+        let id = ctx.reserve_worker_ids(1);
         claimed.push((ctx.id, id));
         Some(id)
     })
@@ -238,7 +239,17 @@ pub(crate) struct TokioRuntimesSource {
     /// never change, so they are emitted exactly once (the writer keeps them in
     /// its merged cache and re-emits them on every rotation).
     fixed_metadata_emitted: bool,
+    /// Next unclaimed global worker ID, shared with every [`RuntimeContext`] on
+    /// this recorder. Handing each context a clone at attach keeps the claim
+    /// path off the source lock.
+    next_worker_id: WorkerIdCounter,
 }
+
+/// Hands out the global worker IDs for one recorder.
+///
+/// Every runtime attached to a recorder shares one counter, which is what keeps
+/// their worker-ID blocks from overlapping.
+pub(crate) type WorkerIdCounter = Arc<AtomicU64>;
 
 impl TokioRuntimesSource {
     pub(crate) fn new(contexts: RuntimeContextRegistry) -> Self {
@@ -249,6 +260,7 @@ impl TokioRuntimesSource {
             sample_interval: Duration::from_millis(10),
             last_fingerprint: 0,
             fixed_metadata_emitted: false,
+            next_worker_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -256,6 +268,11 @@ impl TokioRuntimesSource {
     /// runtime on a recorder lands in the same source.
     pub(crate) fn registry(&self) -> &RuntimeContextRegistry {
         &self.contexts
+    }
+
+    /// This recorder's worker-ID counter, for a context being attached.
+    pub(crate) fn worker_id_counter(&self) -> WorkerIdCounter {
+        self.next_worker_id.clone()
     }
 }
 
@@ -265,21 +282,14 @@ impl TokioRuntimesSource {
 ///
 /// Called once per attach, after the caller's runtime exists.
 pub(crate) fn register_runtime_metrics(
-    shared: &SharedState,
+    handle: &Dial9Handle,
     runtime_name: Option<String>,
     metrics: RuntimeMetrics,
 ) {
-    let mut entry = Some((runtime_name, metrics));
-    shared.with_sources_mut(|sources| {
-        for source in sources.iter_mut() {
-            let any: &mut dyn std::any::Any = &mut **source;
-            if let Some(source) = any.downcast_mut::<TokioRuntimesSource>() {
-                source.runtime_metrics.extend(entry.take());
-                return;
-            }
-        }
+    let registered = handle.with_source(|source: &mut TokioRuntimesSource| {
+        source.runtime_metrics.push((runtime_name, metrics));
     });
-    if entry.is_some() {
+    if registered.is_none() {
         tracing::warn!("Tokio source missing; queue depth will not be sampled");
     }
 }
@@ -375,13 +385,18 @@ impl Source for TokioRuntimesSource {
 }
 
 impl RuntimeContext {
-    pub(crate) fn new(runtime_name: Option<String>, recorder_handle: Dial9Handle) -> Self {
+    pub(crate) fn new(
+        runtime_name: Option<String>,
+        recorder_handle: Dial9Handle,
+        worker_id_counter: WorkerIdCounter,
+    ) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             runtime_id: OnceLock::new(),
             runtime_name,
             recorder_handle,
+            worker_id_counter,
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
@@ -486,6 +501,11 @@ impl RuntimeContext {
         Some(WorkerId::from(global_id as usize))
     }
 
+    /// Reserve a block of `count` global worker IDs, returning the first.
+    fn reserve_worker_ids(&self, count: u64) -> u64 {
+        self.worker_id_counter.fetch_add(count, Ordering::Relaxed)
+    }
+
     /// This thread's global worker ID within this runtime.
     ///
     /// Tokio's `worker_index()` gives the runtime-local slot (0 for a
@@ -494,10 +514,11 @@ impl RuntimeContext {
     #[cfg(tokio_unstable)]
     fn claim_worker_id(&self) -> Option<u64> {
         let local_index = tokio::runtime::worker_index()?;
-        let shared = self.recorder_handle.shared()?;
+        // `get_or_init` runs its closure exactly once, so the block is reserved
+        // once however many workers resolve at the same moment.
         let base = self.worker_id_base.get_or_init(|| {
             let num_workers = worker_metrics(|m| m.num_workers()) as u64;
-            shared.reserve_worker_ids(num_workers)
+            self.reserve_worker_ids(num_workers)
         });
         Some(base + local_index as u64)
     }
@@ -778,6 +799,7 @@ mod tests {
         let ctx = Arc::new(RuntimeContext::new(
             Some(name.to_string()),
             Dial9Handle::disabled(),
+            Arc::new(AtomicU64::new(0)),
         ));
         ctx.worker_ids.lock().unwrap().insert(worker_id);
         contexts.lock().unwrap().push(ctx);

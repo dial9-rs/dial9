@@ -15,17 +15,14 @@ enum State {
     Stopped = 2,
 }
 
+crate::test_util_pub! {
 /// Runtime-agnostic core recording state.
-#[doc(hidden)]
-pub struct SharedState {
+struct SharedState {
     /// Recording lifecycle: `Disabled ⇄ Enabled → Stopped` (terminal).
     state: AtomicU8,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub(crate) start_time_ns: u64,
-    /// Global worker ID counter. Each runtime reserves a contiguous block
-    /// via `fetch_add(num_workers)` so worker IDs don't collide.
-    pub(crate) next_worker_id: AtomicU64,
     /// Epoch counter bumped by the flush thread every ~30s. Thread-local
     /// buffers stamp this value on each self-flush so the flush thread can
     /// skip busy workers when draining.
@@ -40,6 +37,7 @@ pub struct SharedState {
     /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
     #[cfg(feature = "pipeline")]
     dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
+}
 }
 
 impl std::fmt::Debug for SharedState {
@@ -58,7 +56,6 @@ impl SharedState {
                 state: AtomicU8::new(State::Disabled as u8),
                 collector: Arc::new(CentralCollector::new()),
                 start_time_ns,
-                next_worker_id: AtomicU64::new(0),
                 drain_epoch: AtomicU64::new(0),
                 tl_buffers: Mutex::new(Vec::new()),
                 sources: Mutex::new(Vec::new()),
@@ -68,18 +65,22 @@ impl SharedState {
         }
     }
 
-    /// Register a data source to be drained by the flush thread each cycle.
-    pub fn push_source(&self, source: Box<dyn crate::source::Source>) {
-        self.sources.lock().unwrap().push(source);
+    crate::test_util_pub! {
+        /// Register a data source to be drained by the flush thread each cycle.
+        fn push_source(&self, source: Box<dyn crate::source::Source>) {
+            self.sources.lock().unwrap().push(source);
+        }
     }
 
-    /// Run `f` against the registered sources. Returns `None` if the lock is
-    /// poisoned. Used to drive the per-thread source lifecycle hooks.
-    pub fn with_sources_mut<R>(
-        &self,
-        f: impl FnOnce(&mut [Box<dyn crate::source::Source>]) -> R,
-    ) -> Option<R> {
-        self.sources.lock().ok().map(|mut sources| f(&mut sources))
+    crate::test_util_pub! {
+        /// Run `f` against the registered sources. Returns `None` if the lock is
+        /// poisoned. Used to drive the per-thread source lifecycle hooks.
+        fn with_sources_mut<R>(
+            &self,
+            f: impl FnOnce(&mut [Box<dyn crate::source::Source>]) -> R,
+        ) -> Option<R> {
+            self.sources.lock().ok().map(|mut sources| f(&mut sources))
+        }
     }
 
     /// Drop every registered source.
@@ -97,7 +98,7 @@ impl SharedState {
 
     /// Like [`with_sources_mut`](Self::with_sources_mut), but `f` receives the
     /// list itself so it can register sources too.
-    pub fn with_sources_vec<R>(
+    pub(crate) fn with_sources_vec<R>(
         &self,
         f: impl FnOnce(&mut Vec<Box<dyn crate::source::Source>>) -> R,
     ) -> Option<R> {
@@ -105,27 +106,24 @@ impl SharedState {
     }
 
     /// Trace-start `CLOCK_MONOTONIC` timestamp.
-    pub fn start_time_ns(&self) -> u64 {
+    pub(crate) fn start_time_ns(&self) -> u64 {
         self.start_time_ns
     }
 
-    /// Reserve a contiguous block of `count` worker IDs, returning the first.
-    pub fn reserve_worker_ids(&self, count: u64) -> u64 {
-        self.next_worker_id.fetch_add(count, Ordering::Relaxed)
-    }
-
-    /// Turn recording on. No-op once stopped.
-    pub fn enable(&self) {
-        let _ = self.state.compare_exchange(
-            State::Disabled as u8,
-            State::Enabled as u8,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
+    crate::test_util_pub! {
+        /// Turn recording on. No-op once stopped.
+        fn enable(&self) {
+            let _ = self.state.compare_exchange(
+                State::Disabled as u8,
+                State::Enabled as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// Turn recording off. No-op once stopped.
-    pub fn disable(&self) {
+    pub(crate) fn disable(&self) {
         let _ = self.state.compare_exchange(
             State::Enabled as u8,
             State::Disabled as u8,
@@ -141,7 +139,7 @@ impl SharedState {
     }
 
     /// Whether the recorder has shut down for good.
-    pub fn is_stopped(&self) -> bool {
+    pub(crate) fn is_stopped(&self) -> bool {
         self.state.load(Ordering::Relaxed) == State::Stopped as u8
     }
 
@@ -149,7 +147,7 @@ impl SharedState {
     /// facade builder; later calls are ignored. `pub` so the facade (a
     /// sibling crate) can wire the trigger in.
     #[cfg(feature = "pipeline")]
-    pub fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
+    pub(crate) fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
         let _ = self.dump_trigger.set(trigger);
     }
 
@@ -167,7 +165,7 @@ impl SharedState {
     /// which builds the event inside the check. Use `is_enabled()` for
     /// control-flow decisions that don't record, such as whether to wrap a
     /// waker in wake-tracking polls.
-    pub fn is_enabled(&self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         self.state.load(Ordering::Relaxed) == State::Enabled as u8
     }
 
@@ -269,22 +267,26 @@ impl SharedState {
         self.drain_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Drain data sources and write their events into the collector.
-    pub fn flush_sources(&self) {
-        let ctx = self.flush_context();
-        let mut sources = self.sources.lock().unwrap();
-        for source in sources.iter_mut() {
-            source.flush(&ctx);
+    crate::test_util_pub! {
+        /// Drain data sources and write their events into the collector.
+        fn flush_sources(&self) {
+            let ctx = self.flush_context();
+            let mut sources = self.sources.lock().unwrap();
+            for source in sources.iter_mut() {
+                source.flush(&ctx);
+            }
         }
     }
 
-    /// Build a [`FlushContext`] for this state.
-    ///
-    /// Used by `flush_sources` and by tests that construct a ctx directly.
-    ///
-    /// [`FlushContext`]: crate::source::FlushContext
-    pub fn flush_context(&self) -> crate::source::FlushContext<'_> {
-        crate::source::FlushContext::new(&self.collector, &self.drain_epoch)
+    crate::test_util_pub! {
+        /// Build a [`FlushContext`] for this state.
+        ///
+        /// Used by `flush_sources` and by tests that construct a ctx directly.
+        ///
+        /// [`FlushContext`]: crate::source::FlushContext
+        fn flush_context(&self) -> crate::source::FlushContext<'_> {
+            crate::source::FlushContext::new(&self.collector, &self.drain_epoch)
+        }
     }
 }
 

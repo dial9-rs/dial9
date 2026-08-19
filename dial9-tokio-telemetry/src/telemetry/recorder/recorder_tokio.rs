@@ -51,7 +51,7 @@
 use super::register_runtime_hooks;
 #[cfg(not(tokio_unstable))]
 use super::runtime_context::RuntimeContext;
-use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
+use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource, WorkerIdCounter};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
@@ -59,7 +59,6 @@ use dial9_core::buffer::BufferMode;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::RecorderBuilder;
 use dial9_core::recording::Recorder;
-use dial9_core::shared_state::SharedState;
 #[cfg(feature = "worker-s3")]
 use dial9_destinations_s3::S3Config;
 use std::io;
@@ -348,10 +347,10 @@ impl Dial9HandleTokioExt for Dial9Handle {
         mut builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime> {
-        let Some(shared) = self.shared() else {
+        if !self.is_connected() {
             return builder.build();
-        };
-        if shared.is_stopped() {
+        }
+        if self.is_stopped() {
             return Err(io::Error::other(
                 "recorder has shut down; attach runtimes before graceful_shutdown",
             ));
@@ -359,7 +358,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if !options.tokio_instrumentation_enabled {
             return builder.build();
         }
-        let Some(registry) = runtime_registry(shared) else {
+        let Some(state) = tokio_attach_state(self) else {
             return Err(io::Error::other(
                 "dial9 source registry unavailable; Tokio runtime not attached",
             ));
@@ -374,6 +373,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
             &mut builder,
             options.runtime_name,
             self,
+            state.worker_ids,
             options.task_tracking_enabled,
             options.tokio_hooks,
             task_dump_config,
@@ -389,7 +389,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // `WakeTraced` wrapper, which finds this context by the runtime id it
         // is running on.
         ctx.bind_runtime(runtime.handle().id());
-        registry.lock().unwrap().push(ctx);
+        state.registry.lock().unwrap().push(ctx);
         // The current-thread driver does not fire `on_thread_start`, so without
         // this the tracing layer and `dial9::spawn` find no handle until the
         // first poll.
@@ -399,7 +399,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if let Some(config) = task_dump_config {
             crate::task_dumped::set_taskdump_config(config);
         }
-        register_runtime_metrics(shared, runtime_name, runtime.handle().metrics());
+        register_runtime_metrics(self, runtime_name, runtime.handle().metrics());
         Ok(runtime)
     }
 }
@@ -413,7 +413,7 @@ pub(crate) fn current_runtime_ctx(handle: &Dial9Handle) -> Option<Arc<RuntimeCon
     if let Some(ctx) = super::runtime_context::cached_runtime_ctx(id) {
         return Some(ctx);
     }
-    let registry = runtime_registry(handle.shared()?)?;
+    let registry = tokio_attach_state(handle)?.registry;
     let ctx = {
         let registry = registry.lock().ok()?;
         registry.iter().find(|c| c.is_runtime(id)).cloned()?
@@ -422,26 +422,23 @@ pub(crate) fn current_runtime_ctx(handle: &Dial9Handle) -> Option<Arc<RuntimeCon
     Some(ctx)
 }
 
-/// The recorder's runtime registry, installing the [`TokioRuntimesSource`] that
-/// owns it on first use. Find-or-insert under one lock, so racing attaches share
-/// one source. `None` if the source lock is poisoned or the recorder has shut
-/// down.
-pub(crate) fn runtime_registry(shared: &Arc<SharedState>) -> Option<RuntimeContextRegistry> {
-    shared
-        .with_sources_vec(|sources| {
-            if shared.is_stopped() {
-                return None;
-            }
-            let existing = sources.iter_mut().find_map(|source| {
-                let any: &mut dyn std::any::Any = &mut **source;
-                any.downcast_mut::<TokioRuntimesSource>()
-            });
-            if let Some(source) = existing {
-                return Some(source.registry().clone());
-            }
-            let registry: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
-            sources.push(Box::new(TokioRuntimesSource::new(registry.clone())));
-            Some(registry)
-        })
-        .flatten()
+/// What every runtime attached to a recorder shares, owned by its
+/// [`TokioRuntimesSource`].
+pub(crate) struct TokioAttachState {
+    /// The runtimes attached to this recorder.
+    pub registry: RuntimeContextRegistry,
+    /// Hands out this recorder's global worker-ID blocks.
+    pub worker_ids: WorkerIdCounter,
+}
+
+/// This recorder's [`TokioAttachState`], installing the source that owns it on
+/// first use.`None` once the recorder has shut down, or if its lock is poisoned.
+pub(crate) fn tokio_attach_state(handle: &Dial9Handle) -> Option<TokioAttachState> {
+    handle.with_source_or_insert(
+        || TokioRuntimesSource::new(Arc::new(Mutex::new(Vec::new()))),
+        |source| TokioAttachState {
+            registry: source.registry().clone(),
+            worker_ids: source.worker_id_counter(),
+        },
+    )
 }

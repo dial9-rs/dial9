@@ -13,9 +13,9 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 //!
-//! This wraps low-level `Recorder::start`, which expects a pre-built
-//! [`SharedState`](crate::shared_state::SharedState) with sources already
-//! registered. The Tokio integration reuses the same builder.
+//! This wraps low-level `Recorder::start`, which expects pre-built shared
+//! recording state with sources already registered. The Tokio integration
+//! reuses the same builder.
 
 use crate::buffer::{BufferMode, Disk, SegmentWriter};
 use crate::clock;

@@ -168,7 +168,7 @@ impl MemoryProfiler {
     /// hook short-circuits. A connected-but-paused recorder installs
     /// normally, so sampling starts when recording is enabled.
     pub fn install(self, handle: Dial9Handle) -> Result<MemoryProfilerGuard, InstallError> {
-        if handle.shared().is_none() {
+        if !handle.is_connected() {
             return Ok(MemoryProfilerGuard { _private: () });
         }
 
@@ -207,10 +207,11 @@ impl MemoryProfiler {
             .set(inner)
             .map_err(|_| InstallError::AlreadyInstalled)?;
 
-        let shared = handle.shared().expect("checked is_enabled above");
-        let source =
-            MemoryProfileSource::new(rings, source_liveset, self.config.sample_rate_bytes());
-        shared.push_source(Box::new(source));
+        // Registered once: `ACTIVE.set` above already refuses a second install.
+        handle.with_source_or_insert(
+            || MemoryProfileSource::new(rings, source_liveset, self.config.sample_rate_bytes()),
+            |_| (),
+        );
 
         Ok(MemoryProfilerGuard { _private: () })
     }
