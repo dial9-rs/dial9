@@ -120,6 +120,20 @@ impl Source for MockSource {
     // tests include a Tokio runtime.
 }
 
+/// A Source whose `flush` always panics. Used to check whether the flush
+/// loop contains a panicking source.
+struct PanickingSource;
+
+impl Source for PanickingSource {
+    fn flush(&mut self, _ctx: &FlushContext<'_>) {
+        panic!("PanickingSource intentionally panics for shuttle coverage");
+    }
+
+    fn name(&self) -> &'static str {
+        "panicking"
+    }
+}
+
 // ── Test body ───────────────────────────────────────────────────────
 
 crate::shuttle_test! {
@@ -207,6 +221,120 @@ crate::shuttle_test! {
         // Run all invariants.
         check_all_events_present(&expected, &all_decoded);
         check_timestamps_roundtrip(&expected, &all_decoded);
+    }
+}
+
+// ── Panic injection ─────────────────────────────────────────────────
+
+// `flush_sources` has no `catch_unwind`, so the panic propagates out of the
+// flush thread's main loop and kills it.
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, should_panic,
+    expected = "PanickingSource intentionally panics for shuttle coverage",
+    replay = "91011be187b1dcc7fc8f9dbc0100000058555515";
+    fn test_source_panic_does_not_wedge_pipeline() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+        let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(PanickingSource));
+        shared.push_source(Box::new(MockSource::new(source_pending.clone())));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+
+        let healthy_source_event = ValidationEvent {
+            timestamp_ns: 1,
+            thread_id: 0,
+            seq: 0,
+            id: 0,
+        };
+        source_pending
+            .lock()
+            .unwrap()
+            .push(healthy_source_event.clone());
+
+        recorder.stop_flush_thread();
+
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
+
+        assert!(
+            all_decoded.iter().any(|e| e.id == healthy_source_event.id),
+            "healthy source's event must survive a sibling source's panic"
+        );
+    }
+}
+
+// Companion to the scenario above: a TL-buffer write hits the same
+// unguarded-flush gap. Kept separate because the live buffer left behind at
+// panic time is what makes `determinism` crash (16/30 with the write vs
+// 0/30 without) -- hence `flaky_sigabrt_determinism_only`.
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only,
+    expected = "PanickingSource intentionally panics for shuttle coverage",
+    replay = "910124ca81ffb4a781e6ae0a000000006055555555";
+    fn test_source_panic_does_not_lose_tl_buffer_write() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(PanickingSource));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
+
+        let tl_buffer_event = ValidationEvent {
+            timestamp_ns: 2,
+            thread_id: 0,
+            seq: 1,
+            id: 1,
+        };
+        handle.record_event(tl_buffer_event.clone());
+
+        recorder.stop_flush_thread();
+
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
+
+        assert!(
+            all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
+            "TL-buffer event must survive a sibling source's panic"
+        );
     }
 }
 
