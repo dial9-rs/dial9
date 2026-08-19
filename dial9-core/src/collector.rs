@@ -134,6 +134,9 @@ mod tests {
     }
 }
 
+// Shuttle can't see into the real `ArrayQueue`, so this build uses a
+// separate `Mutex<VecDeque>` stand-in instead. These tests only check the
+// stand-in's own correctness, not production's queue.
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
@@ -211,10 +214,9 @@ mod shuttle_tests {
 
     // Deterministic: eviction order is a data-structure property, not a
     // race (the scenario above only checks aggregate counts, not order).
-    // Still needs shuttle's harness since `BoundedQueue` uses `shuttle::sync::Mutex`.
     crate::shuttle_test! {
         default, determinism_only;
-        fn shuttle_collector_eviction_is_fifo() {
+        fn shuttle_collector_stub_evicts_fifo() {
             const CAPACITY: usize = 3;
             let collector = CentralCollector::with_capacity(CAPACITY);
             for id in 0..(CAPACITY as u64 + 2) {
