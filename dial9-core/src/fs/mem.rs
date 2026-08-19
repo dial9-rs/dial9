@@ -351,20 +351,6 @@ impl MemFs {
         }
     }
 
-    /// Test-only: override the creation epoch of a queued slot so tests can
-    /// pin a deterministic value instead of whatever real time `seal()`
-    /// stamped it with (needed for shuttle's determinism replay, which
-    /// requires every value a scenario branches on to be reproducible).
-    /// Only shuttle's `worker::shuttle_tests` calls this today, hence the
-    /// `shuttle` cfg.
-    #[cfg(all(test, feature = "pipeline", shuttle))]
-    pub(super) fn set_epoch_secs_for_test(&self, index: u32, epoch_secs: u64) {
-        let mut q = self.channel.queue.lock().unwrap();
-        for s in q.segments.iter_mut().filter(|s| s.index == index) {
-            s.epoch_secs = epoch_secs;
-        }
-    }
-
     pub(super) fn mark_writer_done(&self) {
         self.channel.writer_done.store(true, Ordering::Release);
         self.channel.notify.notify_one();
@@ -599,58 +585,29 @@ mod shuttle_tests {
         check!(mem.channel.in_flight_bytes.load(Ordering::Relaxed) == 0);
     }
 
-    crate::shuttle_test! {
-        default;
+    fn scenario_no_eviction() {
         // Budget room for many 16-byte segments; nothing should evict.
-        fn shuttle_handoff_no_loss() {
-            run_scenario(1 << 16, 16, 3, true);
-        }
+        run_scenario(1 << 16, 16, 3, true);
     }
 
-    crate::shuttle_test! {
-        default;
+    fn scenario_with_eviction() {
         // Budget fits ~2 segments; the writer outruns the worker so the
         // byte-budget loop evicts under contention.
-        fn shuttle_eviction_accounting() {
-            run_scenario(40, 16, 4, false);
-        }
+        run_scenario(40, 16, 4, false);
     }
 
-    // Deterministic: eviction order is a data-structure property, not a
-    // race (the scenario above only checks aggregate counts, not order).
-    // Still needs shuttle's harness since `MemFs` uses `shuttle::sync::Mutex`.
-    crate::shuttle_test! {
-        default, determinism_only;
-        fn shuttle_eviction_is_fifo() {
-            // Budget for exactly 3 16-byte segments; sealing 5 must evict the
-            // 2 oldest (indices 0 and 1).
-            let mem = MemFs::with_capacity(48, 16).unwrap();
-            for i in 0..5u32 {
-                seal_one(&mem, i, 16);
-            }
-            mem.mark_writer_done();
+    #[test]
+    fn shuttle_handoff_no_loss_pct() {
+        shuttle::check_pct(scenario_no_eviction, 5_000, 3);
+    }
 
-            let mut popped = Vec::new();
-            let mut dropped = 0u64;
-            loop {
-                let taken = mem.take_files();
-                dropped += taken.segments_dropped;
-                if taken.segments.is_empty() {
-                    break;
-                }
-                for seg in taken.segments {
-                    popped.push(seg.seg_ref.index());
-                }
-            }
-            check!(
-                dropped == 2,
-                "the two oldest segments should have been evicted"
-            );
-            check!(
-                popped == vec![2, 3, 4],
-                "surviving segments must be the newest, popped oldest-remaining-first -- \
-                 eviction must drop the oldest segment first, not just any two"
-            );
-        }
+    #[test]
+    fn shuttle_handoff_no_loss_determinism() {
+        shuttle::check_uncontrolled_nondeterminism(scenario_no_eviction, 5_000);
+    }
+
+    #[test]
+    fn shuttle_eviction_accounting_pct() {
+        shuttle::check_pct(scenario_with_eviction, 5_000, 3);
     }
 }
