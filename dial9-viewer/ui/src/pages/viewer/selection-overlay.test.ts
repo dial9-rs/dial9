@@ -33,11 +33,15 @@ function selection(over: Partial<SelectionSlice> = {}): SelectionSlice {
   };
 }
 
+/** The trace extent the retained-box rule compares against. */
+const EXTENT = { minTs: 0, maxTs: 10_000 };
+
 describe("activeSelectionRegion - precedence", () => {
   it("a live keyboard selection wins over everything", () => {
     const region = activeSelectionRegion(
       transient({ keyboardSelection: { kind: "zoom-select", startNs: 800, cursorNs: 200 } }),
       selection({ sidebarRange: { startNs: 0, endNs: 9_999 } }),
+      EXTENT,
     );
     expect(region).toEqual({ startNs: 200, endNs: 800, mode: "zoom" });
   });
@@ -46,6 +50,7 @@ describe("activeSelectionRegion - precedence", () => {
     const region = activeSelectionRegion(
       transient({ drag: { kind: "region-select", startX: 0, startNs: 400, curNs: 100, moved: true } }),
       selection(),
+      EXTENT,
     );
     expect(region).toEqual({ startNs: 100, endNs: 400, mode: "region" });
   });
@@ -54,6 +59,7 @@ describe("activeSelectionRegion - precedence", () => {
     const region = activeSelectionRegion(
       transient({ drag: { kind: "pan", startX: 0, startNs: 400, curNs: 100, moved: true } }),
       selection(),
+      EXTENT,
     );
     expect(region).toBeNull();
   });
@@ -62,6 +68,7 @@ describe("activeSelectionRegion - precedence", () => {
     const region = activeSelectionRegion(
       transient({ drag: { kind: "region-select", startX: 0, startNs: 400, curNs: 400, moved: false } }),
       selection(),
+      EXTENT,
     );
     expect(region).toBeNull();
   });
@@ -70,12 +77,38 @@ describe("activeSelectionRegion - precedence", () => {
     const region = activeSelectionRegion(
       transient(),
       selection({ sidebarRange: { startNs: 1_000, endNs: 2_000 } }),
+      EXTENT,
     );
     expect(region).toEqual({ startNs: 1_000, endNs: 2_000, mode: "region" });
   });
 
+  it("a retained range covering the whole trace draws NO box (issue #796)", () => {
+    // The toolbar Flamegraph / Blocking Calls / Heap buttons open a whole-trace
+    // analysis by retaining [minTs, maxTs]; boxing everything just tints the
+    // page blue without distinguishing any scope.
+    const region = activeSelectionRegion(
+      transient(),
+      selection({ sidebarRange: { startNs: EXTENT.minTs, endNs: EXTENT.maxTs } }),
+      EXTENT,
+    );
+    expect(region).toBeNull();
+  });
+
+  it("a retained range one ns short of the extent still draws its box", () => {
+    const region = activeSelectionRegion(
+      transient(),
+      selection({ sidebarRange: { startNs: EXTENT.minTs + 1, endNs: EXTENT.maxTs } }),
+      EXTENT,
+    );
+    expect(region).toEqual({
+      startNs: EXTENT.minTs + 1,
+      endNs: EXTENT.maxTs,
+      mode: "region",
+    });
+  });
+
   it("nothing selected => null (box hidden)", () => {
-    expect(activeSelectionRegion(transient(), selection())).toBeNull();
+    expect(activeSelectionRegion(transient(), selection(), EXTENT)).toBeNull();
   });
 });
 
