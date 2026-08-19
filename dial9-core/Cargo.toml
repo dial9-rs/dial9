@@ -7,6 +7,11 @@ repository.workspace = true
 description = "Telemetry event bus for dial9"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+# Not `all-features`: omits `test-util` and `_shuttle`.
+features = ["pipeline"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 missing_debug_implementations = "warn"

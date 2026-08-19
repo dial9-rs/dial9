@@ -167,6 +167,8 @@
 //!
 //! Roadmap and tracking for the above: [design doc, "Future evolution"](https://github.com/dial9-rs/dial9/blob/HEAD/docs/design/metrique-integration.md).
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 mod context;
 mod event;
 mod filter;

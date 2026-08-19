@@ -1,5 +1,6 @@
 //! dial9 recording core: the event bus, recorder, and trace writer.
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(unreachable_pub)]
 
 /// Declares an item `pub` under the `test-util` feature and `pub(crate)`
