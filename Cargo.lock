@@ -2092,6 +2092,7 @@ dependencies = [
  "clap",
  "criterion 0.5.1",
  "dial9-core",
+ "dial9-metrique",
  "dial9-trace-format",
  "flate2",
  "form_urlencoded",
