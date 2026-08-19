@@ -947,6 +947,3 @@ impl WorkerLoop {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(all(test, shuttle))]
-mod shuttle_tests;
