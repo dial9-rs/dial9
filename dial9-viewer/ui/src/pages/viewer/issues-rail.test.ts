@@ -11,7 +11,11 @@ import type { ParsedTrace } from "../../types/trace.js";
 import type { KeyEventLike, KeyBinding } from "../../lib/interact/keyboard.js";
 import { createViewerStore } from "./store.js";
 import type { ViewerStore } from "../../store/store.js";
-import { createIssuesRail } from "./issues-rail.js";
+import {
+  clampColWidth,
+  clampRailWidth,
+  createIssuesRail,
+} from "./issues-rail.js";
 
 let trace: ParsedTrace;
 
@@ -90,5 +94,34 @@ describe("issues-rail n/p stepping", () => {
     const rail = createIssuesRail(store);
     expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(false);
     expect(binding(rail.keyBindings, "p").onKey(FAKE_KEY)).toBe(false);
+  });
+});
+
+describe("rail width clamp (resize drag bounds)", () => {
+  it("clamps below the minimum usable table width", () => {
+    expect(clampRailWidth(50, 1200)).toBe(220);
+  });
+
+  it("passes through an in-bounds width, rounded to whole px", () => {
+    expect(clampRailWidth(420, 1200)).toBe(420);
+    expect(clampRailWidth(300.6, 1200)).toBe(301);
+  });
+
+  it("caps at 60% of the viewport so the track column stays usable", () => {
+    expect(clampRailWidth(2000, 1200)).toBe(720);
+  });
+});
+
+describe("column width clamp (per-column resize bounds, both rail tables)", () => {
+  it("floors at the column header's measured width so the label never clips", () => {
+    expect(clampColWidth(10, 64)).toBe(64);
+    expect(clampColWidth(100, 64)).toBe(100);
+    expect(clampColWidth(63.4, 20)).toBe(63);
+  });
+
+  it("keeps the absolute floor when the header measure is degenerate", () => {
+    expect(clampColWidth(4, 0)).toBe(24);
+    expect(clampColWidth(4, Number.NaN)).toBe(24);
+    expect(clampColWidth(4, -10)).toBe(24);
   });
 });

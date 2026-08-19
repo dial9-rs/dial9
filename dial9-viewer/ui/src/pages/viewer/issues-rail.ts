@@ -13,7 +13,7 @@ import { html, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
-import type { PoiSortKey, RailTab, TaskSortKey } from "../../types/state.js";
+import type { IssueColKey, PoiSortKey, RailTab, TaskSortKey } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
 import {
@@ -64,6 +64,175 @@ const TASK_COLUMNS: readonly TaskColumn[] = [
   { key: "longest", label: "longest", title: "Sort by longest poll", defaultDir: "desc" },
   { key: "lifetime", label: "life", title: "Sort by lifetime", defaultDir: "desc" },
 ];
+
+/** Clamp bounds for the rail's resize drag: never narrower than a usable
+ *  table, never wider than 60% of the viewport (the track column must stay
+ *  workable). */
+const MIN_RAIL_WIDTH = 220;
+const MAX_RAIL_VW = 0.6;
+
+/**
+ * Clamp a dragged rail width to [MIN_RAIL_WIDTH, MAX_RAIL_VW * viewport],
+ * rounded to whole px. Exported for the bounds test; the drag handler calls
+ * it with the live window.innerWidth.
+ */
+export function clampRailWidth(width: number, viewportWidth: number): number {
+  const maxW = Number.isFinite(viewportWidth)
+    ? viewportWidth * MAX_RAIL_VW
+    : Infinity;
+  return Math.round(Math.max(MIN_RAIL_WIDTH, Math.min(maxW, width)));
+}
+
+/** Absolute column floor, used when the header measurement is degenerate
+ *  (missing button, zero-width text). */
+const MIN_COL_WIDTH = 24;
+
+/**
+ * Clamp a dragged rail-table column width, rounded to whole px.
+ *
+ * The floor is the column HEADER's measured content width (passed by the
+ * drag handler), so shrinking stops where the label would start to clip;
+ * never below MIN_COL_WIDTH. No upper bound - the table scrolls horizontally
+ * inside the rail. Exported for the bounds test.
+ */
+export function clampColWidth(width: number, headerMinWidth: number): number {
+  const floor = Math.max(
+    MIN_COL_WIDTH,
+    Number.isFinite(headerMinWidth) ? headerMinWidth : 0,
+  );
+  return Math.round(Math.max(floor, width));
+}
+
+/** The per-column widths maps the two rail tables render from (uiPrefs). */
+type TaskColWidths = StoreState["uiPrefs"]["taskColWidths"];
+type IssueColWidths = StoreState["uiPrefs"]["issueColWidths"];
+
+/** The Issues table's th order: the severity dot, then the sortable four.
+ *  Must match railTable's header markup - the seeding pairs these keys with
+ *  `thead th` by index. */
+const ISSUE_COL_KEYS: readonly IssueColKey[] = ["dot", ...COLUMNS.map((c) => c.key)];
+
+/** The header-divider drag handlers for one rail table. */
+interface ColResizeHandlers<K extends string> {
+  /** Mousedown on column `key`'s divider: begin the drag. */
+  onDown(e: MouseEvent, key: K): void;
+  /** Double-click on any divider: back to automatic content-fit layout. */
+  resetAll(): void;
+  /** Detach mid-drag listeners + forced cursor (dispose safety). */
+  cancel(): void;
+}
+
+/** The header label's rendered width (text + button padding): the shrink
+ *  floor, so a drag can never clip the label. Measured with a Range - the
+ *  button itself is width:100%, so its own box tells nothing. */
+function headerContentWidth(th: HTMLElement): number {
+  const button = th.querySelector<HTMLElement>(".d9-rail-sort");
+  if (button === null) return 0;
+  const range = th.ownerDocument.createRange();
+  range.selectNodeContents(button);
+  const text = range.getBoundingClientRect().width;
+  const style = th.ownerDocument.defaultView?.getComputedStyle(button);
+  const pad = style
+    ? parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+    : 0;
+  return Math.ceil(text + pad);
+}
+
+/**
+ * The per-column drag mechanics for one rail table, writing through the
+ * injected accessors so each instance owns exactly one uiPrefs map. `keys`
+ * lists the table's columns in `thead th` DOM order (including non-draggable
+ * ones like the severity dot), which the first-drag seeding pairs by index.
+ */
+function createColResize<K extends string>(
+  keys: readonly K[],
+  get: () => Readonly<Partial<Record<K, number>>>,
+  set: (widths: Partial<Record<K, number>>) => void,
+): ColResizeHandlers<K> {
+  let dragKey: K | null = null;
+  let startX = 0;
+  let startWidth = 0;
+  let minWidth = MIN_COL_WIDTH;
+
+  function onDown(e: MouseEvent, key: K): void {
+    const th = (e.currentTarget as HTMLElement).closest("th");
+    const table = th?.closest("table");
+    if (th == null || table == null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // First drag: seed EVERY column from its exact rendered width, so
+    // switching to fixed layout changes only the dragged column - the table
+    // does not shift at all until the pointer moves.
+    let widths = get();
+    if (Object.keys(widths).length === 0) {
+      const seeded: Partial<Record<K, number>> = {};
+      const ths = table.querySelectorAll("thead th");
+      keys.forEach((colKey, i) => {
+        const header = ths[i];
+        if (header !== undefined) {
+          seeded[colKey] = Math.round(header.getBoundingClientRect().width);
+        }
+      });
+      set(seeded);
+      widths = get();
+    }
+    dragKey = key;
+    startX = e.clientX;
+    startWidth = widths[key] ?? Math.round(th.getBoundingClientRect().width);
+    minWidth = headerContentWidth(th);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+  function onMove(e: MouseEvent): void {
+    if (dragKey === null) return;
+    const width = clampColWidth(startWidth + (e.clientX - startX), minWidth);
+    const cur = get();
+    if (cur[dragKey] !== width) {
+      set({ ...cur, [dragKey]: width });
+    }
+  }
+  function onUp(): void {
+    if (dragKey === null) return;
+    dragKey = null;
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+  }
+
+  return {
+    onDown,
+    resetAll(): void {
+      set({});
+    },
+    cancel: onUp,
+  };
+}
+
+/** The fixed-layout bits a rail table renders once any column is pinned:
+ *  the colgroup, and an explicit table width (= the pinned sum) so column
+ *  widths hold exactly. A partial map (hand-edited URL) keeps table width at
+ *  the CSS 100% so unspecified columns absorb the remainder. */
+function fixedLayout(
+  keys: readonly string[],
+  colWidths: Readonly<Partial<Record<string, number>>>,
+): { fixed: boolean; tableStyle: string; colgroup: TemplateResult | typeof nothing } {
+  const widths = keys.map((key) => colWidths[key]);
+  const fixed = widths.some((w) => w !== undefined);
+  if (!fixed) return { fixed, tableStyle: "", colgroup: nothing };
+  const complete = widths.every((w) => w !== undefined);
+  const tableStyle = complete
+    ? `width:${widths.reduce((sum, w) => (sum ?? 0) + (w ?? 0), 0)}px`
+    : "";
+  const colgroup = html`<colgroup>
+    ${widths.map((w) =>
+      w !== undefined ? html`<col style="width:${w}px" />` : html`<col />`,
+    )}
+  </colgroup>`;
+  return { fixed, tableStyle, colgroup };
+}
 
 export interface IssuesRailController {
   /** The rail template for one render pass (reads live store state). */
@@ -224,6 +393,71 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     store.update("poi", { sortKey: col.key, sortDir: dir, index: -1 });
   }
 
+  // ── Resize drag (the rail's right-edge handle) ──────────────────────────
+  // Width lives in uiPrefs.railWidth: the shell re-renders the rail (and
+  // re-sizes the track canvases) on every uiPrefs change, and the trackPrefs
+  // subscriber persists it. The imperative style write below only pre-empts
+  // the store-driven render within the same frame so the drag never lags.
+
+  let dragHost: HTMLElement | null = null;
+  let dragLeft = 0;
+
+  function applyWidth(width: number): void {
+    const clamped = clampRailWidth(width, window.innerWidth);
+    if (dragHost !== null) dragHost.style.width = `${clamped}px`;
+    if (clamped !== store.getState().uiPrefs.railWidth) {
+      store.update("uiPrefs", { railWidth: clamped });
+      // Poke the viewport channel so the track-CONTENT controllers redraw at
+      // the new column width in real time: lanes/spans/cpu/... subscribe to
+      // `viewport`, not `uiPrefs`, so a bare railWidth change re-renders the
+      // shell chrome + resizes the canvases but leaves their pixels stale.
+      store.update("viewport", {});
+    }
+  }
+
+  function onResizeDown(e: MouseEvent): void {
+    const host = (e.currentTarget as HTMLElement).closest<HTMLElement>(".d9-rail");
+    if (host === null) return;
+    e.preventDefault();
+    dragHost = host;
+    dragLeft = host.getBoundingClientRect().left;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onResizeMove);
+    window.addEventListener("mouseup", onResizeUp);
+  }
+  function onResizeMove(e: MouseEvent): void {
+    if (dragHost === null) return;
+    // The rail is on the left; dragging its right handle sets the width from
+    // the aside's left edge to the pointer.
+    applyWidth(e.clientX - dragLeft);
+  }
+  function onResizeUp(): void {
+    if (dragHost === null) return;
+    dragHost = null;
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    window.removeEventListener("mousemove", onResizeMove);
+    window.removeEventListener("mouseup", onResizeUp);
+  }
+
+  // ── Per-column resize drag (both rail tables' header dividers) ──────────
+  // Store-driven only (no imperative style write): nothing outside the rail
+  // depends on column widths, and the store's RAF tick re-renders the table
+  // in the same frame the imperative write would land in. One instance per
+  // table, each writing its own uiPrefs map through the injected accessors.
+
+  const taskCols = createColResize(
+    TASK_COLUMNS.map((col) => col.key),
+    () => store.getState().uiPrefs.taskColWidths,
+    (taskColWidths) => store.update("uiPrefs", { taskColWidths }),
+  );
+  const issueCols = createColResize(
+    ISSUE_COL_KEYS,
+    () => store.getState().uiPrefs.issueColWidths,
+    (issueColWidths) => store.update("uiPrefs", { issueColWidths }),
+  );
+
   const keyBindings: readonly KeyBinding[] = [
     { key: "n", onKey: () => step(1) },
     { key: "p", onKey: () => step(-1) },
@@ -241,14 +475,25 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
         tab === "issues" ? viewModel(state) : derivePoiViewModel(null, state.poi, 0);
       const taskVm =
         tab === "tasks" ? taskViewModel(state) : deriveTaskViewModel(null, state.poi);
-      return railTemplate(tab, poiVm, taskVm, {
-        setTab,
-        setFilter,
-        sortByColumn,
-        jumpTo,
-        sortTaskByColumn,
-        jumpToTask,
-      });
+      return railTemplate(
+        tab,
+        poiVm,
+        taskVm,
+        state.uiPrefs.railWidth,
+        state.uiPrefs.taskColWidths,
+        state.uiPrefs.issueColWidths,
+        {
+          setTab,
+          setFilter,
+          sortByColumn,
+          jumpTo,
+          sortTaskByColumn,
+          jumpToTask,
+          onResizeDown,
+          taskCols,
+          issueCols,
+        },
+      );
     },
     keyBindings,
     setRevealWorker(reveal: (workerId: number) => void): void {
@@ -258,6 +503,11 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       cacheVm = null;
       taskCacheVm = null;
       revealWorker = () => {};
+      // A dispose mid-drag must not leave window listeners or the forced
+      // cursor behind.
+      onResizeUp();
+      taskCols.cancel();
+      issueCols.cancel();
     },
   };
 }
@@ -297,6 +547,9 @@ interface RailHandlers {
   jumpTo(index: number): void;
   sortTaskByColumn(col: TaskColumn): void;
   jumpToTask(index: number): void;
+  onResizeDown(e: MouseEvent): void;
+  taskCols: ColResizeHandlers<TaskSortKey>;
+  issueCols: ColResizeHandlers<IssueColKey>;
 }
 
 /** The tab strip switching Issues vs Tasks. */
@@ -320,10 +573,18 @@ function railTemplate(
   tab: RailTab,
   vm: PoiViewModel,
   taskVm: TaskViewModel,
+  width: number,
+  taskColWidths: TaskColWidths,
+  issueColWidths: IssueColWidths,
   h: RailHandlers,
 ): TemplateResult {
   return html`
-    <aside class="d9-rail" role="region" aria-label="Issues and tasks">
+    <aside
+      class="d9-rail"
+      role="region"
+      aria-label="Issues and tasks"
+      style="width:${width}px"
+    >
       ${railTabs(tab, h)}
       ${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
       ${tab === "tasks"
@@ -336,10 +597,18 @@ function railTemplate(
                 through dial9's own helpers are tracked, and this trace has
                 none.
               </p>`
-          : taskTable(taskVm, h)
+          : taskTable(taskVm, taskColWidths, h)
         : vm.total === 0
           ? html`<p class="d9-rail-empty">No issues match this filter.</p>`
-          : railTable(vm, h)}
+          : railTable(vm, issueColWidths, h)}
+      <div
+        class="d9-rail-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize issues rail"
+        title="Drag to resize; widen to read full spawn locations"
+        @mousedown=${h.onResizeDown}
+      ></div>
     </aside>
   `;
 }
@@ -416,15 +685,22 @@ function tasksHead(vm: TaskViewModel): TemplateResult {
   `;
 }
 
-function railTable(vm: PoiViewModel, h: RailHandlers): TemplateResult {
+function railTable(
+  vm: PoiViewModel,
+  colWidths: IssueColWidths,
+  h: RailHandlers,
+): TemplateResult {
+  const layout = fixedLayout(ISSUE_COL_KEYS, colWidths);
   return html`
     <div class="d9-rail-list">
       <table
-        class="d9-rail-table"
+        class=${classMap({ "d9-rail-table": true, "d9-cols-fixed": layout.fixed })}
+        style=${layout.tableStyle}
         role="listbox"
         aria-label="Points of interest"
         aria-activedescendant=${vm.index >= 0 ? `d9-poi-${vm.index}` : ""}
       >
+        ${layout.colgroup}
         <thead>
           <tr>
             <th scope="col" aria-hidden="true"></th>
@@ -446,6 +722,15 @@ function railTable(vm: PoiViewModel, h: RailHandlers): TemplateResult {
                       >`
                     : ""}
                 </button>
+                <span
+                  class="d9-col-resize"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize ${col.label} column"
+                  title="Drag to resize the ${col.label} column; double-click to reset all columns"
+                  @mousedown=${(e: MouseEvent) => h.issueCols.onDown(e, col.key)}
+                  @dblclick=${h.issueCols.resetAll}
+                ></span>
               </th>`,
             )}
           </tr>
@@ -496,15 +781,29 @@ function titleWhenClipped(e: Event): void {
   el.title = el.scrollWidth > el.clientWidth ? (el.textContent ?? "") : "";
 }
 
-function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
+function taskTable(
+  vm: TaskViewModel,
+  colWidths: TaskColWidths,
+  h: RailHandlers,
+): TemplateResult {
+  const layout = fixedLayout(
+    TASK_COLUMNS.map((col) => col.key),
+    colWidths,
+  );
   return html`
     <div class="d9-rail-list">
       <table
-        class="d9-rail-table d9-task-table"
+        class=${classMap({
+          "d9-rail-table": true,
+          "d9-task-table": true,
+          "d9-cols-fixed": layout.fixed,
+        })}
+        style=${layout.tableStyle}
         role="listbox"
         aria-label="Tasks"
         aria-activedescendant=${vm.index >= 0 ? `d9-task-${vm.index}` : ""}
       >
+        ${layout.colgroup}
         <thead>
           <tr>
             ${TASK_COLUMNS.map((col) => {
@@ -538,6 +837,15 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
                       >`
                     : ""}
                 </button>
+                <span
+                  class="d9-col-resize"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize ${col.label} column"
+                  title="Drag to resize the ${col.label} column; double-click to reset all columns"
+                  @mousedown=${(e: MouseEvent) => h.taskCols.onDown(e, col.key)}
+                  @dblclick=${h.taskCols.resetAll}
+                ></span>
               </th>`;
             })}
           </tr>
@@ -554,7 +862,7 @@ function taskTable(vm: TaskViewModel, h: RailHandlers): TemplateResult {
                 @click=${() => h.jumpToTask(abs)}
               >
                 <td class="d9-task-id" title="" @pointerenter=${titleWhenClipped}>${row.id}</td>
-                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}>${row.loc}</td>
+                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}><bdi>${row.loc}</bdi></td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.polls}</td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.total}</td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.longest}</td>

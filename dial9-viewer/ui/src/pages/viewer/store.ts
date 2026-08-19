@@ -14,6 +14,11 @@ import type { StoreOptions } from "../../store/store.js";
 /** The default persistent inspector width (CSS px). */
 export const DEFAULT_INSPECTOR_WIDTH = 360;
 
+/** The default issues/tasks rail width (CSS px), drag-resizable at its right
+ *  edge. Matches the pre-resize fixed width so existing layouts are unchanged
+ *  until the user drags. */
+export const DEFAULT_RAIL_WIDTH = 300;
+
 /** Default height of the worker-lanes box (CSS px) - shows ~6 fixed rows before
  *  the box scrolls; the user resizes it via the lanes bottom gutter. Roomy by
  *  default so multi-runtime traces are not cramped to a couple of visible rows;
@@ -62,6 +67,9 @@ export function initialViewerState(): StoreState {
       collapsedRuntimes: {},
       collapsedRuntimeMetrics: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
+      railWidth: DEFAULT_RAIL_WIDTH,
+      taskColWidths: {},
+      issueColWidths: {},
       lanesViewportHeight: DEFAULT_LANES_HEIGHT,
       lanesScrollTop: 0,
       selectedSpanNames: new Set<string>(),
