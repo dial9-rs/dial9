@@ -124,11 +124,8 @@ impl Recorder {
     /// Publish this recorder's handle as the process-global one, so
     /// [`Dial9Handle::current`] resolves it on threads no dial9 runtime owns.
     ///
-    /// Subsequent install replace the previous one. The global is cleared when the
-    /// recorder holding it stops.
-    ///
-    /// [`Dial9Handle::current`] is unaffected and keeps returning the calling
-    /// thread's own handle.
+    /// Subsequent installs replace the previous one. The global is cleared when
+    /// the recorder holding it stops.
     ///
     /// ```no_run
     /// use dial9_core::buffer::MemoryBuffer;
@@ -143,7 +140,7 @@ impl Recorder {
     /// }
     ///
     /// let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
-    /// rec.install_global();
+    /// rec.install_global_handle();
     ///
     /// std::thread::spawn(|| {
     ///     // reachable here, with no handle plumbed in
@@ -151,7 +148,7 @@ impl Recorder {
     /// });
     /// # Ok::<_, std::io::Error>(())
     /// ```
-    pub fn install_global(&self) {
+    pub fn install_global_handle(&self) {
         crate::handle::set_global_handle(self.handle.clone());
     }
 

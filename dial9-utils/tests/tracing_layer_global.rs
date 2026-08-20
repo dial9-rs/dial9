@@ -16,7 +16,7 @@ fn spans_on_a_plain_thread_are_balanced() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
     let recorder = recorder(writer).build();
-    recorder.install_global();
+    recorder.install_global_handle();
 
     std::thread::spawn(|| {
         assert!(

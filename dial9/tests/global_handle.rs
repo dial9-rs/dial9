@@ -46,14 +46,14 @@ fn global_handle_lifecycle() {
 
     assert!(
         !record_from_plain_thread(1),
-        "opt-in: nothing resolves until install_global"
+        "opt-in: nothing resolves until install_global_handle"
     );
 
-    recorder.install_global();
+    recorder.install_global_handle();
 
     assert!(
         record_from_plain_thread(2),
-        "after install_global `current` resolves on a thread no runtime owns"
+        "after install_global_handle `current` resolves on a thread no runtime owns"
     );
 
     recorder.graceful_shutdown(Duration::ZERO);

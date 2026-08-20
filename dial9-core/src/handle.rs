@@ -22,7 +22,7 @@ crate::primitives::thread_local! {
 }
 
 /// Process-wide [`Dial9Handle`], installed by
-/// [`Recorder::install_global`](crate::recording::Recorder::install_global) and
+/// [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle) and
 /// cleared when that recorder stops.
 static GLOBAL_HANDLE: ArcSwapOption<HandleInner> = ArcSwapOption::const_empty();
 
@@ -139,7 +139,7 @@ impl Dial9Handle {
     /// Threads claimed by a dial9 runtime (via [`set_tl_handle`], cleared by
     /// [`clear_tl_handle`]) get that runtime's handle. Any other thread gets the
     /// process-global handle, if one was installed with
-    /// [`Recorder::install_global`](crate::recording::Recorder::install_global).
+    /// [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle).
     /// With neither, an inert handle whose methods are all no-ops, see
     /// [`Dial9Handle::disabled`].
     ///

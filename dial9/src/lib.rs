@@ -72,7 +72,7 @@ use crate::core::{Encodable, current_handle};
 /// thread's, or the process-global one.
 ///
 /// A no-op when neither is installed. Opt into the global with
-/// [`Recorder::install_global`](dial9_core::recording::Recorder::install_global).
+/// [`Recorder::install_global_handle`](dial9_core::recording::Recorder::install_global_handle).
 pub fn record_event(event: impl Encodable) {
     current_handle().record_event(event);
 }

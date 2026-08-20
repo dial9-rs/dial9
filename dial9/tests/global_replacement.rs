@@ -54,10 +54,10 @@ fn a_displaced_recorder_does_not_clear_its_successors_global() {
     let dir_b = tempfile::tempdir().expect("tempdir");
 
     let rec_a = build(dir_a.path());
-    rec_a.install_global();
+    rec_a.install_global_handle();
 
     let rec_b = build(dir_b.path());
-    rec_b.install_global();
+    rec_b.install_global_handle();
 
     rec_a.graceful_shutdown(Duration::ZERO);
 
