@@ -4,6 +4,7 @@ export interface BrowseQuery {
   to: number;
   prefix?: string | undefined;
   service?: string | undefined;
+  layoutHint?: string | undefined;
 }
 
 export interface ServicesQuery {
@@ -20,6 +21,7 @@ export function buildBrowseUrl(query: BrowseQuery): string {
     `&from=${query.from}&to=${query.to}`;
   if (query.prefix) url += `&prefix=${encodeURIComponent(query.prefix)}`;
   if (query.service) url += `&service=${encodeURIComponent(query.service)}`;
+  if (query.layoutHint) url += `&layout_hint=${encodeURIComponent(query.layoutHint)}`;
   return url;
 }
 

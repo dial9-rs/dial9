@@ -29,7 +29,10 @@ export interface BrowseObject {
 /** Additive per-service metadata from GET /api/services. */
 export interface ServiceMetadata {
   service: string;
-  host_count: number;
+  /** Omitted until the selected service has been browsed. */
+  host_count?: number;
+  /** Opaque backend discovery state; the UI only echoes it to `/api/browse`. */
+  layout_hint?: string;
 }
 
 /** Normalized heatmap segment. */

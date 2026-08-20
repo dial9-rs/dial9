@@ -16,10 +16,12 @@ describe("buildBrowseUrl", () => {
         to: 2000,
         prefix: "dial9/traces",
         service: "checkout api",
+        layoutHint: '{"v":1}',
       }),
     ).toBe(
       "/api/browse?bucket=trace%20bucket&from=1000&to=2000" +
-        "&prefix=dial9%2Ftraces&service=checkout%20api",
+        "&prefix=dial9%2Ftraces&service=checkout%20api" +
+        "&layout_hint=%7B%22v%22%3A1%7D",
     );
   });
 

@@ -83,7 +83,8 @@ async fn demo_simulator_drives_browser_objects_and_aggregate_views_without_s3() 
         services["services"],
         serde_json::json!(["simulated-service"])
     );
-    assert_eq!(services["service_metadata"][0]["host_count"], 1);
+    assert!(services["service_metadata"][0].get("host_count").is_none());
+    assert!(services["service_metadata"][0]["layout_hint"].is_string());
 
     let (status, body) = get(
         &app,
@@ -102,8 +103,9 @@ async fn demo_simulator_drives_browser_objects_and_aggregate_views_without_s3() 
         "the requested four-minute window should have virtual coverage"
     );
     let key = objects[0]["key"].as_str().unwrap();
-    assert!(key.starts_with("traces/"));
-    assert!(key.contains("/simulated-service/host-001/"));
+    assert!(key.starts_with("traces/version=1/date="));
+    assert!(key.contains("/service=simulated-service/time="));
+    assert!(key.contains("/instance=host-001/"));
 
     let (status, object) = get(
         &app,

@@ -11,6 +11,7 @@ mod segment_object_key_parser;
 pub mod server;
 pub mod simulator;
 mod source_key_scope;
+mod source_layout;
 pub mod storage;
 mod trace_shape;
 
