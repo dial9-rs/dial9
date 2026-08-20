@@ -284,7 +284,8 @@ of the existing system:
   schemas/string pools/timestamp base (`trace_parser.js:252`), so every S3
   object is a self-contained decode unit.
 - The segment is the atomic transfer unit: already time-partitioned in S3
-  (`.../{date}/{HHMM}/.../{epoch}-{index}.bin.gz`), whole-file gzipped, and
+  (`.../version=1/date={date}/service={service}/time={HHMM}/.../{epoch}-{index}.bin.gz`,
+  with historical positional keys still readable), whole-file gzipped, and
   `/api/object` has no Range support - so byte-range loading is rejected, and
   per-segment time extents come free from listing metadata (the index heatmap
   already does this).

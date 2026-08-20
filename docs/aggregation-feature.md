@@ -110,7 +110,8 @@ literal "how accurate is this sample") are a planned later addition.
 ```
 
 Hive-partitioned paths make the folded-set LIST scope-prunable and give
-partition pruning on the query side; the content hash is only the leaf. The
+partition pruning on the query side; partition values use Hive path escaping
+and the content hash is only the leaf. The
 output is also namespaced by `bucket={source_bucket}` so bring-your-own-creds
 sources fold into isolated, independently prunable/GC-able trees.
 
@@ -118,7 +119,7 @@ Two independent version knobs, deliberately in opposite places:
 - **`ORDER_VERSION`** (= 1) lives *only* in the order-key hash input. Bump it to
   change the fetch-order permutation; persisted samples are order-independent
   and survive untouched.
-- **`SAMPLES_FORMAT_VERSION`** (= 3) lives *only* in the output path. Bump it
+- **`SAMPLES_FORMAT_VERSION`** (= 8) lives *only* in the output path. Bump it
   when changing *what* we persist; reads/writes then target a fresh empty tree
   that repopulates lazily on demand — no backfill job. The old tree is abandoned
   and GC'd out-of-band.

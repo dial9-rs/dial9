@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the default S3 uploader key layout now uses ordered Hive-style
+  partitions (`version=1/date=…/service=…/time=…/instance=…/boot=…`) with Hive
+  path escaping. The viewer reads both the new and historical layouts; custom
+  `S3KeyFn` output is unchanged ([#789](https://github.com/dial9-rs/dial9/issues/789)).
 - **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`
   feature. The `dial9` crate keeps its empty default feature set, while `cli`
   retains the existing S3-enabled binary. For a local-only viewer without S3
