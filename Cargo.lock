@@ -1984,7 +1984,6 @@ dependencies = [
 name = "dial9-tokio-telemetry"
 version = "0.5.0-rc2"
 dependencies = [
- "arc-swap",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
