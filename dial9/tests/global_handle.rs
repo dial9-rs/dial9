@@ -29,7 +29,7 @@ fn record_from_plain_thread(value: u64) -> (bool, bool) {
     std::thread::spawn(move || {
         let global_live = Dial9Handle::global().is_enabled();
         let current_live = Dial9Handle::current().is_enabled();
-        Dial9Handle::global().record_event(PlainThreadEvent {
+        dial9::record_event(PlainThreadEvent {
             timestamp_ns: clock_monotonic_ns(),
             value,
         });
