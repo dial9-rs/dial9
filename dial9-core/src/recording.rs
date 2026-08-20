@@ -121,6 +121,33 @@ impl Recorder {
         &self.handle
     }
 
+    /// Publish this recorder's handle as the process-global one, reachable from
+    /// any thread with [`Dial9Handle::global`].
+    ///
+    /// Subsequent install replace the previous one. The global is cleared when the
+    /// recorder holding it stops.
+    /// 
+    /// [`Dial9Handle::current`] is unaffected and keeps returning the calling
+    /// thread's own handle.
+    ///
+    /// ```no_run
+    /// use dial9_core::buffer::MemoryBuffer;
+    /// use dial9_core::handle::Dial9Handle;
+    /// use dial9_core::recorder::recorder;
+    ///
+    /// let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
+    /// rec.install_global();
+    ///
+    /// std::thread::spawn(|| {
+    ///     // reachable here, with no handle plumbed in
+    ///     Dial9Handle::global().record_event_with(|| todo!("your event"));
+    /// });
+    /// # Ok::<_, std::io::Error>(())
+    /// ```
+    pub fn install_global(&self) {
+        crate::handle::set_global_handle(self.handle.clone());
+    }
+
     /// Attach the background worker to this recorder, so its lifecycle is tied
     /// to the recorder's (drained on `graceful_shutdown`, stopped on drop).
     #[cfg(feature = "pipeline")]
@@ -162,6 +189,12 @@ impl Recorder {
     /// that their thread-local buffers have already been flushed to the central
     /// collector.
     pub(crate) fn stop_flush_thread(&mut self) {
+        // Before the blocking flush below: until the global is gone, otherwise other 
+        // threads would keep resolving it and recording into buffers that nothing will drain.
+        if let Some(shared) = self.handle.shared() {
+            crate::handle::clear_global_handle_for(shared);
+        }
+
         // Drain the calling thread's local buffer — it won't get a thread-stop
         // hook, so any unflushed events would be lost otherwise.
         if let Some(shared) = self.handle.shared() {

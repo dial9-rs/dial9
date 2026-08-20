@@ -3,6 +3,7 @@ use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
 use crate::source::Source;
 use crate::thread::ThreadTrackingGuard;
+use arc_swap::ArcSwapOption;
 use std::any::Any;
 use std::cell::RefCell;
 
@@ -19,6 +20,11 @@ crate::primitives::thread_local! {
     /// Backs [`Dial9Handle::current`] and [`current_handle`].
     static CURRENT_HANDLE: RefCell<Option<Dial9Handle>> = const { RefCell::new(None) };
 }
+
+/// Process-wide [`Dial9Handle`], installed by
+/// [`Recorder::install_global`](crate::recording::Recorder::install_global) and
+/// cleared when that recorder stops.
+static GLOBAL_HANDLE: ArcSwapOption<HandleInner> = ArcSwapOption::const_empty();
 
 /// Commands sent to the flush thread by [`Recorder`](crate::recording::Recorder).
 pub(crate) enum ControlCommand {
@@ -128,12 +134,27 @@ impl Dial9Handle {
     /// On any other thread it returns an inert handle whose methods are all
     /// no-ops — see [`Dial9Handle::disabled`].
     ///
+    /// This does not consult the process-global handle, reach that with
+    /// [`global`](Self::global).
+    ///
     /// Use [`is_enabled`](Self::is_enabled) when you need to branch on
     /// whether telemetry is actually live on the current thread.
     pub fn current() -> Self {
         CURRENT_HANDLE
             .with(|cell| cell.borrow().clone())
             .unwrap_or_else(Self::disabled)
+    }
+
+    /// Return the process-global [`Dial9Handle`], or an inert handle when none
+    /// is installed.
+    ///
+    /// Opt in with
+    /// [`Recorder::install_global`](crate::recording::Recorder::install_global).
+    /// Unlike [`current`](Self::current), it resolves on any thread.
+    pub fn global() -> Self {
+        Self {
+            inner: GLOBAL_HANDLE.load().as_ref().map(|inner| (**inner).clone()),
+        }
     }
 
     /// Return the [`Dial9Handle`] installed for the current thread,
@@ -326,6 +347,39 @@ pub fn set_tl_handle(handle: Dial9Handle) {
 /// Runtime integrations call this from their thread-stop hook.
 pub fn clear_tl_handle() {
     CURRENT_HANDLE.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Install `handle` as the process-global [`Dial9Handle`].
+///
+/// Last write wins; installs do not stack. Warns when it displaces a different
+/// recorder's live handle.
+pub(crate) fn set_global_handle(handle: Dial9Handle) {
+    let displaced_live_other = GLOBAL_HANDLE.load().as_ref().is_some_and(|installed| {
+        !installed.shared.is_stopped()
+            && !handle
+                .shared()
+                .is_some_and(|s| Arc::ptr_eq(s, &installed.shared))
+    });
+    if displaced_live_other {
+        tracing::warn!(target: "dial9", "replacing a live process-global Dial9Handle");
+    }
+    GLOBAL_HANDLE.store(handle.inner.map(Arc::new));
+}
+
+/// Clear the process-global [`Dial9Handle`] if it belongs to the recorder whose
+/// state is `shared`, otherwise leave it alone.
+///
+/// A recorder that has already been displaced still runs this on teardown, and
+/// must not wipe the global its successor installed.
+pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
+    let current = GLOBAL_HANDLE.load();
+    if current
+        .as_ref()
+        .is_some_and(|i| Arc::ptr_eq(&i.shared, shared))
+    {
+        // Compare-and-swap so a stale read here can't undo a newer install.
+        GLOBAL_HANDLE.compare_and_swap(&current, None);
+    }
 }
 
 /// Return the [`Dial9Handle`] for the current thread, or an inert handle if
