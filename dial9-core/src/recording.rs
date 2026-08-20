@@ -126,7 +126,7 @@ impl Recorder {
     ///
     /// Subsequent install replace the previous one. The global is cleared when the
     /// recorder holding it stops.
-    /// 
+    ///
     /// [`Dial9Handle::current`] is unaffected and keeps returning the calling
     /// thread's own handle.
     ///
@@ -134,13 +134,20 @@ impl Recorder {
     /// use dial9_core::buffer::MemoryBuffer;
     /// use dial9_core::handle::Dial9Handle;
     /// use dial9_core::recorder::recorder;
+    /// use dial9_trace_format::TraceEvent;
+    ///
+    /// #[derive(TraceEvent)]
+    /// struct Tick {
+    ///     #[traceevent(timestamp)]
+    ///     timestamp_ns: u64,
+    /// }
     ///
     /// let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
     /// rec.install_global();
     ///
     /// std::thread::spawn(|| {
     ///     // reachable here, with no handle plumbed in
-    ///     Dial9Handle::global().record_event_with(|| todo!("your event"));
+    ///     Dial9Handle::global().record_event(Tick { timestamp_ns: 0 });
     /// });
     /// # Ok::<_, std::io::Error>(())
     /// ```
@@ -189,7 +196,7 @@ impl Recorder {
     /// that their thread-local buffers have already been flushed to the central
     /// collector.
     pub(crate) fn stop_flush_thread(&mut self) {
-        // Before the blocking flush below: until the global is gone, otherwise other 
+        // Before the blocking flush below: until the global is gone, otherwise other
         // threads would keep resolving it and recording into buffers that nothing will drain.
         if let Some(shared) = self.handle.shared() {
             crate::handle::clear_global_handle_for(shared);
