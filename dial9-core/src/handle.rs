@@ -26,6 +26,13 @@ crate::primitives::thread_local! {
 /// cleared when that recorder stops.
 static GLOBAL_HANDLE: ArcSwapOption<HandleInner> = ArcSwapOption::const_empty();
 
+/// The installed process-global handle, if any.
+fn global_handle() -> Option<Dial9Handle> {
+    GLOBAL_HANDLE.load().as_ref().map(|inner| Dial9Handle {
+        inner: Some((**inner).clone()),
+    })
+}
+
 /// Commands sent to the flush thread by [`Recorder`](crate::recording::Recorder).
 pub(crate) enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
@@ -129,38 +136,27 @@ impl Dial9Handle {
 
     /// Return the [`Dial9Handle`] for the current thread.
     ///
-    /// On threads claimed by a dial9 runtime (via [`set_tl_handle`], cleared
-    /// by [`clear_tl_handle`]) this returns the live handle for that runtime.
-    /// On any other thread it returns an inert handle whose methods are all
-    /// no-ops — see [`Dial9Handle::disabled`].
-    ///
-    /// This does not consult the process-global handle, reach that with
-    /// [`global`](Self::global).
+    /// Threads claimed by a dial9 runtime (via [`set_tl_handle`], cleared by
+    /// [`clear_tl_handle`]) get that runtime's handle. Any other thread gets the
+    /// process-global handle, if one was installed with
+    /// [`Recorder::install_global`](crate::recording::Recorder::install_global).
+    /// With neither, an inert handle whose methods are all no-ops, see
+    /// [`Dial9Handle::disabled`].
     ///
     /// Use [`is_enabled`](Self::is_enabled) when you need to branch on
     /// whether telemetry is actually live on the current thread.
     pub fn current() -> Self {
         CURRENT_HANDLE
             .with(|cell| cell.borrow().clone())
+            .or_else(global_handle)
             .unwrap_or_else(Self::disabled)
-    }
-
-    /// Return the process-global [`Dial9Handle`], or an inert handle when none
-    /// is installed.
-    ///
-    /// Opt in with
-    /// [`Recorder::install_global`](crate::recording::Recorder::install_global).
-    /// Unlike [`current`](Self::current), it resolves on any thread.
-    pub fn global() -> Self {
-        Self {
-            inner: GLOBAL_HANDLE.load().as_ref().map(|inner| (**inner).clone()),
-        }
     }
 
     /// Return the [`Dial9Handle`] installed for the current thread,
     /// or `None` if no dial9 runtime has claimed this thread.
     ///
-    /// Prefer [`current`](Self::current) instead.
+    /// Does not consider the process-global handle. Prefer
+    /// [`current`](Self::current) for recording.
     pub fn try_current() -> Option<Self> {
         CURRENT_HANDLE.with(|cell| cell.borrow().clone())
     }
@@ -382,8 +378,8 @@ pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
     }
 }
 
-/// Return the [`Dial9Handle`] for the current thread, or an inert handle if
-/// no dial9 runtime has claimed it. Equivalent to [`Dial9Handle::current`].
+/// Return the [`Dial9Handle`] for the current thread, falling back to the
+/// process-global one. Equivalent to [`Dial9Handle::current`].
 pub fn current_handle() -> Dial9Handle {
     Dial9Handle::current()
 }

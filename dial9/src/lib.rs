@@ -66,17 +66,15 @@ pub mod s3 {
     };
 }
 
-use crate::core::Encodable;
+use crate::core::{Encodable, current_handle};
 
-/// Record an event on the calling thread's handle, or the process-global one
-/// when the thread has none of its own.
+/// Record an event on the handle [`Dial9Handle::current`] resolves: this
+/// thread's, or the process-global one.
 ///
 /// A no-op when neither is installed. Opt into the global with
 /// [`Recorder::install_global`](dial9_core::recording::Recorder::install_global).
 pub fn record_event(event: impl Encodable) {
-    Dial9Handle::try_current()
-        .unwrap_or_else(Dial9Handle::global)
-        .record_event(event);
+    current_handle().record_event(event);
 }
 
 // Tokio runtime integration.

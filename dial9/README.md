@@ -613,7 +613,7 @@ struct RequestCompleted {
     error_message: Option<String>,
 }
 
-# let handle: Dial9Handle = todo!();
+let handle = Dial9Handle::current();
 handle.record_event(RequestCompleted {
     timestamp_ns: clock_monotonic_ns(),
     status_code: 200,
@@ -622,6 +622,8 @@ handle.record_event(RequestCompleted {
 });
 # }
 ```
+
+`current()` resolves on any thread a dial9 runtime owns. To record from a synchronous worker thread instead, call `Recorder::install_global()` once at startup: `current()` then resolves there too, and `dial9::record_event` does the same without naming a handle. Such a thread can also opt into sched and CPU sampling with `Dial9Handle::track_current_thread()`.
 
 ### Custom event callbacks
 

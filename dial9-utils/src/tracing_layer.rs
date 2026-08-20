@@ -410,11 +410,7 @@ where
     }
 
     fn on_close(&self, id: span::Id, _ctx: Context<'_, S>) {
-        let Some(handle) = Dial9Handle::try_current() else {
-            return;
-        };
-
-        handle.record_event(SpanCloseEvent {
+        Dial9Handle::current().record_event(SpanCloseEvent {
             timestamp_ns: clock_monotonic_ns(),
             span_id: id.into_u64(),
         });

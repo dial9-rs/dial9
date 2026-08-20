@@ -62,7 +62,7 @@ fn a_displaced_recorder_does_not_clear_its_successors_global() {
     rec_a.graceful_shutdown(Duration::ZERO);
 
     assert!(
-        Dial9Handle::global().is_enabled(),
+        Dial9Handle::current().is_enabled(),
         "B installed last, so B still holds the global after A stops"
     );
 
@@ -80,7 +80,7 @@ fn a_displaced_recorder_does_not_clear_its_successors_global() {
     assert!(markers(dir_b.path()).contains(&7), "recorded into B");
     assert!(!markers(dir_a.path()).contains(&7), "and not into A");
     assert!(
-        !Dial9Handle::global().is_enabled(),
+        !Dial9Handle::current().is_enabled(),
         "B stopping does clear it"
     );
 }

@@ -121,8 +121,8 @@ impl Recorder {
         &self.handle
     }
 
-    /// Publish this recorder's handle as the process-global one, reachable from
-    /// any thread with [`Dial9Handle::global`].
+    /// Publish this recorder's handle as the process-global one, so
+    /// [`Dial9Handle::current`] resolves it on threads no dial9 runtime owns.
     ///
     /// Subsequent install replace the previous one. The global is cleared when the
     /// recorder holding it stops.
@@ -147,7 +147,7 @@ impl Recorder {
     ///
     /// std::thread::spawn(|| {
     ///     // reachable here, with no handle plumbed in
-    ///     Dial9Handle::global().record_event(Tick { timestamp_ns: 0 });
+    ///     Dial9Handle::current().record_event(Tick { timestamp_ns: 0 });
     /// });
     /// # Ok::<_, std::io::Error>(())
     /// ```

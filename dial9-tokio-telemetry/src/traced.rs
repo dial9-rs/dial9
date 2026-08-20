@@ -240,9 +240,7 @@ impl<F: Future> Future for TracedFuture<F> {
             let handle = match source {
                 HandleSource::Eager(handle) => Some(handle),
                 HandleSource::Passthrough => None,
-                HandleSource::Lazy => {
-                    crate::telemetry::recorder::traced_handle(&Dial9Handle::current())
-                }
+                HandleSource::Lazy => crate::telemetry::recorder::traced_runtime_handle(),
             };
 
             let Some(handle) = handle else {
@@ -323,9 +321,7 @@ mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
     use crate::telemetry::buffer::{DiskBuffer, MemoryBuffer};
-    use crate::telemetry::recorder::{
-        Dial9HandleTokioExt, Dial9TokioHandle, TokioAttachOptions, traced_handle,
-    };
+    use crate::telemetry::recorder::{Dial9HandleTokioExt, Dial9TokioHandle, TokioAttachOptions};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use dial9_core::recorder::recorder;
     use dial9_core::test_util;
@@ -338,7 +334,7 @@ mod tests {
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
         let rec = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap()).build();
-        let handle = traced_handle(rec.handle()).expect("enabled recorder yields a handle");
+        let handle = rec.handle().clone();
 
         let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
         let waker = noop_waker();
@@ -382,7 +378,7 @@ mod tests {
             .attach_tokio_runtime(builder, TokioAttachOptions::default())
             .unwrap();
         let handle =
-            Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));
+            Dial9TokioHandle::for_runtime(runtime.handle().clone(), Some(rec.handle().clone()));
         let notify = Arc::new(tokio::sync::Notify::new());
         let notify_clone = notify.clone();
 
@@ -413,7 +409,7 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = traced_handle(rec.handle()).expect("enabled recorder yields a handle");
+        let th = rec.handle().clone();
         test_util::drain_thread_local(th.shared().unwrap());
 
         // Dropping the runtime + recorder stops the background flush thread, joins

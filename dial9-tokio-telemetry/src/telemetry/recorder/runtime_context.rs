@@ -47,6 +47,8 @@ pub(crate) struct RuntimeContext {
 }
 
 thread_local! {
+    /// Whether a dial9-traced runtime drives this thread.
+    static TRACED_THREAD: Cell<bool> = const { Cell::new(false) };
     /// Global worker ID for this thread, set on every `resolve_worker` call.
     /// Read by `current_worker_id()` for wake events.
     static GLOBAL_WORKER_ID: Cell<Option<u64>> = const { Cell::new(None) };
@@ -544,6 +546,7 @@ fn register_worker_if_needed(ctx: &RuntimeContext, global_id: u64) {
             // does this for pool threads, but a `current_thread` runtime's driver
             // thread gets no `on_thread_start`, so set it here on first poll.
             set_tl_handle(ctx.recorder_handle.clone());
+            mark_thread_traced();
             cell.set(Some(key));
         }
     });
@@ -570,6 +573,21 @@ pub(crate) fn stop_sched_sampling() {
     // `try_with` only fails once TLS teardown has started, and teardown drops
     // the guard itself.
     let _ = THREAD_TRACKING.try_with(|cell| cell.borrow_mut().take());
+}
+
+/// Mark this thread as driven by a dial9-traced runtime.
+pub(crate) fn mark_thread_traced() {
+    TRACED_THREAD.with(|traced| traced.set(true));
+}
+
+/// Undo [`mark_thread_traced`], from the runtime's thread-stop hook.
+pub(crate) fn clear_thread_traced() {
+    TRACED_THREAD.with(|traced| traced.set(false));
+}
+
+/// Whether a dial9-traced runtime drives this thre ad.
+pub(crate) fn thread_is_traced() -> bool {
+    TRACED_THREAD.with(Cell::get)
 }
 
 /// Get the current thread's global worker ID.
