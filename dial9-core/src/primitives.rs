@@ -1,7 +1,7 @@
 //! Cfg-gated concurrency primitives.
 //!
 //! Under normal compilation this re-exports from `std`. With `--cfg shuttle`
-//! it re-exports from [`shuttle`], giving the shuttle scheduler control over all
+//! it re-exports from `shuttle`, giving the shuttle scheduler control over all
 //! synchronization points so that tests can explore thread interleavings
 //! deterministically.
 

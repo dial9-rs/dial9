@@ -12,7 +12,7 @@ categories = ["asynchronous", "development-tools::profiling"]
 [package.metadata.docs.rs]
 all-features = true
 # `--all-features` turns on `taskdump`, which requires `--cfg tokio_unstable`.
-rustdoc-args = ["--cfg", "tokio_unstable"]
+rustdoc-args = ["--cfg", "docsrs", "--cfg", "tokio_unstable"]
 rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 [package.metadata.binstall]

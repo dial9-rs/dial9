@@ -58,10 +58,9 @@ pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
 /// when the writer could not be created.
 ///
 /// Configure it exactly like [`recorder`]: register sources, set a pipeline,
-/// then [`build`](RecorderBuilder::build). When the writer failed, every one of
-/// those is retained but inert, and `build` yields the same recorder
-/// [`recorder_disabled`] does. A bad trace path therefore costs telemetry, not
-/// the process.
+/// then [`build`](RecorderBuilder::build). When the writer failed, that config
+/// is kept but inert, and `build` yields the same recorder
+/// [`recorder_disabled`] does.
 pub fn recorder_or_disabled<M: BufferMode>(
     writer: std::io::Result<SegmentWriter<M>>,
 ) -> RecorderBuilder<M> {
@@ -234,7 +233,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
     ///
     /// Yields a disabled recorder when the writer could not be created (see
     /// [`recorder_or_disabled`]); the sources and pipeline configured on the way
-    /// here are simply never started.
+    /// here are never started.
     pub fn build(self) -> Recorder {
         #[allow(unused_mut)]
         let Some(mut writer) = self.writer else {

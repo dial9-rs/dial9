@@ -45,8 +45,8 @@
 //! # }
 //! ```
 //!
-//! Lost shutdown telemetry is acceptable in this model; `#[dial9::main]` handles
-//! runtime-drop-before-shutdown ordering for you.
+//! Shut down in that order or the workers' last events never reach the trace.
+//! `#[dial9::main]` does it for you.
 
 use super::register_runtime_hooks;
 #[cfg(not(tokio_unstable))]

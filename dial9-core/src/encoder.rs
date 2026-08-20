@@ -5,7 +5,7 @@
 //! batch reaches the configured batch size (default 1 MB).
 //!
 //! Each buffer is wrapped in `Arc<Mutex<…>>` so the flush thread can intrusively
-//! drain idle/silent threads via [`TlBufferHandle`]s registered in `SharedState`.
+//! drain idle/silent threads via `TlBufferHandle`s registered in `SharedState`.
 use crate::collector::CentralCollector;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex, Weak};

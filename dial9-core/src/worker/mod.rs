@@ -1,6 +1,6 @@
 //! The segment-processing worker.
 //!
-//! [`WorkerLoop`] is the consumer side of the bus: it drains sealed segments
+//! `WorkerLoop` is the consumer side of the bus: it drains sealed segments
 //! and runs each through a [`SegmentProcessor`](crate::pipeline::SegmentProcessor)
 //! pipeline (compress, symbolize, upload, write-back). It is the generic
 //! executor of the pipeline trait; the processors themselves are supplied by

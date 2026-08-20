@@ -84,11 +84,10 @@ impl Dial9Handle {
     /// for handles returned by [`Dial9Handle::current`] on a thread not
     /// owned by a dial9 runtime, and while a connected recorder is paused.
     ///
-    /// Cheaper than attempting a record: sources that do per-event work
-    /// before reaching [`with_encoder`](Self::with_encoder) can skip it
-    /// entirely while recording is off. The check is a relaxed atomic load;
-    /// racing a concurrent enable/disable is benign (the event lands or is
-    /// skipped, exactly as if it had arrived a moment earlier or later).
+    /// Check this before doing per-event work that would be wasted while
+    /// recording is off, such as work leading up to [`with_encoder`](Self::with_encoder).
+    /// The check can race a concurrent enable/disable, which is benign since the event either
+    /// lands or is skipped anyway.
     ///
     /// To ask only whether the handle is connected at all, regardless of
     /// pause state, use [`is_connected`](Self::is_connected).

@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Metrique sink for dial9: records unit-of-work metric entries into the dial9 trace"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true }

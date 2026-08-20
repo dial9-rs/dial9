@@ -6,8 +6,7 @@
 //! pipeline into on-demand operation: segments keep accumulating in the ring,
 //! and the pipeline only runs when a `DumpTrigger` requests a dump - from a
 //! panic hook, an idle-ratio watcher, a `/dump` handler, whatever decides
-//! something is worth keeping. Most trace data is uninteresting; this mode
-//! pays processing cost only when it matters.
+//! something is worth keeping.
 //!
 //! This example models the realistic case: a background monitor task samples
 //! the ring on an interval and, when it spots an "incident", triggers a dump -
@@ -19,8 +18,7 @@
 //!
 //! The runtime mints the trigger channel internally; the application reaches
 //! the `DumpTrigger` through the ambient `Dial9Handle::current()` from any
-//! thread the runtime owns (the monitor task, a panic hook, ...). No global
-//! plumbing.
+//! thread the runtime owns (the monitor task, a panic hook, ...).
 //!
 //! This example uses a local `gzip` + `write_back` pipeline (no AWS setup).
 //! Dumped segments land as `*.bin.gz` in the trace dir.
