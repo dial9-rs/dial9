@@ -549,7 +549,7 @@ mod shuttle_tests {
     // below; drop it once fixed.
     crate::shuttle_test! {
         num_iters = 1_000, depth = 3, should_panic,
-        expected = "every sealed segment must be claimed exactly once",
+        expect_panic = "every sealed segment must be claimed exactly once",
         replay = "91022bc1cfb7e1e792c7bc6e802449922481242992a424499224490000";
         fn shuttle_claim_dedup() {
             let dir = tempfile::tempdir().unwrap();

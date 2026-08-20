@@ -139,7 +139,7 @@ pub use crate::define_thread_local as thread_local;
 ///
 /// Modifiers, added after `depth = $depth`:
 /// - `should_panic` -- document a known bug instead of asserting
-///   correctness. Add `expected = "..."` to pin the panic message (default: any panic).
+///   correctness. Add `expect_panic = "..."` to pin the panic message (default: any panic).
 ///   Add `replay = "<schedule>"` to also check in a
 ///   `replay_known_failure` test pinning one captured failing schedule (from
 ///   a `pct` run's "failing schedule" output -- not `determinism`'s "failing
@@ -225,7 +225,7 @@ macro_rules! shuttle_test {
             }
         }
     };
-    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic $(, expected = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic $(, expect_panic = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
@@ -248,7 +248,7 @@ macro_rules! shuttle_test {
                 /// Replays a captured failing schedule so this exact
                 /// failure reproduces deterministically, without waiting on
                 /// `pct`/`determinism` exploration to find it again. No
-                /// `expected` pin needed -- a fixed schedule can't surface
+                /// `expect_panic` pin needed -- a fixed schedule can't surface
                 /// an unrelated panic.
                 #[test]
                 #[should_panic]
@@ -273,7 +273,7 @@ macro_rules! shuttle_test {
     // Confirm the crash first (run `determinism` alone, repeatedly) before
     // using this -- don't use it defensively. Still runnable manually with
     // `--ignored`.
-    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expected = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+    (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expect_panic = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
 
@@ -297,7 +297,7 @@ macro_rules! shuttle_test {
                 /// Replays a captured failing schedule so this exact
                 /// failure reproduces deterministically, without waiting on
                 /// `pct`/`determinism` exploration to find it again. No
-                /// `expected` pin needed -- a fixed schedule can't surface
+                /// `expect_panic` pin needed -- a fixed schedule can't surface
                 /// an unrelated panic.
                 #[test]
                 #[should_panic]
