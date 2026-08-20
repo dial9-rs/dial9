@@ -31,7 +31,7 @@ import process from "node:process";
 import { parseArgs, usage } from "./lib/cli.mjs";
 import { parseInventory, isGated } from "./lib/inventory.mjs";
 import { verdictTable, summarize, writeReport, writeJson } from "./lib/report.mjs";
-import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
+import { launchBrowser, newPage, assertServerReady, FIXTURE_CLOCK } from "./lib/browser.mjs";
 import { WalkError } from "./lib/actions.mjs";
 import { registry as features01 } from "./walkers/features01.mjs";
 import { registry as features03 } from "./walkers/features03.mjs";
@@ -179,7 +179,9 @@ async function main() {
         noteTag = recNote;
       }
 
-      const { context, page } = await newPage(browser, { fixedClock: reg.fixedClock });
+      const { context, page } = await newPage(browser, {
+        fixedClock: fixturesMode ? FIXTURE_CLOCK : reg.fixedClock,
+      });
       const started = Date.now();
       try {
         const evidence = await withTimeout(

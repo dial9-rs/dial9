@@ -2,7 +2,7 @@
 //
 // These encode the access paths the inventory walkers drive repeatedly:
 // waiting out the load-time bootstrap (config -> prefix discovery ->
-// auto-search), running the April-window browse search that reaches the dev
+// auto-search), running the demo-window browse search that reaches the dev
 // seed's single segment, and running a raw search that yields rows.
 //
 // The page clock is pinned to DEV_SEED_CLOCK (see lib/browser.mjs), which
@@ -47,12 +47,13 @@ export async function gotoBrowserPage(page, pageUrl) {
 
 /**
  * Browse-tab search over a window that contains the dev seed's segment.
- * The narrow window also lets the service-discovery feeler observe the
- * `2026-04-09/1900` bucket. Waits for the heatmap to render.
+ * The narrow window also lets service discovery observe the
+ * `version=1/date=2026-08-06/service=demo-service/time=0025` bucket.
+ * Waits for the heatmap to render.
  */
-export async function searchAprilWindow(page) {
-  await page.fill("#range-from", "2026-04-09T18:55");
-  await page.fill("#range-to", "2026-04-09T19:05");
+export async function searchDemoWindow(page) {
+  await page.fill("#range-from", "2026-08-06T00:20");
+  await page.fill("#range-to", "2026-08-06T00:30");
   await page.click("#search-btn");
   await page.waitForSelector("#heatmap-view", { state: "visible", timeout: 20_000 });
   await page.waitForSelector("#heatmap-labels .row", { timeout: 20_000 });
@@ -90,10 +91,9 @@ export async function altDragZoom(page) {
 }
 
 /**
- * Raw-search that yields the seeded row. The raw query is the key sub-prefix
- * BEFORE the date layer; the dev seed has none, so the query is left empty
- * and the implicit last-30-days window (from the pinned clock) reaches the
- * April seed. Waits for the results table.
+ * Raw-search that yields the seeded row. The configured prefix is already
+ * applied, so the additional raw sub-prefix stays empty. The pinned clock
+ * keeps the seed inside the implicit last-30-days window.
  */
 export async function rawSearchSeededRows(page) {
   await page.click("#tab-raw");

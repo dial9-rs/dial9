@@ -16,6 +16,11 @@
 ///                              features/01 D4/#471).
 use std::io::Write;
 
+#[allow(dead_code)]
+#[path = "../segment_object_key_codec.rs"]
+mod segment_object_key_codec;
+use segment_object_key_codec::format_v1_segment_object_key;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -63,25 +68,39 @@ async fn main() -> anyhow::Result<()> {
 
         // Upload the full trace as a single gzipped segment
         let full_compressed = gzip_bytes(&demo_data);
+        let epoch_secs = 1_785_975_935;
+        let key = format_v1_segment_object_key(
+            Some("traces"),
+            "2026-08-06",
+            "demo-service",
+            "0025",
+            "local/host-0",
+            "abcd",
+            &format!("{epoch_secs}-0.bin.gz"),
+        );
         client
             .put_object()
             .bucket(bucket)
-            .key("traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz")
+            .key(&key)
             .body(full_compressed.into())
             .send()
             .await?;
-        tracing::info!(
-            key = "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz",
-            size = demo_data.len(),
-            "seeded full demo trace"
-        );
+        set_object_mtime(&s3_root.path().join(bucket).join(&key), epoch_secs + 5)?;
+        tracing::info!(key, size = demo_data.len(), "seeded full demo trace");
     } else {
         tracing::warn!("demo-trace.bin not found, seeding with synthetic data");
         for i in 0..5 {
             let data = format!("synthetic trace segment {i}");
             let compressed = gzip_bytes(data.as_bytes());
-            let key = format!(
-                "traces/2026-04-09/191{i}/test-svc/us-east-1/host-1/xyzw/1744224{i}00-0.bin.gz"
+            let epoch_secs = 1_785_976_200 + i * 60;
+            let key = format_v1_segment_object_key(
+                Some("traces"),
+                "2026-08-06",
+                "test-svc",
+                &format!("003{i}"),
+                "local/host-1",
+                "xyzw",
+                &format!("{epoch_secs}-0.bin.gz"),
             );
             client
                 .put_object()
@@ -90,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                 .body(compressed.into())
                 .send()
                 .await?;
+            set_object_mtime(&s3_root.path().join(bucket).join(&key), epoch_secs + 60)?;
             tracing::info!(%key, "seeded");
         }
     }
@@ -160,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         default_prefix.as_deref().unwrap_or("(none)")
     );
     tracing::info!("try: http://localhost:{port}/");
-    tracing::info!("search for: 2026-04-09/");
+    tracing::info!("search for: version=1/date=2026-08-06/");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -232,6 +252,13 @@ fn seed_tree(seed_dir: &std::path::Path, s3_root: &std::path::Path) -> anyhow::R
         seeded += 1;
     }
     Ok(seeded)
+}
+
+fn set_object_mtime(path: &std::path::Path, epoch_secs: u64) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.set_times(std::fs::FileTimes::new().set_modified(
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(epoch_secs),
+    ))
 }
 
 fn gzip_bytes(data: &[u8]) -> Vec<u8> {

@@ -4,7 +4,7 @@
 //! checks stop carrying NOT-TRIGGERABLE holes (features/01 "Live validation
 //! results"):
 //!
-//!   - `dial9-fixtures` (bucket): multi-host / multi-service #225 layouts
+//!   - `dial9-fixtures` (bucket): multi-host / multi-service Hive-style layouts
 //!     driving the heatmap's boot-count annotation (F5), seam tiling (F7),
 //!     coverage-gap hatching (F8) and boot-change dividers (F9), plus a
 //!     10-segment windowing host and a multi-runtime (#596) segment;
@@ -58,6 +58,10 @@ use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
 
+#[allow(dead_code)]
+#[path = "../segment_object_key_codec.rs"]
+mod segment_object_key_codec;
+
 const NS: u64 = 1_000_000_000;
 const MS: u64 = 1_000_000;
 
@@ -66,7 +70,7 @@ const MS: u64 = 1_000_000;
 const MONO_BASE_NS: u64 = NS;
 
 /// The fixture day. Every scenario lives on 2026-04-09 so the pinned page
-/// clock used by the live checks (`DEV_SEED_CLOCK`, 2026-04-09T21:00Z)
+/// clock used by the fixture live checks (`FIXTURE_CLOCK`, 2026-04-09T21:00Z)
 /// reaches it with the stock "Last 24hr" window.
 const FIXTURE_YEAR: i32 = 2026;
 const FIXTURE_MONTH: time::Month = time::Month::April;
@@ -193,11 +197,9 @@ fn fixture_epoch(h: u8, m: u8, s: u8) -> i64 {
         .unix_timestamp()
 }
 
-/// Default #225 key layout:
-/// `{prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin.gz`
-/// with the date/HHMM path derived FROM the epoch so they always agree
-/// (unlike the demo key, whose filename epoch mismatches its date path —
-/// features/01 finding 3).
+/// Default segment object key layout:
+/// `{prefix}/version=1/date={YYYY-MM-DD}/service={service}/time={HHMM}/instance={instance}/boot={boot_id}/{epoch}-{index}.bin.gz`
+/// with the date/HHMM path derived FROM the epoch so they always agree.
 fn layout_key(
     prefix: &str,
     service: &str,
@@ -214,12 +216,15 @@ fn layout_key(
         dt.day()
     );
     let hhmm = format!("{:02}{:02}", dt.hour(), dt.minute());
-    let tail = format!("{date}/{hhmm}/{service}/{host}/{boot}/{epoch_s}-{index}.bin.gz");
-    if prefix.is_empty() {
-        tail
+    let prefix = if prefix.is_empty() {
+        None
     } else {
-        format!("{}/{tail}", prefix.trim_end_matches('/'))
-    }
+        Some(prefix.trim_end_matches('/'))
+    };
+    let filename = format!("{epoch_s}-{index}.bin.gz");
+    segment_object_key_codec::format_v1_segment_object_key(
+        prefix, &date, service, &hhmm, host, boot, &filename,
+    )
 }
 
 // ── Deterministic jitter ─────────────────────────────────────────────────
