@@ -6,8 +6,11 @@ mod s3;
 #[cfg(not(feature = "s3"))]
 #[path = "s3_disabled.rs"]
 mod s3;
+mod segment_object_key_codec;
+mod segment_object_key_parser;
 pub mod server;
 pub mod simulator;
+mod source_key_scope;
 pub mod storage;
 mod trace_shape;
 
