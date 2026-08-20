@@ -34,12 +34,13 @@ impl CloseValue for &MonotonicAtClose {
 /// Include one in any entry that should land in the dial9 trace (see the
 /// [module docs](crate) for the full example).
 ///
-/// [`capture`](Dial9Context::capture) reads the calling thread's OS thread
-/// id and the monotonic clock; with the `tokio` feature it also reads the
-/// tokio task id when called inside a task. The end timestamp is captured
-/// automatically when the entry closes. The sink routes these fields into
-/// the trace event header so the viewer can place the event on the timeline
-/// and correlate it with other events on the same thread and task.
+/// [`capture`](Dial9Context::capture) and [`default`](Default::default) read
+/// the calling thread's OS thread id and the monotonic clock; with the
+/// `tokio` feature they also read the tokio task id when called inside a task.
+/// The end timestamp is captured automatically when the entry closes. The
+/// sink routes these fields into the trace event header so the viewer can
+/// place the event on the timeline and correlate it with other events on the
+/// same thread and task.
 ///
 /// The thread id is a capture-time snapshot: a task may migrate to another
 /// worker thread before the entry closes.
@@ -51,8 +52,7 @@ impl CloseValue for &MonotonicAtClose {
 /// field names and makes them easy to filter out of a format that does not
 /// want them (see [`WithoutDial9Fields`](crate::WithoutDial9Fields)).
 //
-// Deliberately neither `Default` nor `Clone`: a defaulted context would
-// silently look like "valid context captured at monotonic time 0".
+// Deliberately not `Clone`: each entry should capture its own start context.
 #[metrics(subfield)]
 #[derive(Debug)]
 pub struct Dial9Context {
@@ -85,6 +85,12 @@ impl Dial9Context {
             monotonic_ns_start: clock_monotonic_ns(),
             monotonic_ns_end: MonotonicAtClose,
         }
+    }
+}
+
+impl Default for Dial9Context {
+    fn default() -> Self {
+        Self::capture()
     }
 }
 
@@ -121,6 +127,22 @@ fn current_task_id() -> Option<u64> {
 #[cfg(not(feature = "tokio"))]
 fn current_task_id() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_captures_current_context() {
+        let before = clock_monotonic_ns();
+        let context = Dial9Context::default();
+        let after = clock_monotonic_ns();
+
+        assert_eq!(context.thread_id, u64::from(cached_tid()));
+        assert!(context.monotonic_ns_start >= before);
+        assert!(context.monotonic_ns_start <= after);
+    }
 }
 
 /// Names of [`Dial9Context`]'s fields, used by the sink to assign context
