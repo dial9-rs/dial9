@@ -585,29 +585,20 @@ mod shuttle_tests {
         check!(mem.channel.in_flight_bytes.load(Ordering::Relaxed) == 0);
     }
 
-    fn scenario_no_eviction() {
+    crate::shuttle_test! {
+        default;
         // Budget room for many 16-byte segments; nothing should evict.
-        run_scenario(1 << 16, 16, 3, true);
+        fn shuttle_handoff_no_loss() {
+            run_scenario(1 << 16, 16, 3, true);
+        }
     }
 
-    fn scenario_with_eviction() {
+    crate::shuttle_test! {
+        default;
         // Budget fits ~2 segments; the writer outruns the worker so the
         // byte-budget loop evicts under contention.
-        run_scenario(40, 16, 4, false);
-    }
-
-    #[test]
-    fn shuttle_handoff_no_loss_pct() {
-        shuttle::check_pct(scenario_no_eviction, 5_000, 3);
-    }
-
-    #[test]
-    fn shuttle_handoff_no_loss_determinism() {
-        shuttle::check_uncontrolled_nondeterminism(scenario_no_eviction, 5_000);
-    }
-
-    #[test]
-    fn shuttle_eviction_accounting_pct() {
-        shuttle::check_pct(scenario_with_eviction, 5_000, 3);
+        fn shuttle_eviction_accounting() {
+            run_scenario(40, 16, 4, false);
+        }
     }
 }

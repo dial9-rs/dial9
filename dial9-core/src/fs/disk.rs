@@ -523,3 +523,88 @@ mod tests {
         check!(strip_active_suffix(p) == PathBuf::from("/tmp/trace.0.bin"));
     }
 }
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use crate::primitives::sync::Arc;
+    use crate::primitives::sync::atomic::AtomicUsize;
+
+    const COUNT: u32 = 3;
+    const SCANS: usize = 3;
+
+    fn seal_one(disk: &DiskFs, dir: &Path, stem: &str, index: u32) {
+        let active_path = dir.join(format!("{stem}.{index}.bin.active"));
+        let handle = disk.create_segment(&active_path).unwrap();
+        disk.seal(handle, &active_path, index).unwrap();
+    }
+
+    // A claimer scans+claims repeatedly while a remover deletes each claimed segment.
+    // Every segment must be claimed exactly once.
+    //
+    // KNOWN BUG (tracking issue #782): `take_files` snapshots the disk scan
+    // and `already_claimed` at two different times. A `remove_sealed(idx)`
+    // completing in between makes `idx` look "new" again, redispatching an
+    // already-processed segment whose file is gone. Documented via `should_panic`
+    // below; drop it once fixed.
+    crate::shuttle_test! {
+        num_iters = 1_000, depth = 3, should_panic,
+        expect_panic = "every sealed segment must be claimed exactly once",
+        replay = "91022bc1cfb7e1e792c7bc6e802449922481242992a424499224490000";
+        fn shuttle_claim_dedup() {
+            let dir = tempfile::tempdir().unwrap();
+            let stem = "trace";
+            let disk = Arc::new(DiskFs::new(dir.path(), stem));
+
+            for i in 0..COUNT {
+                seal_one(&disk, dir.path(), stem, i);
+            }
+
+            let (tx, rx) = crate::primitives::sync::mpsc::sync_channel::<SegmentRef>(COUNT as usize);
+            let dispatched = Arc::new(AtomicUsize::new(0));
+
+            let claimer = {
+                let disk = disk.clone();
+                let dispatched = dispatched.clone();
+                crate::primitives::thread::spawn(move || {
+                    // Scan repeatedly, not just until every segment is claimed,
+                    // so a concurrent remove_sealed can race a later scan too
+                    // (the very first scan claims everything at once, since all
+                    // segments were sealed up front).
+                    for _ in 0..SCANS {
+                        let taken = disk.take_files();
+                        for seg in taken.segments {
+                            dispatched.fetch_add(1, Ordering::Relaxed);
+                            // The known bug can cause an extra
+                            // dispatch after `remover` already exited and
+                            // dropped `rx`. `assert_eq!` below is
+                            // where this is meant to surface.
+                            let _ = tx.send(seg.seg_ref);
+                        }
+                        shuttle::thread::yield_now();
+                    }
+                })
+            };
+
+            let remover = crate::primitives::thread::spawn(move || {
+                let mut removed = 0usize;
+                while removed < COUNT as usize {
+                    let seg_ref = rx.recv().unwrap();
+                    disk.remove_sealed(&seg_ref, RemoveReason::Terminal);
+                    removed += 1;
+                }
+                removed
+            });
+
+            claimer.join().unwrap();
+            let removed_total = remover.join().unwrap();
+
+            assert_eq!(
+                dispatched.load(Ordering::Relaxed),
+                COUNT as usize,
+                "every sealed segment must be claimed exactly once"
+            );
+            assert_eq!(removed_total, COUNT as usize);
+        }
+    }
+}
