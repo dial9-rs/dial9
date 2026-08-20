@@ -116,6 +116,7 @@ background during agent-driven testing.
 - **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the Vitest suites (`npm run test` in `dial9-viewer/ui/`, or a filtered `npx vitest run tests/core/<suite>.test.ts`) and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
 - **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.{js,ts}` for suites over the shared core, `src/**/*.test.ts` for TypeScript modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.
 - Shuttle tests are NOT included in `cargo nextest run`. They require a separate invocation: `./scripts/test-shuttle.sh`. Always run this when modifying code under `#[cfg(all(test, shuttle))]` or the flush/source paths.
+- **New shuttle scenarios:** use the `shuttle_test!` macro (`dial9-core/src/primitives.rs`) instead of hand-pairing `check_pct`/`check_uncontrolled_nondeterminism`. Its doc comment covers the `should_panic`/`expected=`/`replay=`/`flaky_sigabrt_determinism_only`/`verify_faults_triggered`/`default` modifiers.
 
 ## Scope
 
@@ -125,6 +126,7 @@ background during agent-driven testing.
 
 - For Rust code changes, run `cargo fmt --check` and clippy. On Linux, run `cargo clippy --all-targets --all-features`. On non-Linux targets, run `cargo clippy --all-targets --features __nonlinux_all_features` instead. Report if you did not run them.
 - **Preserve doc comments and inline comments.** When reviewing your diff, verify you have not accidentally deleted documentation comments (`///`, `//!`), inline explanatory comments (`//`), or module-level docs. Refactors that move code must carry all associated comments with it.
+- **Keep comments concise.** State the fact or reason, not a narrative walkthrough. Avoid restating what the code already shows.
 
 ## Demo Trace
 

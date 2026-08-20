@@ -120,101 +120,222 @@ impl Source for MockSource {
     // tests include a Tokio runtime.
 }
 
+/// A Source whose `flush` always panics. Used to check whether the flush
+/// loop contains a panicking source.
+struct PanickingSource;
+
+impl Source for PanickingSource {
+    fn flush(&mut self, _ctx: &FlushContext<'_>) {
+        panic!("PanickingSource intentionally panics for shuttle coverage");
+    }
+
+    fn name(&self) -> &'static str {
+        "panicking"
+    }
+}
+
 // ── Test body ───────────────────────────────────────────────────────
 
-fn test_core_pipeline() {
-    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-    ));
+crate::shuttle_test! {
+    num_iters = 10_000, depth = 3;
+    fn test_core_pipeline() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
 
-    let num_threads = 3;
-    let next_id = Arc::new(AtomicU64::new(0));
+        let num_threads = 3;
+        let next_id = Arc::new(AtomicU64::new(0));
 
-    // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
-    // so the ring never evicts before we drain it.
-    let writer = MemoryBuffer::builder()
-        .max_total_size(100 * 1024 * 1024)
-        .max_segment_size(256)
-        .build()
-        .unwrap();
-    let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+        // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
+        // so the ring never evicts before we drain it.
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
 
-    // Mock source: worker threads push events here, flush thread drains them.
-    let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        // Mock source: worker threads push events here, flush thread drains them.
+        let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-    shared.push_source(Box::new(MockSource::new(source_pending.clone())));
-    let mut recorder = Recorder::start(shared, writer, None, || || {});
-    recorder.handle().enable();
-    let handle = recorder.handle().clone();
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(MockSource::new(source_pending.clone())));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
 
-    let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
-    let writers: Vec<_> = (0..num_threads)
-        .map(|thread_id| {
-            let h = handle.clone();
-            let next_id = next_id.clone();
-            let expected = expected.clone();
-            let source_pending = source_pending.clone();
-            let thread_id = thread_id as u64;
-            crate::primitives::thread::spawn(move || {
-                let mut rng = shuttle::rand::thread_rng();
-                let count = rng.gen_range(3u64..=10);
-                let mut ts = rng.gen_range(1000u64..2000);
-                for seq in 0..count {
-                    let id = next_id.fetch_add(1, Ordering::Relaxed);
-                    let timestamp_ns = next_timestamp(&mut ts);
-                    let ev = ValidationEvent {
-                        timestamp_ns,
-                        thread_id,
-                        seq,
-                        id,
-                    };
-                    expected.lock().unwrap().push(ev.clone());
-                    // Randomly choose: emit via handle (TL buffer path)
-                    // or via mock source (flush-thread path).
-                    if rng.gen_range(0u32..2) == 0 {
-                        h.record_event(ev);
-                    } else {
-                        source_pending.lock().unwrap().push(ev);
+        let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let writers: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let h = handle.clone();
+                let next_id = next_id.clone();
+                let expected = expected.clone();
+                let source_pending = source_pending.clone();
+                let thread_id = thread_id as u64;
+                crate::primitives::thread::spawn(move || {
+                    let mut rng = shuttle::rand::thread_rng();
+                    let count = rng.gen_range(3u64..=10);
+                    let mut ts = rng.gen_range(1000u64..2000);
+                    for seq in 0..count {
+                        let id = next_id.fetch_add(1, Ordering::Relaxed);
+                        let timestamp_ns = next_timestamp(&mut ts);
+                        let ev = ValidationEvent {
+                            timestamp_ns,
+                            thread_id,
+                            seq,
+                            id,
+                        };
+                        expected.lock().unwrap().push(ev.clone());
+                        // Randomly choose: emit via handle (TL buffer path)
+                        // or via mock source (flush-thread path).
+                        if rng.gen_range(0u32..2) == 0 {
+                            h.record_event(ev);
+                        } else {
+                            source_pending.lock().unwrap().push(ev);
+                        }
                     }
-                }
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    for w in writers {
-        w.join().unwrap();
-    }
-    // Final flush + seal the last segment, then join the flush thread.
-    recorder.stop_flush_thread();
-
-    // Drain the in-memory ring (memory pops one sealed segment per call).
-    let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-    loop {
-        let taken = fs.take_files();
-        if taken.segments.is_empty() {
-            break;
+        for w in writers {
+            w.join().unwrap();
         }
-        for seg in taken.segments {
-            let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-            all_decoded.extend(decode_validation_events(&payload.into_vec()));
-        }
-    }
-    let expected = expected.lock().unwrap();
+        // Final flush + seal the last segment, then join the flush thread.
+        recorder.stop_flush_thread();
 
-    // Run all invariants.
-    check_all_events_present(&expected, &all_decoded);
-    check_timestamps_roundtrip(&expected, &all_decoded);
+        // Drain the in-memory ring (memory pops one sealed segment per call).
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
+        let expected = expected.lock().unwrap();
+
+        // Run all invariants.
+        check_all_events_present(&expected, &all_decoded);
+        check_timestamps_roundtrip(&expected, &all_decoded);
+    }
 }
 
-#[test]
-fn determinism_check() {
-    shuttle::check_uncontrolled_nondeterminism(test_core_pipeline, 10000);
+// ── Panic injection ─────────────────────────────────────────────────
+
+// `flush_sources` has no `catch_unwind`, so the panic propagates out of the
+// flush thread's main loop and kills it.
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, should_panic,
+    expect_panic = "PanickingSource intentionally panics for shuttle coverage",
+    replay = "91011be187b1dcc7fc8f9dbc0100000058555515";
+    fn test_source_panic_does_not_wedge_pipeline() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+        let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(PanickingSource));
+        shared.push_source(Box::new(MockSource::new(source_pending.clone())));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+
+        let healthy_source_event = ValidationEvent {
+            timestamp_ns: 1,
+            thread_id: 0,
+            seq: 0,
+            id: 0,
+        };
+        source_pending
+            .lock()
+            .unwrap()
+            .push(healthy_source_event.clone());
+
+        recorder.stop_flush_thread();
+
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
+
+        assert!(
+            all_decoded.iter().any(|e| e.id == healthy_source_event.id),
+            "healthy source's event must survive a sibling source's panic"
+        );
+    }
 }
 
-#[test]
-fn pct_real_pipeline() {
-    shuttle::check_pct(test_core_pipeline, 10000, 3);
+// Companion to the scenario above: a TL-buffer write hits the same
+// unguarded-flush gap. Kept separate because the live buffer left behind at
+// panic time is what makes `determinism` crash (16/30 with the write vs
+// 0/30 without) -- hence `flaky_sigabrt_determinism_only`.
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only,
+    expect_panic = "PanickingSource intentionally panics for shuttle coverage",
+    replay = "910124ca81ffb4a781e6ae0a000000006055555555";
+    fn test_source_panic_does_not_lose_tl_buffer_write() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(PanickingSource));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
+
+        let tl_buffer_event = ValidationEvent {
+            timestamp_ns: 2,
+            thread_id: 0,
+            seq: 1,
+            id: 1,
+        };
+        handle.record_event(tl_buffer_event.clone());
+
+        recorder.stop_flush_thread();
+
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
+
+        assert!(
+            all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
+            "TL-buffer event must survive a sibling source's panic"
+        );
+    }
 }
 
 // ── Error injection ─────────────────────────────────────────────────
@@ -329,64 +450,51 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
     warn_count.load(StdOrdering::Relaxed)
 }
 
-/// The fault is armed on the test thread but read on the flush thread,
-/// this proves it crosses that boundary.
-fn fs_fault_visible_across_threads() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("fault_probe");
-    std::fs::write(&path, b"x").unwrap();
+// The fault is armed on the test thread but read on the flush thread,
+// this proves it crosses that boundary. No `pct`: the spawning thread
+// parks on `.join()` immediately with no other work in between, so the
+// two threads are never simultaneously runnable.
+crate::shuttle_test! {
+    default, determinism_only;
+    fn fs_fault_visible_across_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fault_probe");
+        std::fs::write(&path, b"x").unwrap();
 
-    let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
-    let observed_fault = crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
-        .join()
-        .unwrap();
+        let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
+        let observed_fault =
+            crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
+                .join()
+                .unwrap();
 
-    assert!(
-        observed_fault,
-        "fault armed on the test thread was not observed on a spawned thread"
-    );
+        assert!(
+            observed_fault,
+            "fault armed on the test thread was not observed on a spawned thread"
+        );
+    }
 }
 
-#[test]
-fn determinism_check_fs_fault_visible() {
-    shuttle::check_uncontrolled_nondeterminism(fs_fault_visible_across_threads, 100);
+crate::shuttle_test! {
+    num_iters = 10_000, depth = 3;
+    fn test_core_erroring_pipeline() {
+        let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
+        assert!(
+            total <= 10,
+            "rate limiting failed under persistent writer errors: \
+             observed {total} WARN/ERROR events, expected <= 10. \
+             A `rate_limited!` wrapper has likely been removed from a tight loop."
+        );
+    }
 }
 
-fn test_core_erroring_pipeline() {
-    let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
-    assert!(
-        total <= 10,
-        "rate limiting failed under persistent writer errors: \
-         observed {total} WARN/ERROR events, expected <= 10. \
-         A `rate_limited!` wrapper has likely been removed from a tight loop."
-    );
-}
-
-#[test]
-fn determinism_check_erroring() {
-    shuttle::check_uncontrolled_nondeterminism(test_core_erroring_pipeline, 10000);
-}
-
-#[test]
-fn pct_erroring_pipeline() {
-    shuttle::check_pct(test_core_erroring_pipeline, 10000, 3);
-}
-
-fn test_core_probabilistic_fs_faults() {
-    let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
-    assert!(
-        total <= 10,
-        "rate limiting failed under probabilistic fs faults: observed {total} \
-         WARN/ERROR events, expected <= 10."
-    );
-}
-
-#[test]
-fn determinism_check_probabilistic_fs_faults() {
-    shuttle::check_uncontrolled_nondeterminism(test_core_probabilistic_fs_faults, 10000);
-}
-
-#[test]
-fn pct_probabilistic_fs_faults() {
-    shuttle::check_pct(test_core_probabilistic_fs_faults, 10000, 3);
+crate::shuttle_test! {
+    num_iters = 10_000, depth = 3;
+    fn test_core_probabilistic_fs_faults() {
+        let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
+        assert!(
+            total <= 10,
+            "rate limiting failed under probabilistic fs faults: observed {total} \
+             WARN/ERROR events, expected <= 10."
+        );
+    }
 }
