@@ -46,8 +46,8 @@ pub(crate) enum ControlCommand {
 /// - **Enabled** — backed by a live recorder; methods record
 ///   events and control recording.
 /// - **Disabled** — an inert sentinel returned by
-///   [`Dial9Handle::disabled`] and by [`Dial9Handle::current`]
-///   when called from a thread that is not owned by a dial9 runtime.
+///   [`Dial9Handle::disabled`], and by [`Dial9Handle::current`] when neither
+///   the calling thread nor the process has a handle installed.
 ///   All methods are no-ops.
 ///
 /// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
@@ -93,9 +93,9 @@ impl Dial9Handle {
     /// handle is connected to a live recorder AND recording is enabled (not
     /// paused via [`disable`](Self::disable)).
     ///
-    /// Returns `false` for handles obtained via [`Dial9Handle::disabled`],
-    /// for handles returned by [`Dial9Handle::current`] on a thread not
-    /// owned by a dial9 runtime, and while a connected recorder is paused.
+    /// Returns `false` for handles obtained via [`Dial9Handle::disabled`], for
+    /// any handle [`Dial9Handle::current`] could not resolve, and while a
+    /// connected recorder is paused.
     ///
     /// Check this before doing per-event work that would be wasted while
     /// recording is off, such as work leading up to [`with_encoder`](Self::with_encoder).
@@ -134,17 +134,17 @@ impl Dial9Handle {
             .and_then(|i| i.shared.dump_trigger().cloned())
     }
 
-    /// Return the [`Dial9Handle`] for the current thread.
+    /// Return the [`Dial9Handle`] to record through: the calling thread's, or
+    /// the process-global one.
     ///
-    /// Threads claimed by a dial9 runtime (via [`set_tl_handle`], cleared by
-    /// [`clear_tl_handle`]) get that runtime's handle. Any other thread gets the
-    /// process-global handle, if one was installed with
-    /// [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle).
-    /// With neither, an inert handle whose methods are all no-ops, see
-    /// [`Dial9Handle::disabled`].
+    /// Threads a dial9 runtime owns get that runtime's handle. Any other thread
+    /// gets the process-global handle, once
+    /// [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle)
+    /// has been called. With neither you get an inert
+    /// [`disabled`](Self::disabled) handle and recording is a no-op.
     ///
-    /// Use [`is_enabled`](Self::is_enabled) when you need to branch on
-    /// whether telemetry is actually live on the current thread.
+    /// Use [`is_enabled`](Self::is_enabled) to branch on whether telemetry is
+    /// live here.
     pub fn current() -> Self {
         CURRENT_HANDLE
             .with(|cell| cell.borrow().clone())
