@@ -67,9 +67,9 @@ export interface BrowseResponse {
 /** GET /api/services response fields the page reads. */
 export interface ServicesResponse {
   services: string[];
-  /** Additive metadata; omitted by servers predating host-count discovery. */
+  /** Additive discovery metadata; omitted by older servers. */
   service_metadata?:
-    | { service: string; host_count: number }[]
+    | { service: string; host_count?: number; layout_hint?: string }[]
     | undefined;
   truncated?: boolean | undefined;
 }

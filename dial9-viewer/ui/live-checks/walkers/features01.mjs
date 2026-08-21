@@ -10,18 +10,18 @@
 // walk-rows entry lists them as NOT-TRIGGERABLE without driving them.
 //
 // Environment assumptions:
-//   - dev-server seed: single segment at traces/2026-04-09/1900/... — hence
+//   - dev-server seed: single segment under traces/version=1/date=2026-08-06/... — hence
 //     the pinned page clock (lib/browser.mjs DEV_SEED_CLOCK) and the
-//     April-window helpers (lib/actions.mjs);
-//   - the seeded key has six post-date path components — an UNKNOWN layout.
-//     The page renders unknown keys raw, sorts the raw table, dates
-//     day-crossing axis spans, and drives the bucket filter from config.
+//     demo-window helpers (lib/actions.mjs);
+//   - the seeded key uses the default Hive-style layout; the page decodes its
+//     service and instance, dates day-crossing axis spans, and drives the
+//     bucket filter from config.
 
 import {
   expect,
   textOf,
   gotoBrowserPage,
-  searchAprilWindow,
+  searchDemoWindow,
   dragSelectRowZero,
   altDragZoom,
   rawSearchSeededRows,
@@ -313,22 +313,20 @@ export const registry = {
   // ── F. Browse view: density heatmap ──
   F4: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     const rows = page.locator("#heatmap-labels .row");
     expect((await rows.count()) === 1, "expected 1 host row for the single seeded host");
     const label = (await rows.first().textContent()).trim();
-    // The seeded key's layout is unknown, so the row groups by its raw
-    // directory path rather than inventing a service/host split.
     expect(
-      label === "traces/2026-04-09/1900/demo-service/local/host-0/abcd",
-      `row label was "${label}" (expected the raw directory path)`,
+      label === "demo-service / local/host-0",
+      `row label was "${label}"`,
     );
     return `1 host row "${label}"`;
   },
 
   F6: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     const painted = await page.evaluate(() => {
       const c = document.getElementById("heatmap-canvas");
       const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
@@ -342,24 +340,23 @@ export const registry = {
 
   F10: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     const ticks = page.locator("#heatmap-axis .tick");
     const n = await ticks.count();
     expect(n >= 2, `expected >=2 axis ticks, got ${n}`);
-    // The seeded segment crosses day boundaries, so ticks carry the date.
-    // Single-day spans keep the compact HH:MM:SS form.
+    // The seeded segment stays within one day, so ticks use the compact form.
     for (const t of await ticks.allTextContents()) {
       expect(
-        /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t.trim()),
-        `tick "${t}" not date-carrying on a day-crossing span`,
+        /^\d{2}:\d{2}:\d{2}$/.test(t.trim()),
+        `tick "${t}" not time-only on a same-day span`,
       );
     }
-    return `${n} date-carrying ticks rendered (day-crossing span)`;
+    return `${n} time-only ticks rendered (same-day span)`;
   },
 
   F11: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     const hint = await textOf(page, "#heatmap-hint");
     expect(/Drag to select a window/.test(hint), "interaction hint missing");
     await page.waitForSelector("#heatmap-hint .legend .bar", { state: "visible" });
@@ -370,7 +367,7 @@ export const registry = {
 
   F12: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await dragSelectRowZero(page);
     await page.waitForSelector("#heatmap-sel", { state: "visible" });
     const count = await textOf(page, "#selection-count");
@@ -380,7 +377,7 @@ export const registry = {
 
   F13: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await clickRowZero(page);
     await page.waitForFunction(
       () => /1 segment/.test(document.getElementById("selection-count").textContent),
@@ -391,7 +388,7 @@ export const registry = {
 
   F14: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await altDragZoom(page);
     await page.waitForSelector("#heatmap-reset-zoom", { state: "visible", timeout: 5_000 });
     return "Alt+drag zoomed (Reset zoom button appeared)";
@@ -399,7 +396,7 @@ export const registry = {
 
   F15: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await altDragZoom(page);
     await page.waitForSelector("#heatmap-reset-zoom", { state: "visible", timeout: 5_000 });
     await page.locator("#heatmap-plot").dblclick({ position: { x: 200, y: HEATMAP_ROW_H / 2 } });
@@ -409,7 +406,7 @@ export const registry = {
 
   F16: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await page.waitForSelector("#heatmap-reset-zoom", { state: "hidden" });
     await altDragZoom(page);
     await page.waitForSelector("#heatmap-reset-zoom", { state: "visible", timeout: 5_000 });
@@ -420,7 +417,7 @@ export const registry = {
 
   F17: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await dragSelectRowZero(page);
     await page.waitForSelector("#heatmap-labels .row.sel", { timeout: 5_000 });
     await page.waitForSelector("#heatmap-sel", { state: "visible" });
@@ -429,7 +426,7 @@ export const registry = {
 
   F18: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await dragSelectRowZero(page);
     await page.click("header h1"); // outside #heatmap-view and #actions-bar
     await page.waitForSelector("#heatmap-sel", { state: "hidden" });
@@ -445,10 +442,10 @@ export const registry = {
   G2: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
     await page.click("#tab-raw");
-    await page.fill("#raw-search-input", "2026-04-09");
+    await page.fill("#raw-search-input", "team/prod");
     const [req] = await Promise.all([
       page.waitForRequest(
-        (r) => r.url().includes("/api/browse") && r.url().includes("prefix=2026-04-09"),
+        (r) => r.url().includes("/api/browse") && r.url().includes("prefix=team%2Fprod"),
         { timeout: 10_000 },
       ),
       page.press("#raw-search-input", "Enter"),
@@ -525,7 +522,7 @@ export const registry = {
   // ── H. Actions bar ──
   H1: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await dragSelectRowZero(page);
     const count = await textOf(page, "#selection-count");
     expect(
@@ -538,7 +535,7 @@ export const registry = {
 
   H2: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await dragSelectRowZero(page);
     const url = await popupUrl(page, () => page.click("#view-btn"));
     expect(/viewer\.html\?/.test(url), `popup was ${url}`);
@@ -549,30 +546,21 @@ export const registry = {
 
   // ── I. Cross-cutting behaviors ──
   I2: async ({ page, pageUrl }) => {
-    // parseKey runs on every displayed key. The seeded key has an extra
-    // path component: an UNKNOWN layout, which the page renders raw.
+    // parseKey runs on every displayed key. The default Hive layout restores
+    // escaped partition values into the normal Service/Host/Boot columns.
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
-    const rawCell = page.locator("#raw-body tr td.rawkey");
-    expect((await rawCell.count()) === 1, "raw-key cell missing for the unknown-layout key");
-    expect(
-      (await rawCell.getAttribute("colspan")) === "3",
-      "raw-key cell does not span the Service/Host/Boot columns",
-    );
-    const text = (await rawCell.textContent()).trim();
-    expect(
-      /^traces\/2026-04-09\/1900\/demo-service\/local\/host-0\/abcd\/\d+-0\.bin\.gz$/.test(text),
-      `raw-key cell was "${text}"`,
-    );
-    // The layout-independent filename epoch still fills Trace Start.
-    const traceStart = await textOf(page, "#raw-body tr td:nth-child(3)");
+    expect((await textOf(page, "#raw-body tr td.service")) === "demo-service", "service not decoded");
+    const hosts = await page.locator("#raw-body tr td.host").allTextContents();
+    expect(hosts[0] === "local/host-0" && hosts[1] === "abcd", `host/boot were ${hosts}`);
+    const traceStart = await textOf(page, "#raw-body tr td:nth-child(5)");
     expect(/^\d{4}-\d{2}-\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
-    return "unknown-layout key rendered raw (full key across Service/Host/Boot); epoch kept";
+    return "Hive key decoded into service=demo-service, host=local/host-0, boot=abcd";
   },
 
   I4: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
-    await searchAprilWindow(page);
+    await searchDemoWindow(page);
     await dragSelectRowZero(page);
     const url = await popupUrl(page, () => page.click("#view-btn"));
     const params = new URL(url).searchParams;

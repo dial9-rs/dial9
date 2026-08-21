@@ -47,70 +47,70 @@
     {
       "epochS": 1775763000,
       "file": "window-00.bin.gz",
-      "key": "traces/2026-04-09/1930/svc-fix/window/boot-fixw/1775763000-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1930/instance=window/boot=boot-fixw/1775763000-0.bin.gz",
       "monoEndNs": 61000000000,
       "monoStartNs": 1000000000
     },
     {
       "epochS": 1775763060,
       "file": "window-01.bin.gz",
-      "key": "traces/2026-04-09/1931/svc-fix/window/boot-fixw/1775763060-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1931/instance=window/boot=boot-fixw/1775763060-0.bin.gz",
       "monoEndNs": 121000000000,
       "monoStartNs": 61000000000
     },
     {
       "epochS": 1775763120,
       "file": "window-02.bin.gz",
-      "key": "traces/2026-04-09/1932/svc-fix/window/boot-fixw/1775763120-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1932/instance=window/boot=boot-fixw/1775763120-0.bin.gz",
       "monoEndNs": 181000000000,
       "monoStartNs": 121000000000
     },
     {
       "epochS": 1775763180,
       "file": "window-03.bin.gz",
-      "key": "traces/2026-04-09/1933/svc-fix/window/boot-fixw/1775763180-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1933/instance=window/boot=boot-fixw/1775763180-0.bin.gz",
       "monoEndNs": 241000000000,
       "monoStartNs": 181000000000
     },
     {
       "epochS": 1775763240,
       "file": "window-04.bin.gz",
-      "key": "traces/2026-04-09/1934/svc-fix/window/boot-fixw/1775763240-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1934/instance=window/boot=boot-fixw/1775763240-0.bin.gz",
       "monoEndNs": 301000000000,
       "monoStartNs": 241000000000
     },
     {
       "epochS": 1775763300,
       "file": "window-05.bin.gz",
-      "key": "traces/2026-04-09/1935/svc-fix/window/boot-fixw/1775763300-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1935/instance=window/boot=boot-fixw/1775763300-0.bin.gz",
       "monoEndNs": 361000000000,
       "monoStartNs": 301000000000
     },
     {
       "epochS": 1775763360,
       "file": "window-06.bin.gz",
-      "key": "traces/2026-04-09/1936/svc-fix/window/boot-fixw/1775763360-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1936/instance=window/boot=boot-fixw/1775763360-0.bin.gz",
       "monoEndNs": 421000000000,
       "monoStartNs": 361000000000
     },
     {
       "epochS": 1775763420,
       "file": "window-07.bin.gz",
-      "key": "traces/2026-04-09/1937/svc-fix/window/boot-fixw/1775763420-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1937/instance=window/boot=boot-fixw/1775763420-0.bin.gz",
       "monoEndNs": 481000000000,
       "monoStartNs": 421000000000
     },
     {
       "epochS": 1775763480,
       "file": "window-08.bin.gz",
-      "key": "traces/2026-04-09/1938/svc-fix/window/boot-fixw/1775763480-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1938/instance=window/boot=boot-fixw/1775763480-0.bin.gz",
       "monoEndNs": 541000000000,
       "monoStartNs": 481000000000
     },
     {
       "epochS": 1775763540,
       "file": "window-09.bin.gz",
-      "key": "traces/2026-04-09/1939/svc-fix/window/boot-fixw/1775763540-0.bin.gz",
+      "key": "traces/version=1/date=2026-04-09/service=svc-fix/time=1939/instance=window/boot=boot-fixw/1775763540-0.bin.gz",
       "monoEndNs": 601000000000,
       "monoStartNs": 541000000000
     }

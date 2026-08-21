@@ -18,6 +18,10 @@ use dial9_viewer::server::{AppState, router};
 use dial9_viewer::storage::S3Backend;
 use std::sync::Arc;
 
+#[allow(dead_code)]
+#[path = "../src/segment_object_key_codec.rs"]
+mod segment_object_key_codec;
+
 /// Build an s3s-backed client over a filesystem root (the simulated S3).
 fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
     let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
@@ -292,9 +296,28 @@ async fn put(client: &aws_sdk_s3::Client, bucket: &str, key: &str, data: Vec<u8>
         .unwrap();
 }
 
-/// A realistic source key: `{date}/{HHMM}/{service}/{host}/{boot}/{ts}-{i}.bin.gz`.
+/// A realistic versioned segment object key.
 /// `epoch` is the file start time in seconds (drives the scope time filter).
 fn segment_key(date: &str, hhmm: &str, svc: &str, host: &str, epoch: i64, idx: u32) -> String {
+    segment_object_key_codec::format_v1_segment_object_key(
+        None,
+        date,
+        svc,
+        hhmm,
+        host,
+        "boot-1",
+        &format!("{epoch}-{idx}.bin.gz"),
+    )
+}
+
+fn historical_segment_key(
+    date: &str,
+    hhmm: &str,
+    svc: &str,
+    host: &str,
+    epoch: i64,
+    idx: u32,
+) -> String {
     format!("{date}/{hhmm}/{svc}/{host}/boot-1/{epoch}-{idx}.bin.gz")
 }
 
@@ -1276,6 +1299,86 @@ async fn scope_filters_matched_set() {
     let url = format!("{base}/api/flamegraph?service=does-not-exist");
     let status = http.get(&url).send().await.unwrap().status();
     assert_eq!(status.as_u16(), 404, "no matching files → 404");
+}
+
+#[tokio::test]
+async fn time_scoped_aggregation_reads_hive_and_historical_keys() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    let epoch = 1_775_761_800i64; // 2026-04-09T19:10:00Z
+
+    let hive = segment_key("2026-04-09", "1910", "shale", "host-new", epoch, 0);
+    let historical = historical_segment_key(
+        "2026-04-09",
+        "1911",
+        "shale",
+        "host-old/zone",
+        epoch + 60,
+        0,
+    );
+    put(&uploader, "src-bucket", &hive, body.clone()).await;
+    put(&uploader, "src-bucket", &historical, body).await;
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let result = stream_final(
+        &reqwest::Client::new(),
+        &base,
+        &format!(
+            "service=shale&start_ns={}&end_ns={}",
+            epoch * 1_000_000_000,
+            (epoch + 120) * 1_000_000_000
+        ),
+    )
+    .await;
+    assert_eq!(result.coverage.unwrap().files_matched, 2);
+}
+
+#[tokio::test]
+async fn escaped_service_and_instance_survive_aggregation_and_cache_paths() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+    let uploader = fake_s3_client(fs.path());
+    let epoch = 1_775_761_800i64;
+    let service = "payments/api";
+    let host = "cluster/worker=blue%1";
+    let key = segment_key("2026-04-09", "1910", service, host, epoch, 0);
+    put(&uploader, "src-bucket", &key, mini_trace_gz()).await;
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let result = stream_final(
+        &reqwest::Client::new(),
+        &base,
+        &format!(
+            "service={}&host={}&start_ns={}&end_ns={}",
+            urlencoding::encode(service),
+            urlencoding::encode(host),
+            epoch * 1_000_000_000,
+            (epoch + 60) * 1_000_000_000
+        ),
+    )
+    .await;
+    assert_eq!(result.coverage.unwrap().files_matched, 1);
+
+    let version = dial9_viewer::ingest::aggregate::SAMPLES_FORMAT_VERSION;
+    let listed = uploader
+        .list_objects_v2()
+        .bucket("out-bucket")
+        .prefix(format!(
+            "flamegraph-data/v{version}/bucket=src-bucket/samples/"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(listed.contents().iter().any(|object| {
+        object.key().is_some_and(|key| {
+            key.contains("/service=payments%2Fapi/")
+                && key.contains("/host=cluster%2Fworker%3Dblue%251/")
+        })
+    }));
 }
 
 /// A multi-host scope (repeatable `host=` params, as the heatmap box sends)

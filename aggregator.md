@@ -145,7 +145,8 @@ clicked node) are **not yet a server endpoint** — see [Deferred](#deferred).
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Raw traces (S3 or local) — source of truth                           │
-│  {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{host}/{boot}/{ts}-{i}.bin.gz │
+│  {prefix}/version=1/date={date}/service={svc}/time={HHMM}/            │
+│    instance={host}/boot={boot}/{ts}-{i}.bin.gz                         │
 └────────────────────────┬───────────────────────────────────────────── ┘
                          │ folded on demand during a query poll
                          ▼

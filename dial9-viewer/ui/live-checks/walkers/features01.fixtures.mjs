@@ -18,8 +18,8 @@
 // hardcode (hosts, epochs, mtimes) is defined in gen_fixtures.rs — the two
 // files change together.
 //
-// Environment: same pinned clock as the standard walk (DEV_SEED_CLOCK
-// 2026-04-09T21:00Z); the fixture day is 2026-04-09, so "Last 24hr" covers
+// Environment: fixture mode pins FIXTURE_CLOCK to 2026-04-09T21:00Z; the
+// fixture day is 2026-04-09, so "Last 24hr" covers
 // every scenario window.
 
 import { expect, textOf, gotoBrowserPage, dragSelectRowZero, applyTestCreds } from "../lib/actions.mjs";

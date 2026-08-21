@@ -407,7 +407,7 @@ PORT=3021 cargo run -p dial9-viewer --bin dev-server --features dev-server
 All tools run headless Chromium (playwright devDependency; run
 `npx playwright install chromium` once) at a fixed 1440x900 viewport.
 Tools that hit the browser page pin the page clock to the dev seed's date
-(`lib/browser.mjs`) so the seeded April segment stays reachable through
+(`lib/browser.mjs`) so the dated demo segment stays reachable through
 relative time windows.
 
 **Inventory row-walker** — drives every feature-inventory row's access path,

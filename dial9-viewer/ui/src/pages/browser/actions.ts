@@ -17,7 +17,11 @@ import {
   makeSourceScope,
   type SourceScope,
 } from "../../lib/trace/source-scope.js";
-import { isDateLayer, preferredPrefix } from "../../lib/trace/prefixes.js";
+import {
+  isDateLayer,
+  lastSegment,
+  preferredPrefix,
+} from "../../lib/trace/prefixes.js";
 import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import {
   apiFetch,
@@ -292,12 +296,17 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     });
 
     try {
+      const layoutHint = store
+        .getState()
+        .browse.serviceMetadata.find((metadata) => metadata.service === service)
+        ?.layout_hint;
       const url = buildBrowseUrl({
         bucket,
         from: fromEpoch,
         to: toEpoch,
         prefix: keyPrefix,
         service,
+        layoutHint,
       });
       const resp = await apiFetch(url);
       if (!resp.ok) {
@@ -328,10 +337,26 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
           : null,
       });
 
+      const segments = toSegments(allObjects);
+      const hostCount = new Set(
+        segments.map((segment) => segment.host).filter((host) => host !== ""),
+      ).size;
+      const currentMetadata = store.getState().browse.serviceMetadata;
+      const existing = currentMetadata.find((metadata) => metadata.service === service);
+      const serviceMetadata = existing
+        ? currentMetadata.map((metadata) =>
+            metadata.service === service ? { ...metadata, host_count: hostCount } : metadata,
+          )
+        : [...currentMetadata, { service, host_count: hostCount }];
+      store.update("browse", {
+        serviceMetadata,
+        segments,
+        rows: toRows(segments),
+      });
+
       if (allObjects.length === 0) {
         store.update("browse", {
           status: { ...store.getState().browse.status, kind: "normal" },
-          rows: [],
           heatmapVisible: false,
         });
         // Show sample keys to help the user understand the bucket layout
@@ -370,9 +395,6 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         store.update("browse", { status });
         return;
       }
-
-      const segments = toSegments(allObjects);
-      store.update("browse", { segments, rows: toRows(segments) });
       renderHeatmapState();
     } catch (err) {
       store.update("browse", {
@@ -483,14 +505,17 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         store.update("search", { prefixPlaceholder: "(none found)" });
         return;
       }
-      // When the root children are all date partitions (YYYY-MM-DD/), the
-      // bucket has no key prefix - the trace data starts directly at the
-      // date layer. Don't offer the dates as prefix suggestions; the
-      // correct prefix is empty.
-      if (!store.getState().config.serverHasPrefix && isDateLayer(prefixes)) {
+      // A legacy date layer or the versioned-layout anchor at the bucket root
+      // means there is no configurable key prefix.
+      const hasRootLayout =
+        isDateLayer(prefixes) ||
+        prefixes.some((prefix) => lastSegment(prefix) === "version=1");
+      if (!store.getState().config.serverHasPrefix && hasRootLayout) {
         els.prefixInput.value = "";
         mirrorPrefix();
-        store.update("search", { prefixPlaceholder: "(no prefix — dates at root)" });
+        store.update("search", {
+          prefixPlaceholder: "(no prefix — layout at root)",
+        });
         store.update("config", { serverHasPrefix: false });
         syncUrl();
         return;
