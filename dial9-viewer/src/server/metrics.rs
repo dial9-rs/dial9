@@ -17,6 +17,8 @@ use axum::extract::{MatchedPath, Request};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
+use dial9_core::handle::Dial9Handle;
+use dial9_metrique::{Dial9Context, Dial9Stream, Interned, SpanName};
 use metrique::ServiceMetrics;
 use metrique::emf::Emf;
 use metrique::local::{LocalFormat, OutputStyle};
@@ -24,7 +26,7 @@ use metrique::timers::Timer;
 use metrique::unit::{Byte, Count, Millisecond};
 use metrique::unit_of_work::metrics;
 use metrique::writer::sink::AttachHandle;
-use metrique::writer::{AttachGlobalEntrySinkExt, FormatExt};
+use metrique::writer::{AttachGlobalEntrySinkExt, EntryIoStream, FormatExt};
 
 const CLOUDWATCH_NAMESPACE: &str = "dial9_viewer";
 const SESSION_ID_HEADER: &str = "x-dial9-session-id";
@@ -37,12 +39,16 @@ const UNMATCHED_OPERATION: &str = "unmatched";
 
 #[metrics(emf::dimension_sets = [["operation"], []])]
 struct RequestMetrics {
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
     /// Stamp the metric at request *start*. Without this the timestamp would be
     /// taken when the entry is flushed (after the handler runs), skewing it by
     /// the request's own latency.
     #[metrics(timestamp)]
     timestamp: SystemTime,
 
+    #[metrics(flags(Interned, SpanName))]
     operation: String,
 
     /// HTTP status code as a string (e.g. `"200"`). Emitted as a plain value,
@@ -175,10 +181,14 @@ pub struct TokioStatsMetrics {
 /// as the request metric so both line up in CloudWatch.
 #[metrics(emf::dimension_sets = [["operation"], []])]
 pub struct ObjectStreamMetrics {
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
     #[metrics(timestamp)]
     timestamp: SystemTime,
     /// Matched route (`/api/object`), to align with the request metric's
     /// `operation` dimension.
+    #[metrics(flags(Interned, SpanName))]
     operation: String,
     /// Always `1`: the count of completed object streams (the denominator for a
     /// mid-stream-truncation rate alarm).
@@ -202,6 +212,7 @@ impl ObjectStreamMetrics {
     /// `truncated_mid_stream` on the guard if a chunk errors mid-stream.
     pub fn arm(operation: impl Into<String>) -> ObjectStreamMetricsGuard {
         ObjectStreamMetrics {
+            dial9: Dial9Context::capture(),
             timestamp: SystemTime::now(),
             operation: operation.into(),
             count: 1,
@@ -226,10 +237,14 @@ impl ObjectStreamMetrics {
 /// `operation` dimension as the request metric so both line up in CloudWatch.
 #[metrics(emf::dimension_sets = [["operation"], []])]
 pub struct SpanStatsStreamMetrics {
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
     #[metrics(timestamp)]
     timestamp: SystemTime,
     /// Matched route (`/api/span-stats`), to align with the request metric's
     /// `operation` dimension.
+    #[metrics(flags(Interned, SpanName))]
     operation: String,
     /// Always `1`: the count of completed span-stats streams (the denominator
     /// for the stream-duration and coverage rates).
@@ -396,6 +411,7 @@ impl SpanStatsStreamMetrics {
     /// client disconnect).
     pub fn arm(operation: impl Into<String>) -> SpanStatsStreamMetricsGuard {
         SpanStatsStreamMetrics {
+            dial9: Dial9Context::capture(),
             timestamp: SystemTime::now(),
             operation: operation.into(),
             count: 1,
@@ -435,6 +451,9 @@ impl SpanStatsStreamMetrics {
 /// (modulo scheduling gaps) to `total`.
 #[metrics(emf::dimension_sets = [[]])]
 pub struct FoldFileMetrics {
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
     #[metrics(timestamp)]
     timestamp: SystemTime,
 
@@ -506,8 +525,8 @@ pub struct FoldFileMetrics {
 /// runs, then calls [`emit`](Self::emit) once to append the entry to the global
 /// sink. Kept separate from the metric struct so the metric's fields stay
 /// private (new phases are non-breaking).
-#[derive(Default)]
 pub struct FoldFileMetricsBuilder {
+    dial9: Dial9Context,
     source_bytes: u64,
     decompressed_bytes: u64,
     events_decoded: u64,
@@ -524,6 +543,30 @@ pub struct FoldFileMetricsBuilder {
     write_parts: Duration,
     total: Duration,
     failed: bool,
+}
+
+impl Default for FoldFileMetricsBuilder {
+    fn default() -> Self {
+        Self {
+            dial9: Dial9Context::capture(),
+            source_bytes: 0,
+            decompressed_bytes: 0,
+            events_decoded: 0,
+            span_events_decoded: 0,
+            fetch: Duration::ZERO,
+            gunzip: Duration::ZERO,
+            wire_decode: Duration::ZERO,
+            sort_events: Duration::ZERO,
+            poll_reconstruct: Duration::ZERO,
+            sample_resolve: Duration::ZERO,
+            span_resolve: Duration::ZERO,
+            sample_attribution: Duration::ZERO,
+            parquet_encode: Duration::ZERO,
+            write_parts: Duration::ZERO,
+            total: Duration::ZERO,
+            failed: false,
+        }
+    }
 }
 
 impl FoldFileMetricsBuilder {
@@ -579,6 +622,7 @@ impl FoldFileMetricsBuilder {
     /// used when none is attached (tests), matching the rest of this module.
     pub fn emit(self) {
         FoldFileMetrics {
+            dial9: self.dial9,
             timestamp: SystemTime::now(),
             count: 1,
             failed: self.failed as u32,
@@ -665,6 +709,7 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
     let session_id = validated_session_id(req.headers());
 
     let mut metrics = RequestMetrics {
+        dial9: Dial9Context::capture(),
         timestamp: SystemTime::now(),
         operation,
         status_code: String::new(),
@@ -725,21 +770,35 @@ fn validated_session_id(headers: &HeaderMap) -> Option<String> {
 ///   ingests from the log stream.
 /// - `local == true` (`--local`): metrique's human-readable [`LocalFormat`] to
 ///   stdout, for local runs.
+///
+/// When called from a dial9-instrumented runtime, the stream is also connected
+/// to that runtime's current recorder and opted-in entries become dial9 spans.
+/// Without an active recorder, the dial9 side of the stream is inert.
 pub fn attach_request_metrics(local: bool) -> AttachHandle {
+    let dial9 = Dial9Handle::current();
     if local {
-        ServiceMetrics::attach_to_stream(
+        attach_request_metrics_to_stream(
+            &dial9,
             LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stdout().lock()),
         )
     } else {
         // `vec![vec![]]` = a single empty global dimension set, which the
         // entry-level `dimension_sets` are cartesian-joined onto, yielding the
         // final `["operation"]` and `[]` sets.
-        ServiceMetrics::attach_to_stream(
+        attach_request_metrics_to_stream(
+            &dial9,
             Emf::builder(CLOUDWATCH_NAMESPACE.to_string(), vec![vec![]])
                 .build()
                 .output_to_makewriter(|| std::io::stdout().lock()),
         )
     }
+}
+
+fn attach_request_metrics_to_stream(
+    dial9: &Dial9Handle,
+    output: impl EntryIoStream + Send + 'static,
+) -> AttachHandle {
+    ServiceMetrics::attach_to_stream(Dial9Stream::tee(dial9, output))
 }
 
 #[cfg(test)]
@@ -749,8 +808,171 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use metrique::test_util::{TestEntrySink, test_entry_sink};
+    use dial9_core::buffer::DiskBuffer;
+    use dial9_core::recorder::recorder;
+    use dial9_core::schema_extensions::{ROLE_KEY, SPAN_TYPE_KEY, roles, span_types};
+    use metrique::test_util::{TestEntrySink, test_entry_sink, test_metric};
+    use std::collections::{HashMap, HashSet};
     use tower::ServiceExt; // for `oneshot`
+
+    #[test]
+    fn viewer_metrics_are_recorded_as_dial9_spans() {
+        #[derive(Debug)]
+        struct RecordedSchema {
+            fields: HashSet<String>,
+            annotations: HashMap<String, HashMap<String, String>>,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct DecodedRequestMetrics {
+            operation: String,
+            session_id: Option<String>,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("viewer-metrics.bin");
+        let recorder = recorder(DiskBuffer::single_file(&trace_path).unwrap()).build();
+        recorder.enable();
+
+        let request_metrics = || RequestMetrics {
+            dial9: Dial9Context::capture(),
+            timestamp: SystemTime::now(),
+            operation: "/api/browse".to_string(),
+            status_code: "200".to_string(),
+            session_id: Some("123e4567-e89b-42d3-a456-426614174000".to_string()),
+            count: 1,
+            fault: 0,
+            error: 0,
+            latency: Timer::start_now(),
+            op_detail: None,
+        };
+        let normal_metric = test_metric(request_metrics());
+        assert_eq!(normal_metric.values["operation"], "/api/browse");
+        assert_eq!(
+            normal_metric.values["session_id"],
+            "123e4567-e89b-42d3-a456-426614174000"
+        );
+
+        let normal_output = tempfile::NamedTempFile::new().unwrap();
+        let attached = attach_request_metrics_to_stream(
+            recorder.handle(),
+            LocalFormat::new(OutputStyle::Pretty).output_to(normal_output.reopen().unwrap()),
+        );
+
+        drop(request_metrics().append_on_drop(ServiceMetrics::sink_or_discard()));
+        drop(ObjectStreamMetrics::arm("/api/object"));
+        drop(SpanStatsStreamMetrics::arm("/api/span-stats"));
+        FoldFileMetricsBuilder::new().emit();
+
+        // Drain metrique while the recorder can still accept the queued entries.
+        drop(attached);
+        recorder.graceful_shutdown(Duration::from_secs(5));
+
+        let normal_output = std::fs::read_to_string(normal_output.path()).unwrap();
+        assert!(
+            normal_output.contains("/api/browse")
+                && normal_output.contains("123e4567-e89b-42d3-a456-426614174000"),
+            "ordinary metric fields must reach the non-dial9 stream: {normal_output}"
+        );
+        assert!(
+            !normal_output.contains("dial9."),
+            "dial9 context fields leaked into the normal metric stream: {normal_output}"
+        );
+
+        let sealed_trace = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.to_string_lossy().contains(".bin"))
+            .expect("recorder must seal a trace segment");
+        let data = std::fs::read(sealed_trace).unwrap();
+        let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
+        let mut schemas = HashMap::new();
+        let mut request_metrics = None;
+        decoder
+            .for_each_event(|event| {
+                if !event.name.starts_with("metrique:") {
+                    return;
+                }
+                if event.name == "metrique:RequestMetrics" {
+                    request_metrics = Some(
+                        event
+                            .deserialize::<DecodedRequestMetrics>()
+                            .expect("request metrics event must deserialize"),
+                    );
+                }
+                let fields: HashSet<_> = event
+                    .schema
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().to_string())
+                    .collect();
+                let mut annotations: HashMap<String, HashMap<String, String>> = HashMap::new();
+                for annotation in event.schema.annotations() {
+                    let field = event.schema.fields()[usize::from(annotation.field_index())].name();
+                    annotations
+                        .entry(field.to_string())
+                        .or_default()
+                        .insert(annotation.key().to_string(), annotation.value().to_string());
+                }
+                schemas.insert(
+                    event.name.to_string(),
+                    RecordedSchema {
+                        fields,
+                        annotations,
+                    },
+                );
+            })
+            .unwrap();
+
+        let expected = [
+            "metrique:RequestMetrics",
+            "metrique:ObjectStreamMetrics",
+            "metrique:SpanStatsStreamMetrics",
+            "metrique:FoldFileMetrics",
+        ];
+        for name in expected {
+            let schema = schemas
+                .get(name)
+                .unwrap_or_else(|| panic!("missing dial9 span schema {name}: {schemas:#?}"));
+            assert_eq!(
+                schema.annotations[dial9_metrique::field_names::SPAN_DURATION_NS][SPAN_TYPE_KEY],
+                span_types::METRIQUE,
+                "{name} is not annotated as a metrique span"
+            );
+            assert_eq!(
+                schema.annotations[dial9_metrique::field_names::SPAN_DURATION_NS][ROLE_KEY],
+                roles::SPAN_DURATION,
+                "{name} has no span duration role"
+            );
+        }
+
+        for name in [
+            "metrique:RequestMetrics",
+            "metrique:ObjectStreamMetrics",
+            "metrique:SpanStatsStreamMetrics",
+        ] {
+            assert_eq!(
+                schemas[name].annotations["operation"][ROLE_KEY],
+                roles::SPAN_NAME,
+                "{name} does not use operation as its span name"
+            );
+        }
+        assert!(
+            schemas["metrique:RequestMetrics"]
+                .fields
+                .contains("session_id"),
+            "session UUID must remain available for per-session trace correlation"
+        );
+        let request_metrics = request_metrics.expect("request metrics event must be recorded");
+        assert_eq!(
+            request_metrics.session_id.as_deref(),
+            Some("123e4567-e89b-42d3-a456-426614174000")
+        );
+        assert_eq!(
+            request_metrics.operation, "/api/browse",
+            "the operation selected as span.name must retain its value"
+        );
+    }
 
     /// Drive one request through the middleware against a test sink installed
     /// on the current (single-threaded) tokio runtime, and return the single
