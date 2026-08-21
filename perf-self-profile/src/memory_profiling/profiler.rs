@@ -106,6 +106,13 @@ pub enum InstallError {
     AlreadyInstalled,
     /// The SIGSEGV handler used by the FP unwinder failed to install.
     Unwinder(std::io::Error),
+    /// The frame-pointer self-test run at install time indicates this
+    /// binary was not built with `-C force-frame-pointers=yes`; allocation
+    /// stacks would be near-empty and useless for profiling.
+    MissingFramePointers {
+        frames_captured: usize,
+        expected_min: usize,
+    },
 }
 
 impl std::fmt::Display for InstallError {
@@ -115,6 +122,17 @@ impl std::fmt::Display for InstallError {
                 f.write_str("memory profiler already installed in this process")
             }
             Self::Unwinder(e) => write!(f, "failed to install SIGSEGV handler for unwinder: {e}"),
+            Self::MissingFramePointers {
+                frames_captured,
+                expected_min,
+            } => write!(
+                f,
+                "memory profiler self-test captured only {frames_captured} stack frames \
+                 (expected at least {expected_min}); this binary is likely missing \
+                 `-C force-frame-pointers=yes`. Add it to `[build] rustflags` in \
+                 `.cargo/config.toml` — a `rustflags` entry under `[profile.*]` or in \
+                 `Cargo.toml` itself is silently ignored by Cargo."
+            ),
         }
     }
 }
@@ -124,6 +142,7 @@ impl std::error::Error for InstallError {
         match self {
             Self::AlreadyInstalled => None,
             Self::Unwinder(e) => Some(e),
+            Self::MissingFramePointers { .. } => None,
         }
     }
 }
@@ -136,9 +155,15 @@ impl std::error::Error for InstallError {
 /// Install is permanent for the life of the process.
 ///
 /// # Requirements
-/// - Frame pointers are required for complete allocation stacks (build with
-///   `-C force-frame-pointers=yes`). Without them, profiling remains safe but
-///   records empty or shallow stacks.
+/// - Frame pointers: allocation stacks are captured with a frame-pointer
+///   unwinder, so the binary must be built with
+///   `-C force-frame-pointers=yes`. [`install`](Self::install) runs a
+///   self-test for this and returns
+///   [`InstallError::MissingFramePointers`] instead of silently
+///   installing a profiler whose allocation stacks would be near-empty
+///   and useless; see
+///   [`skip_frame_pointer_check`](crate::memory_profiling::MemoryProfilingConfig::skip_frame_pointer_check)
+///   to opt out.
 /// - [`Dial9Allocator`](crate::memory_profiling::Dial9Allocator) must be
 ///   installed as the `#[global_allocator]` for allocations to reach the
 ///   sampling hook.
@@ -160,8 +185,10 @@ impl MemoryProfiler {
 
     /// Install the profiler with the given handle.
     ///
-    /// Build with `-C force-frame-pointers=yes` for complete allocation stacks;
-    /// see the [type-level requirements](MemoryProfiler#requirements).
+    /// Requires a binary built with `-C force-frame-pointers=yes`, checked
+    /// by a self-test run here; see the
+    /// [type-level requirements](MemoryProfiler#requirements) and
+    /// [`InstallError::MissingFramePointers`].
     ///
     /// On a disconnected handle, install is a no-op (returns `Ok` but does
     /// not publish state). `ACTIVE.get()` remains `None` so the allocator
@@ -173,6 +200,16 @@ impl MemoryProfiler {
         }
 
         let unwinder = Unwinder::install().map_err(InstallError::Unwinder)?;
+
+        if !self.config.skip_frame_pointer_check()
+            && let Some(self_test) = unwinder.self_test_frame_pointers()
+            && !self_test.passed()
+        {
+            return Err(InstallError::MissingFramePointers {
+                frames_captured: self_test.frames_captured,
+                expected_min: self_test.expected_min,
+            });
+        }
 
         let rings = Arc::new(RingBuffers::new(
             self.config.ring_capacity(),

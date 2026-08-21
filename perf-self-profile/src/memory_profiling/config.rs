@@ -69,6 +69,21 @@ pub struct MemoryProfilingConfig {
     /// The free queue is sized 8× this.
     #[builder(default = DEFAULT_RING_CAPACITY)]
     ring_capacity: usize,
+
+    /// Skip the frame-pointer self-test that [`MemoryProfiler::install`]
+    /// runs by default. Default `false`.
+    ///
+    /// Only set this if you've independently verified frame pointers are
+    /// enabled, or are prepared to accept near-empty allocation stacks
+    /// otherwise — with this set, `install()` cannot return
+    /// [`InstallError::MissingFramePointers`], so a missing
+    /// `-C force-frame-pointers=yes` produces useless stacks silently
+    /// instead of a clear error at install time.
+    ///
+    /// [`MemoryProfiler::install`]: crate::memory_profiling::MemoryProfiler::install
+    /// [`InstallError::MissingFramePointers`]: crate::memory_profiling::InstallError::MissingFramePointers
+    #[builder(default = false)]
+    skip_frame_pointer_check: bool,
 }
 
 impl<S: memory_profiling_config_builder::IsComplete> MemoryProfilingConfigBuilder<S> {
@@ -114,6 +129,10 @@ impl MemoryProfilingConfig {
     pub fn ring_capacity(&self) -> usize {
         self.ring_capacity
     }
+    /// Whether the install-time frame-pointer self-test is skipped.
+    pub fn skip_frame_pointer_check(&self) -> bool {
+        self.skip_frame_pointer_check
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +167,19 @@ mod tests {
     fn build_accepts_liveset() {
         let cfg = MemoryProfilingConfig::builder().track_liveset(true).build();
         assert!(cfg.track_liveset());
+    }
+
+    #[test]
+    fn skip_frame_pointer_check_defaults_to_false() {
+        let cfg = MemoryProfilingConfig::default();
+        assert!(!cfg.skip_frame_pointer_check());
+    }
+
+    #[test]
+    fn skip_frame_pointer_check_can_be_set() {
+        let cfg = MemoryProfilingConfig::builder()
+            .skip_frame_pointer_check(true)
+            .build();
+        assert!(cfg.skip_frame_pointer_check());
     }
 }
