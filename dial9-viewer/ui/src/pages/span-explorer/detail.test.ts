@@ -3,6 +3,7 @@ import {
   spanExemplarViewerUrl,
   type DetailModel,
 } from "./detail.js";
+import type { Exemplar } from "../../lib/trace/index.js";
 
 const ROLE = "arn:aws:iam::111122223333:role/TraceReader";
 const ROLE_SOURCE = {
@@ -10,6 +11,19 @@ const ROLE_SOURCE = {
   region: "us-west-2",
   credentials: { kind: "role" as const, roleArn: ROLE },
 };
+
+function exemplar(overrides: Partial<Exemplar> = {}): Exemplar {
+  return {
+    elapsed_ns: 1_000,
+    span_uid: "span-1",
+    host: "host-a",
+    start_ns: 1_000,
+    end_ns: 2_000,
+    source_key: "s3://demo-traces/traces/segment.bin.gz",
+    attributes: [],
+    ...overrides,
+  };
+}
 
 describe("Span Explorer exemplar links", () => {
   it("carries the page reader role into viewer jumps", () => {
@@ -26,12 +40,7 @@ describe("Span Explorer exemplar links", () => {
       spanType: { name: "request" },
     } as DetailModel;
 
-    const link = spanExemplarViewerUrl({
-      source_key: "s3://demo-traces/traces/segment.bin.gz",
-      host: "host-a",
-      start_ns: 1_000,
-      end_ns: 2_000,
-    }, model);
+    const link = spanExemplarViewerUrl(exemplar(), model);
     const p = new URL(link, "https://viewer.example").searchParams;
 
     expect(p.get("aws_region")).toBe("us-west-2");
@@ -47,10 +56,7 @@ describe("Span Explorer exemplar links", () => {
       spanType: { name: "request" },
     } as DetailModel;
 
-    const link = spanExemplarViewerUrl(
-      { start_ns: 1_000, end_ns: 2_000 },
-      model,
-    );
+    const link = spanExemplarViewerUrl(exemplar(), model);
     const p = new URL(link, "https://viewer.example").searchParams;
 
     expect(p.get("trace")).toContain("/api/object");
@@ -75,10 +81,7 @@ describe("Span Explorer exemplar links", () => {
       spanType: { name: "request" },
     } as DetailModel;
 
-    const link = spanExemplarViewerUrl(
-      { start_ns: 1_000, end_ns: 2_000 },
-      model,
-    );
+    const link = spanExemplarViewerUrl(exemplar(), model);
 
     expect(link).toContain("credential_mode=literal");
     expect(link).not.toContain("SYNTHETIC_ACCESS_KEY");
