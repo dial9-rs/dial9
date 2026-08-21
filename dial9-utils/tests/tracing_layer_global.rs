@@ -16,11 +16,13 @@ fn spans_on_a_plain_thread_are_balanced() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
     let recorder = recorder(writer).build();
-    recorder.install_global_handle();
+    recorder
+        .install_global_handle()
+        .expect("no global installed yet");
 
     std::thread::spawn(|| {
         assert!(
-            Dial9Handle::try_current().is_none(),
+            Dial9Handle::try_current_thread().is_none(),
             "no thread-local handle here, so the layer must be resolving the global"
         );
 

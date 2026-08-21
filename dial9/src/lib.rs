@@ -3,7 +3,7 @@
 
 // Core recording API
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
-pub use dial9_core::handle::Dial9Handle;
+pub use dial9_core::handle::{Dial9Handle, InstallGlobalHandleError};
 pub use dial9_core::recorder::{
     RecorderBuilder, RecorderSourceExt, recorder, recorder_disabled, recorder_or_disabled,
 };
@@ -68,11 +68,9 @@ pub mod s3 {
 
 use crate::core::{Encodable, current_handle};
 
-/// Record an event on the handle [`Dial9Handle::current`] resolves: this
-/// thread's, or the process-global one.
+/// Record an event on the handle [`Dial9Handle::current`] resolves.
 ///
-/// A no-op when neither is installed. Opt into the global with
-/// [`Recorder::install_global_handle`](dial9_core::recording::Recorder::install_global_handle).
+/// A no-op when it resolves none.
 pub fn record_event(event: impl Encodable) {
     current_handle().record_event(event);
 }

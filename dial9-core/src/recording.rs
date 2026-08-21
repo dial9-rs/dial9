@@ -1,6 +1,6 @@
 use crate::buffer::{BufferMode, SegmentWriter};
 use crate::flush_loop::run_flush_loop;
-use crate::handle::{ControlCommand, Dial9Handle};
+use crate::handle::{ControlCommand, Dial9Handle, InstallGlobalHandleError};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
 use crate::shared_state::SharedState;
@@ -121,11 +121,16 @@ impl Recorder {
         &self.handle
     }
 
-    /// Publish this recorder's handle as the process-global one, so
-    /// [`Dial9Handle::current`] resolves it on threads no dial9 runtime owns.
+    /// Publish this recorder's handle as the process-global one.
     ///
-    /// Subsequent installs replace the previous one. The global is cleared when
-    /// the recorder holding it stops.
+    /// When set, [`Dial9Handle::current`] resolves on every thread in the
+    /// process. When not set, it resolves only on threads a runtime integration
+    /// has installed a handle on.
+    ///
+    /// Returns [`InstallGlobalHandleError`] and changes nothing if another handle
+    /// is already installed: two live globals would split one process's events
+    /// across two traces. A recorder clears its own when it stops, so a later
+    /// install succeeds.
     ///
     /// ```no_run
     /// use dial9_core::buffer::MemoryBuffer;
@@ -140,16 +145,16 @@ impl Recorder {
     /// }
     ///
     /// let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
-    /// rec.install_global_handle();
+    /// rec.install_global_handle()?;
     ///
     /// std::thread::spawn(|| {
     ///     // reachable here, with no handle plumbed in
     ///     Dial9Handle::current().record_event(Tick { timestamp_ns: 0 });
     /// });
-    /// # Ok::<_, std::io::Error>(())
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
     /// ```
-    pub fn install_global_handle(&self) {
-        crate::handle::set_global_handle(self.handle.clone());
+    pub fn install_global_handle(&self) -> Result<(), InstallGlobalHandleError> {
+        crate::handle::set_global_handle(self.handle.clone())
     }
 
     /// Attach the background worker to this recorder, so its lifecycle is tied

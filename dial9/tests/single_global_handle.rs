@@ -1,4 +1,4 @@
-//! Two recorders contending for the process-global handle.
+//! Only one recorder can hold the process-global handle.
 
 use dial9::core::clock_monotonic_ns;
 use dial9::{Dial9Handle, DiskBuffer, recorder};
@@ -46,24 +46,28 @@ fn build(dir: &Path) -> dial9::Recorder {
     recorder(DiskBuffer::single_file(dir.join("trace.bin")).expect("writer")).build()
 }
 
-/// Stopping a recorder that has already been displaced must leave the global
-/// its successor installed alone.
+/// A second install is refused, and the recorder it refused must not take the
+/// installed handle with it when it stops.
 #[test]
-fn a_displaced_recorder_does_not_clear_its_successors_global() {
+fn a_second_install_is_refused_and_leaves_the_first_alone() {
     let dir_a = tempfile::tempdir().expect("tempdir");
     let dir_b = tempfile::tempdir().expect("tempdir");
 
     let rec_a = build(dir_a.path());
-    rec_a.install_global_handle();
+    rec_a
+        .install_global_handle()
+        .expect("first install succeeds");
 
     let rec_b = build(dir_b.path());
-    rec_b.install_global_handle();
+    assert!(
+        rec_b.install_global_handle().is_err(),
+        "a second install must not replace the first"
+    );
 
-    rec_a.graceful_shutdown(Duration::ZERO);
-
+    rec_b.graceful_shutdown(Duration::ZERO);
     assert!(
         Dial9Handle::current().is_enabled(),
-        "B installed last, so B still holds the global after A stops"
+        "A still holds the global after the refused recorder stops"
     );
 
     std::thread::spawn(|| {
@@ -75,12 +79,20 @@ fn a_displaced_recorder_does_not_clear_its_successors_global() {
     .join()
     .expect("worker thread");
 
-    rec_b.graceful_shutdown(Duration::ZERO);
+    rec_a.graceful_shutdown(Duration::ZERO);
 
-    assert!(markers(dir_b.path()).contains(&7), "recorded into B");
-    assert!(!markers(dir_a.path()).contains(&7), "and not into A");
+    assert!(markers(dir_a.path()).contains(&7), "recorded into A");
+    assert!(!markers(dir_b.path()).contains(&7), "and not into B");
     assert!(
         !Dial9Handle::current().is_enabled(),
-        "B stopping does clear it"
+        "A stopping clears the global"
     );
+
+    // Refusal is not permanent: the slot frees up when its holder stops.
+    let dir_c = tempfile::tempdir().expect("tempdir");
+    let rec_c = build(dir_c.path());
+    rec_c
+        .install_global_handle()
+        .expect("install after the holder stopped");
+    rec_c.graceful_shutdown(Duration::ZERO);
 }

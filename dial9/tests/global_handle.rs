@@ -49,7 +49,9 @@ fn global_handle_lifecycle() {
         "opt-in: nothing resolves until install_global_handle"
     );
 
-    recorder.install_global_handle();
+    recorder
+        .install_global_handle()
+        .expect("no global installed yet");
 
     assert!(
         record_from_plain_thread(2),

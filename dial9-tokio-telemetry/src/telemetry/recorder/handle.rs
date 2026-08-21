@@ -8,14 +8,13 @@ crate::primitives::thread_local! {
     pub(super) static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
-/// The handle to instrument with when a dial9-traced runtime drives this
-/// thread, otherwise `None`.
+/// The [`Dial9Handle`] to instrument with when a dial9-traced runtime drives
+/// this thread, otherwise `None`.
 pub(crate) fn traced_runtime_handle() -> Option<Dial9Handle> {
     if !super::runtime_context::thread_is_traced() {
         return None;
     }
-    let handle = Dial9Handle::current();
-    handle.is_connected().then_some(handle)
+    Dial9Handle::try_current_thread().filter(Dial9Handle::is_connected)
 }
 
 /// Tokio handle for spawning instrumented tasks.

@@ -134,14 +134,15 @@ impl Dial9Handle {
             .and_then(|i| i.shared.dump_trigger().cloned())
     }
 
-    /// Return the [`Dial9Handle`] to record through: the calling thread's, or
-    /// the process-global one.
+    /// Return the [`Dial9Handle`] to record through, resolved in order:
     ///
-    /// Threads a dial9 runtime owns get that runtime's handle. Any other thread
-    /// gets the process-global handle, once
-    /// [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle)
-    /// has been called. With neither you get an inert
-    /// [`disabled`](Self::disabled) handle and recording is a no-op.
+    /// 1. The handle installed on this thread with [`set_tl_handle`], which
+    ///    runtime integrations do for the threads they own.
+    /// 2. The process-global handle, if
+    ///    [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle)
+    ///    has been called.
+    /// 3. An inert [`disabled`](Self::disabled) handle, where recording is a
+    ///    no-op.
     ///
     /// Use [`is_enabled`](Self::is_enabled) to branch on whether telemetry is
     /// live here.
@@ -152,12 +153,12 @@ impl Dial9Handle {
             .unwrap_or_else(Self::disabled)
     }
 
-    /// Return the [`Dial9Handle`] installed for the current thread,
-    /// or `None` if no dial9 runtime has claimed this thread.
+    /// Return the [`Dial9Handle`] installed on this thread with [`set_tl_handle`], or
+    /// `None` if there is none.
     ///
-    /// Does not consider the process-global handle. Prefer
-    /// [`current`](Self::current) for recording.
-    pub fn try_current() -> Option<Self> {
+    /// Unlike [`current`](Self::current), never falls back to the
+    /// process-global handle. To record an event, use [`current`](Self::current).
+    pub fn try_current_thread() -> Option<Self> {
         CURRENT_HANDLE.with(|cell| cell.borrow().clone())
     }
 
@@ -347,20 +348,30 @@ pub fn clear_tl_handle() {
 
 /// Install `handle` as the process-global [`Dial9Handle`].
 ///
-/// Last write wins; installs do not stack. Warns when it displaces a different
-/// recorder's live handle.
-pub(crate) fn set_global_handle(handle: Dial9Handle) {
-    let displaced_live_other = GLOBAL_HANDLE.load().as_ref().is_some_and(|installed| {
-        !installed.shared.is_stopped()
-            && !handle
-                .shared()
-                .is_some_and(|s| Arc::ptr_eq(s, &installed.shared))
-    });
-    if displaced_live_other {
-        tracing::warn!(target: "dial9", "replacing a live process-global Dial9Handle");
+/// Install `handle` as the process-global one, unless another is already
+/// installed.
+pub(crate) fn set_global_handle(handle: Dial9Handle) -> Result<(), InstallGlobalHandleError> {
+    let previous =
+        GLOBAL_HANDLE.compare_and_swap(&None::<Arc<HandleInner>>, handle.inner.map(Arc::new));
+    match previous.is_some() {
+        true => Err(InstallGlobalHandleError),
+        false => Ok(()),
     }
-    GLOBAL_HANDLE.store(handle.inner.map(Arc::new));
 }
+
+/// [`Recorder::install_global_handle`](crate::recording::Recorder::install_global_handle)
+/// did not install: a process-global [`Dial9Handle`] was already installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InstallGlobalHandleError;
+
+impl std::fmt::Display for InstallGlobalHandleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a process-global Dial9Handle is already installed")
+    }
+}
+
+impl std::error::Error for InstallGlobalHandleError {}
 
 /// Clear the process-global [`Dial9Handle`] if it belongs to the recorder whose
 /// state is `shared`, otherwise leave it alone.
