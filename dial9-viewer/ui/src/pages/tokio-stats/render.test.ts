@@ -30,6 +30,19 @@ import {
 // attribute-breakout inject.
 const HOSTILE_TAG = `<img src=x onerror="alert(document.cookie)">`;
 const HOSTILE_ATTR = `"><script>alert(1)</script>`;
+const AMBIENT_SOURCE = {
+  bucket: "b",
+  region: "",
+  credentials: { kind: "ambient" as const },
+};
+const ROLE_SOURCE = {
+  bucket: "b",
+  region: "us-west-2",
+  credentials: {
+    kind: "role" as const,
+    roleArn: "arn:aws:iam::111122223333:role/TraceReader",
+  },
+};
 
 /** Recursively split a lit-html TemplateResult into static HTML vs values. */
 interface Split {
@@ -101,7 +114,9 @@ const HOSTILE_DATA: TokioStatsResponse = {
 };
 
 describe("XSS: hostile spawn_loc renders inert (I1, #587 regression)", () => {
-  const t = split(locTableTemplate(HOSTILE_STATS, HOSTILE_DATA, null, () => {}));
+  const t = split(
+    locTableTemplate(HOSTILE_STATS, HOSTILE_DATA, AMBIENT_SOURCE, () => {}),
+  );
 
   it("the hostile spawn_loc is an interpolated VALUE, not baked into HTML", () => {
     expect(t.leaves).toContain(HOSTILE_TAG);
@@ -146,13 +161,17 @@ describe("longPollsTemplate (Longest polls card)", () => {
   };
 
   it("filters rows below the threshold, keeps those above", () => {
-    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
+    const t = split(
+      longPollsTemplate(data, 1_000_000, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     expect(t.leaves).toContain(42); // the 5ms poll's task id survives
     expect(t.leaves).not.toContain(7); // the 0.2ms poll is filtered out
   });
 
   it("returns nothing when no poll exceeds the threshold", () => {
-    expect(longPollsTemplate(data, 10_000_000, null, () => {}, 10, () => {})).toBe(nothing);
+    expect(
+      longPollsTemplate(data, 10_000_000, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    ).toBe(nothing);
   });
 
   it("caps the rendered rows at the requested limit", () => {
@@ -172,7 +191,9 @@ describe("longPollsTemplate (Longest polls card)", () => {
         end_ns: 2,
       })),
     };
-    const t = split(longPollsTemplate(many, 0, null, () => {}, 3, () => {}));
+    const t = split(
+      longPollsTemplate(many, 0, AMBIENT_SOURCE, () => {}, 3, () => {}),
+    );
     // Only the first 3 task ids should appear.
     expect(t.leaves).toContain(1000);
     expect(t.leaves).toContain(1002);
@@ -180,18 +201,27 @@ describe("longPollsTemplate (Longest polls card)", () => {
   });
 
   it("renders the Longest polls heading, emoji included", () => {
-    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
+    const t = split(
+      longPollsTemplate(data, 1_000_000, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     expect(t.strings.join("")).toContain("🕒 Longest polls");
   });
 
   it("each row deep-links its poll via a non-destructive focus link", () => {
-    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}, 10, () => {}));
+    const t = split(
+      longPollsTemplate(data, 1_000_000, ROLE_SOURCE, () => {}, 10, () => {}),
+    );
     const url = t.leaves.find(
       (v): v is string => typeof v === "string" && v.startsWith("viewer.html?"),
     );
     expect(url).toBeDefined();
     expect(url).toContain("focus_start=1000");
     expect(url).not.toContain("/api/trace");
+    const p = new URLSearchParams(url?.slice("viewer.html?".length));
+    expect(p.get("credential_mode")).toBe("role");
+    expect(p.get("aws_role_arn")).toBe(
+      "arn:aws:iam::111122223333:role/TraceReader",
+    );
   });
 
   it("hostile spawn_loc renders as an interpolated VALUE (XSS-safe)", () => {
@@ -204,7 +234,9 @@ describe("longPollsTemplate (Longest polls card)", () => {
         { duration_ns: 5_000_000, worker_id: 0, task_id: 1, spawn_loc: HOSTILE_TAG, host: "h1", source_key: "k", start_ns: 1, end_ns: 2 },
       ],
     };
-    const t = split(longPollsTemplate(hostile, 0, null, () => {}, 10, () => {}));
+    const t = split(
+      longPollsTemplate(hostile, 0, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     expect(t.leaves).toContain(HOSTILE_TAG);
     for (const chunk of t.strings) expect(chunk).not.toContain(HOSTILE_TAG);
   });
@@ -241,11 +273,15 @@ describe("schedulingDelaysTemplate (Scheduling delay card)", () => {
       bucket: "b",
       by_spawn_loc: [],
     };
-    expect(schedulingDelaysTemplate(bare, null, () => {}, 10, () => {})).toBe(nothing);
+    expect(
+      schedulingDelaysTemplate(bare, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    ).toBe(nothing);
   });
 
   it("renders the delays and their evidence labels", () => {
-    const t = split(schedulingDelaysTemplate(data, null, () => {}, 10, () => {}));
+    const t = split(
+      schedulingDelaysTemplate(data, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     expect(t.leaves).toContain(42);
     expect(t.leaves).toContain(7);
     expect(t.leaves).toContain("spawn → first poll");
@@ -272,14 +308,18 @@ describe("schedulingDelaysTemplate (Scheduling delay card)", () => {
         source_key: "k",
       })),
     };
-    const t = split(schedulingDelaysTemplate(many, null, () => {}, 3, () => {}));
+    const t = split(
+      schedulingDelaysTemplate(many, AMBIENT_SOURCE, () => {}, 3, () => {}),
+    );
     expect(t.leaves).toContain(2000);
     expect(t.leaves).toContain(2002);
     expect(t.leaves).not.toContain(2003);
   });
 
   it("each row deep-links via the ready -> poll-end focus window", () => {
-    const t = split(schedulingDelaysTemplate(data, null, () => {}, 10, () => {}));
+    const t = split(
+      schedulingDelaysTemplate(data, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     const url = t.leaves.find(
       (v): v is string => typeof v === "string" && v.startsWith("viewer.html?"),
     );
@@ -297,7 +337,9 @@ describe("schedulingDelaysTemplate (Scheduling delay card)", () => {
       scheduling_delay_coverage: coverage,
       top_scheduling_delays: [],
     };
-    const t = split(schedulingDelaysTemplate(empty, null, () => {}, 10, () => {}));
+    const t = split(
+      schedulingDelaysTemplate(empty, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     const joined = t.strings.join("");
     expect(joined).toContain("No scheduling delay could be safely measured");
   });
@@ -313,7 +355,9 @@ describe("schedulingDelaysTemplate (Scheduling delay card)", () => {
         { delay_ns: 5_000_000, ready_at_ns: 1, poll_start_ns: 2, poll_end_ns: 3, worker_id: 0, task_id: 1, kind: "spawn", spawn_loc: HOSTILE_TAG, host: HOSTILE_ATTR, source_key: "k" },
       ],
     };
-    const t = split(schedulingDelaysTemplate(hostile, null, () => {}, 10, () => {}));
+    const t = split(
+      schedulingDelaysTemplate(hostile, AMBIENT_SOURCE, () => {}, 10, () => {}),
+    );
     expect(t.leaves).toContain(HOSTILE_TAG);
     for (const chunk of t.strings) {
       expect(chunk).not.toContain(HOSTILE_TAG);
@@ -422,14 +466,16 @@ describe("workerActivityTemplate (Worker activity card)", () => {
       bucket: "b",
       by_spawn_loc: [],
     };
-    expect(workerActivityTemplate(bare, null, () => {}, state())).toBe(nothing);
+    expect(
+      workerActivityTemplate(bare, AMBIENT_SOURCE, () => {}, state()),
+    ).toBe(nothing);
   });
 
   it("renders one collapsed host row, hiding per-worker detail", () => {
     const t = split(
       workerActivityTemplate(
         data([worker({ worker_id: 0 }), worker({ worker_id: 1 })]),
-        null,
+        AMBIENT_SOURCE,
         () => {},
         state(),
       ),
@@ -444,7 +490,7 @@ describe("workerActivityTemplate (Worker activity card)", () => {
     const t = split(
       workerActivityTemplate(
         data([worker({ worker_id: 0 }), worker({ worker_id: 1 })]),
-        null,
+        AMBIENT_SOURCE,
         () => {},
         state({ expandedHosts: new Set(["h1"]) }),
       ),
@@ -468,7 +514,7 @@ describe("workerActivityTemplate (Worker activity card)", () => {
             },
           }),
         ]),
-        null,
+        AMBIENT_SOURCE,
         () => {},
         state({ expandedHosts: new Set(["h1"]) }),
       ),
@@ -482,11 +528,21 @@ describe("workerActivityTemplate (Worker activity card)", () => {
 
   it("marks the active sort column with a direction indicator", () => {
     const asc = split(
-      workerActivityTemplate(data([worker()]), null, () => {}, state({ sortDesc: false })),
+      workerActivityTemplate(
+        data([worker()]),
+        AMBIENT_SOURCE,
+        () => {},
+        state({ sortDesc: false }),
+      ),
     );
     expect(asc.leaves).toContain(" ▲");
     const desc = split(
-      workerActivityTemplate(data([worker()]), null, () => {}, state({ sortDesc: true })),
+      workerActivityTemplate(
+        data([worker()]),
+        AMBIENT_SOURCE,
+        () => {},
+        state({ sortDesc: true }),
+      ),
     );
     expect(desc.leaves).toContain(" ▼");
   });
@@ -497,7 +553,7 @@ describe("workerActivityTemplate (Worker activity card)", () => {
     const t = split(
       workerActivityTemplate(
         data([worker({ host: HOSTILE_TAG })]),
-        null,
+        AMBIENT_SOURCE,
         () => {},
         state({ expandedHosts: new Set([HOSTILE_TAG]) }),
       ),

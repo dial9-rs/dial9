@@ -329,6 +329,14 @@ export type {
   UrlSourceScope,
 } from "./source-scope.js";
 
+// exemplar-link.ts - the sole viewer deep-link builder for poll and span
+// exemplars. It owns object-key normalization, safe credentials, and focus.
+export { buildExemplarViewerUrl } from "./exemplar-link.js";
+export type {
+  ExemplarViewerLink,
+  ViewerExemplar,
+} from "./exemplar-link.js";
+
 // aggregates.ts - server aggregate wire types (/api/flamegraph +
 // /api/tokio-stats), the tokio-stats URL builder, and the coverage
 // full/partial/none fallback signal. (Both endpoints stream over SSE now, so
@@ -369,7 +377,7 @@ export type {
 
 // span_explorer.ts - shared Span Explorer helpers: catalog sorting, the
 // log-duration histogram geometry + percentile estimation, the five-way time
-// composition, attribute filters, and the flamegraph/viewer deep links.
+// composition, attribute filters, and the flamegraph deep-link builder.
 export {
   TIME_CATEGORIES,
   addAttrFilter,
@@ -382,7 +390,6 @@ export {
   durationAtPercentile,
   exemplarAttrValue,
   exemplarRequestMatches,
-  exemplarViewerUrl,
   exemplarsInBand,
   flamegraphUrl,
   fmtNs,
@@ -407,7 +414,6 @@ export type {
   AttrFilter,
   CompositionCategory,
   DurationBand,
-  ExemplarLinkScope,
   HistogramBarLike,
   SpanExplorerState,
   SpanHistogramBar,

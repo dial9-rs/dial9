@@ -5,9 +5,9 @@
 import { html, nothing, render, type TemplateResult } from "lit-html";
 import {
   TIME_CATEGORIES,
+  buildExemplarViewerUrl,
   computeTimeComposition,
   countInBand,
-  exemplarViewerUrl,
   exemplarsInBand,
   flamegraphUrl,
   fmtNs,
@@ -20,7 +20,7 @@ import type {
   Coverage,
   DurationBand,
   Exemplar,
-  ExemplarLinkScope,
+  SourceScope,
   SpanExplorerState,
   SpanTypeStats,
 } from "../../lib/trace/index.js";
@@ -45,10 +45,10 @@ export interface DetailModel {
   exemplarPreviewAvailable: boolean;
   /** Scope for the flamegraph deep links (null in raw mode). */
   linkState: SpanExplorerState | null;
+  /** Canonical source identity for aggregate and raw-trace viewer jumps. */
+  source: SourceScope;
   /** Original trace URL used for raw-mode exemplar jumps. */
   rawTrace: string | null;
-  /** Region used to fetch the raw trace, retained in viewer deep links. */
-  rawRegion: string | null;
   onBand: (band: DurationBand) => void;
   onClearBand: () => void;
   onToggleFilter: (key: string, value: string) => void;
@@ -56,15 +56,20 @@ export interface DetailModel {
   onResetOverrides: () => void;
 }
 
-/** The link scope: page identity plus the type's name for `focus_span_name`. */
-function linkScope(m: DetailModel): ExemplarLinkScope {
-  return {
+/** Adapt one span exemplar to the shared viewer-link module. */
+export function spanExemplarViewerUrl(
+  exemplar: Exemplar,
+  m: DetailModel,
+): string {
+  return buildExemplarViewerUrl({
+    exemplar: {
+      ...exemplar,
+      span_name: m.spanType?.name ?? null,
+    },
+    source: m.source,
     trace: m.rawTrace,
-    bucket: m.linkState?.bucket ?? null,
-    region: m.linkState?.region ?? m.rawRegion,
     service: m.linkState?.service ?? null,
-    spanName: m.spanType?.name ?? null,
-  };
+  });
 }
 
 function headerTemplate(st: SpanTypeStats, m: DetailModel, slowest: Exemplar | null): TemplateResult {
@@ -72,7 +77,8 @@ function headerTemplate(st: SpanTypeStats, m: DetailModel, slowest: Exemplar | n
   // link when no band is active - an in-band exemplar's duration may differ from
   // the displayed maximum.
   const hasBand = m.band.min_ns != null || m.band.max_ns != null;
-  const maxJumpUrl = !hasBand && slowest ? exemplarViewerUrl(slowest, linkScope(m)) : "";
+  const maxJumpUrl =
+    !hasBand && slowest ? spanExemplarViewerUrl(slowest, m) : "";
   return html`<div class="detail-header">
     <h2>${spanTypeLabel(st)}</h2>
     <span class="meta"
@@ -249,7 +255,7 @@ export function renderDetail(detailPanel: HTMLElement, m: DetailModel): void {
 
   const tableCtx: ExemplarTableCtx = {
     spanType: st,
-    scope: linkScope(m),
+    viewerUrl: (exemplar) => spanExemplarViewerUrl(exemplar, m),
     attrFilters: m.attrFilters,
     overrides: m.overrides,
     rawMode: m.rawMode,

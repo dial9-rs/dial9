@@ -14,7 +14,6 @@ import {
   collectExemplarAttributeKeys,
   computeTimeComposition,
   exemplarAttrValue,
-  exemplarViewerUrl,
   fmtNs,
   fmtPercentile,
   hasAttrFilter,
@@ -23,7 +22,6 @@ import {
 import type {
   AttrFilter,
   Exemplar,
-  ExemplarLinkScope,
   HistogramBarLike,
   SpanTypeStats,
 } from "../../lib/trace/index.js";
@@ -45,7 +43,7 @@ interface Column extends VisibilityInput<Exemplar> {
 /** Everything the table needs beyond the exemplars themselves. */
 export interface ExemplarTableCtx {
   spanType: SpanTypeStats;
-  scope: ExemplarLinkScope;
+  viewerUrl: (exemplar: Exemplar) => string;
   attrFilters: readonly AttrFilter[];
   overrides: ColumnOverrides;
   /** Raw-trace mode cannot re-query server aggregates for attribute filters. */
@@ -150,7 +148,7 @@ function buildColumns(exemplars: readonly Exemplar[], ctx: ExemplarTableCtx): Co
       th: "",
       hideable: false,
       cell: (ex) => {
-        const url = exemplarViewerUrl(ex, ctx.scope);
+        const url = ctx.viewerUrl(ex);
         return html`<td class="jump-cell">
           ${url
             ? html`<button
