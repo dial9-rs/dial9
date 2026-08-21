@@ -63,5 +63,6 @@ runs:
                   cargo test --all-targets --features __nonlinux_all_features
               fi
               # dial9-core alone: `test-util` is off here, so the single-recorder
-              # guard is compiled in.
-              cargo test -p dial9-core --lib
+              # guard is compiled in. Serial because the guard allows one
+              # recorder at a time, and thread-per-test would overlap them.
+              cargo test -p dial9-core --lib -- --test-threads=1
