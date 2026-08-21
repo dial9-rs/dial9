@@ -11,30 +11,31 @@ import { chromium } from "playwright";
 // hit-testing all depend on layout, so the viewport is part of the contract.
 export const VIEWPORT = { width: 1440, height: 900 };
 
-// The dev-server seeds exactly one segment under the FIXED date path
-// `traces/2026-04-09/1900/...` (dial9-viewer/src/bin/dev_server.rs). The
+// The dev-server seeds exactly one segment under the fixed partition path
+// `traces/version=1/date=2026-08-06/service=demo-service/time=0025/...`
+// (dial9-viewer/src/bin/dev_server.rs). The
 // page's relative time windows ("Last 1hr" quick range, raw search's implicit
 // last-30-days window) are computed from Date.now(), so on a real clock the
 // seeded key drifts out of every reachable window. Checks that
 // target the browser page pin the page's clock (Date only — timers keep
-// running, so debounces behave) to the evening of the seed date. This keeps
-// the recorded 2026-06-30 access paths (search an April window, raw-search
-// rows) re-derivable against the same seed forever.
-export const DEV_SEED_CLOCK = "2026-04-09T21:00:00Z";
+// running, so debounces behave) near the seeded segment. This keeps the
+// recorded access paths re-derivable against the same seed forever.
+export const DEV_SEED_CLOCK = "2026-08-06T01:00:00Z";
+export const FIXTURE_CLOCK = "2026-04-09T21:00:00Z";
 
 export async function launchBrowser() {
   return chromium.launch();
 }
 
 /**
- * Fresh context + page. `fixedClock: true` pins Date to DEV_SEED_CLOCK
- * (must be set before the page loads any app code — done here, pre-goto).
+ * Fresh context + page. `fixedClock: true` pins Date to DEV_SEED_CLOCK;
+ * passing an ISO string pins it to that instant instead.
  */
 export async function newPage(browser, { fixedClock = false } = {}) {
   const context = await browser.newContext({ viewport: VIEWPORT });
   const page = await context.newPage();
   if (fixedClock) {
-    await page.clock.setFixedTime(new Date(DEV_SEED_CLOCK));
+    await page.clock.setFixedTime(new Date(fixedClock === true ? DEV_SEED_CLOCK : fixedClock));
   }
   return { context, page };
 }

@@ -1,6 +1,6 @@
 // Typed seam over the shared span_explorer.js: catalog sorting/labelling,
 // log-duration histogram geometry, percentile estimation, the five-way time
-// composition, attribute filters, and the flamegraph/viewer deep-link builders.
+// composition, attribute filters, and the flamegraph deep-link builder.
 //
 // lib/trace is the sanctioned shared-core import boundary; the Span Explorer
 // page consumes all of this through the barrel.
@@ -17,7 +17,6 @@ export {
   durationAtPercentile,
   exemplarAttrValue,
   exemplarRequestMatches,
-  exemplarViewerUrl,
   exemplarsInBand,
   flamegraphUrl,
   fmtNs,
@@ -43,7 +42,6 @@ export type {
   AttrFilter,
   CompositionCategory,
   DurationBand,
-  ExemplarLinkScope,
   HistogramBarLike,
   SpanExplorerState,
   SpanHistogramBar,

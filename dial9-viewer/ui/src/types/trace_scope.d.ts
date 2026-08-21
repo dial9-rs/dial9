@@ -65,7 +65,7 @@ declare module "*/trace_scope.js" {
   /** Parse an S3 trace key into its service/host/boot/epoch metadata. */
   export function parseKey(key: string): ParsedTraceScopeKey;
 
-  /** Everything before the date-shaped segment; "" when the date is at root. */
+  /** Everything before the recognized layout root; "" when it starts at root. */
   export function extractPrefix(key: string): string;
 
   /** One `/api/object?bucket&key` URL per key (raw, still-gzipped bytes). */

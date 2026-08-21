@@ -96,19 +96,6 @@ declare module "*/span_explorer.js" {
     max_span_ns?: number | null;
   }
 
-  /** Scope for exemplarViewerUrl; the exemplar's own host wins over any here. */
-  export interface ExemplarLinkScope {
-    /** Original source URL in raw mode; avoids requiring a backend source key. */
-    trace?: string | null;
-    bucket?: string | null;
-    region?: string | null;
-    credentialMode?: "ambient" | "literal" | "role" | null;
-    roleArn?: string | null;
-    service?: string | null;
-    /** Forwarded as `focus_span_name` so the viewer selects the exact span. */
-    spanName?: string | null;
-  }
-
   /** Which stream a snapshot arrived on. */
   export type StreamMode = "replace" | "refine" | "exemplars";
 
@@ -340,25 +327,6 @@ declare module "*/span_explorer.js" {
   export function flamegraphUrl(
     state: SpanExplorerState,
     phase?: "blocking" | "cpu" | null,
-  ): string;
-
-  /**
-   * Viewer deep link onto one exemplar: the raw trace or an `/api/object`
-   * component plus NON-DESTRUCTIVE `focus_*` params. Never emits `start`/`end`,
-   * which the viewer treats as a hard parse filter that would drop every
-   * surrounding event. Empty string when neither source is available.
-   */
-  export function exemplarViewerUrl(
-    exemplar:
-      | {
-          source_key?: string;
-          host?: string;
-          start_ns?: number | string;
-          end_ns?: number | string;
-        }
-      | null
-      | undefined,
-    scope: ExemplarLinkScope | null | undefined,
   ): string;
 
 }

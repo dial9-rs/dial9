@@ -5,6 +5,7 @@
 
 use crate::connection;
 pub use crate::instance_metadata::InstanceIdentity;
+use crate::segment_object_key::format_v1_segment_object_key;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
@@ -60,7 +61,7 @@ pub struct KeyContext {
 /// Trait for custom S3 object key generation.
 ///
 /// Implement this to control the S3 key layout. The default key layout is
-/// `{prefix}/{date}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin.gz`.
+/// `{prefix}/version=1/date={date}/service={service}/time={HHMM}/instance={instance}/boot={boot_id}/{epoch}-{index}.bin.gz`.
 pub trait S3KeyFn: Send + Sync {
     /// Generate the S3 object key for the given segment.
     fn object_key(&self, segment: &KeyContext) -> String;
@@ -81,15 +82,22 @@ where
 /// have sensible defaults:
 ///
 /// - `instance_path`: system hostname
-/// - `prefix`: none (keys start at the time bucket)
+/// - `prefix`: none (keys start at `version=1`)
 /// - `region`: auto-detected via `HeadBucket`
-/// - `key_fn`: built-in time-first layout
+/// - `key_fn`: built-in versioned layout
 ///
 /// # Default key layout
 ///
 /// ```text
-/// {prefix}/{YYYY-MM-DD}/{HHMM}/{service_name}/{instance_path}/{boot_id}/{epoch_secs}-{index}.bin.gz
+/// {prefix}/version=1/date={YYYY-MM-DD}/service={service_name}/time={HHMM}/instance={instance_path}/boot={boot_id}/{epoch_secs}-{index}.bin.gz
 /// ```
+///
+/// The consecutive `version/date/service/time` prefix is part of the default
+/// layout: the viewer uses it for efficient service and time
+/// discovery with S3 prefix listing.
+///
+/// Partition values use Hive path escaping, so `/` inside a service, instance,
+/// or boot id is stored as `%2F` instead of creating another path component.
 ///
 /// The `boot_id` segment disambiguates segment indices across process
 /// restarts — without it, a service that restarts will produce colliding
@@ -116,7 +124,7 @@ pub struct S3Config {
     /// namespace is in play.
     #[builder(skip = default_boot_id())]
     boot_id: String,
-    /// Optional key prefix. When `None`, keys start at the time bucket.
+    /// Optional key prefix. When `None`, keys start at `version=1`.
     prefix: Option<String>,
     /// Optional AWS region override. When `None`, uses the SDK default.
     region: Option<String>,
@@ -187,8 +195,8 @@ impl S3Config {
     /// Build the S3 object key for a sealed segment.
     ///
     /// If a custom `key_fn` is set, delegates to it. Otherwise uses the
-    /// default time-first layout:
-    /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{boot_id}/{epoch_secs}-{index}.bin.gz`
+    /// default versioned layout:
+    /// `{prefix}/version=1/date={date}/service={service}/time={HHMM}/instance={instance}/boot={boot_id}/{epoch_secs}-{index}.bin.gz`
     pub(crate) fn object_key(
         &self,
         segment: &SegmentRef,
@@ -207,7 +215,7 @@ impl S3Config {
             };
             return key_fn.object_key(&info);
         }
-        let date_hour = time_bucket_from_epoch(epoch_secs);
+        let (date, time) = time_bucket_from_epoch(epoch_secs);
         let ts = epoch_secs.to_string();
 
         let extension = if metadata
@@ -219,20 +227,16 @@ impl S3Config {
             ".bin"
         };
 
-        let suffix = format!(
-            "{}/{}/{}/{}/{}-{}{}",
-            date_hour,
-            self.service_name,
+        let filename = format!("{}-{}{}", ts, segment.index(), extension);
+        format_v1_segment_object_key(
+            self.prefix.as_deref(),
+            &date,
+            &self.service_name,
+            &time,
             self.instance_path.as_str(),
-            self.boot_id,
-            ts,
-            segment.index(),
-            extension,
-        );
-        match &self.prefix {
-            Some(p) => format!("{p}/{suffix}"),
-            None => suffix,
-        }
+            &self.boot_id,
+            &filename,
+        )
     }
 
     /// Key of the per-dump manifest object: `{prefix}/dumps/{dump_id}.json`.
@@ -312,17 +316,13 @@ fn valid_user_metadata_value(value: &str) -> bool {
     value.len() <= 256 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
-/// Convert epoch seconds to `YYYY-MM-DD/HHMM` string for S3 key bucketing.
-fn time_bucket_from_epoch(epoch_secs: u64) -> String {
+/// Convert epoch seconds to `(YYYY-MM-DD, HHMM)` for S3 key bucketing.
+fn time_bucket_from_epoch(epoch_secs: u64) -> (String, String) {
     let dt = time::OffsetDateTime::from_unix_timestamp(epoch_secs as i64)
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-    format!(
-        "{:04}-{:02}-{:02}/{:02}{:02}",
-        dt.year(),
-        dt.month() as u8,
-        dt.day(),
-        dt.hour(),
-        dt.minute()
+    (
+        format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()),
+        format!("{:02}{:02}", dt.hour(), dt.minute()),
     )
 }
 
@@ -961,7 +961,7 @@ mod tests {
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
         check!(
-            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-3.bin.gz"
+            key == "traces/version=1/date=2025-03-05/service=checkout-api/time=2110/instance=us-east-1%2Fi-0abc123/boot=test-boot-id/1741209000-3.bin.gz"
         );
     }
 
@@ -979,7 +979,7 @@ mod tests {
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
         check!(
-            key == "2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-0.bin.gz"
+            key == "version=1/date=2025-03-05/service=checkout-api/time=2110/instance=us-east-1%2Fi-0abc123/boot=test-boot-id/1741209000-0.bin.gz"
         );
     }
 
@@ -990,7 +990,27 @@ mod tests {
         let metadata = HashMap::from([("epoch_secs".into(), "1741209000".into())]);
         let key = config.object_key(&segment, &metadata);
         check!(
-            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-0.bin"
+            key == "traces/version=1/date=2025-03-05/service=checkout-api/time=2110/instance=us-east-1%2Fi-0abc123/boot=test-boot-id/1741209000-0.bin"
+        );
+    }
+
+    #[test]
+    fn object_key_hive_escapes_partition_values() {
+        let config = with_boot_id(
+            S3Config::builder()
+                .bucket("my-traces")
+                .prefix("company/date=archive/%25")
+                .service_name("payments/api")
+                .instance_path("cluster/worker=blue%1")
+                .build(),
+            "boot/id",
+        );
+        let key = config.object_key(
+            &make_segment("/tmp/trace.0.bin", 0),
+            &make_metadata(1741209000),
+        );
+        check!(
+            key == "company/date=archive/%25/version=1/date=2025-03-05/service=payments%2Fapi/time=2110/instance=cluster%2Fworker%3Dblue%251/boot=boot%2Fid/1741209000-0.bin.gz"
         );
     }
 
@@ -1073,8 +1093,8 @@ mod tests {
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
-        // No prefix → date-hour is first component
-        check!(key.starts_with("2025-03-05/"));
+        // No prefix → the version anchor is the first component.
+        check!(key.starts_with("version=1/date=2025-03-05/"));
     }
 
     // --- S3 integration tests via s3s-fs ---
@@ -1107,7 +1127,7 @@ mod tests {
             .unwrap();
 
         check!(
-            key == "traces/2025-03-05/2110/checkout-api/us-east-1/i-0abc123/test-boot-id/1741209000-0.bin.gz"
+            key == "traces/version=1/date=2025-03-05/service=checkout-api/time=2110/instance=us-east-1%2Fi-0abc123/boot=test-boot-id/1741209000-0.bin.gz"
         );
 
         // Local file should be deleted
@@ -1347,8 +1367,8 @@ mod tests {
         // No epoch_secs in metadata — falls back to 0
         let metadata = HashMap::new();
         let key = config.object_key(&segment, &metadata);
-        // epoch 0 → 1970-01-01/0000 — this is a silent misconfiguration
-        check!(key.contains("1970-01-01/0000"));
+        // Epoch 0 is a silent misconfiguration, but still uses the v1 layout.
+        check!(key.contains("date=1970-01-01/service=checkout-api/time=0000"));
     }
 
     #[test]
@@ -1357,7 +1377,7 @@ mod tests {
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = HashMap::from([("epoch_secs".into(), "not-a-number".into())]);
         let key = config.object_key(&segment, &metadata);
-        check!(key.contains("1970-01-01/0000"));
+        check!(key.contains("date=1970-01-01/service=checkout-api/time=0000"));
     }
 }
 

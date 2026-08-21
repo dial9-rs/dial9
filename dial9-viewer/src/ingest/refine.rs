@@ -24,6 +24,7 @@ use futures::stream::{Stream, StreamExt};
 use tokio::task::JoinSet;
 
 use crate::ingest::aggregate::{self, AggContext, FoldLimits, Scope};
+use crate::source_layout::{self, DayLayout, LayoutSet, Version1Services};
 use crate::storage::ObjectInfo;
 
 /// Floor on the [sampling cap](sampling_cap): a scope always folds at least this
@@ -294,7 +295,7 @@ pub(crate) async fn resolve(agg: &AggContext, scope: &Scope, opts: RefineOpts) -
     // 1. Matched set: list source objects scoped to the time range. When we have
     //    a time range, generate date/hour prefixes to avoid listing the entire
     //    bucket (which can be 100k+ objects).
-    let listing_prefixes = time_scoped_prefixes(&agg.source_prefixes, scope);
+    let listing_prefixes = time_scoped_prefixes(agg, scope).await;
     tracing::info!(
         listing_prefix_count = listing_prefixes.len(),
         sample_listing_prefixes = ?listing_prefixes.iter().take(5).collect::<Vec<_>>(),
@@ -478,32 +479,96 @@ fn sampling_cap(files_matched: usize, max_files_override: Option<usize>) -> usiz
     target.max(BASELINE_FILES).min(files_matched)
 }
 
-/// Generate time-scoped listing prefixes from the scope's time range.
-///
-/// Key layout: `{base_prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{host}/…`, where
-/// `HHMM` is the segment's actual start time **down to the minute** (e.g.
-/// `1940`), not rounded to the hour — the producer creates a fresh directory
-/// every minute (`1930/`, `1931/`, …, `1939/`).
-///
-/// When the query window is narrow (≤ 2 hours), we emit **per-minute** prefixes
-/// (e.g. `2026-06-22/1303`) padded by 2 minutes on each side. A service-scoped
-/// query always uses exact minute prefixes ending in `/{service}/`, regardless
-/// of window width, because the service component follows the full `HHMM`
-/// component in the key. This excludes sibling services at S3 LIST time.
-///
-/// Wider all-service windows (> 2 hours) use **per-hour** prefixes (e.g.
-/// `2026-06-22/13`) padded by 1 hour. Both paths are capped at 72 hours.
-///
-/// Host pruning remains in-memory in `scope_matches`.
-///
-/// Falls back to the raw `source_prefixes` when no time range is given.
-fn time_scoped_prefixes(source_prefixes: &[String], scope: &Scope) -> Vec<String> {
-    let (Some(start_ns), Some(end_ns)) = (scope.start_ns, scope.end_ns) else {
-        return source_prefixes.to_vec();
+#[derive(Clone, Copy)]
+enum TimeGranularity {
+    Hour,
+    Minute,
+}
+
+struct ListingWindow {
+    start: i64,
+    end: i64,
+    granularity: TimeGranularity,
+}
+
+/// Resolve the source layouts for an aggregation scope, then build the same
+/// bounded historical/v1 listing strategy used by the Browser.
+async fn time_scoped_prefixes(agg: &AggContext, scope: &Scope) -> Vec<String> {
+    let Some(window) = listing_window(scope) else {
+        return agg.source_prefixes.clone();
     };
 
-    let start_secs = start_ns / 1_000_000_000;
-    let end_secs = end_ns / 1_000_000_000;
+    let mut prefixes = Vec::new();
+    for base in &agg.source_prefixes {
+        match scope.service.as_deref() {
+            Some(service) => {
+                let days = match source_layout::resolve_service_layouts(
+                    &*agg.source,
+                    &agg.source_bucket,
+                    base,
+                    window.start,
+                    window.end,
+                    service,
+                    None,
+                )
+                .await
+                {
+                    Ok(resolved) => resolved.days,
+                    Err(error) => {
+                        tracing::warn!(%error, %service, %base, "failed to discover source layout; falling back to historical keys");
+                        match source_layout::day_layouts(
+                            window.start,
+                            window.end,
+                            LayoutSet::Historical,
+                        ) {
+                            Ok(days) => days,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to build historical source-key days");
+                                Vec::new()
+                            }
+                        }
+                    }
+                };
+                append_service_prefixes(base, service, &window, &days, &mut prefixes);
+            }
+            None => {
+                let version1 = match source_layout::discover_version1_services(
+                    &*agg.source,
+                    &agg.source_bucket,
+                    base,
+                    window.start,
+                    window.end,
+                )
+                .await
+                {
+                    Ok(discovery) => discovery,
+                    Err(error) => {
+                        tracing::warn!(%error, %base, "failed to discover versioned source layouts; falling back to historical keys");
+                        Version1Services::default()
+                    }
+                };
+                let days =
+                    match source_layout::day_layouts(window.start, window.end, LayoutSet::Both) {
+                        Ok(days) => days,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to build source-key days");
+                            Vec::new()
+                        }
+                    };
+                append_unscoped_prefixes(base, &window, &days, &version1, &mut prefixes);
+            }
+        }
+    }
+    prefixes
+}
+
+fn listing_window(scope: &Scope) -> Option<ListingWindow> {
+    let (Some(start_ns), Some(end_ns)) = (scope.start_ns, scope.end_ns) else {
+        return None;
+    };
+
+    let start_secs = start_ns.div_euclid(1_000_000_000);
+    let end_secs = end_ns.div_euclid(1_000_000_000);
     let span_secs = end_secs - start_secs;
 
     // Narrow window (≤ 2 hours): use minute-level prefixes with 2-minute padding.
@@ -512,52 +577,114 @@ fn time_scoped_prefixes(source_prefixes: &[String], scope: &Scope) -> Vec<String
     const MINUTE_PAD_SECS: i64 = 2 * 60;
     const MAX_WINDOW_SECS: i64 = 72 * 3600;
 
-    if scope.service.is_some() || span_secs <= MINUTE_THRESHOLD_SECS {
-        let padded_start = (start_secs - MINUTE_PAD_SECS) / 60 * 60;
-        let padded_end =
-            ((end_secs + MINUTE_PAD_SECS) / 60 * 60).min(padded_start + MAX_WINDOW_SECS);
-
-        let mut prefixes = Vec::new();
-        for base in source_prefixes {
-            let base_slash = if base.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", base.trim_end_matches('/'))
-            };
-            let mut t = padded_start;
-            while t <= padded_end {
-                let (date, hhmm) = epoch_to_date_hour(t);
-                let minute_prefix = format!("{base_slash}{date}/{hhmm}");
-                prefixes.push(match scope.service.as_deref() {
-                    Some(service) => format!("{minute_prefix}/{service}/"),
-                    None => minute_prefix,
-                });
-                t += 60;
-            }
-        }
-        prefixes
+    if span_secs <= MINUTE_THRESHOLD_SECS {
+        let padded_start = start_secs.saturating_sub(MINUTE_PAD_SECS).div_euclid(60) * 60;
+        let padded_end = end_secs
+            .saturating_add(MINUTE_PAD_SECS)
+            .div_euclid(60)
+            .saturating_mul(60)
+            .min(padded_start.saturating_add(MAX_WINDOW_SECS));
+        Some(ListingWindow {
+            start: padded_start,
+            end: padded_end,
+            granularity: TimeGranularity::Minute,
+        })
     } else {
-        // Wide window: hour-level prefixes with 1-hour padding.
-        let start_hour = (start_secs / 3600 - 1) * 3600;
-        let end_hour = (end_secs / 3600 + 1) * 3600;
-        let end_hour = end_hour.min(start_hour + MAX_WINDOW_SECS);
+        let start_hour = start_secs
+            .div_euclid(3600)
+            .saturating_sub(1)
+            .saturating_mul(3600);
+        let end_hour = end_secs
+            .div_euclid(3600)
+            .saturating_add(1)
+            .saturating_mul(3600)
+            .min(start_hour.saturating_add(MAX_WINDOW_SECS));
+        Some(ListingWindow {
+            start: start_hour,
+            end: end_hour,
+            granularity: TimeGranularity::Hour,
+        })
+    }
+}
 
-        let mut prefixes = Vec::new();
-        for base in source_prefixes {
-            let base_slash = if base.is_empty() {
-                String::new()
-            } else {
-                format!("{}/", base.trim_end_matches('/'))
-            };
-            let mut t = start_hour;
-            while t <= end_hour {
-                let (date, hhmm) = epoch_to_date_hour(t);
-                let hh = &hhmm[..2];
-                prefixes.push(format!("{base_slash}{date}/{hh}"));
-                t += 3600;
-            }
+fn append_service_prefixes(
+    base: &str,
+    service: &str,
+    window: &ListingWindow,
+    days: &[DayLayout],
+    output: &mut Vec<String>,
+) {
+    let encoded_service = crate::segment_object_key_codec::hive_escape(service);
+    for day in days {
+        if day.layout.historical() {
+            append_buckets(day.from, day.to, TimeGranularity::Minute, |date, time| {
+                output.push(join_prefix(base, &format!("{date}/{time}/{service}/")));
+            });
         }
-        prefixes
+        if day.layout.version1() {
+            append_buckets(day.from, day.to, window.granularity, |date, time| {
+                output.push(join_prefix(
+                    base,
+                    &format!("version=1/date={date}/service={encoded_service}/time={time}"),
+                ));
+            });
+        }
+    }
+}
+
+fn append_unscoped_prefixes(
+    base: &str,
+    window: &ListingWindow,
+    days: &[DayLayout],
+    version1: &Version1Services,
+    output: &mut Vec<String>,
+) {
+    for day in days {
+        append_buckets(day.from, day.to, window.granularity, |date, time| {
+            output.push(join_prefix(base, &format!("{date}/{time}")));
+        });
+        for service in version1.services_on(&day.date) {
+            let encoded_service = crate::segment_object_key_codec::hive_escape(service);
+            append_buckets(day.from, day.to, window.granularity, |date, time| {
+                output.push(join_prefix(
+                    base,
+                    &format!("version=1/date={date}/service={encoded_service}/time={time}"),
+                ));
+            });
+        }
+    }
+}
+
+fn append_buckets(
+    from: i64,
+    to: i64,
+    granularity: TimeGranularity,
+    mut append: impl FnMut(&str, &str),
+) {
+    let step = match granularity {
+        TimeGranularity::Hour => 3600,
+        TimeGranularity::Minute => 60,
+    };
+    let mut timestamp = from - from.rem_euclid(step);
+    while timestamp <= to {
+        let (date, hhmm) = epoch_to_date_hour(timestamp);
+        let time = match granularity {
+            TimeGranularity::Hour => &hhmm[..2],
+            TimeGranularity::Minute => hhmm.as_str(),
+        };
+        append(&date, time);
+        let Some(next) = timestamp.checked_add(step) else {
+            break;
+        };
+        timestamp = next;
+    }
+}
+
+fn join_prefix(base: &str, tail: &str) -> String {
+    if base.is_empty() {
+        tail.to_string()
+    } else {
+        format!("{}/{tail}", base.trim_end_matches('/'))
     }
 }
 
@@ -691,8 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn time_scoped_prefixes_narrow_uses_minutes() {
-        // 1-hour window (≤ 2h threshold) → minute-level prefixes with 2-min pad.
+    fn narrow_listing_window_uses_minutes_and_padding() {
         let start_ns = 1781874000i64 * 1_000_000_000; // 2026-06-19 13:00 UTC
         let end_ns = 1781877600i64 * 1_000_000_000; // 2026-06-19 14:00 UTC
         let scope = Scope {
@@ -701,143 +827,91 @@ mod tests {
             service: None,
             hosts: vec![],
         };
-        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
-        // Minute-level: should contain exact minute prefixes
-        assert!(prefixes.contains(&"traces/2026-06-19/1258".to_string())); // 2 min before
-        assert!(prefixes.contains(&"traces/2026-06-19/1300".to_string()));
-        assert!(prefixes.contains(&"traces/2026-06-19/1359".to_string()));
-        assert!(prefixes.contains(&"traces/2026-06-19/1402".to_string())); // 2 min after
-        // Should NOT contain bare hour prefixes
-        assert!(!prefixes.iter().any(|p| p == "traces/2026-06-19/13"));
+        let window = listing_window(&scope).unwrap();
+        assert!(matches!(window.granularity, TimeGranularity::Minute));
+        assert_eq!(window.start, 1781873880); // 12:58
+        assert_eq!(window.end, 1781877720); // 14:02
     }
 
     #[test]
-    fn time_scoped_prefixes_wide_uses_hours() {
-        // 3-hour window (> 2h threshold) → hour-level prefixes with 1-hr pad.
-        let start_ns = 1781874000i64 * 1_000_000_000; // 2026-06-19 13:00 UTC
-        let end_ns = 1781884800i64 * 1_000_000_000; // 2026-06-19 16:00 UTC (3 hours later)
-        let scope = Scope {
-            start_ns: Some(start_ns),
-            end_ns: Some(end_ns),
-            service: None,
-            hosts: vec![],
+    fn service_prefixes_follow_the_migration_boundary() {
+        let first = 1_787_270_400; // 2026-08-21T00:00:00Z
+        let days = vec![
+            DayLayout {
+                date: "2026-08-21".to_string(),
+                from: first,
+                to: first + 3599,
+                layout: LayoutSet::Historical,
+            },
+            DayLayout {
+                date: "2026-08-22".to_string(),
+                from: first + 86_400,
+                to: first + 86_400 + 3599,
+                layout: LayoutSet::Both,
+            },
+            DayLayout {
+                date: "2026-08-23".to_string(),
+                from: first + 2 * 86_400,
+                to: first + 2 * 86_400 + 3599,
+                layout: LayoutSet::Version1,
+            },
+        ];
+        let window = ListingWindow {
+            start: first,
+            end: first + 2 * 86_400 + 3599,
+            granularity: TimeGranularity::Hour,
         };
-        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
-        assert!(prefixes.contains(&"traces/2026-06-19/12".to_string()));
-        assert!(prefixes.contains(&"traces/2026-06-19/13".to_string()));
-        assert!(prefixes.contains(&"traces/2026-06-19/16".to_string()));
-        assert!(prefixes.contains(&"traces/2026-06-19/17".to_string()));
-    }
+        let mut prefixes = Vec::new();
+        append_service_prefixes("traces", "payments/api", &window, &days, &mut prefixes);
 
-    #[test]
-    fn time_scoped_service_prefixes_include_service_for_narrow_window() {
-        let start_ns = 1781874000i64 * 1_000_000_000;
-        let end_ns = (1781874000i64 + 60) * 1_000_000_000;
-        let scope = Scope {
-            start_ns: Some(start_ns),
-            end_ns: Some(end_ns),
-            service: Some("shale".to_string()),
-            hosts: vec![],
-        };
-        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
-
+        assert!(prefixes.contains(&"traces/2026-08-21/0000/payments/api/".to_string()));
         assert!(
-            prefixes.iter().all(|prefix| prefix.ends_with("/shale/")),
-            "service-scoped LIST prefixes must exclude sibling services: {prefixes:?}"
+            !prefixes
+                .iter()
+                .any(|prefix| prefix.contains("date=2026-08-21"))
         );
-        assert!(prefixes.contains(&"traces/2026-06-19/1300/shale/".to_string()));
-    }
-
-    #[test]
-    fn time_scoped_service_prefixes_include_service_for_wide_window() {
-        let start_ns = 1781874000i64 * 1_000_000_000;
-        let end_ns = 1781884800i64 * 1_000_000_000;
-        let scope = Scope {
-            start_ns: Some(start_ns),
-            end_ns: Some(end_ns),
-            service: Some("shale".to_string()),
-            hosts: vec![],
-        };
-        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
-
+        assert!(prefixes.contains(&"traces/2026-08-22/0000/payments/api/".to_string()));
+        assert!(prefixes.contains(
+            &"traces/version=1/date=2026-08-22/service=payments%2Fapi/time=00".to_string()
+        ));
+        assert!(prefixes.contains(
+            &"traces/version=1/date=2026-08-23/service=payments%2Fapi/time=00".to_string()
+        ));
         assert!(
-            prefixes.iter().all(|prefix| prefix.ends_with("/shale/")),
-            "wide service scopes must not fall back to all-service hour prefixes: {prefixes:?}"
-        );
-        assert!(prefixes.contains(&"traces/2026-06-19/1300/shale/".to_string()));
-        assert!(prefixes.contains(&"traces/2026-06-19/1600/shale/".to_string()));
-    }
-
-    #[test]
-    fn time_scoped_prefixes_empty_base() {
-        let start_ns = 1781874000i64 * 1_000_000_000; // 2026-06-19 13:00 UTC
-        let end_ns = 1781877600i64 * 1_000_000_000; // 2026-06-19 14:00 UTC
-        let scope = Scope {
-            start_ns: Some(start_ns),
-            end_ns: Some(end_ns),
-            service: None,
-            hosts: vec![],
-        };
-        let prefixes = time_scoped_prefixes(&["".to_string()], &scope);
-        assert!(prefixes.contains(&"2026-06-19/1300".to_string()));
-    }
-
-    #[test]
-    fn time_scoped_prefix_matches_per_minute_dir() {
-        // A query for 13:00–14:00 must list a segment that landed in
-        // the `1340/` per-minute directory.
-        let start_ns = 1781874000i64 * 1_000_000_000; // 2026-06-19 13:00 UTC
-        let end_ns = 1781877600i64 * 1_000_000_000; // 2026-06-19 14:00 UTC
-        let scope = Scope {
-            start_ns: Some(start_ns),
-            end_ns: Some(end_ns),
-            service: None,
-            hosts: vec![],
-        };
-        let prefixes = time_scoped_prefixes(&["".to_string()], &scope);
-        let real_key = "2026-06-19/1340/shale/host-a/boot-1/1781876400-0.bin.gz";
-        assert!(
-            prefixes.iter().any(|p| real_key.starts_with(p.as_str())),
-            "no generated prefix is a prefix of {real_key}; prefixes = {prefixes:?}"
+            !prefixes
+                .iter()
+                .any(|prefix| prefix.starts_with("traces/2026-08-23/"))
         );
     }
 
     #[test]
-    fn time_scoped_single_segment_narrow() {
-        // A single 60-second segment selection should produce ~5 minute prefixes
-        // (the minute itself + 2 minutes padding on each side), not 3 full hours.
-        let start_ns = 1782219780i64 * 1_000_000_000; // the bug scenario
-        let end_ns = (1782219780i64 + 60) * 1_000_000_000;
-        let scope = Scope {
-            start_ns: Some(start_ns),
-            end_ns: Some(end_ns),
-            service: None,
-            hosts: vec![],
+    fn unscoped_prefixes_include_discovered_v1_services() {
+        let window = ListingWindow {
+            start: 1_781_032_200,
+            end: 1_781_032_260,
+            granularity: TimeGranularity::Minute,
         };
-        let prefixes = time_scoped_prefixes(&["".to_string()], &scope);
-        // Should be a small number of minute-level prefixes, not hundreds
+        let days = source_layout::day_layouts(window.start, window.end, LayoutSet::Both).unwrap();
+        let version1 = Version1Services::default().with_service_on("payments/api", "2026-06-09");
+        let mut prefixes = Vec::new();
+        append_unscoped_prefixes("", &window, &days, &version1, &mut prefixes);
+        assert!(prefixes.contains(&"2026-06-09/1910".to_string()));
         assert!(
-            prefixes.len() <= 7,
-            "expected ≤7 prefixes for 60s window, got {}",
-            prefixes.len()
+            prefixes.contains(
+                &"version=1/date=2026-06-09/service=payments%2Fapi/time=1910".to_string()
+            )
         );
-        // Must match the actual file path from the bug report
-        let real_key = "2026-06-23/1303/shale/ip-10-2-123-116.us-west-2.compute.internal/kxgw-1/1782219780-18603.bin.gz";
-        assert!(
-            prefixes.iter().any(|p| real_key.starts_with(p.as_str())),
-            "no prefix matches {real_key}; prefixes = {prefixes:?}"
-        );
+        assert!(prefixes.iter().all(|prefix| !prefix.starts_with('/')));
     }
 
     #[test]
-    fn time_scoped_no_time_range() {
+    fn scope_without_time_has_no_listing_window() {
         let scope = Scope {
             start_ns: None,
             end_ns: None,
             service: None,
             hosts: vec![],
         };
-        let prefixes = time_scoped_prefixes(&["traces".to_string()], &scope);
-        assert_eq!(prefixes, vec!["traces".to_string()]);
+        assert!(listing_window(&scope).is_none());
     }
 }

@@ -9,7 +9,8 @@ resolved (raise it) or you're inventing language the project doesn't use
 
 **Source file**:
 One immutable raw trace segment in S3
-(`…/{date}/{HHMM}/{service}/{host}/{boot}/{ts}-{i}.bin.gz`). The atomic
+(`…/version=1/date={date}/service={service}/time={HHMM}/instance={host}/boot={boot}/{ts}-{i}.bin.gz`).
+Partition values use Hive path escaping. The atomic
 unit of incremental aggregation work: ordered, fetched, decoded, and
 folded into the `samples` table one at a time. Identified by its
 `source_key`.
@@ -117,15 +118,18 @@ A query's selection: a time range (minute precision), a service, and a
 **host set** (the heatmap box can span many hosts → `host=` is repeatable;
 empty = all hosts, each entry an exact match). Translated to the
 [[matched-set]] in two stages: (1) an S3 prefix prune over the
-`{date}/{HHMM}/` rotation buckets the window spans, widened by one bucket
-each side; when a service is selected, its exact path segment is appended
-(`{date}/{HHMM}/{service}/`) so sibling services are excluded by S3; (2) an
+`version=1/date={date}/service={service}/time={HHMM}/` buckets the window
+spans, widened by one bucket each side; historical keys use their positional
+date/time prefixes; (2) an
 in-memory interval-overlap filter on each file's filename `epoch` (padded by
 the known raw-trace segment duration), plus exact service/host-set checks.
 Host remains an in-memory filter because a scope may contain a host set. The
 S3 browser's 🔥 button builds a scope from the heatmap selection's hosts +
 `[t0,t1]` and drives the [[refinement-loop]] when the server advertises
 `aggregation_enabled` via `/api/config`.
+
+The viewer also lists the historical positional layout; the uploader writes
+only the versioned Hive-style form.
 _Avoid_: query (use "scope" for the selection, "query" for the request).
 
 ## Worker attribution

@@ -45,48 +45,56 @@
 
   // Parse an S3 trace key into its {service, host, bootId, epoch, segIndex}.
   // Mirrors the key layouts the browser understands:
+  //   {prefix}/version=1/date={YYYY-MM-DD}/service={service}/time={HHMM}/instance={instance}/boot={boot_id}/{epoch}-{i}.bin[.gz]
   //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{i}.bin[.gz]
   //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{epoch}-{i}.bin[.gz]   (legacy)
-  // Find the date-shaped segment and count components after it to disambiguate;
-  // fall back to best-effort positional parsing for custom layouts.
+  // The versioned layout is fixed and historical layouts stay positional.
   function parseKey(key) {
     const parts = key.split("/");
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-    let dateIdx = -1;
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (dateRe.test(parts[i])) {
-        dateIdx = i;
-        break;
-      }
-    }
+    const timeRe = /^\d{4}$/;
     const file = parts[parts.length - 1];
-    const match = file.match(/^(\d+)-(\d+)\.bin/);
+    const match = file.match(/^(\d+)-(\d+)\.bin(?:\.gz)?$/);
     let epoch = 0;
     let segIndex = "";
     if (match) {
       epoch = parseInt(match[1], 10);
       segIndex = match[2];
     }
-    if (dateIdx >= 0) {
-      const below = parts.length - 1 - dateIdx;
-      if (below === 5) {
+    const version1 = version1Layout(parts);
+    if (version1) {
+      if (
+        typeof version1.date === "string" &&
+        dateRe.test(version1.date) &&
+        typeof version1.service === "string" &&
+        typeof version1.time === "string" &&
+        timeRe.test(version1.time) &&
+        typeof version1.instance === "string" &&
+        typeof version1.boot === "string"
+      ) {
         return {
-          service: parts[dateIdx + 2],
-          host: parts[dateIdx + 3],
-          bootId: parts[dateIdx + 4],
+          service: version1.service,
+          host: version1.instance,
+          bootId: version1.boot,
           epoch,
           segIndex,
         };
       }
-      if (below === 4) {
-        return {
-          service: parts[dateIdx + 2],
-          host: parts[dateIdx + 3],
-          bootId: "",
-          epoch,
-          segIndex,
-        };
-      }
+      return { service: "", host: key, bootId: "", epoch, segIndex };
+    }
+    const historical = historicalLayout(parts, dateRe, timeRe);
+    if (historical) {
+      const { start, hasBoot } = historical;
+      return {
+        service: parts[start + 2],
+        host: parts[start + 3],
+        bootId: hasBoot ? parts[start + 4] : "",
+        epoch,
+        segIndex,
+      };
+    }
+    if (parts.some((part) => dateRe.test(part) || part === "version=1")) {
+      return { service: "", host: key, bootId: "", epoch, segIndex };
     }
     if (parts.length >= 5) {
       return {
@@ -100,15 +108,58 @@
     return { service: "", host: key, bootId: "", epoch: 0, segIndex: "" };
   }
 
-  // The key prefix: everything before the date-shaped segment (e.g. `traces`).
-  // Empty string when the date is at the root.
+  // The key prefix: everything before the recognized layout root (e.g. `traces`).
+  // Empty string when the layout starts at the object-key root.
   function extractPrefix(key) {
     const parts = key.split("/");
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-    for (let i = 0; i < parts.length; i++) {
-      if (dateRe.test(parts[i])) return parts.slice(0, i).join("/");
-    }
+    const timeRe = /^\d{4}$/;
+    const version1 = version1Layout(parts);
+    if (version1) return parts.slice(0, version1.start).join("/");
+    const historical = historicalLayout(parts, dateRe, timeRe);
+    if (historical) return parts.slice(0, historical.start).join("/");
     return "";
+  }
+
+  function historicalLayout(parts, dateRe, timeRe) {
+    for (const hasBoot of [true, false]) {
+      const width = hasBoot ? 6 : 5;
+      if (parts.length < width) continue;
+      const start = parts.length - width;
+      if (dateRe.test(parts[start]) && timeRe.test(parts[start + 1])) {
+        return { start, hasBoot };
+      }
+    }
+    return null;
+  }
+
+  function version1Layout(parts) {
+    if (parts.length < 7) return null;
+    const start = parts.length - 7;
+    if (parts[start] !== "version=1") return null;
+    return {
+      start,
+      date: decodePartition(parts[start + 1], "date"),
+      service: decodePartition(parts[start + 2], "service"),
+      time: decodePartition(parts[start + 3], "time"),
+      instance: decodePartition(parts[start + 4], "instance"),
+      boot: decodePartition(parts[start + 5], "boot"),
+    };
+  }
+
+  function decodePartition(segment, name) {
+    const prefix = name + "=";
+    return segment.startsWith(prefix)
+      ? decodePartitionValue(segment.slice(prefix.length))
+      : null;
+  }
+
+  function decodePartitionValue(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
+      return null;
+    }
   }
 
   // One viewer `trace=` component per key, each pointing at /api/object (which

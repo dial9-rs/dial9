@@ -11,7 +11,6 @@ import {
   durationAtPercentile,
   exemplarAttrValue,
   exemplarRequestMatches,
-  exemplarViewerUrl,
   exemplarsInBand,
   flamegraphUrl,
   fmtNs,
@@ -403,55 +402,4 @@ describe("visualization deep links", () => {
     expect(blocked.searchParams.get("source")).toBe("sched");
   });
 
-  it("builds a focused object link and splits fully-qualified S3 keys", () => {
-    const link = exemplarViewerUrl(
-      {
-        host: "host-9",
-        start_ns: 1_000,
-        end_ns: 2_000,
-        source_key: "s3://actual-bucket/traces/segment.bin.gz",
-      },
-      {
-        bucket: "scope-bucket",
-        region: "us-west-2",
-        credentialMode: "role",
-        roleArn: "arn:aws:iam::123:role/Dial9",
-        service: "svc",
-        spanName: "request",
-      },
-    );
-    const params = new URL(link, "https://viewer.test").searchParams;
-    const trace = new URL(params.get("trace")!, "https://viewer.test");
-    expect(trace.pathname).toBe("/api/object");
-    expect(trace.searchParams.get("bucket")).toBe("actual-bucket");
-    expect(trace.searchParams.get("key")).toBe("traces/segment.bin.gz");
-    expect(params.get("focus_start")).toBe("1000");
-    expect(params.get("focus_end")).toBe("2000");
-    expect(params.get("focus_span_name")).toBe("request");
-    expect(pickParams(
-      params,
-      ["svc", "host", "aws_region", "credential_mode", "aws_role_arn"],
-    )).toEqual({
-      svc: "svc",
-      host: "host-9",
-      aws_region: "us-west-2",
-      credential_mode: "role",
-      aws_role_arn: "arn:aws:iam::123:role/Dial9",
-    });
-    expect(params.has("start")).toBe(false);
-    expect(params.has("end")).toBe(false);
-  });
-
-  it("reuses a raw trace and refuses an exemplar with no source", () => {
-    const raw = new URL(
-      exemplarViewerUrl(
-        { start_ns: 10, end_ns: 20 },
-        { trace: "demo-trace.bin", spanName: "RecordMetric" },
-      ),
-      "https://viewer.test",
-    );
-    expect(raw.searchParams.get("trace")).toBe("demo-trace.bin");
-    expect(raw.searchParams.get("focus_span_name")).toBe("RecordMetric");
-    expect(exemplarViewerUrl({ start_ns: 1 }, { bucket: "b" })).toBe("");
-  });
 });

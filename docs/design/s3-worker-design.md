@@ -21,8 +21,8 @@ Application Process              Worker Thread (dedicated tokio current_thread r
 └─────────────────┘             └──────────────────────────────────┘
                                            │
                                            ▼
-                        S3: {bucket}/{prefix}/{date-time}/
-                            {service}/{instance}/
+                        S3: {bucket}/{prefix}/version=1/date={date}/
+                            service={service}/time={HHMM}/instance={instance}/boot={boot_id}/
                             {epoch_secs}-{index}.bin.gz
 
 * SymbolizeProcessor is included when cpu-profiling is enabled.
@@ -47,32 +47,39 @@ Sealed:   trace.3.bin          (atomic rename)
 
 **Why not inotify/fswatch?** Adds complexity and platform-specific code. Polling every 1s is simple and sufficient.
 
-### 2. Time-first S3 key layout
+### 2. Versioned S3 key layout
 
-**Problem:** The primary access pattern is incident correlation — "what was happening across all services at time T?" This means time should be the first index in the key hierarchy.
+**Problem:** The browser must discover services in a time range and then list a
+selected service efficiently, without relying on positional values that may
+contain `/`.
 
-**Decision:** Time (1-minute bucket) is the first component after the optional prefix:
+**Decision:** Use a version anchor followed by ordered named partitions:
 
 ```
-{prefix}/{date-time}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
+{prefix}/version=1/date={YYYY-MM-DD}/service={service}/time={HHMM}/instance={instance}/boot={boot_id}/{epoch_secs}-{index}.bin.gz
 ```
 
-Example: `traces/2026-03-07/2030/checkout-api/us-east-1/i-0abc123/1741384542-3.bin.gz`
+Example: `traces/version=1/date=2026-03-07/service=payments%2Fapi/time=2030/instance=cluster%2Fworker-7/boot=abcd-42/1741384542-3.bin.gz`
 
-**Why time-first instead of service-first?**
+Values in named partitions use Hive path escaping, so `/`, `%`, and `=` become
+`%2F`, `%25`, and `%3D`. The optional prefix is opaque and keeps its literal
+path structure.
 
-| Layout | Incident query ("what happened at 8:30pm?") | Single-service query |
-|--------|------------------------------------------|---------------------|
-| `{time}/{service}/...` | `ListObjects(prefix=traces/2026-03-07/2030/)` — one call, all services | `ListObjects(prefix=traces/2026-03-07/2030/checkout-api/)` — still one call |
-| `{service}/{time}/...` | N calls, one per service — must know all service names upfront | `ListObjects(prefix=traces/checkout-api/2026-03-07/2030/)` — one call |
+The order supports the browser's two listing steps:
 
-Time-first is strictly better for incident correlation and no worse for single-service queries. The only case where service-first wins is "list all time ranges for one service" — but that's a rare access pattern compared to "what happened during this incident."
+- `ListObjectsV2` with delimiter `/` at
+  `.../version=1/date=2026-03-07/` discovers services for that day.
+- `ListObjectsV2` at
+  `.../version=1/date=2026-03-07/service=payments%2Fapi/time=20`
+  lists that service's selected time range.
 
 **Benefits:**
-- Time-range queries across all services with a single `ListObjectsV2` prefix
+- `version=1` identifies the schema without inspecting the opaque prefix
+- Service discovery takes one delimiter listing per day
+- Service-scoped time ranges can use minute or hour prefixes
 - Natural Athena partitioning if we add Parquet output later
 - Efficient S3 lifecycle policies (delete everything older than N days)
-- 1-minute bucketing gives 1440 prefixes per day — manageable for listing and lifecycle policies
+- Hive escaping keeps partition values unambiguous
 
 **Tradeoff:** Requires reasonable clock sync, but we already need that for trace timestamps.
 
@@ -191,40 +198,34 @@ Falls back to `us-east-1` if detection fails entirely.
 **Solution:** `S3Config` accepts an optional `key_fn` implementing the `S3KeyFn` trait:
 
 ```rust
+use dial9::s3::KeyContext;
+
 pub trait S3KeyFn: Send + Sync {
-    fn object_key(&self, segment: &SealedSegment, metadata: &HashMap<String, String>) -> String;
+    fn object_key(&self, segment: &KeyContext) -> String;
 }
 ```
 
-When set, it completely overrides the default time-first key layout. Closures implement `S3KeyFn` automatically.
+When set, it completely overrides the default versioned key layout. Closures implement `S3KeyFn` automatically.
 
 ## API
 
 ```rust
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
-use dial9_tokio_telemetry::background_task::s3::S3Config;
-
-let trace_path = "/tmp/traces/trace.bin";
-let writer = RotatingWriter::new(trace_path, 1_MB, 5_MB)?;
+use dial9::s3::S3Config;
 
 let s3_config = S3Config::builder()
     .bucket("my-traces")
     .prefix("prod")
     .service_name("checkout-api")
-    .instance_path("us-east-1/i-0abc123")
-    .boot_id("unique-boot-id")
+    .instance_path("cluster/worker-7")
     .build();
-
-let (runtime, guard) = TracedRuntime::builder()
-    .with_task_tracking(true)
-    .with_s3_uploader(s3_config)
-    .build_and_start(builder, writer)?;
-
-// Graceful shutdown: flush, seal, wait for worker to drain
-guard.graceful_shutdown(Duration::from_secs(30)).await?;
 ```
 
-The builder auto-constructs the worker pipeline from the configured options. When `cpu-profiling` is enabled, the `SymbolizeProcessor` is added automatically. When `worker-s3` is configured, the `GzipCompressor` and `S3PipelineUploader` are added. Without S3, symbolized segments are gzip-compressed and written back to disk.
+Pass this configuration to `RecorderBuilder::with_s3_uploader`. The builder
+auto-constructs the worker pipeline from the configured options. When
+`cpu-profiling` is enabled, the `SymbolizeProcessor` is added automatically.
+When `worker-s3` is configured, the `GzipCompressor` and `S3PipelineUploader`
+are added. Without S3, symbolized segments are gzip-compressed and written
+back to disk.
 
 Additional builder options:
 - `with_worker_poll_interval(Duration)` — how often to scan for sealed segments (default: 1s)
@@ -297,17 +298,23 @@ Pipeline stage metrics are prefixed with the processor name automatically.
 ## S3 Object Layout
 
 ```
-s3://{bucket}/{prefix}/{date-time}/{service}/{instance}/{boot_id}/{epoch_secs}-{index}.bin.gz
+s3://{bucket}/{prefix}/version=1/date={YYYY-MM-DD}/service={service}/time={HHMM}/instance={instance}/boot={boot_id}/{epoch_secs}-{index}.bin.gz
 ```
 
-- `{date-time}`: `2026-03-07/2030` — 1-minute bucket (enables time-range queries across all services)
-- `{service}`: user-provided service name
-- `{instance}`: `us-east-1/i-0abc123` or `dc-west/rack4-host7` (opaque string)
-- `{boot_id}`: 4 lowercase alpha chars generated per process start (disambiguates segment indices across restarts — see issue #225)
+- `version`: object-key layout version
+- `date` and `time`: UTC `2026-03-07` and `2030` — 1-minute listing bucket
+- `service`: user-provided service name
+- `instance`: opaque instance path, Hive-escaped in the key
+- `boot`: boot id generated per process start (disambiguates segment indices across restarts — see issue #225)
 - `{epoch_secs}`: Unix epoch seconds (parsed from `SegmentMetadata` header, falls back to file mtime)
 - `{index}`: segment index from RotatingWriter
 
 Extension is `.bin.gz` when compressed, `.bin` when not.
+
+The uploader applies Hive path escaping to every named partition value. The
+viewer decodes one `%HH` layer and also reads the historical positional layout.
+A custom `S3KeyFn` remains opaque and bypasses this default convention.
+Automatic discovery in the S3 Browser applies only to supported layouts.
 
 **Metadata headers** (set via S3 SDK `.metadata()` — the SDK auto-adds the `x-amz-meta-` prefix):
 ```

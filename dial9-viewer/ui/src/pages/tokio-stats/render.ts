@@ -8,7 +8,11 @@
 
 import { html, nothing, render, type TemplateResult } from "lit-html";
 import { live } from "lit-html/directives/live.js";
-import type { SchedulingDelay, TokioStatsResponse } from "../../lib/trace/index.js";
+import type {
+  SchedulingDelay,
+  SourceScope,
+  TokioStatsResponse,
+} from "../../lib/trace/index.js";
 import { formatDuration, nsToDatetime, schedulingDelayEvidenceLabel } from "./format.js";
 import { busynessHeat, latencyHeat } from "../../lib/trace/tokio_stats_api.js";
 import { exemplarLink } from "./exemplar.js";
@@ -149,12 +153,12 @@ function linkedStat(
   count: number,
   exemplar: LocStats["exemplars"][number],
   bucketFromData: string | null,
-  bucketParam: string | null,
+  source: SourceScope,
   cls: string,
   onOpen: (url: string) => void,
 ): TemplateResult | typeof nothing {
   if (!count) return nothing;
-  const url = exemplarLink(exemplar, bucketFromData, bucketParam);
+  const url = exemplarLink(exemplar, bucketFromData, source);
   if (url) {
     return html`<a
       href="#"
@@ -204,7 +208,7 @@ function summaryCardsTemplate(s: PeriodStats, threshNs: number): TemplateResult 
 export function locTableTemplate(
   s: PeriodStats,
   data: TokioStatsResponse,
-  bucketParam: string | null,
+  source: SourceScope,
   onOpen: (url: string) => void,
 ): TemplateResult {
   const rows = singlePeriodRows(s);
@@ -237,7 +241,7 @@ export function locTableTemplate(
                 v.offCpu,
                 v.exemplars && v.exemplars[0],
                 bucketFromData,
-                bucketParam,
+                source,
                 "off-cpu",
                 onOpen,
               )}
@@ -247,7 +251,7 @@ export function locTableTemplate(
                 v.onCpu,
                 v.exemplars && v.exemplars[1],
                 bucketFromData,
-                bucketParam,
+                source,
                 "on-cpu",
                 onOpen,
               )}
@@ -273,7 +277,7 @@ export function locTableTemplate(
 export function longPollsTemplate(
   data: TokioStatsResponse,
   threshNs: number,
-  bucketParam: string | null,
+  source: SourceScope,
   onOpen: (url: string) => void,
   limit: number,
   onLimitChange: (limit: number) => void,
@@ -306,7 +310,7 @@ export function longPollsTemplate(
       </thead>
       <tbody>
         ${rows.map((p) => {
-          const url = exemplarLink(p, bucketFromData, bucketParam);
+          const url = exemplarLink(p, bucketFromData, source);
           const cells = html`
             <td>
               <span style="color:${latencyHeat(p.duration_ns)};font-weight:600"
@@ -340,7 +344,7 @@ export function longPollsTemplate(
  */
 export function schedulingDelaysTemplate(
   data: TokioStatsResponse,
-  bucketParam: string | null,
+  source: SourceScope,
   onOpen: (url: string) => void,
   limit: number,
   onLimitChange: (limit: number) => void,
@@ -420,7 +424,7 @@ export function schedulingDelaysTemplate(
               task_id: d.task_id,
             },
             bucketFromData,
-            bucketParam,
+            source,
           );
           const cells = html`
             <td>
@@ -475,11 +479,11 @@ function worstPollCell(worstPollNs: number): TemplateResult {
 function workerDetailRows(
   row: HostRow,
   data: TokioStatsResponse,
-  bucketParam: string | null,
+  source: SourceScope,
   onOpen: (url: string) => void,
 ): TemplateResult {
   return html`${sortedWorkers(row).map((w) => {
-    const url = w.worst_exemplar ? exemplarLink(w.worst_exemplar, data.bucket, bucketParam) : "";
+    const url = w.worst_exemplar ? exemplarLink(w.worst_exemplar, data.bucket, source) : "";
     const busyFmt = `${w.busy_pct.toFixed(3)}%`;
     const color = busynessHeat(w.busy_pct);
     // The verification breakdown the rollup promises: busy / observed = pct.
@@ -516,7 +520,7 @@ function workerDetailRows(
  */
 export function workerActivityTemplate(
   data: TokioStatsResponse,
-  bucketParam: string | null,
+  source: SourceScope,
   onOpen: (url: string) => void,
   state: WorkerActivityState,
 ): TemplateResult | typeof nothing {
@@ -576,7 +580,7 @@ export function workerActivityTemplate(
               <td>${row.notablePolls.toLocaleString()}</td>
               <td>${worstPollCell(row.worstPollNs)}</td>
             </tr>
-            ${expanded ? workerDetailRows(row, data, bucketParam, onOpen) : nothing}
+            ${expanded ? workerDetailRows(row, data, source, onOpen) : nothing}
           `;
         })}
       </tbody>
@@ -599,28 +603,28 @@ export function renderSinglePeriod(
   s: PeriodStats,
   data: TokioStatsResponse,
   threshNs: number,
-  bucketParam: string | null,
+  source: SourceScope,
   onOpen: (url: string) => void,
   limits: RowLimits,
   workers: WorkerActivityState,
 ): void {
   render(summaryCardsTemplate(s, threshNs), sumEl);
   render(
-    html`${locTableTemplate(s, data, bucketParam, onOpen)}${workerActivityTemplate(
+    html`${locTableTemplate(s, data, source, onOpen)}${workerActivityTemplate(
       data,
-      bucketParam,
+      source,
       onOpen,
       workers,
     )}${schedulingDelaysTemplate(
       data,
-      bucketParam,
+      source,
       onOpen,
       limits.schedulingDelays,
       limits.onSchedulingDelaysChange,
     )}${longPollsTemplate(
       data,
       threshNs,
-      bucketParam,
+      source,
       onOpen,
       limits.longPolls,
       limits.onLongPollsChange,

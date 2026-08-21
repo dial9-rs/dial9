@@ -44,13 +44,57 @@ test("parseKey reads the legacy (no boot_id) layout", () => {
   assert.strictEqual(p.epoch, 1782760500);
 });
 
-test("extractPrefix returns everything before the date", () => {
+test("extractPrefix returns everything before the layout root", () => {
   assert.strictEqual(scope.extractPrefix(key("h", 1782760500, 1)), "traces");
   assert.strictEqual(scope.extractPrefix("2026-06-29/1915/svc/h/b/1-1.bin.gz"), "");
 });
 
-test("parseKey: new layout with prefix (full field set)", () => {
-  const p = scope.parseKey("traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz");
+test("parseKey reads escaped versioned partitions from an opaque prefix", () => {
+  const versionedKey =
+    "company/date=archive/%25/version=1/date=2026-08-14/" +
+    "service=payments%2Fapi/time=1937/instance=host%2Fone%3D0%25abc/" +
+    "boot=boot%2Fid/1786736220-3.bin.gz";
+  const p = scope.parseKey(versionedKey);
+  assert.strictEqual(p.service, "payments/api");
+  assert.strictEqual(p.host, "host/one=0%abc");
+  assert.strictEqual(p.bootId, "boot/id");
+  assert.strictEqual(p.epoch, 1786736220);
+  assert.strictEqual(scope.extractPrefix(versionedKey), "company/date=archive/%25");
+});
+
+test("parseKey decodes one partition escaping layer", () => {
+  const p = scope.parseKey(
+    "service=prefix/version=1/date=2026-08-14/service=payments%252Fapi/" +
+      "time=1937/instance=host/boot=boot/1786736220-3.bin.gz",
+  );
+  assert.strictEqual(p.service, "payments%2Fapi");
+});
+
+test("parseKey rejects reordered or incomplete versioned layouts", () => {
+  const reordered =
+    "traces/version=1/date=2026-08-14/time=1937/service=svc/" +
+    "instance=host%2Fone/boot=boot/1786736220-3.bin.gz";
+  const p = scope.parseKey(reordered);
+  assert.strictEqual(p.service, "");
+  assert.strictEqual(p.host, reordered);
+
+  const missingBoot =
+    "traces/version=1/date=2026-08-14/service=svc/time=1937/" +
+    "instance=host%2Fone/1786736220-3.bin.gz";
+  assert.strictEqual(scope.parseKey(missingBoot).host, missingBoot);
+});
+
+test("parseKey does not build a scope from malformed versioned values", () => {
+  const rawKey =
+    "service=prefix/version=1/date=2026-08-14/service=bad%2/time=1937/instance=host/" +
+    "boot=boot/1786736220-3.bin.gz";
+  const p = scope.parseKey(rawKey);
+  assert.strictEqual(p.service, "");
+  assert.strictEqual(p.host, rawKey);
+});
+
+test("parseKey: historical boot-id layout with prefix", () => {
+  const p = scope.parseKey("service=prefix/traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz");
   assert.strictEqual(p.service, "checkout-api");
   assert.strictEqual(p.host, "us-east-1");
   assert.strictEqual(p.bootId, "abcd-123213");

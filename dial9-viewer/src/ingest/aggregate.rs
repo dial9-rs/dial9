@@ -42,7 +42,7 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// repopulates lazily. The value is a monotonic cache namespace, not a schema
 /// revision, so skipped values are expected. The old tree is abandoned and
 /// GC'd out-of-band.
-pub const SAMPLES_FORMAT_VERSION: u32 = 7;
+pub const SAMPLES_FORMAT_VERSION: u32 = 8;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this
@@ -113,7 +113,10 @@ fn bucket_segment(source_bucket: &str) -> String {
 /// LIST is scope-prunable and DataFusion-style partition pruning is possible.
 /// The hash is only the leaf; the source bucket is derived from `source_key`.
 fn samples_part_key(output_prefix: &str, source_key: &str) -> String {
-    let (date, service, host) = parse_scope_fields(source_key);
+    let (date, service, host) = required_scope_fields(source_key);
+    let date = crate::segment_object_key_codec::hive_escape(&date);
+    let service = crate::segment_object_key_codec::hive_escape(&service);
+    let host = crate::segment_object_key_codec::hive_escape(&host);
     format!(
         "{root}/samples/service={service}/date={date}/host={host}/{leaf}.parquet",
         root = versioned_root(output_prefix, &parse_source_bucket(source_key)),
@@ -140,7 +143,10 @@ fn polls_part_key(output_prefix: &str, source_key: &str) -> String {
 }
 
 fn spans_part_key(output_prefix: &str, source_key: &str) -> String {
-    let (date, service, host) = parse_scope_fields(source_key);
+    let (date, service, host) = required_scope_fields(source_key);
+    let date = crate::segment_object_key_codec::hive_escape(&date);
+    let service = crate::segment_object_key_codec::hive_escape(&service);
+    let host = crate::segment_object_key_codec::hive_escape(&host);
     format!(
         "{root}/spans/service={service}/date={date}/host={host}/{leaf}.parquet",
         root = versioned_root(output_prefix, &parse_source_bucket(source_key)),
@@ -167,36 +173,25 @@ pub(crate) struct Scope {
     pub end_ns: Option<i64>,
     /// Exact service match (the `service=` path component).
     pub service: Option<String>,
-    /// Host filter. Empty = all hosts. Non-empty = the host path component must
-    /// equal one of these (a *set*, because a heatmap box selection spans many
-    /// hosts). A single entry behaves like an exact single-host filter.
+    /// Host filter. Empty = all hosts. Non-empty = the decoded instance value
+    /// must equal one of these (a *set*, because a heatmap box selection spans
+    /// many hosts). A single entry behaves like an exact single-host filter.
     pub hosts: Vec<String>,
 }
 
-/// Parse `(date, service, host)` from a source key, anchored on the
-/// `YYYY-MM-DD` date component so a leading prefix (e.g. `traces/`) does not
-/// shift the positions. Layout: `…/{date}/{HHMM}/{service}/{host}/{boot}/{file}`.
-fn parse_scope_fields(key: &str) -> (String, String, String) {
-    let path = strip_s3(key);
-    let parts: Vec<&str> = path.split('/').collect();
-    if let Some(anchor) = parts.iter().position(|p| is_date(p)) {
-        let date = parts.get(anchor).copied().unwrap_or("").to_string();
-        let service = parts.get(anchor + 2).copied().unwrap_or("").to_string();
-        let host = parts.get(anchor + 3).copied().unwrap_or("").to_string();
-        (date, service, host)
-    } else {
-        // No date anchor — fall back to the legacy fixed-index parse.
-        let date = parts.first().copied().unwrap_or("").to_string();
-        let service = parts.get(2).copied().unwrap_or("").to_string();
-        let host = parts.get(3).copied().unwrap_or("").to_string();
-        (date, service, host)
-    }
+fn parse_scope_fields(key: &str) -> Option<(String, String, String)> {
+    crate::source_key_scope::scope_fields(key)
 }
 
-/// The host path component of a source key (empty when the key has no host
-/// segment). Used to count distinct hosts for the coverage's fleet-spread badge.
+fn required_scope_fields(key: &str) -> (String, String, String) {
+    parse_scope_fields(key).expect("aggregation source key must have parsed scope fields")
+}
+
+/// The parsed host component used for the coverage's fleet-spread badge.
+///
+/// Panics when the key has no parseable scope fields.
 pub(crate) fn host_of(key: &str) -> String {
-    parse_scope_fields(key).2
+    required_scope_fields(key).2
 }
 
 /// Parse the file start time (epoch SECONDS) from the filename `{ts}-{i}.bin.gz`.
@@ -205,24 +200,6 @@ fn parse_epoch_secs(key: &str) -> Option<i64> {
     let stem = file.split('.').next()?; // strip .bin.gz
     let ts = stem.split('-').next()?; // {ts}-{i}
     ts.parse::<i64>().ok()
-}
-
-fn strip_s3(key: &str) -> &str {
-    if let Some(rest) = key.strip_prefix("s3://") {
-        rest.split_once('/').map_or(rest, |(_, p)| p)
-    } else {
-        key
-    }
-}
-
-fn is_date(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b[..4].iter().all(u8::is_ascii_digit)
-        && b[5..7].iter().all(u8::is_ascii_digit)
-        && b[8..].iter().all(u8::is_ascii_digit)
 }
 
 /// True if a raw source key is a trace segment (not our own Parquet output).
@@ -251,7 +228,15 @@ fn matched_and_ordered(
 }
 
 fn scope_matches(key: &str, scope: &Scope, segment_duration_secs: i64) -> bool {
-    let (_date, service, host) = parse_scope_fields(key);
+    let Some((_date, service, host)) = parse_scope_fields(key) else {
+        dial9_core::rate_limited!(std::time::Duration::from_secs(60), {
+            tracing::warn!(
+                source_key = key,
+                "skipping source key without parseable scope fields"
+            );
+        });
+        return false;
+    };
     if let Some(want) = &scope.service
         && &service != want
     {
@@ -645,7 +630,10 @@ pub(crate) async fn list_folded_leaves(
 fn folded_set_prefix(output_prefix: &str, source_bucket: &str, service: Option<&str>) -> String {
     let prefix = samples_prefix(output_prefix, source_bucket);
     match service {
-        Some(service) => format!("{prefix}service={service}/"),
+        Some(service) => format!(
+            "{prefix}service={}/",
+            crate::segment_object_key_codec::hive_escape(service)
+        ),
         None => prefix,
     }
 }
@@ -1927,7 +1915,8 @@ mod tests {
     fn parse_scope_fields_handles_prefix() {
         let (d, s, h) = parse_scope_fields(
             "traces/2026-04-09/1910/checkout-api/us-east-1/abcd/1744224000-3.bin.gz",
-        );
+        )
+        .unwrap();
         assert_eq!(d, "2026-04-09");
         assert_eq!(s, "checkout-api");
         assert_eq!(h, "us-east-1");
@@ -1936,10 +1925,22 @@ mod tests {
     #[test]
     fn parse_scope_fields_handles_s3_uri() {
         let (d, s, h) =
-            parse_scope_fields("s3://bkt/2026-06-19/1300/shale/host-a/boot-1/1-0.bin.gz");
+            parse_scope_fields("s3://bkt/2026-06-19/1300/shale/host-a/boot-1/1-0.bin.gz").unwrap();
         assert_eq!(d, "2026-06-19");
         assert_eq!(s, "shale");
         assert_eq!(h, "host-a");
+    }
+
+    #[test]
+    fn malformed_version1_scope_fields_are_not_aggregated() {
+        let key =
+            "version=1/date=2026-06-19/service=bad%2/time=1300/instance=host/boot=boot/1-0.bin.gz";
+        assert_eq!(parse_scope_fields(key), None);
+        assert!(!scope_matches(
+            key,
+            &Scope::default(),
+            DEFAULT_SEGMENT_DURATION_SECS
+        ));
     }
 
     #[test]

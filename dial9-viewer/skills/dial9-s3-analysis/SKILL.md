@@ -28,12 +28,15 @@ Present the user with what's in the bucket before doing any analysis.
 # List date range
 aws s3 ls s3://BUCKET/ --region REGION
 
-# List services for a given date/hour
-aws s3 ls s3://BUCKET/YYYY-MM-DD/HHMM/ --region REGION
+# List services for a given date
+aws s3 ls s3://BUCKET/PREFIX/version=1/date=YYYY-MM-DD/ --region REGION
 
-# List all unique service/host/runtime combinations
+# List one service's minute
+aws s3 ls s3://BUCKET/PREFIX/version=1/date=YYYY-MM-DD/service=SERVICE/time=HHMM/ --region REGION
+
+# Inspect keys recursively; use the Browser for decoded service/instance groups
 aws s3 ls s3://BUCKET/ --recursive --region REGION \
-  | awk '{print $4}' | awk -F'/' '{if (NF>=5) print $3"/"$4"/"$5}' | sort -u
+  | awk '{print $4}'
 ```
 
 ### Expected key structure
@@ -41,18 +44,24 @@ aws s3 ls s3://BUCKET/ --recursive --region REGION \
 dial9 S3 uploads follow this layout:
 
 ```
-{prefix/}{YYYY-MM-DD}/{HHMM}/{service_name}/{hostname}/{boot_id}/{epoch_secs}-{segment_index}.bin.gz
+{prefix/}version=1/date={YYYY-MM-DD}/service={service_name}/time={HHMM}/instance={instance_path}/boot={boot_id}/{epoch_secs}-{segment_index}.bin.gz
 ```
 
 | Component | Meaning |
 |-----------|---------|
-| `prefix` | Optional. Value of `DIAL9_S3_PREFIX` (default: none, keys start at date). |
-| `YYYY-MM-DD` | UTC date. |
-| `HHMM` | UTC hour+minute bucket (rotation time determines granularity — default 60s means most keys land on the hour). |
-| `service_name` | Value of `DIAL9_SERVICE_NAME` or the binary name. |
-| `hostname` | Machine hostname (e.g. `ip-10-0-3-249.ec2.internal`). |
-| `boot_id` | 4 random alpha chars + PID, generated at process start (e.g. `nygg-1`). Disambiguates restarts on the same host. |
+| `prefix` | Optional. Value of `DIAL9_S3_PREFIX` (default: none, keys start at `version=1`). |
+| `version` | Object-key layout version. |
+| `date` | UTC date. |
+| `time` | UTC hour+minute bucket. |
+| `service` | Value of `DIAL9_SERVICE_NAME` or the binary name. |
+| `instance` | Instance path, normally a hostname. |
+| `boot` | Process boot id (e.g. `nygg-1`). Disambiguates restarts on the same host. |
 | `epoch_secs-segment_index` | Unix timestamp of segment start + segment sequence number. |
+
+Named partition values use Hive path escaping. Decode one `%HH` layer when
+present: for example, `service=payments%2Fapi` means `payments/api`. Historical
+positional keys may still coexist in the bucket and are supported by the
+viewer.
 
 ### Present findings to user
 
@@ -73,7 +82,7 @@ Ask the user which host/time period they want to investigate, or if they want a 
 aws s3 cp s3://BUCKET/path/to/file.bin.gz /tmp/d9-traces/ --region REGION
 
 # All files for a host in a time window
-aws s3 cp s3://BUCKET/YYYY-MM-DD/HHMM/service/host/ /tmp/d9-traces/ \
+aws s3 cp s3://BUCKET/PREFIX/version=1/date=YYYY-MM-DD/service=SERVICE/time=HHMM/instance=HOST/ /tmp/d9-traces/ \
   --recursive --region REGION
 ```
 
@@ -157,7 +166,7 @@ dial9 agents skill dial9-red-flags
 ## Troubleshooting
 
 - **"Access Denied" or "NoSuchBucket"**: Verify credentials with `aws sts get-caller-identity` and check bucket region
-- **Empty bucket listings**: Verify date format is YYYY-MM-DD, region is correct, and prefix matches
+- **Empty bucket listings**: Verify the `version=1/date=YYYY-MM-DD/service=SERVICE/time=HHMM` partitions, region, and prefix
 - **`dial9` not found**: `cargo install dial9 --features cli` or `cargo binstall dial9`
 - **Analysis errors on .gz files**: Decompress first — `analyze.js` requires raw `.bin` input
 - **"Unknown frame tag" errors**: Toolkit version is older than the trace format — update dial9 with `cargo install dial9 --features cli`

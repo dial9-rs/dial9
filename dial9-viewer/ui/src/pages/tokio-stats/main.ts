@@ -241,8 +241,9 @@ function renderFromCache(): void {
   if (multi && activeTab.startsWith("p")) {
     const idx = parseInt(activeTab.slice(1), 10);
     const s = stats[idx];
-    const data = periods[idx]?.data;
-    if (!s || !data) {
+    const period = periods[idx];
+    const data = period?.data;
+    if (!s || !period || !data) {
       renderNotLoaded(els.tableContainer);
       return;
     }
@@ -252,7 +253,7 @@ function renderFromCache(): void {
       s,
       data,
       threshNs,
-      scope.source.bucket,
+      effectiveScope(period).source,
       openExemplar,
       limits,
       workers,
@@ -270,7 +271,7 @@ function renderFromCache(): void {
       s,
       withData.data,
       threshNs,
-      scope.source.bucket,
+      effectiveScope(withData).source,
       openExemplar,
       limits,
       workers,
