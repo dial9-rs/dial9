@@ -11,18 +11,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(core)* one recorder per process ([#810](https://github.com/dial9-rs/dial9/pull/810))
-- *(core)* opt-in process-global Dial9Handle ([#805](https://github.com/dial9-rs/dial9/pull/805))
-- [**breaking**] remove optional timestamps from trace format API ([#765](https://github.com/dial9-rs/dial9/pull/765))
-- build without tokio_unstable ([#763](https://github.com/dial9-rs/dial9/pull/763))
-- JoinSet extension trait ([#768](https://github.com/dial9-rs/dial9/pull/768))
-- *(viewer)* [**breaking**] make S3 support optional ([#722](https://github.com/dial9-rs/dial9/pull/722))
-- add ad-hoc span wrappers: sync guard, future wrapper, tower layer ([#713](https://github.com/dial9-rs/dial9/pull/713))
-- *(s3)* [**breaking**] adopt Hive-style S3 key layout ([#797](https://github.com/dial9-rs/dial9/pull/797))
-- *(metrique)* implement Default for Dial9Context ([#806](https://github.com/dial9-rs/dial9/pull/806))
-- *(trace-format-derive)* generics, field roles, strict attribute parsing ([#760](https://github.com/dial9-rs/dial9/pull/760))
-- *(viewer)* record metrique metrics as dial9 spans ([#800](https://github.com/dial9-rs/dial9/pull/800))
-- Properly Handle Multi-Runtime Events ([#754](https://github.com/dial9-rs/dial9/pull/754))
+- Opt-in process-global handle ([#699](https://github.com/dial9-rs/dial9/issues/699)).
+  `Recorder::install_global_handle()` publishes the recorder's handle process-wide, and `Dial9Handle::current()` falls back to it on threads that have no handle of their own, so a synchronous worker thread can record without a handle passed down to it. One recorder holds the slot at a time: a second install returns `InstallGlobalHandleError`.
+
+- dial9 now builds without `--cfg tokio_unstable` ([#364](https://github.com/dial9-rs/dial9/issues/364)).
+  With the flag nothing changes. Without it, poll events come from dial9's future wrapper instead of tokio's hooks, so they cover tasks spawned through `dial9::spawn`, `spawn_in`, `block_on` and `spawn_with` rather than every task on the runtime.
+  Task spawn/terminate events and per-worker queue depth have no stable source and are unavailable. 
+  Traces carry `tokio.poll_coverage` and `tokio.local_queue` metadata keys describing what the trace holds, plus `tokio.unstable` for how it was built, and the viewer reports the reduced coverage.
+  The `taskdump` feature still requires the flag: it forwards to `tokio/taskdump`, which is a hard compile error without it.
+- `JoinSetExt` adds dial9-instrumented `spawn_traced` and `spawn_traced_on`
+  methods to Tokio `JoinSet`s while preserving caller locations.
+- Ad-hoc spans outside Tokio tasks: a sync guard, a future wrapper and a tower
+  layer, plus `dial9_span!` for compile-time span schemas ([#713](https://github.com/dial9-rs/dial9/pull/713)).
+- Per-runtime scheduler metrics. `RuntimeMetricsEvent` replaces the process-wide
+  `QueueSampleEvent`, with one sample per runtime per flush cycle tagged with the
+  runtime's name. `QueueSampleEvent` still decodes, and the viewer falls back to
+  it for traces without runtime metrics ([#754](https://github.com/dial9-rs/dial9/pull/754)).
+- `#[derive(TraceEvent)]` supports borrowed event structs, so events can hold
+  `&str` and `&[u8]` fields ([#758](https://github.com/dial9-rs/dial9/pull/758)).
+- The viewer records metrique metrics as dial9 spans ([#800](https://github.com/dial9-rs/dial9/pull/800)).
+- `Dial9Context` implements `Default` ([#806](https://github.com/dial9-rs/dial9/pull/806)).
+
+### Changed
+
+- **Breaking:** the default S3 uploader key layout now uses ordered Hive-style
+  partitions (`version=1/date=…/service=…/time=…/instance=…/boot=…`) with Hive
+  path escaping. The viewer reads both the new and historical layouts; custom
+  `S3KeyFn` output is unchanged ([#789](https://github.com/dial9-rs/dial9/issues/789)).
+- **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`
+  feature. The `dial9` crate keeps its empty default feature set, while `cli`
+  retains the existing S3-enabled binary. For a local-only viewer without S3
+  or the AWS SDK, use `dial9-viewer` directly with its default features
+  disabled ([#722](https://github.com/dial9-rs/dial9/pull/722)).
+- **Breaking:** the trace format API drops optional timestamps.
+  `SchemaEntry::new` and `SchemaEntry::with_annotations` no longer take a
+  `has_timestamp` argument, and `timestamp_ns` on `DecodedFrame::Event`,
+  `DecodedFrameRef::Event` and `RawEvent` is `u64` instead of `Option<u64>`.
+  The wire format is unchanged and legacy `has_timestamp=0` schemas still
+  decode ([#765](https://github.com/dial9-rs/dial9/pull/765)).
+- **Breaking:** `#[derive(TraceEvent)]` rejects unknown `#[traceevent(...)]`
+  attributes and field roles outside the supported vocabulary instead of
+  ignoring them ([#760](https://github.com/dial9-rs/dial9/pull/760)).
+- **Breaking:** a process gets one recorder. A second `build()` returns a
+  disabled recorder and logs an `error!`, since the memory profiler, the
+  allocator, CPU profiling and the process-global handle are already claimed.
+  Dropping the first recorder frees the slot
+  ([#810](https://github.com/dial9-rs/dial9/pull/810)).
 
 ### Fixed
 
@@ -36,7 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - minor improvements post 0.5 refactors ([#755](https://github.com/dial9-rs/dial9/pull/755))
 - improve shuttle concurrency test coverage ([#781](https://github.com/dial9-rs/dial9/pull/781))
 - *(core)* seal SharedState behind test-util ([#787](https://github.com/dial9-rs/dial9/pull/787))
-- support borrowed event structs in #[derive(TraceEvent)] ([#758](https://github.com/dial9-rs/dial9/pull/758))
 - *(tokio)* drop SharedState from the future wrappers ([#785](https://github.com/dial9-rs/dial9/pull/785))
 - *(tokio)* record events through Dial9Handle ([#784](https://github.com/dial9-rs/dial9/pull/784))
 - Decode annotated single-event spans ([#733](https://github.com/dial9-rs/dial9/pull/733))
@@ -44,31 +77,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(viewer)* promote the Vite UI and remove the legacy viewer ([#772](https://github.com/dial9-rs/dial9/pull/772))
 - remove dead code ([#756](https://github.com/dial9-rs/dial9/pull/756))
 - *(s3)* stop asserting a scheduler outcome in the roundtrip test ([#793](https://github.com/dial9-rs/dial9/pull/793))
-
-### Added
-
-- Opt-in process-global handle ([#699](https://github.com/dial9-rs/dial9/issues/699)).
-  `Recorder::install_global_handle()` publishes the recorder's handle process-wide, and `Dial9Handle::current()` falls back to it on threads that have no handle of their own, so a synchronous worker thread can record without a handle passed down to it. One recorder holds the slot at a time: a second install returns `InstallGlobalHandleError`.
-
-- dial9 now builds without `--cfg tokio_unstable` ([#364](https://github.com/dial9-rs/dial9/issues/364)).
-  With the flag nothing changes. Without it, poll events come from dial9's future wrapper instead of tokio's hooks, so they cover tasks spawned through `dial9::spawn`, `spawn_in`, `block_on` and `spawn_with` rather than every task on the runtime.
-  Task spawn/terminate events and per-worker queue depth have no stable source and are unavailable. 
-  Traces carry `tokio.poll_coverage` and `tokio.local_queue` metadata keys describing what the trace holds, plus `tokio.unstable` for how it was built, and the viewer reports the reduced coverage.
-  The `taskdump` feature still requires the flag: it forwards to `tokio/taskdump`, which is a hard compile error without it.
-- `JoinSetExt` adds dial9-instrumented `spawn_traced` and `spawn_traced_on`
-  methods to Tokio `JoinSet`s while preserving caller locations.
-
-### Changed
-
-- **Breaking:** the default S3 uploader key layout now uses ordered Hive-style
-  partitions (`version=1/date=…/service=…/time=…/instance=…/boot=…`) with Hive
-  path escaping. The viewer reads both the new and historical layouts; custom
-  `S3KeyFn` output is unchanged ([#789](https://github.com/dial9-rs/dial9/issues/789)).
-- **Breaking:** `dial9-viewer` exposes its S3 APIs through a default-on `s3`
-  feature. The `dial9` crate keeps its empty default feature set, while `cli`
-  retains the existing S3-enabled binary. For a local-only viewer without S3
-  or the AWS SDK, use `dial9-viewer` directly with its default features
-  disabled ([#722](https://github.com/dial9-rs/dial9/pull/722)).
 
 ## [0.5.0-rc2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc1...dial9-v0.5.0-rc2) - 2026-08-03
 
