@@ -62,3 +62,6 @@ runs:
               else
                   cargo test --all-targets --features __nonlinux_all_features
               fi
+              # dial9-core alone: `test-util` is off here, so the single-recorder
+              # guard is compiled in.
+              cargo test -p dial9-core --lib
