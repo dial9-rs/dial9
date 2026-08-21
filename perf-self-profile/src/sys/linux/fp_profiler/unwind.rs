@@ -47,31 +47,23 @@ pub(crate) fn strip_pac(addr: usize) -> usize {
     addr
 }
 
-/// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
-/// usually obtained from a signal handler's ucontext.
+/// Shared walk loop: given a frame pointer `fp` that has *not yet been
+/// validated or dereferenced*, fault-tolerantly walk the frame-pointer chain,
+/// writing return addresses into `out[n..]`.
 ///
-/// `truncated` is `true` if the walk stopped because the output buffer (or
-/// [`MAX_FRAMES`]) was full *and* at least one additional frame would have been
-/// valid. A natural stop (end of chain, faulty load, implausible pointer)
-/// produces `truncated = false`.
+/// Every frame — including the first one this loop processes — goes through
+/// the same bounds/alignment check and `safe_load`-guarded reads. There is no
+/// "trusted" frame here; callers that do have a trusted PC for frame 0 (e.g.
+/// [`unwind`], seeded from a signal handler's ucontext) write it directly and
+/// start this loop at `n = 1` to fill in the rest of the chain.
 ///
 /// # Safety
 /// - `install_handler` must have been called.
 /// - Should generally be called from a signal handler where the target thread
-///   is stopped; walking a running thread's stack races with mutations.
-pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> CaptureResult {
+///   is stopped, or from the frame whose own `fp` is passed in; walking a
+///   running thread's stack from another thread races with mutations.
+unsafe fn unwind_loop(mut fp: usize, sp: usize, out: &mut [u64], mut n: usize) -> CaptureResult {
     let limit = out.len().min(MAX_FRAMES);
-    if limit == 0 {
-        // No room even for the interrupted PC. The walk would have produced
-        // at least one frame, so this is truncation.
-        return CaptureResult {
-            frames_written: 0,
-            truncated: true,
-        };
-    }
-
-    out[0] = pc as u64;
-    let mut n = 1;
 
     let stack_lo = sp;
     let stack_hi = sp.saturating_add(8 * 1024 * 1024);
@@ -136,6 +128,61 @@ pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> Ca
         n += 1;
         fp = saved_fp;
     }
+}
+
+/// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
+/// usually obtained from a signal handler's ucontext.
+///
+/// `pc` is trusted as-is and written directly to `out[0]` — the caller must
+/// already know it's a valid instruction pointer (e.g. the kernel-supplied
+/// interrupted PC). `fp` is *not* trusted: it is validated and read through
+/// the same `safe_load`-guarded path as every other frame in the chain. If
+/// there is no trusted `pc` to seed frame 0 with, use
+/// [`unwind_from_frame_pointer`] instead.
+///
+/// `truncated` is `true` if the walk stopped because the output buffer (or
+/// [`MAX_FRAMES`]) was full *and* at least one additional frame would have been
+/// valid. A natural stop (end of chain, faulty load, implausible pointer)
+/// produces `truncated = false`.
+///
+/// # Safety
+/// - `install_handler` must have been called.
+/// - Should generally be called from a signal handler where the target thread
+///   is stopped; walking a running thread's stack races with mutations.
+pub unsafe fn unwind(pc: usize, fp: usize, sp: usize, out: &mut [u64]) -> CaptureResult {
+    let limit = out.len().min(MAX_FRAMES);
+    if limit == 0 {
+        // No room even for the interrupted PC. The walk would have produced
+        // at least one frame, so this is truncation.
+        return CaptureResult {
+            frames_written: 0,
+            truncated: true,
+        };
+    }
+
+    out[0] = pc as u64;
+    unsafe { unwind_loop(fp, sp, out, 1) }
+}
+
+/// Derive frame 0 from a live frame pointer and walk the rest of the chain,
+/// without trusting any raw dereference of `fp`.
+///
+/// Unlike [`unwind`], there is no separately-trusted PC here: `fp` is
+/// expected to be the *current* frame's own frame pointer (e.g. read directly
+/// from the `rbp`/`x29` register, with no memory access at all). Frame 0 is
+/// derived by validating and `safe_load`-ing `fp` exactly like every
+/// subsequent frame — there is nothing "trusted" about it. On a binary built
+/// without `-C force-frame-pointers=yes`, `fp` may not point at a real
+/// `[saved_fp, return_addr]` pair at all; this degrades to an empty,
+/// non-truncated result instead of a raw dereference of arbitrary memory.
+///
+/// # Safety
+/// - `install_handler` must have been called.
+/// - Must be called such that `fp` is a live frame pointer of the calling
+///   thread's own stack (not another thread's, and not a value obtained by
+///   dereferencing memory) and `sp` is that thread's current stack pointer.
+pub unsafe fn unwind_from_frame_pointer(fp: usize, sp: usize, out: &mut [u64]) -> CaptureResult {
+    unsafe { unwind_loop(fp, sp, out, 0) }
 }
 
 /// Unwind from inside a signal handler given the raw ucontext.
@@ -449,5 +496,149 @@ mod tests {
         assert_eq!(n, 1, "unwind must stop when ret_addr load faults");
         assert!(!truncated);
         assert_eq!(out[0], 0x40_0000);
+    }
+
+    // `unwind_from_frame_pointer` derives frame 0 itself via the same
+    // validated, `safe_load`-guarded path used for every other frame,
+    // instead of trusting a raw dereference of a live register value. These
+    // mirror the `unwind()` synthetic-stack tests above, but exercise frame
+    // 0's derivation directly.
+
+    #[test]
+    fn from_frame_pointer_walks_valid_chain() {
+        install();
+        let sz = std::mem::size_of::<usize>();
+        let mut stack = [0usize; 8];
+        let base = stack.as_mut_ptr() as usize;
+
+        // Frame C (4,5) is its own saved fp, with a non-zero return address
+        // so the walk stops on the "must advance" check rather than an
+        // incidental dead-zone rejection of a zeroed slot.
+        stack[0] = base + 2 * sz;
+        stack[1] = 0x40_1000;
+        stack[2] = base + 4 * sz;
+        stack[3] = 0x40_2000;
+        stack[4] = base + 4 * sz;
+        stack[5] = 0x40_3000;
+
+        let mut out = [0u64; MAX_FRAMES];
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind_from_frame_pointer(base, base, &mut out) };
+
+        assert_eq!(n, 2);
+        assert!(!truncated);
+        assert_eq!(out[0], 0x40_1000);
+        assert_eq!(out[1], 0x40_2000);
+    }
+
+    #[test]
+    fn from_frame_pointer_reports_zero_frames_on_misaligned_fp() {
+        install();
+        let sp = 0x7fff_0000_0000usize;
+        let mut out = [0u64; MAX_FRAMES];
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind_from_frame_pointer(sp + 1, sp, &mut out) };
+        assert_eq!(
+            n, 0,
+            "a misaligned live fp must produce zero frames, not a dereference"
+        );
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn from_frame_pointer_reports_zero_frames_when_fp_out_of_range() {
+        install();
+        let sp = 0x7fff_0000_0000usize;
+        let mut out = [0u64; MAX_FRAMES];
+        // fp below sp is out of the assumed [sp, sp + 8MiB) stack range.
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind_from_frame_pointer(sp.wrapping_sub(8), sp, &mut out) };
+        assert_eq!(n, 0);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn from_frame_pointer_stops_safely_when_live_fp_load_faults() {
+        install();
+        let ps = page_size();
+        // Simulates a build without frame pointers handing back a garbage
+        // `fp` that happens to point at unmapped memory: the walk must
+        // degrade to zero frames, not dereference it directly.
+        let guard = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                ps,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(guard, libc::MAP_FAILED);
+        let fp = guard as usize;
+
+        let mut out = [0u64; MAX_FRAMES];
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind_from_frame_pointer(fp, fp, &mut out) };
+
+        assert_eq!(unsafe { libc::munmap(guard, ps) }, 0);
+
+        assert_eq!(
+            n, 0,
+            "a faulting live fp must produce zero frames, not a crash"
+        );
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn from_frame_pointer_respects_output_buffer_limit() {
+        install();
+        let sz = std::mem::size_of::<usize>();
+        let mut stack = [0usize; 8];
+        let base = stack.as_mut_ptr() as usize;
+
+        stack[0] = base + 2 * sz;
+        stack[1] = 0x40_1000;
+        stack[2] = base + 4 * sz;
+        stack[3] = 0x40_2000;
+        stack[4] = base + 4 * sz;
+
+        let mut out = [0u64; 1];
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind_from_frame_pointer(base, base, &mut out) };
+        assert_eq!(n, 1);
+        assert!(truncated, "a valid next frame existed but had no room");
+        assert_eq!(out[0], 0x40_1000);
+    }
+
+    #[test]
+    fn from_frame_pointer_with_empty_buffer_reports_truncation_only_if_valid() {
+        install();
+        let sz = std::mem::size_of::<usize>();
+        let mut stack = [0usize; 2];
+        let base = stack.as_mut_ptr() as usize;
+        stack[0] = base + 2 * sz; // would advance validly if there were room
+        stack[1] = 0x40_1000;
+
+        let mut out: [u64; 0] = [];
+        let CaptureResult {
+            frames_written: n,
+            truncated,
+        } = unsafe { unwind_from_frame_pointer(base, base, &mut out) };
+        assert_eq!(n, 0);
+        assert!(
+            truncated,
+            "a genuinely valid frame existed; zero room means truncated"
+        );
     }
 }
