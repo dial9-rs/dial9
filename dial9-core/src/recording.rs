@@ -3,6 +3,7 @@ use crate::flush_loop::run_flush_loop;
 use crate::handle::{ControlCommand, Dial9Handle, InstallGlobalHandleError};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
+use crate::recorder::SoleRecorderGuard;
 use crate::shared_state::SharedState;
 use std::time::Duration;
 
@@ -41,6 +42,8 @@ pub struct Recorder {
     flush_thread: Option<JoinHandle<()>>,
     /// Hooks run once, with the handle, on the first `enable()`.
     recording_start_hooks: Mutex<Vec<RecordingStartHook>>,
+    /// Held while this is the process's recorder. Dropping it frees the slot.
+    sole_recorder: Option<SoleRecorderGuard>,
     #[cfg(feature = "pipeline")]
     worker: Option<WorkerHandle>,
 }
@@ -65,9 +68,15 @@ impl Recorder {
             handle,
             flush_thread,
             recording_start_hooks: Mutex::new(Vec::new()),
+            sole_recorder: None,
             #[cfg(feature = "pipeline")]
             worker: None,
         }
+    }
+
+    /// Hold the process's recorder slot for this recorder's lifetime.
+    pub(crate) fn hold_process(&mut self, guard: crate::recorder::SoleRecorderGuard) {
+        self.sole_recorder = Some(guard);
     }
 
     /// Install the one-shot hooks to run on the first `enable()`.

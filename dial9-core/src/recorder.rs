@@ -17,6 +17,8 @@
 //! recording state with sources already registered. The Tokio integration
 //! reuses the same builder.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::buffer::{BufferMode, Disk, SegmentWriter};
 use crate::clock;
 use crate::handle::Dial9Handle;
@@ -107,6 +109,31 @@ fn builder_with<M: BufferMode>(writer: Option<SegmentWriter<M>>) -> RecorderBuil
 pub fn recorder_disabled() -> crate::recording::Recorder {
     crate::recording::Recorder::new(crate::handle::Dial9Handle::disabled(), None)
 }
+
+/// Proof that this recorder is the only one in the process, released on drop.
+#[derive(Debug)]
+pub(crate) struct SoleRecorderGuard;
+
+impl SoleRecorderGuard {
+    /// Claim the process, or `None` if another recorder holds it.
+    ///
+    /// Always granted under `test-util`, where the suite runs many recorders at
+    /// once.
+    pub(crate) fn claim() -> Option<Self> {
+        match cfg!(feature = "test-util") || !RECORDER_TAKEN.swap(true, Ordering::SeqCst) {
+            true => Some(Self),
+            false => None,
+        }
+    }
+}
+
+impl Drop for SoleRecorderGuard {
+    fn drop(&mut self) {
+        RECORDER_TAKEN.store(false, Ordering::SeqCst);
+    }
+}
+
+static RECORDER_TAKEN: AtomicBool = AtomicBool::new(false);
 
 /// Assemble dial9's default pipeline: source-requested stages
 /// (for example symbolization), then compression, then a terminal stage —
@@ -240,6 +267,14 @@ impl<M: BufferMode> RecorderBuilder<M> {
             return recorder_disabled();
         };
 
+        let Some(sole_recorder) = SoleRecorderGuard::claim() else {
+            tracing::error!(
+                target: "dial9",
+                "dial9: this process already has a recorder, this one will run without telemetry."
+            );
+            return recorder_disabled();
+        };
+
         let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
 
         // Install the on-demand dump trigger so `Dial9Handle::dump_trigger` can
@@ -315,6 +350,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         let hook = self.thread_init.clone();
         #[allow(unused_mut)]
         let mut recorder = Recorder::start(shared, writer, self.metrics_sink, move || hook());
+        recorder.hold_process(sole_recorder);
 
         #[cfg(feature = "pipeline")]
         if let Some(worker) = worker {
@@ -617,6 +653,7 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at build");
         live.enable();
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at most once");
+        drop(live);
 
         let paused_runs = StdArc::new(AtomicUsize::new(0));
         let paused_hook = StdArc::clone(&paused_runs);
@@ -880,6 +917,33 @@ mod tests {
         assert_eq!(
             started, stopped,
             "every thread that ran the hook should run its teardown"
+        );
+    }
+}
+
+#[cfg(all(test, not(feature = "test-util")))]
+mod single_recorder_tests {
+    use super::*;
+    use crate::buffer::MemoryBuffer;
+
+    #[test]
+    fn a_second_recorder_in_the_process_is_refused() {
+        let first = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+        assert!(first.handle().is_connected(), "the first one records");
+
+        let second = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+        assert!(
+            !second.handle().is_connected(),
+            "the process already has a recorder, so this one is inert"
+        );
+
+        drop(second);
+        drop(first);
+
+        let after = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
+        assert!(
+            after.handle().is_connected(),
+            "the slot frees up once the holder stops"
         );
     }
 }
