@@ -198,8 +198,8 @@ impl Recorder {
     /// that their thread-local buffers have already been flushed to the central
     /// collector.
     pub(crate) fn stop_flush_thread(&mut self) {
-        // Before the blocking flush below: until the global is gone, otherwise other
-        // threads would keep resolving it and recording into buffers that nothing will drain.
+        // Clear the global before the blocking flush below, otherwise other threads
+        // keep resolving it and recording into buffers that nothing will drain.
         if let Some(shared) = self.handle.shared() {
             crate::handle::clear_global_handle_for(shared);
         }

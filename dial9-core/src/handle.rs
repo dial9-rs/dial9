@@ -346,10 +346,8 @@ pub fn clear_tl_handle() {
     CURRENT_HANDLE.with(|cell| *cell.borrow_mut() = None);
 }
 
-/// Install `handle` as the process-global [`Dial9Handle`].
-///
-/// Install `handle` as the process-global one, unless another is already
-/// installed.
+/// Install `handle` as the process-global [`Dial9Handle`], unless another is
+/// already installed.
 pub(crate) fn set_global_handle(handle: Dial9Handle) -> Result<(), InstallGlobalHandleError> {
     let previous =
         GLOBAL_HANDLE.compare_and_swap(&None::<Arc<HandleInner>>, handle.inner.map(Arc::new));
@@ -376,8 +374,6 @@ impl std::error::Error for InstallGlobalHandleError {}
 /// Clear the process-global [`Dial9Handle`] if it belongs to the recorder whose
 /// state is `shared`, otherwise leave it alone.
 ///
-/// A recorder that has already been displaced still runs this on teardown, and
-/// must not wipe the global its successor installed.
 pub(crate) fn clear_global_handle_for(shared: &Arc<SharedState>) {
     let current = GLOBAL_HANDLE.load();
     if current

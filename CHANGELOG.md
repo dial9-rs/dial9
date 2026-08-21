@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Opt-in process-global handle ([#699](https://github.com/dial9-rs/dial9/issues/699)).
-  `Recorder::install_global_handle()` publishes the recorder's handle process-wide, and `Dial9Handle::current()` falls back to it on threads no dial9 runtime owns, so a synchronous worker thread can record without a handle passed down to it.
+  `Recorder::install_global_handle()` publishes the recorder's handle process-wide, and `Dial9Handle::current()` falls back to it on threads that have no handle of their own, so a synchronous worker thread can record without a handle passed down to it. One recorder holds the slot at a time: a second install returns `InstallGlobalHandleError`.
 
 - dial9 now builds without `--cfg tokio_unstable` ([#364](https://github.com/dial9-rs/dial9/issues/364)).
   With the flag nothing changes. Without it, poll events come from dial9's future wrapper instead of tokio's hooks, so they cover tasks spawned through `dial9::spawn`, `spawn_in`, `block_on` and `spawn_with` rather than every task on the runtime.
