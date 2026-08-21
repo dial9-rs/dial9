@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc2.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2...dial9-v0.5.0-rc2.1) - 2026-08-21
+
+### Added
+
+- *(core)* one recorder per process ([#810](https://github.com/dial9-rs/dial9/pull/810))
+- *(core)* opt-in process-global Dial9Handle ([#805](https://github.com/dial9-rs/dial9/pull/805))
+- [**breaking**] remove optional timestamps from trace format API ([#765](https://github.com/dial9-rs/dial9/pull/765))
+- build without tokio_unstable ([#763](https://github.com/dial9-rs/dial9/pull/763))
+- JoinSet extension trait ([#768](https://github.com/dial9-rs/dial9/pull/768))
+- *(viewer)* [**breaking**] make S3 support optional ([#722](https://github.com/dial9-rs/dial9/pull/722))
+- add ad-hoc span wrappers: sync guard, future wrapper, tower layer ([#713](https://github.com/dial9-rs/dial9/pull/713))
+- *(s3)* [**breaking**] adopt Hive-style S3 key layout ([#797](https://github.com/dial9-rs/dial9/pull/797))
+- *(metrique)* implement Default for Dial9Context ([#806](https://github.com/dial9-rs/dial9/pull/806))
+- *(trace-format-derive)* generics, field roles, strict attribute parsing ([#760](https://github.com/dial9-rs/dial9/pull/760))
+- *(viewer)* record metrique metrics as dial9 spans ([#800](https://github.com/dial9-rs/dial9/pull/800))
+- Properly Handle Multi-Runtime Events ([#754](https://github.com/dial9-rs/dial9/pull/754))
+
+### Fixed
+
+- *(perf)* profile dial9's own threads again under ctimer ([#792](https://github.com/dial9-rs/dial9/pull/792))
+
+### Other
+
+- cleanup doc fillers, fix broken links ([#804](https://github.com/dial9-rs/dial9/pull/804))
+- document frame-pointer requirement for memory profiling ([#778](https://github.com/dial9-rs/dial9/pull/778))
+- move tracing layer to dial9-utils ([#752](https://github.com/dial9-rs/dial9/pull/752))
+- minor improvements post 0.5 refactors ([#755](https://github.com/dial9-rs/dial9/pull/755))
+- improve shuttle concurrency test coverage ([#781](https://github.com/dial9-rs/dial9/pull/781))
+- *(core)* seal SharedState behind test-util ([#787](https://github.com/dial9-rs/dial9/pull/787))
+- support borrowed event structs in #[derive(TraceEvent)] ([#758](https://github.com/dial9-rs/dial9/pull/758))
+- *(tokio)* drop SharedState from the future wrappers ([#785](https://github.com/dial9-rs/dial9/pull/785))
+- *(tokio)* record events through Dial9Handle ([#784](https://github.com/dial9-rs/dial9/pull/784))
+- Decode annotated single-event spans ([#733](https://github.com/dial9-rs/dial9/pull/733))
+- *(viewer)* retire obsolete parity tooling and consolidate live checks ([#791](https://github.com/dial9-rs/dial9/pull/791))
+- *(viewer)* promote the Vite UI and remove the legacy viewer ([#772](https://github.com/dial9-rs/dial9/pull/772))
+- remove dead code ([#756](https://github.com/dial9-rs/dial9/pull/756))
+- *(s3)* stop asserting a scheduler outcome in the roundtrip test ([#793](https://github.com/dial9-rs/dial9/pull/793))
+
 ### Added
 
 - Opt-in process-global handle ([#699](https://github.com/dial9-rs/dial9/issues/699)).
