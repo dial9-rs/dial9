@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc2.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2...dial9-v0.5.0-rc2.1) - 2026-08-21
+
 ### Added
 
 - Opt-in process-global handle ([#699](https://github.com/dial9-rs/dial9/issues/699)).
@@ -19,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `taskdump` feature still requires the flag: it forwards to `tokio/taskdump`, which is a hard compile error without it.
 - `JoinSetExt` adds dial9-instrumented `spawn_traced` and `spawn_traced_on`
   methods to Tokio `JoinSet`s while preserving caller locations.
+- Ad-hoc spans outside Tokio tasks: a sync guard, a future wrapper and a tower
+  layer, plus `dial9_span!` for compile-time span schemas ([#713](https://github.com/dial9-rs/dial9/pull/713)).
+- Per-runtime scheduler metrics. `RuntimeMetricsEvent` replaces the process-wide
+  `QueueSampleEvent`, with one sample per runtime per flush cycle tagged with the
+  runtime's name. `QueueSampleEvent` still decodes, and the viewer falls back to
+  it for traces without runtime metrics ([#754](https://github.com/dial9-rs/dial9/pull/754)).
+- `#[derive(TraceEvent)]` supports borrowed event structs, so events can hold
+  `&str` and `&[u8]` fields ([#758](https://github.com/dial9-rs/dial9/pull/758)).
+- The viewer records metrique metrics as dial9 spans ([#800](https://github.com/dial9-rs/dial9/pull/800)).
+- `Dial9Context` implements `Default` ([#806](https://github.com/dial9-rs/dial9/pull/806)).
 
 ### Changed
 
@@ -31,6 +43,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retains the existing S3-enabled binary. For a local-only viewer without S3
   or the AWS SDK, use `dial9-viewer` directly with its default features
   disabled ([#722](https://github.com/dial9-rs/dial9/pull/722)).
+- **Breaking:** the trace format API drops optional timestamps.
+  `SchemaEntry::new` and `SchemaEntry::with_annotations` no longer take a
+  `has_timestamp` argument, and `timestamp_ns` on `DecodedFrame::Event`,
+  `DecodedFrameRef::Event` and `RawEvent` is `u64` instead of `Option<u64>`.
+  The wire format is unchanged and legacy `has_timestamp=0` schemas still
+  decode ([#765](https://github.com/dial9-rs/dial9/pull/765)).
+- **Breaking:** `#[derive(TraceEvent)]` rejects unknown `#[traceevent(...)]`
+  attributes and field roles outside the supported vocabulary instead of
+  ignoring them ([#760](https://github.com/dial9-rs/dial9/pull/760)).
+- **Breaking:** a process gets one recorder. A second `build()` returns a
+  disabled recorder and logs an `error!`, since the memory profiler, the
+  allocator, CPU profiling and the process-global handle are already claimed.
+  Dropping the first recorder frees the slot
+  ([#810](https://github.com/dial9-rs/dial9/pull/810)).
+
+### Fixed
+
+- *(perf)* profile dial9's own threads again under ctimer ([#792](https://github.com/dial9-rs/dial9/pull/792))
+
+### Other
+
+- cleanup doc fillers, fix broken links ([#804](https://github.com/dial9-rs/dial9/pull/804))
+- document frame-pointer requirement for memory profiling ([#778](https://github.com/dial9-rs/dial9/pull/778))
+- move tracing layer to dial9-utils ([#752](https://github.com/dial9-rs/dial9/pull/752))
+- minor improvements post 0.5 refactors ([#755](https://github.com/dial9-rs/dial9/pull/755))
+- improve shuttle concurrency test coverage ([#781](https://github.com/dial9-rs/dial9/pull/781))
+- *(core)* seal SharedState behind test-util ([#787](https://github.com/dial9-rs/dial9/pull/787))
+- *(tokio)* drop SharedState from the future wrappers ([#785](https://github.com/dial9-rs/dial9/pull/785))
+- *(tokio)* record events through Dial9Handle ([#784](https://github.com/dial9-rs/dial9/pull/784))
+- Decode annotated single-event spans ([#733](https://github.com/dial9-rs/dial9/pull/733))
+- *(viewer)* retire obsolete parity tooling and consolidate live checks ([#791](https://github.com/dial9-rs/dial9/pull/791))
+- *(viewer)* promote the Vite UI and remove the legacy viewer ([#772](https://github.com/dial9-rs/dial9/pull/772))
+- remove dead code ([#756](https://github.com/dial9-rs/dial9/pull/756))
+- *(s3)* stop asserting a scheduler outcome in the roundtrip test ([#793](https://github.com/dial9-rs/dial9/pull/793))
 
 ## [0.5.0-rc2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc1...dial9-v0.5.0-rc2) - 2026-08-03
 
