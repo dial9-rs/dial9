@@ -2,48 +2,6 @@
 
 // Pure helpers shared by the Tokio-stats page.
 
-// Build the viewer deep link for a poll exemplar / long poll.
-//
-// The viewer fetches each `trace=` component (here a single `/api/object`
-// request that streams the still-gzipped segment) and gunzips it client-side,
-// attaching the bring-your-own-credentials headers from sessionStorage.
-//
-// To land on the exact poll, we pass a `focus_*` window (start/end + optional
-// worker/task). These are DISTINCT from `start`/`end`: the viewer treats
-// start/end as a *hard parse filter* that re-parses keeping only events inside
-// the window, so pointing them at one poll's
-// sub-millisecond window drops every surrounding event and loads an empty page.
-// `focus_*` instead pans/zooms the already-parsed trace to the window and
-// highlights the task — non-destructive, so the
-// surrounding context is still there. When no window is given we just open the
-// whole segment. NEVER emit start/end here.
-//
-// Returns "" when there is no source key to link to.
-function exemplarViewerUrl(opts) {
-  const o = opts || {};
-  if (!o.sourceKey) return "";
-  // Mirror the landing page's objectTraceUrls(): one `/api/object?bucket=&key=`
-  // component, built via URLSearchParams so the key is correctly encoded.
-  const oq = new URLSearchParams();
-  oq.set("bucket", o.bucket || "");
-  oq.set("key", o.sourceKey);
-  const traceUrl = "/api/object?" + oq.toString();
-
-  const p = new URLSearchParams();
-  p.set("trace", traceUrl);
-  if (o.svc) p.set("svc", o.svc);
-  if (o.host) p.set("host", o.host);
-  // Non-destructive focus on the exact poll. `focus_start` alone is enough to
-  // pan the view; worker/task/end refine the framing and highlight.
-  if (o.focusStartNs != null) {
-    p.set("focus_start", String(o.focusStartNs));
-    if (o.focusEndNs != null) p.set("focus_end", String(o.focusEndNs));
-    if (o.focusWorker != null) p.set("focus_worker", String(o.focusWorker));
-    if (o.focusTask != null) p.set("focus_task", String(o.focusTask));
-  }
-  return "viewer.html?" + p.toString();
-}
-
 // Map a poll/latency duration (ns) to a severity color, matching IRIS's
 // `latencyHeat`: ≥3ms red, ≥1ms amber, else green. Hex values are dial9's own
 // palette (the .off-cpu / .card.warn / .card.good colors in tokio_stats.html),
@@ -111,7 +69,6 @@ function hostWorkerCounts(workers) {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    exemplarViewerUrl,
     latencyHeat,
     busynessHeat,
     hostBusyPct,

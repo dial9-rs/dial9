@@ -592,72 +592,6 @@ function exemplarRequestMatches(requestUid, requestScopeKey, currentUid, current
   return requestUid === currentUid && requestScopeKey === currentScopeKey;
 }
 
-// Build the viewer deep link that jumps to a specific slow-exemplar span
-// instance. Mirrors tokio_stats_api.js's exemplarViewerUrl: one `/api/object`
-// component pointing at the exemplar's own source file (bucket + source_key),
-// plus svc/host, and a non-destructive `focus_start`/`focus_end` window that
-// pans/zooms the loaded trace to the span WITHOUT filtering events out.
-//
-// `focus_*` params are DISTINCT from `start`/`end` (which the viewer treats as
-// a hard parse filter that would drop every surrounding event and load an empty
-// page for a narrow single-span window). We never emit start/end here.
-//
-// `exemplar` is a Exemplar: { start_ns, end_ns, source_key, host, ... }.
-// `scope` carries the page scope: { trace, bucket, region, service, spanName }.
-// Raw mode reuses `trace`; aggregate mode builds an `/api/object` component
-// from the exemplar source. The exemplar's own host takes precedence because
-// exemplars can come from different hosts. `spanName`, when given, is forwarded
-// as `focus_span_name` so the viewer selects the exact span (a long span's
-// window overlaps many others).
-//
-// Returns "" when neither a raw trace nor an exemplar source is available.
-function exemplarViewerUrl(exemplar, scope) {
-  const ex = exemplar || {};
-  const sc = scope || {};
-
-  let traceUrl = sc.trace || "";
-  if (!traceUrl) {
-    if (!ex.source_key) return "";
-    // The backend stores source_key as the fully-qualified
-    // `s3://{bucket}/{key}` (that's the `full_key` decode_samples was handed).
-    // But `/api/object` wants a bucket + a BUCKET-RELATIVE key — passing the
-    // whole `s3://…` URI as `key=` 404s. Split it back into bucket + relative
-    // key; fall back to the scope bucket and an already-relative key.
-    let bucket = sc.bucket || "";
-    let key = ex.source_key;
-    const s3 = /^s3:\/\/([^/]+)\/(.+)$/.exec(ex.source_key);
-    if (s3) {
-      bucket = s3[1];
-      key = s3[2];
-    }
-    // Mirror the landing page's objectTraceUrls(): one
-    // `/api/object?bucket=&key=` component, built via URLSearchParams so the
-    // key is correctly encoded.
-    const oq = new URLSearchParams();
-    oq.set("bucket", bucket);
-    oq.set("key", key);
-    traceUrl = "/api/object?" + oq.toString();
-  }
-
-  const p = new URLSearchParams();
-  p.set("trace", traceUrl);
-  if (sc.service) p.set("svc", sc.service);
-  // Prefer the exemplar's own host (it may differ from the scope's host set).
-  if (ex.host) p.set("host", ex.host);
-  if (sc.region) p.set("aws_region", sc.region);
-  if (sc.credentialMode) p.set("credential_mode", sc.credentialMode);
-  if (sc.credentialMode === "role" && sc.roleArn) p.set("aws_role_arn", sc.roleArn);
-  // Non-destructive focus on the exact span. `focus_start` alone triggers the
-  // pan; `focus_end` frames the zoom; `focus_span_name` lets the viewer select
-  // the matching span rather than just pan to a time window.
-  if (ex.start_ns != null) {
-    p.set("focus_start", String(ex.start_ns));
-    if (ex.end_ns != null) p.set("focus_end", String(ex.end_ns));
-    if (sc.spanName) p.set("focus_span_name", sc.spanName);
-  }
-  return "viewer.html?" + p.toString();
-}
-
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 var SpanExplorer = {
@@ -686,7 +620,6 @@ var SpanExplorer = {
   classifyExemplarSnapshot,
   completeExemplarRefresh,
   exemplarRequestMatches,
-  exemplarViewerUrl,
   parseAttrFilterParams,
   formatAttrFilterParams,
   hasAttrFilter,
