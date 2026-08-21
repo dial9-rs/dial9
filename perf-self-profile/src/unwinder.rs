@@ -96,7 +96,9 @@ impl Unwinder {
     /// capture returns frame 0 and stops. This lets binaries without frame
     /// pointers degrade to an empty or shallow stack instead of crashing,
     /// although arbitrary register values can occasionally resemble a valid
-    /// frame record.
+    /// frame record. Detect missing frame pointers with
+    /// [`self_test_frame_pointers`](Self::self_test_frame_pointers) rather
+    /// than relying on `capture` to fail loudly.
     ///
     /// # Safety
     /// - [`install`](Self::install) must have succeeded and the SIGSEGV
@@ -124,6 +126,136 @@ impl Unwinder {
         // SAFETY: forwarding Unwinder::capture's own safety contract to
         // platform::capture (handler installed, not in a SIGSEGV handler).
         unsafe { platform::capture(out) }
+    }
+
+    /// Checks whether this binary looks like it was built with
+    /// `-C force-frame-pointers=yes`.
+    ///
+    /// Recurses a fixed depth through this module's own `#[inline(never)]`
+    /// function on a dedicated thread, then inspects the captured stack —
+    /// by symbol name where available (layout-independent), falling back
+    /// to a raw frame-count threshold otherwise.
+    ///
+    /// Returns `None` if the self-test itself couldn't run (thread spawn
+    /// or panic) — inconclusive, not evidence of missing frame pointers.
+    pub fn self_test_frame_pointers(&self) -> Option<FramePointerSelfTest> {
+        let unwinder = *self;
+        let join = std::thread::Builder::new()
+            .name("dial9-fp-selftest".to_string())
+            .spawn(move || self_test::run(&unwinder))
+            .ok()?;
+        join.join().ok()
+    }
+}
+
+/// Result of [`Unwinder::self_test_frame_pointers`].
+///
+/// `#[non_exhaustive]` so new fields can be added without breaking callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FramePointerSelfTest {
+    /// A match count if `matched_by_symbol`, otherwise a raw frame count.
+    pub frames_captured: usize,
+    /// Minimum `frames_captured` needed to pass.
+    pub expected_min: usize,
+    pub matched_by_symbol: bool,
+}
+
+impl FramePointerSelfTest {
+    /// Whether the self-test result looks like a healthy, frame-pointer-enabled build.
+    pub fn passed(&self) -> bool {
+        self.frames_captured >= self.expected_min
+    }
+}
+
+mod self_test {
+    use super::{FramePointerSelfTest, Unwinder};
+
+    /// Recursion depth used by the self-test. Chosen with slack above
+    /// `EXPECTED_MIN` so ordinary variance (e.g. a couple of frames lost to
+    /// `MAX_FRAME_SIZE`/dead-zone gating near the top of the walk) doesn't
+    /// produce false positives on a healthy build.
+    pub(super) const DEPTH: usize = 16;
+    /// Minimum evidence count required to pass. Tuned empirically.
+    pub(super) const EXPECTED_MIN: usize = 12;
+
+    pub(super) fn run(unwinder: &Unwinder) -> FramePointerSelfTest {
+        let mut frames = [0u64; DEPTH + 4];
+        let written = recurse(unwinder, DEPTH, &mut frames);
+        let captured = &frames[..written];
+
+        if let Some(matched) = verify_by_symbol(captured) {
+            return FramePointerSelfTest {
+                frames_captured: matched,
+                expected_min: EXPECTED_MIN,
+                matched_by_symbol: true,
+            };
+        }
+
+        FramePointerSelfTest {
+            frames_captured: captured.len(),
+            expected_min: EXPECTED_MIN,
+            matched_by_symbol: false,
+        }
+    }
+
+    #[inline(never)]
+    fn recurse(unwinder: &Unwinder, depth: usize, out: &mut [u64]) -> usize {
+        if depth == 0 {
+            // SAFETY: called only from `run`, on the thread
+            // `Unwinder::self_test_frame_pointers` just spawned, after
+            // `Unwinder::install()` has already succeeded (the caller holds
+            // an `Unwinder`); not inside a signal handler.
+            let result = unsafe { unwinder.capture(out) };
+            return result.frames_written;
+        }
+        // Not a tail call (the `black_box` after it forces the recursive
+        // call's result to actually be used), so this frame is guaranteed
+        // to still be on the stack when the base case captures.
+        let n = recurse(unwinder, depth - 1, out);
+        std::hint::black_box(n)
+    }
+
+    /// `None` means nothing resolved at all (e.g. no symbolizer, or a
+    /// stripped binary) — callers should fall back to the frame-count
+    /// check, not read it as "no match". `Some(n)` is the match count,
+    /// which may be 0.
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "android", target_arch = "aarch64")
+    ))]
+    fn verify_by_symbol(frames: &[u64]) -> Option<usize> {
+        use blazesym::symbolize::Symbolizer;
+
+        let maps = crate::read_proc_maps();
+        let symbolizer = Symbolizer::new();
+        let mut matched = 0;
+        let mut any_resolved = false;
+        for &addr in frames {
+            match crate::resolve_symbol_with_maps(addr, &symbolizer, &maps).name {
+                Some(name) => {
+                    any_resolved = true;
+                    if name.ends_with("self_test::recurse") {
+                        matched += 1;
+                    } else {
+                        // Walked past the self-test's own recursion into its
+                        // caller (`run`, the thread closure, etc.) — the
+                        // chain of interest ends here.
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        any_resolved.then_some(matched)
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        all(target_os = "android", target_arch = "aarch64")
+    )))]
+    fn verify_by_symbol(_frames: &[u64]) -> Option<usize> {
+        None
     }
 }
 
@@ -172,15 +304,14 @@ mod platform {
         unsafe { unwind(pc, fp, sp, out) }
     }
 
-    /// Read `(pc, fp, sp)` such that `pc` is the PC to use for frame 0 and
-    /// `fp` is the saved frame pointer of the frame *above* the current one.
+    /// Read `(pc, fp, sp)` for the caller of [`Unwinder::capture`], reading
+    /// every field through `safe_load` rather than trusting a raw
+    /// dereference.
     ///
     /// Because this is `#[inline(always)]`, the `rbp`/`x29` read observes
     /// `Unwinder::capture`'s frame (its one and only non-inlined ancestor).
-    /// - `*(rbp + 8)` on x86_64 / LR save slot on aarch64 is
-    ///   `Unwinder::capture`'s return address → goes to `out[0]`.
-    /// - `*rbp` / `*x29` is the saved fp of the caller of `Unwinder::capture`
-    ///   → where we start walking the chain.
+    /// `pc` is the return address of `capture` (frame 0); `fp` is the saved
+    /// frame pointer to continue walking from.
     ///
     /// Returns `None` when the current frame record is implausible or its
     /// return-address slot cannot be read safely. An unusable caller frame
