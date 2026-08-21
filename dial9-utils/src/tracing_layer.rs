@@ -410,10 +410,12 @@ where
     }
 
     fn on_close(&self, id: span::Id, _ctx: Context<'_, S>) {
-        let Some(handle) = Dial9Handle::try_current() else {
+        // `current` like the enter/exit sides, so a span opened through the
+        // process-global handle is also closed through it.
+        let handle = Dial9Handle::current();
+        if !handle.is_enabled() {
             return;
-        };
-
+        }
         handle.record_event(SpanCloseEvent {
             timestamp_ns: clock_monotonic_ns(),
             span_id: id.into_u64(),

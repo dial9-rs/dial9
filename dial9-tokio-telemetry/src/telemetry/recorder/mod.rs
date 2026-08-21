@@ -12,7 +12,7 @@ pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
 
 pub use dial9_core::handle::Dial9Handle;
-pub(crate) use handle::traced_handle;
+pub(crate) use handle::traced_runtime_handle;
 pub use handle::{Dial9TokioHandle, block_on, spawn, spawn_in};
 pub use join_set::JoinSetExt;
 
@@ -165,6 +165,7 @@ fn register_hooks(
         // Install this thread's Dial9Handle so user code can call
         // `Dial9Handle::current()` from anywhere on this thread.
         set_tl_handle(handle_for_tl.clone());
+        runtime_context::mark_thread_traced();
 
         // Install this thread's task-dump config for `TaskDumped` to read.
         #[cfg(feature = "taskdump")]
@@ -186,6 +187,7 @@ fn register_hooks(
 
     register_hook!(builder, on_thread_stop, tokio_hooks.on_thread_stop, {
         clear_tl_handle();
+        runtime_context::clear_thread_traced();
 
         #[cfg(feature = "taskdump")]
         crate::task_dumped::clear_taskdump_config();
@@ -510,8 +512,7 @@ mod tests {
         // Recorder methods should be safe no-ops.
         rec.enable();
         rec.disable();
-        let handle =
-            Dial9TokioHandle::for_runtime(rt.handle().clone(), traced_handle(rec.handle()));
+        let handle = Dial9TokioHandle::for_runtime(rt.handle().clone(), Some(rec.handle().clone()));
         let _start = rec.start_time();
 
         // Runtime should work normally, including handle.spawn
@@ -935,7 +936,7 @@ mod tests {
 
         // Spawn on runtime B with wake-tracked wrapping → wake events.
         let handle =
-            Dial9TokioHandle::for_runtime(runtime_b.handle().clone(), traced_handle(rec.handle()));
+            Dial9TokioHandle::for_runtime(runtime_b.handle().clone(), Some(rec.handle().clone()));
         runtime_b.block_on(async {
             let mut handles = Vec::new();
             for _ in 0..50 {
@@ -1361,7 +1362,7 @@ mod tests {
     /// attribute them to and the wrapper stays out of it.
     #[test]
     fn wrapper_leaves_unattached_runtimes_alone() {
-        use crate::telemetry::recorder::{Dial9TokioHandle, traced_handle};
+        use crate::telemetry::recorder::Dial9TokioHandle;
 
         let (capture, data) = CapturingProcessor::new();
         let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
@@ -1373,7 +1374,7 @@ mod tests {
             .build()
             .unwrap();
         let handle =
-            Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));
+            Dial9TokioHandle::for_runtime(runtime.handle().clone(), Some(rec.handle().clone()));
         runtime.block_on(async {
             handle.spawn(async {}).await.unwrap();
         });
@@ -1868,7 +1869,7 @@ mod tests {
             .unwrap();
 
         let handle =
-            Dial9TokioHandle::for_runtime(runtime.handle().clone(), traced_handle(rec.handle()));
+            Dial9TokioHandle::for_runtime(runtime.handle().clone(), Some(rec.handle().clone()));
 
         runtime.block_on(async {
             // handle.spawn wraps the future with wake tracking;
@@ -1884,12 +1885,7 @@ mod tests {
         });
 
         // Drain thread-local buffers before shutdown.
-        test_util::drain_thread_local(
-            traced_handle(rec.handle())
-                .expect("enabled recorder must yield a handle")
-                .shared()
-                .unwrap(),
-        );
+        test_util::drain_thread_local(rec.handle().clone().shared().unwrap());
 
         drop(runtime);
         rec.graceful_shutdown(Duration::from_secs(1));
@@ -1939,9 +1935,9 @@ mod tests {
             .unwrap();
 
         let handle_a =
-            Dial9TokioHandle::for_runtime(rt_a.handle().clone(), traced_handle(rec.handle()));
+            Dial9TokioHandle::for_runtime(rt_a.handle().clone(), Some(rec.handle().clone()));
         let handle_b =
-            Dial9TokioHandle::for_runtime(rt_b.handle().clone(), traced_handle(rec.handle()));
+            Dial9TokioHandle::for_runtime(rt_b.handle().clone(), Some(rec.handle().clone()));
 
         // Spawn from outside any runtime context — should target the correct runtime.
         let join_a = handle_a.spawn(async {

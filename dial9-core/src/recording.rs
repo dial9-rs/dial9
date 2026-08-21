@@ -1,6 +1,6 @@
 use crate::buffer::{BufferMode, SegmentWriter};
 use crate::flush_loop::run_flush_loop;
-use crate::handle::{ControlCommand, Dial9Handle};
+use crate::handle::{ControlCommand, Dial9Handle, InstallGlobalHandleError};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
 use crate::shared_state::SharedState;
@@ -121,6 +121,42 @@ impl Recorder {
         &self.handle
     }
 
+    /// Publish this recorder's handle as the process-global one.
+    ///
+    /// When set, [`Dial9Handle::current`] resolves on every thread in the
+    /// process. When not set, it resolves only on threads a runtime integration
+    /// has installed a handle on.
+    ///
+    /// Returns [`InstallGlobalHandleError`] and changes nothing if another handle
+    /// is already installed: two live globals would split one process's events
+    /// across two traces. A recorder clears its own when it stops, so a later
+    /// install succeeds.
+    ///
+    /// ```no_run
+    /// use dial9_core::buffer::MemoryBuffer;
+    /// use dial9_core::handle::Dial9Handle;
+    /// use dial9_core::recorder::recorder;
+    /// use dial9_trace_format::TraceEvent;
+    ///
+    /// #[derive(TraceEvent)]
+    /// struct Tick {
+    ///     #[traceevent(timestamp)]
+    ///     timestamp_ns: u64,
+    /// }
+    ///
+    /// let rec = recorder(MemoryBuffer::new(1 << 20)?).build();
+    /// rec.install_global_handle()?;
+    ///
+    /// std::thread::spawn(|| {
+    ///     // reachable here, with no handle plumbed in
+    ///     Dial9Handle::current().record_event(Tick { timestamp_ns: 0 });
+    /// });
+    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn install_global_handle(&self) -> Result<(), InstallGlobalHandleError> {
+        crate::handle::set_global_handle(self.handle.clone())
+    }
+
     /// Attach the background worker to this recorder, so its lifecycle is tied
     /// to the recorder's (drained on `graceful_shutdown`, stopped on drop).
     #[cfg(feature = "pipeline")]
@@ -162,6 +198,12 @@ impl Recorder {
     /// that their thread-local buffers have already been flushed to the central
     /// collector.
     pub(crate) fn stop_flush_thread(&mut self) {
+        // Clear the global before the blocking flush below, otherwise other threads
+        // keep resolving it and recording into buffers that nothing will drain.
+        if let Some(shared) = self.handle.shared() {
+            crate::handle::clear_global_handle_for(shared);
+        }
+
         // Drain the calling thread's local buffer — it won't get a thread-stop
         // hook, so any unflushed events would be lost otherwise.
         if let Some(shared) = self.handle.shared() {

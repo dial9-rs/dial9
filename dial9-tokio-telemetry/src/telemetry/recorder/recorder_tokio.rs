@@ -394,6 +394,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // this the tracing layer and `dial9::spawn` find no handle until the
         // first poll.
         set_tl_handle(self.clone());
+        super::runtime_context::mark_thread_traced();
         // Same for the task-dump config.
         #[cfg(feature = "taskdump")]
         if let Some(config) = task_dump_config {

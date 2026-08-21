@@ -17,6 +17,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 missing_debug_implementations = "warn"
 
 [dependencies]
+arc-swap = "1"
 bon = "3"
 bytes = "1"
 crossbeam-queue = "0.3"
