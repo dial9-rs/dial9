@@ -191,7 +191,7 @@ Socket accept queue knobs (`linux-socket` feature required, Linux only):
 | `DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED` | `false` | Enable TCP accept queue snapshots from Linux sock_diag. |
 | `DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS` | `400` | Sampling interval in milliseconds. |
 
-Task dump knobs (see [Task dumps](#task-dumps-linux-only) for capture requirements):
+Task dump knobs (important: see [Task dumps](#task-dumps-linux-only) for additional requirements):
 
 | Name | Default | Meaning |
 | --- | --- | --- |
