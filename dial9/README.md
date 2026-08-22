@@ -444,6 +444,8 @@ dial9 = { version = "0.5", features = ["memory-profiling"] }
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
+This must go in `.cargo/config.toml`, not `Cargo.toml` — a `rustflags` entry under `[profile.*]` or elsewhere in `Cargo.toml` is silently ignored by Cargo. If you get it wrong, `MemoryProfiler::install()` won't succeed quietly and fail later: it runs a self-test and returns `InstallError::MissingFramePointers` with the exact fix, letting you decide whether to crash out (as in the example below) or continue without memory profiling.
+
 **Install the allocator and profiler:**
 
 ```rust,no_run
