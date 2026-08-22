@@ -225,7 +225,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 ### Tokio events
 `dial9` uses Tokio runtime hooks to record events on each `poll`, task `spawn` and when runtime workers park and unpark. If you use `dial9`'s [`spawn`](https://docs.rs/dial9/latest/dial9/fn.spawn.html) your future will be instrumented to capture two additional pieces of info:
 1. The wake event, when your future was _ready_ to run vs. when Tokio actually started running it.
-2. A "task dump", a stack trace of what your future was doing when it went idle.
+2. When enabled, task dumps; only futures instrumented this way can produce them.
 
 `recorder.handle().attach_tokio_runtime(..)` takes a Tokio runtime builder you configured, installs
 dial9's hooks on it, and builds it. Pair the recorder with the runtime to get a
@@ -555,6 +555,8 @@ Field units (from `#[metrics(unit = ..)]` or the value type) are carried into th
 
 `dial9` can capture async backtraces at yield points. This is the Tokio equivalent of scheduling events: You can see the stack trace your future was at when it went idle.
 
+Task dumps are captured only for futures spawned through a Dial9 spawner, such as `dial9::spawn`. Enabling the `taskdump` feature and configuring `TaskDumpConfig` do not instrument every task on the attached runtime. Tasks spawned directly with `tokio::spawn` are valid, but do not produce task dumps.
+
 > Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64) and only under `--cfg tokio_unstable`. Enabling it on another target, or without the flag, is a hard compile error from Tokio.
 
 ```rust,no_run
@@ -587,7 +589,13 @@ fn my_config() -> io::Result<AttachedRuntime> {
 }
 
 #[dial9::main(config = my_config)]
-async fn main() { /* ... */ }
+async fn main() {
+    dial9::spawn(async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+    .await
+    .expect("task failed");
+}
 ```
 
 > Performance note: Task dumps currently produce one extra wake per capture and are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
