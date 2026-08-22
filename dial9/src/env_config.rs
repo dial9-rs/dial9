@@ -527,8 +527,8 @@ fn build_s3_config(config: ResolvedS3Config) -> dial9_destinations_s3::S3Config 
 /// | `DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED` | `false` | Enable TCP accept queue snapshots from Linux sock_diag. |
 /// | `DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS` | `400` | Sampling interval in milliseconds. |
 ///
-/// Supported task dump variables (capture requires the `taskdump` feature and
-/// futures spawned through a Dial9 spawner, such as `dial9::spawn`):
+/// Supported task dump variables (see [`TaskDumpConfig`] for capture
+/// requirements):
 ///
 /// | Variable | Default | Meaning |
 /// | --- | --- | --- |
