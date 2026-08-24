@@ -4,6 +4,7 @@
 //! attributes.
 
 use proc_macro::TokenStream;
+use proc_macro_crate::{Error as CrateNameError, FoundCrate, crate_name};
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
@@ -78,6 +79,46 @@ fn parse_field_attrs(field: &syn::Field) -> Result<FieldAttrs, syn::Error> {
     Ok(parsed)
 }
 
+/// Crates that can supply `dial9-trace-format`, and where it sits inside each.
+/// Checked in order, so the most direct dependency wins.
+const CANDIDATES: &[(&str, Option<&str>)] = &[
+    ("dial9-trace-format", None),
+    ("dial9", Some("__trace_format")),
+];
+
+/// Where the expansion should look for `dial9-trace-format`.
+///
+/// Since a bare `::dial9_trace_format` resolves against the caller's dependencies,
+/// it does not exist for anyone reaching the derive through a re-export.
+/// Instead, we read the caller's manifest to find the path.
+fn resolve_crate_path() -> proc_macro2::TokenStream {
+    for (dep, suffix) in CANDIDATES {
+        let found = match crate_name(dep) {
+            Ok(found) => found,
+            Err(CrateNameError::CrateNotFound { .. }) => continue,
+            // Every lookup reads the same manifest, so retrying is pointless.
+            Err(_) => break,
+        };
+        let root = match found {
+            // Compiling dial9-trace-format's own lib or examples,
+            // `extern crate self` in its lib makes this resolve.
+            FoundCrate::Itself => dep.replace('-', "_"),
+            // The name the caller declared it under, renames included.
+            FoundCrate::Name(name) => name,
+        };
+        let root = proc_macro2::Ident::new(&root, proc_macro2::Span::call_site());
+        return match suffix {
+            None => quote!(::#root),
+            Some(module) => {
+                let module = proc_macro2::Ident::new(module, proc_macro2::Span::call_site());
+                quote!(::#root::#module)
+            }
+        };
+    }
+    // Fall back to the direct dependency
+    quote!(::dial9_trace_format)
+}
+
 fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     let name = &input.ident;
 
@@ -131,6 +172,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             })?;
         }
     }
+    let krate = resolve_crate_path();
+
     // The wire event name expression returned by `event_name()`: either the
     // `name = ...` override (evaluated at the override's call site, so builtins
     // like `file!()`/`line!()` resolve there) or the struct name as a literal.
@@ -229,7 +272,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             // excludes the timestamp field.
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
-                ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "unit", #unit)
+                #krate::schema::FieldAnnotation::new(#idx, "unit", #unit)
             });
         }
         if let Some(role) = &attrs.role {
@@ -245,7 +288,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             }
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
-                ::dial9_trace_format::schema::FieldAnnotation::new(
+                #krate::schema::FieldAnnotation::new(
                     #idx,
                     #ROLE_ANNOTATION_KEY,
                     #role,
@@ -267,18 +310,18 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             }
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
-                ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "kind", #kind)
+                #krate::schema::FieldAnnotation::new(#idx, "kind", #kind)
             });
         }
 
         field_def_tokens.push(quote! {
-            ::dial9_trace_format::schema::FieldDef::new(
+            #krate::schema::FieldDef::new(
                 #field_name_lit,
-                <#ty as ::dial9_trace_format::TraceField>::field_type(),
+                <#ty as #krate::TraceField>::field_type(),
             )
         });
         encode_tokens.push(quote! {
-            <#ty as ::dial9_trace_format::TraceField>::encode(&self.#field_name, enc)?;
+            <#ty as #krate::TraceField>::encode(&self.#field_name, enc)?;
         });
     }
 
@@ -301,7 +344,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
                 if cached != 0 {
                     return cached;
                 }
-                let new = ::dial9_trace_format::__NEXT_TYPE_SLOT
+                let new = #krate::__NEXT_TYPE_SLOT
                     .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed);
                 match SLOT.compare_exchange(
                     0,
@@ -324,8 +367,8 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         quote! {}
     } else {
         quote! {
-            fn schema_entry() -> ::dial9_trace_format::schema::SchemaEntry {
-                ::dial9_trace_format::schema::SchemaEntry::with_annotations(
+            fn schema_entry() -> #krate::schema::SchemaEntry {
+                #krate::schema::SchemaEntry::with_annotations(
                     Self::event_name(),
                     Self::field_defs(),
                     vec![#(#annotation_tokens),*],
@@ -335,15 +378,15 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
     };
 
     Ok(quote! {
-        impl #impl_generics ::dial9_trace_format::TraceEvent for #name #ty_generics #where_clause {
+        impl #impl_generics #krate::TraceEvent for #name #ty_generics #where_clause {
             fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
-            fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+            fn field_defs() -> Vec<#krate::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
             }
             #schema_entry_impl
             #timestamp_impl
-            fn encode_fields<W: ::std::io::Write>(&self, enc: &mut ::dial9_trace_format::EventEncoder<'_, W>) -> ::std::io::Result<()> {
+            fn encode_fields<W: ::std::io::Write>(&self, enc: &mut #krate::EventEncoder<'_, W>) -> ::std::io::Result<()> {
                 #(#encode_tokens)*
                 Ok(())
             }

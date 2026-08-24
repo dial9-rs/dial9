@@ -15,6 +15,7 @@ members = [
     "examples/metrics-service",
     "examples/simple-local",
     "examples/memory-local",
+    "tests-build",
 ]
 exclude = [
     "dial9-trace-format/fuzz",
