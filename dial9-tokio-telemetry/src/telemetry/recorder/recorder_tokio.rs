@@ -202,10 +202,14 @@ pub struct TokioAttachOptions {
     task_tracking_enabled: bool,
     /// Async-backtrace capture config (requires the `taskdump` feature).
     ///
+    /// <div class="warning">
+    ///
     /// Configuring this does not instrument every task on the runtime. Only
     /// futures spawned through a Dial9 spawner, such as `dial9::spawn`, can
-    /// produce task dumps. Futures spawned directly with [`tokio::spawn`] do
+    /// produce task dumps. Futures spawned directly with `tokio::spawn` do
     /// not produce task dumps.
+    ///
+    /// </div>
     task_dump_config: Option<TaskDumpConfig>,
     /// User-composed Tokio hooks, run after dial9's own.
     #[builder(default)]
