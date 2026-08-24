@@ -18,6 +18,9 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+// Lets derive expansions name `::dial9_trace_format` inside this crate too.
+extern crate self as dial9_trace_format;
+
 pub mod codec;
 #[cfg(feature = "serde-deserialize")]
 pub mod de;

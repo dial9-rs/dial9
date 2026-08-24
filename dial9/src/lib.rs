@@ -9,6 +9,10 @@ pub use dial9_core::recorder::{
 };
 pub use dial9_core::recording::Recorder;
 
+/// What `#[derive(TraceEvent)]` expansions resolve against.
+#[doc(hidden)]
+pub use dial9_trace_format as __trace_format;
+
 /// The trace format: define events with `#[derive(TraceEvent)]`, encode your own
 /// types with [`TraceField`](format::TraceField), read a trace back with
 /// [`Decoder`](format::Decoder).

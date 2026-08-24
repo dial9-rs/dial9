@@ -1,0 +1,10 @@
+# Tests that verify downstream users can build against dial9 reaching entirely through `dial9`.
+[package]
+name = "tests-build"
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+[dependencies]
+dial9 = { path = "../dial9", default-features = false, features = ["tokio"] }
+dial9-utils = { path = "../dial9-utils", features = ["span"] }
