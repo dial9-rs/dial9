@@ -193,11 +193,11 @@ page emits it via `traceTitleParams`/`objectTraceUrls`):
 | `inspect_full` | full frame symbol | Flamegraph only: inspection identity when it differs from `inspect`; omitted otherwise. |
 | `prof` | `1` | Viewer only, debug: enables the render profiler (features/02 A14). Honored but not part of any UI's emitted links. |
 
-`start`/`end` are ABSOLUTE monotonic nanoseconds, the same values carried by
-`event.ts`/`trace.minTs` from `TraceParser.parseTrace()`, NOT offsets from
-trace start. `viewer.html` uses them as viewport bounds and uses the additive
-`data-start`/`data-end` pair for its parse filter. `flamegraph.html` retains
-the original parse-filter meaning.
+`start`/`end` are ABSOLUTE monotonic nanoseconds on the trace record clock, NOT
+offsets from trace start. `viewer.html` uses them as viewport bounds, clamped to
+the extent of all sliceable timestamped records (`recordMinTs`/`recordMaxTs`),
+and uses the additive `data-start`/`data-end` pair for its parse filter.
+`flamegraph.html` retains the original parse-filter meaning.
 
 ### Query params - viewer.html durable view state
 
