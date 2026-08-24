@@ -17,6 +17,7 @@ import {
   type ViewerUrlState,
 } from "./url-state.js";
 import { taskIndexFor } from "./tasks-model.js";
+import { traceDisplayBounds, type TraceDisplayBounds } from "./trace-bounds.js";
 
 export type LoadedTraceKind = "source" | "reparse";
 
@@ -51,20 +52,16 @@ export function createViewerReconstruction(
 
   let firstTrace = true;
 
-  function fitTrace(trace: ParsedTrace): void {
-    // Runtime events define the normal view; analysis-only traces still have
-    // sliceable bounds tracked across all timestamped records.
-    const minTs = trace.minTs ?? trace.recordMinTs;
-    const maxTs = trace.maxTs ?? trace.recordMaxTs;
-    if (minTs !== null && maxTs !== null && maxTs >= minTs) {
-      const viewMaxTs = maxTs === minTs ? minTs + 1 : maxTs;
+  function fitTrace(trace: ParsedTrace): TraceDisplayBounds | null {
+    const bounds = traceDisplayBounds(trace);
+    if (bounds !== null) {
       store.update("viewport", {
-        minTs,
-        maxTs: viewMaxTs,
-        viewStart: minTs,
-        viewEnd: viewMaxTs,
+        minTs: bounds.minTs,
+        maxTs: bounds.maxTs,
+        viewStart: bounds.minTs,
+        viewEnd: bounds.maxTs,
       });
-      return;
+      return bounds;
     }
     store.update("viewport", {
       minTs: 0,
@@ -72,18 +69,18 @@ export function createViewerReconstruction(
       viewStart: 0,
       viewEnd: 0,
     });
+    return null;
   }
 
   function restoreInitialTrace(trace: ParsedTrace): void {
-    fitTrace(trace);
+    const bounds = fitTrace(trace);
     if (
-      trace.minTs !== null &&
-      trace.maxTs !== null &&
+      bounds !== null &&
       urlState.viewStart !== undefined &&
       urlState.viewEnd !== undefined
     ) {
-      const viewStart = Math.max(trace.minTs, urlState.viewStart);
-      const viewEnd = Math.min(trace.maxTs, urlState.viewEnd);
+      const viewStart = Math.max(bounds.minTs, urlState.viewStart);
+      const viewEnd = Math.min(bounds.maxTs, urlState.viewEnd);
       if (viewEnd > viewStart) {
         store.update("viewport", { viewStart, viewEnd });
       }
@@ -100,8 +97,8 @@ export function createViewerReconstruction(
         if (Number.isFinite(window.start)) {
           const pad = Math.max((window.end - window.start) * 2, 1e6);
           store.update("viewport", {
-            viewStart: Math.max(trace.minTs ?? window.start, window.start - pad),
-            viewEnd: Math.min(trace.maxTs ?? window.end, window.end + pad),
+            viewStart: Math.max(bounds?.minTs ?? window.start, window.start - pad),
+            viewEnd: Math.min(bounds?.maxTs ?? window.end, window.end + pad),
           });
         }
       }

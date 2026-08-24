@@ -131,6 +131,30 @@ describe("viewer deep-link reconstruction", () => {
     },
   );
 
+  it("fits and restores the viewport against all-record bounds", () => {
+    const trace: ParsedTrace = {
+      ...settledTrace,
+      minTs: 100,
+      maxTs: 200,
+      recordMinTs: 50,
+      recordMaxTs: 300,
+    };
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search: "?start=60&end=290",
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(trace, "source");
+
+    expect(store.getState().viewport).toMatchObject({
+      minTs: 50,
+      maxTs: 300,
+      viewStart: 60,
+      viewEnd: 290,
+    });
+  });
+
   it("selects focus_task even when no span matches the focus window", () => {
     const task = taskIndexFor(settledTrace).rows.find((row) => row.pollCount > 0)!;
     const offset = settledTrace.clockOffsetNs ?? 0;

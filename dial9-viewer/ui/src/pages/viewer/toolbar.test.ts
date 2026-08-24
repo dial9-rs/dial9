@@ -70,6 +70,17 @@ describe("file-info stats line", () => {
     // Duration segment is present (a human duration unit).
     expect(text.split(" · ").length).toBeGreaterThanOrEqual(3);
   });
+
+  it("shows the duration across all timestamped records", () => {
+    const text = fileMetaText({
+      ...trace,
+      minTs: 1e9,
+      maxTs: 2e9,
+      recordMinTs: 0,
+      recordMaxTs: 3e9,
+    });
+    expect(text).toContain("3.00s");
+  });
 });
 
 describe("uninstrumented count", () => {

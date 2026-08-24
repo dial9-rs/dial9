@@ -92,6 +92,30 @@ describe("URL range selection restoration", () => {
     expect(patch.sidebarRange).toBeUndefined();
     expect(patch.spawnedTasksRange).toEqual({ startNs: 150, endNs: 200 });
   });
+
+  it("clamps ranges to all records rather than runtime events", () => {
+    deriveLaneDataMock.mockReturnValue({
+      columnarSpans: undefined,
+      spanByIdSingle: new Map(),
+      workerIds: [],
+      workerSpans: {},
+    } as unknown as LaneData);
+    const boundedTrace = {
+      customEvents: [],
+      minTs: 100,
+      maxTs: 200,
+      recordMinTs: 50,
+      recordMaxTs: 300,
+    } as unknown as ParsedTrace;
+
+    const patch = resolveUrlSelection(boundedTrace, {
+      sidebarRange: { startNs: 25, endNs: 75 },
+      spawnedRange: { startNs: 250, endNs: 350 },
+    } as ViewerUrlState);
+
+    expect(patch.sidebarRange).toEqual({ startNs: 50, endNs: 75 });
+    expect(patch.spawnedTasksRange).toEqual({ startNs: 250, endNs: 300 });
+  });
 });
 
 describe("URL task-dump restoration", () => {
