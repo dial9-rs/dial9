@@ -191,12 +191,16 @@ Socket accept queue knobs (`linux-socket` feature required, Linux only):
 | `DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED` | `false` | Enable TCP accept queue snapshots from Linux sock_diag. |
 | `DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS` | `400` | Sampling interval in milliseconds. |
 
-Task dump knobs (important: see [Task dumps](#task-dumps-linux-only) for additional requirements):
+Task dump knobs (capture requires the `taskdump` feature, `--cfg tokio_unstable`,
+Linux on aarch64, x86, or x86_64, and futures spawned through a Dial9 spawner,
+such as `dial9::spawn`):
 
 | Name | Default | Meaning |
 | --- | --- | --- |
 | `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
 | `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
+
+See [Task dumps](#task-dumps-linux-only) for setup and usage details.
 
 Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `recorder_from_env` behavior.
 
