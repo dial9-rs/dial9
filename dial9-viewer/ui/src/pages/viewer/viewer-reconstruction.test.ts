@@ -100,6 +100,37 @@ function normalizedProjection(
 }
 
 describe("viewer deep-link reconstruction", () => {
+  it.each([
+    ["record range", 100, 300, 300],
+    ["single timestamp", 100, 100, 101],
+  ])(
+    "fits an analysis-only trace from its %s",
+    (_label, recordMinTs, recordMaxTs, expectedMaxTs) => {
+      const trace: ParsedTrace = {
+        ...settledTrace,
+        events: [],
+        minTs: null,
+        maxTs: null,
+        recordMinTs,
+        recordMaxTs,
+      };
+      const store = createViewerStore({ scheduler: () => {} });
+      const reconstruction = createViewerReconstruction(store, {
+        search: "",
+        hash: "",
+      });
+
+      reconstruction.applyLoadedTrace(trace, "source");
+
+      expect(store.getState().viewport).toMatchObject({
+        minTs: recordMinTs,
+        maxTs: expectedMaxTs,
+        viewStart: recordMinTs,
+        viewEnd: expectedMaxTs,
+      });
+    },
+  );
+
   it("selects focus_task even when no span matches the focus window", () => {
     const task = taskIndexFor(settledTrace).rows.find((row) => row.pollCount > 0)!;
     const offset = settledTrace.clockOffsetNs ?? 0;

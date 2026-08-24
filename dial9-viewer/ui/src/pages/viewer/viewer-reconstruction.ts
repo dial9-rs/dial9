@@ -52,12 +52,17 @@ export function createViewerReconstruction(
   let firstTrace = true;
 
   function fitTrace(trace: ParsedTrace): void {
-    if (trace.minTs !== null && trace.maxTs !== null) {
+    // Runtime events define the normal view; analysis-only traces still have
+    // sliceable bounds tracked across all timestamped records.
+    const minTs = trace.minTs ?? trace.recordMinTs;
+    const maxTs = trace.maxTs ?? trace.recordMaxTs;
+    if (minTs !== null && maxTs !== null && maxTs >= minTs) {
+      const viewMaxTs = maxTs === minTs ? minTs + 1 : maxTs;
       store.update("viewport", {
-        minTs: trace.minTs,
-        maxTs: trace.maxTs,
-        viewStart: trace.minTs,
-        viewEnd: trace.maxTs,
+        minTs,
+        maxTs: viewMaxTs,
+        viewStart: minTs,
+        viewEnd: viewMaxTs,
       });
       return;
     }
