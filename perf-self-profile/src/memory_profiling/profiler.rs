@@ -136,9 +136,9 @@ impl std::error::Error for InstallError {
 /// Install is permanent for the life of the process.
 ///
 /// # Requirements
-/// - Frame pointers: allocation stacks are captured with a frame-pointer
-///   unwinder, so the binary must be built with
-///   `-C force-frame-pointers=yes`.
+/// - Frame pointers are required for complete allocation stacks (build with
+///   `-C force-frame-pointers=yes`). Without them, profiling remains safe but
+///   records empty or shallow stacks.
 /// - [`Dial9Allocator`](crate::memory_profiling::Dial9Allocator) must be
 ///   installed as the `#[global_allocator]` for allocations to reach the
 ///   sampling hook.
@@ -160,8 +160,8 @@ impl MemoryProfiler {
 
     /// Install the profiler with the given handle.
     ///
-    /// Requires a binary built with `-C force-frame-pointers=yes`; see the
-    /// [type-level requirements](MemoryProfiler#requirements).
+    /// Build with `-C force-frame-pointers=yes` for complete allocation stacks;
+    /// see the [type-level requirements](MemoryProfiler#requirements).
     ///
     /// On a disconnected handle, install is a no-op (returns `Ok` but does
     /// not publish state). `ACTIVE.get()` remains `None` so the allocator

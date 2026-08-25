@@ -75,12 +75,15 @@ impl Unwinder {
     /// whether the walk was truncated. Never allocates.
     ///
     /// # Frame-0 contract
-    /// `out[0]` is the return address of `capture` itself — i.e. a PC
-    /// *inside the caller of `capture`*. Subsequent frames walk outward
-    /// via the frame-pointer chain. Any `#[inline(never)]` shim inserted
-    /// between the user's code and `capture` will appear as an extra
-    /// frame; plain function calls with frame pointers enabled behave as
-    /// expected.
+    /// With frame pointers enabled, `out[0]` is the return address of `capture`
+    /// itself — i.e. a PC *inside the caller of `capture`*. Subsequent frames
+    /// walk outward via the frame-pointer chain. Any `#[inline(never)]` shim
+    /// inserted between the user's code and `capture` will appear as an extra
+    /// frame.
+    ///
+    /// Without frame pointers, capture is crash-safe but best-effort: output
+    /// may be empty or shallow, and frame 0 is not guaranteed to identify the
+    /// direct caller.
     ///
     /// # Buffer and truncation
     /// At most `out.len().min(MAX_FRAMES)` frames are written (where
@@ -261,6 +264,7 @@ mod platform {
     }
 
     #[cfg(test)]
+    #[allow(unused_assignments)] // frame records are read through safe_load assembly
     mod tests {
         use super::*;
 
@@ -273,6 +277,73 @@ mod platform {
             let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
             assert!(page_size > 0);
             page_size as usize
+        }
+
+        #[test]
+        fn valid_frame_record_is_read() {
+            install();
+            let mut frame = [0usize; 2];
+            let fp = frame.as_mut_ptr() as usize;
+            let caller_fp = fp + 2 * core::mem::size_of::<usize>();
+            let ret_addr = DEAD_ZONE + 1;
+            frame[0] = caller_fp;
+            frame[1] = ret_addr;
+
+            let result = unsafe { read_frame_record(fp, fp) };
+
+            assert_eq!(result, Some((ret_addr, caller_fp, fp)));
+        }
+
+        #[test]
+        fn implausible_frame_pointer_degrades_to_no_frames() {
+            install();
+            let word = core::mem::size_of::<usize>();
+            let sp = 0x10_000usize;
+            let aligned_max = usize::MAX & !(word - 1);
+            let cases = [
+                (sp - word, sp, "below stack pointer"),
+                (
+                    sp + MAX_FRAME_SIZE + word,
+                    sp,
+                    "too far above stack pointer",
+                ),
+                (sp + 1, sp, "misaligned"),
+                (aligned_max, aligned_max, "return-address slot overflows"),
+            ];
+
+            for (fp, sp, case) in cases {
+                let result = unsafe { read_frame_record(fp, sp) };
+                assert_eq!(result, None, "{case}");
+            }
+        }
+
+        #[test]
+        fn implausible_return_address_degrades_to_no_frames() {
+            install();
+            let mut frame = [0usize; 2];
+            let fp = frame.as_mut_ptr() as usize;
+            frame[0] = fp + 2 * core::mem::size_of::<usize>();
+
+            for ret_addr in [SAFE_LOAD_FAULT, DEAD_ZONE - 1] {
+                frame[1] = ret_addr;
+                let result = unsafe { read_frame_record(fp, fp) };
+                assert_eq!(result, None, "return address {ret_addr:#x}");
+            }
+        }
+
+        #[test]
+        fn implausible_caller_frame_pointer_retains_frame_zero() {
+            install();
+            let mut frame = [0usize; 2];
+            let fp = frame.as_mut_ptr() as usize;
+            let ret_addr = DEAD_ZONE + 1;
+            frame[1] = ret_addr;
+
+            for caller_fp in [fp, fp + MAX_FRAME_SIZE + core::mem::size_of::<usize>()] {
+                frame[0] = caller_fp;
+                let result = unsafe { read_frame_record(fp, fp) };
+                assert_eq!(result, Some((ret_addr, 0, fp)));
+            }
         }
 
         #[test]

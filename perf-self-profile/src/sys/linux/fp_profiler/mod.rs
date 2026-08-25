@@ -20,6 +20,7 @@ compile_error!(
 
 mod supported {
     use std::ptr;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicPtr;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -73,7 +74,46 @@ mod supported {
         unsafe { safe_load(ptr) }
     }
 
-    static HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
+    struct HandlerInstallation {
+        installed: AtomicBool,
+        lock: Mutex<()>,
+    }
+
+    impl HandlerInstallation {
+        const fn new() -> Self {
+            Self {
+                installed: AtomicBool::new(false),
+                lock: Mutex::new(()),
+            }
+        }
+
+        fn install(
+            &self,
+            install: impl FnOnce() -> Result<(), std::io::Error>,
+        ) -> Result<(), std::io::Error> {
+            if self.installed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+
+            let _guard = self
+                .lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.installed.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            install()?;
+            self.installed.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn is_installed(&self) -> bool {
+            self.installed.load(Ordering::Acquire)
+        }
+    }
+
+    static HANDLER_INSTALLATION: HandlerInstallation = HandlerInstallation::new();
     static OLD_HANDLER: AtomicPtr<libc::sigaction> = AtomicPtr::new(ptr::null_mut());
     /// `true` after we have successfully registered with `libsigchain`. On
     /// non-Android platforms this is always `false` and unused.
@@ -110,15 +150,7 @@ mod supported {
     /// Modifies process-global signal state. Call once during initialization.
     #[cfg(not(target_os = "android"))]
     pub unsafe fn install_handler() -> Result<(), std::io::Error> {
-        if HANDLER_INSTALLED.swap(true, Ordering::SeqCst) {
-            return Ok(()); // already installed
-        }
-
-        if let Err(err) = unsafe { install_sigaction_handler() } {
-            HANDLER_INSTALLED.store(false, Ordering::SeqCst);
-            return Err(err);
-        }
-        Ok(())
+        HANDLER_INSTALLATION.install(|| unsafe { install_sigaction_handler() })
     }
 
     /// Android variant: register our safe_load fault handler with ART's
@@ -127,27 +159,23 @@ mod supported {
     /// (e.g. a plain adb-shell binary, no ART), installs the direct handler.
     #[cfg(target_os = "android")]
     pub unsafe fn install_handler() -> Result<(), std::io::Error> {
-        if HANDLER_INSTALLED.swap(true, Ordering::SeqCst) {
-            return Ok(()); // already attempted
-        }
-        // SAFETY: `sigchain_safe_load_handler` is async-signal-safe, returns
-        // `false` for non-safe_load faults, and lives for the lifetime of the
-        // process.
-        let ok = unsafe { super::android_sigchain::try_register(sigchain_safe_load_handler) };
-        if ok {
-            SIGCHAIN_REGISTERED.store(true, Ordering::SeqCst);
-            tracing::info!(
-                "libsigchain safe_load handler registered; frame-pointer unwinding enabled"
-            );
-        } else {
-            if let Err(err) = unsafe { install_sigaction_handler() } {
-                HANDLER_INSTALLED.store(false, Ordering::SeqCst);
-                return Err(err);
+        HANDLER_INSTALLATION.install(|| {
+            // SAFETY: `sigchain_safe_load_handler` is async-signal-safe,
+            // returns `false` for non-safe_load faults, and lives for the
+            // lifetime of the process.
+            let ok = unsafe { super::android_sigchain::try_register(sigchain_safe_load_handler) };
+            if ok {
+                SIGCHAIN_REGISTERED.store(true, Ordering::SeqCst);
+                tracing::info!(
+                    "libsigchain safe_load handler registered; frame-pointer unwinding enabled"
+                );
+            } else {
+                unsafe { install_sigaction_handler() }?;
+                DIRECT_HANDLER_INSTALLED.store(true, Ordering::SeqCst);
+                tracing::info!("libsigchain not loaded; direct safe_load handler registered");
             }
-            DIRECT_HANDLER_INSTALLED.store(true, Ordering::SeqCst);
-            tracing::info!("libsigchain not loaded; direct safe_load handler registered");
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Check whether our SIGSEGV handler is still the active handler for
@@ -162,7 +190,7 @@ mod supported {
     #[cfg(not(target_os = "android"))]
     pub fn handler_is_installed() -> bool {
         // If we never installed, we cannot be installed.
-        if !HANDLER_INSTALLED.load(Ordering::SeqCst) {
+        if !HANDLER_INSTALLATION.is_installed() {
             return false;
         }
 
@@ -186,6 +214,9 @@ mod supported {
     /// registered for the lifetime of the process.
     #[cfg(target_os = "android")]
     pub fn handler_is_installed() -> bool {
+        if !HANDLER_INSTALLATION.is_installed() {
+            return false;
+        }
         if SIGCHAIN_REGISTERED.load(Ordering::SeqCst) {
             return true;
         }
@@ -340,6 +371,52 @@ mod supported {
     #[cfg(all(target_arch = "aarch64", target_os = "android"))]
     unsafe fn set_result_reg(uc: *mut libc::c_void, val: usize) {
         unsafe { super::bionic_arm64::android_ucontext_set_result_reg(uc, val as u64) };
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::HandlerInstallation;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        #[test]
+        fn concurrent_installer_waits_for_installation_to_finish() {
+            let installation = Arc::new(HandlerInstallation::new());
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let first = {
+                let installation = Arc::clone(&installation);
+                std::thread::spawn(move || {
+                    installation.install(|| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    })
+                })
+            };
+            entered_rx.recv().unwrap();
+
+            let (started_tx, started_rx) = mpsc::channel();
+            let (returned_tx, returned_rx) = mpsc::channel();
+            let second = {
+                let installation = Arc::clone(&installation);
+                std::thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    let result = installation.install(|| panic!("installer ran twice"));
+                    returned_tx.send(result).unwrap();
+                })
+            };
+            started_rx.recv().unwrap();
+            assert!(
+                returned_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "concurrent installer returned before installation completed"
+            );
+
+            release_tx.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap();
+            returned_rx.recv().unwrap().unwrap();
+        }
     }
 }
 
