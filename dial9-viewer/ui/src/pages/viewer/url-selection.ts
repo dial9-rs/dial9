@@ -21,6 +21,7 @@ import {
   type FocusLink,
 } from "./focus-link.js";
 import { resolveTaskDumpCaptures } from "./inspector-model.js";
+import { traceDisplayBounds } from "./trace-bounds.js";
 
 
 /**
@@ -114,14 +115,12 @@ export function resolveFocusLink(
   // opens on the same instance the span belongs to.
   if (span.taskId != null) patch.selectedTaskId = span.taskId;
 
-  // A trace with no resolved bounds cannot clamp; fall back to the span's own
+  // A trace with no display bounds cannot clamp; fall back to the span's own
   // extent, which focusViewport then pads.
+  const bounds = traceDisplayBounds(trace);
   return {
     patch,
-    viewport: focusViewport(span, {
-      minTs: trace.minTs ?? span.start,
-      maxTs: trace.maxTs ?? span.end,
-    }),
+    viewport: focusViewport(span, bounds ?? { minTs: span.start, maxTs: span.end }),
   };
 }
 
@@ -200,12 +199,14 @@ export function resolveUrlSelection(
 
   // Ranges are semantic trace anchors. Clamp partial overlap to this trace and
   // drop wholly stale ranges so the URL never claims an invisible analysis.
+  const bounds = traceDisplayBounds(trace);
   const resolveRange = (
     range: { startNs: number; endNs: number } | undefined,
   ): { startNs: number; endNs: number } | null => {
     if (range === undefined) return null;
-    const startNs = trace.minTs != null ? Math.max(trace.minTs, range.startNs) : range.startNs;
-    const endNs = trace.maxTs != null ? Math.min(trace.maxTs, range.endNs) : range.endNs;
+    const startNs =
+      bounds !== null ? Math.max(bounds.minTs, range.startNs) : range.startNs;
+    const endNs = bounds !== null ? Math.min(bounds.maxTs, range.endNs) : range.endNs;
     return endNs > startNs ? { startNs, endNs } : null;
   };
   const sidebarRange = resolveRange(url.sidebarRange);

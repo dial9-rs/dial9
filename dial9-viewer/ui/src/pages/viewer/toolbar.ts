@@ -27,6 +27,7 @@ import {
 } from "../../lib/trace/index.js";
 import { poiSourceFor, kindLabel, redFlagCounts } from "./poi.js";
 import type { PointOfInterestType } from "../../types/trace.js";
+import { traceDisplayBounds } from "./trace-bounds.js";
 
 /** Which whole-trace analysis an analysis button opens. */
 export type AnalysisKind = "cpu" | "blocking" | "heap";
@@ -228,9 +229,8 @@ export function fileMetaText(trace: ParsedTrace | null): string {
   if (trace === null) return "no trace loaded";
   const workers = new Set(trace.tidToWorker.values()).size;
   const parts = [`${trace.events.length.toLocaleString()} events`, `${workers} workers`];
-  if (trace.minTs !== null && trace.maxTs !== null) {
-    parts.push(formatHumanDuration(trace.maxTs - trace.minTs));
-  }
+  const bounds = traceDisplayBounds(trace);
+  if (bounds !== null) parts.push(formatHumanDuration(bounds.maxTs - bounds.minTs));
   if (trace.truncated) parts.push("truncated");
   if (trace.timeFiltered) parts.push("range-filtered");
   return parts.join(" · ");
@@ -372,10 +372,9 @@ function infoMenu(
       ? "Trace details and segment metadata"
       : "Trace and load details (parse performance, uninstrumented tasks)";
   const workers = new Set(trace.tidToWorker.values()).size;
+  const bounds = traceDisplayBounds(trace);
   const duration =
-    trace.minTs !== null && trace.maxTs !== null
-      ? formatHumanDuration(trace.maxTs - trace.minTs)
-      : "-";
+    bounds !== null ? formatHumanDuration(bounds.maxTs - bounds.minTs) : "-";
   return html`
     <details class="d9-info-menu" data-info-menu>
       <summary
