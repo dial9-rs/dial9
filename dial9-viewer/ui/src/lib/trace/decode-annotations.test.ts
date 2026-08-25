@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
+import { lstatSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { FieldType, TraceDecoder } from "../../../decode.js";
 
 const require = createRequire(import.meta.url);
+const canonicalDecoderPath = fileURLToPath(
+  new URL("../../../decode.js", import.meta.url),
+);
+const toolkitDecoderPath = fileURLToPath(
+  new URL(
+    "../../../../skills/dial9-toolkit/scripts/decode.js",
+    import.meta.url,
+  ),
+);
 const { parseTrace } = require("../../../trace_parser.js") as {
   parseTrace: (bytes: Uint8Array, options?: unknown) => Promise<{
     customEvents: Array<{
@@ -97,6 +108,13 @@ function timestampLessSpanSchemaFrame(): number[] {
 }
 
 describe("TraceDecoder schema annotations", () => {
+  it("shares the canonical decoder with the agent toolkit", () => {
+    expect(lstatSync(toolkitDecoderPath).isSymbolicLink()).toBe(true);
+    expect(realpathSync(toolkitDecoderPath)).toBe(
+      realpathSync(canonicalDecoderPath),
+    );
+  });
+
   it("accumulates unit and kind from separate annotation frames", () => {
     const bytes = Uint8Array.from([
       0x54, 0x52, 0x43, 0x00, 1,
