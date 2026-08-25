@@ -170,6 +170,8 @@ mod supported {
                     "libsigchain safe_load handler registered; frame-pointer unwinding enabled"
                 );
             } else {
+                // SAFETY: the outer `install_handler` call accepts process-global
+                // signal-state mutation, which `HANDLER_INSTALLATION` serializes.
                 unsafe { install_sigaction_handler() }?;
                 DIRECT_HANDLER_INSTALLED.store(true, Ordering::SeqCst);
                 tracing::info!("libsigchain not loaded; direct safe_load handler registered");
