@@ -19,10 +19,11 @@ pub(crate) fn traced_runtime_handle() -> Option<Dial9Handle> {
 
 /// Tokio handle for spawning instrumented tasks.
 ///
-/// Spawned futures are wrapped with wake-event tracking when telemetry is live
-/// on this handle. Otherwise they spawn plainly. Obtain one for the current
-/// runtime with [`current`](Self::current). To spawn onto a specific runtime
-/// from any thread, use [`spawn_in`].
+/// Spawned futures are wrapped with wake-event tracking and, when configured,
+/// task dump capture while telemetry is live on this handle. Otherwise they
+/// spawn plainly. Obtain one for the current runtime with
+/// [`current`](Self::current). To spawn onto a specific runtime from any thread,
+/// use [`spawn_in`].
 ///
 /// This handle only spawns. For recording and control, use [`Dial9Handle`].
 #[derive(Clone)]
@@ -44,8 +45,8 @@ impl std::fmt::Debug for Dial9TokioHandle {
 impl Dial9TokioHandle {
     /// Handle that spawns on the **current** tokio runtime (like `tokio::spawn`).
     ///
-    /// Wraps spawned futures with wake tracking when the current thread is owned
-    /// by a live dial9 runtime, otherwise spawns plainly.
+    /// Wraps spawned futures with Dial9 instrumentation when the current thread
+    /// is owned by a live dial9 runtime, otherwise spawns plainly.
     pub fn current() -> Self {
         Self {
             runtime: None,
@@ -54,7 +55,7 @@ impl Dial9TokioHandle {
     }
 
     /// Inert handle: [`spawn`](Self::spawn) falls back to [`tokio::spawn`]
-    /// without wake tracking.
+    /// without Dial9 instrumentation.
     pub fn disabled() -> Self {
         Self {
             runtime: None,
@@ -76,9 +77,10 @@ impl Dial9TokioHandle {
 
     /// Spawn an instrumented future.
     ///
-    /// On an enabled handle the future is wrapped with wake-event tracking. The
-    /// task runs on this handle's runtime, the current one for [`current`](Self::current),
-    /// or the specific runtime the handle was built for.
+    /// On an enabled handle the future is wrapped with wake-event tracking and,
+    /// when configured, task dump capture. The task runs on this handle's
+    /// runtime, the current one for [`current`](Self::current), or the specific
+    /// runtime the handle was built for.
     ///
     /// # Panics
     ///
@@ -179,9 +181,9 @@ impl Dial9TokioHandle {
 
 /// Spawn a traced task on the current tokio runtime.
 ///
-/// Like [`tokio::spawn`], but wraps the future with wake-event tracking
-/// when called from a thread owned by a dial9 runtime. On other threads,
-/// falls back to plain [`tokio::spawn`].
+/// Like [`tokio::spawn`], but wraps the future with wake-event tracking and,
+/// when configured, task dump capture when called from a thread owned by a
+/// dial9 runtime. On other threads, falls back to plain [`tokio::spawn`].
 ///
 /// Equivalent to [`Dial9TokioHandle::current().spawn(future)`](Dial9TokioHandle::spawn).
 ///

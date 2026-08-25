@@ -6,9 +6,9 @@
 //! [`TokioAttachOptions`](crate::telemetry::TokioAttachOptions) when attaching a
 //! runtime.
 //!
-//! Requires the `taskdump` crate feature. With that feature off, this module
-//! is still compiled so the configuration API surface stays the same, but no
-//! dumps are captured.
+//! Capture requires the `taskdump` crate feature, `--cfg tokio_unstable`, and a
+//! supported Linux target. With the feature off, this module is still compiled
+//! so the configuration API surface stays the same, but no dumps are captured.
 
 use std::time::Duration;
 
@@ -16,6 +16,15 @@ use std::time::Duration;
 const DEFAULT_IDLE_THRESHOLD: Duration = Duration::from_millis(10);
 
 /// Configuration for task dump capture.
+///
+/// <div class="warning">
+///
+/// This enables capture but does not instrument every task on the attached
+/// runtime. Only futures spawned through a Dial9 spawner, such as
+/// `dial9::spawn`, can produce task dumps. Futures spawned directly with
+/// `tokio::spawn` remain valid, but do not produce task dumps.
+///
+/// </div>
 #[derive(Debug, Clone, Copy, bon::Builder)]
 pub struct TaskDumpConfig {
     /// Mean idle duration for Poisson sampling. On average, one

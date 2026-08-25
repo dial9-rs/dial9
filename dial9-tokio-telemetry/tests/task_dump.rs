@@ -34,10 +34,7 @@ enum DumpEvent {
     Other,
 }
 
-/// A task that stays idle longer than the threshold between polls should
-/// produce at least one `TaskDump` event.
-#[test]
-fn task_dump_emitted_for_long_sleep() {
+fn task_dump_callchains(spawn_with_dial9: bool) -> Vec<Vec<u64>> {
     let (capture, batches) = capture_processor();
 
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
@@ -53,10 +50,15 @@ fn task_dump_emitted_for_long_sleep() {
 
     let handle = Dial9TokioHandle::current();
     rt.block_on(async {
-        let join = handle.spawn(async {
+        let future = async {
             // Well above the 10ms default threshold.
             tokio::time::sleep(Duration::from_millis(50)).await;
-        });
+        };
+        let join = if spawn_with_dial9 {
+            handle.spawn(future)
+        } else {
+            tokio::spawn(future)
+        };
         join.await.unwrap();
     });
 
@@ -65,17 +67,37 @@ fn task_dump_emitted_for_long_sleep() {
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
-    let dumps: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, DumpEvent::TaskDumpEvent { .. }))
-        .collect();
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            DumpEvent::TaskDumpEvent { callchain } => Some(callchain),
+            _ => None,
+        })
+        .collect()
+}
 
-    assert!(!dumps.is_empty(), "expected TaskDump events");
-    for dump in &dumps {
-        if let DumpEvent::TaskDumpEvent { callchain } = dump {
-            assert!(!callchain.is_empty(), "callchain must be non-empty");
-        }
+/// A task that stays idle longer than the threshold between polls should
+/// produce at least one `TaskDump` event.
+#[test]
+fn task_dump_emitted_for_long_sleep() {
+    let dial9_callchains = task_dump_callchains(true);
+    assert!(
+        !dial9_callchains.is_empty(),
+        "expected TaskDump events from the Dial9-spawned task"
+    );
+    for callchain in dial9_callchains {
+        assert!(!callchain.is_empty(), "callchain must be non-empty");
     }
+}
+
+/// A task spawned directly through Tokio should not produce task dumps.
+#[test]
+fn tokio_spawn_does_not_emit_task_dump() {
+    let tokio_callchains = task_dump_callchains(false);
+    assert!(
+        tokio_callchains.is_empty(),
+        "a task spawned directly with tokio::spawn must not produce TaskDump events"
+    );
 }
 
 /// A task whose idles are all below threshold should produce zero dumps.
