@@ -602,7 +602,7 @@ async fn main() {
 }
 ```
 
-> Performance note: Task dumps currently produce one extra wake per capture and are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
+> Performance note: Task dumps re-poll the future and walk its async stack at each captured yield point, so they are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
 
 ### Custom events
 

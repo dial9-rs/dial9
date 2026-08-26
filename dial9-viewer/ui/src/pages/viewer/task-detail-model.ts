@@ -618,11 +618,36 @@ export function buildTaskDetailRenderModel(
   for (let i = 0; i < polls.length - 1; i++) {
     const gapStart = polls[i]!.end;
     const gapEnd = polls[i + 1]!.start;
-    if (gapEnd < viewStart || gapStart > viewEnd) continue;
     const nextPw = pollWakes[i + 1];
     const nextWakeTs = nextPw != null ? nextPw.effectiveWake : null;
-    // Skip when the next poll's wake covers this gap (the wake band owns it).
-    if (nextWakeTs !== null && nextWakeTs <= gapStart) continue;
+    const wakeOwnsGap = nextWakeTs !== null && nextWakeTs <= gapStart;
+
+    // Captures made during poll[i] describe its following idle gap. Pre-1.53
+    // Tokio inserted a synthetic poll after capture; when that wake owns the
+    // whole gap, retain the capture for the next real idle. Prefer a fresh
+    // current-poll capture over retained legacy captures.
+    const gapDumps: TaskDump[] = [];
+    if (!wakeOwnsGap) {
+      let eligibleEnd = dumpIdx;
+      while (
+        eligibleEnd < dumps.length &&
+        dumps[eligibleEnd]!.timestamp < polls[i + 1]!.start
+      ) {
+        eligibleEnd++;
+      }
+      let currentStart = dumpIdx;
+      while (
+        currentStart < eligibleEnd &&
+        dumps[currentStart]!.timestamp < polls[i]!.start
+      ) {
+        currentStart++;
+      }
+      const selectedStart = currentStart < eligibleEnd ? currentStart : dumpIdx;
+      gapDumps.push(...dumps.slice(selectedStart, eligibleEnd));
+      dumpIdx = eligibleEnd;
+    }
+
+    if (gapEnd < viewStart || gapStart > viewEnd || wakeOwnsGap) continue;
     const x1 = Math.max(0, nsToX(gapStart));
     const wakeX =
       nextWakeTs !== null
@@ -632,21 +657,6 @@ export function buildTaskDetailRenderModel(
     const w = Math.max(x2 - x1, 0);
     if (w < 1) continue;
 
-    // Dump lookup: dumps captured during poll[i-1] describe what the task waits
-    // on during THIS gap. `dumps` is sorted by ts and the cursor advances
-    // monotonically across the outer loop.
-    const gapDumps: TaskDump[] = [];
-    const prevPollStart = i > 0 ? polls[i - 1]!.start : polls[i]!.start;
-    while (dumpIdx < dumps.length && dumps[dumpIdx]!.timestamp < prevPollStart) {
-      dumpIdx++;
-    }
-    for (
-      let di = dumpIdx;
-      di < dumps.length && dumps[di]!.timestamp <= polls[i]!.start;
-      di++
-    ) {
-      gapDumps.push(dumps[di]!);
-    }
     const hasDump = gapDumps.length > 0;
     const dur = (nextWakeTs !== null ? nextWakeTs : gapEnd) - gapStart;
     idleBands.push({

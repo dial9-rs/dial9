@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Task dumps no longer skip every other idle-point capture on Tokio 1.53+, and
+  the viewer attaches each captured stack to the idle gap it describes. The
+  Tokio telemetry integration now requires Tokio 1.53.
+
 ## [0.5.0](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2.1...dial9-v0.5.0) - 2026-08-26
 
 ### Fixed

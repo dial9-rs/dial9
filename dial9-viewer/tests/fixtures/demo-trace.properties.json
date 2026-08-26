@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 17093,
+  "total_samples": 14405,
   "by_source": {
-    "0": 165,
-    "1": 16928
+    "0": 190,
+    "1": 14215
   },
   "on_off_all": {
-    "on_runtime": 17073,
-    "off_runtime": 20
+    "on_runtime": 14379,
+    "off_runtime": 26
   },
   "on_off_by_source": {
     "0": {
-      "on": 145,
-      "off": 20
+      "on": 164,
+      "off": 26
     },
     "1": {
-      "on": 16928,
+      "on": 14215,
       "off": 0
     }
   },
@@ -26,27 +26,37 @@
     3
   ],
   "cpu_profile": {
-    "count": 165,
-    "distinct_stacks": 134,
-    "stack_sig_digest": "abf0aa7db2bc5094",
-    "ts_count": 165,
-    "ts_span_ns": 4474824362,
-    "ts_delta_digest": "db1670ba3ca3d0ae",
+    "count": 190,
+    "distinct_stacks": 151,
+    "stack_sig_digest": "257995da50285bb7",
+    "ts_count": 190,
+    "ts_span_ns": 4487783336,
+    "ts_delta_digest": "8d4657f0e04eeb4d",
     "top_stacks": [
       {
-        "count": 13,
-        "depth": 1,
-        "leaf": "__libc_write"
-      },
-      {
-        "count": 7,
+        "count": 10,
         "depth": 1,
         "leaf": "__lll_unlock_wake"
       },
       {
+        "count": 9,
+        "depth": 1,
+        "leaf": "__libc_write"
+      },
+      {
+        "count": 5,
+        "depth": 1,
+        "leaf": "dl_iterate_phdr"
+      },
+      {
         "count": 4,
         "depth": 1,
-        "leaf": "__lll_lock_wait"
+        "leaf": "_int_malloc"
+      },
+      {
+        "count": 3,
+        "depth": 1,
+        "leaf": "__strlen_sse2"
       },
       {
         "count": 3,
@@ -56,22 +66,12 @@
       {
         "count": 3,
         "depth": 1,
-        "leaf": "[unknown] 0x7f0f39c88f28"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__strlen_sse2"
+        "leaf": "__pthread_mutex_unlock_usercnt"
       },
       {
         "count": 2,
         "depth": 1,
-        "leaf": "[unknown] 0x7f0f39c8b3aa"
-      },
-      {
-        "count": 2,
-        "depth": 2,
-        "leaf": "[unknown] 0x7f0f39c88f25"
+        "leaf": "[unknown] 0x7f59f31543aa"
       }
     ]
   }
