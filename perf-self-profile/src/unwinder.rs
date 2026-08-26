@@ -45,8 +45,9 @@ impl Unwinder {
     /// Returns `Err` if `sigaction` fails (Linux) or if the platform is
     /// unsupported.
     ///
-    /// # Requirements
-    /// - Frame pointers (build with `-C force-frame-pointers=yes`).
+    /// Frame pointers are required for complete stacks (build with
+    /// `-C force-frame-pointers=yes`). Without them, capture safely returns an
+    /// empty or shallow stack.
     pub fn install() -> std::io::Result<Self> {
         platform::install()?;
         Ok(Self { _private: () })
@@ -74,18 +75,28 @@ impl Unwinder {
     /// whether the walk was truncated. Never allocates.
     ///
     /// # Frame-0 contract
-    /// `out[0]` is the return address of `capture` itself — i.e. a PC
-    /// *inside the caller of `capture`*. Subsequent frames walk outward
-    /// via the frame-pointer chain. Any `#[inline(never)]` shim inserted
-    /// between the user's code and `capture` will appear as an extra
-    /// frame; plain function calls with frame pointers enabled behave as
-    /// expected.
+    /// With frame pointers enabled, `out[0]` is the return address of `capture`
+    /// itself — i.e. a PC *inside the caller of `capture`*. Subsequent frames
+    /// walk outward via the frame-pointer chain. Any `#[inline(never)]` shim
+    /// inserted between the user's code and `capture` will appear as an extra
+    /// frame.
+    ///
+    /// Without frame pointers, capture is crash-safe but best-effort: output
+    /// may be empty or shallow, and frame 0 is not guaranteed to identify the
+    /// direct caller.
     ///
     /// # Buffer and truncation
     /// At most `out.len().min(MAX_FRAMES)` frames are written (where
     /// `MAX_FRAMES = 128`). If the real stack is deeper, innermost frames
     /// are kept and outer frames are dropped; `CaptureResult::truncated`
     /// is set to `true`.
+    ///
+    /// If the current frame record is implausible or unreadable, capture
+    /// returns no frames. If only the caller's frame pointer is unusable,
+    /// capture returns frame 0 and stops. This lets binaries without frame
+    /// pointers degrade to an empty or shallow stack instead of crashing,
+    /// although arbitrary register values can occasionally resemble a valid
+    /// frame record.
     ///
     /// # Safety
     /// - [`install`](Self::install) must have succeeded and the SIGSEGV
@@ -97,10 +108,6 @@ impl Unwinder {
     ///   installation.
     /// - Must not be called from inside a signal handler for SIGSEGV
     ///   (that would recurse into our own handler without bound).
-    /// - The calling thread's stack must be valid for frame-pointer walking
-    ///   (binary compiled with `-C force-frame-pointers=yes`, no code
-    ///   currently executing in a prologue/epilogue window where `rbp`
-    ///   does not point at a saved-fp slot).
     // Takes `&self` to prove that `Unwinder::install()` succeeded, even though
     // no instance data is accessed internally.
     #[inline(never)]
@@ -115,8 +122,7 @@ impl Unwinder {
              something replaced it without chaining. See Unwinder::verify_handler."
         );
         // SAFETY: forwarding Unwinder::capture's own safety contract to
-        // platform::capture (handler installed, not in a SIGSEGV handler,
-        // frame pointers enabled).
+        // platform::capture (handler installed, not in a SIGSEGV handler).
         unsafe { platform::capture(out) }
     }
 }
@@ -127,7 +133,10 @@ impl Unwinder {
 ))]
 mod platform {
     use super::CaptureResult;
-    use crate::sys::fp_profiler::{handler_is_installed, install_handler, unwind::unwind};
+    use crate::sys::fp_profiler::{
+        SAFE_LOAD_FAULT, handler_is_installed, install_handler, load,
+        unwind::{DEAD_ZONE, MAX_FRAME_SIZE, strip_pac, unwind},
+    };
 
     pub fn install() -> std::io::Result<()> {
         // SAFETY: installs the SIGSEGV handler for safe_load; idempotent.
@@ -145,14 +154,18 @@ mod platform {
     /// test.
     ///
     /// # Safety
-    /// Same obligations as [`Unwinder::capture`]: handler installed,
-    /// not inside a SIGSEGV handler, frame pointers enabled.
+    /// Same obligations as [`Unwinder::capture`]: handler installed and not
+    /// inside a SIGSEGV handler.
     #[inline(always)]
     pub unsafe fn capture(out: &mut [u64]) -> CaptureResult {
-        // SAFETY: called from Unwinder::capture which forwards the full
-        // safety contract (handler installed, frame pointers enabled, not
-        // inside a SIGSEGV handler, not in a prologue/epilogue window).
-        let (pc, fp, sp) = unsafe { read_caller_regs() };
+        // SAFETY: called from Unwinder::capture which forwards the safety
+        // contract (handler installed and not inside a SIGSEGV handler).
+        let Some((pc, fp, sp)) = (unsafe { read_caller_regs() }) else {
+            return CaptureResult {
+                frames_written: 0,
+                truncated: false,
+            };
+        };
         // SAFETY: handler is installed (caller holds Unwinder), and we are
         // not inside a SIGSEGV handler (see Unwinder::capture safety
         // contract).
@@ -169,33 +182,20 @@ mod platform {
     /// - `*rbp` / `*x29` is the saved fp of the caller of `Unwinder::capture`
     ///   → where we start walking the chain.
     ///
+    /// Returns `None` when the current frame record is implausible or its
+    /// return-address slot cannot be read safely. An unusable caller frame
+    /// pointer is returned as zero so the unwind retains frame 0 and stops.
+    ///
     /// # Safety
-    /// - Must be called with `#[inline(always)]` preserved so the read
-    ///   observes `Unwinder::capture`'s frame, not this helper's. If ever
-    ///   actually inlined into a different caller or promoted to a
-    ///   standalone frame, the returned `fp`/return-address semantics
-    ///   change and the frame-0 contract breaks.
-    /// - Must only be called after [`install_handler`] has succeeded.
-    ///   Reading `*fp` and `*(fp+8)` is a raw dereference of the stack;
-    ///   the SIGSEGV handler installed by `install_handler` does *not*
-    ///   cover these reads (it only covers `safe_load`). The reads are
-    ///   safe only because — on a thread built with
-    ///   `-C force-frame-pointers=yes` — the kernel/ABI guarantees that
-    ///   `rbp`/`x29` always points at a valid `[saved_fp, ret_addr]`
-    ///   pair for the currently executing function.
-    /// - The calling binary must be compiled with
-    ///   `-C force-frame-pointers=yes`. Without frame pointers, `rbp`
-    ///   may be used as a general-purpose register and the raw reads
-    ///   will dereference arbitrary memory.
-    /// - Must not be called during function prologue/epilogue or other
-    ///   windows where `rbp`/`x29` does not yet (or no longer) points at
-    ///   a saved-fp slot. For the intended call site inside
-    ///   `Unwinder::capture`'s body this is always satisfied; calling
-    ///   from hand-written asm shims, signal-trampoline code, or from
-    ///   within another `naked` function is not supported.
+    /// - Must be called with `#[inline(always)]` preserved so the register
+    ///   read observes `Unwinder::capture`'s frame, not this helper's. If
+    ///   inlined into a different caller or promoted to a standalone frame,
+    ///   the returned `fp`/return-address semantics change.
+    /// - Must only be called after [`install_handler`] has succeeded and not
+    ///   from inside a SIGSEGV handler.
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    unsafe fn read_caller_regs() -> (usize, usize, usize) {
+    unsafe fn read_caller_regs() -> Option<(usize, usize, usize)> {
         let fp: usize;
         let sp: usize;
         // SAFETY: Reading `rbp`/`rsp` with `nostack, nomem` has no memory
@@ -210,20 +210,13 @@ mod platform {
                 options(nostack, nomem),
             );
         }
-        // SAFETY: `fp` is `Unwinder::capture`'s frame pointer (see top-level
-        // # Safety note). On x86_64 System V, with frame pointers enabled,
-        // a compiler-generated frame begins with
-        //   [saved_rbp : usize, return_addr : usize, ...]
-        // so `*fp` and `*(fp + 8)` are guaranteed to be valid reads of
-        // currently-live stack memory for this frame.
-        let ret_addr = unsafe { *(fp as *const usize).add(1) };
-        let caller_fp = unsafe { *(fp as *const usize) };
-        (ret_addr, caller_fp, sp)
+        // SAFETY: the caller guarantees the safe-load handler is active.
+        unsafe { read_frame_record(fp, sp) }
     }
 
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
-    unsafe fn read_caller_regs() -> (usize, usize, usize) {
+    unsafe fn read_caller_regs() -> Option<(usize, usize, usize)> {
         let fp: usize;
         let sp: usize;
         // SAFETY: Reading `x29`/`sp` with `nostack, nomem` has no memory
@@ -238,15 +231,179 @@ mod platform {
                 options(nostack, nomem),
             );
         }
-        // SAFETY: Same layout as x86_64 under AAPCS64 with frame pointers:
-        //   [saved_fp (x29) : u64, saved_lr : u64, ...]
-        // so `*fp` and `*(fp + 8)` are valid reads of live stack memory.
-        let ret_addr = unsafe { *(fp as *const usize).add(1) };
-        // Strip pointer authentication bits (ARMv8.3-A PAC). The saved LR may
-        // be signed when compiled with `-Z branch-protection=pac-ret`.
-        let ret_addr = crate::sys::fp_profiler::unwind::strip_pac(ret_addr);
-        let caller_fp = unsafe { *(fp as *const usize) };
-        (ret_addr, caller_fp, sp)
+        // SAFETY: the caller guarantees the safe-load handler is active.
+        unsafe { read_frame_record(fp, sp) }
+    }
+
+    #[inline(always)]
+    unsafe fn read_frame_record(fp: usize, sp: usize) -> Option<(usize, usize, usize)> {
+        let word = core::mem::size_of::<usize>();
+        if fp < sp || fp - sp > MAX_FRAME_SIZE || fp & (word - 1) != 0 {
+            return None;
+        }
+
+        let ret_addr_slot = fp.checked_add(word)?;
+        // SAFETY: the slot is aligned and the caller guarantees the
+        // safe-load handler is active.
+        let ret_addr = strip_pac(unsafe { load(ret_addr_slot as *const usize) });
+        if ret_addr == SAFE_LOAD_FAULT || !(DEAD_ZONE..=usize::MAX - DEAD_ZONE).contains(&ret_addr)
+        {
+            return None;
+        }
+
+        // SAFETY: `fp` is aligned and the safe-load handler is active.
+        let caller_fp = unsafe { load(fp as *const usize) };
+        let caller_fp =
+            if caller_fp != SAFE_LOAD_FAULT && caller_fp > fp && caller_fp - fp <= MAX_FRAME_SIZE {
+                caller_fp
+            } else {
+                0
+            };
+
+        Some((ret_addr, caller_fp, sp))
+    }
+
+    #[cfg(test)]
+    #[allow(unused_assignments)] // frame records are read through safe_load assembly
+    mod tests {
+        use super::*;
+
+        fn install() {
+            // SAFETY: tests install the process-global handler idempotently.
+            unsafe { install_handler().unwrap() };
+        }
+
+        fn page_size() -> usize {
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            assert!(page_size > 0);
+            page_size as usize
+        }
+
+        #[test]
+        fn valid_frame_record_is_read() {
+            install();
+            let mut frame = [0usize; 2];
+            let fp = frame.as_mut_ptr() as usize;
+            let caller_fp = fp + 2 * core::mem::size_of::<usize>();
+            let ret_addr = DEAD_ZONE + 1;
+            frame[0] = caller_fp;
+            frame[1] = ret_addr;
+
+            let result = unsafe { read_frame_record(fp, fp) };
+
+            assert_eq!(result, Some((ret_addr, caller_fp, fp)));
+        }
+
+        #[test]
+        fn implausible_frame_pointer_degrades_to_no_frames() {
+            install();
+            let word = core::mem::size_of::<usize>();
+            let sp = 0x10_000usize;
+            let aligned_max = usize::MAX & !(word - 1);
+            let cases = [
+                (sp - word, sp, "below stack pointer"),
+                (
+                    sp + MAX_FRAME_SIZE + word,
+                    sp,
+                    "too far above stack pointer",
+                ),
+                (sp + 1, sp, "misaligned"),
+                (aligned_max, aligned_max, "return-address slot overflows"),
+            ];
+
+            for (fp, sp, case) in cases {
+                let result = unsafe { read_frame_record(fp, sp) };
+                assert_eq!(result, None, "{case}");
+            }
+        }
+
+        #[test]
+        fn implausible_return_address_degrades_to_no_frames() {
+            install();
+            let mut frame = [0usize; 2];
+            let fp = frame.as_mut_ptr() as usize;
+            frame[0] = fp + 2 * core::mem::size_of::<usize>();
+
+            for ret_addr in [SAFE_LOAD_FAULT, DEAD_ZONE - 1] {
+                frame[1] = ret_addr;
+                let result = unsafe { read_frame_record(fp, fp) };
+                assert_eq!(result, None, "return address {ret_addr:#x}");
+            }
+        }
+
+        #[test]
+        fn implausible_caller_frame_pointer_retains_frame_zero() {
+            install();
+            let mut frame = [0usize; 2];
+            let fp = frame.as_mut_ptr() as usize;
+            let ret_addr = DEAD_ZONE + 1;
+            frame[1] = ret_addr;
+
+            for caller_fp in [fp, fp + MAX_FRAME_SIZE + core::mem::size_of::<usize>()] {
+                frame[0] = caller_fp;
+                let result = unsafe { read_frame_record(fp, fp) };
+                assert_eq!(result, Some((ret_addr, 0, fp)));
+            }
+        }
+
+        #[test]
+        fn unreadable_return_address_degrades_to_no_frames() {
+            install();
+            let page_size = page_size();
+            let page = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    page_size,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(page, libc::MAP_FAILED);
+
+            let result = unsafe { read_frame_record(page as usize, page as usize) };
+
+            assert_eq!(unsafe { libc::munmap(page, page_size) }, 0);
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn unreadable_caller_fp_retains_frame_zero() {
+            install();
+            let page_size = page_size();
+            let region = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    2 * page_size,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(region, libc::MAP_FAILED);
+
+            let second_page = unsafe { region.cast::<u8>().add(page_size) };
+            assert_eq!(
+                unsafe {
+                    libc::mprotect(
+                        second_page.cast(),
+                        page_size,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                    )
+                },
+                0
+            );
+            let ret_addr = DEAD_ZONE + 1;
+            unsafe { second_page.cast::<usize>().write(ret_addr) };
+            let fp = second_page as usize - core::mem::size_of::<usize>();
+
+            let result = unsafe { read_frame_record(fp, fp) };
+
+            assert_eq!(unsafe { libc::munmap(region, 2 * page_size) }, 0);
+            assert_eq!(result, Some((ret_addr, 0, fp)));
+        }
     }
 }
 
