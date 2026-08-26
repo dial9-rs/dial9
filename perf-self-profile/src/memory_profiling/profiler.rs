@@ -130,8 +130,7 @@ impl std::fmt::Display for InstallError {
                 "memory profiler self-test captured only {frames_captured} stack frames \
                  (expected at least {expected_min}); this binary is likely missing \
                  `-C force-frame-pointers=yes`. Add it to `[build] rustflags` in \
-                 `.cargo/config.toml` — a `rustflags` entry under `[profile.*]` or in \
-                 `Cargo.toml` itself is silently ignored by Cargo."
+                 `.cargo/config.toml`."
             ),
         }
     }

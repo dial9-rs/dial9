@@ -444,7 +444,7 @@ dial9 = { version = "0.5", features = ["memory-profiling"] }
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
-This must go in `.cargo/config.toml`, not `Cargo.toml` — a `rustflags` entry under `[profile.*]` or elsewhere in `Cargo.toml` is silently ignored by Cargo. If you get it wrong, `MemoryProfiler::install()` won't succeed quietly and fail later: it runs a self-test and returns `InstallError::MissingFramePointers` with the exact fix, letting you decide whether to crash out (as in the example below) or continue without memory profiling.
+If this is misconfigured, `MemoryProfiler::install()` runs a self-test and returns `InstallError::MissingFramePointers`, so you can choose to crash out (as in the example below) or continue without memory profiling.
 
 **Install the allocator and profiler:**
 
@@ -473,6 +473,8 @@ let _guard = MemoryProfiler::from_config(config)
 # }
 # fn main() {}
 ```
+
+To continue without memory profiling instead of crashing out on `InstallError::MissingFramePointers`, set `MemoryProfilingConfig::builder().skip_frame_pointer_check(true)`.
 
 The `sample_rate_bytes` controls how frequently allocations are sampled. At the default of 512 KiB, a service allocating 1 GB/s produces ~2000 samples/sec. Set to `1` to sample every allocation (useful for tests, not production).
 
