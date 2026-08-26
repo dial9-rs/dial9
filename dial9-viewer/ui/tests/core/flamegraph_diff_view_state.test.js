@@ -128,7 +128,7 @@ function makeDom() {
 const {
   apiUrlFor,
   createDiffView,
-  browserApi,
+  getApi,
   isSearchFocusKey,
   refinementLifecycleBadge,
   scopeLabel,
@@ -306,19 +306,12 @@ test("a user zoom cancels a not-yet-landed pending restore", () => {
   }
 });
 
-test("browser API fallback exposes Refine work-depth and adoption helpers", () => {
-  const root = {
-    formatCoverageBadge() {},
-    foldErrorNotice() {},
-    nextMaxFiles() {},
-    refinementWorkDepth() {},
-    shouldAdoptRefinementSnapshot() {},
-  };
-  const api = browserApi(root);
-  assert.strictEqual(api.refinementWorkDepth, root.refinementWorkDepth,
-    "browser fallback carries refinementWorkDepth");
-  assert.strictEqual(api.shouldAdoptRefinementSnapshot, root.shouldAdoptRefinementSnapshot,
-    "browser fallback carries snapshot adoption helper");
+test("resolved API exposes Refine work-depth and adoption helpers", () => {
+  const api = getApi();
+  assert.strictEqual(typeof api.refinementWorkDepth, "function",
+    "resolved API carries refinementWorkDepth");
+  assert.strictEqual(typeof api.shouldAdoptRefinementSnapshot, "function",
+    "resolved API carries snapshot adoption helper");
 });
 
 test("Load more keeps each side visible until cached coverage recovers its baseline", () => {

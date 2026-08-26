@@ -20,18 +20,10 @@
     if (typeof FlamegraphDiff !== "undefined") return FlamegraphDiff;
     throw new Error("FlamegraphDiff not found. Load flamegraph_diff.js first.");
   }
-  function browserApi(root) {
-    return {
-      formatCoverageBadge: root.formatCoverageBadge,
-      foldErrorNotice: root.foldErrorNotice,
-      nextMaxFiles: root.nextMaxFiles,
-      refinementWorkDepth: root.refinementWorkDepth,
-      shouldAdoptRefinementSnapshot: root.shouldAdoptRefinementSnapshot,
-    };
-  }
   function getApi() {
     if (typeof require !== "undefined") return require("./flamegraph_api.js");
-    return browserApi(window);
+    if (typeof FlamegraphApi !== "undefined") return FlamegraphApi;
+    throw new Error("FlamegraphApi not found. Load flamegraph_api.js first.");
   }
   function getSse() {
     if (typeof require !== "undefined") return require("./sse.js");
@@ -729,7 +721,7 @@
     apiUrlFor,
     scopeLabel,
     isSearchFocusKey,
-    browserApi,
+    getApi,
     refinementLifecycleBadge,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = ex;
