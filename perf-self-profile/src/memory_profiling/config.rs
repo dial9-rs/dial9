@@ -70,20 +70,20 @@ pub struct MemoryProfilingConfig {
     #[builder(default = DEFAULT_RING_CAPACITY)]
     ring_capacity: usize,
 
-    /// Skip the frame-pointer self-test that [`MemoryProfiler::install`]
-    /// runs by default. Default `false`.
+    /// Whether a failed frame-pointer self-test is a hard install error.
+    /// Default `true`.
     ///
-    /// Only set this if you've independently verified frame pointers are
-    /// enabled, or are prepared to accept near-empty allocation stacks
-    /// otherwise — with this set, `install()` cannot return
-    /// [`InstallError::MissingFramePointers`], so a missing
-    /// `-C force-frame-pointers=yes` produces useless stacks silently
-    /// instead of a clear error at install time.
+    /// [`MemoryProfiler::install`] always runs the self-test and always logs
+    /// a warning on failure. By default a failure also returns
+    /// [`InstallError::MissingFramePointers`]; set this to `false` to have
+    /// `install()` proceed instead, relying on the warning alone. Only do
+    /// that if you've independently verified frame pointers are enabled, or
+    /// are prepared to accept near-empty allocation stacks.
     ///
     /// [`MemoryProfiler::install`]: crate::memory_profiling::MemoryProfiler::install
     /// [`InstallError::MissingFramePointers`]: crate::memory_profiling::InstallError::MissingFramePointers
-    #[builder(default = false)]
-    skip_frame_pointer_check: bool,
+    #[builder(default = true)]
+    fail_on_missing_frame_pointers: bool,
 }
 
 impl<S: memory_profiling_config_builder::IsComplete> MemoryProfilingConfigBuilder<S> {
@@ -129,9 +129,9 @@ impl MemoryProfilingConfig {
     pub fn ring_capacity(&self) -> usize {
         self.ring_capacity
     }
-    /// Whether the install-time frame-pointer self-test is skipped.
-    pub fn skip_frame_pointer_check(&self) -> bool {
-        self.skip_frame_pointer_check
+    /// Whether a failed frame-pointer self-test is a hard install error.
+    pub fn fail_on_missing_frame_pointers(&self) -> bool {
+        self.fail_on_missing_frame_pointers
     }
 }
 
@@ -170,16 +170,16 @@ mod tests {
     }
 
     #[test]
-    fn skip_frame_pointer_check_defaults_to_false() {
+    fn fail_on_missing_frame_pointers_defaults_to_true() {
         let cfg = MemoryProfilingConfig::default();
-        assert!(!cfg.skip_frame_pointer_check());
+        assert!(cfg.fail_on_missing_frame_pointers());
     }
 
     #[test]
-    fn skip_frame_pointer_check_can_be_set() {
+    fn fail_on_missing_frame_pointers_can_be_set() {
         let cfg = MemoryProfilingConfig::builder()
-            .skip_frame_pointer_check(true)
+            .fail_on_missing_frame_pointers(false)
             .build();
-        assert!(cfg.skip_frame_pointer_check());
+        assert!(!cfg.fail_on_missing_frame_pointers());
     }
 }

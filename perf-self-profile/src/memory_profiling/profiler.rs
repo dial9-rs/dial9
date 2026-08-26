@@ -161,8 +161,9 @@ impl std::error::Error for InstallError {
 ///   [`InstallError::MissingFramePointers`] instead of silently
 ///   installing a profiler whose allocation stacks would be near-empty
 ///   and useless; see
-///   [`skip_frame_pointer_check`](crate::memory_profiling::MemoryProfilingConfig::skip_frame_pointer_check)
-///   to opt out.
+///   [`fail_on_missing_frame_pointers`](crate::memory_profiling::MemoryProfilingConfig::fail_on_missing_frame_pointers)
+///   to downgrade this to a warning instead. A failed self-test always
+///   logs a `tracing::warn!`, regardless of that setting.
 /// - [`Dial9Allocator`](crate::memory_profiling::Dial9Allocator) must be
 ///   installed as the `#[global_allocator]` for allocations to reach the
 ///   sampling hook.
@@ -200,14 +201,22 @@ impl MemoryProfiler {
 
         let unwinder = Unwinder::install().map_err(InstallError::Unwinder)?;
 
-        if !self.config.skip_frame_pointer_check()
-            && let Some(self_test) = unwinder.self_test_frame_pointers()
+        if let Some(self_test) = unwinder.self_test_frame_pointers()
             && !self_test.passed()
         {
-            return Err(InstallError::MissingFramePointers {
-                frames_captured: self_test.frames_captured,
-                expected_min: self_test.expected_min,
-            });
+            tracing::warn!(
+                frames_captured = self_test.frames_captured,
+                expected_min = self_test.expected_min,
+                fail_on_missing_frame_pointers = self.config.fail_on_missing_frame_pointers(),
+                "frame-pointer self-test failed; this binary is likely missing \
+                 -C force-frame-pointers=yes"
+            );
+            if self.config.fail_on_missing_frame_pointers() {
+                return Err(InstallError::MissingFramePointers {
+                    frames_captured: self_test.frames_captured,
+                    expected_min: self_test.expected_min,
+                });
+            }
         }
 
         let rings = Arc::new(RingBuffers::new(
