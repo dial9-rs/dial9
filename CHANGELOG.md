@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-rc2.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2.1...dial9-v0.5.0-rc2.2) - 2026-08-26
+
+### Fixed
+
+- *(trace-format-derive)* resolve the crate path from the caller ([#819](https://github.com/dial9-rs/dial9/pull/819))
+- safely bootstrap frame-pointer capture ([#818](https://github.com/dial9-rs/dial9/pull/818))
+- *(viewer)* share decoder with agent toolkit ([#826](https://github.com/dial9-rs/dial9/pull/826))
+
+### Other
+
+- *(tokio)* clarify spawner requirement for task dumps ([#812](https://github.com/dial9-rs/dial9/pull/812))
+
 ## [0.5.0-rc2.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2...dial9-v0.5.0-rc2.1) - 2026-08-21
 
 ### Added
