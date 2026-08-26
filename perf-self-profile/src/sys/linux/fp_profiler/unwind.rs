@@ -25,11 +25,11 @@ use crate::unwinder::CaptureResult;
 pub const MAX_FRAMES: usize = 128;
 
 // Minimum distance from address-space edges for a plausible return address.
-const DEAD_ZONE: usize = 0x1000;
+pub(crate) const DEAD_ZONE: usize = 0x1000;
 
 /// Maximum plausible single-frame advance of the frame pointer (256 KiB).
 /// Rejects wild pointers that happen to be above fp but aren't real frames.
-const MAX_FRAME_SIZE: usize = 0x40000;
+pub(crate) const MAX_FRAME_SIZE: usize = 0x40000;
 
 /// Strip pointer authentication (PAC) bits from a return address.
 ///

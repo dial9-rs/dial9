@@ -313,6 +313,17 @@ jobs:
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           cargo test -p dial9-perf-self-profile --lib --all-features \
             -Z build-std --target x86_64-unknown-linux-gnu
+      - name: Run memory profiler under ASAN without frame pointers
+        env:
+          CARGO_TARGET_DIR: target/asan-no-frame-pointers
+          RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=no -Zsanitizer=address"
+        run: |
+          cargo test --release \
+            -p dial9-perf-self-profile \
+            --test memory_profiler_no_frame_pointers \
+            --features memory-profiling \
+            -Z build-std --target x86_64-unknown-linux-gnu \
+            -- --exact allocation_hook_survives_best_effort_stack_capture
       - name: Restrict perf_event_open to force ctimer path
         run: sudo sysctl kernel.perf_event_paranoid=3
       - name: Run perf-self-profile tests under ASAN (ctimer path)
