@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0-rc2.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2.1...dial9-v0.5.0-rc2.2) - 2026-08-26
+## [0.5.0](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2.1...dial9-v0.5.0) - 2026-08-26
 
 ### Fixed
 
