@@ -47,23 +47,37 @@ pub(crate) fn strip_pac(addr: usize) -> usize {
     addr
 }
 
-/// Shared walk loop: given a frame pointer `fp` that has *not yet been
-/// validated or dereferenced*, fault-tolerantly walk the frame-pointer chain,
-/// writing return addresses into `out[n..]`.
+/// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
+/// usually obtained from a signal handler's ucontext.
 ///
-/// Every frame — including the first one this loop processes — goes through
-/// the same bounds/alignment check and `safe_load`-guarded reads. There is no
-/// "trusted" frame here; callers that do have a trusted PC for frame 0 (e.g.
-/// [`unwind`], seeded from a signal handler's ucontext) write it directly and
-/// start this loop at `n = 1` to fill in the rest of the chain.
+/// `pc` is trusted as-is and written directly to `out[0]` — the caller must
+/// already know it's a valid instruction pointer (e.g. the kernel-supplied
+/// interrupted PC). `fp` is *not* trusted: every frame from here on,
+/// including the first, goes through the same bounds/alignment check and
+/// `safe_load`-guarded reads.
+///
+/// `truncated` is `true` if the walk stopped because the output buffer (or
+/// [`MAX_FRAMES`]) was full *and* at least one additional frame would have been
+/// valid. A natural stop (end of chain, faulty load, implausible pointer)
+/// produces `truncated = false`.
 ///
 /// # Safety
 /// - `install_handler` must have been called.
 /// - Should generally be called from a signal handler where the target thread
-///   is stopped, or from the frame whose own `fp` is passed in; walking a
-///   running thread's stack from another thread races with mutations.
-unsafe fn unwind_loop(mut fp: usize, sp: usize, out: &mut [u64], mut n: usize) -> CaptureResult {
+///   is stopped; walking a running thread's stack races with mutations.
+pub unsafe fn unwind(pc: usize, mut fp: usize, sp: usize, out: &mut [u64]) -> CaptureResult {
     let limit = out.len().min(MAX_FRAMES);
+    if limit == 0 {
+        // No room even for the interrupted PC. The walk would have produced
+        // at least one frame, so this is truncation.
+        return CaptureResult {
+            frames_written: 0,
+            truncated: true,
+        };
+    }
+
+    out[0] = pc as u64;
+    let mut n = 1;
 
     let stack_lo = sp;
     let stack_hi = sp.saturating_add(8 * 1024 * 1024);
@@ -128,38 +142,6 @@ unsafe fn unwind_loop(mut fp: usize, sp: usize, out: &mut [u64], mut n: usize) -
         n += 1;
         fp = saved_fp;
     }
-}
-
-/// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
-/// usually obtained from a signal handler's ucontext.
-///
-/// `pc` is trusted as-is and written directly to `out[0]` — the caller must
-/// already know it's a valid instruction pointer (e.g. the kernel-supplied
-/// interrupted PC). `fp` is *not* trusted: it is validated and read through
-/// the same `safe_load`-guarded path as every other frame in the chain.
-///
-/// `truncated` is `true` if the walk stopped because the output buffer (or
-/// [`MAX_FRAMES`]) was full *and* at least one additional frame would have been
-/// valid. A natural stop (end of chain, faulty load, implausible pointer)
-/// produces `truncated = false`.
-///
-/// # Safety
-/// - `install_handler` must have been called.
-/// - Should generally be called from a signal handler where the target thread
-///   is stopped; walking a running thread's stack races with mutations.
-pub unsafe fn unwind(pc: usize, fp: usize, sp: usize, out: &mut [u64]) -> CaptureResult {
-    let limit = out.len().min(MAX_FRAMES);
-    if limit == 0 {
-        // No room even for the interrupted PC. The walk would have produced
-        // at least one frame, so this is truncation.
-        return CaptureResult {
-            frames_written: 0,
-            truncated: true,
-        };
-    }
-
-    out[0] = pc as u64;
-    unsafe { unwind_loop(fp, sp, out, 1) }
 }
 
 /// Unwind from inside a signal handler given the raw ucontext.
