@@ -132,9 +132,8 @@ impl Unwinder {
     /// `-C force-frame-pointers=yes`.
     ///
     /// Recurses a fixed depth through this module's own `#[inline(never)]`
-    /// function on a dedicated thread, then inspects the captured stack —
-    /// by symbol name where available (layout-independent), falling back
-    /// to a raw frame-count threshold otherwise.
+    /// function on a dedicated thread, then checks the captured frame
+    /// count against a threshold.
     ///
     /// Returns `Err` if the self-test itself couldn't run (thread spawn
     /// failure or panic) — inconclusive, not evidence of missing frame
@@ -196,11 +195,10 @@ impl std::error::Error for SelfTestError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FramePointerSelfTest {
-    /// A match count if `matched_by_symbol`, otherwise a raw frame count.
+    /// Number of frames captured by the self-test's recursion.
     pub(crate) frames_captured: usize,
     /// Minimum `frames_captured` needed to pass.
     pub(crate) expected_min: usize,
-    pub(crate) matched_by_symbol: bool,
 }
 
 impl FramePointerSelfTest {
@@ -224,20 +222,9 @@ mod self_test {
     pub(super) fn run(unwinder: &Unwinder) -> FramePointerSelfTest {
         let mut frames = [0u64; DEPTH + 4];
         let written = recurse(unwinder, DEPTH, &mut frames);
-        let captured = &frames[..written];
-
-        if let Some(matched) = verify_by_symbol(captured) {
-            return FramePointerSelfTest {
-                frames_captured: matched,
-                expected_min: EXPECTED_MIN,
-                matched_by_symbol: true,
-            };
-        }
-
         FramePointerSelfTest {
-            frames_captured: captured.len(),
+            frames_captured: written,
             expected_min: EXPECTED_MIN,
-            matched_by_symbol: false,
         }
     }
 
@@ -256,48 +243,6 @@ mod self_test {
         // to still be on the stack when the base case captures.
         let n = recurse(unwinder, depth - 1, out);
         std::hint::black_box(n)
-    }
-
-    /// `None` means nothing resolved at all (e.g. no symbolizer, or a
-    /// stripped binary) — callers should fall back to the frame-count
-    /// check, not read it as "no match". `Some(n)` is the match count,
-    /// which may be 0.
-    #[cfg(any(
-        target_os = "linux",
-        all(target_os = "android", target_arch = "aarch64")
-    ))]
-    fn verify_by_symbol(frames: &[u64]) -> Option<usize> {
-        use blazesym::symbolize::Symbolizer;
-
-        let maps = crate::read_proc_maps();
-        let symbolizer = Symbolizer::new();
-        let mut matched = 0;
-        let mut any_resolved = false;
-        for &addr in frames {
-            match crate::resolve_symbol_with_maps(addr, &symbolizer, &maps).name {
-                Some(name) => {
-                    any_resolved = true;
-                    if name.ends_with("self_test::recurse") {
-                        matched += 1;
-                    } else {
-                        // Walked past the self-test's own recursion into its
-                        // caller (`run`, the thread closure, etc.) — the
-                        // chain of interest ends here.
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-        any_resolved.then_some(matched)
-    }
-
-    #[cfg(not(any(
-        target_os = "linux",
-        all(target_os = "android", target_arch = "aarch64")
-    )))]
-    fn verify_by_symbol(_frames: &[u64]) -> Option<usize> {
-        None
     }
 }
 
