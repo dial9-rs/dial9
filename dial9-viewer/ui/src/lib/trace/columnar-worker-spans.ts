@@ -96,14 +96,16 @@ interface WakeRec {
 
 /** Per-task poll index as a typed-array CSR (replaces the fat Map<taskId,
  * {start,end,workerId}[]>). Task `slot` owns [off[slot], off[slot+1]) in the
- * flat start/end/worker arrays, sorted ascending by start. Built once, cached,
- * shared by schedulingDelays + buildSpanDataColumnar's reconstructSpanSegments. */
+ * flat arrays, sorted ascending by start. `sourceIndex` identifies the poll
+ * within its worker's columns. Built once, cached, shared by schedulingDelays +
+ * buildSpanDataColumnar's reconstructSpanSegments. */
 export interface PollsByTaskCSR {
   slotOf: Map<number, number>;
   off: Int32Array;
   start: Float64Array;
   end: Float64Array;
   worker: Float64Array;
+  sourceIndex: Int32Array;
 }
 
 /** Per-task poll aggregate for the Tasks tab index. Scalars only - reduced from
@@ -304,7 +306,7 @@ export class ColumnarWorkerSpans {
   /** Set by attachCpuSamples; pollAt reads it to hand back real sample refs. */
   private cpuSamplesArr: readonly CpuSample[] | null = null;
   /** Lazily-built, cached per-task poll CSR (shared by schedulingDelays +
-   * buildSpanDataColumnar). ~127 MB typed vs 5.3M {start,end,workerId} objects. */
+   * buildSpanDataColumnar). ~148 MB typed vs 5.3M {start,end,workerId} objects. */
   private _pollsByTaskCSR: PollsByTaskCSR | null = null;
 
   private intern(s: string | null): number {
@@ -641,6 +643,7 @@ export class ColumnarWorkerSpans {
     const start = new Float64Array(off[T]!);
     const end = new Float64Array(off[T]!);
     const worker = new Float64Array(off[T]!);
+    const sourceIndex = new Int32Array(off[T]!);
     const cur = off.slice(0, T);
     // Pass 2: fill.
     for (const [w, c] of this.byWorker) {
@@ -648,12 +651,31 @@ export class ColumnarWorkerSpans {
         const t = c.taskId[i];
         if (!t) continue;
         const p = cur[slotOf.get(t)!]!++;
-        start[p] = c.start[i]!; end[p] = c.end[i]!; worker[p] = w;
+        start[p] = c.start[i]!;
+        end[p] = c.end[i]!;
+        worker[p] = w;
+        sourceIndex[p] = i;
       }
     }
     // Sort each task slice by start (stable - matches the fat arr.sort tie-break).
-    for (let s = 0; s < T; s++) sortTriByStart(start, end, worker, off[s]!, off[s + 1]!);
-    return (this._pollsByTaskCSR = { slotOf, off, start, end, worker });
+    for (let s = 0; s < T; s++) {
+      sortPollsByStart(
+        start,
+        end,
+        worker,
+        sourceIndex,
+        off[s]!,
+        off[s + 1]!,
+      );
+    }
+    return (this._pollsByTaskCSR = {
+      slotOf,
+      off,
+      start,
+      end,
+      worker,
+      sourceIndex,
+    });
   }
 
   /**
@@ -911,20 +933,28 @@ export class ColumnarWorkerSpans {
   }
 
   /**
-   * Columnar port of the frozen computeSchedulingDelays. For each poll of a
-   * task, find the latest wake before its start; if that wake landed mid an
-   * earlier poll of the same task, measure from that poll's end. Emits a
-   * schedDelay per poll with delay in (0, 1e9), sorted by wakeTime - identical
-   * to the fat pass. `pollsByTask` (5.3M poll refs in the fat pass) becomes a
-   * per-task CSR over Float64 start/end columns (~85 MB, not 1.9 GB of objects),
-   * transient to this call.
+   * Columnar port of computeSchedulingDelays. For each poll of a task, find the
+   * latest wake callback not consumed by the previous poll; if that wake landed
+   * during the previous poll, measure from that poll's end. For older traces
+   * that include stale callback attempts, this is a conservative lower bound.
+   * Emits a schedDelay per poll with delay in (0, 1e9), sorted by wakeTime -
+   * identical to the fat pass.
+   * `pollsByTask` (5.3M poll refs in the fat pass) becomes a per-task CSR over
+   * compact typed columns (~148 MB, not 1.9 GB of objects).
    */
   schedulingDelays(
     workerIds: number[],
     wakesByTask: Record<number, WakeRec[]>
   ): SchedDelayView[] {
     // Shared per-task poll CSR (cached; also used by buildSpanDataColumnar).
-    const { slotOf: slot, off, start: pStart, end: pEnd } = this.pollsByTaskCSR();
+    const {
+      slotOf: slot,
+      off,
+      start: pStart,
+      end: pEnd,
+      worker: pWorker,
+      sourceIndex: pSourceIndex,
+    } = this.pollsByTaskCSR();
     const out: SchedDelayView[] = [];
     for (const w of workerIds) {
       const c = this.byWorker.get(w);
@@ -935,26 +965,46 @@ export class ColumnarWorkerSpans {
         const wakes = wakesByTask[taskId];
         if (!wakes || !wakes.length) continue;
         const sStart = c.start[i]!;
-        // latest wake with timestamp <= sStart
+        const taskSlot = slot.get(taskId);
+        if (taskSlot === undefined) continue;
+        const pollLo = off[taskSlot]!;
+        const pollHi = off[taskSlot + 1]!;
+        let plo = pollLo, phi = pollHi - 1, pollIndex = pollHi;
+        while (plo <= phi) {
+          const mid = (plo + phi) >> 1;
+          if (pStart[mid]! < sStart) {
+            plo = mid + 1;
+          } else {
+            pollIndex = mid;
+            phi = mid - 1;
+          }
+        }
+        while (
+          pollIndex < pollHi &&
+          (pStart[pollIndex] !== sStart ||
+            pWorker[pollIndex] !== w ||
+            pSourceIndex[pollIndex] !== i)
+        ) {
+          pollIndex++;
+        }
+        if (pollIndex >= pollHi) continue;
+
+        const previousIndex = pollIndex > pollLo ? pollIndex - 1 : -1;
+        const consumedThrough =
+          previousIndex >= 0 ? pStart[previousIndex]! : -Infinity;
         let lo = 0, hi = wakes.length - 1, best = -1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
-          if (wakes[mid]!.timestamp <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
+          if (wakes[mid]!.timestamp <= sStart) {
+            best = mid;
+            lo = mid + 1;
+          } else hi = mid - 1;
         }
-        if (best < 0) continue;
+        if (best < 0 || wakes[best]!.timestamp <= consumedThrough) continue;
         const wake = wakes[best]!;
         let effectiveWake = wake.timestamp;
-        const s = slot.get(taskId);
-        if (s !== undefined) {
-          // rightmost poll of the task with start <= wake.timestamp
-          let plo = off[s]!, phi = off[s + 1]! - 1, pbest = -1;
-          while (plo <= phi) {
-            const pmid = (plo + phi) >> 1;
-            if (pStart[pmid]! <= wake.timestamp) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
-          }
-          if (pbest >= 0 && pStart[pbest]! < sStart && wake.timestamp <= pEnd[pbest]!) {
-            effectiveWake = pEnd[pbest]!;
-          }
+        if (previousIndex >= 0 && wake.timestamp <= pEnd[previousIndex]!) {
+          effectiveWake = pEnd[previousIndex]!;
         }
         const delay = sStart - effectiveWake;
         if (delay > 0 && delay < 1e9) {
@@ -1026,11 +1076,16 @@ export class ColumnarWorkerSpansBuilder {
   }
 }
 
-/** Stable sort of the parallel (start,end,worker) slice [lo,hi) by start
+/** Stable sort of the parallel poll columns in [lo,hi) by start
  * ascending; ties keep insertion order (== the fat arr.sort tie-break, so the
  * mid-poll binary search + segment reconstruction pick the same poll). */
-function sortTriByStart(
-  pStart: Float64Array, pEnd: Float64Array, pWorker: Float64Array, lo: number, hi: number
+function sortPollsByStart(
+  pStart: Float64Array,
+  pEnd: Float64Array,
+  pWorker: Float64Array,
+  pSourceIndex: Int32Array,
+  lo: number,
+  hi: number,
 ): void {
   const n = hi - lo;
   if (n < 2) return;
@@ -1038,9 +1093,18 @@ function sortTriByStart(
   // across engines regardless.
   const arr = Array.from({ length: n }, (_, k) => lo + k);
   arr.sort((x, y) => pStart[x]! - pStart[y]! || x - y);
-  const ts = new Float64Array(n), te = new Float64Array(n), tw = new Float64Array(n);
-  for (let k = 0; k < n; k++) { ts[k] = pStart[arr[k]!]!; te[k] = pEnd[arr[k]!]!; tw[k] = pWorker[arr[k]!]!; }
+  const ts = new Float64Array(n);
+  const te = new Float64Array(n);
+  const tw = new Float64Array(n);
+  const ti = new Int32Array(n);
+  for (let k = 0; k < n; k++) {
+    ts[k] = pStart[arr[k]!]!;
+    te[k] = pEnd[arr[k]!]!;
+    tw[k] = pWorker[arr[k]!]!;
+    ti[k] = pSourceIndex[arr[k]!]!;
+  }
   pStart.set(ts, lo);
   pEnd.set(te, lo);
   pWorker.set(tw, lo);
+  pSourceIndex.set(ti, lo);
 }

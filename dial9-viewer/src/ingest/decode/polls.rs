@@ -114,12 +114,13 @@ impl Reconstructor {
             if let Some(worker_id) = self.open_worker_by_task.get(&event.woken_task_id)
                 && let Some(open) = self.open_by_worker.get_mut(worker_id)
             {
-                // Wakes coalesce while a task is already scheduled. Keep the
-                // first one until the readiness transition is consumed.
-                open.wake_during_poll.get_or_insert(evidence);
+                // Older producers recorded callback attempts after the live
+                // executor waker had already been consumed. The latest
+                // callback is the conservative lower-bound evidence.
+                open.wake_during_poll = Some(evidence);
             }
         } else {
-            state.ready.get_or_insert(evidence);
+            state.ready = Some(evidence);
         }
     }
 
@@ -496,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_wake_measures_next_poll_and_coalesces_to_earliest_wake() {
+    fn idle_wake_uses_latest_callback_as_conservative_ready_time() {
         let mut reconstructor = Reconstructor::default();
         reconstructor.wake(&WakeEvent {
             timestamp_ns: 200,
@@ -512,9 +513,9 @@ mod tests {
         reconstructor.poll_end(&end(320));
 
         let ready = reconstructor.records[0].readiness.unwrap();
-        assert_eq!(ready.timestamp, MonoNs(200));
+        assert_eq!(ready.timestamp, MonoNs(250));
         assert_eq!(ready.kind, SchedulingDelayKind::Wake);
-        assert_eq!(ready.waker_task_id, Some(11));
+        assert_eq!(ready.waker_task_id, Some(12));
     }
 
     #[test]
@@ -526,6 +527,11 @@ mod tests {
             waker_task_id: 11,
             woken_task_id: 7,
         });
+        reconstructor.wake(&WakeEvent {
+            timestamp_ns: 170,
+            waker_task_id: 12,
+            woken_task_id: 7,
+        });
         reconstructor.poll_end(&end(200));
         reconstructor.poll_start(&start(500, 7));
         reconstructor.poll_end(&end(520));
@@ -533,7 +539,7 @@ mod tests {
         let ready = reconstructor.records[1].readiness.unwrap();
         assert_eq!(ready.timestamp, MonoNs(200));
         assert_eq!(ready.kind, SchedulingDelayKind::WakeDuringPoll);
-        assert_eq!(ready.waker_task_id, Some(11));
+        assert_eq!(ready.waker_task_id, Some(12));
     }
 
     #[test]

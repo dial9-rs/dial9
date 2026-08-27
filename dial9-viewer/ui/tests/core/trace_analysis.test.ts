@@ -596,6 +596,42 @@ describe("computeSchedulingDelays", () => {
       `gap wake wrongly adjusted: wakeTime=${r[0].wakeTime} delay=${r[0].delay} (expected 300/200)`,
     ).toBe(true);
   });
+
+  it("uses the latest unconsumed wake as a conservative lower bound", () => {
+    const ws = {
+      0: {
+        polls: [
+          { taskId: 1, start: 100, end: 200 },
+          { taskId: 1, start: 500, end: 600 },
+          { taskId: 1, start: 900, end: 1_000 },
+        ],
+      },
+    };
+    const wakes = {
+      1: [
+        { timestamp: 150, wakerTaskId: 7 },
+        { timestamp: 490, wakerTaskId: 8 },
+      ],
+    };
+
+    const r = computeSchedulingDelays(ws, [0], wakes);
+
+    expect(
+      r.map((delay: any) => ({
+        wakeTime: delay.wakeTime,
+        pollTime: delay.pollTime,
+        delay: delay.delay,
+        wakerTaskId: delay.wakerTaskId,
+      })),
+    ).toEqual([
+      {
+        wakeTime: 490,
+        pollTime: 500,
+        delay: 10,
+        wakerTaskId: 8,
+      },
+    ]);
+  });
 });
 
 // ── filterPointsOfInterest ──
@@ -1854,8 +1890,7 @@ describe("block-in-place active-span suppression", () => {
 
 // ── computePollWakes ──
 
-// Reference O(P^2) implementation — the original viewer loop, kept here to
-// prove the binary-search version produces identical results.
+// Deliberately simple O(P*W) reference for the production linear merge.
 function pollWakesBruteForce(
   polls: { start: number; end: number }[],
   wakes: { timestamp: number; wakerTaskId: number }[],
@@ -1864,29 +1899,26 @@ function pollWakesBruteForce(
   for (let pi = 0; pi < polls.length; pi++) {
     const s = polls[pi]!;
     let best: { wake: { wakerTaskId: number }; effectiveWake: number } | null = null;
-    if (wakes.length) {
-      let lo = 0,
-        hi = wakes.length - 1,
-        bi = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (wakes[mid]!.timestamp <= s.start) {
-          bi = mid;
-          lo = mid + 1;
-        } else hi = mid - 1;
+    const previousPoll = pi > 0 ? polls[pi - 1]! : null;
+    const consumedThrough = previousPoll?.start ?? -Infinity;
+    let wake: { timestamp: number; wakerTaskId: number } | null = null;
+    for (let wi = wakes.length - 1; wi >= 0; wi--) {
+      const candidate = wakes[wi]!;
+      if (
+        candidate.timestamp > consumedThrough &&
+        candidate.timestamp <= s.start
+      ) {
+        wake = candidate;
+        break;
       }
-      if (bi >= 0) {
-        const w = wakes[bi]!;
-        let effectiveWake = w.timestamp;
-        for (let j = 0; j < pi; j++) {
-          if (w.timestamp >= polls[j]!.start && w.timestamp <= polls[j]!.end) {
-            effectiveWake = polls[j]!.end;
-            break;
-          }
-        }
-        const delay = s.start - effectiveWake;
-        if (delay >= 0 && delay < 1e9) best = { wake: w, effectiveWake };
-      }
+    }
+    if (wake) {
+      const effectiveWake =
+        previousPoll && wake.timestamp <= previousPoll.end
+          ? previousPoll.end
+          : wake.timestamp;
+      const delay = s.start - effectiveWake;
+      if (delay >= 0 && delay < 1e9) best = { wake, effectiveWake };
     }
     out.push(best);
   }
@@ -1894,7 +1926,7 @@ function pollWakesBruteForce(
 }
 
 describe("computePollWakes", () => {
-  it("binary-search computePollWakes matches O(P^2) reference (400 polls, 600 wakes)", () => {
+  it("linear merge matches a simple reference (400 polls, 600 wakes)", () => {
     // Deterministic pseudo-random non-overlapping polls + scattered wakes.
     const polls: { start: number; end: number }[] = [];
     let t = 0;
@@ -1911,11 +1943,8 @@ describe("computePollWakes", () => {
     for (let i = 0; i < 600; i++) {
       wakes.push({ timestamp: Math.floor(rnd() * t), wakerTaskId: i });
     }
-    // Deliberately seed wakes EXACTLY on poll boundaries (poll.start, which for
-    // a zero-gap poll equals the previous poll's end). This is the case where a
-    // wake is contained by two adjacent polls and where the binary-search and
-    // O(P^2) versions can disagree on which poll "owns" it — so the comparison
-    // below actually exercises the first-match tie-break, not just interiors.
+    // Deliberately seed wakes exactly on poll boundaries. This checks that a
+    // boundary wake is consumed once by the poll starting at that timestamp.
     for (let i = 0; i < polls.length; i += 7) {
       wakes.push({ timestamp: polls[i]!.start, wakerTaskId: 1000 + i });
       wakes.push({ timestamp: polls[i]!.end, wakerTaskId: 2000 + i });
@@ -1974,13 +2003,27 @@ describe("computePollWakes", () => {
     ).toBeTruthy();
   });
 
-  it("wake on a shared poll boundary matches first-match (lowest-index) semantics", () => {
-    // A wake landing on a shared poll boundary (poll0.end == poll1.start == t)
-    // is contained by BOTH adjacent polls. The original O(P^2) loop took the
-    // FIRST (lowest-index) match, so effectiveWake = poll0.end == t (no bump).
-    // The binary search finds the rightmost poll with start <= t (poll1), so it
-    // must walk left to poll0 to stay faithful. Without that walk it would
-    // wrongly report poll1.end.
+  it("uses the latest idle wake once and consumes it", () => {
+    const polls = [
+      { start: 100, end: 200 },
+      { start: 500, end: 600 },
+      { start: 900, end: 1_000 },
+    ];
+    const wakes = [
+      { timestamp: 250, wakerTaskId: 7 },
+      { timestamp: 490, wakerTaskId: 8 },
+    ];
+
+    const out = computePollWakes(polls, wakes);
+
+    expect(out).toEqual([
+      null,
+      { wake: wakes[1], effectiveWake: 490 },
+      null,
+    ]);
+  });
+
+  it("consumes a wake on a shared poll boundary at that poll", () => {
     const polls = [
       { start: 0, end: 10 },
       { start: 10, end: 20 },
@@ -1988,12 +2031,13 @@ describe("computePollWakes", () => {
     ];
     const wakes = [{ timestamp: 10, wakerTaskId: 7 }];
     const out = computePollWakes(polls, wakes);
+    expect(out[1]?.effectiveWake).toBe(10);
     expect(
-      out[2] && out[2].effectiveWake === 10,
-      `pollWakes: shared-boundary effectiveWake should be 10 (first match), got ${out[2] && out[2].effectiveWake}`,
-    ).toBeTruthy();
+      out[2],
+      "pollWakes: a boundary wake must not be reused by a later poll",
+    ).toBeNull();
 
-    // Zero-width poll chain all touching t=10: lowest-index match is poll0.
+    // A zero-width chain still consumes the wake only once.
     const chain = [
       { start: 0, end: 10 },
       { start: 10, end: 10 },
@@ -2002,9 +2046,9 @@ describe("computePollWakes", () => {
     ];
     const cout = computePollWakes(chain, wakes);
     expect(
-      cout[3] && cout[3].effectiveWake === 10,
-      `pollWakes: boundary-chain effectiveWake should be 10, got ${cout[3] && cout[3].effectiveWake}`,
-    ).toBeTruthy();
+      cout[3],
+      "pollWakes: a boundary wake must not survive a zero-width poll chain",
+    ).toBeNull();
   });
 });
 

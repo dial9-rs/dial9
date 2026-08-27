@@ -200,9 +200,10 @@ declare module "*/trace_analysis.js" {
   ): SchedDelay[];
 
   /**
-   * For each poll of one task, the most recent wake at/before its start and
-   * the effective wake time (bumped past an earlier poll containing the
-   * wake). Result is parallel to `polls`; null where no wake applies.
+   * For each poll of one task, the latest wake callback not consumed by the
+   * previous poll and its effective wake time. This is a conservative lower
+   * bound for old traces that recorded stale callbacks. Result is parallel to
+   * `polls`; null where no wake applies.
    */
   export function computePollWakes(
     polls: readonly { start: number; end: number }[],

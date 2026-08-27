@@ -336,4 +336,85 @@ describe("ColumnarWorkerSpans.schedulingDelays matches frozen computeSchedulingD
     });
     expect(col.map(norm)).toEqual(fat.map(norm));
   });
+
+  it("uses the latest unconsumed wake as a conservative lower bound", () => {
+    const synthetic = {
+      0: {
+        polls: [
+          { taskId: 1, start: 100, end: 200 },
+          { taskId: 1, start: 500, end: 600 },
+          { taskId: 1, start: 900, end: 1_000 },
+        ],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    };
+    const wakes = {
+      1: [
+        { timestamp: 150, wakerTaskId: 7 },
+        { timestamp: 490, wakerTaskId: 8 },
+      ],
+    };
+    const store = ColumnarWorkerSpans.fromWorkerSpans(synthetic as never);
+
+    expect(
+      store.schedulingDelays([0], wakes).map((delay) => ({
+        wakeTime: delay.wakeTime,
+        pollTime: delay.pollTime,
+        delay: delay.delay,
+        wakerTaskId: delay.wakerTaskId,
+      })),
+    ).toEqual([
+      {
+        wakeTime: 490,
+        pollTime: 500,
+        delay: 10,
+        wakerTaskId: 8,
+      },
+    ]);
+  });
+
+  it("preserves poll identity across an equal-start zero-width chain", async () => {
+    const { computeSchedulingDelays } = await import("./index.js");
+    const synthetic = {
+      0: {
+        polls: [
+          { taskId: 1, start: 0, end: 5 },
+          { taskId: 1, start: 10, end: 10 },
+          { taskId: 1, start: 10, end: 20 },
+        ],
+        parks: [],
+        actives: [],
+        cpuSampleTimes: [],
+      },
+    };
+    const wakes = {
+      1: [{ timestamp: 9, wakerTaskId: 7 }],
+    };
+    const store = ColumnarWorkerSpans.fromWorkerSpans(synthetic as never);
+    const norm = (delay: {
+      wakeTime: number;
+      pollTime: number;
+      delay: number;
+      poll: { end: number };
+    }) => ({
+      wakeTime: delay.wakeTime,
+      pollTime: delay.pollTime,
+      delay: delay.delay,
+      pollEnd: delay.poll.end,
+    });
+
+    const fat = computeSchedulingDelays(
+      synthetic as never,
+      [0],
+      wakes as never,
+    ).map(norm);
+    const columnar = store.schedulingDelays([0], wakes).map(norm);
+
+    expect(fat).toEqual([
+      { wakeTime: 9, pollTime: 10, delay: 1, pollEnd: 10 },
+    ]);
+    expect(columnar).toEqual(fat);
+  });
 });

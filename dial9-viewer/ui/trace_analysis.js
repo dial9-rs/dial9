@@ -755,7 +755,9 @@
   }
 
   /**
-   * Compute scheduling delays: for each poll, find the most recent wake before it.
+   * Compute scheduling delays: for each poll, use the latest wake callback not
+   * consumed by the previous poll. Older producers recorded stale callback
+   * attempts, so the latest callback is a conservative lower-bound estimate.
    * Adjusts for mid-poll wake arrivals.
    * @param {Object} workerSpans - as returned by buildWorkerSpans
    * @param {number[]} workerIds
@@ -779,6 +781,35 @@
         if (!s.taskId) continue;
         const wakes = wakesByTask[s.taskId];
         if (!wakes || !wakes.length) continue;
+        const taskPolls = pollsByTask[s.taskId];
+        if (!taskPolls) continue;
+        let plo = 0,
+          phi = taskPolls.length - 1,
+          pollIndex = -1;
+        while (plo <= phi) {
+          const mid = (plo + phi) >> 1;
+          if (taskPolls[mid].start < s.start) {
+            plo = mid + 1;
+          } else {
+            if (taskPolls[mid] === s) pollIndex = mid;
+            phi = mid - 1;
+          }
+        }
+        if (pollIndex < 0) {
+          pollIndex = plo;
+          while (
+            pollIndex < taskPolls.length &&
+            taskPolls[pollIndex].start === s.start &&
+            taskPolls[pollIndex] !== s
+          ) {
+            pollIndex++;
+          }
+          if (taskPolls[pollIndex] !== s) continue;
+        }
+
+        const previousPoll =
+          pollIndex > 0 ? taskPolls[pollIndex - 1] : null;
+        const consumedThrough = previousPoll?.start ?? -Infinity;
         let lo = 0,
           hi = wakes.length - 1,
           best = -1;
@@ -789,37 +820,11 @@
             lo = mid + 1;
           } else hi = mid - 1;
         }
-        if (best >= 0) {
+        if (best >= 0 && wakes[best].timestamp > consumedThrough) {
           const wake = wakes[best];
           let effectiveWake = wake.timestamp;
-          const taskPolls = pollsByTask[s.taskId];
-          if (taskPolls) {
-            // If the wake landed mid-poll (the task was already being polled
-            // when it was woken), measure the delay from the end of that poll
-            // rather than the wake itself. taskPolls is sorted by start and a
-            // single task's polls never overlap, so at most one poll's
-            // [start, end] can contain wake.timestamp. Binary search for the
-            // rightmost poll with start <= wake.timestamp instead of linearly
-            // scanning every poll of the task (which is O(P^2) for a
-            // long-lived task with millions of polls).
-            let plo = 0,
-              phi = taskPolls.length - 1,
-              pbest = -1;
-            while (plo <= phi) {
-              const pmid = (plo + phi) >> 1;
-              if (taskPolls[pmid].start <= wake.timestamp) {
-                pbest = pmid;
-                plo = pmid + 1;
-              } else phi = pmid - 1;
-            }
-            if (pbest >= 0) {
-              const p = taskPolls[pbest];
-              // Preserve original semantics: only an earlier poll counts, and
-              // the wake must fall within it (start <= wake is guaranteed by
-              // the search above).
-              if (p.start < s.start && wake.timestamp <= p.end)
-                effectiveWake = p.end;
-            }
+          if (previousPoll && wake.timestamp <= previousPoll.end) {
+            effectiveWake = previousPoll.end;
           }
           const delay = s.start - effectiveWake;
           if (delay > 0 && delay < 1e9) {
@@ -841,21 +846,19 @@
   }
 
   /**
-   * For each poll of a selected task, find the most recent wake at or before
-   * the poll's start, plus the "effective wake" time used to measure the
-   * wake→poll scheduling delay.
+   * For each poll of a selected task, find the latest wake callback not
+   * consumed by the previous poll, plus the "effective wake" time used to
+   * estimate the wake→poll scheduling delay. Older producers recorded stale
+   * callback attempts, so this is a conservative lower bound.
    *
    * If that wake actually arrived while an EARLIER poll of the same task was
    * still running (the task was woken again mid-poll), the wait doesn't begin
    * until that earlier poll ends — so `effectiveWake` is bumped to that poll's
    * `end`.
    *
-   * `polls` MUST be the task's polls sorted ascending by `start`; a single
-   * task is polled on one worker at a time, so they are non-overlapping.
-   * `wakes` MUST be sorted ascending by `timestamp`. Both lookups are binary
-   * searches, so the whole pass is O(P·logP + P·logW) — NOT the O(P²) that a
-   * per-poll linear scan over earlier polls costs for a task polled millions
-   * of times. (This mirrors the binary-search fix in computeSchedulingDelays.)
+   * `polls` MUST be the task's polls sorted ascending by `start`; a single task
+   * is polled on one worker at a time, so they are non-overlapping. `wakes`
+   * MUST be sorted ascending by `timestamp`. The pass is O(P + W).
    *
    * @param {Array<{start:number,end:number}>} polls  task polls, sorted by start
    * @param {Array<{timestamp:number}>} wakes          task wakes, sorted by timestamp
@@ -864,39 +867,22 @@
   function computePollWakes(polls, wakes) {
     const result = new Array(polls.length).fill(null);
     if (!wakes || wakes.length === 0) return result;
+    let wakeIndex = 0;
     for (let pi = 0; pi < polls.length; pi++) {
       const s = polls[pi];
-      // Rightmost wake at or before this poll's start.
-      let lo = 0, hi = wakes.length - 1, bi = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (wakes[mid].timestamp <= s.start) { bi = mid; lo = mid + 1; }
-        else hi = mid - 1;
+      const previousPoll = pi > 0 ? polls[pi - 1] : null;
+      let wake = null;
+      while (
+        wakeIndex < wakes.length &&
+        wakes[wakeIndex].timestamp <= s.start
+      ) {
+        wake = wakes[wakeIndex];
+        wakeIndex++;
       }
-      if (bi < 0) continue;
-      const wake = wakes[bi];
+      if (wake === null) continue;
       let effectiveWake = wake.timestamp;
-      // Did that wake land inside an EARLIER poll (index < pi)? The original
-      // O(P^2) loop scanned earlier polls and took the FIRST (lowest-index) one
-      // containing the wake. Binary search the rightmost poll whose
-      // start <= wake.timestamp — the only candidates that can contain it are
-      // that poll and its immediate predecessors (polls are non-overlapping and
-      // sorted, so their `end`s are non-decreasing; an earlier poll contains the
-      // wake only at an exact shared boundary, end == wake == next.start). Walk
-      // left across that contiguous boundary run to the lowest-index member so
-      // the result matches the original "first match wins" semantics exactly
-      // (which, at such a boundary, yields effectiveWake == wake.timestamp — no
-      // bump — rather than the later poll's end). The walk spans only a tiny
-      // boundary chain, so the pass stays O(P·logP + P·logW) overall.
-      let plo = 0, phi = pi - 1, pbest = -1;
-      while (plo <= phi) {
-        const pmid = (plo + phi) >> 1;
-        if (polls[pmid].start <= wake.timestamp) { pbest = pmid; plo = pmid + 1; }
-        else phi = pmid - 1;
-      }
-      if (pbest >= 0 && wake.timestamp <= polls[pbest].end) {
-        while (pbest > 0 && polls[pbest - 1].end >= wake.timestamp) pbest--;
-        effectiveWake = polls[pbest].end;
+      if (previousPoll && wake.timestamp <= previousPoll.end) {
+        effectiveWake = previousPoll.end;
       }
       const delay = s.start - effectiveWake;
       if (delay >= 0 && delay < 1e9) result[pi] = { wake, effectiveWake };

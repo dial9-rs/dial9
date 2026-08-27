@@ -338,28 +338,36 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
 }
 
 /// Compute wake→poll scheduling delays from wake events and poll starts.
-/// Returns a sorted vec of delay durations in nanoseconds.
+/// Each poll consumes callbacks through its start; for older traces that
+/// include stale callback attempts, the latest callback is a conservative
+/// lower-bound estimate. Returns sorted delay durations in nanoseconds.
 pub fn compute_wake_to_poll_delays(events: &[Dial9Event]) -> Vec<u64> {
     let mut wakes_by_task: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut poll_starts = Vec::new();
     for e in events {
-        if let Dial9Event::WakeEvent(w) = e {
-            wakes_by_task
-                .entry(w.woken_task_id)
-                .or_default()
-                .push(w.timestamp_ns);
+        match e {
+            Dial9Event::WakeEvent(w) => {
+                wakes_by_task
+                    .entry(w.woken_task_id)
+                    .or_default()
+                    .push(w.timestamp_ns);
+            }
+            Dial9Event::PollStartEvent(p) => poll_starts.push(p),
+            _ => {}
         }
     }
     for v in wakes_by_task.values_mut() {
         v.sort_unstable();
     }
+    poll_starts.sort_by_key(|p| p.timestamp_ns);
 
     let mut delays = Vec::new();
-    for e in events {
-        if let Dial9Event::PollStartEvent(p) = e
-            && let Some(wakes) = wakes_by_task.get(&p.task_id)
-        {
+    let mut last_poll_start_by_task = HashMap::new();
+    for p in poll_starts {
+        if let Some(wakes) = wakes_by_task.get(&p.task_id) {
+            let previous_poll_start = last_poll_start_by_task.insert(p.task_id, p.timestamp_ns);
             let idx = wakes.partition_point(|&t| t <= p.timestamp_ns);
-            if idx > 0 {
+            if idx > 0 && previous_poll_start.is_none_or(|start| wakes[idx - 1] > start) {
                 let delay = p.timestamp_ns - wakes[idx - 1];
                 if delay > 0 && delay < 1_000_000_000 {
                     delays.push(delay);
@@ -616,29 +624,39 @@ pub struct WakeDelay {
 }
 
 /// Detect wake-to-poll delays exceeding `threshold_ns`.
+///
+/// Each callback is consumed by the first subsequent poll. When an older trace
+/// contains multiple callback attempts before that poll, the latest one is the
+/// conservative lower-bound evidence.
 pub fn detect_wake_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<WakeDelay> {
     const MAX_REASONABLE_DELAY_NS: u64 = 1_000_000_000;
 
     let mut wakes_by_task: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut poll_starts = Vec::new();
     for event in events {
-        if let Dial9Event::WakeEvent(w) = event {
-            wakes_by_task
-                .entry(w.woken_task_id)
-                .or_default()
-                .push(w.timestamp_ns);
+        match event {
+            Dial9Event::WakeEvent(w) => {
+                wakes_by_task
+                    .entry(w.woken_task_id)
+                    .or_default()
+                    .push(w.timestamp_ns);
+            }
+            Dial9Event::PollStartEvent(p) => poll_starts.push(p),
+            _ => {}
         }
     }
     for v in wakes_by_task.values_mut() {
         v.sort_unstable();
     }
+    poll_starts.sort_by_key(|p| p.timestamp_ns);
 
     let mut delays = Vec::new();
-    for event in events {
-        if let Dial9Event::PollStartEvent(p) = event
-            && let Some(wakes) = wakes_by_task.get(&p.task_id)
-        {
+    let mut last_poll_start_by_task = HashMap::new();
+    for p in poll_starts {
+        if let Some(wakes) = wakes_by_task.get(&p.task_id) {
+            let previous_poll_start = last_poll_start_by_task.insert(p.task_id, p.timestamp_ns);
             let idx = wakes.partition_point(|&t| t <= p.timestamp_ns);
-            if idx > 0 {
+            if idx > 0 && previous_poll_start.is_none_or(|start| wakes[idx - 1] > start) {
                 let delay = p.timestamp_ns.saturating_sub(wakes[idx - 1]);
                 if delay >= threshold_ns && delay < MAX_REASONABLE_DELAY_NS {
                     delays.push(WakeDelay {
@@ -1254,6 +1272,77 @@ mod tests {
         ];
         let delays = detect_wake_delays(&events, 100_000);
         assert!(delays.is_empty());
+    }
+
+    #[test]
+    fn wake_callback_is_consumed_by_the_first_poll() {
+        let events = vec![
+            Dial9Event::WakeEvent(WakeEvent {
+                timestamp_ns: 1_000_000,
+                waker_task_id: 0,
+                woken_task_id: 1,
+                target_worker: 0,
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 1_600_000,
+                worker_id: WorkerId(0),
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_800_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 1_900_000,
+                worker_id: WorkerId(0),
+            }),
+        ];
+
+        assert_eq!(compute_wake_to_poll_delays(&events), vec![500_000]);
+        let delays = detect_wake_delays(&events, 100_000);
+        assert_eq!(delays.len(), 1);
+        assert_eq!(delays[0].poll_ns, 1_500_000);
+    }
+
+    #[test]
+    fn wake_callback_is_consumed_by_the_first_poll_in_timestamp_order() {
+        let events = vec![
+            Dial9Event::WakeEvent(WakeEvent {
+                timestamp_ns: 1_000_000,
+                waker_task_id: 0,
+                woken_task_id: 1,
+                target_worker: 0,
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_800_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+        ];
+
+        assert_eq!(compute_wake_to_poll_delays(&events), vec![500_000]);
+        let delays = detect_wake_delays(&events, 100_000);
+        assert_eq!(delays.len(), 1);
+        assert_eq!(delays[0].poll_ns, 1_500_000);
+        assert_eq!(delays[0].worker_id, WorkerId(0));
     }
 
     #[test]
