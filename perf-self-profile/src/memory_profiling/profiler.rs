@@ -202,22 +202,31 @@ impl MemoryProfiler {
 
         let unwinder = Unwinder::install().map_err(InstallError::Unwinder)?;
 
-        if let Some(self_test) = unwinder.self_test_frame_pointers()
-            && !self_test.passed()
-        {
-            tracing::warn!(
-                frames_captured = self_test.frames_captured,
-                expected_min = self_test.expected_min,
-                fail_on_missing_frame_pointers = self.config.fail_on_missing_frame_pointers(),
-                "frame-pointer self-test failed; this binary is likely missing \
-                 -C force-frame-pointers=yes"
-            );
-            if self.config.fail_on_missing_frame_pointers() {
-                return Err(InstallError::MissingFramePointers {
-                    frames_captured: self_test.frames_captured,
-                    expected_min: self_test.expected_min,
-                });
+        match unwinder.self_test_frame_pointers() {
+            Ok(self_test) if !self_test.passed() => {
+                tracing::warn!(
+                    frames_captured = self_test.frames_captured,
+                    expected_min = self_test.expected_min,
+                    fail_on_missing_frame_pointers = self.config.fail_on_missing_frame_pointers(),
+                    "frame-pointer self-test failed; this binary is likely missing \
+                     -C force-frame-pointers=yes"
+                );
+                if self.config.fail_on_missing_frame_pointers() {
+                    return Err(InstallError::MissingFramePointers {
+                        frames_captured: self_test.frames_captured,
+                        expected_min: self_test.expected_min,
+                    });
+                }
             }
+            Ok(_) => {}
+            // Inconclusive (thread spawn failed, or the self-test panicked) --
+            // not evidence of missing frame pointers, so this doesn't affect
+            // whether install() proceeds. Logged so the cause isn't silently
+            // discarded.
+            Err(e) => tracing::warn!(
+                "frame-pointer self-test could not run: {e}; proceeding without \
+                 verifying frame pointers"
+            ),
         }
 
         let rings = Arc::new(RingBuffers::new(

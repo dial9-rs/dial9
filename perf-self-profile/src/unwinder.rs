@@ -136,15 +136,57 @@ impl Unwinder {
     /// by symbol name where available (layout-independent), falling back
     /// to a raw frame-count threshold otherwise.
     ///
-    /// Returns `None` if the self-test itself couldn't run (thread spawn
-    /// or panic) — inconclusive, not evidence of missing frame pointers.
-    pub fn self_test_frame_pointers(&self) -> Option<FramePointerSelfTest> {
+    /// Returns `Err` if the self-test itself couldn't run (thread spawn
+    /// failure or panic) — inconclusive, not evidence of missing frame
+    /// pointers, but the cause is preserved rather than discarded.
+    pub fn self_test_frame_pointers(&self) -> Result<FramePointerSelfTest, SelfTestError> {
         let unwinder = *self;
         let join = std::thread::Builder::new()
             .name("dial9-fp-selftest".to_string())
             .spawn(move || self_test::run(&unwinder))
-            .ok()?;
-        join.join().ok()
+            .map_err(SelfTestError::Spawn)?;
+        join.join().map_err(SelfTestError::from_panic_payload)
+    }
+}
+
+/// Error from [`Unwinder::self_test_frame_pointers`] when the self-test
+/// itself couldn't run — inconclusive, not evidence of missing frame
+/// pointers.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SelfTestError {
+    /// Failed to spawn the dedicated self-test thread.
+    Spawn(std::io::Error),
+    /// The self-test thread panicked.
+    Panicked(String),
+}
+
+impl SelfTestError {
+    fn from_panic_payload(payload: Box<dyn std::any::Any + Send>) -> Self {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        Self::Panicked(msg)
+    }
+}
+
+impl std::fmt::Display for SelfTestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(e) => write!(f, "failed to spawn frame-pointer self-test thread: {e}"),
+            Self::Panicked(msg) => write!(f, "frame-pointer self-test thread panicked: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SelfTestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn(e) => Some(e),
+            Self::Panicked(_) => None,
+        }
     }
 }
 
@@ -759,5 +801,36 @@ mod tests {
             let err = Unwinder::install().unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         }
+    }
+
+    // `SelfTestError::from_panic_payload` is pure platform-independent logic
+    // (no threading needed to exercise it), so these run on every target.
+    use super::SelfTestError;
+
+    #[test]
+    fn from_panic_payload_extracts_str_message() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert!(matches!(
+            SelfTestError::from_panic_payload(payload),
+            SelfTestError::Panicked(m) if m == "boom"
+        ));
+    }
+
+    #[test]
+    fn from_panic_payload_extracts_string_message() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+        assert!(matches!(
+            SelfTestError::from_panic_payload(payload),
+            SelfTestError::Panicked(m) if m == "kaboom"
+        ));
+    }
+
+    #[test]
+    fn from_panic_payload_falls_back_on_unknown_type() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert!(matches!(
+            SelfTestError::from_panic_payload(payload),
+            SelfTestError::Panicked(m) if m == "non-string panic payload"
+        ));
     }
 }
