@@ -29,6 +29,7 @@ import type {
   TracingSpan,
 } from "../../lib/trace/index.js";
 import type {
+  InspectorTab,
   PinnedCustomEvent,
   SelectionSlice,
   TaskDumpSelection,
@@ -293,6 +294,73 @@ export function buildEventDetail(
     rows.push(kvRow("Task", `${hex} (selected)`));
   }
   return { title, rows, taskId: pinned.taskId, isSingle };
+}
+
+// ── Span detail ───────────────────────────────────────────────────────────
+
+/** The Span tab view: the focused span's name + its kv rows. */
+export interface SpanDetailView {
+  /** Sidebar title: the span name. */
+  title: string;
+  rows: KvRow[];
+  taskId: number | null;
+}
+
+/** The span sources the detail resolves from (the lanes' derivation). */
+export interface SpanDetailContext {
+  allSpans: readonly TracingSpan[];
+  columnarSpans?: ColumnarSpans | undefined;
+}
+
+/**
+ * Build the Span tab view for the focused span: its user fields
+ * (unit-formatted, first - they are what the user clicked to read, issue
+ * #803), then duration/active/idle, poll count, workers, start time, and the
+ * owning task. Null when nothing is focused or the id no longer resolves
+ * (e.g. a stale URL against a different trace).
+ */
+export function buildSpanDetail(
+  sel: Pick<SelectionSlice, "focusedSpanId" | "selectedTaskId">,
+  ctx: SpanDetailContext,
+  fmtTs: (ns: number) => string,
+): SpanDetailView | null {
+  const focusedSpanId = sel.focusedSpanId;
+  if (focusedSpanId === null) return null;
+  const cs = ctx.columnarSpans;
+  let span: TracingSpan | null = null;
+  if (cs) {
+    const r = cs.spanIdToRow.get(focusedSpanId);
+    if (r !== undefined) span = cs.at(r) as TracingSpan;
+  } else {
+    span = ctx.allSpans.find((s) => s.spanId === focusedSpanId) ?? null;
+  }
+  if (span === null) return null;
+
+  const rows: KvRow[] = [];
+  for (const [k, v] of Object.entries(span.fields ?? {})) {
+    rows.push(kvRow(k, formatFieldValue(v, span.units?.[k])));
+  }
+  const dur = span.end - span.start;
+  const idle = dur - span.activeNs;
+  rows.push(kvRow("duration", formatHumanDuration(dur)));
+  rows.push(kvRow("active", formatHumanDuration(span.activeNs)));
+  if (idle > 0) rows.push(kvRow("idle", formatHumanDuration(idle)));
+  if (span.segments.length > 1) {
+    rows.push(kvRow("polls", String(span.segments.length)));
+  }
+  const workers = [...new Set(span.segments.map((sg) => sg.workerId))].sort(
+    (a, b) => a - b,
+  );
+  if (workers.length > 0) {
+    rows.push(kvRow(workers.length > 1 ? "workers" : "worker", workers.join(", ")));
+  }
+  rows.push(kvRow("@", fmtTs(span.start)));
+  if (span.taskId != null) {
+    const hex = `0x${span.taskId.toString(16)}`;
+    const suffix = span.taskId === sel.selectedTaskId ? " (selected)" : "";
+    rows.push(kvRow("Task", `${hex}${suffix}`));
+  }
+  return { title: span.spanName, rows, taskId: span.taskId };
 }
 
 // ── Related ───────────────────────────────────────────────────────────────
@@ -617,11 +685,12 @@ export function resolveTaskDumpCaptures(
   );
 }
 
-/** The inspector tabs. */
-export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
+/** The inspector tabs (the union lives in types/state.d.ts, re-exported). */
+export type { InspectorTab };
 
 export const INSPECTOR_TABS: readonly InspectorTab[] = [
   "task",
+  "span",
   "poll",
   "event",
   "related",
@@ -631,6 +700,7 @@ export const INSPECTOR_TABS: readonly InspectorTab[] = [
 /** Which tabs currently carry content. */
 export interface TabAvailability {
   task: boolean;
+  span: boolean;
   poll: boolean;
   event: boolean;
   related: boolean;
@@ -647,6 +717,7 @@ export function tabAvailability(sel: SelectionSlice): TabAvailability {
   const pinned = sel.pinnedEvent;
   return {
     task: sel.selectedTaskId !== null,
+    span: sel.focusedSpanId !== null,
     poll: sel.pollDetail !== null,
     event: pinned !== null,
     related: pinned !== null && pinned.detailEvent !== null,
@@ -670,7 +741,83 @@ export function preferredTab(sel: SelectionSlice): InspectorTab | null {
   if (sel.pinnedEvent !== null) return "event";
   if (sel.spawnedTasksRange !== null || sel.sidebarRange !== null) return "stack";
   if (sel.taskDump !== null) return "stack";
+  // Before Task: panel focus comes only from explicit span clicks (spans
+  // track, Related rows, deep links), which co-select the owning task; the
+  // click's intent is the span (issue #803 - its fields must be visible).
+  if (sel.focusedSpanId !== null) return "span";
   if (sel.selectedTaskId !== null) return "task";
+  return null;
+}
+
+// ── Selection-change detection + tab auto-activation ─────────────────────
+
+/** Scalar key for a poll selection (avoids retaining the poll object). */
+export function pollKey(poll: SelectionSlice["pollDetail"]): string | null {
+  return poll === null ? null : `${poll.start}:${poll.taskId}`;
+}
+
+/** Scalar key for the Related anchor event. */
+export function detailEventKey(event: CustomTraceEvent | null): string | null {
+  return event === null ? null : `${event.timestamp}:${event.name}`;
+}
+
+/**
+ * One scalar per selection surface, for change detection. autoActivateTab
+ * compares consecutive results to see which surface an action just changed.
+ */
+export function selectionParts(sel: SelectionSlice): string[] {
+  return [
+    String(sel.selectedTaskId ?? "-"),
+    pollKey(sel.pollDetail) ?? "-",
+    sel.taskDump
+      ? `${sel.taskDump.taskId}:${sel.taskDump.timestamps.join(",")}`
+      : "-",
+    sel.pinnedEvent
+      ? `${sel.pinnedEvent.timestamp}:${sel.pinnedEvent.events.length}`
+      : "-",
+    detailEventKey(sel.pinnedEvent?.detailEvent ?? null) ?? "-",
+    sel.spawnedTasksRange
+      ? `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}`
+      : "-",
+    sel.sidebarRange
+      ? `${sel.sidebarRange.startNs}-${sel.sidebarRange.endNs}`
+      : "-",
+    sel.focusedSpanId ?? "-",
+  ];
+}
+
+/** The selectionParts indices that back each tab's preference. */
+const TAB_PARTS: Record<InspectorTab, readonly number[]> = {
+  task: [0],
+  poll: [1],
+  stack: [2, 5, 6],
+  event: [3, 4],
+  related: [3, 4],
+  span: [7],
+};
+
+/**
+ * The tab to auto-activate after a selection change, or null to stay put.
+ *
+ * Re-scopes to preferredTab only when the selection surface BACKING that
+ * preference is what changed - so a subordinate change (e.g. a Related row
+ * focusing a span while its event stays pinned) never yanks the user off the
+ * tab they are reading - or when the current tab just lost its content.
+ */
+export function autoActivateTab(
+  prev: readonly string[] | null,
+  next: readonly string[],
+  current: InspectorTab,
+  sel: SelectionSlice,
+): InspectorTab | null {
+  const pref = preferredTab(sel);
+  const avail = tabAvailability(sel);
+  if (pref !== null && avail[pref]) {
+    const changed =
+      prev === null || TAB_PARTS[pref].some((i) => prev[i] !== next[i]);
+    return changed || !avail[current] ? pref : null;
+  }
+  if (!avail[current] && pref === null) return "task";
   return null;
 }
 
@@ -678,6 +825,7 @@ export function preferredTab(sel: SelectionSlice): InspectorTab | null {
 export function hasNoSelection(sel: SelectionSlice): boolean {
   return (
     sel.selectedTaskId === null &&
+    sel.focusedSpanId === null &&
     sel.pollDetail === null &&
     sel.pinnedEvent === null &&
     sel.taskDump === null &&

@@ -237,6 +237,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
       focusedSpanId: spanId,
       spanFocus: { spanId, chain },
       pinnedEvent: null,
+      pollDetail: null,
       taskDump: null,
     };
     if (taskId !== null) patch.selectedTaskId = taskId;
@@ -249,6 +250,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
       spanFocus: null,
       selectedTaskId: null,
       pinnedEvent: null,
+      pollDetail: null,
       taskDump: null,
     });
   }

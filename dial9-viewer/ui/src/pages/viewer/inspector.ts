@@ -1,8 +1,8 @@
 // The persistent inspector sidebar component: one mount(host, store) that
-// renders the tabs (Task / Poll / Event / Related / Stack) + the at-cursor
-// readout, driven by the selection slice, and owns the P-row mechanics (resize
-// -> uiPrefs.sidebarWidth + localStorage, tab families, body scroll, the "what
-// is selected" line + Esc/clear affordance).
+// renders the tabs (Task / Span / Poll / Event / Related / Stack) + the
+// at-cursor readout, driven by the selection slice, and owns the P-row
+// mechanics (resize -> uiPrefs.sidebarWidth + localStorage, tab families,
+// body scroll, the "what is selected" line + Esc/clear affordance).
 //
 // The shell renders an EMPTY <aside class="d9-inspector"> landmark; this
 // component renders its whole interior imperatively via lit-html into that
@@ -44,16 +44,22 @@ import type {
 } from "../../types/state.js";
 import {
   INSPECTOR_TABS,
+  autoActivateTab,
   buildEventDetail,
   buildPollDetail,
   buildRelated,
+  buildSpanDetail,
   buildSpawnedTasksView,
+  detailEventKey,
   hasNoSelection,
+  pollKey,
   preferredTab,
   resolveTaskDumpCaptures,
+  selectionParts,
   tabAvailability,
   type FrameLine,
   type InspectorTab,
+  type KvRow,
   type RelatedExpandState,
   type RelatedRow,
   type RelatedSection,
@@ -74,6 +80,7 @@ const EVENT_DEFAULT_WIDTH = 350;
 
 const TAB_LABELS: Record<InspectorTab, string> = {
   task: "Task",
+  span: "Span",
   poll: "Poll",
   event: "Event",
   related: "Related",
@@ -166,7 +173,7 @@ export function mountInspector(
   // Selection signatures and semantic anchor keys are implementation caches
   // only; every user-visible choice itself lives in state.view. Scalar keys
   // avoid retaining a prior parsed trace after Set/Clear Range.
-  let lastSelSig: string | null = null;
+  let lastSelParts: readonly string[] | null = null;
   let lastPollKey: string | null = null;
   let lastDetailEventKey: string | null = null;
   let preserveInitialTab = deps.preserveInitialTab === true;
@@ -223,33 +230,12 @@ export function mountInspector(
 
   // ── Selection-driven tab activation (re-scope in the same action) ─────────
 
-  function selectionSignature(sel: SelectionSlice): string {
-    return [
-      sel.selectedTaskId ?? "-",
-      pollKey(sel.pollDetail) ?? "-",
-      sel.taskDump
-        ? `${sel.taskDump.taskId}:${sel.taskDump.timestamps.join(",")}`
-        : "-",
-      sel.pinnedEvent ? `${sel.pinnedEvent.timestamp}:${sel.pinnedEvent.events.length}` : "-",
-      detailEventKey(sel.pinnedEvent?.detailEvent ?? null) ?? "-",
-      sel.spawnedTasksRange ? `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}` : "-",
-      sel.sidebarRange ? `${sel.sidebarRange.startNs}-${sel.sidebarRange.endNs}` : "-",
-    ].join("|");
-  }
-
-  function pollKey(poll: SelectionSlice["pollDetail"]): string | null {
-    return poll === null ? null : `${poll.start}:${poll.taskId}`;
-  }
-
-  function detailEventKey(event: CustomTraceEvent | null): string | null {
-    return event === null ? null : `${event.timestamp}:${event.name}`;
-  }
-
   /** React to a genuinely-new selection: reset per-selection UI, auto-activate. */
   function reconcileSelection(sel: SelectionSlice): void {
-    const sig = selectionSignature(sel);
-    if (sig === lastSelSig) return;
-    lastSelSig = sig;
+    const parts = selectionParts(sel);
+    const prevParts = lastSelParts;
+    if (prevParts !== null && parts.join("|") === prevParts.join("|")) return;
+    lastSelParts = parts;
 
     const patch: Partial<StoreState["view"]> = {};
     const nextPollKey = pollKey(sel.pollDetail);
@@ -278,17 +264,14 @@ export function mountInspector(
     }
 
     const pref = preferredTab(sel);
-    const avail = tabAvailability(sel);
-    const current = state().view.inspectorTab;
     if (preserveInitialTab) {
       // The inspector mounts before trace-dependent URL anchors resolve. Keep
       // the explicit tab through empty/trace-only renders and consume the
       // preservation only when the first actual selection arrives.
       if (pref !== null) preserveInitialTab = false;
-    } else if (pref !== null && avail[pref]) {
-      patch.inspectorTab = pref;
-    } else if (!avail[current] && pref === null) {
-      patch.inspectorTab = "task";
+    } else {
+      const next = autoActivateTab(prevParts, parts, state().view.inspectorTab, sel);
+      if (next !== null) patch.inspectorTab = next;
     }
     if (Object.keys(patch).length > 0) store.update("view", patch);
 
@@ -425,6 +408,10 @@ export function mountInspector(
     }
     if (sel.spawnedTasksRange !== null) return "Spawn-range selected";
     if (sel.sidebarRange !== null) return "Region selected";
+    if (sel.focusedSpanId !== null) {
+      const name = data().laneData?.spanByIdSingle.get(sel.focusedSpanId)?.spanName;
+      return `Span ${name ?? sel.focusedSpanId} selected · Esc clears`;
+    }
     if (sel.selectedTaskId !== null) {
       return `Task 0x${sel.selectedTaskId.toString(16)} selected · Esc clears`;
     }
@@ -468,6 +455,8 @@ export function mountInspector(
     switch (s.view.inspectorTab) {
       case "task":
         return taskTemplate(taskDetail());
+      case "span":
+        return spanTemplate(s.selection);
       case "poll":
         return pollTemplate(s.selection);
       case "event":
@@ -512,6 +501,47 @@ export function mountInspector(
 
   function kv(k: string, v: string): TemplateResult {
     return html`<div class="d9-kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  }
+
+  // ── Span tab ──────────────────────────────────────────────────────────────
+
+  function spanTemplate(sel: SelectionSlice): TemplateResult {
+    const d = data();
+    const { fmtTs } = formatters();
+    const view = buildSpanDetail(
+      sel,
+      {
+        allSpans: d.laneData?.allSpans ?? [],
+        columnarSpans: d.laneData?.columnarSpans,
+      },
+      fmtTs,
+    );
+    if (view === null) {
+      return html`<p class="d9-inspector-hint">
+        Click a span in the spans track to see its fields here.
+      </p>`;
+    }
+    return html`
+      <div class="d9-span-detail">
+        <div class="d9-span-title">${view.title}</div>
+        ${view.rows.map(spanRow)}
+      </div>
+    `;
+  }
+
+  function spanRow(row: KvRow): TemplateResult {
+    return html`<div class="d9-kv-row d9-span-row">
+      <span class="k">${row.key}</span><span class="v">${row.value}</span>
+      <button
+        type="button"
+        class="d9-kv-copy"
+        title="Copy value"
+        aria-label="Copy ${row.key}"
+        @click=${(e: MouseEvent) => copyValue(e, row.value)}
+      >
+        ⎘
+      </button>
+    </div>`;
   }
 
   // ── Poll Detail tab ──────────────────────────────────────────────────────
@@ -1137,6 +1167,8 @@ export function mountInspector(
     // A spawned-task link selects the task (re-scopes to the Task tab).
     store.update("selection", {
       selectedTaskId: taskId,
+      spanFocus: null,
+      focusedSpanId: null,
       pinnedEvent: null,
       pollDetail: null,
       taskDump: null,

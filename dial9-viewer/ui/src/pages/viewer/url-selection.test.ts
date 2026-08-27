@@ -46,7 +46,6 @@ describe("URL span selection restoration", () => {
 
     const patch = resolveUrlSelection(trace, urlFor("child"));
 
-    expect(patch.focusedSpanId).toBe("child");
     expect([...patch.spanFocus!.chain]).toEqual(["child", "parent", "root"]);
   });
 
@@ -62,8 +61,36 @@ describe("URL span selection restoration", () => {
 
     const patch = resolveUrlSelection(trace, urlFor("child"));
 
-    expect(patch.focusedSpanId).toBe("child");
     expect([...patch.spanFocus!.chain]).toEqual(["child", "parent", "root"]);
+  });
+
+  it("a highlight-only `span` param never grants span-panel focus", () => {
+    const spans = [span("root", null)];
+    deriveLaneDataMock.mockReturnValue({
+      columnarSpans: undefined,
+      spanByIdSingle: new Map(spans.map((s) => [s.spanId, s])),
+    } as unknown as LaneData);
+
+    const patch = resolveUrlSelection(trace, urlFor("root"));
+
+    expect(patch.spanFocus!.spanId).toBe("root");
+    expect(patch.focusedSpanId).toBeUndefined();
+  });
+
+  it("`span-focus` restores the panel focus independently", () => {
+    const spans = [span("root", null)];
+    deriveLaneDataMock.mockReturnValue({
+      columnarSpans: undefined,
+      spanByIdSingle: new Map(spans.map((s) => [s.spanId, s])),
+    } as unknown as LaneData);
+
+    const patch = resolveUrlSelection(trace, {
+      selectedSpanId: "root",
+      focusedSpanId: "root",
+    } as ViewerUrlState);
+
+    expect(patch.spanFocus!.spanId).toBe("root");
+    expect(patch.focusedSpanId).toBe("root");
   });
 });
 

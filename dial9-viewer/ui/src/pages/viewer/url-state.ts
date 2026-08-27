@@ -35,6 +35,7 @@ import {
   poiAnchor,
   type PoiAnchor,
 } from "./poi.js";
+import { INSPECTOR_TABS, preferredTab } from "./inspector-model.js";
 import {
   FIELD_CHART_KINDS,
   FIELD_CHART_URL_SEPARATOR,
@@ -119,7 +120,6 @@ const projectedPoiAnchorCache = new WeakMap<
 const TASK_SORT_KEYS: readonly TaskSortKey[] = ["id", "loc", "polls", "total", "longest", "lifetime"];
 /** Valid issue-cols keys: the severity-dot column plus the sortable four. */
 const ISSUE_COL_KEYS: readonly string[] = ["dot", ...POI_SORT_KEYS];
-const INSPECTOR_TABS: readonly InspectorTab[] = ["task", "poll", "event", "related", "stack"];
 const REGION_MODES: readonly RegionAnalysisMode[] = ["cpu", "blocking", "heap"];
 
 type FieldOwnership =
@@ -374,16 +374,8 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (state.uiPrefs.stacksAsFlamegraph) vs.stackView = "flame";
 
   const view = state.view;
-  const inferredInspectorTab: InspectorTab =
-    sel.pollDetail !== null
-      ? "poll"
-      : sel.pinnedEvent !== null
-        ? "event"
-        : sel.taskDump !== null ||
-            sel.spawnedTasksRange !== null ||
-            sel.sidebarRange !== null
-          ? "stack"
-          : "task";
+  // The tab the selection would auto-activate on load; omitted when it matches.
+  const inferredInspectorTab: InspectorTab = preferredTab(sel) ?? "task";
   if (view.inspectorTab !== inferredInspectorTab) vs.inspectorTab = view.inspectorTab;
   if (view.pollFlamegraphSection !== "cpu") vs.pollSection = view.pollFlamegraphSection;
   if (view.expandedPollGroups.size > 0) {

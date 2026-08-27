@@ -284,6 +284,8 @@ export function mountLaneInteraction(
     if (mouseXCol < geom.layout.labelW || mouseXCol > geom.layout.labelW + geom.drawW) {
       store.update("selection", {
         selectedTaskId: null,
+        spanFocus: null,
+        focusedSpanId: null,
         pinnedEvent: null,
         pollDetail: null,
         taskDump: null,
@@ -309,6 +311,8 @@ export function mountLaneInteraction(
     if (workerId === null) {
       store.update("selection", {
         selectedTaskId: null,
+        spanFocus: null,
+        focusedSpanId: null,
         pinnedEvent: null,
         pollDetail: null,
         taskDump: null,
