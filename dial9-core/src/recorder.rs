@@ -575,6 +575,7 @@ mod tests {
             .expect("a sealed .bin segment")
     }
 
+    #[cfg(feature = "pipeline")]
     fn sealed_segments(dir: &Path) -> Vec<PathBuf> {
         let mut paths: Vec<_> = std::fs::read_dir(dir)
             .expect("trace dir readable")
@@ -588,6 +589,7 @@ mod tests {
         paths
     }
 
+    #[cfg(feature = "pipeline")]
     fn active_segment(dir: &Path) -> PathBuf {
         std::fs::read_dir(dir)
             .expect("trace dir readable")
@@ -675,6 +677,7 @@ mod tests {
 
     /// A current-data dump seals the pending fragment before dispatching it,
     /// without closing the recording gate.
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn dump_current_data_seals_and_continues_recording() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -731,6 +734,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn stop_recording_takes_final_source_sample_before_checkpoint() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -774,6 +778,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn stop_recording_waits_for_in_flight_event_and_rejects_later_event() {
         struct BlockingEvent {
@@ -850,6 +855,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn stop_recording_does_not_sample_sources_when_already_disabled() {
         use std::sync::Arc as StdArc;
@@ -899,6 +905,7 @@ mod tests {
         assert!(sealed_segments(dir.path()).is_empty());
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn current_data_checkpoint_returns_would_block_when_control_queue_is_full() {
         use std::future::IntoFuture;
@@ -961,6 +968,7 @@ mod tests {
             .expect("accepted checkpoint should succeed");
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn dump_current_data_returns_checkpoint_flush_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -996,6 +1004,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn dump_current_data_reports_missing_active_and_recovers_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1048,6 +1057,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn stop_recording_bypasses_dump_debounce() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
