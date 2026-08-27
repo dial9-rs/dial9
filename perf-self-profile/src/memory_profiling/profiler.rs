@@ -109,6 +109,7 @@ pub enum InstallError {
     /// The frame-pointer self-test run at install time indicates this
     /// binary was not built with `-C force-frame-pointers=yes`; allocation
     /// stacks would be near-empty and useless for profiling.
+    #[non_exhaustive]
     MissingFramePointers {
         frames_captured: usize,
         expected_min: usize,
