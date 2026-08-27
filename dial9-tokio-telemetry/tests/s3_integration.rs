@@ -985,14 +985,15 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         "triggered mode must not upload until a dump is requested"
     );
 
-    // A triggered worker parks until a dump is requested, so a confirmed-sealed
-    // segment persists and the unbounded `dump_current_data` window is
-    // guaranteed to match it.
+    // End this bounded workload at the checkpoint. Closing the recording gate
+    // on the flush thread prevents a slow runner from producing enough
+    // post-boundary telemetry to evict the snapshot before the worker claims
+    // it.
     wait_for_sealed_segment(&rt, trace_dir.path());
 
     let receipt = rt.block_on(async {
         trigger
-            .dump_current_data()
+            .stop_recording_and_dump_current_data()
             .with_metadata("reason", "test")
             .await
             .expect("dump resolves")
