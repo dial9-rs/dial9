@@ -96,7 +96,9 @@ impl Unwinder {
     /// capture returns frame 0 and stops. This lets binaries without frame
     /// pointers degrade to an empty or shallow stack instead of crashing,
     /// although arbitrary register values can occasionally resemble a valid
-    /// frame record.
+    /// frame record. Detect missing frame pointers with
+    /// [`self_test_frame_pointers`](Self::self_test_frame_pointers) rather
+    /// than relying on `capture` to fail loudly.
     ///
     /// # Safety
     /// - [`install`](Self::install) must have succeeded and the SIGSEGV
@@ -124,6 +126,123 @@ impl Unwinder {
         // SAFETY: forwarding Unwinder::capture's own safety contract to
         // platform::capture (handler installed, not in a SIGSEGV handler).
         unsafe { platform::capture(out) }
+    }
+
+    /// Checks whether this binary looks like it was built with
+    /// `-C force-frame-pointers=yes`.
+    ///
+    /// Recurses a fixed depth through this module's own `#[inline(never)]`
+    /// function on a dedicated thread, then checks the captured frame
+    /// count against a threshold.
+    ///
+    /// Returns `Err` if the self-test itself couldn't run (thread spawn
+    /// failure or panic) — inconclusive, not evidence of missing frame
+    /// pointers, but the cause is preserved rather than discarded.
+    pub fn self_test_frame_pointers(&self) -> Result<FramePointerSelfTest, SelfTestError> {
+        let unwinder = *self;
+        let join = std::thread::Builder::new()
+            .name("dial9-fp-selftest".to_string())
+            .spawn(move || self_test::run(&unwinder))
+            .map_err(SelfTestError::Spawn)?;
+        join.join().map_err(SelfTestError::from_panic_payload)
+    }
+}
+
+/// Error from [`Unwinder::self_test_frame_pointers`] when the self-test
+/// itself couldn't run — inconclusive, not evidence of missing frame
+/// pointers.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SelfTestError {
+    /// Failed to spawn the dedicated self-test thread.
+    Spawn(std::io::Error),
+    /// The self-test thread panicked.
+    Panicked(String),
+}
+
+impl SelfTestError {
+    fn from_panic_payload(payload: Box<dyn std::any::Any + Send>) -> Self {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        Self::Panicked(msg)
+    }
+}
+
+impl std::fmt::Display for SelfTestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(e) => write!(f, "failed to spawn frame-pointer self-test thread: {e}"),
+            Self::Panicked(msg) => write!(f, "frame-pointer self-test thread panicked: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SelfTestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn(e) => Some(e),
+            Self::Panicked(_) => None,
+        }
+    }
+}
+
+/// Result of [`Unwinder::self_test_frame_pointers`].
+///
+/// `#[non_exhaustive]` so new fields can be added without breaking callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FramePointerSelfTest {
+    /// Number of frames captured by the self-test's recursion.
+    pub(crate) frames_captured: usize,
+    /// Minimum `frames_captured` needed to pass.
+    pub(crate) expected_min: usize,
+}
+
+impl FramePointerSelfTest {
+    /// Whether the self-test result looks like a healthy, frame-pointer-enabled build.
+    pub fn passed(&self) -> bool {
+        self.frames_captured >= self.expected_min
+    }
+}
+
+mod self_test {
+    use super::{FramePointerSelfTest, Unwinder};
+
+    /// Recursion depth used by the self-test. Chosen with slack above
+    /// `EXPECTED_MIN` so ordinary variance (e.g. a couple of frames lost to
+    /// `MAX_FRAME_SIZE`/dead-zone gating near the top of the walk) doesn't
+    /// produce false positives on a healthy build.
+    pub(super) const DEPTH: usize = 16;
+    /// Minimum evidence count required to pass. Tuned empirically.
+    pub(super) const EXPECTED_MIN: usize = 12;
+
+    pub(super) fn run(unwinder: &Unwinder) -> FramePointerSelfTest {
+        let mut frames = [0u64; DEPTH + 4];
+        let written = recurse(unwinder, DEPTH, &mut frames);
+        FramePointerSelfTest {
+            frames_captured: written,
+            expected_min: EXPECTED_MIN,
+        }
+    }
+
+    #[inline(never)]
+    fn recurse(unwinder: &Unwinder, depth: usize, out: &mut [u64]) -> usize {
+        if depth == 0 {
+            // SAFETY: called only from `run`, on the thread
+            // `Unwinder::self_test_frame_pointers` just spawned, after
+            // `Unwinder::install()` has already succeeded (the caller holds
+            // an `Unwinder`); not inside a signal handler.
+            let result = unsafe { unwinder.capture(out) };
+            return result.frames_written;
+        }
+        // Not a tail call (the `black_box` after it forces the recursive
+        // call's result to actually be used), so this frame is guaranteed
+        // to still be on the stack when the base case captures.
+        let n = recurse(unwinder, depth - 1, out);
+        std::hint::black_box(n)
     }
 }
 
@@ -172,15 +291,14 @@ mod platform {
         unsafe { unwind(pc, fp, sp, out) }
     }
 
-    /// Read `(pc, fp, sp)` such that `pc` is the PC to use for frame 0 and
-    /// `fp` is the saved frame pointer of the frame *above* the current one.
+    /// Read `(pc, fp, sp)` for the caller of [`Unwinder::capture`], reading
+    /// every field through `safe_load` rather than trusting a raw
+    /// dereference.
     ///
     /// Because this is `#[inline(always)]`, the `rbp`/`x29` read observes
     /// `Unwinder::capture`'s frame (its one and only non-inlined ancestor).
-    /// - `*(rbp + 8)` on x86_64 / LR save slot on aarch64 is
-    ///   `Unwinder::capture`'s return address → goes to `out[0]`.
-    /// - `*rbp` / `*x29` is the saved fp of the caller of `Unwinder::capture`
-    ///   → where we start walking the chain.
+    /// `pc` is the return address of `capture` (frame 0); `fp` is the saved
+    /// frame pointer to continue walking from.
     ///
     /// Returns `None` when the current frame record is implausible or its
     /// return-address slot cannot be read safely. An unusable caller frame
@@ -628,5 +746,36 @@ mod tests {
             let err = Unwinder::install().unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         }
+    }
+
+    // `SelfTestError::from_panic_payload` is pure platform-independent logic
+    // (no threading needed to exercise it), so these run on every target.
+    use super::SelfTestError;
+
+    #[test]
+    fn from_panic_payload_extracts_str_message() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert!(matches!(
+            SelfTestError::from_panic_payload(payload),
+            SelfTestError::Panicked(m) if m == "boom"
+        ));
+    }
+
+    #[test]
+    fn from_panic_payload_extracts_string_message() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+        assert!(matches!(
+            SelfTestError::from_panic_payload(payload),
+            SelfTestError::Panicked(m) if m == "kaboom"
+        ));
+    }
+
+    #[test]
+    fn from_panic_payload_falls_back_on_unknown_type() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert!(matches!(
+            SelfTestError::from_panic_payload(payload),
+            SelfTestError::Panicked(m) if m == "non-string panic payload"
+        ));
     }
 }
