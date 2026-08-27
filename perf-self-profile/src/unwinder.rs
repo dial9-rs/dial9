@@ -197,10 +197,10 @@ impl std::error::Error for SelfTestError {
 #[non_exhaustive]
 pub struct FramePointerSelfTest {
     /// A match count if `matched_by_symbol`, otherwise a raw frame count.
-    pub frames_captured: usize,
+    pub(crate) frames_captured: usize,
     /// Minimum `frames_captured` needed to pass.
-    pub expected_min: usize,
-    pub matched_by_symbol: bool,
+    pub(crate) expected_min: usize,
+    pub(crate) matched_by_symbol: bool,
 }
 
 impl FramePointerSelfTest {
