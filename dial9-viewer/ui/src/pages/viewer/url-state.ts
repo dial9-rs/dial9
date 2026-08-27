@@ -26,7 +26,12 @@ import {
   DEFAULT_LANES_HEIGHT,
   DEFAULT_RAIL_WIDTH,
 } from "./store.js";
-import { POI_FILTERS } from "./poi.js";
+import {
+  POI_FILTERS,
+  derivePoiViewModel,
+  poiAnchor,
+  type PoiAnchor,
+} from "./poi.js";
 import {
   FIELD_CHART_KINDS,
   FIELD_CHART_URL_SEPARATOR,
@@ -54,6 +59,7 @@ const P_SPAWNED = "spawned";
 const P_ISSUE = "issue";
 const P_ISSUE_SORT = "issue-sort";
 const P_ISSUE_INDEX = "issue-index";
+const P_ISSUE_ANCHOR = "issue-anchor";
 const P_SPAN_PCT = "span-pct";
 const P_SPAN_NAMES = "span-names";
 const P_EVENT_NAMES = "event-names";
@@ -87,11 +93,22 @@ const P_ANALYSIS_INSPECT = "analysis-inspect";
 const P_SPAN_INDEX = "span-index";
 const P_DATA_START = "data-start";
 const P_DATA_END = "data-end";
+const ONE_SHOT_FOCUS_PARAMS = [
+  "focus_start",
+  "focus_end",
+  "focus_span_name",
+  "focus_worker",
+  "focus_task",
+] as const;
 
 /** Valid rail sort keys (drop anything else on read). */
 const POI_SORT_KEYS: readonly PoiSortKey[] = ["worker", "kind", "time", "duration"];
 /** Valid span percentile-filter steps (0/All is the default, never emitted). */
 const SPAN_PCTS: readonly number[] = [50, 90, 95, 99];
+const projectedPoiAnchorCache = new WeakMap<
+  object,
+  { key: string; value: string | null }
+>();
 
 const TASK_SORT_KEYS: readonly TaskSortKey[] = ["id", "loc", "polls", "total", "longest", "lifetime"];
 /** Valid issue-cols keys: the severity-dot column plus the sortable four. */
@@ -144,7 +161,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     filter: url(P_ISSUE),
     sortKey: url(P_ISSUE_SORT),
     sortDir: url(P_ISSUE_SORT),
-    index: url(P_ISSUE_INDEX),
+    index: url(P_ISSUE_INDEX, P_ISSUE_ANCHOR),
     railTab: url(P_RAIL_TAB),
     taskSort: url(P_TASK_SORT),
     taskSortDir: url(P_TASK_SORT),
@@ -222,6 +239,22 @@ export const VIEWER_VIEW_QUERY_PARAMS: readonly string[] = [
   ),
 ];
 
+function projectedPoiAnchor(
+  trace: NonNullable<StoreState["trace"]["trace"]>,
+  poi: Readonly<StoreState["poi"]>,
+  minTs: number,
+): string | null {
+  const key = `${poi.filter}|${poi.sortKey}|${poi.sortDir}|${poi.index}`;
+  const cached = projectedPoiAnchorCache.get(trace);
+  if (cached?.key === key) return cached.value;
+  const selected = derivePoiViewModel(trace, poi, minTs).sorted[poi.index];
+  const value = selected !== undefined
+    ? encodePoiAnchor(poiAnchor(selected))
+    : null;
+  projectedPoiAnchorCache.set(trace, { key, value });
+  return value;
+}
+
 /** Project the store into the shareable ViewState. */
 export function projectViewerState(state: ReadonlyState<StoreState>): ViewState {
   const vs: ViewState = {};
@@ -275,7 +308,14 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (poi.sortKey !== "duration" || poi.sortDir !== "desc") {
     vs.poiSort = `${poi.sortKey},${poi.sortDir}`;
   }
-  if (poi.index >= 0) vs.poiIndex = poi.index;
+  if (poi.index >= 0) {
+    vs.poiIndex = poi.index;
+    const trace = state.trace.trace;
+    if (trace !== null) {
+      const anchor = projectedPoiAnchor(trace, poi, vp.minTs);
+      if (anchor !== null) vs.poiAnchor = anchor;
+    }
+  }
   if (state.uiPrefs.spanPctFilter !== 0) vs.spanPct = state.uiPrefs.spanPctFilter;
   if (state.uiPrefs.selectedSpanNames.size > 0) {
     vs.spanNames = [...state.uiPrefs.selectedSpanNames].sort();
@@ -377,6 +417,9 @@ export function mirrorViewerToQuery(
   params: URLSearchParams,
   vs: ViewState,
 ): void {
+  // focus_* bootstraps an exemplar once. The canonical viewport and selection
+  // below replace it so later navigation cannot leave two conflicting targets.
+  for (const param of ONE_SHOT_FOCUS_PARAMS) params.delete(param);
   set(params, P_START, vs.viewStart != null ? String(Math.round(vs.viewStart)) : null);
   set(params, P_END, vs.viewEnd != null ? String(Math.round(vs.viewEnd)) : null);
   set(params, P_TASK, vs.selectedTaskId != null ? `0x${vs.selectedTaskId.toString(16)}` : null);
@@ -398,6 +441,7 @@ export function mirrorViewerToQuery(
   set(params, P_ISSUE, vs.poiFilter ?? null);
   set(params, P_ISSUE_SORT, vs.poiSort ?? null);
   set(params, P_ISSUE_INDEX, vs.poiIndex != null ? String(Math.round(vs.poiIndex)) : null);
+  set(params, P_ISSUE_ANCHOR, vs.poiAnchor ?? null);
   set(params, P_SPAN_PCT, vs.spanPct != null ? String(vs.spanPct) : null);
   set(params, P_SPAN_NAMES, encodeList(vs.spanNames));
   set(params, P_EVENT_NAMES, encodeList(vs.eventNames));
@@ -479,6 +523,39 @@ function set(params: URLSearchParams, key: string, value: string | null): void {
   else params.set(key, value);
 }
 
+function encodePoiAnchor(anchor: PoiAnchor): string {
+  return [
+    Math.round(anchor.worker),
+    Math.round(anchor.time),
+    Math.round(anchor.spanStart),
+    anchor.taskId !== undefined ? Math.round(anchor.taskId) : "-",
+  ].join(":");
+}
+
+function decodePoiAnchor(value: string | null): PoiAnchor | null {
+  if (value === null) return null;
+  const parts = value.split(":");
+  if (parts.length !== 4) return null;
+  const worker = nonNegativeInt(parts[0]!);
+  const time = num(parts[1]!);
+  const spanStart = num(parts[2]!);
+  const taskId = parts[3] === "-" ? undefined : nonNegativeInt(parts[3]!);
+  if (
+    worker === null ||
+    time === null ||
+    spanStart === null ||
+    (parts[3] !== "-" && taskId === null)
+  ) {
+    return null;
+  }
+  return {
+    worker,
+    time,
+    spanStart,
+    ...(taskId !== undefined && taskId !== null ? { taskId } : {}),
+  };
+}
+
 /** The viewer state parsed from a URL query string. */
 export interface ViewerUrlState {
   /** Restore-on-load viewport window (ns), applied to the first loaded trace. */
@@ -501,6 +578,7 @@ export interface ViewerUrlState {
   poiFilter?: PointOfInterestType;
   poiSort?: { key: PoiSortKey; dir: "asc" | "desc" };
   poiIndex?: number;
+  poiAnchor?: PoiAnchor;
   spanPct?: number;
   spanNames?: string[];
   eventNames?: string[];
@@ -725,6 +803,8 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   }
   const issueIndex = nonNegativeInt(p.get(P_ISSUE_INDEX));
   if (issueIndex != null) out.poiIndex = issueIndex;
+  const issueAnchor = decodePoiAnchor(p.get(P_ISSUE_ANCHOR));
+  if (issueAnchor !== null) out.poiAnchor = issueAnchor;
   const spanPct = num(p.get(P_SPAN_PCT));
   if (spanPct != null && SPAN_PCTS.includes(spanPct)) out.spanPct = spanPct;
   const spanNames = decodeList(p.get(P_SPAN_NAMES));

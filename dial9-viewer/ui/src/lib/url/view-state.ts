@@ -113,6 +113,8 @@ export interface ViewState {
   poiSort?: string;
   /** Current POI index in the filtered+sorted rail list, when >= 0. */
   poiIndex?: number;
+  /** Stable identity of the current POI; the numeric index is only a fallback. */
+  poiAnchor?: string;
   /** Span percentile filter (50/90/95/99), when not 0 (All). */
   spanPct?: number;
   /** Span legend name chips toggled on for display filtering. */

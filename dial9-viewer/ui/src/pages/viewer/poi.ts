@@ -226,6 +226,52 @@ export function sortPois(
   return keyed.map((k) => k.poi);
 }
 
+/** Resolve a poll-backed issue after detector output or sort order changes. */
+export function poiIndexForPoll(
+  pois: readonly PointOfInterest[],
+  poll: Pick<PollSpan, "start" | "taskId">,
+): number {
+  return pois.findIndex(
+    (poi) =>
+      "taskId" in poi.span &&
+      poi.span.start === poll.start &&
+      poi.span.taskId === poll.taskId,
+  );
+}
+
+export interface PoiAnchor {
+  worker: number;
+  time: number;
+  spanStart: number;
+  taskId?: number;
+}
+
+/** Stable identity for one issue, independent of its current sorted index. */
+export function poiAnchor(poi: PointOfInterest): PoiAnchor {
+  return {
+    worker: poi.worker,
+    time: poi.time,
+    spanStart: poi.span.start,
+    ...("taskId" in poi.span ? { taskId: poi.span.taskId } : {}),
+  };
+}
+
+/** Resolve a stable issue identity against freshly computed detector output. */
+export function poiIndexForAnchor(
+  pois: readonly PointOfInterest[],
+  anchor: PoiAnchor,
+): number {
+  return pois.findIndex((poi) => {
+    const taskId = "taskId" in poi.span ? poi.span.taskId : undefined;
+    return (
+      poi.worker === anchor.worker &&
+      poi.time === anchor.time &&
+      poi.span.start === anchor.spanStart &&
+      taskId === anchor.taskId
+    );
+  });
+}
+
 function compareBy(
   a: PointOfInterest,
   b: PointOfInterest,

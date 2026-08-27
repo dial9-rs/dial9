@@ -89,6 +89,23 @@ describe("issues-rail n/p stepping", () => {
     expect(store.getState().poi.index).toBe(0);
   });
 
+  it("opens the full backing poll when stepping to a sampled issue", () => {
+    const store = loadedStore();
+    store.update("poi", { filter: "cpu-sampled" });
+    const rail = createIssuesRail(store);
+
+    expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(true);
+
+    const state = store.getState();
+    const poll = state.selection.pollDetail;
+    expect(poll).not.toBeNull();
+    expect(poll?.taskId).toBe(state.selection.selectedTaskId);
+    expect(poll).toHaveProperty("spawnLocId");
+    expect(
+      (poll?.cpuSamples?.length ?? 0) + (poll?.schedSamples?.length ?? 0),
+    ).toBeGreaterThan(0);
+  });
+
   it("declines (returns false) when no trace is loaded - the key falls through", () => {
     const store = createViewerStore({ scheduler: () => {} });
     const rail = createIssuesRail(store);
