@@ -607,6 +607,7 @@ mod shuttle_tests {
 
             let mut total: u64 = 0;
             while let Some(batch) = ss.collector.next() {
+                assert!(batch.event_count() > 0, "empty batch reached collector");
                 total += batch.event_count();
             }
             assert_eq!(
@@ -626,7 +627,10 @@ mod shuttle_tests {
 
     crate::shuttle_test! {
         default;
-        // `disable()` raced against the recording gate, `if_enabled`
+        // `disable`/`enable`/`mark_stopped` raced against the recording
+        // gate, `if_enabled` -> `EventBuffer::record_encodable_event`. The
+        // shutdown-adjacent lifecycle transition other tests in this crate
+        // skip (they `enable()` once at setup and never leave `Enabled`).
         //
         // Every `Some` return must land exactly one event in the collector,
         // and every `None` must record nothing, so the collector total equals the number
@@ -684,6 +688,8 @@ mod shuttle_tests {
             assert!(ss.is_stopped(), "Stopped must be terminal");
             ss.enable();
             assert!(!ss.is_enabled(), "enable() must be a no-op once stopped");
+            ss.disable();
+            assert!(ss.is_stopped(), "disable() must not un-stop a terminal state");
 
             // Drain happens after `mark_stopped`: draining is
             // state-independent, so buffered events are still recoverable
@@ -693,6 +699,7 @@ mod shuttle_tests {
 
             let mut total = 0u64;
             while let Some(batch) = ss.collector.next() {
+                assert!(batch.event_count() > 0, "empty batch reached collector");
                 total += batch.event_count();
             }
             assert_eq!(ss.collector.take_dropped_batches(), 0);
@@ -753,6 +760,7 @@ mod shuttle_tests {
 
             let mut total = 0u64;
             while let Some(batch) = ss.collector.next() {
+                assert!(batch.event_count() > 0, "empty batch reached collector");
                 total += batch.event_count();
             }
             assert_eq!(ss.collector.take_dropped_batches(), 0);
