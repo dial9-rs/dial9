@@ -71,8 +71,12 @@ pub mod unwinder;
 #[cfg(feature = "cpu-profiling")]
 pub mod cpu_source;
 
+#[cfg(feature = "cuda")]
+pub mod cuda;
+
 #[cfg(any(
     feature = "cpu-profiling",
+    feature = "cuda",
     feature = "memory-profiling",
     feature = "process-resource",
     feature = "linux-socket"
@@ -153,8 +157,12 @@ pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaGpuConfig, CudaGpuEvent, CudaGpuSource, CudaGpuStartError};
+
 #[cfg(any(
     feature = "cpu-profiling",
+    feature = "cuda",
     feature = "memory-profiling",
     feature = "process-resource",
     feature = "linux-socket"

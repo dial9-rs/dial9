@@ -13,6 +13,10 @@ use dial9_core::rate_limited;
 /// [`RecorderSourceExt`]. The core [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder)
 /// and runtime wrappers that forward to it.
 pub trait RecorderPerfExt: Sized {
+    /// Register the NVIDIA CUDA GPU sampler. Warns and skips when NVML is unavailable.
+    #[cfg(feature = "cuda")]
+    fn with_cuda_gpu_profiling(self, config: crate::CudaGpuConfig) -> Self;
+
     /// Register the process-wide CPU profiler. Warns and skips on start failure.
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
@@ -37,6 +41,17 @@ pub trait RecorderPerfExt: Sized {
 }
 
 impl<T: RecorderSourceExt> RecorderPerfExt for T {
+    #[cfg(feature = "cuda")]
+    fn with_cuda_gpu_profiling(self, config: crate::CudaGpuConfig) -> Self {
+        match crate::CudaGpuSource::start(config) {
+            Ok(source) => self.source(source),
+            Err(e) => {
+                tracing::debug!("CUDA GPU profiling disabled because NVML is unavailable: {e}");
+                self
+            }
+        }
+    }
+
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
         match crate::CpuProfiler::start(config) {
