@@ -1031,44 +1031,159 @@
    * Build a flamegraph tree from CPU samples with reversed callchains.
    * @param {import('./trace_parser.js').CpuSample[]} samples
    * @param {Map} callframeSymbols
+   * @param {{weightKey?: string, allocWeightKey?: string, callchainStartKey?: string}} [opts]
    * @returns {{ name: string, children: Map, count: number, self: number }}
    */
-  function buildFlamegraphTree(samples, callframeSymbols) {
-    const root = { name: "(all)", children: new Map(), count: 0, self: 0 };
+  function buildFlamegraphTree(samples, callframeSymbols, opts) {
+    const weightKey = opts && opts.weightKey;
+    const allocWeightKey = opts && opts.allocWeightKey;
+    const callchainStartKey = opts && opts.callchainStartKey;
+    const weighted = allocWeightKey != null;
+    const root = {
+      name: "(all)",
+      children: new Map(),
+      count: 0,
+      self: 0,
+    };
+    if (weighted && samples.length > 0) {
+      root.allocCount = 0;
+    }
+    // Symbol expansion and frame formatting depend only on the raw address.
+    // Large heap profiles revisit a small symbol table millions of times, so
+    // resolve each address once per build instead of once per sample.
+    const framesByAddr = new Map();
+
+    function resolveFrames(addr) {
+      const entry = callframeSymbols.get(addr);
+      if (!Array.isArray(entry)) {
+        const formatted = entry
+          ? formatFrame(entry)
+          : formatFrame(addr, callframeSymbols);
+        return {
+          key: entry ? entry.symbol : addr || "??",
+          text: formatted.text,
+          location: entry ? entry.location : null,
+          docsUrl: formatted.docsUrl,
+        };
+      }
+
+      // Expand inlined frames. Per blazesym, an array entry is ordered
+      // [outermost, ..., innermost]: entry[0] is the real function at this
+      // address, and entry[i>0] are inlined callees (entry[0] calls entry[1]
+      // calls entry[2], etc.). To walk the call graph caller→callee while
+      // descending the flamegraph tree, iterate 0 → N. Skip nullish slots
+      // that can appear in sparse arrays (rare, but can happen if inline
+      // SymbolTableEntry events arrive before their depth=0 sibling).
+      const frames = [];
+      for (let fi = 0; fi < entry.length; fi++) {
+        const resolved = entry[fi];
+        if (fi > 0 && !resolved) continue;
+        const formatted = resolved
+          ? formatFrame(resolved)
+          : formatFrame(addr, callframeSymbols);
+        frames.push({
+          key: resolved ? resolved.symbol : addr || "??",
+          text: formatted.text,
+          location: resolved ? resolved.location : null,
+          docsUrl: formatted.docsUrl,
+        });
+      }
+      return frames;
+    }
+
+    function newNode(frame) {
+      const node = {
+        name: frame.text,
+        fullName: frame.key,
+        location: frame.location,
+        docsUrl: frame.docsUrl,
+        children: new Map(),
+        count: 0,
+        self: 0,
+      };
+      if (weighted) {
+        node.allocCount = 0;
+      }
+      return node;
+    }
+
+    // Heap profiles always carry both weight axes. Keeping this path separate
+    // removes two optional-value branches from every visited stack frame.
+    if (weighted) {
+      for (const s of samples) {
+        const w = weightKey != null ? s[weightKey] : s.weight != null ? s.weight : 1;
+        const aw = s[allocWeightKey];
+        const start = callchainStartKey != null ? s[callchainStartKey] : 0;
+        let node = root;
+        node.count += w;
+        node.allocCount += aw;
+        for (let ci = s.callchain.length - 1; ci >= start; ci--) {
+          const addr = s.callchain[ci];
+          let frames = framesByAddr.get(addr);
+          if (frames === undefined) {
+            frames = resolveFrames(addr);
+            framesByAddr.set(addr, frames);
+          }
+          if (Array.isArray(frames)) {
+            for (const frame of frames) {
+              let child = node.children.get(frame.key);
+              if (child === undefined) {
+                child = newNode(frame);
+                node.children.set(frame.key, child);
+              }
+              node = child;
+              node.count += w;
+              node.allocCount += aw;
+            }
+          } else {
+            let child = node.children.get(frames.key);
+            if (child === undefined) {
+              child = newNode(frames);
+              node.children.set(frames.key, child);
+            }
+            node = child;
+            node.count += w;
+            node.allocCount += aw;
+          }
+        }
+        node.self += w;
+        node.selfAllocCount = (node.selfAllocCount || 0) + aw;
+      }
+      return root;
+    }
+
     for (const s of samples) {
-      const w = s.weight != null ? s.weight : 1;
+      const w = weightKey != null ? s[weightKey] : s.weight != null ? s.weight : 1;
       const aw = s.allocWeight;
-      const chain = s.callchain.slice().reverse();
+      const start = callchainStartKey != null ? s[callchainStartKey] : 0;
       let node = root;
       node.count += w;
       if (aw != null) node.allocCount = (node.allocCount || 0) + aw;
-      for (const addr of chain) {
-        const entry = callframeSymbols.get(addr);
-        // Expand inlined frames. Per blazesym, an array entry is ordered
-        // [outermost, ..., innermost]: entry[0] is the real function at this
-        // address, and entry[i>0] are inlined callees (entry[0] calls entry[1]
-        // calls entry[2], etc.). To walk the call graph caller→callee while
-        // descending the flamegraph tree, iterate 0 → N. Skip nullish slots
-        // that can appear in sparse arrays (rare, but can happen if inline
-        // SymbolTableEntry events arrive before their depth=0 sibling).
-        const frames = Array.isArray(entry) ? entry : [entry];
-        for (let fi = 0; fi < frames.length; fi++) {
-          const resolved = frames[fi];
-          if (fi > 0 && !resolved) continue;
-          const key = resolved ? resolved.symbol : addr || "??";
-          const formatted = resolved ? formatFrame(resolved) : formatFrame(addr, callframeSymbols);
-          if (!node.children.has(key)) {
-            node.children.set(key, {
-              name: formatted.text,
-              fullName: key,
-              location: resolved ? resolved.location : null,
-              docsUrl: formatted.docsUrl,
-              children: new Map(),
-              count: 0,
-              self: 0,
-            });
+      for (let ci = s.callchain.length - 1; ci >= start; ci--) {
+        const addr = s.callchain[ci];
+        let frames = framesByAddr.get(addr);
+        if (frames === undefined) {
+          frames = resolveFrames(addr);
+          framesByAddr.set(addr, frames);
+        }
+        if (Array.isArray(frames)) {
+          for (const frame of frames) {
+            let child = node.children.get(frame.key);
+            if (child === undefined) {
+              child = newNode(frame);
+              node.children.set(frame.key, child);
+            }
+            node = child;
+            node.count += w;
+            if (aw != null) node.allocCount = (node.allocCount || 0) + aw;
           }
-          node = node.children.get(key);
+        } else {
+          let child = node.children.get(frames.key);
+          if (child === undefined) {
+            child = newNode(frames);
+            node.children.set(frames.key, child);
+          }
+          node = child;
           node.count += w;
           if (aw != null) node.allocCount = (node.allocCount || 0) + aw;
         }

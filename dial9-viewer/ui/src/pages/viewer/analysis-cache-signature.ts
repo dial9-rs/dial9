@@ -31,7 +31,7 @@ export function regionComputedCacheSignature(args: {
 }): string {
   const range = `${args.range.startNs}-${args.range.endNs}`;
   if (args.mode === "heap") {
-    return `${traceIdentity(args.trace)}:heap:${range}:${args.heapMode}`;
+    return `${traceIdentity(args.trace)}:heap:${range}`;
   }
   if (args.mode === "blocking") {
     return `${traceIdentity(args.trace)}:blocking:${range}:${args.groupBy}`;
@@ -43,6 +43,9 @@ export function regionWidgetCacheSignature(args: {
   trace: object;
   computed: string;
   blockingFlame: boolean;
+  /** Rendering variant over the same derived data, such as heap Bytes/Count. */
+  variant?: string;
 }): string {
-  return `${traceIdentity(args.trace)}:${args.computed}${args.blockingFlame ? ":flame" : ""}`;
+  const variant = args.variant === undefined ? "" : `:${args.variant}`;
+  return `${traceIdentity(args.trace)}:${args.computed}${variant}${args.blockingFlame ? ":flame" : ""}`;
 }

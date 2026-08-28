@@ -208,6 +208,7 @@ export type {
   AllocationSite,
   FlamegraphNode,
   FlamegraphSampleInput,
+  FlamegraphTreeOptions,
   FlatFlamegraphNode,
   ParkSpan,
   PointOfInterest,

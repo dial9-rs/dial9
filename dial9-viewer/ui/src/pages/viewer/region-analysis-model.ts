@@ -99,6 +99,44 @@ export function collectSchedSamplesInRange(
   return out;
 }
 
+/** Whether an in-poll scheduling sample exists in `range`, without materializing entries. */
+function hasSchedSampleInRange(
+  workerSpans: WorkerSpans,
+  workerIds: readonly number[],
+  range: TimeRange | null,
+): boolean {
+  for (const w of workerIds) {
+    const lane = workerSpans[w];
+    if (!lane) continue;
+    for (const poll of lane.polls) {
+      if (!poll.schedSamples) continue;
+      if (range && (poll.end < range.startNs || poll.start > range.endNs)) continue;
+      for (const sample of poll.schedSamples) {
+        if (range && (sample.timestamp < range.startNs || sample.timestamp > range.endNs)) {
+          continue;
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Whether a foldable on-CPU sample exists in `range`, without allocating a filtered array. */
+function hasCpuInRange(cpuSamples: readonly CpuSample[], range: TimeRange | null): boolean {
+  for (const sample of cpuSamples) {
+    if (!isFoldableCpuSample(sample)) continue;
+    if (
+      range &&
+      (sample.timestamp < range.startNs || sample.timestamp > range.endNs)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 /** Whether alloc events with stacks exist in `range`. */
 export function hasHeapInRange(
   allocEvents: readonly AllocEvent[],
@@ -122,10 +160,8 @@ export function regionModesPresent(
   workerIds: readonly number[],
   range: TimeRange | null,
 ): RegionModesPresent {
-  const cpu =
-    filterRegionCpuSamples(trace.cpuSamples, range?.startNs ?? null, range?.endNs ?? null)
-      .length > 0;
-  const blocking = collectSchedSamplesInRange(workerSpans, workerIds, range).length > 0;
+  const cpu = hasCpuInRange(trace.cpuSamples, range);
+  const blocking = hasSchedSampleInRange(workerSpans, workerIds, range);
   const heap = hasHeapInRange(trace.allocEvents, range);
   return { cpu, blocking, heap };
 }
@@ -182,13 +218,19 @@ export function cpuRegionView(
   trace: ParsedTrace,
   range: TimeRange | null,
 ): CpuRegionView {
-  const samples = filterRegionCpuSamples(
-    trace.cpuSamples,
-    range?.startNs ?? null,
-    range?.endNs ?? null,
-  );
+  const samples: CpuSample[] = [];
+  let totalRecords = 0;
+  for (const sample of trace.cpuSamples) {
+    if (
+      range &&
+      (sample.timestamp < range.startNs || sample.timestamp > range.endNs)
+    ) {
+      continue;
+    }
+    totalRecords += 1;
+    if (isFoldableCpuSample(sample)) samples.push(sample);
+  }
   const foldableCount = samples.length;
-  const totalRecords = countCpuRecords(trace.cpuSamples, range);
   return {
     samples,
     foldableCount,
@@ -218,9 +260,12 @@ const HOOK_PATTERNS: readonly string[] = [
   "__rustc::__rust_realloc",
 ];
 
-/** A heap sample carrying BOTH weight axes; mapped to widget samples per mode. */
+/** A heap sample carrying both weight axes; the widget selects fields per mode. */
 export interface HeapBaseSample {
-  callchain: string[];
+  /** Original allocation callchain; allocator hooks are skipped via callchainStart. */
+  callchain: readonly string[];
+  /** First non-allocator frame in callchain. */
+  callchainStart: number;
   workerId: number;
   spawnLoc: string | null;
   /** size * 1/P(sample) - unbiased bytes (Horvitz-Thompson). */
@@ -239,25 +284,32 @@ export interface HeapRegionView {
   estimatedAllocs: number;
 }
 
-/** Strip leading allocator-hook frames. */
-function stripHookFrames(
+/** First frame after the leading allocator hooks. */
+function hookFrameStart(
   chain: readonly string[],
   callframeSymbols: CallframeSymbols,
-): string[] {
+  hookFrames: Map<string, boolean>,
+): number {
   let start = 0;
   while (start < chain.length) {
     const key = chain[start];
     if (key === undefined) break;
-    const entry = callframeSymbols.get(key);
-    const frames = Array.isArray(entry) ? entry : [entry];
-    const name = frames.map((f) => (f ? f.symbol : "")).join(" ");
-    if (HOOK_PATTERNS.some((p) => name.includes(p))) {
+    let isHook = hookFrames.get(key);
+    if (isHook === undefined) {
+      const entry = callframeSymbols.get(key);
+      const frames = Array.isArray(entry) ? entry : [entry];
+      isHook = frames.some(
+        (frame) => frame != null && HOOK_PATTERNS.some((pattern) => frame.symbol.includes(pattern)),
+      );
+      hookFrames.set(key, isHook);
+    }
+    if (isHook) {
       start += 1;
       continue;
     }
     break;
   }
-  return start > 0 ? chain.slice(start) : chain.slice();
+  return start;
 }
 
 /** Spawn location of the poll `timestamp` fell in for tid->worker `wId` (binary
@@ -288,12 +340,13 @@ export function heapRegionView(
   workerSpans: WorkerSpans,
 ): HeapRegionView {
   const baseSamples: HeapBaseSample[] = [];
+  const hookFrames = new Map<string, boolean>();
   let estimatedBytes = 0;
   let estimatedAllocs = 0;
   for (const a of trace.allocEvents) {
     if (range && (a.timestamp < range.startNs || a.timestamp > range.endNs)) continue;
-    const chain = stripHookFrames(a.callchain, trace.callframeSymbols);
-    if (chain.length === 0) continue;
+    const callchainStart = hookFrameStart(a.callchain, trace.callframeSymbols, hookFrames);
+    if (callchainStart === a.callchain.length) continue;
     const wId = trace.tidToWorker.get(a.tid);
     const size = a.size;
     const ratio = size / HEAP_R;
@@ -301,7 +354,8 @@ export function heapRegionView(
     const byteWeight = size * invP;
     const countWeight = invP;
     baseSamples.push({
-      callchain: chain,
+      callchain: a.callchain,
+      callchainStart,
       workerId: wId != null ? 0 : OFF_WORKER_WORKER_ID,
       spawnLoc: spawnLocAt(workerSpans, wId, a.timestamp),
       byteWeight,
@@ -318,14 +372,14 @@ export function heapRegionView(
   };
 }
 
-/** Map heap base samples to widget samples for the Bytes/Count toggle:
+/** Compatibility mapper for callers that need ordinary weighted widget samples:
  *  bytes -> weight=bytes/allocWeight=count; count -> swapped. */
 export function heapSamplesForMode(
   base: readonly HeapBaseSample[],
   mode: "bytes" | "count",
 ): FlamegraphDataSample[] {
   return base.map((s) => ({
-    callchain: s.callchain,
+    callchain: s.callchain.slice(s.callchainStart),
     workerId: s.workerId,
     spawnLoc: s.spawnLoc,
     weight: mode === "bytes" ? s.byteWeight : s.countWeight,
@@ -515,8 +569,9 @@ export function displayNamePath(
   callframeSymbols: CallframeSymbols,
 ): string[] {
   const names: string[] = [];
-  const chain = callchain.slice().reverse();
-  for (const addr of chain) {
+  for (let ci = callchain.length - 1; ci >= 0; ci--) {
+    const addr = callchain[ci];
+    if (addr === undefined) continue;
     const entry = callframeSymbols.get(addr);
     const frames = Array.isArray(entry) ? entry : [entry];
     for (let fi = 0; fi < frames.length; fi++) {
@@ -529,17 +584,9 @@ export function displayNamePath(
   return names;
 }
 
-function pathStartsWith(path: readonly string[], prefix: readonly string[]): boolean {
-  if (prefix.length === 0 || prefix.length > path.length) return false;
-  for (let i = 0; i < prefix.length; i++) {
-    if (path[i] !== prefix[i]) return false;
-  }
-  return true;
-}
-
 /** A sample the extent walk reads: a stack + panel routing + a timestamp. */
 export interface ExtentSample {
-  callchain: string[];
+  callchain: readonly string[];
   workerId: number;
   timestamp: number;
 }
@@ -562,13 +609,43 @@ export function frameSampleTimeExtent(
   if (!onWorker && !onOff) return null;
   const names = onWorker ? zoomPath.worker : zoomPath.offworker;
   const wantOff = !onWorker && onOff;
+  const namesByAddr = new Map<string, readonly string[]>();
   let min = Infinity;
   let max = -Infinity;
   for (const s of samples) {
     const isOff = s.workerId === OFF_WORKER_WORKER_ID;
     if (isOff !== wantOff) continue;
-    const path = displayNamePath(s.callchain, callframeSymbols);
-    if (!pathStartsWith(path, names)) continue;
+    let nameIndex = 0;
+    let matches = true;
+    for (let ci = s.callchain.length - 1; ci >= 0 && nameIndex < names.length; ci--) {
+      const addr = s.callchain[ci];
+      if (addr === undefined) continue;
+      let frameNames = namesByAddr.get(addr);
+      if (frameNames === undefined) {
+        const entry = callframeSymbols.get(addr);
+        const frames = Array.isArray(entry) ? entry : [entry];
+        const formatted: string[] = [];
+        for (let fi = 0; fi < frames.length; fi++) {
+          const resolved = frames[fi];
+          if (fi > 0 && !resolved) continue;
+          formatted.push(
+            resolved ? formatFrame(resolved).text : formatFrame(addr, callframeSymbols).text,
+          );
+        }
+        frameNames = formatted;
+        namesByAddr.set(addr, frameNames);
+      }
+      for (const frameName of frameNames) {
+        if (frameName !== names[nameIndex]) {
+          matches = false;
+          break;
+        }
+        nameIndex += 1;
+        if (nameIndex === names.length) break;
+      }
+      if (!matches) break;
+    }
+    if (!matches || nameIndex !== names.length) continue;
     if (s.timestamp < min) min = s.timestamp;
     if (s.timestamp > max) max = s.timestamp;
   }

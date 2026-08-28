@@ -60,6 +60,7 @@ import type {
   WorkerLane,
   TracingSpan,
   FlamegraphNode,
+  FlamegraphTreeOptions,
 } from "../../trace_analysis.js";
 import {
   formatHumanDuration,
@@ -490,6 +491,39 @@ export function probeFlamegraph(container: HTMLElement, trace: ParsedTrace): voi
       return `~${count} (${pct}%) ${self} self${allocs !== null ? ` ${allocs} allocs` : ""}`;
     },
   });
+
+  // Keyed weighted columns avoid remapping large heap profiles.
+  const keyedHeapSamples = samples.map((s) => ({
+    ...s,
+    callchainStart: 0,
+    byteWeight: 8,
+    allocationWeight: 1,
+  }));
+  const treeOptions: FlamegraphTreeOptions<(typeof keyedHeapSamples)[number]> = {
+    weightKey: "byteWeight",
+    allocWeightKey: "allocationWeight",
+    callchainStartKey: "callchainStart",
+  };
+  const keyedTree: FlamegraphNode = buildFlamegraphTree(
+    keyedHeapSamples,
+    trace.callframeSymbols,
+    treeOptions,
+  );
+  void keyedTree.count;
+  fg.setData(keyedHeapSamples, trace.callframeSymbols, { treeOptions });
+
+  type KeyProbeSample = (typeof keyedHeapSamples)[number] & {
+    optionalWeight?: number;
+  };
+  const invalidTreeOptions: FlamegraphTreeOptions<KeyProbeSample> = {
+    // @ts-expect-error weight fields must be required numeric properties.
+    weightKey: "callchain",
+    // @ts-expect-error optional numeric properties are not safe tree weights.
+    allocWeightKey: "optionalWeight",
+    // @ts-expect-error callchain offsets must be required numeric properties.
+    callchainStartKey: "callchain",
+  };
+  void invalidTreeOptions;
 
   // API mode: minimal toFgTree node into setTreeDirect.
   function toFgTree(node: { name: string; count: number; self: number; children?: { name: string; count: number; self: number }[] }): FlamegraphNode {
