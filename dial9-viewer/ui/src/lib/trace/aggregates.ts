@@ -114,6 +114,23 @@ export interface ApiFlamegraphNode {
   children?: ApiFlamegraphNode[];
 }
 
+/** One nested interned-v1 node; `frame` indexes the enclosing frame table. */
+export interface InternedApiFlamegraphNode {
+  frame: number;
+  count: number;
+  self: number;
+  children?: InternedApiFlamegraphNode[];
+}
+
+/** Negotiated compact response used by the canonical aggregate UI. */
+export interface InternedApiFlamegraphTree {
+  format: "interned-v1";
+  frames: string[];
+  root: InternedApiFlamegraphNode;
+}
+
+export type ApiFlamegraphTree = ApiFlamegraphNode | InternedApiFlamegraphTree;
+
 /** One facet's values. */
 export interface FacetResult {
   /** Query-param / filter key name (e.g. "source", "thread_class"). */
@@ -168,7 +185,7 @@ export interface FlamegraphMetadata {
 }
 
 export interface FlamegraphResponse {
-  tree: ApiFlamegraphNode;
+  tree: ApiFlamegraphTree;
   total_samples: number;
   /**
    * Absent only outside demand-driven mode (a single complete fetch);

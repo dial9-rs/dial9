@@ -6,6 +6,7 @@
 
 export {
   coveragePercent,
+  decodeFlamegraphTree,
   foldErrorNotice,
   formatCoverageBadge,
   hostFacetOptions,
@@ -17,6 +18,10 @@ export {
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
 } from "../../../flamegraph_api.js";
-export type { FacetOption, LegacyCoverage } from "../../../flamegraph_api.js";
+export type {
+  DecodedFlamegraphNode,
+  FacetOption,
+  LegacyCoverage,
+} from "../../../flamegraph_api.js";
 
 export { formatHumanDuration } from "../../../format.js";

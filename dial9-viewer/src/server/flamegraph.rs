@@ -22,8 +22,8 @@ use hex;
 use serde::{Deserialize, Serialize};
 
 use crate::ingest::aggregate::{
-    self, AggContext, AggSnapshot, Coverage, FACETS, FacetResult, FlamegraphAccum,
-    PollDurationBucket, SampleFilter, Scope,
+    self, AggContext, AggSnapshot, Coverage, FACETS, FacetResult, FlamegraphAccum, FrameId,
+    PollDurationBucket, SampleFilter, Scope, StackDictionary,
 };
 use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
@@ -86,16 +86,26 @@ pub struct FlamegraphParams {
     pub min_span_ns: Option<i64>,
     /// Maximum span elapsed_ns for the span filter (inclusive).
     pub max_span_ns: Option<i64>,
+    /// Response tree encoding. The canonical UI requests `interned-v1`; absent
+    /// or unknown values retain the legacy nested-name response.
+    pub format: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct FlamegraphResponse {
-    pub tree: FlamegraphNode,
+    pub tree: FlamegraphTree,
     pub total_samples: usize,
     /// Present in demand-driven mode: how much of the scope has been folded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<Coverage>,
     pub metadata: FlamegraphMetadata,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum FlamegraphTree {
+    Legacy(FlamegraphNode),
+    Interned(InternedFlamegraphTree),
 }
 
 #[derive(Serialize, Clone)]
@@ -106,6 +116,24 @@ pub struct FlamegraphNode {
     pub self_count: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<FlamegraphNode>,
+}
+
+#[derive(Serialize)]
+pub struct InternedFlamegraphTree {
+    pub format: &'static str,
+    /// Frame names indexed by every node's `frame` field.
+    pub frames: Vec<String>,
+    pub root: InternedFlamegraphNode,
+}
+
+#[derive(Serialize)]
+pub struct InternedFlamegraphNode {
+    pub frame: u32,
+    pub count: u64,
+    #[serde(rename = "self")]
+    pub self_count: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<InternedFlamegraphNode>,
 }
 
 #[derive(Serialize)]
@@ -152,10 +180,10 @@ pub struct ScopeEcho {
 
 /// Build a flamegraph tree from (stack_id, count) pairs and a stacks dictionary.
 fn build_flamegraph_tree(
-    stack_counts: &[(Vec<u8>, u64)],
-    stacks_dict: &HashMap<Vec<u8>, Vec<String>>,
-) -> FlamegraphNode {
-    let mut root = TrieNode::new("(all)".to_string());
+    stack_counts: &[([u8; 16], u64)],
+    stacks_dict: &StackDictionary,
+) -> TrieNode {
+    let mut root = TrieNode::new(stacks_dict.root());
 
     for (stack_id, count) in stack_counts {
         let frames = match stacks_dict.get(stack_id) {
@@ -166,58 +194,113 @@ fn build_flamegraph_tree(
         root.count += count;
         let mut node = &mut root;
         for frame in frames.iter().rev() {
-            node = node.get_or_insert_child(frame.clone());
+            node = node.get_or_insert_child(*frame);
             node.count += count;
         }
         // Leaf gets self-time
         node.self_count += count;
     }
 
-    root.into_response()
+    root
 }
 
 struct TrieNode {
-    name: String,
+    frame: FrameId,
     count: u64,
     self_count: u64,
-    children: HashMap<String, TrieNode>,
+    children: HashMap<FrameId, TrieNode>,
 }
 
 impl TrieNode {
-    fn new(name: String) -> Self {
+    fn new(frame: FrameId) -> Self {
         Self {
-            name,
+            frame,
             count: 0,
             self_count: 0,
             children: HashMap::new(),
         }
     }
 
-    fn get_or_insert_child(&mut self, name: String) -> &mut TrieNode {
-        // `or_insert_with_key` clones the name only when a new node is inserted;
-        // on the hot path (child already present) it's just a move into the
-        // lookup with no allocation.
+    fn get_or_insert_child(&mut self, frame: FrameId) -> &mut TrieNode {
         self.children
-            .entry(name)
-            .or_insert_with_key(|name| TrieNode::new(name.clone()))
+            .entry(frame)
+            .or_insert_with_key(|frame| TrieNode::new(*frame))
     }
 
-    fn into_response(self) -> FlamegraphNode {
-        let mut children: Vec<_> = self
-            .children
-            .into_values()
-            .map(|c| c.into_response())
-            .collect();
-        // Sort children by count descending for consistent output
-        children.sort_by_key(|c| std::cmp::Reverse(c.count));
-
+    fn into_legacy(self, stacks_dict: &StackDictionary) -> FlamegraphNode {
+        let mut children: Vec<_> = self.children.into_values().collect();
+        sort_children(&mut children, stacks_dict);
         FlamegraphNode {
-            name: self.name,
+            name: stacks_dict.resolve(self.frame).to_string(),
             count: self.count,
             self_count: self.self_count,
-            children,
+            children: children
+                .into_iter()
+                .map(|child| child.into_legacy(stacks_dict))
+                .collect(),
         }
     }
+
+    fn collect_frames(&self, frames: &mut std::collections::HashSet<FrameId>) {
+        frames.insert(self.frame);
+        for child in self.children.values() {
+            child.collect_frames(frames);
+        }
+    }
+
+    fn into_interned(
+        self,
+        stacks_dict: &StackDictionary,
+        wire_ids: &HashMap<FrameId, u32>,
+    ) -> InternedFlamegraphNode {
+        let mut children: Vec<_> = self.children.into_values().collect();
+        sort_children(&mut children, stacks_dict);
+        InternedFlamegraphNode {
+            frame: wire_ids[&self.frame],
+            count: self.count,
+            self_count: self.self_count,
+            children: children
+                .into_iter()
+                .map(|child| child.into_interned(stacks_dict, wire_ids))
+                .collect(),
+        }
+    }
+
+    fn into_interned_tree(self, stacks_dict: &StackDictionary) -> InternedFlamegraphTree {
+        let mut used = std::collections::HashSet::new();
+        self.collect_frames(&mut used);
+        let mut frames: Vec<_> = used.into_iter().collect();
+        frames.sort_unstable_by(|a, b| stacks_dict.resolve(*a).cmp(stacks_dict.resolve(*b)));
+        let wire_ids: HashMap<_, _> = frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                (
+                    *frame,
+                    u32::try_from(index).expect("a flamegraph cannot contain more than u32 frames"),
+                )
+            })
+            .collect();
+        let names = frames
+            .iter()
+            .map(|frame| stacks_dict.resolve(*frame).to_string())
+            .collect();
+        InternedFlamegraphTree {
+            format: "interned-v1",
+            frames: names,
+            root: self.into_interned(stacks_dict, &wire_ids),
+        }
+    }
+}
+
+fn sort_children(children: &mut [TrieNode], stacks_dict: &StackDictionary) {
+    children.sort_unstable_by(|a, b| {
+        b.count.cmp(&a.count).then_with(|| {
+            stacks_dict
+                .resolve(a.frame)
+                .cmp(stacks_dict.resolve(b.frame))
+        })
+    });
 }
 
 /// Handler for GET /api/flamegraph — a Server-Sent Events stream.
@@ -478,6 +561,13 @@ struct StreamCtx {
     end_ns: Option<i64>,
     min_poll_ns: Option<i64>,
     max_poll_ns: Option<i64>,
+    wire_format: WireFormat,
+}
+
+#[derive(Clone, Copy)]
+enum WireFormat {
+    Legacy,
+    InternedV1,
 }
 
 /// The flamegraph [`FoldSink`] adapter: owns the incremental [`FlamegraphAccum`]
@@ -622,6 +712,10 @@ fn flamegraph_stream(
         end_ns: params.end_ns,
         min_poll_ns: params.min_poll_ns,
         max_poll_ns: params.max_poll_ns,
+        wire_format: match params.format.as_deref() {
+            Some("interned-v1") => WireFormat::InternedV1,
+            _ => WireFormat::Legacy,
+        },
     };
     let accum = FlamegraphAccum::new(ctx.filter.clone());
     fold_stream::drive(agg, resolved, limits, FlamegraphSink { ctx, accum })
@@ -629,7 +723,13 @@ fn flamegraph_stream(
 
 /// Shape a [`FlamegraphResponse`] from an [`AggSnapshot`] + [`Coverage`].
 fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> FlamegraphResponse {
-    let tree = build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict);
+    let trie = build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict);
+    let tree = match ctx.wire_format {
+        WireFormat::Legacy => FlamegraphTree::Legacy(trie.into_legacy(snap.stacks_dict)),
+        WireFormat::InternedV1 => {
+            FlamegraphTree::Interned(trie.into_interned_tree(snap.stacks_dict))
+        }
+    };
 
     // Echo the active filter values back to the UI (facet name → selected value).
     let filters: HashMap<String, String> = ctx
@@ -673,23 +773,24 @@ mod tests {
 
     #[test]
     fn test_build_flamegraph_tree() {
-        let mut stacks_dict = HashMap::new();
+        let mut stacks = HashMap::new();
         // Stack A: main → foo → bar (leaf→root stored as bar, foo, main)
-        let stack_a = vec![0u8; 16];
-        stacks_dict.insert(
-            stack_a.clone(),
+        let stack_a = [0u8; 16];
+        stacks.insert(
+            stack_a,
             vec!["bar".to_string(), "foo".to_string(), "main".to_string()],
         );
         // Stack B: main → foo → baz
-        let mut stack_b = vec![0u8; 16];
+        let mut stack_b = [0u8; 16];
         stack_b[0] = 1;
-        stacks_dict.insert(
-            stack_b.clone(),
+        stacks.insert(
+            stack_b,
             vec!["baz".to_string(), "foo".to_string(), "main".to_string()],
         );
+        let stacks_dict = StackDictionary::from_stacks(stacks);
 
         let stack_counts = vec![(stack_a, 10), (stack_b, 5)];
-        let tree = build_flamegraph_tree(&stack_counts, &stacks_dict);
+        let tree = build_flamegraph_tree(&stack_counts, &stacks_dict).into_legacy(&stacks_dict);
 
         assert_eq!(tree.name, "(all)");
         assert_eq!(tree.count, 15);
@@ -701,5 +802,62 @@ mod tests {
         assert_eq!(foo_node.name, "foo");
         assert_eq!(foo_node.count, 15);
         assert_eq!(foo_node.children.len(), 2); // "bar" and "baz"
+    }
+
+    #[test]
+    fn interned_tree_serializes_each_frame_name_once() {
+        let repeated = "very_long_symbol_name_".repeat(64);
+        let mut stacks = HashMap::new();
+        for i in 0..8u8 {
+            let mut stack_id = [0u8; 16];
+            stack_id[0] = i;
+            stacks.insert(
+                stack_id,
+                vec![format!("leaf_{i}"), repeated.clone(), format!("root_{i}")],
+            );
+        }
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+        let stack_counts: Vec<_> = (0..8u8)
+            .map(|i| {
+                let mut stack_id = [0u8; 16];
+                stack_id[0] = i;
+                (stack_id, 1)
+            })
+            .collect();
+
+        let tree =
+            build_flamegraph_tree(&stack_counts, &stacks_dict).into_interned_tree(&stacks_dict);
+        let json = serde_json::to_string(&tree).unwrap();
+
+        assert_eq!(
+            json.matches(&repeated).count(),
+            1,
+            "the frame table must own the repeated symbol once"
+        );
+        assert_eq!(tree.root.count, 8);
+        assert_eq!(
+            tree.frames.iter().filter(|name| *name == &repeated).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn interned_tree_is_deterministic_across_input_order() {
+        let mut stacks = HashMap::new();
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        stacks.insert(a, vec!["z-leaf".to_string(), "shared".to_string()]);
+        stacks.insert(b, vec!["a-leaf".to_string(), "shared".to_string()]);
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+
+        let first =
+            build_flamegraph_tree(&[(a, 5), (b, 5)], &stacks_dict).into_interned_tree(&stacks_dict);
+        let second =
+            build_flamegraph_tree(&[(b, 5), (a, 5)], &stacks_dict).into_interned_tree(&stacks_dict);
+
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
     }
 }

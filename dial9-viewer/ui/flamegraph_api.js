@@ -156,6 +156,44 @@ function shouldAdoptRefinementSnapshot(preserveExisting, baselineFilesFolded, in
   if (!preserveExisting) return true;
   return Number(incomingFilesFolded || 0) >= Number(baselineFilesFolded || 0);
 }
+
+// Resolve the negotiated aggregate flamegraph encoding into the legacy
+// nested-name tree consumed by the existing renderers. Older servers return
+// that tree directly; interned-v1 sends every frame name once and references
+// it by index from each node.
+function decodeFlamegraphTree(response) {
+  const tree = response && response.tree;
+  if (!tree || tree.format !== "interned-v1") return tree;
+  if (!Array.isArray(tree.frames)) {
+    throw new Error("interned-v1 flamegraph is missing its frame table");
+  }
+
+  function decodeNode(node) {
+    const frame = node && node.frame;
+    if (!Number.isInteger(frame) || frame < 0 || frame >= tree.frames.length) {
+      throw new Error(`interned-v1 flamegraph references invalid frame ${String(frame)}`);
+    }
+    const name = tree.frames[frame];
+    if (typeof name !== "string") {
+      throw new Error(`interned-v1 flamegraph frame ${frame} is not a string`);
+    }
+    const children = node.children;
+    if (children != null && !Array.isArray(children)) {
+      throw new Error("interned-v1 flamegraph node children must be an array");
+    }
+    const decoded = {
+      name,
+      count: node.count,
+      self: node.self,
+    };
+    if (children && children.length) {
+      decoded.children = children.map(decodeNode);
+    }
+    return decoded;
+  }
+
+  return decodeNode(tree.root);
+}
 // --- Data-driven toolbar facet options ---------------------------------------
 //
 // The `/api/flamegraph` response carries a `metadata` block describing which
@@ -214,6 +252,7 @@ const FlamegraphApi = {
   nextMaxFiles,
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
+  decodeFlamegraphTree,
   nsToPickerUtc,
   pickerUtcToNs,
   msToNs,

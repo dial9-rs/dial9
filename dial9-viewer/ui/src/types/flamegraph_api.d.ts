@@ -31,6 +31,13 @@ declare module "*/flamegraph_api.js" {
     label: string;
   }
 
+  export interface DecodedFlamegraphNode {
+    name: string;
+    count: number;
+    self: number;
+    children?: DecodedFlamegraphNode[];
+  }
+
   /**
    * "12 / 480 files (2.5%) [middot 8 / 40 hosts] middot 41,203 samples
    * [middot 4.1 MB]" - the stats-bar coverage badge. Host fraction omitted
@@ -100,6 +107,14 @@ declare module "*/flamegraph_api.js" {
     baselineFilesFolded: number,
     incomingFilesFolded: number
   ): boolean;
+
+  /**
+   * Decode the negotiated aggregate tree encoding. Legacy nested-name trees
+   * pass through; interned-v1 frame IDs are resolved through its frame table.
+   */
+  export function decodeFlamegraphTree(response: {
+    tree: unknown;
+  }): DecodedFlamegraphNode;
 
   /**
    * Epoch-ns -> `datetime-local` value ("YYYY-MM-DDTHH:MM:SS"), shown as

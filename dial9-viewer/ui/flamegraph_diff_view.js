@@ -66,6 +66,7 @@
     }
     for (const h of scope.getAll("host")) u.searchParams.append("host", h);
     if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+    u.searchParams.set("format", "interned-v1");
     return u;
   }
 
@@ -625,8 +626,9 @@
           )) return;
 
           adoptedSnapshot = true;
-          if (side === "a") treeA = resp.tree; else treeB = resp.tree;
-          status.total = resp.total_samples || (resp.tree && resp.tree.count) || 0;
+          const tree = api.decodeFlamegraphTree(resp);
+          if (side === "a") treeA = tree; else treeB = tree;
+          status.total = resp.total_samples || (tree && tree.count) || 0;
           status.meta = resp.metadata || null;
           status.coverage = cov || null;
           if (cov != null) {
