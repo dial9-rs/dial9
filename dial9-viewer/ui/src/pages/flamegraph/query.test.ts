@@ -33,6 +33,7 @@ function state(over: Partial<ApiQueryState> = {}): ApiQueryState {
     spanTypeUid: null,
     minSpanNs: null,
     maxSpanNs: null,
+    inspect: null,
     ...over,
   };
 }
@@ -154,6 +155,12 @@ describe("buildApiUrl", () => {
     expect(u).toBe(
       `${ORIGIN}/api/flamegraph?data_dir=%2Fvar%2Ftraces&source=cpu` +
         "&host_group=blue&format=flat-v1",
+    );
+  });
+  it("forwards the current inspect frame for projection retention", () => {
+    expect(buildApiUrl(state({ inspect: "core::task::poll" }), ORIGIN)).toBe(
+      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu` +
+        "&inspect=core%3A%3Atask%3A%3Apoll&format=flat-v1",
     );
   });
 });

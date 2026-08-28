@@ -141,6 +141,9 @@ export interface FlatApiFlamegraphTree {
   format: "flat-v1";
   frames: string[];
   nodes: FlatApiFlamegraphNode[];
+  total_nodes: number;
+  omitted_nodes: number;
+  inspect_retained?: boolean;
 }
 
 export type ApiFlamegraphTree =

@@ -3,13 +3,14 @@
 //!
 //! One request holds the connection open: it [resolves](refine::resolve) the
 //! scope, streams already-folded parts in bounded cumulative snapshots, then
-//! folds missing capped-prefix files and pushes a fresh full-tree snapshot as
-//! each file lands, closing when the bounded work-list drains. Each SSE `data:`
+//! folds missing capped-prefix files and pushes a fresh bounded-tree snapshot
+//! as each file lands, closing when the bounded work-list drains. Each SSE `data:`
 //! frame is one
 //! [`FlamegraphResponse`] JSON object — the same shape the UI rendered per poll
 //! before — so the client just re-renders on every event.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::convert::Infallible;
 
 use axum::Extension;
@@ -30,6 +31,8 @@ use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::fold_stream;
 use crate::server::metrics::OperationMetrics;
+
+const DEFAULT_FLAMEGRAPH_NODE_BUDGET: usize = 50_000;
 
 #[derive(Deserialize)]
 pub struct FlamegraphParams {
@@ -89,6 +92,9 @@ pub struct FlamegraphParams {
     /// Response tree encoding. The canonical UI requests `flat-v1`; absent or
     /// unknown values retain the legacy nested-name response.
     pub format: Option<String>,
+    /// Frame identity currently focused by the aggregate inspect view. The
+    /// bounded projection retains one deterministic path to this frame.
+    pub inspect: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -146,6 +152,13 @@ pub struct FlatFlamegraphTree {
     /// row zero and names itself as its parent; every other parent precedes its
     /// children.
     pub nodes: Vec<FlatFlamegraphNode>,
+    /// Exact trie node count before projection.
+    pub total_nodes: usize,
+    /// Exact trie nodes represented only through synthetic `[other]` rows.
+    pub omitted_nodes: usize,
+    /// True when a requested inspect frame was found and its path retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inspect_retained: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -340,6 +353,7 @@ impl FlamegraphTrie {
         }
     }
 
+    #[cfg(test)]
     fn append_flat(
         &self,
         node_id: usize,
@@ -366,6 +380,7 @@ impl FlamegraphTrie {
         }
     }
 
+    #[cfg(test)]
     fn into_flat_tree(mut self, stacks_dict: &StackDictionary) -> FlatFlamegraphTree {
         self.edges = HashMap::new();
         let frames = WireFrames::new(&self.nodes, stacks_dict);
@@ -376,6 +391,219 @@ impl FlamegraphTrie {
             format: "flat-v1",
             frames: frames.names,
             nodes,
+            total_nodes: self.nodes.len(),
+            omitted_nodes: 0,
+            inspect_retained: None,
+        }
+    }
+
+    fn projection(
+        &self,
+        stacks_dict: &StackDictionary,
+        children: &OrderedChildren,
+        node_budget: usize,
+        inspect: Option<&str>,
+    ) -> Projection {
+        let mut preorder = Vec::with_capacity(self.nodes.len());
+        children.append_preorder(0, &mut preorder);
+        let mut rank = vec![0usize; self.nodes.len()];
+        for (index, node) in preorder.into_iter().enumerate() {
+            rank[node] = index;
+        }
+
+        let inspected = inspect.and_then(|name| {
+            (0..self.nodes.len())
+                .filter(|node| stacks_dict.resolve(self.nodes[*node].frame) == name)
+                .max_by_key(|node| (self.nodes[*node].count, Reverse(rank[*node])))
+        });
+
+        let mut selected = vec![false; self.nodes.len()];
+        selected[0] = true;
+        if let Some(mut node) = inspected {
+            loop {
+                selected[node] = true;
+                if node == 0 {
+                    break;
+                }
+                node = self.nodes[node].parent;
+            }
+        }
+
+        let mut omitted_children = vec![0usize; self.nodes.len()];
+        let mut selected_nodes = 0usize;
+        let mut collapsed_nodes = 0usize;
+        for parent in 0..self.nodes.len() {
+            if !selected[parent] {
+                continue;
+            }
+            selected_nodes += 1;
+            let omitted = children
+                .of(parent)
+                .iter()
+                .filter(|child| !selected[**child])
+                .count();
+            omitted_children[parent] = omitted;
+            collapsed_nodes += usize::from(omitted > 0);
+        }
+
+        // A path is normally only a few dozen frames. If a caller supplies an
+        // impossibly small test/config budget, prefer honoring the hard cap to
+        // claiming that the inspect path was retained.
+        let mut inspect_retained = inspected.is_some();
+        if selected_nodes + collapsed_nodes > node_budget {
+            selected.fill(false);
+            selected[0] = true;
+            omitted_children.fill(0);
+            omitted_children[0] = children.of(0).len();
+            selected_nodes = 1;
+            collapsed_nodes = usize::from(omitted_children[0] > 0);
+            inspect_retained = false;
+        }
+
+        let mut output_nodes = selected_nodes + collapsed_nodes;
+        let mut frontier = BinaryHeap::new();
+        let mut queued = vec![false; self.nodes.len()];
+        for parent in 0..self.nodes.len() {
+            if !selected[parent] {
+                continue;
+            }
+            for child in children.of(parent) {
+                if !selected[*child] && !queued[*child] {
+                    frontier.push((self.nodes[*child].count, Reverse(rank[*child]), *child));
+                    queued[*child] = true;
+                }
+            }
+        }
+
+        while let Some((_, _, node)) = frontier.pop() {
+            let parent = self.nodes[node].parent;
+            debug_assert!(selected[parent]);
+            let parent_still_collapsed = omitted_children[parent] > 1;
+            let child_collapsed = !children.of(node).is_empty();
+            // Selecting this node adds one real row, may remove its parent's
+            // `[other]`, and may add a new `[other]` beneath the selected node.
+            let delta = usize::from(parent_still_collapsed) + usize::from(child_collapsed);
+            if output_nodes + delta > node_budget {
+                continue;
+            }
+
+            selected[node] = true;
+            selected_nodes += 1;
+            output_nodes += delta;
+            omitted_children[parent] -= 1;
+            omitted_children[node] = children.of(node).len();
+            for child in children.of(node) {
+                frontier.push((self.nodes[*child].count, Reverse(rank[*child]), *child));
+            }
+        }
+
+        Projection {
+            selected,
+            output_nodes,
+            omitted_nodes: self.nodes.len() - selected_nodes,
+            inspect_retained: inspect.map(|_| inspect_retained),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_projected_flat(
+        &self,
+        node_id: usize,
+        parent_wire_id: u32,
+        stacks_dict: &StackDictionary,
+        frames: &WireFrames,
+        children: &OrderedChildren,
+        projection: &Projection,
+        rows: &mut Vec<FlatFlamegraphNode>,
+    ) {
+        let wire_id =
+            u32::try_from(rows.len()).expect("a flamegraph cannot contain more than u32 nodes");
+        let node = &self.nodes[node_id];
+        rows.push(FlatFlamegraphNode(
+            if node_id == 0 {
+                wire_id
+            } else {
+                parent_wire_id
+            },
+            frames.ids[&node.frame],
+            node.count,
+            node.self_count,
+        ));
+
+        let omitted_count: u64 = children
+            .of(node_id)
+            .iter()
+            .filter(|child| !projection.selected[**child])
+            .map(|child| self.nodes[*child].count)
+            .sum();
+        let mut emitted_other = omitted_count == 0;
+        for child in children
+            .of(node_id)
+            .iter()
+            .filter(|child| projection.selected[**child])
+        {
+            let child_node = &self.nodes[*child];
+            if !emitted_other
+                && (omitted_count > child_node.count
+                    || (omitted_count == child_node.count
+                        && "[other]" < stacks_dict.resolve(child_node.frame)))
+            {
+                rows.push(FlatFlamegraphNode(
+                    wire_id,
+                    frames.other.expect("projected trees intern [other]"),
+                    omitted_count,
+                    omitted_count,
+                ));
+                emitted_other = true;
+            }
+            self.append_projected_flat(
+                *child,
+                wire_id,
+                stacks_dict,
+                frames,
+                children,
+                projection,
+                rows,
+            );
+        }
+        if !emitted_other {
+            rows.push(FlatFlamegraphNode(
+                wire_id,
+                frames.other.expect("projected trees intern [other]"),
+                omitted_count,
+                omitted_count,
+            ));
+        }
+    }
+
+    fn into_projected_flat_tree(
+        mut self,
+        stacks_dict: &StackDictionary,
+        node_budget: usize,
+        inspect: Option<&str>,
+    ) -> FlatFlamegraphTree {
+        self.edges = HashMap::new();
+        let children = self.ordered_children(stacks_dict);
+        let projection = self.projection(stacks_dict, &children, node_budget, inspect);
+        let frames = WireFrames::new_selected(&self.nodes, stacks_dict, &projection.selected, true);
+        let mut nodes = Vec::with_capacity(projection.output_nodes);
+        self.append_projected_flat(
+            0,
+            0,
+            stacks_dict,
+            &frames,
+            &children,
+            &projection,
+            &mut nodes,
+        );
+        debug_assert_eq!(nodes.len(), projection.output_nodes);
+        FlatFlamegraphTree {
+            format: "flat-v1",
+            frames: frames.names,
+            nodes,
+            total_nodes: self.nodes.len(),
+            omitted_nodes: projection.omitted_nodes,
+            inspect_retained: projection.inspect_retained,
         }
     }
 }
@@ -389,16 +617,44 @@ impl OrderedChildren {
     fn of(&self, parent: usize) -> &[usize] {
         &self.nodes[self.starts[parent]..self.starts[parent + 1]]
     }
+
+    fn append_preorder(&self, parent: usize, output: &mut Vec<usize>) {
+        output.push(parent);
+        for child in self.of(parent) {
+            self.append_preorder(*child, output);
+        }
+    }
+}
+
+struct Projection {
+    selected: Vec<bool>,
+    output_nodes: usize,
+    omitted_nodes: usize,
+    inspect_retained: Option<bool>,
 }
 
 struct WireFrames {
     names: Vec<String>,
     ids: HashMap<FrameId, u32>,
+    other: Option<u32>,
 }
 
 impl WireFrames {
     fn new(nodes: &[TrieNode], stacks_dict: &StackDictionary) -> Self {
-        let mut frames: Vec<_> = nodes.iter().map(|node| node.frame).collect();
+        Self::new_selected(nodes, stacks_dict, &vec![true; nodes.len()], false)
+    }
+
+    fn new_selected(
+        nodes: &[TrieNode],
+        stacks_dict: &StackDictionary,
+        selected: &[bool],
+        include_other: bool,
+    ) -> Self {
+        let mut frames: Vec<_> = nodes
+            .iter()
+            .zip(selected)
+            .filter_map(|(node, selected)| selected.then_some(node.frame))
+            .collect();
         frames.sort_unstable_by(|a, b| stacks_dict.resolve(*a).cmp(stacks_dict.resolve(*b)));
         frames.dedup();
         let ids = frames
@@ -411,11 +667,21 @@ impl WireFrames {
                 )
             })
             .collect();
-        let names = frames
+        let mut names: Vec<String> = frames
             .iter()
             .map(|frame| stacks_dict.resolve(*frame).to_string())
             .collect();
-        Self { names, ids }
+        let other = include_other.then(|| {
+            if let Some(index) = names.iter().position(|name| name == "[other]") {
+                u32::try_from(index).expect("a flamegraph cannot contain more than u32 frames")
+            } else {
+                let index = u32::try_from(names.len())
+                    .expect("a flamegraph cannot contain more than u32 frames");
+                names.push("[other]".to_string());
+                index
+            }
+        });
+        Self { names, ids, other }
     }
 }
 
@@ -424,7 +690,7 @@ impl WireFrames {
 /// [Resolves](refine::resolve) the scope, primes an incremental
 /// [`FlamegraphAccum`] over the already-folded set, and emits an initial
 /// snapshot. Then it folds the not-yet-folded capped files in [order key] order
-/// (up to the [sampling cap](refine)), pushing a fresh full-tree SSE event as
+/// (up to the [sampling cap](refine)), pushing a fresh bounded-tree SSE event as
 /// each file lands, and closes when the work-list drains. The client re-renders
 /// on every event; there is no re-polling.
 ///
@@ -678,6 +944,7 @@ struct StreamCtx {
     min_poll_ns: Option<i64>,
     max_poll_ns: Option<i64>,
     wire_format: WireFormat,
+    inspect: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -834,6 +1101,7 @@ fn flamegraph_stream(
             Some("flat-v1") => WireFormat::FlatV1,
             _ => WireFormat::Legacy,
         },
+        inspect: params.inspect.clone(),
     };
     let accum = FlamegraphAccum::new(ctx.filter.clone());
     fold_stream::drive(agg, resolved, limits, FlamegraphSink { ctx, accum })
@@ -847,7 +1115,11 @@ fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> Fl
         WireFormat::InternedV1 => {
             FlamegraphTree::Interned(trie.into_interned_tree(snap.stacks_dict))
         }
-        WireFormat::FlatV1 => FlamegraphTree::Flat(trie.into_flat_tree(snap.stacks_dict)),
+        WireFormat::FlatV1 => FlamegraphTree::Flat(trie.into_projected_flat_tree(
+            snap.stacks_dict,
+            DEFAULT_FLAMEGRAPH_NODE_BUDGET,
+            ctx.inspect.as_deref(),
+        )),
     };
 
     // Echo the active filter values back to the UI (facet name → selected value).
@@ -1027,6 +1299,89 @@ mod tests {
             build_flamegraph_tree(&[(a, 5), (b, 5)], &stacks_dict).into_flat_tree(&stacks_dict);
         let second =
             build_flamegraph_tree(&[(b, 5), (a, 5)], &stacks_dict).into_flat_tree(&stacks_dict);
+
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn projected_tree_respects_budget_and_conserves_collapsed_counts() {
+        let mut stacks = HashMap::new();
+        let mut stack_counts = Vec::new();
+        for i in 0..20u8 {
+            let mut stack_id = [0u8; 16];
+            stack_id[0] = i;
+            stacks.insert(stack_id, vec![format!("leaf-{i}"), format!("branch-{i}")]);
+            stack_counts.push((stack_id, u64::from(i) + 1));
+        }
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+        let tree = build_flamegraph_tree(&stack_counts, &stacks_dict).into_projected_flat_tree(
+            &stacks_dict,
+            10,
+            None,
+        );
+
+        assert!(tree.nodes.len() <= 10);
+        assert_eq!(tree.total_nodes, 41);
+        assert!(tree.omitted_nodes > 0);
+        assert!(tree.frames.iter().any(|name| name == "[other]"));
+
+        let mut child_totals = vec![0u64; tree.nodes.len()];
+        for (index, node) in tree.nodes.iter().enumerate().skip(1) {
+            child_totals[usize::try_from(node.0).unwrap()] += node.2;
+            assert!(usize::try_from(node.0).unwrap() < index);
+        }
+        for (index, node) in tree.nodes.iter().enumerate() {
+            assert_eq!(
+                node.2,
+                node.3 + child_totals[index],
+                "projected node {index} must conserve its inclusive count"
+            );
+        }
+    }
+
+    #[test]
+    fn projected_tree_retains_inspected_path() {
+        let hot = [1u8; 16];
+        let cold = [2u8; 16];
+        let mut stacks = HashMap::new();
+        stacks.insert(hot, vec!["hot-leaf".to_string(), "hot-root".to_string()]);
+        stacks.insert(
+            cold,
+            vec!["focus-frame".to_string(), "cold-root".to_string()],
+        );
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+        let tree = build_flamegraph_tree(&[(hot, 1_000), (cold, 1)], &stacks_dict)
+            .into_projected_flat_tree(&stacks_dict, 4, Some("focus-frame"));
+
+        let emitted_names: Vec<_> = tree
+            .nodes
+            .iter()
+            .map(|node| tree.frames[usize::try_from(node.1).unwrap()].as_str())
+            .collect();
+        assert_eq!(tree.inspect_retained, Some(true));
+        assert!(emitted_names.contains(&"cold-root"));
+        assert!(emitted_names.contains(&"focus-frame"));
+        assert!(tree.nodes.len() <= 4);
+    }
+
+    #[test]
+    fn projected_tree_is_deterministic_across_input_order() {
+        let mut stacks = HashMap::new();
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        let c = [3u8; 16];
+        stacks.insert(a, vec!["z-leaf".to_string(), "shared".to_string()]);
+        stacks.insert(b, vec!["a-leaf".to_string(), "shared".to_string()]);
+        stacks.insert(c, vec!["focus".to_string(), "cold".to_string()]);
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+
+        let first = build_flamegraph_tree(&[(a, 5), (b, 5), (c, 1)], &stacks_dict)
+            .into_projected_flat_tree(&stacks_dict, 6, Some("focus"));
+        let second = build_flamegraph_tree(&[(c, 1), (b, 5), (a, 5)], &stacks_dict)
+            .into_projected_flat_tree(&stacks_dict, 6, Some("focus"));
 
         assert_eq!(
             serde_json::to_string(&first).unwrap(),

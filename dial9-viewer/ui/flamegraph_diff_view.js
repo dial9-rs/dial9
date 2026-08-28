@@ -593,7 +593,7 @@
 
     // ── Per-side SSE stream ──
     // One stream per side: the server emits cumulative snapshots after bounded
-    // cached batches, then a fresh full snapshot per newly-folded capped-prefix
+    // cached batches, then a fresh bounded snapshot per newly-folded capped-prefix
     // file, and closes when that work-list drains (the server owns the stop
     // condition — no client polling or plateau detection). A new tree on either
     // side triggers a re-merge + re-render. The cap is the
