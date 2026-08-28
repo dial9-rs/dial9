@@ -311,16 +311,24 @@ declare module "*/trace_analysis.js" {
     allocWeight?: number;
   }
 
+  type RequiredNumericKey<S> = {
+    [K in keyof S]-?: undefined extends S[K]
+      ? never
+      : S[K] extends number
+        ? K
+        : never;
+  }[keyof S] & string;
+
   export interface FlamegraphTreeOptions<S extends FlamegraphSampleInput> {
     /** Sample property used as the primary weight instead of `weight`. */
-    weightKey?: keyof S & string;
+    weightKey?: RequiredNumericKey<S>;
     /**
      * Sample property used as the secondary weight. Supplying this selects the
      * optimized path for profiles where every sample has both weight axes.
      */
-    allocWeightKey?: keyof S & string;
+    allocWeightKey?: RequiredNumericKey<S>;
     /** Sample property containing the first callchain index to include. */
-    callchainStartKey?: keyof S & string;
+    callchainStartKey?: RequiredNumericKey<S>;
   }
 
   export interface FlamegraphNode {

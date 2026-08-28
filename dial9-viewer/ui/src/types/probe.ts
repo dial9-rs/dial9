@@ -512,6 +512,19 @@ export function probeFlamegraph(container: HTMLElement, trace: ParsedTrace): voi
   void keyedTree.count;
   fg.setData(keyedHeapSamples, trace.callframeSymbols, { treeOptions });
 
+  type KeyProbeSample = (typeof keyedHeapSamples)[number] & {
+    optionalWeight?: number;
+  };
+  const invalidTreeOptions: FlamegraphTreeOptions<KeyProbeSample> = {
+    // @ts-expect-error weight fields must be required numeric properties.
+    weightKey: "callchain",
+    // @ts-expect-error optional numeric properties are not safe tree weights.
+    allocWeightKey: "optionalWeight",
+    // @ts-expect-error callchain offsets must be required numeric properties.
+    callchainStartKey: "callchain",
+  };
+  void invalidTreeOptions;
+
   // API mode: minimal toFgTree node into setTreeDirect.
   function toFgTree(node: { name: string; count: number; self: number; children?: { name: string; count: number; self: number }[] }): FlamegraphNode {
     const m = new Map<string, FlamegraphNode>();
