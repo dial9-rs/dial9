@@ -2,13 +2,12 @@
 //! Server-Sent Events, refining as source files fold.
 //!
 //! One request holds the connection open: it [resolves](refine::resolve) the
-//! scope, streams already-folded parts in bounded cumulative snapshots, then
-//! folds missing capped-prefix files and pushes a fresh bounded-tree snapshot
-//! as each file lands, closing when the bounded work-list drains. Each SSE `data:`
-//! frame is one
-//! [`FlamegraphResponse`] JSON object — the same shape the UI rendered per poll
-//! before — so the client just re-renders on every event.
+//! scope, streams coverage plus bounded partial trees while already-folded and
+//! missing capped-prefix files merge, then emits the full bounded tree after the
+//! work-list drains. Legacy response formats retain their cumulative snapshot
+//! behavior.
 
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::convert::Infallible;
@@ -33,6 +32,8 @@ use crate::server::fold_stream;
 use crate::server::metrics::OperationMetrics;
 
 const DEFAULT_FLAMEGRAPH_NODE_BUDGET: usize = 50_000;
+const PARTIAL_FLAMEGRAPH_NODE_BUDGET: usize = 2_000;
+const PARTIAL_FLAMEGRAPH_MAX_DEPTH: usize = 16;
 
 #[derive(Deserialize)]
 pub struct FlamegraphParams {
@@ -99,12 +100,23 @@ pub struct FlamegraphParams {
 
 #[derive(Serialize)]
 pub struct FlamegraphResponse {
+    /// Present for the negotiated coverage/partial/final protocol; omitted from
+    /// legacy and interned-v1 snapshots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
     pub tree: FlamegraphTree,
     pub total_samples: usize,
     /// Present in demand-driven mode: how much of the scope has been folded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<Coverage>,
     pub metadata: FlamegraphMetadata,
+}
+
+#[derive(Serialize)]
+struct FlamegraphCoverage {
+    kind: &'static str,
+    total_samples: usize,
+    coverage: Coverage,
 }
 
 #[derive(Serialize)]
@@ -211,6 +223,14 @@ fn build_flamegraph_tree(
     stack_counts: &[([u8; 16], u64)],
     stacks_dict: &StackDictionary,
 ) -> FlamegraphTrie {
+    build_flamegraph_tree_to_depth(stack_counts, stacks_dict, usize::MAX)
+}
+
+fn build_flamegraph_tree_to_depth(
+    stack_counts: &[([u8; 16], u64)],
+    stacks_dict: &StackDictionary,
+    max_depth: usize,
+) -> FlamegraphTrie {
     let mut trie = FlamegraphTrie::new(stacks_dict.root());
 
     for (stack_id, count) in stack_counts {
@@ -221,11 +241,11 @@ fn build_flamegraph_tree(
         // Frames are stored leaf→root; flamegraph trie inserts root→leaf
         trie.nodes[0].count += count;
         let mut node = 0;
-        for frame in frames.iter().rev() {
+        for frame in frames.iter().rev().take(max_depth) {
             node = trie.get_or_insert_child(node, *frame);
             trie.nodes[node].count += count;
         }
-        // Leaf gets self-time
+        // The leaf, or the deepest retained prefix node, gets self-time.
         trie.nodes[node].self_count += count;
     }
 
@@ -688,11 +708,11 @@ impl WireFrames {
 /// Handler for GET /api/flamegraph — a Server-Sent Events stream.
 ///
 /// [Resolves](refine::resolve) the scope, primes an incremental
-/// [`FlamegraphAccum`] over the already-folded set, and emits an initial
-/// snapshot. Then it folds the not-yet-folded capped files in [order key] order
-/// (up to the [sampling cap](refine)), pushing a fresh bounded-tree SSE event as
-/// each file lands, and closes when the work-list drains. The client re-renders
-/// on every event; there is no re-polling.
+/// [`FlamegraphAccum`] over the already-folded set, and emits initial coverage.
+/// Then it folds the not-yet-folded capped files in [order key] order (up to the
+/// [sampling cap](refine)), pushing coverage as each file lands, bounded partial
+/// trees at exponential checkpoints, and one full bounded tree when the
+/// work-list drains. There is no re-polling.
 ///
 /// The aggregation context comes from [`AppState::agg_context_for`]: a `bucket`
 /// param builds a per-request bring-your-own-credentials context; otherwise the
@@ -954,15 +974,102 @@ enum WireFormat {
     FlatV1,
 }
 
+#[derive(Clone, Copy)]
+enum TreeEventKind {
+    Partial,
+    Final,
+}
+
+impl TreeEventKind {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Partial => "partial",
+            Self::Final => "final",
+        }
+    }
+}
+
+struct PartialTreeCadence {
+    next_files: Cell<usize>,
+}
+
+impl PartialTreeCadence {
+    fn new() -> Self {
+        Self {
+            next_files: Cell::new(1),
+        }
+    }
+
+    fn should_emit(&self, files_folded: usize, total_samples: usize) -> bool {
+        let next = self.next_files.get();
+        if total_samples == 0 || files_folded < next {
+            return false;
+        }
+
+        let next = files_folded
+            .checked_add(1)
+            .and_then(usize::checked_next_power_of_two)
+            .unwrap_or(usize::MAX);
+        self.next_files.set(next);
+        true
+    }
+}
+
 /// The flamegraph [`FoldSink`] adapter: owns the incremental [`FlamegraphAccum`]
 /// and the per-request [`StreamCtx`]. Supplies the three operations that differ
 /// from span-stats; the folded-set discipline lives in the driver.
 struct FlamegraphSink {
     ctx: StreamCtx,
     accum: FlamegraphAccum,
+    partial_cadence: PartialTreeCadence,
+}
+
+impl FlamegraphSink {
+    fn coverage(
+        &self,
+        resolved: &Resolved,
+        files_folded: usize,
+        folded_set_id: &str,
+        target_folded_set_id: Option<&str>,
+        hosts_folded: usize,
+        errors: &FoldErrors,
+    ) -> Coverage {
+        fold_stream::coverage_from(
+            resolved,
+            files_folded,
+            folded_set_id,
+            target_folded_set_id,
+            hosts_folded,
+            errors,
+            self.accum.total_samples(),
+        )
+    }
+
+    fn tree_event(&self, coverage: Coverage, kind: TreeEventKind) -> Event {
+        let snap = self.accum.snapshot();
+        let resp = build_response(&self.ctx, &snap, coverage, kind);
+        flamegraph_json_event(&resp)
+    }
+}
+
+fn flamegraph_json_event(value: &impl Serialize) -> Event {
+    // Serialization only fails for an unsupported value. Keep the stream alive
+    // with a comment so one bad event cannot tear down an in-flight fold.
+    Event::default().json_data(value).unwrap_or_else(|e| {
+        fold_stream::rate_limited_warn("flamegraph: event serialize failed", &anyhow::anyhow!(e));
+        Event::default().comment("serialize error")
+    })
 }
 
 impl fold_stream::FoldSink for FlamegraphSink {
+    fn seed_batch_size(&self, first_batch: bool) -> usize {
+        if first_batch && matches!(self.ctx.wire_format, WireFormat::FlatV1) {
+            1
+        } else {
+            Self::SEED_BATCH_SIZE
+        }
+    }
+
     async fn seed_batch(
         &mut self,
         agg: &AggContext,
@@ -1047,37 +1154,65 @@ impl fold_stream::FoldSink for FlamegraphSink {
         hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event {
-        let snap = self.accum.snapshot();
-        let coverage = fold_stream::coverage_from(
+        let coverage = self.coverage(
             resolved,
             files_folded,
             folded_set_id,
             target_folded_set_id,
             hosts_folded,
             errors,
-            snap.total_samples,
         );
-        let resp = build_response(&self.ctx, &snap, coverage);
-        // `json_data` only fails if the value can't serialize; our response always
-        // can, so fall back to an empty comment event rather than propagating.
-        Event::default().json_data(&resp).unwrap_or_else(|e| {
-            fold_stream::rate_limited_warn(
-                "flamegraph: event serialize failed",
-                &anyhow::anyhow!(e),
+        match self.ctx.wire_format {
+            WireFormat::FlatV1
+                if self
+                    .partial_cadence
+                    .should_emit(files_folded, self.accum.total_samples()) =>
+            {
+                self.tree_event(coverage, TreeEventKind::Partial)
+            }
+            WireFormat::FlatV1 => flamegraph_json_event(&FlamegraphCoverage {
+                kind: "coverage",
+                total_samples: self.accum.total_samples(),
+                coverage,
+            }),
+            WireFormat::Legacy | WireFormat::InternedV1 => {
+                self.tree_event(coverage, TreeEventKind::Final)
+            }
+        }
+    }
+
+    fn final_event(
+        &self,
+        resolved: &Resolved,
+        files_folded: usize,
+        folded_set_id: &str,
+        target_folded_set_id: Option<&str>,
+        hosts_folded: usize,
+        errors: &FoldErrors,
+    ) -> Option<Event> {
+        matches!(self.ctx.wire_format, WireFormat::FlatV1).then(|| {
+            let coverage = self.coverage(
+                resolved,
+                files_folded,
+                folded_set_id,
+                target_folded_set_id,
+                hosts_folded,
+                errors,
             );
-            Event::default().comment("serialize error")
+            self.tree_event(coverage, TreeEventKind::Final)
         })
     }
 }
 
 /// Build the SSE event stream for one flamegraph request.
 ///
-/// Cached already-folded parts are merged in bounded batches, with a cumulative
-/// snapshot emitted after each batch. Once cached state is exhausted, each later
-/// step pulls one file off [`refine::fold_stream`], reads + merges its part-files,
-/// and emits a refined snapshot, closing when the work-list drains. Dropping the
-/// returned stream (client disconnect) drops the fold stream, cancelling
-/// in-flight folds.
+/// Cached already-folded parts are merged in bounded batches, with coverage
+/// emitted after each batch. Once cached state is exhausted, each later step
+/// pulls one file off [`refine::fold_stream`], reads + merges its part-files,
+/// and emits refined coverage. Flat-v1 adds cheap partial trees at exponential
+/// file-coverage checkpoints and one full bounded tree after the work-list
+/// drains; legacy formats retain cumulative trees. Dropping the returned stream
+/// (client disconnect) drops the fold stream, cancelling in-flight folds.
 fn flamegraph_stream(
     agg: AggContext,
     resolved: Resolved,
@@ -1104,12 +1239,33 @@ fn flamegraph_stream(
         inspect: params.inspect.clone(),
     };
     let accum = FlamegraphAccum::new(ctx.filter.clone());
-    fold_stream::drive(agg, resolved, limits, FlamegraphSink { ctx, accum })
+    fold_stream::drive(
+        agg,
+        resolved,
+        limits,
+        FlamegraphSink {
+            ctx,
+            accum,
+            partial_cadence: PartialTreeCadence::new(),
+        },
+    )
 }
 
 /// Shape a [`FlamegraphResponse`] from an [`AggSnapshot`] + [`Coverage`].
-fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> FlamegraphResponse {
-    let trie = build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict);
+fn build_response(
+    ctx: &StreamCtx,
+    snap: &AggSnapshot,
+    coverage: Coverage,
+    kind: TreeEventKind,
+) -> FlamegraphResponse {
+    let trie = match (ctx.wire_format, kind) {
+        (WireFormat::FlatV1, TreeEventKind::Partial) => build_flamegraph_tree_to_depth(
+            &snap.stack_counts,
+            snap.stacks_dict,
+            PARTIAL_FLAMEGRAPH_MAX_DEPTH,
+        ),
+        _ => build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict),
+    };
     let tree = match ctx.wire_format {
         WireFormat::Legacy => FlamegraphTree::Legacy(trie.into_legacy(snap.stacks_dict)),
         WireFormat::InternedV1 => {
@@ -1117,7 +1273,10 @@ fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> Fl
         }
         WireFormat::FlatV1 => FlamegraphTree::Flat(trie.into_projected_flat_tree(
             snap.stacks_dict,
-            DEFAULT_FLAMEGRAPH_NODE_BUDGET,
+            match kind {
+                TreeEventKind::Partial => PARTIAL_FLAMEGRAPH_NODE_BUDGET,
+                TreeEventKind::Final => DEFAULT_FLAMEGRAPH_NODE_BUDGET,
+            },
             ctx.inspect.as_deref(),
         )),
     };
@@ -1131,6 +1290,7 @@ fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> Fl
         .collect();
 
     FlamegraphResponse {
+        kind: matches!(ctx.wire_format, WireFormat::FlatV1).then_some(kind.wire_name()),
         tree,
         total_samples: snap.total_samples,
         coverage: Some(coverage),
@@ -1387,5 +1547,79 @@ mod tests {
             serde_json::to_string(&first).unwrap(),
             serde_json::to_string(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn partial_tree_limits_depth_and_conserves_counts() {
+        let mut stacks = HashMap::new();
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        stacks.insert(
+            a,
+            vec![
+                "left-leaf".to_string(),
+                "left-middle".to_string(),
+                "shared".to_string(),
+                "root".to_string(),
+            ],
+        );
+        stacks.insert(
+            b,
+            vec![
+                "right-leaf".to_string(),
+                "right-middle".to_string(),
+                "shared".to_string(),
+                "root".to_string(),
+            ],
+        );
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+        let tree = build_flamegraph_tree_to_depth(&[(a, 4), (b, 3)], &stacks_dict, 2)
+            .into_projected_flat_tree(&stacks_dict, PARTIAL_FLAMEGRAPH_NODE_BUDGET, None);
+
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.nodes[0].2, 7);
+        assert_eq!(tree.nodes.iter().map(|node| node.3).sum::<u64>(), 7);
+    }
+
+    #[test]
+    fn partial_tree_cadence_advances_at_power_of_two_crossings() {
+        let cadence = PartialTreeCadence::new();
+
+        assert!(!cadence.should_emit(0, 0));
+        assert!(cadence.should_emit(1, 10));
+        assert!(!cadence.should_emit(1, 10));
+        assert!(cadence.should_emit(2, 20));
+        assert!(!cadence.should_emit(3, 30));
+        assert!(cadence.should_emit(25, 250));
+        assert!(!cadence.should_emit(25, 250));
+        assert_eq!(cadence.next_files.get(), 32);
+    }
+
+    #[test]
+    fn coverage_event_carries_no_tree_or_metadata() {
+        let event = FlamegraphCoverage {
+            kind: "coverage",
+            total_samples: 42,
+            coverage: Coverage {
+                files_matched: 10,
+                files_folded: 3,
+                folded_set_id: Some("folded".to_string()),
+                target_folded_set_id: None,
+                fold_work_cap: 4,
+                samples_folded: 42,
+                total_bytes: 1_024,
+                hosts_matched: 2,
+                hosts_folded: 1,
+                fold_errors: 0,
+                fold_error_sample: None,
+            },
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["kind"], "coverage");
+        assert_eq!(json["total_samples"], 42);
+        assert_eq!(json["coverage"]["files_folded"], 3);
+        assert!(json.get("tree").is_none());
+        assert!(json.get("metadata").is_none());
     }
 }

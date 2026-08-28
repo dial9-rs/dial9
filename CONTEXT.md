@@ -52,10 +52,12 @@ The query control flow, realized as a **single held-open SSE stream** per
 request. The server *resolves* the scope once (list → [[order-key]] sort →
 take the first [[sampling-cap]] files → list the folded set), emits the
 already-folded snapshot immediately, then folds the not-yet-folded
-[[source-file]]s (in order) concurrently and pushes a fresh tree +
-[[coverage]] block as each file lands, closing the stream at the cap. The
-endpoint merges each folded file into an in-memory accumulator incrementally
-(one merge per file), rather than re-scanning the whole folded set per event.
+[[source-file]]s (in order) concurrently and pushes fresh [[coverage]] as each
+file lands. Flamegraphs additionally push bounded, depth-limited partial trees
+at exponentially-spaced file-coverage checkpoints, then one full bounded tree
+at the cap. The endpoint merges each folded file into an in-memory accumulator
+incrementally (one merge per file), rather than re-scanning the whole folded set
+per event.
 No background tasks and no coordination — folding runs only while the request
 is open (the fold `JoinSet` is dropped, cancelling in-flight folds, when the
 client disconnects), and re-folding is safe by idempotency. Coverage climbs

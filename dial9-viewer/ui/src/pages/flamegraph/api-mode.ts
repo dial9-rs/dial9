@@ -1,9 +1,8 @@
 // The aggregated server-side flamegraph mode (`?api=1`): instead of fetching +
 // decoding trace bytes client-side, the page opens the server's /api/flamegraph
-// SSE stream and renders the pre-built tree each streamed snapshot carries. The
-// server owns the refine/stop loop: it emits the already-folded snapshot first,
-// then folds to the cap and pushes a fresh tree per file, closing the stream
-// when done.
+// SSE stream, renders bounded partial trees while the server folds, then adopts
+// the full bounded tree carried by the final event. The server owns the
+// refine/stop loop and closes the stream when the bounded work-list drains.
 
 import {
   Dial9Creds,
@@ -28,7 +27,9 @@ import type {
   Coverage,
   FlamegraphMetadata,
   FlamegraphNode,
+  FlamegraphCoverageEvent,
   FlamegraphResponse,
+  FlamegraphStreamEvent,
 } from "../../lib/trace/index.js";
 import { createFlamegraph, diffSearch, fullScopeQuery } from "../../lib/canvas/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
@@ -363,7 +364,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     setRefiningUi(false);
   }
 
-  // Render one streamed snapshot (a full FlamegraphResponse).
+  // Render one bounded partial/final tree.
   function renderEvent(resp: FlamegraphResponse): void {
     gotEvent = true;
     const meta = resp.metadata;
@@ -392,6 +393,16 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       cov == null
         ? baseStats(resp)
         : baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
+    statsEl.innerHTML =
+      lastBadge +
+      ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
+  }
+
+  function renderCoverageEvent(event: FlamegraphCoverageEvent): void {
+    lastCoverage = event.coverage;
+    lastBadge =
+      `${event.total_samples.toLocaleString()} samples \u00b7 ` +
+      formatCoverageBadge(event.coverage);
     statsEl.innerHTML =
       lastBadge +
       ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
@@ -427,19 +438,25 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       signal: abortCtl.signal,
       onEvent: (obj) => {
         if (token !== streamToken) return;
-        const resp = obj as FlamegraphResponse;
+        const event = obj as FlamegraphStreamEvent;
         if (
           !shouldAdoptRefinementSnapshot(
             preserveExisting,
             baselineFilesFolded,
-            resp.coverage?.files_folded ?? 0,
+            event.coverage?.files_folded ?? 0,
           )
         ) {
           return;
         }
+        if (event.kind === "coverage") {
+          renderCoverageEvent(event);
+          return;
+        }
+        const resp = event;
         // setTreeDirect resets the canvas view, so carry the live zoom across
-        // a same-scope refine - the user did not ask to be moved.
-        const preservedView = preserveExisting ? fg.getViewState() : null;
+        // later partials and same-scope refinement.
+        const preservedView =
+          preserveExisting || gotEvent ? fg.getViewState() : null;
         renderEvent(resp);
         if (preservedView) fg.applyViewState(preservedView);
         inspectSync.restoreAfterTreeChange();
