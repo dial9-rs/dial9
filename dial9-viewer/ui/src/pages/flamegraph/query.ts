@@ -126,7 +126,7 @@ export function buildApiUrl(state: ApiQueryState, origin: string): string {
   writeRequestParams(u.searchParams, state.source);
   appendScope(u.searchParams, state);
   if (state.maxFiles != null) u.searchParams.set("max_files", String(state.maxFiles));
-  u.searchParams.set("format", "interned-v1");
+  u.searchParams.set("format", "flat-v1");
   return u.toString();
 }
 

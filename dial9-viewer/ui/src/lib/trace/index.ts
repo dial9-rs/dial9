@@ -364,6 +364,8 @@ export type {
   Exemplar,
   ExemplarAttribute,
   FacetResult,
+  FlatApiFlamegraphNode,
+  FlatApiFlamegraphTree,
   FlamegraphMetadata,
   FlamegraphResponse,
   InternedApiFlamegraphNode,

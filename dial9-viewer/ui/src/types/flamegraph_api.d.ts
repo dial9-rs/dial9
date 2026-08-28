@@ -110,7 +110,8 @@ declare module "*/flamegraph_api.js" {
 
   /**
    * Decode the negotiated aggregate tree encoding. Legacy nested-name trees
-   * pass through; interned-v1 frame IDs are resolved through its frame table.
+   * pass through; interned-v1 and flat-v1 frame IDs are resolved through their
+   * frame tables.
    */
   export function decodeFlamegraphTree(response: {
     tree: unknown;
