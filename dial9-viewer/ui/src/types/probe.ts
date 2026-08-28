@@ -60,6 +60,7 @@ import type {
   WorkerLane,
   TracingSpan,
   FlamegraphNode,
+  FlamegraphTreeOptions,
 } from "../../trace_analysis.js";
 import {
   formatHumanDuration,
@@ -490,6 +491,26 @@ export function probeFlamegraph(container: HTMLElement, trace: ParsedTrace): voi
       return `~${count} (${pct}%) ${self} self${allocs !== null ? ` ${allocs} allocs` : ""}`;
     },
   });
+
+  // Keyed weighted columns avoid remapping large heap profiles.
+  const keyedHeapSamples = samples.map((s) => ({
+    ...s,
+    callchainStart: 0,
+    byteWeight: 8,
+    allocationWeight: 1,
+  }));
+  const treeOptions: FlamegraphTreeOptions<(typeof keyedHeapSamples)[number]> = {
+    weightKey: "byteWeight",
+    allocWeightKey: "allocationWeight",
+    callchainStartKey: "callchainStart",
+  };
+  const keyedTree: FlamegraphNode = buildFlamegraphTree(
+    keyedHeapSamples,
+    trace.callframeSymbols,
+    treeOptions,
+  );
+  void keyedTree.count;
+  fg.setData(keyedHeapSamples, trace.callframeSymbols, { treeOptions });
 
   // API mode: minimal toFgTree node into setTreeDirect.
   function toFgTree(node: { name: string; count: number; self: number; children?: { name: string; count: number; self: number }[] }): FlamegraphNode {

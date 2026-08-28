@@ -834,6 +834,57 @@ describe("flamegraph", () => {
       "node.allocCount should be undefined for unweighted samples",
     ).toBe(true);
   });
+
+  it("resolves each repeated address once per tree build", () => {
+    const callframeSymbols = new Map([
+      ["0xD", [{ symbol: "leaf_fn", location: "leaf.rs:1" }]],
+      ["0xE", [{ symbol: "caller_fn", location: "caller.rs:1" }]],
+    ]);
+    const mapGet = callframeSymbols.get.bind(callframeSymbols);
+    let lookups = 0;
+    callframeSymbols.get = (key) => {
+      lookups += 1;
+      return mapGet(key);
+    };
+    const samples = Array.from({ length: 100 }, () => ({
+      callchain: ["0xD", "0xE"],
+    }));
+
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+
+    expect(tree.count).toBe(100);
+    expect(lookups).toBe(2);
+  });
+
+  it("reads weighted profile fields and a callchain start offset without remapping", () => {
+    const callframeSymbols = new Map([
+      ["hook", { symbol: "allocator_hook", location: null }],
+      ["leaf", { symbol: "leaf_fn", location: null }],
+      ["root", { symbol: "root_fn", location: null }],
+    ]);
+    const samples = [
+      {
+        callchain: ["hook", "leaf", "root"],
+        callchainStart: 1,
+        bytes: 128,
+        allocations: 4,
+      },
+    ];
+
+    const tree = buildFlamegraphTree(samples, callframeSymbols, {
+      weightKey: "bytes",
+      allocWeightKey: "allocations",
+      callchainStartKey: "callchainStart",
+    });
+
+    expect(tree.count).toBe(128);
+    expect(tree.allocCount).toBe(4);
+    const root = tree.children.get("root_fn");
+    const leaf = root?.children.get("leaf_fn");
+    expect(leaf?.count).toBe(128);
+    expect(leaf?.allocCount).toBe(4);
+    expect(leaf?.children.has("allocator_hook")).toBe(false);
+  });
 });
 
 // ── TaskDumpEvent parsing (verified against the demo trace) ──
