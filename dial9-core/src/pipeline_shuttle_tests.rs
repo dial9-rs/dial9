@@ -450,10 +450,14 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
     warn_count.load(StdOrdering::Relaxed)
 }
 
-// The fault is armed on the test thread but read on the flush thread,
-// this proves it crosses that boundary. No `pct`: the spawning thread
-// parks on `.join()` immediately with no other work in between, so the
-// two threads are never simultaneously runnable.
+// Pins the choice of using a real `std::thread_local!` on `primitives::fs::FAULT`
+// so a fault armed on this thread is visible to a spawned thread too.
+//
+// If a future upgrade caused shuttle to lose visibility of that thread,
+// this is what would catch it.
+//
+// No `pct`: the spawning thread parks on `.join()` immediately with no
+// other work in between, so there's no interleaving choice to explore.
 crate::shuttle_test! {
     default, determinism_only;
     fn fs_fault_visible_across_threads() {
