@@ -313,23 +313,25 @@ impl EventBuffer<'_> {
 }
 
 #[cfg(test)]
+fn sample_event() -> crate::format::ClockSyncEvent {
+    crate::format::ClockSyncEvent {
+        timestamp_ns: 1000,
+        realtime_ns: 2000,
+    }
+}
+
+/// Helper: create a SharedState with recording enabled.
+#[cfg(test)]
+fn enabled_shared_state() -> SharedState {
+    let ss = SharedState::new(0);
+    ss.enable();
+    ss
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::primitives::sync::atomic::AtomicBool;
-
-    fn sample_event() -> crate::format::ClockSyncEvent {
-        crate::format::ClockSyncEvent {
-            timestamp_ns: 1000,
-            realtime_ns: 2000,
-        }
-    }
-
-    /// Helper: create a SharedState with recording enabled.
-    fn enabled_shared_state() -> SharedState {
-        let ss = SharedState::new(0);
-        ss.enable();
-        ss
-    }
 
     #[test]
     fn record_event_registers_tl_buffer_handle() {
@@ -535,6 +537,13 @@ mod tests {
     }
 }
 
+// Every scenario below that touches `drain_epoch`/`flush_epoch`/`state`
+// shares one caveat: those fields are `Ordering::Relaxed` throughout, but
+// shuttle 0.9.1 only correctly models `SeqCst` (it treats every other
+// ordering as `SeqCst`). A `Relaxed`-specific bug is invisible here
+// regardless of how exhaustively a scenario searches, even though it's
+// reachable on real hardware -- only the surrounding CAS/transition logic
+// is actually under test.
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
@@ -548,19 +557,6 @@ mod shuttle_tests {
     const EVENTS_PER_WRITER: u64 = 3;
     const DRAIN_TICKS: usize = 3;
 
-    fn sample_event() -> crate::format::ClockSyncEvent {
-        crate::format::ClockSyncEvent {
-            timestamp_ns: 1000,
-            realtime_ns: 2000,
-        }
-    }
-
-    fn enabled_shared_state() -> SharedState {
-        let ss = SharedState::new(0);
-        ss.enable();
-        ss
-    }
-
     crate::shuttle_test! {
         default;
         // Shuttle counterpart of `concurrent_record_and_drain_preserves_event_count`:
@@ -568,6 +564,9 @@ mod shuttle_tests {
         // the drain epoch and intrusively drains, exploring interleavings
         // exhaustively instead of sampling them. Every recorded event must reach
         // the collector exactly once, regardless of schedule.
+        //
+        // Keeping real-thread proptest above because of the `Ordering::Relaxed` caveat
+        // this scenario shares with the others below (see module comments).
         fn shuttle_concurrent_record_and_drain() {
             let ss = Arc::new(enabled_shared_state());
 
@@ -619,6 +618,153 @@ mod shuttle_tests {
                 total,
                 WRITERS as u64 * EVENTS_PER_WRITER,
                 "every recorded event must reach the collector exactly once"
+            );
+        }
+    }
+
+    const LIFECYCLE_WRITERS: usize = 2;
+
+    crate::shuttle_test! {
+        default;
+        // `disable()` raced against the recording gate, `if_enabled`
+        //
+        // Every `Some` return must land exactly one event in the collector,
+        // and every `None` must record nothing, so the collector total equals the number
+        // of `Some`s, no matter where `disable`/`enable`/`mark_stopped`
+        // interleave.
+        //
+        // This does NOT assert "no events arrive after disable()". A writer that passed
+        // `is_enabled()` completes its write after `disable()` returns (by design).
+        //
+        // Also subject to the `Ordering::Relaxed` caveat (see module comments).
+        fn shuttle_disable_races_record() {
+            let ss = Arc::new(enabled_shared_state());
+
+            let writers: Vec<_> = (0..LIFECYCLE_WRITERS)
+                .map(|_| {
+                    let ss = ss.clone();
+                    crate::primitives::thread::spawn(move || {
+                        let mut recorded = 0u64;
+                        for _ in 0..EVENTS_PER_WRITER {
+                            // Production entry point, not the `#[cfg(test)]`
+                            // `SharedState::record_encodable_event` shortcut:
+                            // the enabled check and the write must be one call.
+                            if ss
+                                .if_enabled(|buf| buf.record_encodable_event(&sample_event()))
+                                .is_some()
+                            {
+                                recorded += 1;
+                            }
+                        }
+                        recorded
+                    })
+                })
+                .collect();
+
+            let lifecycle = {
+                let ss = ss.clone();
+                crate::primitives::thread::spawn(move || {
+                    ss.disable(); // Enabled -> Disabled
+                    ss.enable(); // Disabled -> Enabled (re-arm)
+                    ss.disable();
+                    ss.mark_stopped(); // terminal
+                })
+            };
+
+            let mut expected = 0u64;
+            for w in writers {
+                expected += w.join().unwrap();
+            }
+            lifecycle.join().unwrap();
+
+            // `Stopped` is terminal regardless of schedule: a `disable()` or
+            // `enable()` that lost the race must not have clobbered it back
+            // to a live state. Catches a CAS -> plain `store` regression in
+            // either.
+            assert!(ss.is_stopped(), "Stopped must be terminal");
+            ss.enable();
+            assert!(!ss.is_enabled(), "enable() must be a no-op once stopped");
+
+            // Drain happens after `mark_stopped`: draining is
+            // state-independent, so buffered events are still recoverable
+            // at shutdown.
+            ss.bump_drain_epoch();
+            ss.drain_all_tl_buffers();
+
+            let mut total = 0u64;
+            while let Some(batch) = ss.collector.next() {
+                total += batch.event_count();
+            }
+            assert_eq!(ss.collector.take_dropped_batches(), 0);
+            assert_eq!(
+                total, expected,
+                "every if_enabled that returned Some must yield exactly one event"
+            );
+        }
+    }
+
+    crate::shuttle_test! {
+        default;
+        // Writer threads exit *while* the drainer is mid-drain, so the TLB
+        // `Drop` flush (`encoder.rs`'s thread-local buffer handle) overlaps
+        // `drain_all_tl_buffers`'s `Weak::upgrade` + prune logic.
+        //
+        // Whether a writer still holds a pending event at exit is schedule-dependent.
+        // So some interleavings exercise upgrade-vs-teardown without exercising the
+        // `Drop` flush itself.
+        //
+        // Also subject to the `Ordering::Relaxed` caveat (see module comments).
+        fn shuttle_writer_exit_races_drain() {
+            let ss = Arc::new(enabled_shared_state());
+
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|_| {
+                    let ss = ss.clone();
+                    crate::primitives::thread::spawn(move || {
+                        ss.if_enabled(|buf| buf.record_encodable_event(&sample_event()));
+                        // Return immediately: the next scheduling points are
+                        // the thread-local destructor, the final `Arc`
+                        // decrement, and the `Mutex` drop.
+                    })
+                })
+                .collect();
+
+            let drainer = {
+                let ss = ss.clone();
+                crate::primitives::thread::spawn(move || {
+                    for _ in 0..DRAIN_TICKS {
+                        ss.bump_drain_epoch();
+                        // No `yield_now` grace here, unlike
+                        // `shuttle_concurrent_record_and_drain`: draining
+                        // while handles are still live is the point.
+                        ss.drain_all_tl_buffers();
+                    }
+                })
+            };
+
+            // Deliberately NOT joined before the drainer runs.
+            for w in writers {
+                w.join().unwrap();
+            }
+            drainer.join().unwrap();
+
+            ss.bump_drain_epoch();
+            ss.drain_all_tl_buffers();
+
+            let mut total = 0u64;
+            while let Some(batch) = ss.collector.next() {
+                total += batch.event_count();
+            }
+            assert_eq!(ss.collector.take_dropped_batches(), 0);
+            assert_eq!(
+                total, WRITERS as u64,
+                "each writer's event must arrive exactly once, whether flushed by \
+                 the intrusive drain or by the TLB Drop impl on thread exit"
+            );
+            assert_eq!(
+                ss.tl_buffers.lock().unwrap().len(),
+                0,
+                "all handles are dead after join; the final drain must prune them"
             );
         }
     }
