@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result, bail, ensure};
 use dial9_trace_format::decoder::Decoder;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de};
 use std::{collections::BTreeSet, num::NonZeroU64};
 
 const EXPECTATION_EVENT: &str = "TelemetryFixtureExpectationEvent";
@@ -8,12 +8,25 @@ const MARKER_EVENT: &str = "TelemetryFixtureMarkerEvent";
 const FIXTURE_PREFIX: &str = "dial9_fixture_";
 const WEIGHT_SEPARATOR: &str = "_weight_";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum FixtureFeature {
     Cpu,
     TaskDump,
     Span,
+}
+
+impl<'de> Deserialize<'de> for FixtureFeature {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "cpu" => Ok(Self::Cpu),
+            "task_dump" => Ok(Self::TaskDump),
+            "span" => Ok(Self::Span),
+            value => Err(de::Error::unknown_variant(
+                value,
+                &["cpu", "task_dump", "span"],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -98,11 +111,23 @@ struct MarkerEvent {
     phase: MarkerPhase,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy)]
 enum MarkerPhase {
     MeasurementStart,
     MeasurementEnd,
+}
+
+impl<'de> Deserialize<'de> for MarkerPhase {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "measurement_start" => Ok(Self::MeasurementStart),
+            "measurement_end" => Ok(Self::MeasurementEnd),
+            value => Err(de::Error::unknown_variant(
+                value,
+                &["measurement_start", "measurement_end"],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
