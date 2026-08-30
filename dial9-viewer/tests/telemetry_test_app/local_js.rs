@@ -1,4 +1,6 @@
-use super::expectations::{ExpectedModel, ExpectedStackEdge, FixtureFeature, FunctionSymbol};
+use super::expectations::{
+    ExpectedModel, ExpectedStackEdge, FixtureFeature, FunctionSymbol, SpanName,
+};
 use anyhow::{Context as _, Result, ensure};
 use serde::Deserialize;
 use std::{path::Path, process::Command};
@@ -15,22 +17,22 @@ struct LocalObservations {
 #[derive(Debug, Deserialize)]
 struct ObservedStack {
     feature: FixtureFeature,
-    frames: Vec<String>,
+    frames: Vec<FunctionSymbol>,
     count: u64,
 }
 
 #[derive(Debug, Deserialize)]
 struct ObservedSpan {
-    name: String,
-    parent: Option<String>,
+    name: SpanName,
+    parent: Option<SpanName>,
     field_names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ObservedSpanAssociation {
     feature: FixtureFeature,
-    symbol: String,
-    active_span: String,
+    symbol: FunctionSymbol,
+    active_span: SpanName,
 }
 
 pub(crate) fn check_local_trace(
@@ -102,7 +104,7 @@ fn compare_observations(expected: &ExpectedModel, observed: &LocalObservations) 
 
     for span in &expected.spans {
         ensure!(
-            observed.spans.iter().any(|item| item.name == span.as_str()),
+            observed.spans.iter().any(|item| &item.name == span),
             "local JavaScript parser did not observe span {:?}",
             span.as_str()
         );
@@ -110,8 +112,7 @@ fn compare_observations(expected: &ExpectedModel, observed: &LocalObservations) 
     for edge in &expected.span_edges {
         ensure!(
             observed.spans.iter().any(|span| {
-                span.name == edge.child.as_str()
-                    && span.parent.as_deref() == Some(edge.parent.as_str())
+                span.name == edge.child && span.parent.as_ref() == Some(&edge.parent)
             }),
             "local JavaScript parser did not observe span edge {:?} -> {:?}",
             edge.parent.as_str(),
@@ -133,8 +134,8 @@ fn compare_observations(expected: &ExpectedModel, observed: &LocalObservations) 
         ensure!(
             observed.associations.iter().any(|item| {
                 item.feature == feature
-                    && item.symbol == association.symbol.as_str()
-                    && item.active_span == association.active_span.as_str()
+                    && item.symbol == association.symbol
+                    && item.active_span == association.active_span
             }),
             "local JavaScript parser did not associate {:?} with span {:?}",
             association.symbol.as_str(),
@@ -145,7 +146,7 @@ fn compare_observations(expected: &ExpectedModel, observed: &LocalObservations) 
     let cycle_spans: Vec<_> = observed
         .spans
         .iter()
-        .filter(|span| span.name == "dial9_fixture_span_cycle")
+        .filter(|span| span.name.as_str() == "dial9_fixture_span_cycle")
         .collect();
     ensure!(
         !cycle_spans.is_empty()
@@ -167,21 +168,15 @@ fn symbol_count(
         .stacks
         .iter()
         .filter(|stack| {
-            stack.feature == feature && stack.frames.iter().any(|frame| frame == symbol.as_str())
+            stack.feature == feature && stack.frames.iter().any(|frame| frame == symbol)
         })
         .map(|stack| stack.count)
         .sum()
 }
 
 fn stack_has_edge(stack: &ObservedStack, edge: &ExpectedStackEdge) -> bool {
-    let parent = stack
-        .frames
-        .iter()
-        .position(|frame| frame == edge.parent.as_str());
-    let child = stack
-        .frames
-        .iter()
-        .position(|frame| frame == edge.child.as_str());
+    let parent = stack.frames.iter().position(|frame| frame == &edge.parent);
+    let child = stack.frames.iter().position(|frame| frame == &edge.child);
     matches!((parent, child), (Some(parent), Some(child)) if parent < child)
 }
 
