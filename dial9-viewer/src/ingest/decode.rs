@@ -30,6 +30,7 @@ pub(crate) mod spans;
 mod types;
 
 use events::*;
+use lasso::{Rodeo, Spur};
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use spans::span_builder;
@@ -50,6 +51,45 @@ fn parse_source_key(key: &str) -> Option<(String, String, String)> {
 /// on directly opened or custom keys.
 fn unknown_source_fields() -> (String, String, String) {
     (String::new(), String::new(), String::new())
+}
+
+/// Flatten a callchain into frame names, expanding each address's inlined
+/// frames, and feed the names to `hasher` for the stack id.
+///
+/// Both the input callchain and the returned vector are leaf→root. `addr_to_keys`
+/// holds an address's symbols sorted ascending by inline depth (0 = the function
+/// that owns the machine code, 1..N = successively deeper inlined callees), so
+/// the group is emitted in *descending* depth order: the innermost inlined
+/// callee is nearest the leaf. Emitting depth 0 first would make the consumer's
+/// wholesale `.rev()` (see `server::flamegraph::build_flamegraph_tree`) invert
+/// every inline group, showing a callee as the caller of the function it was
+/// inlined into.
+///
+/// Addresses with no symbol entry contribute a single `0x…` frame.
+fn flatten_callchain(
+    callchain: &[u64],
+    addr_to_keys: &FxHashMap<u64, Vec<(u64, Spur)>>,
+    interner: &Rodeo,
+    hasher: &mut blake3::Hasher,
+) -> Vec<String> {
+    let mut frame_strings: Vec<String> = Vec::with_capacity(callchain.len());
+    for &addr in callchain {
+        match addr_to_keys.get(&addr) {
+            Some(entries) => {
+                for (_, key) in entries.iter().rev() {
+                    frame_strings.push(interner.resolve(key).to_string());
+                }
+            }
+            None => frame_strings.push(format!("0x{addr:x}")),
+        }
+    }
+    for (i, frame) in frame_strings.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b"\x00");
+        }
+        hasher.update(frame.as_bytes());
+    }
+    frame_strings
 }
 
 /// Extract CPU samples from raw (already gunzipped) trace bytes.
@@ -168,30 +208,8 @@ pub(crate) fn decode_samples_with_stats(
                     cached
                 } else {
                     let mut hasher = blake3::Hasher::new();
-                    let mut first = true;
-                    let mut frame_strings: Vec<String> = Vec::new();
-
-                    for &addr in &s.callchain {
-                        if let Some(entries) = addr_to_keys.get(&addr) {
-                            for (_, key) in entries {
-                                let name = interner.resolve(key);
-                                if !first {
-                                    hasher.update(b"\x00");
-                                }
-                                hasher.update(name.as_bytes());
-                                frame_strings.push(name.to_string());
-                                first = false;
-                            }
-                        } else {
-                            let hex = format!("0x{addr:x}");
-                            if !first {
-                                hasher.update(b"\x00");
-                            }
-                            hasher.update(hex.as_bytes());
-                            frame_strings.push(hex);
-                            first = false;
-                        }
-                    }
+                    let frame_strings =
+                        flatten_callchain(&s.callchain, &addr_to_keys, &interner, &mut hasher);
 
                     if frame_strings.is_empty() {
                         continue;
@@ -514,6 +532,56 @@ fn union_intervals(intervals: &[(u64, u64)]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An inlined callee must land *below* (nearer the leaf than) the function
+    /// it was inlined into, because the flamegraph builder reverses the whole
+    /// frame vector. Getting this backwards renders impossible edges such as
+    /// `make_poll_start` calling `record_poll_start`.
+    #[test]
+    fn inlined_frames_flatten_innermost_first() {
+        let mut interner = Rodeo::default();
+        let outer = interner.get_or_intern("record_poll_start::{{closure}}");
+        let inner = interner.get_or_intern("make_poll_start");
+        let root = interner.get_or_intern("main");
+
+        let mut addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>> = FxHashMap::default();
+        // Symbols arrive sorted ascending by inline depth, as decode does.
+        addr_to_keys.insert(0x1000, vec![(0, outer), (1, inner)]);
+        addr_to_keys.insert(0x2000, vec![(0, root)]);
+
+        let mut hasher = blake3::Hasher::new();
+        // Callchain is leaf→root.
+        let frames = flatten_callchain(&[0x1000, 0x2000], &addr_to_keys, &interner, &mut hasher);
+        assert_eq!(
+            frames,
+            vec!["make_poll_start", "record_poll_start::{{closure}}", "main"],
+            "inlined callee must precede its containing function in a leaf→root stack"
+        );
+
+        // Root→leaf order, as the flamegraph trie walks it.
+        let caller_to_callee: Vec<&String> = frames.iter().rev().collect();
+        let inner_pos = caller_to_callee
+            .iter()
+            .position(|f| f.as_str() == "make_poll_start")
+            .unwrap();
+        let outer_pos = caller_to_callee
+            .iter()
+            .position(|f| f.as_str() == "record_poll_start::{{closure}}")
+            .unwrap();
+        assert!(
+            outer_pos < inner_pos,
+            "record_poll_start must be the parent of make_poll_start, got {caller_to_callee:?}"
+        );
+    }
+
+    #[test]
+    fn unsymbolized_addresses_flatten_to_hex_frames() {
+        let interner = Rodeo::default();
+        let addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>> = FxHashMap::default();
+        let mut hasher = blake3::Hasher::new();
+        let frames = flatten_callchain(&[0xdead, 0xbeef], &addr_to_keys, &interner, &mut hasher);
+        assert_eq!(frames, vec!["0xdead", "0xbeef"]);
+    }
 
     #[test]
     fn parse_source_key_supports_current_and_historical_layouts() {

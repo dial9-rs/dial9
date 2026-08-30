@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(viewer)* inlined frames no longer render upside down. Both the server-side
+  aggregation path and `symbolizeChain` flattened an address's inline group
+  outermost-first inside a leaf→root callchain, so every inline edge appeared
+  reversed — a callee looked like the caller of the function it was inlined into
+  (for example `make_poll_start` calling `record_poll_start`). The group is now
+  emitted innermost-first, keeping the flat chain uniformly leaf→root.
+  `SAMPLES_FORMAT_VERSION` is bumped to 9, so cached aggregate rollups written
+  with the old ordering are abandoned and repopulate lazily.
+
 ## [0.5.0](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0-rc2.1...dial9-v0.5.0) - 2026-08-26
 
 ### Fixed
