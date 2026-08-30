@@ -1,29 +1,19 @@
 use anyhow::{Context as _, Result, bail, ensure};
 use dial9_trace_format::decoder::Decoder;
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 const EXPECTATION_EVENT: &str = "TelemetryFixtureExpectationEvent";
 const MARKER_EVENT: &str = "TelemetryFixtureMarkerEvent";
 const FIXTURE_PREFIX: &str = "dial9_fixture_";
 const WEIGHT_SEPARATOR: &str = "_weight_";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum FixtureFeature {
     Cpu,
     TaskDump,
     Span,
-}
-
-impl FixtureFeature {
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "cpu" => Ok(Self::Cpu),
-            "task_dump" => Ok(Self::TaskDump),
-            "span" => Ok(Self::Span),
-            _ => bail!("unknown telemetry fixture feature {value:?}"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -57,7 +47,7 @@ pub(crate) struct ExpectedSymbol {
     pub(crate) feature: FixtureFeature,
     pub(crate) symbol: FunctionSymbol,
     pub(crate) name: String,
-    pub(crate) weight: u64,
+    pub(crate) weight: NonZeroU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,6 +55,9 @@ pub(crate) struct ExpectedEdge<T> {
     pub(crate) parent: T,
     pub(crate) child: T,
 }
+
+pub(crate) type ExpectedStackEdge = ExpectedEdge<FunctionSymbol>;
+pub(crate) type ExpectedSpanEdge = ExpectedEdge<SpanName>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ExpectedSpanAssociation {
@@ -82,8 +75,8 @@ pub(crate) struct MeasurementWindow {
 pub(crate) struct ExpectedModel {
     pub(crate) symbols: BTreeSet<ExpectedSymbol>,
     pub(crate) spans: BTreeSet<SpanName>,
-    pub(crate) stack_edges: BTreeSet<ExpectedEdge<FunctionSymbol>>,
-    pub(crate) span_edges: BTreeSet<ExpectedEdge<SpanName>>,
+    pub(crate) stack_edges: BTreeSet<ExpectedStackEdge>,
+    pub(crate) span_edges: BTreeSet<ExpectedSpanEdge>,
     pub(crate) span_associations: BTreeSet<ExpectedSpanAssociation>,
     pub(crate) measurement: MeasurementWindow,
 }
@@ -91,7 +84,7 @@ pub(crate) struct ExpectedModel {
 #[derive(Debug, Deserialize)]
 struct ExpectationEvent {
     timestamp_ns: u64,
-    feature: String,
+    feature: FixtureFeature,
     name: String,
     #[serde(default)]
     parent: Option<String>,
@@ -102,7 +95,14 @@ struct ExpectationEvent {
 #[derive(Debug, Deserialize)]
 struct MarkerEvent {
     timestamp_ns: u64,
-    phase: String,
+    phase: MarkerPhase,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MarkerPhase {
+    MeasurementStart,
+    MeasurementEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +114,7 @@ enum SymbolDomain {
 struct ParsedWeightedSymbol {
     domain: SymbolDomain,
     name: String,
-    weight: u64,
+    weight: NonZeroU64,
 }
 
 #[derive(Default)]
@@ -122,8 +122,8 @@ struct ModelBuilder {
     symbols: BTreeSet<ExpectedSymbol>,
     symbol_identities: BTreeSet<(FixtureFeature, String)>,
     spans: BTreeSet<SpanName>,
-    stack_edges: BTreeSet<ExpectedEdge<FunctionSymbol>>,
-    span_edges: BTreeSet<ExpectedEdge<SpanName>>,
+    stack_edges: BTreeSet<ExpectedStackEdge>,
+    span_edges: BTreeSet<ExpectedSpanEdge>,
     span_associations: BTreeSet<ExpectedSpanAssociation>,
     expectation_timestamps: Vec<u64>,
     measurement_start_ns: Option<u64>,
@@ -132,7 +132,7 @@ struct ModelBuilder {
 
 impl ModelBuilder {
     fn add_expectation(&mut self, event: ExpectationEvent) -> Result<()> {
-        let feature = FixtureFeature::parse(&event.feature)?;
+        let feature = event.feature;
         self.expectation_timestamps.push(event.timestamp_ns);
 
         match feature {
@@ -146,7 +146,7 @@ impl ModelBuilder {
                 ensure!(
                     parsed.domain == expected_domain,
                     "feature {:?} does not match weighted symbol {:?}",
-                    event.feature,
+                    feature,
                     event.name
                 );
 
@@ -154,7 +154,7 @@ impl ModelBuilder {
                     self.symbol_identities
                         .insert((feature, parsed.name.clone())),
                     "duplicate fixture identity ({:?}, {:?})",
-                    event.feature,
+                    feature,
                     parsed.name
                 );
                 let symbol = ExpectedSymbol {
@@ -210,10 +210,9 @@ impl ModelBuilder {
     }
 
     fn add_marker(&mut self, event: MarkerEvent) -> Result<()> {
-        let slot = match event.phase.as_str() {
-            "measurement_start" => &mut self.measurement_start_ns,
-            "measurement_end" => &mut self.measurement_end_ns,
-            _ => bail!("unknown telemetry fixture marker phase {:?}", event.phase),
+        let slot = match event.phase {
+            MarkerPhase::MeasurementStart => &mut self.measurement_start_ns,
+            MarkerPhase::MeasurementEnd => &mut self.measurement_end_ns,
         };
         ensure!(slot.is_none(), "duplicate fixture marker {:?}", event.phase);
         *slot = Some(event.timestamp_ns);
@@ -315,9 +314,8 @@ fn parse_weighted_symbol(symbol: &str) -> Result<ParsedWeightedSymbol> {
         .with_context(|| format!("weighted symbol {symbol:?} has no weight suffix"))?;
     ensure!(!name.is_empty(), "weighted symbol {symbol:?} has no name");
     let weight = weight
-        .parse::<u64>()
+        .parse::<NonZeroU64>()
         .with_context(|| format!("weighted symbol {symbol:?} has invalid weight"))?;
-    ensure!(weight > 0, "weighted symbol {symbol:?} has zero weight");
     Ok(ParsedWeightedSymbol {
         domain,
         name: name.to_owned(),
@@ -448,13 +446,13 @@ mod tests {
             feature: FixtureFeature::Cpu,
             symbol: FunctionSymbol::new("dial9_fixture_cpu_outer_weight_1"),
             name: "outer".to_owned(),
-            weight: 1,
+            weight: NonZeroU64::new(1).unwrap(),
         }));
         assert!(model.symbols.contains(&ExpectedSymbol {
             feature: FixtureFeature::TaskDump,
             symbol: FunctionSymbol::new("dial9_fixture_wait_database_lookup_weight_14"),
             name: "database_lookup".to_owned(),
-            weight: 14,
+            weight: NonZeroU64::new(14).unwrap(),
         }));
         assert_eq!(
             model.spans,
