@@ -27,23 +27,49 @@ impl FixtureFeature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct FunctionSymbol(String);
+
+impl FunctionSymbol {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SpanName(String);
+
+impl SpanName {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ExpectedSymbol {
     pub(crate) feature: FixtureFeature,
-    pub(crate) symbol: String,
+    pub(crate) symbol: FunctionSymbol,
     pub(crate) name: String,
     pub(crate) weight: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ExpectedEdge {
-    pub(crate) parent: String,
-    pub(crate) child: String,
+pub(crate) struct ExpectedEdge<T> {
+    pub(crate) parent: T,
+    pub(crate) child: T,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ExpectedSpanAssociation {
-    pub(crate) symbol: String,
-    pub(crate) active_span: String,
+    pub(crate) symbol: FunctionSymbol,
+    pub(crate) active_span: SpanName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +81,9 @@ pub(crate) struct MeasurementWindow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExpectedModel {
     pub(crate) symbols: BTreeSet<ExpectedSymbol>,
-    pub(crate) spans: BTreeSet<String>,
-    pub(crate) stack_edges: BTreeSet<ExpectedEdge>,
-    pub(crate) span_edges: BTreeSet<ExpectedEdge>,
+    pub(crate) spans: BTreeSet<SpanName>,
+    pub(crate) stack_edges: BTreeSet<ExpectedEdge<FunctionSymbol>>,
+    pub(crate) span_edges: BTreeSet<ExpectedEdge<SpanName>>,
     pub(crate) span_associations: BTreeSet<ExpectedSpanAssociation>,
     pub(crate) measurement: MeasurementWindow,
 }
@@ -95,9 +121,9 @@ struct ParsedWeightedSymbol {
 struct ModelBuilder {
     symbols: BTreeSet<ExpectedSymbol>,
     symbol_identities: BTreeSet<(FixtureFeature, String)>,
-    spans: BTreeSet<String>,
-    stack_edges: BTreeSet<ExpectedEdge>,
-    span_edges: BTreeSet<ExpectedEdge>,
+    spans: BTreeSet<SpanName>,
+    stack_edges: BTreeSet<ExpectedEdge<FunctionSymbol>>,
+    span_edges: BTreeSet<ExpectedEdge<SpanName>>,
     span_associations: BTreeSet<ExpectedSpanAssociation>,
     expectation_timestamps: Vec<u64>,
     measurement_start_ns: Option<u64>,
@@ -133,7 +159,7 @@ impl ModelBuilder {
                 );
                 let symbol = ExpectedSymbol {
                     feature,
-                    symbol: event.name.clone(),
+                    symbol: FunctionSymbol::new(&event.name),
                     name: parsed.name,
                     weight: parsed.weight,
                 };
@@ -146,15 +172,15 @@ impl ModelBuilder {
                 if let Some(parent) = event.parent {
                     validate_mixed_function_name(&parent)?;
                     self.stack_edges.insert(ExpectedEdge {
-                        parent,
-                        child: event.name.clone(),
+                        parent: FunctionSymbol::new(parent),
+                        child: FunctionSymbol::new(&event.name),
                     });
                 }
                 if let Some(active_span) = event.active_span {
                     validate_span_name(&active_span)?;
                     self.span_associations.insert(ExpectedSpanAssociation {
-                        symbol: event.name,
-                        active_span,
+                        symbol: FunctionSymbol::new(event.name),
+                        active_span: SpanName::new(active_span),
                     });
                 }
             }
@@ -166,15 +192,15 @@ impl ModelBuilder {
                     event.name
                 );
                 ensure!(
-                    self.spans.insert(event.name.clone()),
+                    self.spans.insert(SpanName::new(&event.name)),
                     "duplicate fixture expectation for {:?}",
                     event.name
                 );
                 if let Some(parent) = event.parent {
                     validate_span_name(&parent)?;
                     self.span_edges.insert(ExpectedEdge {
-                        parent,
-                        child: event.name,
+                        parent: SpanName::new(parent),
+                        child: SpanName::new(event.name),
                     });
                 }
             }
@@ -420,29 +446,29 @@ mod tests {
         assert_eq!(model.symbols.len(), 2);
         assert!(model.symbols.contains(&ExpectedSymbol {
             feature: FixtureFeature::Cpu,
-            symbol: "dial9_fixture_cpu_outer_weight_1".to_owned(),
+            symbol: FunctionSymbol::new("dial9_fixture_cpu_outer_weight_1"),
             name: "outer".to_owned(),
             weight: 1,
         }));
         assert!(model.symbols.contains(&ExpectedSymbol {
             feature: FixtureFeature::TaskDump,
-            symbol: "dial9_fixture_wait_database_lookup_weight_14".to_owned(),
+            symbol: FunctionSymbol::new("dial9_fixture_wait_database_lookup_weight_14"),
             name: "database_lookup".to_owned(),
             weight: 14,
         }));
         assert_eq!(
             model.spans,
             BTreeSet::from([
-                "dial9_fixture_span_cycle".to_owned(),
-                "dial9_fixture_span_inner".to_owned(),
+                SpanName::new("dial9_fixture_span_cycle"),
+                SpanName::new("dial9_fixture_span_inner"),
             ])
         );
         assert_eq!(model.stack_edges.len(), 2);
         assert_eq!(
             model.span_edges,
             BTreeSet::from([ExpectedEdge {
-                parent: "dial9_fixture_span_cycle".to_owned(),
-                child: "dial9_fixture_span_inner".to_owned(),
+                parent: SpanName::new("dial9_fixture_span_cycle"),
+                child: SpanName::new("dial9_fixture_span_inner"),
             }])
         );
         assert_eq!(model.span_associations.len(), 2);
