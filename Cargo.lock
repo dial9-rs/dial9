@@ -1897,7 +1897,7 @@ dependencies = [
  "proptest",
  "serde",
  "shuttle",
- "shuttle-tokio",
+ "shuttle-tokio-impl-inner",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -4871,28 +4871,6 @@ dependencies = [
  "scoped-tls",
  "smallvec",
  "tracing",
-]
-
-[[package]]
-name = "shuttle-tokio"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e54c16acf992b3f2ed76597b4bccbc266700063a809f36a91cb2103c242a59b"
-dependencies = [
- "cfg-if",
- "shuttle-tokio-impl",
- "tokio",
-]
-
-[[package]]
-name = "shuttle-tokio-impl"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68e20b41b8c88313b9818ed34809a1def3a962ce9c93387854616ffdcf96a60b"
-dependencies = [
- "cfg-if",
- "shuttle-tokio-impl-inner",
- "tokio",
 ]
 
 [[package]]

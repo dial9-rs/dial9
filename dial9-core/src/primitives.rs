@@ -186,21 +186,19 @@ pub mod time {
     }
 }
 
-/// `tokio::select!` normally; `shuttle_tokio::select!` under `--cfg shuttle`.
+/// `tokio::select!` normally; `shuttle_tokio_impl_inner::select!` under
+/// `--cfg shuttle`, which patches `select!`'s branch tie-break to draw from
+/// `shuttle::rand::thread_rng()` instead of real OS entropy, so a replayed
+/// schedule picks the same branch every time.
 ///
-/// `select!`'s branch tie-break otherwise calls tokio's own `thread_rng_n`,
-/// seeded from real OS entropy per thread -- not shuttle-controlled, so a
-/// replayed schedule can pick a different branch. `shuttle-tokio` patches
-/// that one function to draw from `shuttle::rand::thread_rng()` instead.
-///
-/// Doesn't cover `sleep`/`sleep_until`: `shuttle-tokio`'s `Sleep` resolves
-/// immediately on first poll for any realistic deadline rather than
-/// suspending, so `primitives::time` keeps its own `Yield` for those.
+/// Doesn't cover `sleep`/`sleep_until`: its `Sleep` resolves immediately on
+/// first poll instead of suspending, so `primitives::time` keeps its own
+/// `Yield` for those.
 #[cfg(all(shuttle, feature = "pipeline"))]
 #[macro_export]
 macro_rules! shuttle_select {
     ($($arms:tt)*) => {
-        shuttle_tokio::select! { $($arms)* }
+        shuttle_tokio_impl_inner::select! { $($arms)* }
     };
 }
 #[cfg(all(not(shuttle), feature = "pipeline"))]
