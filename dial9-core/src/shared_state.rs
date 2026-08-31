@@ -537,22 +537,16 @@ mod tests {
     }
 }
 
-// Every scenario below that touches `drain_epoch`/`flush_epoch`/`state`
-// shares one caveat: those fields are `Ordering::Relaxed` throughout, but
-// shuttle 0.9.1 only correctly models `SeqCst` (it treats every other
-// ordering as `SeqCst`). A `Relaxed`-specific bug is invisible here
-// regardless of how exhaustively a scenario searches, even though it's
-// reachable on real hardware -- only the surrounding CAS/transition logic
-// is actually under test.
+// Every scenario below shares a caveat: `drain_epoch`/`flush_epoch`/`state`
+// are `Ordering::Relaxed`, but shuttle 0.9.1 treats every ordering as
+// `SeqCst`. A `Relaxed`-specific bug is invisible here no matter how
+// exhaustively a scenario searches.
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
 
-    // Shuttle's search cost grows with interleaving
-    // space, unlike a real-thread proptest. Widening these (or using
-    // shuttle::rand, as pipeline_shuttle_tests.rs does) would exercise more
-    // events per buffer, at lower coverage density per iteration at this
-    // scenario's `depth = 3` (from `default`).
+    // Small values kept: shuttle's search cost grows with interleaving
+    // space, unlike a real-thread proptest.
     const WRITERS: usize = 3;
     const EVENTS_PER_WRITER: u64 = 3;
     const DRAIN_TICKS: usize = 3;
@@ -560,13 +554,8 @@ mod shuttle_tests {
     crate::shuttle_test! {
         default;
         // Shuttle counterpart of `concurrent_record_and_drain_preserves_event_count`:
-        // writer threads record events while a drainer thread concurrently bumps
-        // the drain epoch and intrusively drains, exploring interleavings
-        // exhaustively instead of sampling them. Every recorded event must reach
-        // the collector exactly once, regardless of schedule.
-        //
-        // Keeping real-thread proptest above because of the `Ordering::Relaxed` caveat
-        // this scenario shares with the others below (see module comments).
+        // exhaustively explores interleavings instead of sampling. Keeping
+        // the real-thread proptest too, for the `Ordering::Relaxed` caveat above.
         fn shuttle_concurrent_record_and_drain() {
             let ss = Arc::new(enabled_shared_state());
 
@@ -628,19 +617,12 @@ mod shuttle_tests {
     crate::shuttle_test! {
         default;
         // `disable`/`enable`/`mark_stopped` raced against the recording
-        // gate, `if_enabled` -> `EventBuffer::record_encodable_event`. The
-        // shutdown-adjacent lifecycle transition other tests in this crate
-        // skip (they `enable()` once at setup and never leave `Enabled`).
-        //
-        // Every `Some` return must land exactly one event in the collector,
-        // and every `None` must record nothing, so the collector total equals the number
-        // of `Some`s, no matter where `disable`/`enable`/`mark_stopped`
-        // interleave.
-        //
-        // This does NOT assert "no events arrive after disable()". A writer that passed
-        // `is_enabled()` completes its write after `disable()` returns (by design).
-        //
-        // Also subject to the `Ordering::Relaxed` caveat (see module comments).
+        // gate (`if_enabled`). The shutdown-adjacent transition other
+        // tests skip. Every `Some` must land exactly one event, every
+        // `None` zero, regardless of interleaving. Does NOT assert "no
+        // events after disable()": a writer that passed `is_enabled()`
+        // completes its write after `disable()` returns, by design. Also
+        // subject to the `Ordering::Relaxed` caveat above.
         fn shuttle_disable_races_record() {
             let ss = Arc::new(enabled_shared_state());
 
@@ -713,14 +695,10 @@ mod shuttle_tests {
     crate::shuttle_test! {
         default;
         // Writer threads exit *while* the drainer is mid-drain, so the TLB
-        // `Drop` flush (`encoder.rs`'s thread-local buffer handle) overlaps
-        // `drain_all_tl_buffers`'s `Weak::upgrade` + prune logic.
-        //
-        // Whether a writer still holds a pending event at exit is schedule-dependent.
-        // So some interleavings exercise upgrade-vs-teardown without exercising the
-        // `Drop` flush itself.
-        //
-        // Also subject to the `Ordering::Relaxed` caveat (see module comments).
+        // `Drop` flush overlaps `drain_all_tl_buffers`'s `Weak::upgrade`+prune
+        // logic. Not every interleaving exercises the `Drop` flush itself,
+        // since that depends on whether a writer still holds a pending event
+        // at exit. Also subject to the `Ordering::Relaxed` caveat above.
         fn shuttle_writer_exit_races_drain() {
             let ss = Arc::new(enabled_shared_state());
 

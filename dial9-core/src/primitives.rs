@@ -274,12 +274,10 @@ macro_rules! shuttle_test {
     // using this -- don't use it defensively. Still runnable manually with
     // `--ignored`.
     //
-    // If also using `replay = $schedule`, capture that schedule from `pct`'s
-    // failure output, never from `determinism`'s: `replay` does a single run,
-    // same as `pct` -- safe. `determinism`'s schedules come from its
-    // record-twice mechanism, the same one that SIGABRTs, so replaying one
-    // of those could reproduce the abort deterministically instead of the
-    // catchable panic.
+    // If also using `replay = $schedule`: capture it from `pct`'s failure
+    // output, not `determinism`'s. `determinism`'s schedules come from
+    // the same record-twice mechanism that SIGABRTs, so replaying one
+    // could reproduce the abort instead of a catchable panic.
     (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expect_panic = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
@@ -422,15 +420,10 @@ pub mod fs {
         FailProb(f64),
     }
 
-    // Deliberately the real `std::thread_local!`, not this module's shuttle-
-    // swapped one. Shuttle's threads are coroutines cooperatively scheduled
-    // on a single real OS thread, so a real thread-local is effectively
-    // global for the whole test -- a fault armed on the test's own thread
-    // stays visible to every thread it spawns. The shuttle-aware thread_local
-    // would isolate storage per logical thread instead, so this deliberately
-    // opts out of that: switching it would silently stop fault injection
-    // from reaching any spawned thread, which is most real usage (e.g. the
-    // flush thread). Pinned by `fs_fault_visible_across_threads`.
+    // Shuttle's threads are coroutines on one real OS thread, so this
+    // stays visible to every spawned thread instead of being isolated per
+    // logical thread. Swapping to `shuttle::thread` would silently stop fault injection
+    // from reaching spawned threads. Pinned by `fs_fault_visible_across_threads`.
     std::thread_local! {
         static FAULT: Cell<FaultPolicy> = const { Cell::new(FaultPolicy::None) };
     }
