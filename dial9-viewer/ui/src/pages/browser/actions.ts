@@ -854,7 +854,10 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     const W = canvasWidth();
     const { tMin, tMax } = b.domain;
     const t = xToTime(x, tMin, tMax, W);
-    const hits = segmentsOverlapping(b.rows[r]!.segments, t, t);
+    // Use the same tiled spans the heatmap paints. A raw segment ends when its
+    // upload finishes, which can lag beyond the next segment's start; using it
+    // in the generated scope would include that next segment.
+    const hits = segmentsOverlapping(b.rows[r]!.tiled, t, t);
     if (!hits.length) {
       setHeatmapSelection(null);
       return;
