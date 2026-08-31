@@ -134,6 +134,61 @@ crate::shuttle_test! {
     }
 }
 
+// Pins the deadlock `run_triggered`'s module comment mentions. Marking
+// the writer done without cancelling `stop` leaves the wait branch nothing
+// to wake it.
+// `expect_panic = "deadlock"`: shuttle's own deadlock detector panics
+// rather than hanging the process.
+crate::shuttle_test! {
+    num_iters = 50, depth = 3, should_panic, expect_panic = "deadlock";
+    fn shuttle_deadlock_without_stop_cancel() {
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let processed = Arc::new(AtomicUsize::new(0));
+
+        let writers = spawn_writers(fs.clone());
+
+        let (trigger, rx) = crate::dump::channel();
+
+        let trigger_handle = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(async move {
+                let receipt = trigger.dump_current_data().await;
+                assert!(receipt.is_ok());
+            });
+        });
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker_fs = fs.clone();
+        let worker_processed = processed.clone();
+        let worker_stop = stop.clone();
+        let worker = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(async move {
+                let mut worker = WorkerLoop::new(
+                    worker_fs.clone(),
+                    Duration::from_millis(1),
+                    vec![Box::new(CountingProcessor(worker_processed))],
+                    worker_stop,
+                    metrique::writer::sink::DevNullSink::boxed(),
+                    Some(rx),
+                )
+                .await
+                .expect("initialize worker");
+
+                let rx = worker.trigger.take().expect("triggered mode");
+                worker.run_triggered(rx).await;
+            });
+        });
+
+        for w in writers {
+            w.join().unwrap();
+        }
+        trigger_handle.join().unwrap();
+        fs.mark_writer_done();
+        // Deliberately NOT calling stop.cancel() here -- this is the broken
+        // ordering the module comment warns about.
+        worker.join().unwrap();
+    }
+}
+
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     // Drives the real `run_triggered()`, including its outer `select!` on
