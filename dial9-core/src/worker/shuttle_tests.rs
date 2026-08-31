@@ -50,6 +50,23 @@ const SEGMENTS_PER_WRITER: u32 = 2;
 /// of reading real wall-clock time.
 const FIXED_EPOCH_SECS_FOR_TEST: u64 = 1_000;
 
+/// A minimal, valid trace segment header. An unparseable payload (e.g. the
+/// old placeholder `b"x"`) makes `process_segments` fall back to
+/// `SystemTime::now()`, a real-clock read shuttle can't control, which
+/// causes `shuttle_dump_resolves_exactly_once::determinism`'s
+/// flake. This keeps the test off that fallback path; `process_segments`
+/// itself still discards the epoch already cached for in-memory segments
+/// and re-derives it the same fallback-prone way, not fixed here.
+fn segment_bytes_with_epoch(epoch_secs: u64) -> Vec<u8> {
+    use dial9_trace_format::encoder::Encoder;
+    let mut enc = Encoder::new_to(Vec::new()).unwrap();
+    enc.write_infallible(&crate::format::ClockSyncEvent {
+        timestamp_ns: 1,
+        realtime_ns: epoch_secs * 1_000_000_000,
+    });
+    enc.into_inner()
+}
+
 /// Spawns `WRITERS` threads, each sealing `SEGMENTS_PER_WRITER` segments
 /// into `fs` with globally unique indices. Shared by every scenario in this
 /// module that needs writer threads racing a worker/trigger. Takes the
@@ -63,7 +80,8 @@ fn spawn_writers(fs: Arc<Fs>) -> Vec<crate::primitives::thread::JoinHandle<()>> 
                 for i in 0..SEGMENTS_PER_WRITER {
                     let index = w as u32 * SEGMENTS_PER_WRITER + i;
                     let mut h = fs.create_segment(Path::new("trace")).unwrap();
-                    h.write_all(b"x").unwrap();
+                    h.write_all(&segment_bytes_with_epoch(FIXED_EPOCH_SECS_FOR_TEST))
+                        .unwrap();
                     fs.seal(h, Path::new("trace"), index).unwrap();
                     fs.set_seal_secs_for_test(index, FIXED_EPOCH_SECS_FOR_TEST);
                 }
