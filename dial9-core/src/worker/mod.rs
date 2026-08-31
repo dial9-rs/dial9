@@ -496,7 +496,7 @@ impl WorkerLoop {
                 ), if min_deadline.is_some() => {}
                 // Relies on every caller cancelling `self.stop` right after marking the
                 // writer done, which wakes this select via `stop.cancelled()`
-                // instead -- breaking that ordering can deadlock this loop.
+                // instead. Breaking that ordering can deadlock this loop.
                 _ = Self::wait_for_more(&self.fs, &self.stop, self.poll_interval),
                     if !dumps.is_empty() => {}
             }

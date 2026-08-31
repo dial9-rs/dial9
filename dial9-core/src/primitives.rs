@@ -136,6 +136,7 @@ pub use crate::define_thread_local as thread_local;
 pub mod time {
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     pub use tokio::time::Instant;
@@ -155,6 +156,21 @@ pub mod time {
         yielded: bool,
     }
 
+    // Shuttle resets its own state every execution, but this must accumulate
+    // across a whole `check_pct` batch to answer "did any schedule in this batch
+    // actually suspend here."
+    static YIELD_PENDING_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Count of `Yield::poll` calls that returned `Pending` since the last call.
+    /// Lets a scenario built around `sleep`/`sleep_until`
+    /// assert it actually suspended at least once across a batch.
+    ///
+    /// Test-integrity check: a failure here means the scenario stopped exercising
+    /// the code path it exists to cover.
+    pub fn take_yield_pending_polls() -> usize {
+        YIELD_PENDING_POLLS.swap(0, Ordering::Relaxed)
+    }
+
     impl Future for Yield {
         type Output = ();
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
@@ -162,6 +178,7 @@ pub mod time {
                 Poll::Ready(())
             } else {
                 self.yielded = true;
+                YIELD_PENDING_POLLS.fetch_add(1, Ordering::Relaxed);
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
