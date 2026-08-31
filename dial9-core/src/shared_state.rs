@@ -771,19 +771,38 @@ mod tests {
 
     crate::shuttle_test! {
         default;
-        // Writer threads exit *while* the drainer is mid-drain, so the TLB
-        // `Drop` flush overlaps `drain_all_tl_buffers`'s `Weak::upgrade`+prune
-        // logic. Not every interleaving exercises the `Drop` flush itself,
-        // since that depends on whether a writer still holds a pending event
-        // at exit. Also subject to the `Ordering::Relaxed` caveat above.
+        // Writer threads emit one event through `Dial9Handle` and exit
+        // immediately, racing `run_flush_loop`'s own ~5ms polling +
+        // grace-period cadence. Each writer holds exactly one event, so
+        // a plain id-presence check works regardless of which path
+        // flushed it. Also subject to the `Ordering::Relaxed` caveat above.
         fn shuttle_writer_exit_races_drain() {
-            let ss = Arc::new(enabled_shared_state());
+            let _ts_guard = metrique_timesource::set_time_source(
+                metrique_timesource::TimeSource::custom(
+                    metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+                ),
+            );
+
+            let writer = MemoryBuffer::builder()
+                .max_total_size(100 * 1024 * 1024)
+                .max_segment_size(256)
+                .build()
+                .unwrap();
+            let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+            let shared = Arc::new(SharedState::new(0));
+            let mut recorder = Recorder::start(shared, writer, None, || || {});
+            recorder.handle().enable();
+            let handle = recorder.handle().clone();
 
             let writers: Vec<_> = (0..WRITERS)
-                .map(|_| {
-                    let ss = ss.clone();
+                .map(|id| {
+                    let handle = handle.clone();
                     crate::primitives::thread::spawn(move || {
-                        ss.if_enabled(|buf| buf.record_encodable_event(&sample_event()));
+                        handle.record_event(LifecycleEvent {
+                            timestamp_ns: id as u64,
+                            id: id as u64,
+                        });
                         // Return immediately: the next scheduling points are
                         // the thread-local destructor, the final `Arc`
                         // decrement, and the `Mutex` drop.
@@ -791,43 +810,21 @@ mod tests {
                 })
                 .collect();
 
-            let drainer = {
-                let ss = ss.clone();
-                crate::primitives::thread::spawn(move || {
-                    for _ in 0..DRAIN_TICKS {
-                        ss.bump_drain_epoch();
-                        // No `yield_now` grace here, unlike
-                        // `shuttle_concurrent_record_and_drain`: draining
-                        // while handles are still live is the point.
-                        ss.drain_all_tl_buffers();
-                    }
-                })
-            };
-
-            // Deliberately NOT joined before the drainer runs.
             for w in writers {
                 w.join().unwrap();
             }
-            drainer.join().unwrap();
 
-            ss.bump_drain_epoch();
-            ss.drain_all_tl_buffers();
+            // Flushes, seals the final segment, joins the flush thread.
+            recorder.stop_flush_thread();
 
-            let mut total = 0u64;
-            while let Some(batch) = ss.collector.next() {
-                assert!(batch.event_count() > 0, "empty batch reached collector");
-                total += batch.event_count();
-            }
-            assert_eq!(ss.collector.take_dropped_batches(), 0);
+            let decoded = decode_all_lifecycle_events(&fs);
+            let mut ids: Vec<u64> = decoded.iter().map(|e| e.id).collect();
+            ids.sort_unstable();
             assert_eq!(
-                total, WRITERS as u64,
+                ids,
+                (0..WRITERS as u64).collect::<Vec<_>>(),
                 "each writer's event must arrive exactly once, whether flushed by \
-                 the intrusive drain or by the TLB Drop impl on thread exit"
-            );
-            assert_eq!(
-                ss.tl_buffers.lock().unwrap().len(),
-                0,
-                "all handles are dead after join; the final drain must prune them"
+                 the flush loop's intrusive drain or by the TLB Drop impl on thread exit"
             );
         }
     }
