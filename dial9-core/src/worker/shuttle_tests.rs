@@ -4,18 +4,15 @@
 //! through `run_background_task`'s real Tokio runtime.
 //!
 //! `shuttle_worker_handoff` drives the real `run()`/`run_continuous()` path
-//! (not the test-only `process_open_segments()` shortcut): this works for
-//! the in-memory `Fs` backend because `wait_for_more`'s in-memory branch
-//! only awaits `Fs::wait_for_wakeup()` (a plain `tokio::sync::Notify`, no
-//! reactor/timer needed) rather than `tokio::time::sleep` -- that real timer
-//! is only on the disk-backend branch, which this module never uses.
+//! (not the test-only `process_open_segments()` shortcut): safe for the
+//! in-memory `Fs` backend since `wait_for_more` only awaits a plain
+//! `Notify` there, not `tokio::time::sleep` (disk-backend only).
 //!
 //! `shuttle_dump_resolves_exactly_once` drives the real `run_triggered()`,
-//! including its outer `select!` on stop/`sleep_until`/`wait_for_more` --
-//! `primitives::time` and `shuttle_select!` make both shuttle-safe. The
-//! processor pipeline itself never takes a retryable-failure path in either
-//! scenario, which is the only other place `process_segments` awaits a real
-//! `tokio::time::sleep`.
+//! including its `select!` on stop/`sleep_until`/`wait_for_more`.
+//! `primitives::time`/`shuttle_select!` make both shuttle-safe. Neither
+//! scenario's processor pipeline takes a retryable-failure path, the only
+//! other place `process_segments` awaits a real `tokio::time::sleep`.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -136,16 +133,12 @@ crate::shuttle_test! {
 
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
-    // Drives the real `run_triggered()`, including its outer `select!` on
-    // stop/`sleep_until`/`wait_for_more` -- `primitives::time` and
-    // `shuttle_select!` make both shuttle-safe (see module doc). Multiple
-    // writers seal segments concurrently with one on-demand dump request; it
-    // must resolve exactly once regardless of whether any segments landed in
-    // its window first.
-    //
-    // `dump_current_data` has an unbounded lookback (no window to pin), so
-    // this verifies the resolve-exactly-once race itself, not any
-    // window-matching behavior.
+    // Drives the real `run_triggered()`, including its `select!` on
+    // stop/`sleep_until`/`wait_for_more` (see module doc). Multiple writers
+    // seal segments concurrently with one on-demand dump request; it must
+    // resolve exactly once regardless of window timing (`dump_current_data`
+    // has unbounded lookback, so this verifies the race itself, not
+    // window-matching).
     fn shuttle_dump_resolves_exactly_once() {
         let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
         let processed = Arc::new(AtomicUsize::new(0));
@@ -154,10 +147,10 @@ crate::shuttle_test! {
 
         let (trigger, rx) = crate::dump::channel();
 
-        // Sole `DumpTrigger` handle -- moved (not cloned) into this thread,
-        // so the channel closes deterministically once it drops, right
-        // after this await resolves. The worker's `recv()` loop below
-        // relies on that to know no more requests are ever coming.
+        // Sole `DumpTrigger` handle, moved (not cloned) into this thread, so
+        // the channel closes deterministically once it drops, right after
+        // this await resolves. The worker's `recv()` loop below relies on
+        // that to know no more requests are ever coming.
         let trigger_handle = crate::primitives::thread::spawn(move || {
             shuttle::future::block_on(async move {
                 let receipt = trigger.dump_current_data().await;
@@ -199,7 +192,7 @@ crate::shuttle_test! {
         trigger_handle.join().unwrap();
         fs.mark_writer_done();
         // `run_triggered` only notices `writer_done()` while idle if `stop`
-        // is also cancelled -- mirror real callers by doing both.
+        // is also cancelled. Mirror real callers by doing both.
         stop.cancel();
         worker.join().unwrap();
 
@@ -276,7 +269,7 @@ mod shuttle_dump_time_range_resolves_via_deadline {
         for w in writers {
             w.join().unwrap();
         }
-        // Join order matters here too -- see the module comment above.
+        // Join order matters here too. See the module comment above.
         trigger_handle.join().unwrap();
         fs.mark_writer_done();
         stop.cancel();
@@ -309,11 +302,7 @@ mod shuttle_dump_time_range_resolves_via_deadline {
     }
 
     #[test]
-    #[ignore = "SIGBUSes due to shuttle's default 60KB stack size -- a \
-                config issue, to be fixed crate-wide in a follow-up (see \
-                module comment above). That fix alone isn't enough though: \
-                it surfaces a second, unresolved shuttle-internal panic \
-                during replay. pct alone gives full coverage meanwhile."]
+    #[ignore = "SIGBUSes due to shuttle's default 60KB stack size."]
     fn determinism() {
         shuttle::check_uncontrolled_nondeterminism(
             shuttle_dump_time_range_resolves_via_deadline,
