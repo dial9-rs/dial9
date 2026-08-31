@@ -186,17 +186,21 @@ pub mod time {
     }
 }
 
-/// `tokio::select!`, `biased;` only under `--cfg shuttle`.
+/// `tokio::select!` normally; `shuttle_tokio::select!` under `--cfg shuttle`.
 ///
-/// `select!`'s branch tie-break otherwise calls tokio's own internal RNG,
-/// which isn't shuttle-controlled.
+/// `select!`'s branch tie-break otherwise calls tokio's own `thread_rng_n`,
+/// seeded from real OS entropy per thread -- not shuttle-controlled, so a
+/// replayed schedule can pick a different branch. `shuttle-tokio` patches
+/// that one function to draw from `shuttle::rand::thread_rng()` instead.
 ///
-/// Production keeps randomized `select!` unchanged.
+/// Doesn't cover `sleep`/`sleep_until`: `shuttle-tokio`'s `Sleep` resolves
+/// immediately on first poll for any realistic deadline rather than
+/// suspending, so `primitives::time` keeps its own `Yield` for those.
 #[cfg(all(shuttle, feature = "pipeline"))]
 #[macro_export]
 macro_rules! shuttle_select {
     ($($arms:tt)*) => {
-        tokio::select! { biased; $($arms)* }
+        shuttle_tokio::select! { $($arms)* }
     };
 }
 #[cfg(all(not(shuttle), feature = "pipeline"))]
