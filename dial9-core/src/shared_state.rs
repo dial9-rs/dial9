@@ -313,25 +313,23 @@ impl EventBuffer<'_> {
 }
 
 #[cfg(test)]
-fn sample_event() -> crate::format::ClockSyncEvent {
-    crate::format::ClockSyncEvent {
-        timestamp_ns: 1000,
-        realtime_ns: 2000,
-    }
-}
-
-/// Helper: create a SharedState with recording enabled.
-#[cfg(test)]
-fn enabled_shared_state() -> SharedState {
-    let ss = SharedState::new(0);
-    ss.enable();
-    ss
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::primitives::sync::atomic::AtomicBool;
+
+    fn sample_event() -> crate::format::ClockSyncEvent {
+        crate::format::ClockSyncEvent {
+            timestamp_ns: 1000,
+            realtime_ns: 2000,
+        }
+    }
+
+    /// Helper: create a SharedState with recording enabled.
+    fn enabled_shared_state() -> SharedState {
+        let ss = SharedState::new(0);
+        ss.enable();
+        ss
+    }
 
     #[test]
     fn record_event_registers_tl_buffer_handle() {
@@ -535,15 +533,14 @@ mod tests {
             );
         }
     }
-}
 
-// Every scenario below shares a caveat: `drain_epoch`/`flush_epoch`/`state`
-// are `Ordering::Relaxed`, but shuttle 0.9.1 treats every ordering as
-// `SeqCst`. A `Relaxed`-specific bug is invisible here no matter how
-// exhaustively a scenario searches.
-#[cfg(all(test, shuttle))]
-mod shuttle_tests {
-    use super::*;
+    // Every scenario below shares a caveat: `drain_epoch`/`flush_epoch`/`state`
+    // are `Ordering::Relaxed`, but shuttle 0.9.1 treats every ordering as
+    // `SeqCst`. A `Relaxed`-specific bug is invisible here no matter how
+    // exhaustively a scenario searches.
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
 
     // Small values kept: shuttle's search cost grows with interleaving
     // space, unlike a real-thread proptest.
@@ -753,5 +750,6 @@ mod shuttle_tests {
                 "all handles are dead after join; the final drain must prune them"
             );
         }
+    }
     }
 }
