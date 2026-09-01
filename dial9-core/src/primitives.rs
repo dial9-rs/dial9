@@ -45,6 +45,10 @@ pub use crate::define_thread_local as thread_local;
 #[cfg(all(not(shuttle), feature = "pipeline"))]
 pub mod time {
     pub use tokio::time::{Instant, sleep, sleep_until};
+
+    pub fn now() -> Instant {
+        Instant::now()
+    }
 }
 
 // ── shuttle path (deterministic testing) ────────────────────────────────────
@@ -134,12 +138,29 @@ pub use crate::define_thread_local as thread_local;
 
 #[cfg(all(shuttle, feature = "pipeline"))]
 pub mod time {
+    use std::cell::Cell;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     pub use tokio::time::Instant;
+
+    // `Instant::now()` is nondeterministic under shuttle replay (real
+    // clock). `now()` reads a thread-local logical clock instead, advanced
+    // one tick per genuine `Yield` suspend, isolated per concurrently
+    // running `#[test]`.
+    std::thread_local! {
+        static LOGICAL_CLOCK: (Instant, Cell<u64>) = (Instant::now(), Cell::new(0));
+    }
+
+    // Comfortably clears this crate's current millisecond-scale test
+    // deadlines; not derived from anything principled.
+    const LOGICAL_TICK: std::time::Duration = std::time::Duration::from_millis(10);
+
+    pub fn now() -> Instant {
+        LOGICAL_CLOCK.with(|(base, nanos)| *base + std::time::Duration::from_nanos(nanos.get()))
+    }
 
     /// Shuttle has no virtual clock. Like `primitives::thread::sleep`, this
     /// is a single scheduling point, not a real delay.
@@ -179,6 +200,8 @@ pub mod time {
             } else {
                 self.yielded = true;
                 YIELD_PENDING_POLLS.fetch_add(1, Ordering::Relaxed);
+                LOGICAL_CLOCK
+                    .with(|(_, nanos)| nanos.set(nanos.get() + LOGICAL_TICK.as_nanos() as u64));
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }

@@ -265,7 +265,7 @@ impl ActiveDump {
             // Anchor at trigger time so worker pickup latency does not
             // extend the forward window.
             let elapsed = req.triggered_at.elapsed().unwrap_or_default();
-            crate::primitives::time::Instant::now() + req.lookforward.saturating_sub(elapsed)
+            crate::primitives::time::now() + req.lookforward.saturating_sub(elapsed)
         });
         Self {
             id: req.id,
@@ -466,7 +466,7 @@ impl WorkerLoop {
                 // there keeps everything open until the head of the ring
                 // settles (budget-bounded, brief).
                 let exhaustive = self.fs.take_is_exhaustive();
-                let now = crate::primitives::time::Instant::now();
+                let now = crate::primitives::time::now();
                 let mut i = 0;
                 while i < dumps.len() {
                     let held = !retry_hold.is_empty()
@@ -508,7 +508,7 @@ impl WorkerLoop {
                     }
                 }
                 _ = crate::primitives::time::sleep_until(
-                    min_deadline.unwrap_or_else(crate::primitives::time::Instant::now)
+                    min_deadline.unwrap_or_else(crate::primitives::time::now)
                 ), if min_deadline.is_some() => {}
                 // Relies on every caller cancelling `self.stop` right after marking the
                 // writer done, which wakes this select via `stop.cancelled()`

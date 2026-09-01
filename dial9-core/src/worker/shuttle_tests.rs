@@ -212,12 +212,6 @@ crate::shuttle_test! {
 /// value itself doesn't matter, shuttle's `sleep_until` ignores it.
 const LOOKFORWARD: Duration = Duration::from_millis(1);
 
-// `determinism` SIGBUSes here because shuttle's
-// default 60KB coroutine stack is too small for this call depth.
-// Config issue, to be fixed crate-wide in a follow-up. Bumping
-// it locally confirmed the SIGBUS goes away, but also surfaces an
-// unresolved shuttle-internal panic during replay, so `determinism` stays
-// `#[ignore]`d below until both are addressed. `pct` is unaffected.
 mod shuttle_dump_time_range_resolves_via_deadline {
     use super::*;
 
@@ -286,12 +280,25 @@ mod shuttle_dump_time_range_resolves_via_deadline {
         );
     }
 
+    // SIGBUSes on shuttle's bare 60KB default stack under concurrent load;
+    // matches shuttle-tokio's own bumped default. Scoped to this test only.
+    fn bumped_stack_config() -> shuttle::Config {
+        let mut config = shuttle::Config::new();
+        config.stack_size = 0x000F_0000;
+        config
+    }
+
     #[test]
     fn pct() {
         // Drain any count left over from an earlier test in this binary.
         crate::primitives::time::take_yield_pending_polls();
 
-        shuttle::check_pct(shuttle_dump_time_range_resolves_via_deadline, 500, 3);
+        {
+            use shuttle::scheduler::PctScheduler;
+            let scheduler = PctScheduler::new(3, 500);
+            let runner = shuttle::Runner::new(scheduler, bumped_stack_config());
+            runner.run(shuttle_dump_time_range_resolves_via_deadline);
+        }
 
         // Batch-level: whether a given schedule reaches the wait depends on the interleaving,
         // but across 500 iterations at least one must have. Without this, the scenario passes
@@ -307,12 +314,14 @@ mod shuttle_dump_time_range_resolves_via_deadline {
     }
 
     #[test]
-    #[ignore = "SIGBUSes due to shuttle's default 60KB stack size."]
+    #[ignore = "flakes ~1-in-5 under concurrent execution: shuttle's own \
+                uncontrolled-nondeterminism detector trips. Root cause not \
+                yet isolated."]
     fn determinism() {
-        shuttle::check_uncontrolled_nondeterminism(
-            shuttle_dump_time_range_resolves_via_deadline,
-            500,
-        );
+        use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
+        let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(500));
+        let runner = shuttle::Runner::new(scheduler, bumped_stack_config());
+        runner.run(shuttle_dump_time_range_resolves_via_deadline);
     }
 }
 
