@@ -104,6 +104,8 @@ export interface PollsByTaskCSR {
   start: Float64Array;
   end: Float64Array;
   worker: Float64Array;
+  /** 1 = no matching PollEnd, so `end` is a bound, not the poll's real end. */
+  openEnded: Uint8Array;
 }
 
 /** Per-task poll aggregate for the Tasks tab index. Scalars only - reduced from
@@ -641,6 +643,7 @@ export class ColumnarWorkerSpans {
     const start = new Float64Array(off[T]!);
     const end = new Float64Array(off[T]!);
     const worker = new Float64Array(off[T]!);
+    const openEnded = new Uint8Array(off[T]!);
     const cur = off.slice(0, T);
     // Pass 2: fill.
     for (const [w, c] of this.byWorker) {
@@ -649,11 +652,12 @@ export class ColumnarWorkerSpans {
         if (!t) continue;
         const p = cur[slotOf.get(t)!]!++;
         start[p] = c.start[i]!; end[p] = c.end[i]!; worker[p] = w;
+        openEnded[p] = c.openEnded[i]!;
       }
     }
     // Sort each task slice by start (stable - matches the fat arr.sort tie-break).
-    for (let s = 0; s < T; s++) sortTriByStart(start, end, worker, off[s]!, off[s + 1]!);
-    return (this._pollsByTaskCSR = { slotOf, off, start, end, worker });
+    for (let s = 0; s < T; s++) sortTriByStart(start, end, worker, openEnded, off[s]!, off[s + 1]!);
+    return (this._pollsByTaskCSR = { slotOf, off, start, end, worker, openEnded });
   }
 
   /**
@@ -662,6 +666,14 @@ export class ColumnarWorkerSpans {
    * (the CSR slice is start-sorted, so slot 0 is the first). Never materializes
    * a PollView - the whole point of the columnar path. Tasks that never polled
    * are absent here; the caller unions them in from the spawn map.
+   *
+   * An open-ended poll has no matching PollEnd, so its `end` is only an upper
+   * bound - the interval up to it can be mostly idle (a park whose events were
+   * lost, or a block_in_place handoff at an unknown instant). It still counts as
+   * a poll and still names its workers, but its duration is unknown and is left
+   * out of `total`/`longest` rather than reported as time the task spent
+   * running. Including it made an unobserved gap read as the task's longest
+   * poll.
    */
   taskAggregates(): TaskPollAggregate[] {
     const csr = this.pollsByTaskCSR();
@@ -674,10 +686,11 @@ export class ColumnarWorkerSpans {
       let longest = 0;
       const workers = new Set<number>();
       for (let p = lo; p < hi; p++) {
+        workers.add(csr.worker[p]!);
+        if (csr.openEnded[p] === 1) continue;
         const dur = csr.end[p]! - csr.start[p]!;
         total += dur;
         if (dur > longest) longest = dur;
-        workers.add(csr.worker[p]!);
       }
       out.push({
         taskId,
@@ -1030,7 +1043,8 @@ export class ColumnarWorkerSpansBuilder {
  * ascending; ties keep insertion order (== the fat arr.sort tie-break, so the
  * mid-poll binary search + segment reconstruction pick the same poll). */
 function sortTriByStart(
-  pStart: Float64Array, pEnd: Float64Array, pWorker: Float64Array, lo: number, hi: number
+  pStart: Float64Array, pEnd: Float64Array, pWorker: Float64Array, pOpen: Uint8Array,
+  lo: number, hi: number
 ): void {
   const n = hi - lo;
   if (n < 2) return;
@@ -1039,8 +1053,13 @@ function sortTriByStart(
   const arr = Array.from({ length: n }, (_, k) => lo + k);
   arr.sort((x, y) => pStart[x]! - pStart[y]! || x - y);
   const ts = new Float64Array(n), te = new Float64Array(n), tw = new Float64Array(n);
-  for (let k = 0; k < n; k++) { ts[k] = pStart[arr[k]!]!; te[k] = pEnd[arr[k]!]!; tw[k] = pWorker[arr[k]!]!; }
+  const to = new Uint8Array(n);
+  for (let k = 0; k < n; k++) {
+    ts[k] = pStart[arr[k]!]!; te[k] = pEnd[arr[k]!]!; tw[k] = pWorker[arr[k]!]!;
+    to[k] = pOpen[arr[k]!]!;
+  }
   pStart.set(ts, lo);
   pEnd.set(te, lo);
   pWorker.set(tw, lo);
+  pOpen.set(to, lo);
 }

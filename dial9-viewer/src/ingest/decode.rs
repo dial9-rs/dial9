@@ -180,6 +180,7 @@ pub(crate) fn decode_samples_with_stats(
     let t_polls = Instant::now();
     let mut poll_timeline = polls::PollTimeline::reconstruct(&events);
     stats.poll_reconstruct = t_polls.elapsed();
+    stats.polls_end_unproven = poll_timeline.end_unproven();
 
     let t_samples = Instant::now();
     let mut stacks_dict: FxHashMap<[u8; 16], Vec<String>> = FxHashMap::default();
