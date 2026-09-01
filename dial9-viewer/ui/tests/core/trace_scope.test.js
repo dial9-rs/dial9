@@ -418,6 +418,52 @@ test("resolveScope uses half-open boundaries for adjacent segments", async () =>
   );
 });
 
+test("resolveScope excludes a preceding segment whose upload lagged into the window", async () => {
+  // #649: a rotating writer's last_modified is when the *upload finished*, which
+  // lands after the next segment already started. A click scoped to exactly one
+  // segment ([its start, its successor's start]) must still resolve to that one
+  // segment — the previous segment's lagging end must not drag it in.
+  const s = {
+    bucket: "bkt",
+    prefix: "traces",
+    service: "shale",
+    hosts: ["h1"],
+    from: 1782760100,
+    to: 1782760160,
+  };
+  const selected = key("h1", 1782760100, 1);
+  const browse = {
+    objects: [
+      // Started 60s before the window; upload finished 5s INTO it.
+      { key: key("h1", 1782760040, 0), size: 10, last_modified: "2026-06-29T19:08:25Z" },
+      // The clicked segment; its own upload also laps past `to`.
+      { key: selected, size: 10, last_modified: "2026-06-29T19:09:25Z" },
+      { key: key("h1", 1782760160, 2), size: 10, last_modified: "2026-06-29T19:10:25Z" },
+    ],
+  };
+
+  const urls = await scope.resolveScope(s, async () => browse);
+  assert.deepStrictEqual(
+    urls.map((u) => new URL(u, "http://dial9.test").searchParams.get("key")),
+    [selected],
+    "upload lag must not widen the window to the neighbouring segments",
+  );
+});
+
+test("resolveScope keeps a genuine overlap from a different host", async () => {
+  // Ends are tiled per service/host row, so one host's rotation cadence can
+  // never mask another host's segment that really does cover the window.
+  const s = { bucket: "bkt", prefix: "traces", service: "shale", hosts: [], from: 1782760100, to: 1782760160 };
+  const browse = {
+    objects: [
+      { key: key("h1", 1782760100, 1), size: 10, last_modified: "2026-06-29T19:09:25Z" },
+      { key: key("h2", 1782760040, 0), size: 10, last_modified: "2026-06-29T19:10:25Z" },
+    ],
+  };
+  const urls = await scope.resolveScope(s, async () => browse);
+  assert.strictEqual(urls.length, 2, "h2 has no successor to clamp against, so its real span counts");
+});
+
 test("resolveScope sends an encoded service and retains client-side service filtering", async () => {
   const service = "checkout api+canary?";
   const s = {
