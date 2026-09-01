@@ -96,8 +96,11 @@ impl BackgroundTaskConfig {
 ///
 /// Creates a single-threaded tokio runtime for async processors (e.g. S3 upload).
 /// The worker is a "good citizen": it will lose data rather than disrupt the application.
+///
+/// Pure runtime provisioning; orchestration logic lives in
+/// [`run_background_task_inner`].
 pub(crate) fn run_background_task(
-    mut config: BackgroundTaskConfig,
+    config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
     fs: Arc<Fs>,
 ) {
@@ -107,58 +110,71 @@ pub(crate) fn run_background_task(
         .build()
         .expect("failed to create worker runtime");
 
+    rt.block_on(run_background_task_inner(config, shutdown, fs));
+}
+
+/// Builds the `WorkerLoop`, contains any panic escaping its initialization
+/// or run loop, and races the shutdown signal / drain timeout against it.
+/// Doesn't build its own Tokio runtime: [`run_background_task`] does that
+/// via `rt.block_on`. The panic-containment/shutdown-race portion is
+/// shuttle-drivable (`shuttle_tests`); the drain-timeout race isn't, since
+/// `tokio::time::timeout` needs a real reactor.
+async fn run_background_task_inner(
+    mut config: BackgroundTaskConfig,
+    shutdown: tokio::sync::oneshot::Receiver<Duration>,
+    fs: Arc<Fs>,
+) {
     let processors = std::mem::take(&mut config.processors);
     let metrics_sink = config.metrics_sink.clone();
     let trigger = config.trigger.take();
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");
-    rt.block_on(async {
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker_stop = stop.clone();
-        let worker = async move {
-            let mut worker = WorkerLoop::new(
-                fs,
-                config.poll_interval(),
-                processors,
-                worker_stop,
-                metrics_sink,
-                trigger,
-            )
-            .await?;
-            worker.run().await;
-            io::Result::Ok(())
-        };
-        let mut run_fut =
-            std::pin::pin!(std::panic::AssertUnwindSafe(worker).catch_unwind());
-        // Poll the worker until we receive a shutdown signal with a drain timeout.
-        let drain_timeout = tokio::select! {
-            result = &mut run_fut => {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
-                    }
-                    Err(_) => {
-                        tracing::error!(target: "dial9_worker", "worker panicked");
-                    }
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let worker_stop = stop.clone();
+    let worker = async move {
+        let mut worker = WorkerLoop::new(
+            fs,
+            config.poll_interval(),
+            processors,
+            worker_stop,
+            metrics_sink,
+            trigger,
+        )
+        .await?;
+        worker.run().await;
+        io::Result::Ok(())
+    };
+    let mut run_fut = std::pin::pin!(std::panic::AssertUnwindSafe(worker).catch_unwind());
+    // Poll the worker until we receive a shutdown signal with a drain timeout.
+    let drain_timeout = crate::shuttle_select! {
+        result = &mut run_fut => {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
                 }
-                return;
+                Err(_) => {
+                    tracing::error!(target: "dial9_worker", "worker panicked");
+                }
             }
-            msg = shutdown => msg.unwrap_or(Duration::ZERO),
-        };
-        tracing::info!(target: "dial9_worker", ?drain_timeout, "stop signal received, draining");
-        // Tell the worker to exit after its current processing cycle.
-        stop.cancel();
-        // Give it `drain_timeout` to finish; after that, drop the future.
-        match tokio::time::timeout(drain_timeout, run_fut).await {
-            Ok(Ok(Ok(()))) => tracing::info!(target: "dial9_worker", "drain complete"),
-            Ok(Ok(Err(error))) => {
-                tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
-            }
-            Ok(Err(_)) => tracing::error!(target: "dial9_worker", "worker panicked"),
-            Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
+            tracing::info!(target: "dial9_worker", "worker stopped");
+            return;
         }
-    });
+        msg = shutdown => msg.unwrap_or(Duration::ZERO),
+    };
+    tracing::info!(target: "dial9_worker", ?drain_timeout, "stop signal received, draining");
+    // Tell the worker to exit after its current processing cycle.
+    stop.cancel();
+    // Give it `drain_timeout` to finish; after that, drop the future.
+    match tokio::time::timeout(drain_timeout, run_fut).await {
+        Ok(Ok(Ok(()))) => tracing::info!(target: "dial9_worker", "drain complete"),
+        Ok(Ok(Err(error))) => {
+            tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
+        }
+        Ok(Err(_)) => tracing::error!(target: "dial9_worker", "worker panicked"),
+        Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
+    }
     tracing::info!(target: "dial9_worker", "worker stopped");
 }
 
