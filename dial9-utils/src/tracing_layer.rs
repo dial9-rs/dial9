@@ -63,13 +63,13 @@
 
 use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::handle::Dial9Handle;
+use dial9_core::primitives::sync::Mutex;
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
 use tracing::callsite::Identifier;
 use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
@@ -420,5 +420,95 @@ where
             timestamp_ns: clock_monotonic_ns(),
             span_id: id.into_u64(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn callsite_a() -> &'static tracing::Metadata<'static> {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("callsite_a", field_a = 1, field_b = 2);
+            span.metadata().expect("span carries its callsite metadata")
+        })
+    }
+
+    fn callsite_b() -> &'static tracing::Metadata<'static> {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("callsite_b", field_c = 3);
+            span.metadata().expect("span carries its callsite metadata")
+        })
+    }
+
+    /// Each unique callsite gets its own wire schema. The shuttle test
+    /// exercises one callsite (it's checking the lock, not the
+    /// keying), so this is the only test that would catch the cache
+    /// collapsing two distinct callsites into one entry.
+    #[test]
+    fn get_schemas_is_keyed_per_callsite() {
+        let layer = Dial9TracingLayer::new();
+        let a = layer.get_schemas(callsite_a());
+        let b = layer.get_schemas(callsite_b());
+
+        assert_ne!(a.enter.name(), b.enter.name());
+        assert_ne!(a.exit.name(), b.exit.name());
+        assert_ne!(a.field_names, b.field_names);
+    }
+}
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use dial9_core::primitives::sync::Arc;
+    use dial9_core::primitives::thread;
+    use dial9_core::shuttle_test;
+
+    const CALLERS: usize = 4;
+
+    shuttle_test! {
+        num_iters = 2_000, depth = 3;
+        // The cache is fully serialized behind one Mutex, so this mainly
+        // guards against panic/deadlock and checks every caller observes a
+        // consistent cached schema for that callsite regardless of which
+        // thread's call actually built it.
+        fn shuttle_concurrent_get_schemas() {
+            // Callsite's metadata, obtained via a span macro invocation once.
+            // Without an active subscriber, the callsite is disabled and
+            // `Span::metadata()` returns `None`. `Registry` alone (no
+            // layers) is enough to make the span "real".
+            let meta = tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+                let span = tracing::info_span!("shuttle_test_span", field_a = 1, field_b = 2);
+                span.metadata()
+                    .expect("span carries its callsite metadata")
+            });
+
+            let layer = Arc::new(Dial9TracingLayer::new());
+
+            let handles: Vec<_> = (0..CALLERS)
+                .map(|_| {
+                    let layer = layer.clone();
+                    thread::spawn(move || layer.get_schemas(meta))
+                })
+                .collect();
+
+            let results: Vec<CallsiteSchemas> =
+                handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            let first = &results[0];
+            for schemas in &results[1..] {
+                assert_eq!(
+                    schemas.enter.name(),
+                    first.enter.name(),
+                    "every caller must observe the same cached enter schema for one callsite"
+                );
+                assert_eq!(
+                    schemas.exit.name(),
+                    first.exit.name(),
+                    "every caller must observe the same cached exit schema for one callsite"
+                );
+                assert_eq!(schemas.field_names, first.field_names);
+            }
+        }
     }
 }
