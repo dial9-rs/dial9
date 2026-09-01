@@ -229,6 +229,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `issue` | POI detector id | Issues filter. |
 | `issue-sort` | `<worker\|kind\|time\|duration>,<asc\|desc>` | Issues ordering. |
 | `issue-index` | non-negative integer | Current issues cursor. |
+| `issue-anchor` | `<worker>:<timeNs>:<spanStartNs>:<taskId\|->` | Stable identity for the current issue; takes precedence over its sorted index. |
 | `span-pct` | `50` \| `90` \| `95` \| `99` | Span percentile floor. |
 | `span-names` | `v1:` + TAB-joined names | Enabled span legend chips. |
 | `event-names` | same | Enabled custom-event legend chips. |

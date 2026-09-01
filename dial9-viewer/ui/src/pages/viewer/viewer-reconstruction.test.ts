@@ -18,6 +18,7 @@ import {
 import { resolveUrlSelection } from "./url-selection.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
 import { taskIndexFor } from "./tasks-model.js";
+import { derivePoiViewModel } from "./poi.js";
 
 let settledTrace: ParsedTrace;
 let reconstructedTrace: ParsedTrace;
@@ -152,6 +153,115 @@ describe("viewer deep-link reconstruction", () => {
       maxTs: 300,
       viewStart: 60,
       viewEnd: 290,
+    });
+  });
+
+  it("lets canonical viewer state override a stale exemplar focus", () => {
+    const polls = lanePolls(deriveLaneData(settledTrace))
+      .sort((a, b) => a.start - b.start);
+    const focusPoll = polls[0]!;
+    const canonicalPoll = polls.at(-1)!;
+    const offset = settledTrace.clockOffsetNs ?? 0;
+    const canonicalStart = Math.max(
+      settledTrace.recordMinTs!,
+      canonicalPoll.start - 1_000,
+    );
+    const canonicalEnd = Math.min(
+      settledTrace.recordMaxTs!,
+      canonicalPoll.end + 1_000,
+    );
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search:
+        `?focus_start=${focusPoll.start + offset}` +
+        `&focus_end=${focusPoll.end + offset}` +
+        `&focus_task=${focusPoll.taskId}` +
+        `&start=${canonicalStart}&end=${canonicalEnd}` +
+        `&task=0x${canonicalPoll.taskId.toString(16)}` +
+        `&poll=${canonicalPoll.start}:${canonicalPoll.taskId}`,
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(settledTrace, "source");
+
+    expect(store.getState().viewport).toMatchObject({
+      viewStart: canonicalStart,
+      viewEnd: canonicalEnd,
+    });
+    expect(store.getState().selection).toMatchObject({
+      selectedTaskId: canonicalPoll.taskId,
+      pollDetail: {
+        start: canonicalPoll.start,
+        taskId: canonicalPoll.taskId,
+      },
+    });
+  });
+
+  it("does not retain an exemplar task after restoring a canonical viewport", () => {
+    const task = taskIndexFor(settledTrace).rows.find((row) => row.pollCount > 0)!;
+    const offset = settledTrace.clockOffsetNs ?? 0;
+    const viewStart = settledTrace.recordMinTs! + 1_000;
+    const viewEnd = settledTrace.recordMaxTs! - 1_000;
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search:
+        `?focus_start=${task.firstPollStart + offset}` +
+        `&focus_end=${task.firstPollStart + offset + 1_000}` +
+        `&focus_task=${task.taskId}` +
+        `&start=${viewStart}&end=${viewEnd}`,
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(settledTrace, "source");
+
+    expect(store.getState().viewport).toMatchObject({ viewStart, viewEnd });
+    expect(store.getState().selection.selectedTaskId).toBeNull();
+  });
+
+  it("falls back to issue-index when a stable issue anchor no longer resolves", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search:
+        "?issue=wake-delay&issue-index=1" +
+        "&issue-anchor=999999:0:0:-",
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(settledTrace, "source");
+
+    expect(store.getState().poi.index).toBe(1);
+  });
+
+  it("resolves a legacy exemplar's stale issue index from its poll anchor", () => {
+    const poi = {
+      filter: "wake-delay" as const,
+      sortKey: "duration" as const,
+      sortDir: "desc" as const,
+      index: -1,
+      railTab: "issues" as const,
+      taskSort: "total" as const,
+      taskSortDir: "desc" as const,
+      taskIndex: -1,
+    };
+    const target = derivePoiViewModel(settledTrace, poi, settledTrace.minTs!)
+      .sorted[0]!;
+    expect("taskId" in target.span).toBe(true);
+    const taskId = (target.span as PollSpan).taskId;
+    const store = createViewerStore({ scheduler: () => {} });
+    const reconstruction = createViewerReconstruction(store, {
+      search:
+        "?issue=wake-delay&issue-index=1" +
+        `&focus_start=${target.time + (settledTrace.clockOffsetNs ?? 0)}` +
+        `&poll=${target.span.start}:${taskId}&task=0x${taskId.toString(16)}`,
+      hash: "",
+    });
+
+    reconstruction.applyLoadedTrace(settledTrace, "source");
+
+    expect(store.getState().poi.index).toBe(0);
+    expect(store.getState().selection.pollDetail).toMatchObject({
+      start: target.span.start,
+      taskId,
     });
   });
 
