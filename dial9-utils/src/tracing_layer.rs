@@ -98,17 +98,13 @@ struct CallsiteSchemas {
     field_names: Vec<&'static str>,
 }
 
-/// Test-integrity counter: how many times `build_callsite_schemas` has run
-/// since the last `take_schema_build_count()` call.
-///
-/// `build_callsite_schemas` is a pure function of `meta`, so a cache that
-/// rebuilds on every racing call returns the same values as one that builds
-/// once and clones — no value comparison can tell them apart; this counter
-/// is what does.
-///
-/// Using `std::sync::atomic::AtomicUsize`, instead of the shuttle-aware
-/// `primitives::sync::atomic` re-export: it must persist across shuttle's
-/// per-iteration state reset so the test can drain it once per iteration.
+/// Times `build_callsite_schemas` has run since the last
+/// `take_schema_build_count()` call. Needed because `build_callsite_schemas`
+/// is a pure function of `meta`, so no value comparison can tell "built
+/// once, cloned" apart from "rebuilt every racing call". Plain
+/// `std::sync::atomic::AtomicUsize`, not the shuttle-aware
+/// `primitives::sync::atomic` re-export: must survive shuttle's
+/// per-iteration state reset.
 #[cfg(all(test, shuttle))]
 static SCHEMA_BUILD_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -117,13 +113,11 @@ fn take_schema_build_count() -> usize {
     SCHEMA_BUILD_COUNT.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Serializes access to `SCHEMA_BUILD_COUNT` across `pct` and `determinism`
-/// — `shuttle_test!`'s own doc comment warns its generated tests run
-/// concurrently and would corrupt shared `static` state, recommending a
-/// hand-guarded `std::sync::Mutex`. Non-shuttle: it only needs to keep the
-/// two top-level test threads from interleaving their own iterations
-/// against the counter, not participate in shuttle's own interleavings
-/// within one iteration.
+/// Serializes access to `SCHEMA_BUILD_COUNT` across `pct` and `determinism`,
+/// which `cargo test` runs concurrently (the concurrency `shuttle_test!`'s
+/// own docs warn can corrupt shared `static` state). Plain
+/// `std::sync::Mutex`: only needs to keep those two test threads apart, not
+/// participate in shuttle's own interleavings within one iteration.
 #[cfg(all(test, shuttle))]
 static SCHEMA_BUILD_COUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -473,10 +467,10 @@ mod tests {
         })
     }
 
-    /// Each unique callsite gets its own wire schema. The shuttle test
-    /// exercises one callsite (it's checking the lock, not the
-    /// keying), so this is the only test that would catch the cache
-    /// collapsing two distinct callsites into one entry.
+    /// The only test that would catch the cache collapsing two distinct
+    /// callsites into one entry: the shuttle test exercises just one
+    /// callsite (it's checking the lock, not the keying), so per-callsite
+    /// schema keying needs its own coverage here.
     #[test]
     fn get_schemas_is_keyed_per_callsite() {
         let layer = Dial9TracingLayer::new();
@@ -492,79 +486,112 @@ mod tests {
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
-    use dial9_core::primitives::sync::Arc;
+    use dial9_core::buffer::MemoryBuffer;
+    use dial9_core::handle::set_tl_handle;
     use dial9_core::primitives::thread;
+    use dial9_core::recorder::recorder;
     use dial9_core::shuttle_test;
+    use tracing_subscriber::prelude::*;
 
     const CALLERS: usize = 4;
 
+    /// All racing threads call this one function so they hit the same
+    /// schema-cache entry. Each `info_span!` invocation site compiles to
+    /// its own callsite `Identifier`, even with identical arguments, so
+    /// calling the macro separately per thread would race four different
+    /// cache entries instead of one.
+    fn probe_span() -> tracing::Span {
+        tracing::info_span!(
+            "shuttle_concurrent_get_schemas_probe",
+            field_a = 1,
+            field_b = 2
+        )
+    }
+
     shuttle_test! {
         num_iters = 2_000, depth = 3;
-        // The cache is fully serialized behind one Mutex, so this mainly
-        // guards against panic/deadlock and checks every caller observes a
-        // consistent cached schema for that callsite regardless of which
-        // thread's call actually built it.
+        // Drives `Dial9TracingLayer`'s dispatch path: `on_enter`'s enabled
+        // gate, thread-local encoder access, task-ID/clock lookups, and
+        // `Registry`'s span-extension storage, not just `get_schemas` alone.
         //
-        // Value equality alone can't detect a cache that rebuilds every
-        // racing call instead of building once and cloning (see
+        // One subscriber, installed once as the ambient default for the
+        // whole race. `tracing-core`'s "current default" is
+        // a plain thread-local shared across all of shuttle's coroutines
+        // regardless of per-thread `set_default` calls. `Dial9Handle` still
+        // needs explicit `set_tl_handle` per thread, since `CURRENT_HANDLE`
+        // is a shuttle-virtualized thread-local instead.
+        //
+        // Value equality can't detect a cache that rebuilds every racing
+        // call instead of building once and cloning (see
         // `SCHEMA_BUILD_COUNT`'s doc comment). A failure below means this
         // test stopped proving the dedup, not that `Dial9TracingLayer`
         // regressed some other way.
         fn shuttle_concurrent_get_schemas() {
-            // Held for the whole iteration — see `SCHEMA_BUILD_COUNT_LOCK`.
-            // Poison ignored: a panic in one racing test's own assertion
-            // shouldn't mask the other's failure behind a `PoisonError`.
+            // Held for the whole iteration, including building/dropping the
+            // `Recorder` below (see `SCHEMA_BUILD_COUNT_LOCK` for the
+            // counter half). A `Recorder` also claims a process-wide "only
+            // one active recorder" guard (`SoleRecorderGuard`); two racing
+            // to claim it at once would silently disable one. Poison
+            // ignored, so one racing test's panic doesn't mask the other's.
             let _serialize = SCHEMA_BUILD_COUNT_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-            // Callsite's metadata, obtained via a span macro invocation once.
-            // Without an active subscriber, the callsite is disabled and
-            // `Span::metadata()` returns `None`. `Registry` alone (no
-            // layers) is enough to make the span "real".
-            let meta = tracing::subscriber::with_default(tracing_subscriber::registry(), || {
-                let span = tracing::info_span!("shuttle_test_span", field_a = 1, field_b = 2);
-                span.metadata()
-                    .expect("span carries its callsite metadata")
-            });
-
-            // Drain any count left over from a previous iteration — the
+            // Drain any count left over from a previous iteration: the
             // counter is a plain static that outlives shuttle's own
             // per-iteration reset, so each iteration must clear it itself.
             take_schema_build_count();
 
-            let layer = Arc::new(Dial9TracingLayer::new());
+            // An enabled `Dial9Handle`: `on_enter`'s gate requires one, and
+            // `with_encoder` needs a live recorder behind it to run its
+            // closure. In-memory writer: this scenario only cares about the
+            // schema cache, not the encoded bytes.
+            let writer = MemoryBuffer::new(1 << 16).expect("build in-memory writer");
+            let recorder = recorder(writer).build();
+            let handle = recorder.handle().clone();
+            assert!(
+                handle.is_enabled(),
+                "recorder must be enabled for on_enter's gate to run"
+            );
+
+            // Filtered to our own probe span only: shuttle's own scheduler
+            // uses `tracing` for its own diagnostics (see `Runner::run`'s
+            // `span!(Level::ERROR, "execution", i)`), dispatched through this
+            // same ambient default. Letting shuttle's own spans reach
+            // `Dial9TracingLayer` re-enters `ExecutionState` from inside
+            // shuttle's own bookkeeping (an unfiltered layer here panics with
+            // "ExecutionState is already borrowed"). The filter keeps our layer
+            // from ever seeing them.
+            let filter = tracing_subscriber::filter::FilterFn::new(|meta| {
+                meta.name() == "shuttle_concurrent_get_schemas_probe"
+            });
+            let subscriber =
+                tracing_subscriber::registry().with(Dial9TracingLayer::new().with_filter(filter));
+            let _sub_guard = tracing::subscriber::set_default(subscriber);
 
             let handles: Vec<_> = (0..CALLERS)
                 .map(|_| {
-                    let layer = layer.clone();
-                    thread::spawn(move || layer.get_schemas(meta))
+                    let handle = handle.clone();
+                    thread::spawn(move || {
+                        set_tl_handle(handle);
+                        let span = probe_span();
+                        let _enter = span.enter();
+                    })
                 })
                 .collect();
 
-            let results: Vec<CallsiteSchemas> =
-                handles.into_iter().map(|h| h.join().unwrap()).collect();
+            for h in handles {
+                h.join().unwrap();
+            }
 
             assert_eq!(
                 take_schema_build_count(),
                 1,
-                "cache must build a callsite's schema exactly once, no matter how many callers race for it"
+                "cache must build a callsite's schema exactly once, no matter how many real \
+                 concurrent span entries race for it"
             );
 
-            let first = &results[0];
-            for schemas in &results[1..] {
-                assert_eq!(
-                    schemas.enter.name(),
-                    first.enter.name(),
-                    "every caller must observe the same cached enter schema for one callsite"
-                );
-                assert_eq!(
-                    schemas.exit.name(),
-                    first.exit.name(),
-                    "every caller must observe the same cached exit schema for one callsite"
-                );
-                assert_eq!(schemas.field_names, first.field_names);
-            }
+            drop(recorder);
         }
     }
 }
