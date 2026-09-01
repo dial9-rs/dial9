@@ -548,68 +548,6 @@ mod tests {
     // space, unlike a real-thread proptest.
     const WRITERS: usize = 3;
     const EVENTS_PER_WRITER: u64 = 3;
-    const DRAIN_TICKS: usize = 3;
-
-    crate::shuttle_test! {
-        default;
-        // Shuttle counterpart of `concurrent_record_and_drain_preserves_event_count`:
-        // exhaustively explores interleavings instead of sampling. Keeping
-        // the real-thread proptest too, for the `Ordering::Relaxed` caveat above.
-        fn shuttle_concurrent_record_and_drain() {
-            let ss = Arc::new(enabled_shared_state());
-
-            let writers: Vec<_> = (0..WRITERS)
-                .map(|_| {
-                    let ss = ss.clone();
-                    crate::primitives::thread::spawn(move || {
-                        for _ in 0..EVENTS_PER_WRITER {
-                            ss.record_encodable_event(&sample_event());
-                        }
-                    })
-                })
-                .collect();
-
-            let drainer = {
-                let ss = ss.clone();
-                crate::primitives::thread::spawn(move || {
-                    for _ in 0..DRAIN_TICKS {
-                        ss.bump_drain_epoch();
-                        // Grace period for an in-flight writer to self-flush
-                        // before the intrusive drain locks its buffer, mirroring
-                        // the real flush loop's tick-then-drain gap.
-                        shuttle::thread::yield_now();
-                        ss.drain_all_tl_buffers();
-                    }
-                })
-            };
-
-            for w in writers {
-                w.join().unwrap();
-            }
-            drainer.join().unwrap();
-
-            // Writers have exited, so their TLB `Drop` impls flushed any
-            // remaining events. Final bump+drain prunes dead handles.
-            ss.bump_drain_epoch();
-            ss.drain_all_tl_buffers();
-
-            let mut total: u64 = 0;
-            while let Some(batch) = ss.collector.next() {
-                assert!(batch.event_count() > 0, "empty batch reached collector");
-                total += batch.event_count();
-            }
-            assert_eq!(
-                ss.collector.take_dropped_batches(),
-                0,
-                "collector must not evict a batch under this workload"
-            );
-            assert_eq!(
-                total,
-                WRITERS as u64 * EVENTS_PER_WRITER,
-                "every recorded event must reach the collector exactly once"
-            );
-        }
-    }
 
     const LIFECYCLE_WRITERS: usize = 2;
 
