@@ -1060,3 +1060,71 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use dial9_core::shuttle_test;
+
+    shuttle_test! {
+        default;
+        // Races concurrent attaches against a concurrent `segment_metadata`
+        // reader; every attach observed exactly once. Mirrors
+        // `attach_tokio_runtime`'s real bind/publish sequence (minted real
+        // `Id`, registry push, `set_tl_handle`/`mark_thread_traced`), not
+        // the config/build/metrics steps around it. Skips
+        // `worker_id_base`/`worker_ids`. Assertion only checks registry
+        // length, not `segment_metadata`'s own output.
+        fn shuttle_concurrent_attach() {
+            const ATTACHERS: usize = 3;
+            let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+
+            let attachers: Vec<_> = (0..ATTACHERS)
+                .map(|i| {
+                    let contexts = contexts.clone();
+                    crate::primitives::thread::spawn(move || {
+                        let throwaway = tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap();
+                        let id = throwaway.handle().id();
+                        drop(throwaway);
+
+                        let handle = Dial9Handle::disabled();
+                        let ctx = Arc::new(RuntimeContext::new(
+                            Some(format!("runtime-{i}")),
+                            handle.clone(),
+                            Arc::new(AtomicU64::new(0)),
+                        ));
+                        ctx.bind_runtime(id);
+                        contexts.lock().unwrap().push(ctx);
+                        set_tl_handle(handle);
+                        mark_thread_traced();
+                    })
+                })
+                .collect();
+
+            let reader = {
+                let contexts = contexts.clone();
+                crate::primitives::thread::spawn(move || {
+                    let mut source = TokioRuntimesSource::new(contexts);
+                    let mut out = Vec::new();
+                    for _ in 0..ATTACHERS {
+                        out.clear();
+                        source.segment_metadata(&mut out);
+                    }
+                })
+            };
+
+            for attacher in attachers {
+                attacher.join().unwrap();
+            }
+            reader.join().unwrap();
+
+            assert_eq!(
+                contexts.lock().unwrap().len(),
+                ATTACHERS,
+                "every concurrent attach must be observed exactly once"
+            );
+        }
+    }
+}
