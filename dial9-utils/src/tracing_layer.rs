@@ -98,8 +98,40 @@ struct CallsiteSchemas {
     field_names: Vec<&'static str>,
 }
 
+/// Test-integrity counter: how many times `build_callsite_schemas` has run
+/// since the last `take_schema_build_count()` call.
+///
+/// `build_callsite_schemas` is a pure function of `meta`, so a cache that
+/// rebuilds on every racing call returns the same values as one that builds
+/// once and clones — no value comparison can tell them apart; this counter
+/// is what does.
+///
+/// Using `std::sync::atomic::AtomicUsize`, instead of the shuttle-aware
+/// `primitives::sync::atomic` re-export: it must persist across shuttle's
+/// per-iteration state reset so the test can drain it once per iteration.
+#[cfg(all(test, shuttle))]
+static SCHEMA_BUILD_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, shuttle))]
+fn take_schema_build_count() -> usize {
+    SCHEMA_BUILD_COUNT.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Serializes access to `SCHEMA_BUILD_COUNT` across `pct` and `determinism`
+/// — `shuttle_test!`'s own doc comment warns its generated tests run
+/// concurrently and would corrupt shared `static` state, recommending a
+/// hand-guarded `std::sync::Mutex`. Non-shuttle: it only needs to keep the
+/// two top-level test threads from interleaving their own iterations
+/// against the counter, not participate in shuttle's own interleavings
+/// within one iteration.
+#[cfg(all(test, shuttle))]
+static SCHEMA_BUILD_COUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Build the enter and exit schemas for a callsite.
 fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> CallsiteSchemas {
+    #[cfg(all(test, shuttle))]
+    SCHEMA_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let file = meta.file().unwrap_or("unknown");
     let line = meta.line().unwrap_or(0);
     let schema_id = format!("{}::{}:{}:{}", meta.target(), meta.name(), file, line);
@@ -472,7 +504,20 @@ mod shuttle_tests {
         // guards against panic/deadlock and checks every caller observes a
         // consistent cached schema for that callsite regardless of which
         // thread's call actually built it.
+        //
+        // Value equality alone can't detect a cache that rebuilds every
+        // racing call instead of building once and cloning (see
+        // `SCHEMA_BUILD_COUNT`'s doc comment). A failure below means this
+        // test stopped proving the dedup, not that `Dial9TracingLayer`
+        // regressed some other way.
         fn shuttle_concurrent_get_schemas() {
+            // Held for the whole iteration — see `SCHEMA_BUILD_COUNT_LOCK`.
+            // Poison ignored: a panic in one racing test's own assertion
+            // shouldn't mask the other's failure behind a `PoisonError`.
+            let _serialize = SCHEMA_BUILD_COUNT_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
             // Callsite's metadata, obtained via a span macro invocation once.
             // Without an active subscriber, the callsite is disabled and
             // `Span::metadata()` returns `None`. `Registry` alone (no
@@ -482,6 +527,11 @@ mod shuttle_tests {
                 span.metadata()
                     .expect("span carries its callsite metadata")
             });
+
+            // Drain any count left over from a previous iteration — the
+            // counter is a plain static that outlives shuttle's own
+            // per-iteration reset, so each iteration must clear it itself.
+            take_schema_build_count();
 
             let layer = Arc::new(Dial9TracingLayer::new());
 
@@ -494,6 +544,12 @@ mod shuttle_tests {
 
             let results: Vec<CallsiteSchemas> =
                 handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            assert_eq!(
+                take_schema_build_count(),
+                1,
+                "cache must build a callsite's schema exactly once, no matter how many callers race for it"
+            );
 
             let first = &results[0];
             for schemas in &results[1..] {
