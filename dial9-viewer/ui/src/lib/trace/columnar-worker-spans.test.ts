@@ -40,6 +40,33 @@ describe("ColumnarWorkerSpans", () => {
     expect(total).toBeGreaterThan(0);
   });
 
+  it("taskAggregates leaves an open-ended poll's unknown duration out of total/longest", () => {
+    // One task, two polls on one worker: a short explicitly ended poll and a
+    // much longer open-ended one (no PollEnd, so its end is only a bound). The
+    // long one must not become the task's longest poll.
+    const lane = {
+      polls: [
+        { start: 1_000, end: 1_100, taskId: 7, spawnLocId: null, spawnLoc: null },
+        { start: 2_000, end: 32_000, taskId: 7, spawnLocId: null, spawnLoc: null, openEnded: true },
+      ],
+      parks: [],
+      actives: [],
+    };
+    const store = ColumnarWorkerSpans.fromWorkerSpans({ 0: lane } as never);
+    const aggs = store.taskAggregates();
+    expect(aggs).toHaveLength(1);
+    expect(aggs[0]).toMatchObject({
+      taskId: 7,
+      // Both polls happened, so both are counted...
+      pollCount: 2,
+      // ...but only the proven one contributes duration.
+      totalPollNs: 100,
+      longestPollNs: 100,
+      firstPollStart: 1_000,
+      workerCount: 1,
+    });
+  });
+
   it("columnar parks + actives are field-for-field identical to the objects", () => {
     const store = ColumnarWorkerSpans.fromWorkerSpans(ws as never);
     let parks = 0, actives = 0;

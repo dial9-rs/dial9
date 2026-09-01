@@ -596,6 +596,16 @@
             openUnpark[w] = null;
           }
         } else if (e.eventType === EVENT_TYPES.WorkerUnpark) {
+          // An unpark with a poll still open means the poll's PollEnd AND the
+          // park that would have bounded it were both lost. The worker sat
+          // parked meanwhile, so the poll was not running: drop it rather than
+          // draw a bar over the park. Same reasoning as the trace-end discard
+          // below (#194) - `openPark[w]` is necessarily null here, because a
+          // park event would already have closed the poll above.
+          if (openPoll[w] != null) {
+            openPoll[w] = null;
+            openPollMeta[w] = null;
+          }
           if (openPark[w] != null) {
             workerSpans[w].parks.push({
               start: openPark[w],
