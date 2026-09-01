@@ -1,7 +1,9 @@
 //! Shuttle coverage for the `WorkerLoop` segment handoff.
 //!
-//! Drives `WorkerLoop` directly via `shuttle::future::block_on` rather than
-//! through `run_background_task`'s real Tokio runtime.
+//! `shuttle_worker_handoff`/`shuttle_dump_resolves_exactly_once`/
+//! `shuttle_dump_time_range_resolves_via_deadline` drive `WorkerLoop`
+//! directly via `shuttle::future::block_on` rather than through
+//! `run_background_task`'s real Tokio runtime.
 //!
 //! `shuttle_worker_handoff` drives the real `run()`/`run_continuous()` path
 //! (not the test-only `process_open_segments()` shortcut): safe for the
@@ -13,6 +15,13 @@
 //! `primitives::time`/`shuttle_select!` make both shuttle-safe. Neither
 //! scenario's processor pipeline takes a retryable-failure path, the only
 //! other place `process_segments` awaits a real `tokio::time::sleep`.
+//!
+//! `shuttle_background_task_contains_init_panic` drives
+//! `run_background_task_inner` directly, covering the panic-containment
+//! `catch_unwind`/shutdown race the `WorkerLoop`-level scenarios above
+//! never reach. That function's drain-timeout race calls real
+//! `tokio::time::timeout` (needs a live reactor), so it stays covered only
+//! by `worker/tests.rs`'s real-runtime tests.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -47,13 +56,9 @@ const SEGMENTS_PER_WRITER: u32 = 2;
 /// of reading real wall-clock time.
 const FIXED_EPOCH_SECS_FOR_TEST: u64 = 1_000;
 
-/// A minimal, valid trace segment header. An unparseable payload (e.g. the
-/// old placeholder `b"x"`) makes `process_segments` fall back to
-/// `SystemTime::now()`, a real-clock read shuttle can't control, which
-/// causes `shuttle_dump_resolves_exactly_once::determinism`'s
-/// flake. This keeps the test off that fallback path; `process_segments`
-/// itself still discards the epoch already cached for in-memory segments
-/// and re-derives it the same fallback-prone way, not fixed here.
+/// A minimal, valid trace segment header. An unparseable payload makes
+/// `process_segments` fall back to `SystemTime::now()`, a real-clock read
+/// shuttle can't control.
 fn segment_bytes_with_epoch(epoch_secs: u64) -> Vec<u8> {
     use dial9_trace_format::encoder::Encoder;
     let mut enc = Encoder::new_to(Vec::new()).unwrap();
@@ -307,6 +312,55 @@ mod shuttle_dump_time_range_resolves_via_deadline {
         shuttle::check_uncontrolled_nondeterminism(
             shuttle_dump_time_range_resolves_via_deadline,
             500,
+        );
+    }
+}
+
+/// A processor whose `initialize()` panics instead of returning an error.
+struct PanickingInitializer;
+
+impl SegmentProcessor for PanickingInitializer {
+    fn name(&self) -> &'static str {
+        "PanickingInitializer"
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(async { panic!("PanickingInitializer: simulated init panic") })
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move { Ok(data) })
+    }
+}
+
+crate::shuttle_test! {
+    num_iters = 500, determinism_only;
+    // A panic escaping `WorkerLoop::new` must be caught by
+    // `run_background_task_inner`'s top-level `catch_unwind`, distinct from
+    // the per-segment panics `process_segments` already catches internally.
+    // No `pct`: single task, nothing to interleave against; still needs
+    // shuttle's harness for `shuttle_select!`.
+    fn shuttle_background_task_contains_init_panic() {
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let config = BackgroundTaskConfig::builder()
+            .processors(vec![Box::new(PanickingInitializer) as Box<dyn SegmentProcessor>])
+            .build();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let worker = crate::primitives::thread::spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+            }))
+        });
+
+        assert!(
+            worker.join().unwrap().is_ok(),
+            "a panic inside WorkerLoop::new/run must be caught by \
+             run_background_task_inner's top-level catch_unwind, not \
+             propagate to its caller"
         );
     }
 }
