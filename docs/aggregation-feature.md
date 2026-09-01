@@ -119,7 +119,7 @@ Two independent version knobs, deliberately in opposite places:
 - **`ORDER_VERSION`** (= 1) lives *only* in the order-key hash input. Bump it to
   change the fetch-order permutation; persisted samples are order-independent
   and survive untouched.
-- **`SAMPLES_FORMAT_VERSION`** (= 8) lives *only* in the output path. Bump it
+- **`SAMPLES_FORMAT_VERSION`** (= 9) lives *only* in the output path. Bump it
   when changing *what* we persist; reads/writes then target a fresh empty tree
   that repopulates lazily on demand — no backfill job. The old tree is abandoned
   and GC'd out-of-band.

@@ -2405,8 +2405,14 @@
 
     /**
      * Resolve a callchain (array of address strings) to frame objects.
-     * When an address has inlined frames (stored as an array in callframeSymbols),
-     * they are expanded in place (outermost first, then inlined callees).
+     *
+     * A callchain is leaf→root, and so is the returned array. An address with
+     * inlined frames is stored in `callframeSymbols` as an array indexed by
+     * inline depth (`[0]` = the function that owns the machine code, `[i>0]` =
+     * successively deeper inlined callees), so the group is expanded in place in
+     * *reverse*: innermost callee first, keeping the whole array leaf→root.
+     * Expanding it depth-0-first would make callers appear below their callees
+     * for consumers that read `[0]` as the leaf or reverse the array wholesale.
      * @param {string[]} callchain - Address strings like "0x55cc6d053893"
      * @param {Map<string, {symbol: string, location: string|null}|Array>} callframeSymbols
      * @returns {{symbol: string, location: string|null}[]}
@@ -2420,7 +2426,12 @@
                 continue;
             }
             if (Array.isArray(entry)) {
-                for (const e of entry) result.push(e);
+                for (let i = entry.length - 1; i >= 0; i--) {
+                    // Sparse arrays can miss an inline slot when a depth>0
+                    // SymbolTableEntry arrives without its depth-0 sibling.
+                    const e = entry[i];
+                    if (e) result.push(e);
+                }
                 continue;
             }
             if (typeof entry === "string") {
