@@ -9,6 +9,7 @@ import {
   Dial9Creds,
   Dial9Session,
   applyToCreds,
+  decodeFlamegraphTree,
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
@@ -369,7 +370,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     // without it.
     loadingEl.classList.add("hidden");
     containerEl.style.display = "flex";
-    fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
+    const tree = decodeFlamegraphTree(resp);
+    fg.setTreeDirect(toFgTree(tree), tree.count);
 
     const cov = resp.coverage;
     lastCoverage = cov ?? null;

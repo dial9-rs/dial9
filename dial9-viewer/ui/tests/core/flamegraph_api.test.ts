@@ -46,6 +46,7 @@ const {
   nextMaxFiles,
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
+  decodeFlamegraphTree,
   nsToPickerUtc,
   pickerUtcToNs,
   msToNs,
@@ -79,12 +80,80 @@ const {
     baselineFilesFolded: number,
     incomingFilesFolded: number,
   ) => boolean;
+  decodeFlamegraphTree: (response: { tree: unknown }) => unknown;
   nsToPickerUtc: (ns: string | null) => string;
   pickerUtcToNs: (picker: string) => string | null;
   sourceFacetOptions: (present?: string[]) => FacetOption[];
   threadFacetOptions: (present: string[]) => FacetOption[];
   hostFacetOptions: (hosts: string[]) => FacetOption[];
 };
+
+describe("decodeFlamegraphTree", () => {
+  it("resolves repeated interned frame IDs into the legacy nested tree", () => {
+    expect(
+      decodeFlamegraphTree({
+        tree: {
+          format: "interned-v1",
+          frames: ["(all)", "shared", "left", "right"],
+          root: {
+            frame: 0,
+            count: 7,
+            self: 0,
+            children: [
+              {
+                frame: 1,
+                count: 4,
+                self: 0,
+                children: [{ frame: 2, count: 4, self: 4 }],
+              },
+              {
+                frame: 1,
+                count: 3,
+                self: 0,
+                children: [{ frame: 3, count: 3, self: 3 }],
+              },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      name: "(all)",
+      count: 7,
+      self: 0,
+      children: [
+        {
+          name: "shared",
+          count: 4,
+          self: 0,
+          children: [{ name: "left", count: 4, self: 4 }],
+        },
+        {
+          name: "shared",
+          count: 3,
+          self: 0,
+          children: [{ name: "right", count: 3, self: 3 }],
+        },
+      ],
+    });
+  });
+
+  it("passes a legacy tree through unchanged", () => {
+    const tree = { name: "(all)", count: 1, self: 1 };
+    expect(decodeFlamegraphTree({ tree })).toBe(tree);
+  });
+
+  it("rejects an invalid frame reference", () => {
+    expect(() =>
+      decodeFlamegraphTree({
+        tree: {
+          format: "interned-v1",
+          frames: ["(all)"],
+          root: { frame: 2, count: 1, self: 1 },
+        },
+      }),
+    ).toThrow(/invalid frame 2/);
+  });
+});
 
 describe("formatCoverageBadge", () => {
   it("spec example", () => {

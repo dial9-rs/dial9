@@ -261,6 +261,7 @@ export type { Dial9SessionApi, SessionStorageLike } from "./session.js";
 // consumers share one implementation.
 export {
   coveragePercent,
+  decodeFlamegraphTree,
   foldErrorNotice,
   formatCoverageBadge,
   formatHumanDuration,
@@ -273,7 +274,11 @@ export {
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
 } from "./api_format.js";
-export type { FacetOption, LegacyCoverage } from "./api_format.js";
+export type {
+  DecodedFlamegraphNode,
+  FacetOption,
+  LegacyCoverage,
+} from "./api_format.js";
 
 // sse.ts - the fetch-based Server-Sent Events client for the streamed
 // aggregation endpoints (the server owns the refine/stop loop).
@@ -351,6 +356,7 @@ export {
 export type {
   AggregateScope,
   ApiFlamegraphNode,
+  ApiFlamegraphTree,
   AttributeFacet,
   CompositionBucket,
   Coverage,
@@ -360,6 +366,8 @@ export type {
   FacetResult,
   FlamegraphMetadata,
   FlamegraphResponse,
+  InternedApiFlamegraphNode,
+  InternedApiFlamegraphTree,
   PollDurationBar,
   PollExemplar,
   SchedulingDelay,

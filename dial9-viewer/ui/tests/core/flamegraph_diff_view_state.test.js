@@ -151,6 +151,7 @@ test("apiUrlFor forwards server scope and strips client-only flags", () => {
   assert.strictEqual(url.searchParams.get("aws_region"), "us-west-2");
   assert.deepStrictEqual(url.searchParams.getAll("host"), ["h1", "h2"]);
   assert.strictEqual(url.searchParams.get("max_files"), "8");
+  assert.strictEqual(url.searchParams.get("format"), "interned-v1");
   assert.strictEqual(url.searchParams.get("api"), null);
 });
 
