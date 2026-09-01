@@ -54,10 +54,10 @@ impl Drop for ThreadTrackingGuard {
 
 /// OS thread ID (tid) of the calling thread.
 ///
-/// `gettid()` on Linux/Android (a vDSO/syscall); a stable per-thread counter
-/// elsewhere. Allocation-free, so it is safe to call from the allocator hook.
-/// On hot paths prefer [`cached_tid`], which pays the syscall once per
-/// thread.
+/// `gettid()` on Linux/Android, `pthread_getthreadid_np()` on FreeBSD, and a
+/// stable per-thread counter elsewhere. Allocation-free, so it is safe to call
+/// from the allocator hook. On hot paths prefer [`cached_tid`], which pays the
+/// syscall once per thread.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn current_tid() -> u32 {
     // SAFETY: gettid takes no args and only returns the caller's tid.
@@ -85,7 +85,14 @@ pub fn cached_tid() -> u32 {
     })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(target_os = "freebsd")]
+pub fn current_tid() -> u32 {
+    // SAFETY: pthread_getthreadid_np takes no arguments and returns the
+    // calling kernel thread's id.
+    unsafe { libc::pthread_getthreadid_np() as u32 }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
 pub fn current_tid() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -117,6 +124,14 @@ mod tests {
     use crate::source::{FlushContext, Source};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(target_os = "freebsd")]
+    #[test]
+    fn freebsd_tid_matches_kernel_thread_id() {
+        // SAFETY: pthread_getthreadid_np has no preconditions.
+        let expected = unsafe { libc::pthread_getthreadid_np() as u32 };
+        assert_eq!(current_tid(), expected);
+    }
 
     #[derive(Default)]
     struct Counts {

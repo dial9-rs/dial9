@@ -64,6 +64,41 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+  freebsd:
+    name: FreeBSD 15.1
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    env:
+      RUST_BACKTRACE: 1
+      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build and test in FreeBSD
+        uses: vmactions/freebsd-vm@77ed28d336d03fe19a3f4f7266c1d2c4714dd79d # v1.5.2
+        with:
+          release: "15.1"
+          usesh: true
+          copyback: false
+          cache-after-prepare: true
+          envs: "RUST_BACKTRACE RUSTFLAGS"
+          prepare: |
+            pkg install -y rustup-init
+            rustup-init -y --profile minimal --default-toolchain "${{ env.STABLE_TOOLCHAIN }}"
+            . "$HOME/.cargo/env"
+          run: |
+            . "$HOME/.cargo/env"
+            freebsd-version
+            rustc --version
+            cargo test -p dial9-core \
+              freebsd_tid_matches_kernel_thread_id
+            cargo test -p dial9-tokio-telemetry \
+              --test park_unpark_tid \
+              --test process_resource_usage
+            cargo test -p dial9-perf-self-profile \
+              --features "process-resource test-util" \
+              process_resource
+
   windows-cli-check:
     name: Windows CLI check
     runs-on: windows-latest
