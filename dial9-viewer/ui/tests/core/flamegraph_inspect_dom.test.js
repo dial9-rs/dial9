@@ -144,6 +144,17 @@ function sampleTree() {
   return tree("", 15, 0, [a, b]);
 }
 
+function exactSamples(frame) {
+  const symbols = new Map([
+    [1, { symbol: "root", location: null }],
+    [2, { symbol: frame, location: null }],
+  ]);
+  const samples = [
+    { callchain: [2, 1], workerId: 0, spawnLoc: null, weight: 1 },
+  ];
+  return { samples, symbols };
+}
+
 // Dispatch a mouse-ish event to an element's handlers.
 function fire(el, type, props) {
   const ev = Object.assign({
@@ -192,6 +203,29 @@ test("right-click → Inspect enters butterfly; Esc exits (#652)", () => {
     const consumed = fg.handleEscape();
     assert.strictEqual(consumed, true, "Esc consumed by inspect exit");
     assert.strictEqual(inspectView.style.display, "none", "inspect view hidden after Esc");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("replacing exact-trace data exits inspect and hides its DOM", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("../../flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    const cpu = exactSamples("cpu_frame");
+    fg.setData(cpu.samples, cpu.symbols);
+
+    assert.strictEqual(fg.focusInspectByKey("cpu_frame"), true);
+    const inspectView = dom.byClass["fg-inspect"][0];
+    assert.strictEqual(inspectView.style.display, "", "inspect view is visible");
+
+    const heap = exactSamples("heap_frame");
+    fg.setData(heap.samples, heap.symbols);
+
+    assert.strictEqual(fg.getInspectFocus(), null, "inspect focus is cleared");
+    assert.strictEqual(inspectView.style.display, "none", "inspect view is hidden");
+    assert.strictEqual(fg.handleEscape(), false, "no stale inspect state remains");
   } finally {
     dom.restore();
   }

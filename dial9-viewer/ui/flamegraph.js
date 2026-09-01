@@ -339,9 +339,13 @@
   }
 
   function filterCpuSamples(cpuSamples, startNs, endNs) {
-    let out = cpuSamples.filter((s) => s.callchain.length > 0 && s.source !== 1);
-    if (startNs != null) out = out.filter((s) => s.timestamp >= startNs);
-    if (endNs != null) out = out.filter((s) => s.timestamp <= endNs);
+    const out = [];
+    for (const sample of cpuSamples) {
+      if (sample.callchain.length === 0 || sample.source === 1) continue;
+      if (startNs != null && sample.timestamp < startNs) continue;
+      if (endNs != null && sample.timestamp > endNs) continue;
+      out.push(sample);
+    }
     return out;
   }
 
@@ -368,6 +372,7 @@
     let repaintQueued = false;
     let allSamples = [];
     let currentSymbols = null;
+    let treeOptions = null;
     // True once setTreeDirect() has installed a pre-built (aggregated/API) tree.
     // In that mode there are no raw `allSamples`, so the spawn/runtime filters
     // (which rebuild the trees from samples) do not apply and must not run —
@@ -1481,25 +1486,23 @@
     function applyFilters() {
       const filterVal = spawnFilter.value;
       const runtimeVal = runtimeFilter.value;
-      let samples = allSamples;
-      if (filterVal) {
-        samples = samples.filter((s) => (s.spawnLoc || "(unknown)") === filterVal);
-      }
-      if (runtimeVal) {
+      const workerSamples = [];
+      const offworkerSamples = [];
+      for (const sample of allSamples) {
+        if (filterVal && (sample.spawnLoc || "(unknown)") !== filterVal) continue;
         // Off-worker samples (workerId 255) have no runtime; a runtime filter
         // excludes them. Worker samples are kept when their worker belongs to
         // the selected runtime.
-        samples = samples.filter((s) => workerRuntime.get(s.workerId) === runtimeVal);
+        if (runtimeVal && workerRuntime.get(sample.workerId) !== runtimeVal) continue;
+        if (sample.workerId === 255) offworkerSamples.push(sample);
+        else workerSamples.push(sample);
       }
 
-      const workerSamples = samples.filter((s) => s.workerId !== 255);
-      const offworkerSamples = samples.filter((s) => s.workerId === 255);
-
       workerTree = workerSamples.length > 0
-        ? buildFlamegraphTree(workerSamples, currentSymbols)
+        ? buildFlamegraphTree(workerSamples, currentSymbols, treeOptions)
         : null;
       offworkerTree = offworkerSamples.length > 0
-        ? buildFlamegraphTree(offworkerSamples, currentSymbols)
+        ? buildFlamegraphTree(offworkerSamples, currentSymbols, treeOptions)
         : null;
 
       workerZoomStack = [];
@@ -1507,6 +1510,7 @@
       // The focus node points into trees we just rebuilt; drop inspect state and
       // any stale search dropdown so nothing dangles onto the old trees.
       resetInspectState();
+      setInspectVisible(false);
       hideSearchResults();
 
       workerLabel.textContent =
@@ -1537,6 +1541,7 @@
       directMode = false;
       allSamples = samples;
       currentSymbols = callframeSymbols;
+      treeOptions = (opts && opts.treeOptions) || null;
       formatCount = (opts && opts.formatCount) || null;
       workerLabelPrefix = (opts && opts.workerLabel) || "Worker threads";
       offworkerLabelPrefix = (opts && opts.offworkerLabel) || "Off-worker (sampler thread)";

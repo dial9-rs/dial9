@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createActions } from "./actions.js";
 import type { BrowserEls } from "./dom.js";
-import { createBrowserStore } from "./state.js";
+import { createBrowserStore, type HeatmapSegment } from "./state.js";
+import { toRows } from "./segments.js";
 
 function input(value = ""): HTMLInputElement {
   return { value } as HTMLInputElement;
@@ -323,5 +324,44 @@ describe("clearBrowseNoService", () => {
     expect(store.getState().browse.status.text).toBe(
       "Choose a service to browse its traces.",
     );
+  });
+});
+
+describe("heatmap segment selection", () => {
+  it("ends at the next segment start instead of its delayed upload time", () => {
+    const store = createBrowserStore();
+    const selected: HeatmapSegment = {
+      key: "traces/2026-04-09/1910/shale/h1/100-0.bin.gz",
+      size: 1,
+      start: 100,
+      // The segment rotated at 110, but S3 completed its upload a second later.
+      end: 111,
+      layout: "known",
+      service: "shale",
+      host: "h1",
+      bootId: "",
+    };
+    const next: HeatmapSegment = {
+      ...selected,
+      key: "traces/2026-04-09/1910/shale/h1/110-1.bin.gz",
+      start: 110,
+      end: 120,
+    };
+    const segments = [selected, next];
+    store.update("browse", {
+      segments,
+      rows: toRows(segments),
+      domain: { tMin: 100, tMax: 120 },
+    });
+    const els = browserEls("");
+    Object.assign(els, { heatmapCanvas: { clientWidth: 100, style: {} } });
+
+    createActions(store, els).selectSegmentAt(0, 0);
+
+    expect(store.getState().browse.selection).toMatchObject({
+      keys: [selected.key],
+      t0: 100,
+      t1: 110,
+    });
   });
 });

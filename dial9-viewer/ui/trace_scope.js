@@ -333,6 +333,36 @@
     return params.get(P.from) != null && params.get(P.to) != null;
   }
 
+  // Effective end of each candidate for the window-overlap test, keyed by S3
+  // key. A segment's `last_modified` is when its *upload finished*, which for a
+  // rotating writer lands after the next segment already started. Compared raw,
+  // that lag makes a segment overlap a window that begins at its successor's
+  // start — so a click scoped to exactly one segment would also re-resolve the
+  // one before it. Clamp each end to the next start on the same service/host
+  // (the same tiling the heatmap paints with), so consecutive segments meet at
+  // a single boundary instead of overlapping.
+  function tiledEnds(candidates) {
+    const byHost = new Map();
+    for (const c of candidates) {
+      const rowKey = c.service + " " + c.host;
+      let row = byHost.get(rowKey);
+      if (!row) byHost.set(rowKey, (row = []));
+      row.push(c);
+    }
+    const ends = new Map();
+    for (const row of byHost.values()) {
+      row.sort((a, b) => a.start - b.start);
+      for (let i = 0; i < row.length; i++) {
+        const next = row[i + 1];
+        let end = row[i].end;
+        // Clamp only on real overlap, and never back past the start.
+        if (next && next.start > row[i].start && next.start < end) end = next.start;
+        ends.set(row[i].key, end);
+      }
+    }
+    return ends;
+  }
+
   // Resolve a scope to the list of /api/object URLs its files map to. `fetchJson`
   // is an injected `(url) => Promise<parsedJson>` so each page supplies its own
   // credentialed fetch and the resolver stays unit-testable. Lists the window
@@ -350,21 +380,28 @@
     const objects = (result && result.objects) || [];
 
     const hostSet = new Set(scope.hosts || []);
-    const matched = [];
+    // Candidates first: parse and apply the host/service filters, then tile the
+    // ends within each row before testing window overlap.
+    const candidates = [];
     for (const obj of objects) {
       const p = parseKey(obj.key);
       // Window overlap: segment start (epoch) to last_modified (upload time).
       const start = p.epoch;
       if (!start) continue;
+      if (scope.service && p.service && p.service !== scope.service) continue;
+      if (hostSet.size && !hostSet.has(p.host)) continue;
       const end = obj.last_modified
         ? new Date(obj.last_modified).getTime() / 1000
         : start;
-      if (start >= scope.to || end <= scope.from) continue;
-      if (scope.service && p.service && p.service !== scope.service) continue;
-      if (hostSet.size && !hostSet.has(p.host)) continue;
-      matched.push({ key: obj.key, epoch: start });
+      candidates.push({ key: obj.key, service: p.service, host: p.host, start, end });
     }
-    matched.sort((a, b) => a.epoch - b.epoch || (a.key < b.key ? -1 : 1));
+    const ends = tiledEnds(candidates);
+    const matched = [];
+    for (const c of candidates) {
+      if (c.start >= scope.to || ends.get(c.key) <= scope.from) continue;
+      matched.push(c);
+    }
+    matched.sort((a, b) => a.start - b.start || (a.key < b.key ? -1 : 1));
     return objectTraceUrls(scope.bucket, matched.map((m) => m.key));
   }
 

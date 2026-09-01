@@ -259,7 +259,8 @@ Place standalone flamegraph files in `report/flamegraphs/<name>.html`. They load
 **Key points:**
 - `buildWorkerSpans` + `attachCpuSamples` decorates each sample with `.spawnLoc` (the source location where the task was spawned). This is required for any recipe that filters by spawn location.
 - Polls in `ws.workerSpans[workerId].polls` have `.taskId`, `.start`, `.end`. Use these to filter samples by task or by poll duration.
-- `trace.callframeSymbols` is a `Map<string, entry|entry[]>` where each entry is `{symbol, location}`. Array entries are inlined frames (index 0 = outermost).
+- `trace.callframeSymbols` is a `Map<string, entry|entry[]>` where each entry is `{symbol, location}`. An array value means the address has inlined frames, indexed by inline depth: index 0 is the function that owns the machine code and the last index is the innermost inlined callee (the frame actually executing). `symbolizeChain` flattens this the right way round; hand-rolled lookups must pick the last element for a leaf.
+- `sample.callchain` is leaf→root: `callchain[0]` is the on-CPU frame, the last element is the outermost caller.
 
 ### Recipes
 
@@ -360,16 +361,17 @@ const samples = trace.cpuSamples.filter(s =>
 ```js
 const SEARCH = 'load_native_certs';
 const samples = trace.cpuSamples.filter(s => {
-  const leaf = s.callchain[s.callchain.length - 1];
+  const leaf = s.callchain[0]; // callchain is leaf→root
   const sym = trace.callframeSymbols.get(leaf);
   if (!sym) return false;
-  // Handle both plain entries and inlined-frame arrays
-  const name = Array.isArray(sym) ? sym[0].symbol : sym.symbol;
+  // Handle both plain entries and inlined-frame arrays. For an array the
+  // innermost inlined callee is the last element — that is the leaf.
+  const name = Array.isArray(sym) ? sym[sym.length - 1].symbol : sym.symbol;
   return name && name.includes(SEARCH);
 });
 ```
 
-**When NOT to use:** When you want to find a function *anywhere* in the stack (not just at the leaf). Remove the `[s.callchain.length - 1]` indexing and iterate all frames with `.some()` instead.
+**When NOT to use:** When you want to find a function *anywhere* in the stack (not just at the leaf). Drop the `[0]` indexing and iterate all frames with `.some()` instead.
 
 ---
 

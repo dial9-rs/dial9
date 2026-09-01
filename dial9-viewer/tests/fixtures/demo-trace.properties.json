@@ -28,7 +28,7 @@
   "cpu_profile": {
     "count": 190,
     "distinct_stacks": 151,
-    "stack_sig_digest": "257995da50285bb7",
+    "stack_sig_digest": "0293365dce8ccf83",
     "ts_count": 190,
     "ts_span_ns": 4487783336,
     "ts_delta_digest": "8d4657f0e04eeb4d",

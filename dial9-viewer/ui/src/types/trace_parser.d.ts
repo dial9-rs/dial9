@@ -462,8 +462,9 @@ declare module "*/trace_parser.js" {
   ): { text: string; docsUrl: string | null };
 
   /**
-   * Resolve a callchain (address strings) to frames; inlined frames are
-   * expanded in place (outermost first).
+   * Resolve a callchain (address strings) to frames. Leaf→root in, leaf→root
+   * out: an address's inlined frames are expanded in place innermost callee
+   * first, so `[0]` is always the leaf.
    */
   export function symbolizeChain(
     callchain: readonly string[],

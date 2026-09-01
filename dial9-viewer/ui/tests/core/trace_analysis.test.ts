@@ -19,9 +19,10 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 
-const { EVENT_TYPES, parseTrace } = require("../../trace_parser.js") as {
+const { EVENT_TYPES, parseTrace, symbolizeChain } = require("../../trace_parser.js") as {
   EVENT_TYPES: Record<string, number>;
   parseTrace: (buf: Buffer) => Promise<any>;
+  symbolizeChain: (chain: string[], syms: Map<string, any>) => any[];
 };
 const {
   buildWorkerSpans,
@@ -781,6 +782,39 @@ describe("flamegraph", () => {
     expect(node.self, `unresolved node.self = ${node.self}, expected 1`).toBe(1);
   });
 
+  // `symbolizeChain` returns a *flat* leaf→root chain, so it must expand an
+  // address's inline group in the opposite order to the tree walk above:
+  // innermost callee first. Consumers read [0] as the leaf or reverse the whole
+  // array; expanding depth-0-first inverted every inline edge, e.g. rendering
+  // `make_poll_start` as the caller of the `record_poll_start` closure it was
+  // inlined into.
+  it("symbolizeChain expands inlines innermost-first (leaf→root)", () => {
+    const callframeSymbols = new Map<string, any>([
+      [
+        "0x1000",
+        [
+          { symbol: "record_poll_start::{{closure}}", location: null },
+          { symbol: "make_poll_start", location: null },
+        ],
+      ],
+      ["0x2000", { symbol: "main", location: null }],
+    ]);
+    const chain = symbolizeChain(["0x1000", "0x2000"], callframeSymbols);
+    expect(chain.map((f) => f.symbol)).toEqual([
+      "make_poll_start",
+      "record_poll_start::{{closure}}",
+      "main",
+    ]);
+  });
+
+  it("symbolizeChain skips holes in sparse inline arrays", () => {
+    const sparse = new Array(3);
+    sparse[0] = { symbol: "outer_fn", location: null };
+    sparse[2] = { symbol: "leaf_fn", location: null };
+    const chain = symbolizeChain(["0x1000"], new Map<string, any>([["0x1000", sparse]]));
+    expect(chain.map((f) => f.symbol)).toEqual(["leaf_fn", "outer_fn"]);
+  });
+
   it("weighted samples accumulate count, self, allocCount, selfAllocCount", () => {
     const callframeSymbols = new Map([
       ["0xA", [{ symbol: "alloc_fn", location: "alloc.rs:1" }]],
@@ -833,6 +867,57 @@ describe("flamegraph", () => {
       node.allocCount == null,
       "node.allocCount should be undefined for unweighted samples",
     ).toBe(true);
+  });
+
+  it("resolves each repeated address once per tree build", () => {
+    const callframeSymbols = new Map([
+      ["0xD", [{ symbol: "leaf_fn", location: "leaf.rs:1" }]],
+      ["0xE", [{ symbol: "caller_fn", location: "caller.rs:1" }]],
+    ]);
+    const mapGet = callframeSymbols.get.bind(callframeSymbols);
+    let lookups = 0;
+    callframeSymbols.get = (key) => {
+      lookups += 1;
+      return mapGet(key);
+    };
+    const samples = Array.from({ length: 100 }, () => ({
+      callchain: ["0xD", "0xE"],
+    }));
+
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+
+    expect(tree.count).toBe(100);
+    expect(lookups).toBe(2);
+  });
+
+  it("reads weighted profile fields and a callchain start offset without remapping", () => {
+    const callframeSymbols = new Map([
+      ["hook", { symbol: "allocator_hook", location: null }],
+      ["leaf", { symbol: "leaf_fn", location: null }],
+      ["root", { symbol: "root_fn", location: null }],
+    ]);
+    const samples = [
+      {
+        callchain: ["hook", "leaf", "root"],
+        callchainStart: 1,
+        bytes: 128,
+        allocations: 4,
+      },
+    ];
+
+    const tree = buildFlamegraphTree(samples, callframeSymbols, {
+      weightKey: "bytes",
+      allocWeightKey: "allocations",
+      callchainStartKey: "callchainStart",
+    });
+
+    expect(tree.count).toBe(128);
+    expect(tree.allocCount).toBe(4);
+    const root = tree.children.get("root_fn");
+    const leaf = root?.children.get("leaf_fn");
+    expect(leaf?.count).toBe(128);
+    expect(leaf?.allocCount).toBe(4);
+    expect(leaf?.children.has("allocator_hook")).toBe(false);
   });
 });
 
