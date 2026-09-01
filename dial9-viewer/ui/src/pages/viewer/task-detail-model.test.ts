@@ -339,21 +339,44 @@ describe("buildTaskDetailRenderModel: idle gaps + lifespan", () => {
     expect(m.idleBands).toHaveLength(0);
   });
 
-  it("cross-hatches an idle gap that has a captured task dump", () => {
-    // Dump attribution: a dump captured during poll[i-1] (ts in
-    // [poll[i-1].start, poll[i].start]) describes gap i - so gap 0 has a
-    // degenerate window and the dump attaches to gap 1 (between poll 1 and 2).
+  it("attaches each poll's capture to its following idle gap", () => {
     const data = detailData({
       polls: [poll(100, 150, 1), poll(300, 350, 1), poll(600, 650, 1)],
-      taskDumps: [{ timestamp: 200, callchain: ["x"] }],
+      taskDumps: [
+        { timestamp: 101, callchain: ["first"] },
+        { timestamp: 301, callchain: ["second"] },
+      ],
     });
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
-    const dumped = m.idleBands.find((b) => b.hasDump);
-    expect(dumped).toBeDefined();
-    expect(dumped!.dumps).toHaveLength(1);
-    const idleHit = m.hitRegions.find((r) => r.dumps !== null && r.dumps.length > 0)!;
-    expect(idleHit.type).toBe("idle");
-    expect(idleHit.detail).toContain("click for async stack trace");
+    expect(m.idleBands.map((b) => b.dumps.map((d) => d.timestamp))).toEqual([[101], [301]]);
+    expect(
+      m.hitRegions.filter((r) => r.dumps !== null && r.dumps.length > 0),
+    ).toHaveLength(2);
+  });
+
+  it("carries a capture across a legacy synthetic poll with no fresh capture", () => {
+    const data = detailData({
+      polls: [poll(100, 150, 1), poll(300, 350, 1), poll(600, 650, 1)],
+      pollWakes: [null, wakeInfo(140, 5, "self"), null],
+      taskDumps: [{ timestamp: 101, callchain: ["legacy"] }],
+    });
+    const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
+    expect(m.idleBands).toHaveLength(1);
+    expect(m.idleBands[0]!.dumps.map((d) => d.timestamp)).toEqual([101]);
+  });
+
+  it("prefers a fresh capture after a wake-owned gap", () => {
+    const data = detailData({
+      polls: [poll(100, 150, 1), poll(300, 350, 1), poll(600, 650, 1)],
+      pollWakes: [null, wakeInfo(140, 5, "self"), null],
+      taskDumps: [
+        { timestamp: 101, callchain: ["stale"] },
+        { timestamp: 301, callchain: ["fresh"] },
+      ],
+    });
+    const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
+    expect(m.idleBands).toHaveLength(1);
+    expect(m.idleBands[0]!.dumps.map((d) => d.timestamp)).toEqual([301]);
   });
 
   it("places the lifespan bar with spawn/done edges inside the view", () => {

@@ -21,9 +21,8 @@
 //! If the current poll returns `Pending`, a fresh capture is taken via
 //! [`tokio::runtime::dump::trace_with`] so that the next poll's sampling
 //! decision has fresh data. The capture runs a second `poll` of the inner
-//! future under the real waker inside `trace_with`. This may produce a
-//! spurious wake (the inner future re-registers the waker, which fires
-//! immediately), but avoids lost wakes that would cause task hangs.
+//! future under the real waker inside `trace_with`, preserving registrations
+//! made by the future without scheduling an extra wake on Tokio 1.53 and later.
 //!
 //! # Allocation
 //!
@@ -89,12 +88,6 @@ pin_project! {
         sample_mean_ns: u64,
         // Per-task PRNG for drawing exponential gaps.
         rng: SplitMix64,
-        // Set after `capture()` re-polls the inner future with the real waker.
-        // The re-poll causes a spurious immediate wake; this flag suppresses
-        // the next capture to break the busy loop (capture → wake → poll →
-        // capture → …). Cleared on the next poll so subsequent real wakes
-        // proceed normally.
-        just_captured: bool,
         // Whether task dumps are configured for this recorder. `None` until the
         // first poll reads the per-thread config. The wrapping thread may lack
         // it (e.g. an explicit handle spawned from elsewhere), but the polling
@@ -115,7 +108,6 @@ impl<F> TaskDumped<F> {
             next_sample_ns: 0,
             sample_mean_ns: 0,
             rng: SplitMix64::new(0),
-            just_captured: false,
             enabled: None,
         }
     }
@@ -188,23 +180,15 @@ impl<F: Future> Future for TaskDumped<F> {
                 *this.pending_capture_ts = None;
             }
             Poll::Pending => {
-                // Skip capture if this poll was triggered by the spurious wake
-                // from the previous capture's re-poll. This breaks the busy
-                // loop: capture → wake → poll → capture → …
-                if *this.just_captured {
-                    *this.just_captured = false;
-                } else {
-                    let repoll_result = this.frames.capture(this.inner.as_mut(), cx);
-                    // In rare circumstances, repoll will now be ready.
-                    if repoll_result.is_ready() {
-                        this.frames.clear();
-                        *this.pending_capture_ts = None;
-                        return repoll_result;
-                    }
-                    *this.just_captured = true;
-                    let poll_end = crate::telemetry::recorder::poll_start_ts_monotonic();
-                    *this.pending_capture_ts = NonZeroU64::new(poll_end);
+                let repoll_result = this.frames.capture(this.inner.as_mut(), cx);
+                // In rare circumstances, repoll will now be ready.
+                if repoll_result.is_ready() {
+                    this.frames.clear();
+                    *this.pending_capture_ts = None;
+                    return repoll_result;
                 }
+                let capture_ts = crate::telemetry::recorder::poll_start_ts_monotonic();
+                *this.pending_capture_ts = NonZeroU64::new(capture_ts);
             }
         }
         result

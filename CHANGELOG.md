@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Task dumps no longer skip every other idle-point capture on Tokio 1.53+, and
+  the viewer attaches each captured stack to the idle gap it describes. The
+  Tokio telemetry integration now requires Tokio 1.53.
 - *(viewer)* inlined frames no longer render upside down. Both the server-side
   aggregation path and `symbolizeChain` flattened an address's inline group
   outermost-first inside a leaf→root callchain, so every inline edge appeared

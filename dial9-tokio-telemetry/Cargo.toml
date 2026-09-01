@@ -24,7 +24,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 missing_debug_implementations = "warn"
 
 [dependencies]
-tokio = { version = "1.52.0", features = [
+tokio = { version = "1.53.0", features = [
     "rt",
     "macros",
     "time",
@@ -142,7 +142,7 @@ metrique-timesource = { version = "0.1", features = [
 ] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
 metrique = { version = "0.1.29", features = ["local-format"] }
-tokio = { version = "1.52.0", features = ["test-util"] }
+tokio = { version = "1.53.0", features = ["test-util"] }
 proptest = "1"
 tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
