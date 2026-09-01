@@ -43,7 +43,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -165,7 +165,7 @@ pub(crate) struct DumpRequest {
 #[derive(Debug)]
 struct Debounce {
     window: Duration,
-    last: Mutex<Option<(Instant, DumpId)>>,
+    last: crate::primitives::sync::Mutex<Option<(Instant, DumpId)>>,
 }
 
 /// Sending half of the trigger channel.
@@ -198,7 +198,7 @@ impl DumpTrigger {
     pub fn with_debounce(mut self, window: Duration) -> Self {
         self.debounce = Some(Arc::new(Debounce {
             window,
-            last: Mutex::new(None),
+            last: crate::primitives::sync::Mutex::new(None),
         }));
         self
     }
@@ -628,5 +628,47 @@ mod tests {
 
         let parsed: DumpId = a.to_string().parse().expect("round-trip");
         assert_eq!(parsed, a);
+    }
+}
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+
+    const CALLERS: usize = 4;
+
+    crate::shuttle_test! {
+        default;
+        // Multiple threads race a shared, debounced trigger; exactly one
+        // must dispatch a real request, the rest must coalesce into it.
+        fn shuttle_debounce_gate() {
+            let (trigger, mut rx) = channel();
+            let trigger = trigger.with_debounce(Duration::from_secs(60));
+
+            let handles: Vec<_> = (0..CALLERS)
+                .map(|_| {
+                    let trigger = trigger.clone();
+                    crate::primitives::thread::spawn(move || {
+                        // Dropped without awaiting: per `DumpRun`'s `Drop`
+                        // impl, dispatch (or no-op, if coalesced) happens
+                        // right here.
+                        drop(trigger.dump_current_data());
+                    })
+                })
+                .collect();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            let mut dispatched = 0;
+            while rx.rx.try_recv().is_ok() {
+                dispatched += 1;
+            }
+            assert_eq!(
+                dispatched, 1,
+                "exactly one trigger within the debounce window must dispatch a real request"
+            );
+        }
     }
 }
