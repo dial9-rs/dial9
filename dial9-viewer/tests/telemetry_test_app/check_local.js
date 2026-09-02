@@ -5,11 +5,13 @@ const path = require("path");
 const zlib = require("zlib");
 
 const uiDir = path.resolve(__dirname, "../../ui");
-const { EVENT_TYPES, parseTrace } = require(path.join(uiDir, "trace_parser.js"));
-const { buildSpanData, buildWorkerSpans } = require(path.join(
+const { EVENT_TYPES, parseTrace, symbolizeChain } = require(path.join(
   uiDir,
-  "trace_analysis.js",
+  "trace_parser.js",
 ));
+const { buildSpanData, buildWorkerSpans, enclosingSpans } = require(
+  path.join(uiDir, "trace_analysis.js"),
+);
 
 const MARKER_EVENT = "TelemetryFixtureMarkerEvent";
 const FIXTURE_SYMBOL = /dial9_fixture_(?:cpu|wait)_.+?_weight_[1-9][0-9]*/g;
@@ -48,17 +50,10 @@ function measurementWindow(customEvents) {
   return { start, end };
 }
 
-function callerFirstFrames(callchain, symbols) {
-  const frames = [];
-  for (let index = callchain.length - 1; index >= 0; index--) {
-    const address = callchain[index];
-    const entry = symbols.get(address);
-    for (const frame of Array.isArray(entry) ? entry : [entry]) {
-      if (frame != null) frames.push(typeof frame === "string" ? frame : frame.symbol);
-      else frames.push(address);
-    }
-  }
-  return frames;
+function callerFirstSymbols(callchain, symbols) {
+  return symbolizeChain(callchain, symbols)
+    .reverse()
+    .map((frame) => frame.symbol);
 }
 
 function workerIds(trace) {
@@ -72,38 +67,6 @@ function workerIds(trace) {
     }
   }
   return [...ids].sort((left, right) => left - right);
-}
-
-function taskAt(workerSpans, workerId, timestamp) {
-  const polls = workerSpans[workerId]?.polls;
-  if (polls == null) return null;
-  let low = 0;
-  let high = polls.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (polls[middle].start <= timestamp) low = middle + 1;
-    else high = middle;
-  }
-  const poll = polls[low - 1];
-  return poll != null && timestamp <= poll.end ? poll.taskId : null;
-}
-
-function activeSpan(spans, taskId, timestamp) {
-  if (taskId == null) return null;
-  let active = null;
-  for (const span of spans) {
-    if (
-      span.taskId === taskId &&
-      span.start <= timestamp &&
-      timestamp <= span.end &&
-      (active == null ||
-        span.depth > active.depth ||
-        (span.depth === active.depth && span.start > active.start))
-    ) {
-      active = span;
-    }
-  }
-  return active;
 }
 
 function fixtureSymbols(frames) {
@@ -192,24 +155,22 @@ async function observeTrace(paths) {
     if (sample.source !== 0 || sample.timestamp < start || sample.timestamp > end)
       continue;
     const frames = fixtureFrames(
-      callerFirstFrames(sample.callchain, trace.callframeSymbols),
+      callerFirstSymbols(sample.callchain, trace.callframeSymbols),
     );
     if (frames.length === 0) continue;
     addStack(stacks, "cpu", frames);
-    const taskId = taskAt(workers, sample.workerId, sample.timestamp);
-    addAssociations(
-      associations,
-      "cpu",
-      frames,
-      activeSpan(allSpans, taskId, sample.timestamp),
-    );
+    const active = enclosingSpans(allSpans, {
+      timestamp: sample.timestamp,
+      fields: { worker_id: sample.workerId },
+    }).at(-1);
+    addAssociations(associations, "cpu", frames, active);
   }
 
   for (const dumps of trace.taskDumps.values()) {
     for (const dump of dumps) {
       if (dump.timestamp < start || dump.timestamp > end) continue;
       const frames = fixtureFrames(
-        callerFirstFrames(dump.callchain, trace.callframeSymbols),
+        callerFirstSymbols(dump.callchain, trace.callframeSymbols),
       );
       if (frames.length === 0) continue;
       addStack(stacks, "task_dump", frames);
