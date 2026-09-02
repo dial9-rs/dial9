@@ -2090,6 +2090,7 @@ dependencies = [
  "aws-smithy-types",
  "axum 0.8.9",
  "axum-extra",
+ "backtrace",
  "blake3",
  "bon",
  "bytes",
@@ -2108,6 +2109,7 @@ dependencies = [
  "metrique-writer",
  "mime_guess",
  "parquet",
+ "rayon",
  "reqwest",
  "rust-embed",
  "rustc-hash",
@@ -4266,6 +4268,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rayon-fanout"
+version = "0.1.0"
+dependencies = [
+ "dial9",
+ "rayon",
+ "tokio",
 ]
 
 [[package]]

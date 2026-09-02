@@ -368,8 +368,6 @@ export type {
   FlatApiFlamegraphTree,
   FlamegraphMetadata,
   FlamegraphResponse,
-  InternedApiFlamegraphNode,
-  InternedApiFlamegraphTree,
   PollDurationBar,
   PollExemplar,
   SchedulingDelay,

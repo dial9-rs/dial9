@@ -114,22 +114,10 @@ export interface ApiFlamegraphNode {
   children?: ApiFlamegraphNode[];
 }
 
-/** One nested interned-v1 node; `frame` indexes the enclosing frame table. */
-export interface InternedApiFlamegraphNode {
-  frame: number;
-  count: number;
-  self: number;
-  children?: InternedApiFlamegraphNode[];
-}
-
-/** Negotiated compact response used by the canonical aggregate UI. */
-export interface InternedApiFlamegraphTree {
-  format: "interned-v1";
-  frames: string[];
-  root: InternedApiFlamegraphNode;
-}
-
-/** Preorder `[parent_node, frame, count, self_count]` row. */
+/**
+ * Preorder `[parent_node, frame, count, self_count]` row. `frame` indexes the
+ * enclosing tree's frame table; row zero is the root, whose `parent` is ignored.
+ */
 export type FlatApiFlamegraphNode = [
   parent: number,
   frame: number,
@@ -137,16 +125,14 @@ export type FlatApiFlamegraphNode = [
   selfCount: number,
 ];
 
+/** Negotiated compact response used by the canonical aggregate UI. */
 export interface FlatApiFlamegraphTree {
   format: "flat-v1";
   frames: string[];
   nodes: FlatApiFlamegraphNode[];
 }
 
-export type ApiFlamegraphTree =
-  | ApiFlamegraphNode
-  | InternedApiFlamegraphTree
-  | FlatApiFlamegraphTree;
+export type ApiFlamegraphTree = ApiFlamegraphNode | FlatApiFlamegraphTree;
 
 /** One facet's values. */
 export interface FacetResult {

@@ -121,31 +121,19 @@ describe("decodeFlamegraphTree", () => {
     });
   });
 
-  it("resolves repeated interned frame IDs into the legacy nested tree", () => {
+  it("resolves a frame ID repeated across sibling subtrees", () => {
     expect(
       decodeFlamegraphTree({
         tree: {
-          format: "interned-v1",
+          format: "flat-v1",
           frames: ["(all)", "shared", "left", "right"],
-          root: {
-            frame: 0,
-            count: 7,
-            self: 0,
-            children: [
-              {
-                frame: 1,
-                count: 4,
-                self: 0,
-                children: [{ frame: 2, count: 4, self: 4 }],
-              },
-              {
-                frame: 1,
-                count: 3,
-                self: 0,
-                children: [{ frame: 3, count: 3, self: 3 }],
-              },
-            ],
-          },
+          nodes: [
+            [0, 0, 7, 0],
+            [0, 1, 4, 0],
+            [1, 2, 4, 4],
+            [0, 1, 3, 0],
+            [3, 3, 3, 3],
+          ],
         },
       }),
     ).toEqual({
@@ -178,9 +166,9 @@ describe("decodeFlamegraphTree", () => {
     expect(() =>
       decodeFlamegraphTree({
         tree: {
-          format: "interned-v1",
+          format: "flat-v1",
           frames: ["(all)"],
-          root: { frame: 2, count: 1, self: 1 },
+          nodes: [[0, 2, 1, 1]],
         },
       }),
     ).toThrow(/invalid frame 2/);
