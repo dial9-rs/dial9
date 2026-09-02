@@ -1,3 +1,17 @@
+//! Required observation structure:
+//!
+//! ```text
+//! dial9_fixture_mixed_cycle / dial9_fixture_span_cycle
+//! ├── dial9_fixture_cpu_outer_weight_1
+//! ├── dial9_fixture_wait_outer_weight_1
+//! └── dial9_fixture_mixed_inner / dial9_fixture_span_inner
+//!     ├── dial9_fixture_cpu_inner_weight_3
+//!     └── dial9_fixture_wait_inner_weight_2
+//! ```
+//!
+//! The test relies on this naming and nesting for observation and cannot detect
+//! an incorrectly written fixture.
+
 use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9::RecorderPerfExt;
