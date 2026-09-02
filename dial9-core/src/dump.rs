@@ -150,6 +150,12 @@ pub(crate) struct DumpRequest {
     pub(crate) receipt_tx: oneshot::Sender<Result<DumpReceipt, DumpError>>,
 }
 
+impl DumpRequest {
+    pub(crate) fn elapsed_since_trigger(&self) -> Duration {
+        crate::primitives::time::elapsed_since(self.triggered_at)
+    }
+}
+
 /// Leading-edge debounce gate shared across [`DumpTrigger`] clones.
 ///
 /// Records when the last accepted request was *built* and the [`DumpId`] it

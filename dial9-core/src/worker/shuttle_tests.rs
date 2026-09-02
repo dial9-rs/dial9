@@ -314,9 +314,6 @@ mod shuttle_dump_time_range_resolves_via_deadline {
     }
 
     #[test]
-    #[ignore = "flakes ~1-in-5 under concurrent execution: shuttle's own \
-                uncontrolled-nondeterminism detector trips. Root cause not \
-                yet isolated."]
     fn determinism() {
         use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
         let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(500));

@@ -264,7 +264,7 @@ impl ActiveDump {
         let deadline = (!req.lookforward.is_zero()).then(|| {
             // Anchor at trigger time so worker pickup latency does not
             // extend the forward window.
-            let elapsed = req.triggered_at.elapsed().unwrap_or_default();
+            let elapsed = req.elapsed_since_trigger();
             crate::primitives::time::now() + req.lookforward.saturating_sub(elapsed)
         });
         Self {

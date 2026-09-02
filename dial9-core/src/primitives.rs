@@ -49,6 +49,10 @@ pub mod time {
     pub fn now() -> Instant {
         Instant::now()
     }
+
+    pub fn elapsed_since(t: std::time::SystemTime) -> std::time::Duration {
+        t.elapsed().unwrap_or_default()
+    }
 }
 
 // ── shuttle path (deterministic testing) ────────────────────────────────────
@@ -160,6 +164,14 @@ pub mod time {
 
     pub fn now() -> Instant {
         LOGICAL_CLOCK.with(|(base, nanos)| *base + std::time::Duration::from_nanos(nanos.get()))
+    }
+
+    /// Always zero: `SystemTime::elapsed()` needs a real clock read, which
+    /// is nondeterministic under shuttle replay. Matches `sleep`/
+    /// `sleep_until` below, which also ignore their requested duration
+    /// rather than fake one.
+    pub fn elapsed_since(_t: std::time::SystemTime) -> std::time::Duration {
+        std::time::Duration::ZERO
     }
 
     /// Shuttle has no virtual clock. Like `primitives::thread::sleep`, this
