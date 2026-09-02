@@ -205,6 +205,8 @@ export interface FlamegraphMetadata {
 }
 
 export interface FlamegraphResponse {
+  /** Present on tree-bearing events in the negotiated flat-v1 stream. */
+  kind?: "partial" | "final";
   tree: ApiFlamegraphTree;
   total_samples: number;
   /**
@@ -214,6 +216,14 @@ export interface FlamegraphResponse {
   coverage?: Coverage;
   metadata: FlamegraphMetadata;
 }
+
+export interface FlamegraphCoverageEvent {
+  kind: "coverage";
+  total_samples: number;
+  coverage: Coverage;
+}
+
+export type FlamegraphStreamEvent = FlamegraphCoverageEvent | FlamegraphResponse;
 
 // ─── Wire types: /api/tokio-stats ────────────────────────────────────────
 

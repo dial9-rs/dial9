@@ -1206,6 +1206,11 @@ impl FlamegraphAccum {
     }
 
     /// A borrowed snapshot of the current totals for emitting one SSE event.
+    pub(crate) fn total_samples(&self) -> usize {
+        self.total_samples
+    }
+
+    /// A borrowed snapshot of the current totals for emitting one full tree.
     pub(crate) fn snapshot(&self) -> AggSnapshot<'_> {
         let stack_counts: Vec<([u8; 16], u64)> =
             self.counts.iter().map(|(k, v)| (*k, *v)).collect();

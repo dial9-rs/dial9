@@ -2,9 +2,9 @@
 //! `/api/span-stats`.
 //!
 //! Both endpoints hold one connection open, [resolve](refine::resolve) a scope,
-//! stream already-folded data in bounded cumulative snapshots, then fold the
-//! not-yet-folded capped files one at a time, pushing a fresh full snapshot as
-//! each file lands and closing when the work-list drains. That control flow —
+//! stream already-folded data in bounded cumulative updates, then fold the
+//! not-yet-folded capped files one at a time, pushing a fresh update as each
+//! file lands and closing when the work-list drains. That control flow —
 //! the `Seeding`/`Folding` phase machine, the growing `folded` set, the
 //! [`FoldErrors`] tally, and the crucial "insert into `folded` only after BOTH
 //! the GET and the merge succeed" discipline (ADR-0003 folded-set semantics) —
@@ -14,8 +14,9 @@
 //! Each endpoint supplies a thin [`FoldSink`] adapter providing only the three
 //! operations that actually differ: **seed_batch** (prime the accumulator from
 //! a bounded slice of already-folded parts), **fold_one** (fetch + merge one
-//! just-folded file), and **snapshot_event** (shape the endpoint's response type
-//! into an SSE `Event`). Both merge operations return a [`PartOutcome`] rather
+//! just-folded file), and **snapshot_event** (shape the endpoint's update into
+//! an SSE `Event`). A sink may also provide one **final_event** after all work
+//! drains. Both merge operations return a [`PartOutcome`] rather
 //! than touching the `folded` set themselves, so the driver — and only the
 //! driver — decides when a leaf becomes folded.
 
@@ -110,6 +111,21 @@ pub(crate) trait FoldSink {
         hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event;
+
+    /// Optionally emit one terminal event after cached seeding and cold folding
+    /// both drain. Most sinks already put their full state in every
+    /// [`snapshot_event`](Self::snapshot_event), so the default emits nothing.
+    fn final_event(
+        &self,
+        _resolved: &Resolved,
+        _files_folded: usize,
+        _folded_set_id: &str,
+        _target_folded_set_id: Option<&str>,
+        _hosts_folded: usize,
+        _errors: &FoldErrors,
+    ) -> Option<Event> {
+        None
+    }
 }
 
 /// Build the [`Coverage`] block from the resolved scope, the growing `folded`
@@ -171,6 +187,7 @@ fn seed_batch_end(next: usize, len: usize, batch_size: usize) -> usize {
 enum Phase {
     Seeding,
     Folding,
+    Done,
 }
 
 /// The mutable state threaded through the `unfold`: the immutable per-request
@@ -230,6 +247,9 @@ impl<S: FoldSink> Driver<S> {
                     match self.phase {
                         Phase::Seeding => self.files_seeded += 1,
                         Phase::Folding => self.files_folded_cold += 1,
+                        Phase::Done => {
+                            unreachable!("no outcomes are applied after the final event")
+                        }
                     }
                     self.folded_hosts.insert(host.to_string());
                 }
@@ -282,6 +302,18 @@ impl<S: FoldSink> Driver<S> {
     fn snapshot_event(&self) -> Event {
         let folded_set_id = folded_set_id(&self.folded);
         self.sink.snapshot_event(
+            &self.resolved,
+            self.files_folded,
+            &folded_set_id,
+            self.target_folded_set_id.as_deref(),
+            self.folded_hosts.len(),
+            &self.errors,
+        )
+    }
+
+    fn final_event(&self) -> Option<Event> {
+        let folded_set_id = folded_set_id(&self.folded);
+        self.sink.final_event(
             &self.resolved,
             self.files_folded,
             &folded_set_id,
@@ -402,9 +434,15 @@ where
                 Some((Ok(event), d))
             }
             Phase::Folding => {
-                // Pull the next fold outcome; `None` = work-list drained → close.
-                match d.folds.next().await? {
-                    FoldOutcome::Folded(f) => {
+                // Pull the next fold outcome. Once the work-list drains, a sink
+                // may emit one terminal event before the stream closes.
+                match d.folds.next().await {
+                    None => {
+                        let event = d.final_event()?;
+                        d.phase = Phase::Done;
+                        return Some((Ok(event), d));
+                    }
+                    Some(FoldOutcome::Folded(f)) => {
                         // Only mark the leaf folded after fetch AND merge succeed;
                         // failures increment errors. The sink does the fetch+merge
                         // and reports the outcome; the driver applies the rule.
@@ -412,7 +450,7 @@ where
                         d.record_phase_durations();
                         d.apply(outcome);
                     }
-                    FoldOutcome::Failed { raw_key, error } => {
+                    Some(FoldOutcome::Failed { raw_key, error }) => {
                         // Count it and carry a sample message so the client can see
                         // that folding is failing (e.g. unwritable output).
                         d.errors.record(&raw_key, &error);
@@ -422,6 +460,7 @@ where
                 let event = d.snapshot_event();
                 Some((Ok(event), d))
             }
+            Phase::Done => None,
         }
     })
 }
@@ -709,6 +748,77 @@ mod tests {
             0,
             "seed-only mode must not fold the unfolded capped file"
         );
+    }
+
+    struct TerminalSink {
+        final_calls: Arc<Mutex<usize>>,
+    }
+
+    impl FoldSink for TerminalSink {
+        async fn seed_batch(
+            &mut self,
+            _agg: &AggContext,
+            _full_keys: &[String],
+        ) -> Vec<PartOutcome> {
+            Vec::new()
+        }
+
+        async fn fold_one(&mut self, _agg: &AggContext, _folded: &Folded) -> PartOutcome {
+            panic!("empty test scope has no fold work")
+        }
+
+        fn snapshot_event(
+            &self,
+            _resolved: &Resolved,
+            _files_folded: usize,
+            _folded_set_id: &str,
+            _target_folded_set_id: Option<&str>,
+            _hosts_folded: usize,
+            _errors: &FoldErrors,
+        ) -> Event {
+            Event::default()
+        }
+
+        fn final_event(
+            &self,
+            _resolved: &Resolved,
+            _files_folded: usize,
+            _folded_set_id: &str,
+            _target_folded_set_id: Option<&str>,
+            _hosts_folded: usize,
+            _errors: &FoldErrors,
+        ) -> Option<Event> {
+            *self.final_calls.lock().unwrap() += 1;
+            Some(Event::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_can_emit_exactly_one_terminal_event() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
+        let agg = AggContext {
+            source: Arc::clone(&backend),
+            output: backend,
+            source_bucket: String::new(),
+            source_is_local: true,
+            output_bucket: String::new(),
+            output_prefix: "test".to_string(),
+            source_prefixes: Vec::new(),
+            segment_duration_secs: 60,
+        };
+        let final_calls = Arc::new(Mutex::new(0usize));
+        let sink = TerminalSink {
+            final_calls: Arc::clone(&final_calls),
+        };
+        let resolved = Resolved::for_test(Vec::new(), HashSet::new());
+
+        let events: Vec<_> =
+            drive_with_options(agg, resolved, FoldLimits::new(1, 1, 1), sink, true, None)
+                .collect()
+                .await;
+
+        assert_eq!(events.len(), 2, "one regular event plus one terminal event");
+        assert_eq!(*final_calls.lock().unwrap(), 1);
     }
 
     struct MetricsSink {

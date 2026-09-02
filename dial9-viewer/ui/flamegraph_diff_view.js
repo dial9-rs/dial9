@@ -592,11 +592,10 @@
     }
 
     // ── Per-side SSE stream ──
-    // One stream per side: the server emits cumulative snapshots after bounded
-    // cached batches, then a fresh bounded snapshot per newly-folded capped-prefix
-    // file, and closes when that work-list drains (the server owns the stop
-    // condition — no client polling or plateau detection). A new tree on either
-    // side triggers a re-merge + re-render. The cap is the
+    // One stream per side: the server emits coverage while merging cached and
+    // newly-folded files, then one bounded tree when that work-list drains (the
+    // server owns the stop condition - no client polling or plateau detection).
+    // A new final tree on either side triggers a re-merge + re-render. The cap is the
     // shared client-driven `maxFiles` (small initial fold, raised by "Load
     // more") rather than the server default.
     function startSide(side, scope, status, preserveExisting = false) {
@@ -625,11 +624,7 @@
             incomingFilesFolded,
           )) return;
 
-          adoptedSnapshot = true;
-          const tree = api.decodeFlamegraphTree(resp);
-          if (side === "a") treeA = tree; else treeB = tree;
-          status.total = resp.total_samples || (tree && tree.count) || 0;
-          status.meta = resp.metadata || null;
+          status.total = resp.total_samples || 0;
           status.coverage = cov || null;
           if (cov != null) {
             status.badge = api.formatCoverageBadge(cov) + " · refining…";
@@ -640,6 +635,16 @@
           } else {
             status.badge = "";
           }
+          if (resp.kind === "coverage") {
+            updateStats();
+            return;
+          }
+
+          adoptedSnapshot = true;
+          const tree = api.decodeFlamegraphTree(resp);
+          if (side === "a") treeA = tree; else treeB = tree;
+          status.total = resp.total_samples || (tree && tree.count) || 0;
+          status.meta = resp.metadata || null;
           updateStats();
           render();
         },
