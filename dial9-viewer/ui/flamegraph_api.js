@@ -159,40 +159,52 @@ function shouldAdoptRefinementSnapshot(preserveExisting, baselineFilesFolded, in
 
 // Resolve the negotiated aggregate flamegraph encoding into the legacy
 // nested-name tree consumed by the existing renderers. Older servers return
-// that tree directly; interned-v1 sends every frame name once and references
-// it by index from each node.
+// that tree directly; flat-v1 sends every frame name once, plus one preorder
+// `[parent, frame, count, self]` row per node referencing it by index.
 function decodeFlamegraphTree(response) {
   const tree = response && response.tree;
-  if (!tree || tree.format !== "interned-v1") return tree;
+  if (!tree || tree.format !== "flat-v1") return tree;
   if (!Array.isArray(tree.frames)) {
-    throw new Error("interned-v1 flamegraph is missing its frame table");
+    throw new Error("flat-v1 flamegraph is missing its frame table");
+  }
+  if (!Array.isArray(tree.nodes) || tree.nodes.length === 0) {
+    throw new Error("flat-v1 flamegraph must contain a root node");
   }
 
-  function decodeNode(node) {
-    const frame = node && node.frame;
+  function frameName(frame) {
     if (!Number.isInteger(frame) || frame < 0 || frame >= tree.frames.length) {
-      throw new Error(`interned-v1 flamegraph references invalid frame ${String(frame)}`);
+      throw new Error(`flat-v1 flamegraph references invalid frame ${String(frame)}`);
     }
     const name = tree.frames[frame];
     if (typeof name !== "string") {
-      throw new Error(`interned-v1 flamegraph frame ${frame} is not a string`);
+      throw new Error(`flat-v1 flamegraph frame ${frame} is not a string`);
     }
-    const children = node.children;
-    if (children != null && !Array.isArray(children)) {
-      throw new Error("interned-v1 flamegraph node children must be an array");
-    }
-    const decoded = {
-      name,
-      count: node.count,
-      self: node.self,
-    };
-    if (children && children.length) {
-      decoded.children = children.map(decodeNode);
-    }
-    return decoded;
+    return name;
   }
 
-  return decodeNode(tree.root);
+  const decoded = [];
+  for (let i = 0; i < tree.nodes.length; i++) {
+    const row = tree.nodes[i];
+    if (!Array.isArray(row) || row.length !== 4) {
+      throw new Error(`flat-v1 flamegraph node ${i} is not a four-field row`);
+    }
+    const node = {
+      name: frameName(row[1]),
+      count: row[2],
+      self: row[3],
+    };
+    decoded.push(node);
+    // Row 0 is the root, so its parent field carries no meaning; every later
+    // row must name a parent that already precedes it.
+    if (i === 0) continue;
+    const parent = row[0];
+    if (!Number.isInteger(parent) || parent < 0 || parent >= i) {
+      throw new Error(`flat-v1 flamegraph node ${i} has invalid parent ${String(parent)}`);
+    }
+    const parentNode = decoded[parent];
+    (parentNode.children || (parentNode.children = [])).push(node);
+  }
+  return decoded[0];
 }
 // --- Data-driven toolbar facet options ---------------------------------------
 //

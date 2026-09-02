@@ -66,7 +66,7 @@
     }
     for (const h of scope.getAll("host")) u.searchParams.append("host", h);
     if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
-    u.searchParams.set("format", "interned-v1");
+    u.searchParams.set("format", "flat-v1");
     return u;
   }
 

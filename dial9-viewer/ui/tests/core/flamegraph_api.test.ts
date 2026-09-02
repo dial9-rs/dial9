@@ -89,31 +89,51 @@ const {
 };
 
 describe("decodeFlamegraphTree", () => {
-  it("resolves repeated interned frame IDs into the legacy nested tree", () => {
+  it("materializes parent-first flat rows", () => {
     expect(
       decodeFlamegraphTree({
         tree: {
-          format: "interned-v1",
+          format: "flat-v1",
+          frames: ["(all)", "main", "left", "right"],
+          nodes: [
+            [0, 0, 7, 0],
+            [0, 1, 7, 0],
+            [1, 2, 4, 4],
+            [1, 3, 3, 3],
+          ],
+        },
+      }),
+    ).toEqual({
+      name: "(all)",
+      count: 7,
+      self: 0,
+      children: [
+        {
+          name: "main",
+          count: 7,
+          self: 0,
+          children: [
+            { name: "left", count: 4, self: 4 },
+            { name: "right", count: 3, self: 3 },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("resolves a frame ID repeated across sibling subtrees", () => {
+    expect(
+      decodeFlamegraphTree({
+        tree: {
+          format: "flat-v1",
           frames: ["(all)", "shared", "left", "right"],
-          root: {
-            frame: 0,
-            count: 7,
-            self: 0,
-            children: [
-              {
-                frame: 1,
-                count: 4,
-                self: 0,
-                children: [{ frame: 2, count: 4, self: 4 }],
-              },
-              {
-                frame: 1,
-                count: 3,
-                self: 0,
-                children: [{ frame: 3, count: 3, self: 3 }],
-              },
-            ],
-          },
+          nodes: [
+            [0, 0, 7, 0],
+            [0, 1, 4, 0],
+            [1, 2, 4, 4],
+            [0, 1, 3, 0],
+            [3, 3, 3, 3],
+          ],
         },
       }),
     ).toEqual({
@@ -146,12 +166,27 @@ describe("decodeFlamegraphTree", () => {
     expect(() =>
       decodeFlamegraphTree({
         tree: {
-          format: "interned-v1",
+          format: "flat-v1",
           frames: ["(all)"],
-          root: { frame: 2, count: 1, self: 1 },
+          nodes: [[0, 2, 1, 1]],
         },
       }),
     ).toThrow(/invalid frame 2/);
+  });
+
+  it("rejects a flat node whose parent does not precede it", () => {
+    expect(() =>
+      decodeFlamegraphTree({
+        tree: {
+          format: "flat-v1",
+          frames: ["(all)", "child"],
+          nodes: [
+            [0, 0, 1, 0],
+            [2, 1, 1, 1],
+          ],
+        },
+      }),
+    ).toThrow(/node 1 has invalid parent 2/);
   });
 });
 
