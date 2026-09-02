@@ -9,10 +9,11 @@
 // distance above the axis. The underlying numbers are unchanged - only the
 // y-mapping does.
 //
-// The three series (global injection queue, max per-worker local queue,
-// active-task count) share ONE explicit zero baseline even though the
+// The three line/area series (global injection queue, max per-worker local
+// queue, active-task count) share ONE explicit zero baseline even though the
 // active-task line keeps its own right-axis magnitude scale, so all three read
-// against the same floor.
+// against the same floor. Task spawns render as an independently scaled,
+// viewport-adaptive histogram behind those series.
 
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
@@ -63,6 +64,8 @@ export interface QueueData {
   mergedLocalSamples: readonly MergedLocalSample[];
   /** Active-task-count timeline, sorted by t. */
   activeTaskSamples: readonly { t: number; count: number }[];
+  /** Task-spawn timestamps, sorted ascending. */
+  taskSpawnTimes: readonly number[];
   /** task id -> first-poll time, the spawn proxy. */
   taskFirstPoll: ReadonlyMap<number, number>;
   /** task id -> spawn-location id (null when unknown). */
@@ -80,6 +83,7 @@ export const EMPTY_QUEUE_DATA: QueueData = {
   queueSamples: [],
   mergedLocalSamples: [],
   activeTaskSamples: [],
+  taskSpawnTimes: [],
   taskFirstPoll: new Map(),
   taskSpawnLocs: new Map(),
   spawnLocations: new Map(),
@@ -104,6 +108,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     trace.taskTerminateTimes,
   );
   const activeTaskSamples = activeTaskSeries(trace, timeline);
+  const taskSpawnTimes = [...trace.taskSpawnTimes.values()].sort((a, b) => a - b);
   // The global-queue series comes from per-runtime RuntimeMetrics (summed per
   // cycle) when the trace has them; otherwise fall back to the legacy
   // pre-summed QueueSample series that buildWorkerSpans extracts.
@@ -129,6 +134,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     queueSamples,
     mergedLocalSamples: merged,
     activeTaskSamples,
+    taskSpawnTimes,
     taskFirstPoll: timeline.taskFirstPoll,
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,
@@ -169,6 +175,18 @@ export interface QueueActiveTaskModel {
   maxTasks: number;
 }
 
+/** Spawn counts in viewport-adaptive, fixed-pixel-width time buckets. */
+export interface QueueSpawnHistogramModel {
+  /** Spawn count per bucket, left-to-right across the viewport. */
+  counts: readonly number[];
+  /** Peak count across the visible buckets, >= 1. */
+  maxSpawns: number;
+  /** Width of one bucket in CSS px. */
+  binWidthPx: number;
+  /** Duration represented by one bucket in trace nanoseconds. */
+  binDurationNs: number;
+}
+
 /**
  * The bucketed queue render model for one frame. `global[i]` / `local[i]` are
  * the plotted (carry-forward-applied) step values at pixel column i. `maxQ` is
@@ -185,6 +203,8 @@ export interface QueueRenderModel {
   local: readonly number[];
   /** Shared magnitude for the global + local series (>= 1). */
   maxQ: number;
+  /** Spawn histogram, or null when no task spawns fall inside the viewport. */
+  spawnHistogram: QueueSpawnHistogramModel | null;
   /** The active-task overlay, or null when the trace has no task timeline. */
   activeTask: QueueActiveTaskModel | null;
   /** True when any series has data in view (else the "no data" path). */
@@ -325,6 +345,7 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
       global,
       local: data.hasLocalQueueDepth ? local : [],
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: false,
     };
@@ -397,6 +418,9 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     local[i] = lastL;
   }
 
+  const spawnHistogram = buildSpawnHistogram(data, viewStart, viewEnd, viewDur, drawW);
+  if (spawnHistogram !== null) hasData = true;
+
   const activeTask = buildActiveTaskModel(data, viewStart, viewEnd, viewDur, drawW);
   if (activeTask !== null) hasData = true;
 
@@ -405,8 +429,61 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     global,
     local: data.hasLocalQueueDepth ? local : [],
     maxQ,
+    spawnHistogram,
     activeTask,
     hasData,
+  };
+}
+
+/** Target histogram resolution: one time bucket for roughly every 8 CSS px. */
+const SPAWN_BIN_TARGET_PX = 8;
+
+/** Binary search: index of the first number >= target. */
+function lowerBoundNumber(arr: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid]! < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Count real task-spawn events into viewport-adaptive time buckets. The
+ * independent scale preserves burst shape without letting a large spawn spike
+ * flatten the active-task total.
+ */
+function buildSpawnHistogram(
+  data: QueueData,
+  viewStart: number,
+  viewEnd: number,
+  viewDur: number,
+  drawW: number,
+): QueueSpawnHistogramModel | null {
+  const spawnTimes = data.taskSpawnTimes;
+  if (spawnTimes.length === 0) return null;
+
+  const numBins = Math.max(1, Math.ceil(drawW / SPAWN_BIN_TARGET_PX));
+  const counts = new Array<number>(numBins).fill(0);
+  let maxSpawns = 0;
+  const from = lowerBoundNumber(spawnTimes, viewStart);
+  for (let i = from; i < spawnTimes.length; i++) {
+    const t = spawnTimes[i]!;
+    if (t > viewEnd) break;
+    const bin = Math.min(numBins - 1, Math.floor(((t - viewStart) / viewDur) * numBins));
+    const count = counts[bin]! + 1;
+    counts[bin] = count;
+    if (count > maxSpawns) maxSpawns = count;
+  }
+  if (maxSpawns === 0) return null;
+
+  return {
+    counts,
+    maxSpawns,
+    binWidthPx: drawW / numBins,
+    binDurationNs: viewDur / numBins,
   };
 }
 
@@ -512,22 +589,22 @@ export function computeSpawnedTasks(
 /** One queue-legend entry: a swatch encoding + its meaning (matches the draw). */
 export interface QueueLegendEntry {
   /** Which series this explains, so a caller can drop the ones it will not draw. */
-  key: "global" | "local" | "activeTask";
+  key: "global" | "local" | "spawns" | "activeTask";
   /** Swatch fill (CSS color). */
   swatch: string;
   label: string;
   /** Shape hint so the swatch reads as an area/line, matching the render. */
-  shape: "area" | "line";
+  shape: "area" | "bars" | "line";
 }
 
 /**
  * The queue track legend: every series the track draws is explained, with
- * swatch encodings that MATCH the in-track rendering. Ordered global -> local
- * -> active-task, the draw order.
+ * swatch encodings that MATCH the in-track rendering.
  */
 export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
   { key: "global", swatch: "#4fc3f7", label: "Global queue", shape: "area" },
   { key: "local", swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
+  { key: "spawns", swatch: "#81c784", label: "Task spawns / bucket", shape: "bars" },
   { key: "activeTask", swatch: "#81c784", label: "Active tasks", shape: "line" },
 ];
 

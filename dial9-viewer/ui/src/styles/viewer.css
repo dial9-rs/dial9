@@ -862,6 +862,14 @@ body {
 /* Line encodings (max-local, active-task) read as a 2px rule, not a box, so
    the swatch matches what the track draws (swatches match rendering). */
 .d9-queue-legend-swatch.shape-line { height: 2px; }
+.d9-queue-legend-swatch.shape-bars {
+    background: repeating-linear-gradient(
+        90deg,
+        currentColor 0 2px,
+        transparent 2px 4px
+    ) !important;
+    opacity: 0.55;
+}
 .d9-queue-legend-text { white-space: nowrap; }
 .d9-queue-canvas { flex: 1; min-width: 0; }
 

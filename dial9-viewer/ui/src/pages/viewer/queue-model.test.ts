@@ -149,6 +149,49 @@ describe("buildQueueRenderModel", () => {
     expect(m.activeTask!.points[0]).toEqual({ x: 25, count: 8 });
   });
 
+  it("bins task spawns at viewport-adaptive fixed-pixel resolution", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        taskSpawnTimes: [0, 1, 39, 40, 80, 120, 121],
+      }),
+      viewStart: 0,
+      viewEnd: 120,
+      drawW: 24,
+    });
+    expect(m.spawnHistogram).toEqual({
+      counts: [3, 1, 2],
+      maxSpawns: 3,
+      binWidthPx: 8,
+      binDurationNs: 40,
+    });
+    expect(m.hasData).toBe(true);
+  });
+
+  it("omits the spawn histogram when no spawn falls inside the viewport", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({ taskSpawnTimes: [-10, 110] }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 24,
+    });
+    expect(m.spawnHistogram).toBeNull();
+  });
+
+  it("uses one spawn bucket for canvases narrower than the target bin width", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({ taskSpawnTimes: [1, 2, 3] }),
+      viewStart: 0,
+      viewEnd: 10,
+      drawW: 4,
+    });
+    expect(m.spawnHistogram).toEqual({
+      counts: [3],
+      maxSpawns: 3,
+      binWidthPx: 4,
+      binDurationNs: 10,
+    });
+  });
+
   it("carries the first sampled task count backward instead of inventing zero", () => {
     const m = buildQueueRenderModel({
       data: queueData({
@@ -354,7 +397,31 @@ describe("computeQueueData / deriveQueueWindow", () => {
 
     const data = computeQueueData(trace);
     expect(data.activeTaskSamples).toEqual([{ t: 100, count: 43 }]);
+    expect(data.taskSpawnTimes).toEqual([110]);
     expect(data.taskFirstPoll.get(1)).toBe(110);
+  });
+
+  it("sorts task spawn timestamps for histogram windowing", () => {
+    const trace = {
+      events: [],
+      maxTs: 1000,
+      blockInPlaceGaps: [],
+      runtimeWorkers: new Map(),
+      runtimeMetrics: [],
+      legacyActiveTaskSamples: [],
+      taskSpawnTimes: new Map([
+        [1, 300],
+        [2, 100],
+        [3, 200],
+      ]),
+      taskTerminateTimes: new Map(),
+      taskSpawnLocs: new Map(),
+      spawnLocations: new Map(),
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    } as unknown as ParsedTrace;
+
+    expect(computeQueueData(trace).taskSpawnTimes).toEqual([100, 200, 300]);
   });
 
   it("resolves complete for an empty segments slice, oversized when a segment is", () => {
