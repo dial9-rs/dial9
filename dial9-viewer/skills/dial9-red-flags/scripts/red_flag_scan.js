@@ -16,7 +16,7 @@ function resolve(name) {
 }
 
 const { parseTrace, EVENT_TYPES, deduplicateSamples } = require(resolve('trace_parser.js'));
-const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
+const { activeTaskSeries, buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, buildSpanData, globalQueueSeries } = require(resolve('trace_analysis.js'));
 
 async function redFlagScan(tracePath) {
@@ -31,6 +31,7 @@ async function redFlagScan(tracePath) {
     const spans = buildWorkerSpans(trace.events, workerIds, maxTs, trace.blockInPlaceGaps);
     attachCpuSamples(trace.cpuSamples, spans.workerSpans);
     const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
+    const activeTaskSamples = activeTaskSeries(trace, taskTimeline);
     const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
 
     const findings = [];
@@ -56,7 +57,7 @@ async function redFlagScan(tracePath) {
     }
 
     // 2. Task leak detection
-    const samples = taskTimeline.activeTaskSamples;
+    const samples = activeTaskSamples;
     if (samples.length > 10) {
       const first = samples[0].count;
       const last = samples[samples.length - 1].count;

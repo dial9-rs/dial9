@@ -192,6 +192,14 @@ declare module "*/trace_parser.js" {
     aliveTasks: number;
   }
 
+  /** Process-wide active-task sample decoded from the superseded QueueSampleEvent. */
+  export interface LegacyActiveTaskSample {
+    /** Monotonic sample timestamp (ns). */
+    t: number;
+    /** Tasks alive across all attached runtimes. */
+    count: number;
+  }
+
   /**
    * A detected block-in-place handoff interval. Worker attribution inside
    * [startNs, endNs) is unknowable: samples in the gap have workerId
@@ -265,6 +273,12 @@ declare module "*/trace_parser.js" {
      * `RuntimeMetricsEvent` (those carry a summed `QueueSample` instead).
      */
     runtimeMetrics: RuntimeMetricsSample[];
+    /**
+     * Process-wide active-task samples from the transitional QueueSampleEvent
+     * format. Empty for traces before that field and for current traces, which
+     * carry per-runtime counts in `runtimeMetrics`.
+     */
+    legacyActiveTaskSamples: LegacyActiveTaskSample[];
     customEvents: CustomTraceEvent[];
     /**
      * Columnar span-producing custom events (SpanEnter/Exit/Close and annotated

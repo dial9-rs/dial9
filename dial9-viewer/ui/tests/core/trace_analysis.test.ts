@@ -25,8 +25,10 @@ const { EVENT_TYPES, parseTrace, symbolizeChain } = require("../../trace_parser.
   symbolizeChain: (chain: string[], syms: Map<string, any>) => any[];
 };
 const {
+  activeTaskSeries,
   buildWorkerSpans,
   globalQueueSeries,
+  sumActiveTasksByCycle,
   sumGlobalQueueByCycle,
   attachCpuSamples,
   buildActiveTaskTimeline,
@@ -346,6 +348,24 @@ describe("sumGlobalQueueByCycle", () => {
   });
 });
 
+describe("sumActiveTasksByCycle", () => {
+  it("sums per-runtime alive-task counts per cycle timestamp and sorts by t", () => {
+    const summed = sumActiveTasksByCycle([
+      { t: 20, runtimeName: "", globalQueue: 0, aliveTasks: 7 },
+      { t: 10, runtimeName: "", globalQueue: 0, aliveTasks: 40 },
+      { t: 10, runtimeName: "io", globalQueue: 0, aliveTasks: 3 },
+    ]);
+    expect(summed).toEqual([
+      { t: 10, count: 43 },
+      { t: 20, count: 7 },
+    ]);
+  });
+
+  it("is empty for no samples", () => {
+    expect(sumActiveTasksByCycle([])).toEqual([]);
+  });
+});
+
 describe("globalQueueSeries", () => {
   it("prefers summed RuntimeMetrics over the legacy queueSamples", () => {
     const trace = {
@@ -382,6 +402,46 @@ describe("globalQueueSeries", () => {
     } else {
       expect(series).toBe(spans.queueSamples);
     }
+  });
+});
+
+describe("activeTaskSeries", () => {
+  const lifecycle = {
+    activeTaskSamples: [{ t: 11, count: 1 }],
+  };
+
+  it("prefers summed RuntimeMetrics so partial traces retain their baseline", () => {
+    const series = activeTaskSeries(
+      {
+        runtimeMetrics: [
+          { t: 10, runtimeName: "", globalQueue: 0, aliveTasks: 40 },
+          { t: 10, runtimeName: "io", globalQueue: 0, aliveTasks: 3 },
+        ],
+        legacyActiveTaskSamples: [{ t: 10, count: 999 }],
+      },
+      lifecycle,
+    );
+    expect(series).toEqual([{ t: 10, count: 43 }]);
+  });
+
+  it("falls back to transitional QueueSample active-task samples", () => {
+    const legacy = [{ t: 10, count: 17 }];
+    expect(
+      activeTaskSeries(
+        { runtimeMetrics: [], legacyActiveTaskSamples: legacy },
+        lifecycle,
+      ),
+    ).toBe(legacy);
+  });
+
+  it("falls back to lifecycle deltas when no sampled counts exist", () => {
+    expect(
+      activeTaskSeries(
+        { runtimeMetrics: [], legacyActiveTaskSamples: [] },
+        lifecycle,
+      ),
+    ).toBe(lifecycle.activeTaskSamples);
+    expect(activeTaskSeries({}, lifecycle)).toBe(lifecycle.activeTaskSamples);
   });
 });
 

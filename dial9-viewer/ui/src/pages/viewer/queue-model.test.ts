@@ -149,6 +149,23 @@ describe("buildQueueRenderModel", () => {
     expect(m.activeTask!.points[0]).toEqual({ x: 25, count: 8 });
   });
 
+  it("carries the first sampled task count backward instead of inventing zero", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        activeTaskSamples: [
+          { t: 25, count: 56 },
+          { t: 75, count: 50 },
+        ],
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 100,
+    });
+    expect(m.activeTask!.startCount).toBe(56);
+    expect(m.activeTask!.maxTasks).toBe(56);
+    expect(m.activeTask!.points[0]).toEqual({ x: 25, count: 56 });
+  });
+
   it("has no active-task overlay when the trace lacks the timeline", () => {
     const m = buildQueueRenderModel({
       data: queueData({ queueSamples: [{ t: 5, global: 1 }] }),
@@ -314,6 +331,30 @@ describe("computeQueueData / deriveQueueWindow", () => {
     expect(data.workerIds).toEqual([]);
     expect(data.queueSamples).toEqual([]);
     expect(data.hasTaskTracking).toBe(false);
+  });
+
+  it("uses sampled active-task totals instead of restarting partial traces at zero", () => {
+    const trace = {
+      events: [],
+      maxTs: 1000,
+      blockInPlaceGaps: [],
+      runtimeWorkers: new Map(),
+      runtimeMetrics: [
+        { t: 100, runtimeName: "", globalQueue: 0, aliveTasks: 40 },
+        { t: 100, runtimeName: "io", globalQueue: 0, aliveTasks: 3 },
+      ],
+      legacyActiveTaskSamples: [],
+      taskSpawnTimes: new Map([[1, 110]]),
+      taskTerminateTimes: new Map(),
+      taskSpawnLocs: new Map([[1, "spawn.rs:1"]]),
+      spawnLocations: new Map([["spawn.rs:1", "spawn.rs:1"]]),
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    } as unknown as ParsedTrace;
+
+    const data = computeQueueData(trace);
+    expect(data.activeTaskSamples).toEqual([{ t: 100, count: 43 }]);
+    expect(data.taskFirstPoll.get(1)).toBe(110);
   });
 
   it("resolves complete for an empty segments slice, oversized when a segment is", () => {
