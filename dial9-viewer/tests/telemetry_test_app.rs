@@ -11,6 +11,10 @@ mod expectations;
 mod local_js;
 
 #[cfg(target_os = "linux")]
+#[path = "telemetry_test_app/observations.rs"]
+mod observations;
+
+#[cfg(target_os = "linux")]
 #[test]
 fn local_javascript_matches_the_self_described_fixture() {
     use flate2::read::GzDecoder;
@@ -64,6 +68,8 @@ fn local_javascript_matches_the_self_described_fixture() {
         .collect();
     let expected = expectations::read_expected_model(raw_segments.iter().map(Vec::as_slice))
         .expect("read fixture expectations");
-    local_js::check_local_trace(&trace_paths, &expected)
+    let local = local_js::observe_local_trace(&trace_paths)
+        .expect("observe fixture through local JavaScript parser");
+    observations::compare_observations("local JavaScript parser", &expected, &local)
         .expect("local JavaScript observations must match fixture expectations");
 }
