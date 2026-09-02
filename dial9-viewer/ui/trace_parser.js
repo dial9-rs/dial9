@@ -29,6 +29,16 @@
     }
 
     /**
+     * Decode the optional active-task count carried by the superseded
+     * QueueSampleEvent. Traces predating that field legitimately omit it, so
+     * absence means "no sample", never zero.
+     */
+    function decodeLegacyActiveTaskSample(timestamp, fields) {
+        if (fields.active_tasks == null) return null;
+        return { t: timestamp, count: num(fields.active_tasks) };
+    }
+
+    /**
      * Intern a callchain frame address to its "0x…" hex string, deduped per
      * parse. Callchains across millions of samples/dumps/allocs share very few
      * distinct addresses (same code paths), so caching the hex string collapses
@@ -400,6 +410,7 @@
      *   threadNames: Map<number, string>,
      *   runtimeWorkers: Map<string, number[]>,
      *   segmentMetadata: Map<string, string>,
+     *   legacyActiveTaskSamples: Array<{t: number, count: number}>,
      * }} ParsedTrace
      */
 
@@ -716,6 +727,10 @@
             // (a handful per 10ms), so kept as a plain side-channel array rather
             // than routed through the columnar scheduler-event store.
             runtimeMetrics: [],
+            // QueueSampleEvent briefly carried a process-wide active-task count
+            // before RuntimeMetricsEvent replaced it. Keep that optional field
+            // in a side channel so traces from that generation remain useful.
+            legacyActiveTaskSamples: [],
             taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
             customEvents: [], // unrecognized event types: {name, timestamp, fields}
             // Schema active when each custom event was decoded. Kept parallel to
@@ -1188,6 +1203,7 @@
         const runtimeWorkers = state.runtimeWorkers;
         const segmentMetadata = state.segmentMetadata;
         const runtimeMetrics = state.runtimeMetrics;
+        const legacyActiveTaskSamples = state.legacyActiveTaskSamples;
         const taskDumps = state.taskDumps;
         const customEvents = state.customEvents;
         const spanEventSink = state.spanEventSink;
@@ -1324,6 +1340,12 @@
                 });
                 break;
             case "QueueSampleEvent":
+                {
+                    const activeTaskSample = decodeLegacyActiveTaskSample(ts, v);
+                    if (activeTaskSample != null) {
+                        legacyActiveTaskSamples.push(activeTaskSample);
+                    }
+                }
                 if (events.pushEvent) {
                     events.pushEvent(4, ts, 0, 0, num(v.global_queue), 0, 0, 0, null, undefined, undefined, undefined);
                     break;
@@ -1600,6 +1622,7 @@
             runtimeWorkers,
             segmentMetadata,
             runtimeMetrics,
+            legacyActiveTaskSamples,
             taskDumps,
             customEvents,
             customEventSchemas,
@@ -1753,6 +1776,7 @@
             runtimeWorkers,
             segmentMetadata,
             runtimeMetrics,
+            legacyActiveTaskSamples,
             customEvents,
             taskDumps,
             clockSyncAnchors,
@@ -2111,6 +2135,8 @@
         raw.events = events;
         raw.cpuSamples = cpuSamples;
         if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
+        if (!raw.runtimeMetrics) raw.runtimeMetrics = [];
+        if (!raw.legacyActiveTaskSamples) raw.legacyActiveTaskSamples = [];
         // Cache files written before the capability fields were serialized:
         // re-derive them from the cached metadata and spawn times.
         if (raw.hasFullTaskCoverage === undefined) {
@@ -2491,6 +2517,9 @@
             deduplicateSamples,
             deriveBlockInPlaceGaps,
             deriveCapabilities,
+            // Exported for focused backwards-compatibility tests. Not part of
+            // the browser API.
+            decodeLegacyActiveTaskSample,
             // Exported for unit tests: the single-event span schema compiler
             // and its runtime timing resolution. Not part of the browser API.
             compileSingleEventSpanSchema,

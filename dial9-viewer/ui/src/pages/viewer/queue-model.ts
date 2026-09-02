@@ -16,7 +16,10 @@
 
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
-import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
+import {
+  activeTaskSeries,
+  buildActiveTaskTimeline,
+} from "../../lib/trace/index.js";
 import {
   deriveRuntimeMetrics,
   deriveWorkerIds,
@@ -86,8 +89,9 @@ export const EMPTY_QUEUE_DATA: QueueData = {
 
 /**
  * Derive the queue track's frame-invariant data for one parsed trace. Runs
- * buildWorkerSpans (global + per-worker queue series) and
- * buildActiveTaskTimeline (active-task counts + taskFirstPoll). Call once per
+ * buildWorkerSpans (global + per-worker queue series),
+ * buildActiveTaskTimeline (lifecycle fallback + taskFirstPoll), and
+ * activeTaskSeries (sampled process-wide counts when available). Call once per
  * trace and cache (store.derived over the `trace` slice) - never per frame.
  */
 export function computeQueueData(trace: ParsedTrace | null): QueueData {
@@ -99,6 +103,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,
   );
+  const activeTaskSamples = activeTaskSeries(trace, timeline);
   // The global-queue series comes from per-runtime RuntimeMetrics (summed per
   // cycle) when the trace has them; otherwise fall back to the legacy
   // pre-summed QueueSample series that buildWorkerSpans extracts.
@@ -123,7 +128,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     workerIds,
     queueSamples,
     mergedLocalSamples: merged,
-    activeTaskSamples: timeline.activeTaskSamples,
+    activeTaskSamples,
     taskFirstPoll: timeline.taskFirstPoll,
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,

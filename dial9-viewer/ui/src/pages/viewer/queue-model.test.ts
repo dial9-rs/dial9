@@ -316,6 +316,30 @@ describe("computeQueueData / deriveQueueWindow", () => {
     expect(data.hasTaskTracking).toBe(false);
   });
 
+  it("uses sampled active-task totals instead of restarting partial traces at zero", () => {
+    const trace = {
+      events: [],
+      maxTs: 1000,
+      blockInPlaceGaps: [],
+      runtimeWorkers: new Map(),
+      runtimeMetrics: [
+        { t: 100, runtimeName: "", globalQueue: 0, aliveTasks: 40 },
+        { t: 100, runtimeName: "io", globalQueue: 0, aliveTasks: 3 },
+      ],
+      legacyActiveTaskSamples: [],
+      taskSpawnTimes: new Map([[1, 110]]),
+      taskTerminateTimes: new Map(),
+      taskSpawnLocs: new Map([[1, "spawn.rs:1"]]),
+      spawnLocations: new Map([["spawn.rs:1", "spawn.rs:1"]]),
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    } as unknown as ParsedTrace;
+
+    const data = computeQueueData(trace);
+    expect(data.activeTaskSamples).toEqual([{ t: 100, count: 43 }]);
+    expect(data.taskFirstPoll.get(1)).toBe(110);
+  });
+
   it("resolves complete for an empty segments slice, oversized when a segment is", () => {
     const complete = deriveQueueWindow({
       segments: { segments: new Map() },

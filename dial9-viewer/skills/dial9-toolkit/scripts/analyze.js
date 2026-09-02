@@ -20,7 +20,7 @@ function resolve(name) {
 }
 
 const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples, deriveCapabilities } = require(resolve('trace_parser.js'));
-const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
+const { activeTaskSeries, buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations,
         globalQueueSeries } = require(resolve('trace_analysis.js'));
 const { diagnoseSetup } = require(resolve('diagnose_setup.js'));
@@ -179,6 +179,7 @@ function accumulateTrace(acc, trace, sourceFile) {
   const spans = buildWorkerSpans(trace.events, workerIds, maxTs, trace.blockInPlaceGaps);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);
   const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
+  const activeTaskSamples = activeTaskSeries(trace, taskTimeline);
   const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
 
   // Scalars
@@ -243,7 +244,7 @@ function accumulateTrace(acc, trace, sourceFile) {
   }
 
   // Task timeline
-  for (const s of taskTimeline.activeTaskSamples) acc.taskTimelineSamples.push(s);
+  for (const s of activeTaskSamples) acc.taskTimelineSamples.push(s);
 
   // Maps
   for (const [k, v] of trace.taskSpawnLocs) acc.taskSpawnLocs.set(k, v);
@@ -497,21 +498,12 @@ function reportAnalysis(a, label) {
 
   const atSamples = a.taskTimeline.activeTaskSamples;
   if (atSamples.length > 0) {
-    // Recompute from merged spawn/terminate maps for accurate cross-file count
-    // Tasks that terminate without a recorded spawn were alive at trace start
-    let preExisting = 0;
-    for (const [taskId] of taskTerminateTimes) {
-      if (!taskSpawnTimes.has(taskId)) preExisting++;
-    }
-    const taskEvents = [];
-    for (const [, t] of taskSpawnTimes) taskEvents.push({ t, delta: 1 });
-    for (const [, t] of taskTerminateTimes) taskEvents.push({ t, delta: -1 });
-    taskEvents.sort((a, b) => a.t - b.t);
-    let count = preExisting, peak = preExisting;
-    for (const te of taskEvents) { count += te.delta; if (count > peak) peak = count; }
-    const alive = count;
-    console.log(`\n  Peak active tasks: ${peak}${preExisting > 0 ? ` (${preExisting} pre-existing at trace start)` : ''}`);
-    console.log(`  Active at trace end: ${alive}`);
+    const first = atSamples[0].count;
+    const alive = atSamples[atSamples.length - 1].count;
+    const peak = atSamples.reduce((m, s) => Math.max(m, s.count), -Infinity);
+    console.log(`\n  Peak active tasks: ${peak}`);
+    console.log(`  Active at first sample: ${first}`);
+    console.log(`  Active at last sample: ${alive}`);
     if (alive > peak / 2 && alive === peak) {
       console.log('  ⚠ POSSIBLE TASK LEAK — active count grew monotonically');
       const alive = new Map();
@@ -941,6 +933,7 @@ async function parseWorkerMain(traceFile, cachePath) {
     // current traces (buildWorkerSpans' queueSamples is empty once producers
     // emit RuntimeMetricsEvent instead of QueueSampleEvent).
     runtimeMetrics: trace.runtimeMetrics || [],
+    legacyActiveTaskSamples: trace.legacyActiveTaskSamples || [],
   }});
   for (const e of trace.events) writeLine({ t: 'e', d: e });
   for (const s of trace.cpuSamples) writeLine({ t: 'c', d: s });
@@ -983,6 +976,7 @@ function loadCacheFile(cachePath) {
   raw.events = events; raw.cpuSamples = cpuSamples; raw.customEvents = customEvents;
   if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
   if (!raw.runtimeMetrics) raw.runtimeMetrics = []; // pre-RuntimeMetrics cache files
+  if (!raw.legacyActiveTaskSamples) raw.legacyActiveTaskSamples = [];
   // Pre-capability cache files: re-derive from the cached metadata and spawn times.
   if (raw.hasFullTaskCoverage === undefined) Object.assign(raw, deriveCapabilities(raw.segmentMetadata, raw.taskSpawnTimes ?? new Map()));
   raw.allocEvents = allocEvents; raw.freeEvents = freeEvents;
@@ -998,6 +992,7 @@ function analyzeWorkerMain(cachePath) {
   const spans = buildWorkerSpans(trace.events, wids, maxTs, trace.blockInPlaceGaps);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);
   const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
+  const activeTaskSamples = activeTaskSeries(trace, taskTimeline);
   const schedDelays = computeSchedulingDelays(spans.workerSpans, wids, spans.wakesByTask);
   const onCpu = trace.cpuSamples.filter(s => s.source === 0);
   const offCpu = trace.cpuSamples.filter(s => s.source === 1);
@@ -1014,7 +1009,7 @@ function analyzeWorkerMain(cachePath) {
     queueMax: 0, queueSum: 0, queueCount: 0,
     schedDelayTotal: schedDelays.length, schedDelayHighCount: 0, schedDelayWorst: [],
     schedDelayValues: schedDelays.map(sd => Math.max(1, Math.round(sd.delay))),
-    taskTimelineSamples: taskTimeline.activeTaskSamples,
+    taskTimelineSamples: activeTaskSamples,
     taskSpawnLocs: mapToEntries(trace.taskSpawnLocs),
     taskSpawnTimes: mapToEntries(trace.taskSpawnTimes),
     taskTerminateTimes: mapToEntries(trace.taskTerminateTimes),

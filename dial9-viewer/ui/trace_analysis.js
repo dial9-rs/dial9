@@ -646,6 +646,22 @@
   }
 
   /**
+   * Sum per-runtime alive-task counts into one process-wide timeline.
+   *
+   * @param {import('./trace_parser.js').RuntimeMetricsSample[]} runtimeMetrics
+   * @returns {Array<{t: number, count: number}>} sorted by t
+   */
+  function sumActiveTasksByCycle(runtimeMetrics) {
+    const byTs = new Map();
+    for (const s of runtimeMetrics) {
+      byTs.set(s.t, (byTs.get(s.t) ?? 0) + s.aliveTasks);
+    }
+    return [...byTs.entries()]
+      .map(([t, count]) => ({ t, count }))
+      .sort((a, b) => a.t - b.t);
+  }
+
+  /**
    * The process-wide global injection-queue timeline for a trace, from whichever
    * event generation the trace carries. THE one place that decision is made, so
    * every consumer (viewer queue track, skill scripts) reads the same series:
@@ -665,6 +681,35 @@
       return sumGlobalQueueByCycle(runtimeMetrics);
     }
     return workerSpansResult.queueSamples;
+  }
+
+  /**
+   * The process-wide active-task timeline from whichever event generation the
+   * trace carries:
+   *
+   * - Current traces carry per-runtime `RuntimeMetricsEvent`s, summed per cycle.
+   * - The transitional QueueSample generation carries an already-summed
+   *   `active_tasks` field in `legacyActiveTaskSamples`.
+   * - Older traces fall back to spawn/terminate lifecycle deltas.
+   *
+   * Sampled counts are authoritative when available because they include tasks
+   * that were already alive when a partial trace began.
+   *
+   * @param {import('./trace_parser.js').ParsedTrace} trace
+   * @param {{activeTaskSamples: Array<{t: number, count: number}>}} taskTimeline
+   *   the `buildActiveTaskTimeline` result for the same trace
+   * @returns {Array<{t: number, count: number}>} sorted by t
+   */
+  function activeTaskSeries(trace, taskTimeline) {
+    const runtimeMetrics = trace.runtimeMetrics;
+    if (runtimeMetrics && runtimeMetrics.length > 0) {
+      return sumActiveTasksByCycle(runtimeMetrics);
+    }
+    const legacySamples = trace.legacyActiveTaskSamples;
+    if (legacySamples && legacySamples.length > 0) {
+      return legacySamples;
+    }
+    return taskTimeline.activeTaskSamples;
   }
 
   /**
@@ -1945,7 +1990,9 @@
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
+    activeTaskSeries,
     globalQueueSeries,
+    sumActiveTasksByCycle,
     sumGlobalQueueByCycle,
     computeRuntimeGroups,
     buildRuntimeFilterData,

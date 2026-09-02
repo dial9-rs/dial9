@@ -10,6 +10,7 @@
 import "./core-globals.js";
 
 export {
+  activeTaskSeries,
   analyzeAllocations,
   attachCpuSamples,
   buildActiveTaskTimeline,
@@ -29,6 +30,7 @@ export {
   globalQueueSeries,
   hasCpuProfileSamples,
   selectSpanRenderSet,
+  sumActiveTasksByCycle,
   sumGlobalQueueByCycle,
 } from "../../../trace_analysis.js";
 

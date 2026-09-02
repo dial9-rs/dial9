@@ -180,6 +180,7 @@ export type { SpanAncestry, SpanList } from "./query.js";
 
 // analysis.ts - the trace_analysis.js facade.
 export {
+  activeTaskSeries,
   analyzeAllocations,
   attachCpuSamples,
   buildActiveTaskTimeline,
@@ -200,6 +201,7 @@ export {
   globalQueueSeries,
   hasCpuProfileSamples,
   selectSpanRenderSet,
+  sumActiveTasksByCycle,
   sumGlobalQueueByCycle,
 } from "./analysis.js";
 export type {
