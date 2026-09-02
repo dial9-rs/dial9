@@ -86,8 +86,8 @@ pub struct FlamegraphParams {
     pub min_span_ns: Option<i64>,
     /// Maximum span elapsed_ns for the span filter (inclusive).
     pub max_span_ns: Option<i64>,
-    /// Response tree encoding. The canonical UI requests `interned-v1`; absent
-    /// or unknown values retain the legacy nested-name response.
+    /// Response tree encoding. The canonical UI requests `flat-v1`; absent or
+    /// unknown values retain the legacy nested-name response.
     pub format: Option<String>,
 }
 
@@ -106,6 +106,7 @@ pub struct FlamegraphResponse {
 pub enum FlamegraphTree {
     Legacy(FlamegraphNode),
     Interned(InternedFlamegraphTree),
+    Flat(FlatFlamegraphTree),
 }
 
 #[derive(Serialize, Clone)]
@@ -135,6 +136,20 @@ pub struct InternedFlamegraphNode {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<InternedFlamegraphNode>,
 }
+
+#[derive(Serialize)]
+pub struct FlatFlamegraphTree {
+    pub format: &'static str,
+    /// Frame names indexed by each node row's frame field.
+    pub frames: Vec<String>,
+    /// Preorder rows: `[parent_node, frame, count, self_count]`. The root is
+    /// row zero and names itself as its parent; every other parent precedes its
+    /// children.
+    pub nodes: Vec<FlatFlamegraphNode>,
+}
+
+#[derive(Serialize)]
+pub struct FlatFlamegraphNode(u32, u32, u64, u64);
 
 #[derive(Serialize)]
 pub struct FlamegraphMetadata {
@@ -182,8 +197,8 @@ pub struct ScopeEcho {
 fn build_flamegraph_tree(
     stack_counts: &[([u8; 16], u64)],
     stacks_dict: &StackDictionary,
-) -> TrieNode {
-    let mut root = TrieNode::new(stacks_dict.root());
+) -> FlamegraphTrie {
+    let mut trie = FlamegraphTrie::new(stacks_dict.root());
 
     for (stack_id, count) in stack_counts {
         let frames = match stacks_dict.get(stack_id) {
@@ -191,87 +206,202 @@ fn build_flamegraph_tree(
             None => continue,
         };
         // Frames are stored leaf→root; flamegraph trie inserts root→leaf
-        root.count += count;
-        let mut node = &mut root;
+        trie.nodes[0].count += count;
+        let mut node = 0;
         for frame in frames.iter().rev() {
-            node = node.get_or_insert_child(*frame);
-            node.count += count;
+            node = trie.get_or_insert_child(node, *frame);
+            trie.nodes[node].count += count;
         }
         // Leaf gets self-time
-        node.self_count += count;
+        trie.nodes[node].self_count += count;
     }
 
-    root
+    trie
 }
 
 struct TrieNode {
     frame: FrameId,
+    parent: usize,
     count: u64,
     self_count: u64,
-    children: HashMap<FrameId, TrieNode>,
 }
 
-impl TrieNode {
-    fn new(frame: FrameId) -> Self {
+struct FlamegraphTrie {
+    nodes: Vec<TrieNode>,
+    edges: HashMap<(usize, FrameId), usize>,
+}
+
+impl FlamegraphTrie {
+    fn new(root_frame: FrameId) -> Self {
         Self {
+            nodes: vec![TrieNode {
+                frame: root_frame,
+                parent: 0,
+                count: 0,
+                self_count: 0,
+            }],
+            edges: HashMap::new(),
+        }
+    }
+
+    fn get_or_insert_child(&mut self, parent: usize, frame: FrameId) -> usize {
+        let key = (parent, frame);
+        if let Some(child) = self.edges.get(&key) {
+            return *child;
+        }
+        let child = self.nodes.len();
+        self.nodes.push(TrieNode {
             frame,
+            parent,
             count: 0,
             self_count: 0,
-            children: HashMap::new(),
+        });
+        self.edges.insert(key, child);
+        child
+    }
+
+    fn ordered_children(&self, stacks_dict: &StackDictionary) -> OrderedChildren {
+        let mut nodes: Vec<_> = (1..self.nodes.len()).collect();
+        nodes.sort_unstable_by(|a, b| {
+            let a = &self.nodes[*a];
+            let b = &self.nodes[*b];
+            a.parent.cmp(&b.parent).then_with(|| {
+                b.count.cmp(&a.count).then_with(|| {
+                    stacks_dict
+                        .resolve(a.frame)
+                        .cmp(stacks_dict.resolve(b.frame))
+                })
+            })
+        });
+
+        let mut starts = vec![0usize; self.nodes.len() + 1];
+        for node in self.nodes.iter().skip(1) {
+            starts[node.parent + 1] += 1;
         }
-    }
-
-    fn get_or_insert_child(&mut self, frame: FrameId) -> &mut TrieNode {
-        self.children
-            .entry(frame)
-            .or_insert_with_key(|frame| TrieNode::new(*frame))
-    }
-
-    fn into_legacy(self, stacks_dict: &StackDictionary) -> FlamegraphNode {
-        let mut children: Vec<_> = self.children.into_values().collect();
-        sort_children(&mut children, stacks_dict);
-        FlamegraphNode {
-            name: stacks_dict.resolve(self.frame).to_string(),
-            count: self.count,
-            self_count: self.self_count,
-            children: children
-                .into_iter()
-                .map(|child| child.into_legacy(stacks_dict))
-                .collect(),
+        for i in 1..starts.len() {
+            starts[i] += starts[i - 1];
         }
+        OrderedChildren { nodes, starts }
     }
 
-    fn collect_frames(&self, frames: &mut std::collections::HashSet<FrameId>) {
-        frames.insert(self.frame);
-        for child in self.children.values() {
-            child.collect_frames(frames);
-        }
-    }
-
-    fn into_interned(
-        self,
+    fn legacy_node(
+        &self,
+        node_id: usize,
         stacks_dict: &StackDictionary,
-        wire_ids: &HashMap<FrameId, u32>,
-    ) -> InternedFlamegraphNode {
-        let mut children: Vec<_> = self.children.into_values().collect();
-        sort_children(&mut children, stacks_dict);
-        InternedFlamegraphNode {
-            frame: wire_ids[&self.frame],
-            count: self.count,
-            self_count: self.self_count,
+        children: &OrderedChildren,
+    ) -> FlamegraphNode {
+        let node = &self.nodes[node_id];
+        FlamegraphNode {
+            name: stacks_dict.resolve(node.frame).to_string(),
+            count: node.count,
+            self_count: node.self_count,
             children: children
-                .into_iter()
-                .map(|child| child.into_interned(stacks_dict, wire_ids))
+                .of(node_id)
+                .iter()
+                .map(|child| self.legacy_node(*child, stacks_dict, children))
                 .collect(),
         }
     }
 
-    fn into_interned_tree(self, stacks_dict: &StackDictionary) -> InternedFlamegraphTree {
-        let mut used = std::collections::HashSet::new();
-        self.collect_frames(&mut used);
-        let mut frames: Vec<_> = used.into_iter().collect();
+    fn into_legacy(mut self, stacks_dict: &StackDictionary) -> FlamegraphNode {
+        self.edges = HashMap::new();
+        let children = self.ordered_children(stacks_dict);
+        self.legacy_node(0, stacks_dict, &children)
+    }
+
+    fn interned_node(
+        &self,
+        node_id: usize,
+        frames: &WireFrames,
+        children: &OrderedChildren,
+    ) -> InternedFlamegraphNode {
+        let node = &self.nodes[node_id];
+        InternedFlamegraphNode {
+            frame: frames.ids[&node.frame],
+            count: node.count,
+            self_count: node.self_count,
+            children: children
+                .of(node_id)
+                .iter()
+                .map(|child| self.interned_node(*child, frames, children))
+                .collect(),
+        }
+    }
+
+    fn into_interned_tree(mut self, stacks_dict: &StackDictionary) -> InternedFlamegraphTree {
+        self.edges = HashMap::new();
+        let frames = WireFrames::new(&self.nodes, stacks_dict);
+        let children = self.ordered_children(stacks_dict);
+        let root = self.interned_node(0, &frames, &children);
+        InternedFlamegraphTree {
+            format: "interned-v1",
+            frames: frames.names,
+            root,
+        }
+    }
+
+    fn append_flat(
+        &self,
+        node_id: usize,
+        parent_wire_id: u32,
+        frames: &WireFrames,
+        children: &OrderedChildren,
+        rows: &mut Vec<FlatFlamegraphNode>,
+    ) {
+        let wire_id =
+            u32::try_from(rows.len()).expect("a flamegraph cannot contain more than u32 nodes");
+        let node = &self.nodes[node_id];
+        rows.push(FlatFlamegraphNode(
+            if node_id == 0 {
+                wire_id
+            } else {
+                parent_wire_id
+            },
+            frames.ids[&node.frame],
+            node.count,
+            node.self_count,
+        ));
+        for child in children.of(node_id) {
+            self.append_flat(*child, wire_id, frames, children, rows);
+        }
+    }
+
+    fn into_flat_tree(mut self, stacks_dict: &StackDictionary) -> FlatFlamegraphTree {
+        self.edges = HashMap::new();
+        let frames = WireFrames::new(&self.nodes, stacks_dict);
+        let children = self.ordered_children(stacks_dict);
+        let mut nodes = Vec::with_capacity(self.nodes.len());
+        self.append_flat(0, 0, &frames, &children, &mut nodes);
+        FlatFlamegraphTree {
+            format: "flat-v1",
+            frames: frames.names,
+            nodes,
+        }
+    }
+}
+
+struct OrderedChildren {
+    nodes: Vec<usize>,
+    starts: Vec<usize>,
+}
+
+impl OrderedChildren {
+    fn of(&self, parent: usize) -> &[usize] {
+        &self.nodes[self.starts[parent]..self.starts[parent + 1]]
+    }
+}
+
+struct WireFrames {
+    names: Vec<String>,
+    ids: HashMap<FrameId, u32>,
+}
+
+impl WireFrames {
+    fn new(nodes: &[TrieNode], stacks_dict: &StackDictionary) -> Self {
+        let mut frames: Vec<_> = nodes.iter().map(|node| node.frame).collect();
         frames.sort_unstable_by(|a, b| stacks_dict.resolve(*a).cmp(stacks_dict.resolve(*b)));
-        let wire_ids: HashMap<_, _> = frames
+        frames.dedup();
+        let ids = frames
             .iter()
             .enumerate()
             .map(|(index, frame)| {
@@ -285,22 +415,8 @@ impl TrieNode {
             .iter()
             .map(|frame| stacks_dict.resolve(*frame).to_string())
             .collect();
-        InternedFlamegraphTree {
-            format: "interned-v1",
-            frames: names,
-            root: self.into_interned(stacks_dict, &wire_ids),
-        }
+        Self { names, ids }
     }
-}
-
-fn sort_children(children: &mut [TrieNode], stacks_dict: &StackDictionary) {
-    children.sort_unstable_by(|a, b| {
-        b.count.cmp(&a.count).then_with(|| {
-            stacks_dict
-                .resolve(a.frame)
-                .cmp(stacks_dict.resolve(b.frame))
-        })
-    });
 }
 
 /// Handler for GET /api/flamegraph — a Server-Sent Events stream.
@@ -568,6 +684,7 @@ struct StreamCtx {
 enum WireFormat {
     Legacy,
     InternedV1,
+    FlatV1,
 }
 
 /// The flamegraph [`FoldSink`] adapter: owns the incremental [`FlamegraphAccum`]
@@ -714,6 +831,7 @@ fn flamegraph_stream(
         max_poll_ns: params.max_poll_ns,
         wire_format: match params.format.as_deref() {
             Some("interned-v1") => WireFormat::InternedV1,
+            Some("flat-v1") => WireFormat::FlatV1,
             _ => WireFormat::Legacy,
         },
     };
@@ -729,6 +847,7 @@ fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> Fl
         WireFormat::InternedV1 => {
             FlamegraphTree::Interned(trie.into_interned_tree(snap.stacks_dict))
         }
+        WireFormat::FlatV1 => FlamegraphTree::Flat(trie.into_flat_tree(snap.stacks_dict)),
     };
 
     // Echo the active filter values back to the UI (facet name → selected value).
@@ -854,6 +973,60 @@ mod tests {
             build_flamegraph_tree(&[(a, 5), (b, 5)], &stacks_dict).into_interned_tree(&stacks_dict);
         let second =
             build_flamegraph_tree(&[(b, 5), (a, 5)], &stacks_dict).into_interned_tree(&stacks_dict);
+
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn flat_tree_preserves_counts_and_parent_order() {
+        let mut stacks = HashMap::new();
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        stacks.insert(
+            a,
+            vec!["left".to_string(), "main".to_string(), "root".to_string()],
+        );
+        stacks.insert(
+            b,
+            vec!["right".to_string(), "main".to_string(), "root".to_string()],
+        );
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+        let tree =
+            build_flamegraph_tree(&[(a, 4), (b, 3)], &stacks_dict).into_flat_tree(&stacks_dict);
+
+        assert_eq!(tree.format, "flat-v1");
+        assert_eq!(tree.nodes.len(), 5);
+        assert_eq!(
+            (tree.nodes[0].0, tree.nodes[0].2, tree.nodes[0].3),
+            (0, 7, 0)
+        );
+        for (index, node) in tree.nodes.iter().enumerate().skip(1) {
+            assert!(
+                usize::try_from(node.0).unwrap() < index,
+                "node {index} must follow parent {}",
+                node.0
+            );
+        }
+        let self_total: u64 = tree.nodes.iter().map(|node| node.3).sum();
+        assert_eq!(self_total, 7);
+    }
+
+    #[test]
+    fn flat_tree_is_deterministic_across_input_order() {
+        let mut stacks = HashMap::new();
+        let a = [1u8; 16];
+        let b = [2u8; 16];
+        stacks.insert(a, vec!["z-leaf".to_string(), "shared".to_string()]);
+        stacks.insert(b, vec!["a-leaf".to_string(), "shared".to_string()]);
+        let stacks_dict = StackDictionary::from_stacks(stacks);
+
+        let first =
+            build_flamegraph_tree(&[(a, 5), (b, 5)], &stacks_dict).into_flat_tree(&stacks_dict);
+        let second =
+            build_flamegraph_tree(&[(b, 5), (a, 5)], &stacks_dict).into_flat_tree(&stacks_dict);
 
         assert_eq!(
             serde_json::to_string(&first).unwrap(),

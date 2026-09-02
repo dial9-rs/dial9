@@ -159,30 +159,62 @@ function shouldAdoptRefinementSnapshot(preserveExisting, baselineFilesFolded, in
 
 // Resolve the negotiated aggregate flamegraph encoding into the legacy
 // nested-name tree consumed by the existing renderers. Older servers return
-// that tree directly; interned-v1 sends every frame name once and references
-// it by index from each node.
+// that tree directly; interned-v1 and flat-v1 send every frame name once and
+// reference it by index from each node.
 function decodeFlamegraphTree(response) {
   const tree = response && response.tree;
-  if (!tree || tree.format !== "interned-v1") return tree;
+  if (!tree || (tree.format !== "interned-v1" && tree.format !== "flat-v1")) return tree;
   if (!Array.isArray(tree.frames)) {
-    throw new Error("interned-v1 flamegraph is missing its frame table");
+    throw new Error(`${tree.format} flamegraph is missing its frame table`);
+  }
+
+  function frameName(frame) {
+    if (!Number.isInteger(frame) || frame < 0 || frame >= tree.frames.length) {
+      throw new Error(`${tree.format} flamegraph references invalid frame ${String(frame)}`);
+    }
+    const name = tree.frames[frame];
+    if (typeof name !== "string") {
+      throw new Error(`${tree.format} flamegraph frame ${frame} is not a string`);
+    }
+    return name;
+  }
+
+  if (tree.format === "flat-v1") {
+    if (!Array.isArray(tree.nodes) || tree.nodes.length === 0) {
+      throw new Error("flat-v1 flamegraph must contain a root node");
+    }
+    const decoded = [];
+    for (let i = 0; i < tree.nodes.length; i++) {
+      const row = tree.nodes[i];
+      if (!Array.isArray(row) || row.length !== 4) {
+        throw new Error(`flat-v1 flamegraph node ${i} is not a four-field row`);
+      }
+      const parent = row[0];
+      if (!Number.isInteger(parent) || (i === 0 ? parent !== 0 : parent < 0 || parent >= i)) {
+        throw new Error(`flat-v1 flamegraph node ${i} has invalid parent ${String(parent)}`);
+      }
+      const node = {
+        name: frameName(row[1]),
+        count: row[2],
+        self: row[3],
+      };
+      decoded.push(node);
+      if (i > 0) {
+        const parentNode = decoded[parent];
+        (parentNode.children || (parentNode.children = [])).push(node);
+      }
+    }
+    return decoded[0];
   }
 
   function decodeNode(node) {
     const frame = node && node.frame;
-    if (!Number.isInteger(frame) || frame < 0 || frame >= tree.frames.length) {
-      throw new Error(`interned-v1 flamegraph references invalid frame ${String(frame)}`);
-    }
-    const name = tree.frames[frame];
-    if (typeof name !== "string") {
-      throw new Error(`interned-v1 flamegraph frame ${frame} is not a string`);
-    }
     const children = node.children;
     if (children != null && !Array.isArray(children)) {
       throw new Error("interned-v1 flamegraph node children must be an array");
     }
     const decoded = {
-      name,
+      name: frameName(frame),
       count: node.count,
       self: node.self,
     };

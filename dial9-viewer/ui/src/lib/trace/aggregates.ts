@@ -129,7 +129,24 @@ export interface InternedApiFlamegraphTree {
   root: InternedApiFlamegraphNode;
 }
 
-export type ApiFlamegraphTree = ApiFlamegraphNode | InternedApiFlamegraphTree;
+/** Preorder `[parent_node, frame, count, self_count]` row. */
+export type FlatApiFlamegraphNode = [
+  parent: number,
+  frame: number,
+  count: number,
+  selfCount: number,
+];
+
+export interface FlatApiFlamegraphTree {
+  format: "flat-v1";
+  frames: string[];
+  nodes: FlatApiFlamegraphNode[];
+}
+
+export type ApiFlamegraphTree =
+  | ApiFlamegraphNode
+  | InternedApiFlamegraphTree
+  | FlatApiFlamegraphTree;
 
 /** One facet's values. */
 export interface FacetResult {
