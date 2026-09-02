@@ -117,10 +117,6 @@ aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-types = "1"
 aws-smithy-async = { version = "1", features = ["rt-tokio"] }
 http = "1"
-# Fan-out fixture for the flamegraph wire-format tests: real rayon work-stealing
-# stacks, captured and symbolized in-process.
-rayon = "1"
-backtrace = "0.3"
 
 criterion = { version = "0.5", features = ["html_reports"] }
 

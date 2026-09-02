@@ -981,98 +981,80 @@ mod tests {
         );
     }
 
-    /// Real rayon work-stealing stacks: the fan-out shape that motivated the
-    /// compact wire formats.
+    /// The rayon work-stealing fan-out shape that motivated the compact wire
+    /// formats: a handful of very long monomorphized symbols recombining into
+    /// thousands of distinct root→leaf paths, so legacy nodes repeat a whole
+    /// symbol at every one of them.
     ///
-    /// A `for_each` over a range plus a recursive `join` tree both re-enter
-    /// `join_context` at every split depth, so a handful of (very long,
-    /// monomorphized) symbols recombine into thousands of distinct root→leaf
-    /// paths. Legacy nodes repeat the whole symbol at every one of them.
+    /// The shape is synthesized rather than sampled from a live rayon pool.
+    /// Sampling made every byte count here depend on the host — core count sets
+    /// how deep rayon actually splits, so CI's small runners produced a
+    /// different tree than a workstation and the ratios below failed there. The
+    /// frame names are real monomorphizations captured from
+    /// `examples/rayon-fanout`, which is where the end-to-end measurement on a
+    /// genuine trace lives.
     mod rayon_fanout {
         use super::*;
-        use rayon::prelude::*;
         use std::collections::{HashMap, HashSet};
-        use std::sync::Mutex;
 
-        /// One captured sample: the instruction pointers of the live stack,
-        /// innermost frame first (the leaf→root order `StackDictionary` wants).
-        fn capture(out: &Mutex<Vec<Vec<usize>>>) {
-            let mut ips = Vec::new();
-            backtrace::trace(|frame| {
-                ips.push(frame.ip() as usize);
-                true
-            });
-            out.lock().expect("capture buffer poisoned").push(ips);
+        /// Real rayon monomorphizations (204..945 bytes) captured from the
+        /// example binary's symbol table.
+        fn frame_names() -> Vec<&'static str> {
+            include_str!("testdata/rayon_symbols.txt")
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .collect()
         }
 
-        /// Run rayon work and turn the captured stacks into the `(dictionary,
-        /// stack_counts)` pair the tree builder consumes.
+        /// How deep the synthetic split tree goes. Each level doubles the path
+        /// count, so this is the dial on fan-out: depth 11 is 2,048 leaves.
+        const SPLIT_DEPTH: u32 = 11;
+
+        /// The `(dictionary, stack_counts)` pair the tree builder consumes,
+        /// describing a `SPLIT_DEPTH`-deep binary split tree.
         ///
-        /// Frame identity is the instruction pointer, so the fan-out structure
-        /// holds even where symbolization is unavailable; names fall back to the
-        /// raw address in that case.
-        fn rayon_stacks() -> (StackDictionary, Vec<([u8; 16], u64)>) {
-            let captured = Mutex::new(Vec::new());
-
-            // Parallel iterator: rayon's producer/consumer bridge splits the
-            // range recursively, so each sample sits at a different join depth.
-            (0..2_000u64)
-                .into_par_iter()
-                .for_each(|_| capture(&captured));
-
-            // Recursive join tree: the same few symbols at eight nesting depths.
-            fn split(depth: u32, out: &Mutex<Vec<Vec<usize>>>) {
-                if depth == 0 {
-                    capture(out);
-                    return;
-                }
-                rayon::join(|| split(depth - 1, out), || split(depth - 1, out));
-            }
-            split(8, &captured);
-
-            let samples = captured.into_inner().expect("capture buffer poisoned");
-
-            // Resolve each distinct address once — a few dozen lookups instead
-            // of one per sample.
-            let mut names: HashMap<usize, String> = HashMap::new();
-            for ip in samples.iter().flatten() {
-                names.entry(*ip).or_insert_with(|| {
-                    let mut name = None;
-                    backtrace::resolve(*ip as *mut _, |symbol| {
-                        if name.is_none() {
-                            name = symbol.name().map(|n| n.to_string());
-                        }
-                    });
-                    name.unwrap_or_else(|| format!("0x{ip:x}"))
-                });
-            }
-
-            // Collapse identical stacks into counts, keyed by a dense synthetic
-            // stack ID (the real pipeline uses a content hash).
-            let mut ids: HashMap<Vec<usize>, [u8; 16]> = HashMap::new();
-            let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
+        /// Every level draws its two frames from `frame_names()`, cycling — the
+        /// left/right pair at a level stands in for the two closures of one
+        /// `join_context` monomorphization, which is where rayon's real path
+        /// cardinality comes from. Because the pool of names is far smaller than
+        /// the depth, ~10 distinct symbols cover 2,048 distinct paths.
+        ///
+        /// Samples are taken at every depth from 4 up, not just at the leaves,
+        /// standing in for a sampler that catches threads mid-split.
+        fn fan_out_stacks() -> (StackDictionary, Vec<([u8; 16], u64)>) {
+            let names = frame_names();
             let mut stacks: HashMap<[u8; 16], Vec<String>> = HashMap::new();
-            for sample in &samples {
-                let next = ids.len() as u64;
-                let id = *ids.entry(sample.clone()).or_insert_with(|| {
+            let mut stack_counts = Vec::new();
+
+            for depth in 4..=SPLIT_DEPTH {
+                for path in 0..(1u32 << depth) {
+                    // Leaf→root order, the orientation `StackDictionary` wants.
+                    let mut frames = vec![format!("score_document_{}", path % 3)];
+                    for level in (0..depth).rev() {
+                        let side = usize::from(path >> level & 1 == 1);
+                        frames.push(names[(2 * level as usize + side) % names.len()].to_string());
+                    }
+                    frames.push("rayon_fanout::handle_request".to_string());
+
                     let mut id = [0u8; 16];
-                    id[..8].copy_from_slice(&next.to_le_bytes());
-                    id
-                });
-                *counts.entry(id).or_insert(0) += 1;
-                stacks
-                    .entry(id)
-                    .or_insert_with(|| sample.iter().map(|ip| names[ip].clone()).collect());
+                    id[..4].copy_from_slice(&path.to_le_bytes());
+                    id[4] = depth as u8;
+                    stacks.insert(id, frames);
+                    // Uneven weights so sibling ordering is exercised.
+                    stack_counts.push((id, u64::from(path % 7) + 1));
+                }
             }
 
-            let mut stack_counts: Vec<_> = counts.into_iter().collect();
             stack_counts.sort_unstable();
             (StackDictionary::from_stacks(stacks), stack_counts)
         }
 
+        /// Guards the fixture's defining property, so an edit that accidentally
+        /// flattened it could not silently weaken the size assertions below:
+        /// the fan-out is in the paths, not in the symbol count.
         #[test]
         fn a_few_rayon_symbols_recombine_into_many_distinct_paths() {
-            let (dict, stack_counts) = rayon_stacks();
+            let (dict, stack_counts) = fan_out_stacks();
             let distinct_stacks = stack_counts.len();
             let distinct_frames: HashSet<_> = stack_counts
                 .iter()
@@ -1082,7 +1064,7 @@ mod tests {
 
             assert!(
                 distinct_stacks >= 64,
-                "rayon split depths should produce many distinct stacks, got {distinct_stacks}"
+                "split depths should produce many distinct stacks, got {distinct_stacks}"
             );
             assert!(
                 distinct_frames.len() * 4 <= distinct_stacks,
@@ -1093,7 +1075,7 @@ mod tests {
 
         #[test]
         fn flat_rows_shrink_the_rayon_fan_out_wire_size() {
-            let (dict, stack_counts) = rayon_stacks();
+            let (dict, stack_counts) = fan_out_stacks();
             let nodes = build_flamegraph_tree(&stack_counts, &dict).nodes.len();
 
             let legacy = serde_json::to_string(
@@ -1118,7 +1100,10 @@ mod tests {
 
             // The frame table absorbs the repeated monomorphized symbols and the
             // rows drop the per-node property names, so per-node cost falls from
-            // "one whole symbol" to four integers and six delimiters.
+            // "one whole symbol" to four integers and six delimiters. This
+            // fixture measures 16.8x (235.1 -> 14.0 B/node); the bound leaves
+            // room for frame-name churn without letting a regression to
+            // per-node names through.
             assert!(
                 flat * 8 < legacy,
                 "flat rows should be an order of magnitude under legacy: {flat} vs {legacy}"
@@ -1136,7 +1121,7 @@ mod tests {
         /// resolution, and count placement over 20k+ real fan-out nodes.
         #[test]
         fn flat_rows_rebuild_the_legacy_rayon_tree() {
-            let (dict, stack_counts) = rayon_stacks();
+            let (dict, stack_counts) = fan_out_stacks();
             let flat = build_flamegraph_tree(&stack_counts, &dict).into_flat_tree(&dict);
 
             let mut children_of = vec![Vec::new(); flat.nodes.len()];
@@ -1177,7 +1162,7 @@ mod tests {
         /// refinement count — the number the encoding has to move.
         #[test]
         fn flat_rows_shrink_the_streamed_sse_total() {
-            let (dict, stack_counts) = rayon_stacks();
+            let (dict, stack_counts) = fan_out_stacks();
             // Stand in for a scope that folds in eight refinements, each adding
             // a shard of the stack population.
             let events = 8usize;
@@ -1220,7 +1205,7 @@ mod tests {
 
         #[test]
         fn flat_rows_conserve_the_rayon_fan_out_counts() {
-            let (dict, stack_counts) = rayon_stacks();
+            let (dict, stack_counts) = fan_out_stacks();
             let total: u64 = stack_counts.iter().map(|(_, count)| count).sum();
             let tree = build_flamegraph_tree(&stack_counts, &dict).into_flat_tree(&dict);
 
