@@ -21,8 +21,11 @@ class FakeEventTarget {
 }
 
 class FakeElement extends FakeEventTarget {
-  constructor(private readonly ancestors: readonly string[] = []) {
+  private readonly ancestors: readonly string[];
+
+  constructor(ancestors: readonly string[] = []) {
     super();
+    this.ancestors = ancestors;
   }
 
   closest(selector: string): FakeElement | null {
