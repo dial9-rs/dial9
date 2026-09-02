@@ -149,6 +149,23 @@ describe("buildQueueRenderModel", () => {
     expect(m.activeTask!.points[0]).toEqual({ x: 25, count: 8 });
   });
 
+  it("carries the first sampled task count backward instead of inventing zero", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        activeTaskSamples: [
+          { t: 25, count: 56 },
+          { t: 75, count: 50 },
+        ],
+      }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 100,
+    });
+    expect(m.activeTask!.startCount).toBe(56);
+    expect(m.activeTask!.maxTasks).toBe(56);
+    expect(m.activeTask!.points[0]).toEqual({ x: 25, count: 56 });
+  });
+
   it("has no active-task overlay when the trace lacks the timeline", () => {
     const m = buildQueueRenderModel({
       data: queueData({ queueSamples: [{ t: 5, global: 1 }] }),

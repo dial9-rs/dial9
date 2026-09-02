@@ -429,12 +429,12 @@ function buildActiveTaskModel(
 
   // Bounded window: samples are t-sorted, so seek the edges by binary search
   // instead of scanning all ~O(tasks) samples every frame. `startCount` is the
-  // level entering the view = the last sample with t <= viewStart (upperBound-1);
-  // a sample exactly at viewStart seeds AND becomes the first point, matching the
-  // old scan.
+  // level entering the view = the last sample with t <= viewStart (upperBound-1).
+  // Before the first sample, carry that first known level backward rather than
+  // inventing a zero that renders as a false startup jump.
   let a = 0, b = n;
   while (a < b) { const m = (a + b) >>> 1; if (samples[m]!.t <= viewStart) a = m + 1; else b = m; }
-  const startCount = a > 0 ? samples[a - 1]!.count : 0;
+  const startCount = a > 0 ? samples[a - 1]!.count : samples[0]!.count;
 
   const from = lowerBoundT(samples, viewStart);
   let maxTasks = Math.max(1, startCount);
