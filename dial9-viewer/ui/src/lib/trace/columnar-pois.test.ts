@@ -142,8 +142,12 @@ describe("taskAggregates matches a fat reduction", () => {
           firstPollStart: Infinity, firstPollWorker: -1, workers: new Set(),
         };
         a.pollCount++;
-        a.totalPollNs += dur;
-        if (dur > a.longestPollNs) a.longestPollNs = dur;
+        // An open-ended poll's duration is unknown, so it contributes to the
+        // count and the worker set but not to total/longest.
+        if (!p.openEnded) {
+          a.totalPollNs += dur;
+          if (dur > a.longestPollNs) a.longestPollNs = dur;
+        }
         if (p.start < a.firstPollStart) { a.firstPollStart = p.start; a.firstPollWorker = w; }
         a.workers.add(w);
         fat.set(p.taskId, a);

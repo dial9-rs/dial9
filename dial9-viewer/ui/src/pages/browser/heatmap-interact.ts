@@ -15,6 +15,9 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
   let zooming = false;
   let startX = 0;
   let startY = 0;
+  // A drag ending outside the plot emits a trailing click on an ancestor.
+  // Consume that click so it cannot clear the selection committed on mouseup.
+  let justDraggedOnHeatmap = false;
 
   function localXY(e: MouseEvent): { x: number; y: number } {
     const rect = els.heatmapPlot.getBoundingClientRect();
@@ -30,6 +33,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
 
   els.heatmapPlot.addEventListener("mousedown", (e) => {
     if (!store.getState().browse.rows.length) return;
+    justDraggedOnHeatmap = false;
     dragging = true;
     zooming = e.altKey;
     const { x, y } = localXY(e);
@@ -54,6 +58,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     store.update("transient", { drag: null });
     if (zooming) {
       zooming = false;
+      justDraggedOnHeatmap = true;
       actions.zoomToX(Math.min(x, startX), Math.max(x, startX));
       return;
     }
@@ -62,6 +67,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     if (dx <= DRAG_INTENT_PX && dy <= DRAG_INTENT_PX) {
       actions.selectSegmentAt(startX, startY); // treat as a click
     } else {
+      justDraggedOnHeatmap = true;
       actions.finalizeSelection(
         Math.min(x, startX),
         Math.max(x, startX),
@@ -85,6 +91,9 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
   // current selection. Clicks inside the plot are handled by its own
   // mousedown/up; clicks on the action buttons must preserve the selection.
   document.addEventListener("click", (e) => {
+    const wasDrag = justDraggedOnHeatmap;
+    justDraggedOnHeatmap = false;
+    if (wasDrag) return;
     const s = store.getState();
     if (s.ui.tab !== "browse" || !s.browse.selection) return;
     const target = e.target instanceof Element ? e.target : null;

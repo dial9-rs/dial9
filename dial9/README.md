@@ -444,6 +444,8 @@ dial9 = { version = "0.5", features = ["memory-profiling"] }
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
+If this is misconfigured, `MemoryProfiler::install()` runs a self-test and returns `InstallError::MissingFramePointers`, so you can choose to crash out (as in the example below) or install anyway with near-empty allocation stacks.
+
 **Install the allocator and profiler:**
 
 ```rust,no_run
@@ -471,6 +473,8 @@ let _guard = MemoryProfiler::from_config(config)
 # }
 # fn main() {}
 ```
+
+To install despite missing frame pointers instead of crashing out on `InstallError::MissingFramePointers`, set `MemoryProfilingConfig::builder().fail_on_missing_frame_pointers(false)`; a warning is logged instead.
 
 The `sample_rate_bytes` controls how frequently allocations are sampled. At the default of 512 KiB, a service allocating 1 GB/s produces ~2000 samples/sec. Set to `1` to sample every allocation (useful for tests, not production).
 
@@ -602,7 +606,7 @@ async fn main() {
 }
 ```
 
-> Performance note: Task dumps currently produce one extra wake per capture and are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
+> Performance note: Task dumps re-poll the future and walk its async stack at each captured yield point, so they are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
 
 ### Custom events
 

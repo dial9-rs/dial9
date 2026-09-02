@@ -90,6 +90,54 @@ fn task_dump_emitted_for_long_sleep() {
     }
 }
 
+/// Tokio 1.53 stopped waking a task from `trace_with`. Each real poll that
+/// reaches a new idle point must therefore refresh the pending capture.
+#[test]
+fn task_dump_captures_each_sequential_idle() {
+    let (capture, batches) = capture_processor();
+
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let rt = common::attach_current_thread(
+        &recorder,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .maybe_task_dump_config(Some(
+                TaskDumpConfig::builder()
+                    .idle_threshold(Duration::from_nanos(1))
+                    .rng_seed(42)
+                    .build(),
+            ))
+            .build(),
+    );
+
+    let handle = Dial9TokioHandle::current();
+    rt.block_on(async {
+        handle
+            .spawn(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            })
+            .await
+            .unwrap();
+    });
+
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    let b = batches.lock().unwrap();
+    let events: Vec<DumpEvent> = decode_all(&b);
+    let dump_count = events
+        .iter()
+        .filter(|e| matches!(e, DumpEvent::TaskDumpEvent { .. }))
+        .count();
+    assert_eq!(
+        dump_count, 2,
+        "each sequential idle point should produce a fresh task dump"
+    );
+}
+
 /// A task spawned directly through Tokio should not produce task dumps.
 #[test]
 fn tokio_spawn_does_not_emit_task_dump() {

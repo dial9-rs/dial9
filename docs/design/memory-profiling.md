@@ -322,16 +322,22 @@ The memory profiler uses the existing `Unwinder` (from
 
 - **No allocations.** Captures into an on-stack `[u64; 128]` buffer.
 - **Safe against corrupted frame chains** via the `safe_load` SIGSEGV
-  handler (installed once at startup).
+  handler (installed once at startup). Frame 0 is derived the same way as
+  every later frame — `Unwinder::capture` never raw-dereferences a live
+  register value — so a missing frame pointer degrades a capture to
+  near-empty rather than risking a segfault.
 - **~5 ns per frame, ~110 ns for a 20-frame walk** on x86_64. Add
   ~50–200 ns in production for cold caches; faulting frames that hit
   the SIGSEGV safe-load path cost ~1–5 µs for the single faulting
   frame.
-- **Requires frame pointers** (`-C force-frame-pointers=yes`).
+- **Requires frame pointers** (`-C force-frame-pointers=yes`), checked by a
+  self-test at install time. `MemoryProfiler::install()` returns
+  `InstallError::MissingFramePointers` rather than installing a profiler
+  that would produce useless allocation stacks.
 
-`MemoryProfiler::install()` calls `Unwinder::install()` and stores the
-returned handle. The hook accesses it via the process-global
-`MemoryProfilerInner`:
+`MemoryProfiler::install()` calls `Unwinder::install()`, runs that
+self-test, and stores the returned handle. The hook accesses it via the
+process-global `MemoryProfilerInner`:
 
 ```rust
 // 128 frames × 8 B = 1 KiB stack buffer. Rust async call stacks

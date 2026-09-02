@@ -18,6 +18,11 @@ import {
 } from "./url-state.js";
 import { taskIndexFor } from "./tasks-model.js";
 import { traceDisplayBounds, type TraceDisplayBounds } from "./trace-bounds.js";
+import {
+  derivePoiViewModel,
+  poiIndexForAnchor,
+  poiIndexForPoll,
+} from "./poi.js";
 
 export type LoadedTraceKind = "source" | "reparse";
 
@@ -74,6 +79,7 @@ export function createViewerReconstruction(
 
   function restoreInitialTrace(trace: ParsedTrace): void {
     const bounds = fitTrace(trace);
+    let restoredCanonicalViewport = false;
     if (
       bounds !== null &&
       urlState.viewStart !== undefined &&
@@ -83,17 +89,51 @@ export function createViewerReconstruction(
       const viewEnd = Math.min(bounds.maxTs, urlState.viewEnd);
       if (viewEnd > viewStart) {
         store.update("viewport", { viewStart, viewEnd });
+        restoredCanonicalViewport = true;
       }
     }
     const selection = resolveUrlSelection(trace, urlState);
+    if (
+      urlState.poiAnchor !== undefined ||
+      (
+        focusLink !== null &&
+        urlState.poiFilter !== undefined &&
+        urlState.poll !== undefined
+      )
+    ) {
+      const state = store.getState();
+      const sorted = derivePoiViewModel(
+        trace,
+        state.poi,
+        state.viewport.minTs,
+      ).sorted;
+      const index = urlState.poiAnchor
+        ? poiIndexForAnchor(sorted, urlState.poiAnchor)
+        : selection.pollDetail != null
+          ? poiIndexForPoll(sorted, selection.pollDetail)
+          : -1;
+      if (index >= 0) {
+        store.update("poi", { index });
+      }
+    }
+    const hasCanonicalSelection =
+      Object.keys(selection).length > 0 ||
+      taskExists(trace, urlState.selectedTaskId);
+    const activeFocusLink =
+      !restoredCanonicalViewport && !hasCanonicalSelection
+        ? focusLink
+        : null;
 
-    if (focusLink !== null) {
-      const focused = resolveFocusLink(trace, focusLink);
+    // focus_* is a one-shot bootstrap for aggregate exemplars. Once a URL has
+    // canonical viewport or selection anchors, those describe the current
+    // navigated state and must win over the original exemplar.
+    if (activeFocusLink !== null) {
+      const focused = resolveFocusLink(trace, activeFocusLink);
       if (focused !== null) {
         Object.assign(selection, focused.patch);
         store.update("viewport", focused.viewport);
       } else {
-        const window = focusWindow(focusLink, trace.clockOffsetNs);
+        const window = focusWindow(activeFocusLink, trace.clockOffsetNs);
         if (Number.isFinite(window.start)) {
           const pad = Math.max((window.end - window.start) * 2, 1e6);
           store.update("viewport", {
@@ -107,7 +147,7 @@ export function createViewerReconstruction(
     // An explicit shareable task selection wins, followed by the exemplar's
     // focus_task. Keep a task inferred from a matched span only when neither
     // URL task anchor resolves against this trace.
-    for (const taskId of [urlState.selectedTaskId, focusLink?.taskId]) {
+    for (const taskId of [urlState.selectedTaskId, activeFocusLink?.taskId]) {
       if (taskExists(trace, taskId)) {
         selection.selectedTaskId = taskId;
         break;

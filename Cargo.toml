@@ -15,6 +15,7 @@ members = [
     "examples/metrics-service",
     "examples/simple-local",
     "examples/memory-local",
+    "examples/rayon-fanout",
     "tests-build",
 ]
 exclude = [

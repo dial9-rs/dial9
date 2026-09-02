@@ -376,6 +376,20 @@ describe("viewer URL state: complete durable view", () => {
 
 
 describe("viewer URL state: constructible and strict values", () => {
+  it("removes one-shot exemplar focus when canonicalizing viewer state", () => {
+    const params = new URLSearchParams(
+      "?trace=trace.bin&focus_start=100&focus_end=200" +
+        "&focus_worker=3&focus_task=42&focus_span_name=request",
+    );
+
+    mirrorViewerToQuery(params, projectViewerState(mkState({})));
+
+    expect(params.get("trace")).toBe("trace.bin");
+    expect(
+      [...params.keys()].filter((key) => key.startsWith("focus_")),
+    ).toEqual([]);
+  });
+
   it("reads a single-pass agent-authored list containing commas", () => {
     const out = readViewerUrlState("?span-names=v1%3Ahttp%2C+request%09poll");
     expect(out.spanNames).toEqual(["http, request", "poll"]);

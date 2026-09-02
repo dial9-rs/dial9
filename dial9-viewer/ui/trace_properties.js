@@ -80,7 +80,7 @@
 
   /**
    * The symbolized frame-name signature of a sample's callchain: the sequence
-   * of frame symbol names (inlines expanded, outermost→inlined), joined by
+   * of frame symbol names (leaf→root, inlines expanded innermost-first), joined by
    * {@link FRAME_SEP}. Hash-independent (no blake3 needed) and directly
    * comparable to the Rust side, which reconstructs the same names from its
    * stacks dictionary.

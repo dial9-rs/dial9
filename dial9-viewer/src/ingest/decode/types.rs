@@ -222,6 +222,14 @@ pub struct DecodeStats {
     pub sort_events: std::time::Duration,
     /// Phase: reconstruct the poll timeline from park/unpark/poll events.
     pub poll_reconstruct: std::time::Duration,
+    /// Polls dropped because no event proved their end - usually a rotation cut
+    /// the worker's buffer mid-poll, so the `PollEnd` is in the next file.
+    ///
+    /// Nonzero means this file's poll durations are UNDERCOUNTED rather than
+    /// inflated. The alternative was guessing an end and reporting unobserved
+    /// time as a long poll; the honest recovery is to stitch the poll across the
+    /// two files, as the viewer's `computeWindowBoundaryPolls` does.
+    pub polls_end_unproven: u64,
     /// Phase: the sample loop (symbolication + per-sample poll attribution).
     pub sample_resolve: std::time::Duration,
     /// Phase: tracing/single-event span resolution.

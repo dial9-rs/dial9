@@ -46,6 +46,7 @@ const {
   nextMaxFiles,
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
+  decodeFlamegraphTree,
   nsToPickerUtc,
   pickerUtcToNs,
   msToNs,
@@ -79,12 +80,115 @@ const {
     baselineFilesFolded: number,
     incomingFilesFolded: number,
   ) => boolean;
+  decodeFlamegraphTree: (response: { tree: unknown }) => unknown;
   nsToPickerUtc: (ns: string | null) => string;
   pickerUtcToNs: (picker: string) => string | null;
   sourceFacetOptions: (present?: string[]) => FacetOption[];
   threadFacetOptions: (present: string[]) => FacetOption[];
   hostFacetOptions: (hosts: string[]) => FacetOption[];
 };
+
+describe("decodeFlamegraphTree", () => {
+  it("materializes parent-first flat rows", () => {
+    expect(
+      decodeFlamegraphTree({
+        tree: {
+          format: "flat-v1",
+          frames: ["(all)", "main", "left", "right"],
+          nodes: [
+            [0, 0, 7, 0],
+            [0, 1, 7, 0],
+            [1, 2, 4, 4],
+            [1, 3, 3, 3],
+          ],
+        },
+      }),
+    ).toEqual({
+      name: "(all)",
+      count: 7,
+      self: 0,
+      children: [
+        {
+          name: "main",
+          count: 7,
+          self: 0,
+          children: [
+            { name: "left", count: 4, self: 4 },
+            { name: "right", count: 3, self: 3 },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("resolves a frame ID repeated across sibling subtrees", () => {
+    expect(
+      decodeFlamegraphTree({
+        tree: {
+          format: "flat-v1",
+          frames: ["(all)", "shared", "left", "right"],
+          nodes: [
+            [0, 0, 7, 0],
+            [0, 1, 4, 0],
+            [1, 2, 4, 4],
+            [0, 1, 3, 0],
+            [3, 3, 3, 3],
+          ],
+        },
+      }),
+    ).toEqual({
+      name: "(all)",
+      count: 7,
+      self: 0,
+      children: [
+        {
+          name: "shared",
+          count: 4,
+          self: 0,
+          children: [{ name: "left", count: 4, self: 4 }],
+        },
+        {
+          name: "shared",
+          count: 3,
+          self: 0,
+          children: [{ name: "right", count: 3, self: 3 }],
+        },
+      ],
+    });
+  });
+
+  it("passes a legacy tree through unchanged", () => {
+    const tree = { name: "(all)", count: 1, self: 1 };
+    expect(decodeFlamegraphTree({ tree })).toBe(tree);
+  });
+
+  it("rejects an invalid frame reference", () => {
+    expect(() =>
+      decodeFlamegraphTree({
+        tree: {
+          format: "flat-v1",
+          frames: ["(all)"],
+          nodes: [[0, 2, 1, 1]],
+        },
+      }),
+    ).toThrow(/invalid frame 2/);
+  });
+
+  it("rejects a flat node whose parent does not precede it", () => {
+    expect(() =>
+      decodeFlamegraphTree({
+        tree: {
+          format: "flat-v1",
+          frames: ["(all)", "child"],
+          nodes: [
+            [0, 0, 1, 0],
+            [2, 1, 1, 1],
+          ],
+        },
+      }),
+    ).toThrow(/node 1 has invalid parent 2/);
+  });
+});
 
 describe("formatCoverageBadge", () => {
   it("spec example", () => {

@@ -533,4 +533,238 @@ mod tests {
             );
         }
     }
+
+    // Every scenario below shares a caveat: `drain_epoch`/`flush_epoch`/`state`
+    // are `Ordering::Relaxed`, but shuttle 0.9.1 treats every ordering as
+    // `SeqCst`. A `Relaxed`-specific bug is invisible here no matter how
+    // exhaustively a scenario searches.
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
+        use crate::buffer::MemoryBuffer;
+        use crate::recording::Recorder;
+
+    // Small values kept: shuttle's search cost grows with interleaving
+    // space, unlike a real-thread proptest.
+    const WRITERS: usize = 3;
+    const EVENTS_PER_WRITER: u64 = 3;
+
+    const LIFECYCLE_WRITERS: usize = 2;
+
+    // Shared with `shuttle_writer_exit_races_drain`: both drive a
+    // `Recorder`/flush thread and assert only on decoded, sealed output.
+
+    /// Round-trip event recorded through [`Dial9Handle`](crate::handle::Dial9Handle).
+    #[derive(dial9_trace_format::TraceEvent, Clone, Debug, serde::Deserialize)]
+    struct LifecycleEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        id: u64,
+    }
+
+    fn decode_lifecycle_events(data: &[u8]) -> Vec<LifecycleEvent> {
+        use dial9_trace_format::decoder::Decoder;
+        let Some(mut dec) = Decoder::new(data) else {
+            assert!(data.is_empty(), "failed to decode a non-empty segment");
+            return vec![];
+        };
+        let mut out = Vec::new();
+        dec.for_each_event(|ev| {
+            if ev.name == "LifecycleEvent"
+                && let Ok(decoded) = ev.deserialize::<LifecycleEvent>()
+            {
+                out.push(decoded);
+            }
+        })
+        .expect("decode failed");
+        out
+    }
+
+    /// Drain every sealed segment the in-memory writer has produced so far.
+    fn decode_all_lifecycle_events(fs: &crate::fs::Fs) -> Vec<LifecycleEvent> {
+        let mut decoded = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                decoded.extend(decode_lifecycle_events(&payload.into_vec()));
+            }
+        }
+        decoded
+    }
+
+    crate::shuttle_test! {
+        default;
+        // `disable`/`enable` raced against recording, through the
+        // `Recorder`/`Dial9Handle`/flush-thread stack. `record_event`
+        // doesn't report whether a call actually landed, so this checks
+        // decoded output directly: no duplicate ids, no un-attempted
+        // ids, and `Stopped` stays terminal under a raced `enable`/
+        // `disable`. Also subject to the `Ordering::Relaxed` caveat above.
+        fn shuttle_disable_races_record() {
+            let _ts_guard = metrique_timesource::set_time_source(
+                metrique_timesource::TimeSource::custom(
+                    metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+                ),
+            );
+
+            // Small segments so the writer/drain race actually forces
+            // rotation; the total budget is far above this test's data so
+            // the ring never evicts before we drain it.
+            let writer = MemoryBuffer::builder()
+                .max_total_size(100 * 1024 * 1024)
+                .max_segment_size(256)
+                .build()
+                .unwrap();
+            let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+            let shared = Arc::new(SharedState::new(0));
+            let mut recorder = Recorder::start(shared, writer, None, || || {});
+            recorder.handle().enable();
+            let handle = recorder.handle().clone();
+
+            let next_id = Arc::new(AtomicU64::new(0));
+            let attempted: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+
+            let writers: Vec<_> = (0..LIFECYCLE_WRITERS)
+                .map(|_| {
+                    let handle = handle.clone();
+                    let next_id = next_id.clone();
+                    let attempted = attempted.clone();
+                    crate::primitives::thread::spawn(move || {
+                        for _ in 0..EVENTS_PER_WRITER {
+                            let id = next_id.fetch_add(1, Ordering::Relaxed);
+                            attempted.lock().unwrap().push(id);
+                            handle.record_event(LifecycleEvent {
+                                timestamp_ns: id,
+                                id,
+                            });
+                        }
+                    })
+                })
+                .collect();
+
+            let lifecycle = {
+                let handle = handle.clone();
+                crate::primitives::thread::spawn(move || {
+                    handle.disable(); // Enabled -> Disabled
+                    handle.enable(); // Disabled -> Enabled (re-arm)
+                    handle.disable();
+                })
+            };
+
+            for w in writers {
+                w.join().unwrap();
+            }
+            lifecycle.join().unwrap();
+
+            // Flushes, seals the final segment, joins the flush thread,
+            // then calls `SharedState::mark_stopped`.
+            recorder.stop_flush_thread();
+
+            // `Stopped` is terminal regardless of schedule: a `disable()` or
+            // `enable()` that lost the race must not have clobbered it back
+            // to a live state. Catches a CAS -> plain `store` regression in
+            // either.
+            assert!(handle.is_stopped(), "Stopped must be terminal");
+            handle.enable();
+            assert!(!handle.is_enabled(), "enable() must be a no-op once stopped");
+            handle.disable();
+            assert!(
+                handle.is_stopped(),
+                "disable() must not un-stop a terminal state"
+            );
+
+            let decoded = decode_all_lifecycle_events(&fs);
+            let attempted = attempted.lock().unwrap();
+            let attempted_ids: std::collections::HashSet<u64> =
+                attempted.iter().copied().collect();
+
+            let mut decoded_ids: Vec<u64> = decoded.iter().map(|e| e.id).collect();
+            for id in &decoded_ids {
+                assert!(
+                    attempted_ids.contains(id),
+                    "decoded event id {id} was never attempted"
+                );
+            }
+            decoded_ids.sort_unstable();
+            let mut deduped = decoded_ids.clone();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                decoded_ids.len(),
+                "an event id was recorded more than once: {decoded_ids:?}"
+            );
+            assert!(
+                decoded_ids.len() <= attempted.len(),
+                "more events landed ({}) than were ever attempted ({})",
+                decoded_ids.len(),
+                attempted.len()
+            );
+        }
+    }
+
+    crate::shuttle_test! {
+        default;
+        // Writer threads emit one event through `Dial9Handle` and exit
+        // immediately, racing `run_flush_loop`'s own ~5ms polling +
+        // grace-period cadence. Each writer holds exactly one event, so
+        // a plain id-presence check works regardless of which path
+        // flushed it. Also subject to the `Ordering::Relaxed` caveat above.
+        fn shuttle_writer_exit_races_drain() {
+            let _ts_guard = metrique_timesource::set_time_source(
+                metrique_timesource::TimeSource::custom(
+                    metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+                ),
+            );
+
+            let writer = MemoryBuffer::builder()
+                .max_total_size(100 * 1024 * 1024)
+                .max_segment_size(256)
+                .build()
+                .unwrap();
+            let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+            let shared = Arc::new(SharedState::new(0));
+            let mut recorder = Recorder::start(shared, writer, None, || || {});
+            recorder.handle().enable();
+            let handle = recorder.handle().clone();
+
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|id| {
+                    let handle = handle.clone();
+                    crate::primitives::thread::spawn(move || {
+                        handle.record_event(LifecycleEvent {
+                            timestamp_ns: id as u64,
+                            id: id as u64,
+                        });
+                        // Return immediately: the next scheduling points are
+                        // the thread-local destructor, the final `Arc`
+                        // decrement, and the `Mutex` drop.
+                    })
+                })
+                .collect();
+
+            for w in writers {
+                w.join().unwrap();
+            }
+
+            // Flushes, seals the final segment, joins the flush thread.
+            recorder.stop_flush_thread();
+
+            let decoded = decode_all_lifecycle_events(&fs);
+            let mut ids: Vec<u64> = decoded.iter().map(|e| e.id).collect();
+            ids.sort_unstable();
+            assert_eq!(
+                ids,
+                (0..WRITERS as u64).collect::<Vec<_>>(),
+                "each writer's event must arrive exactly once, whether flushed by \
+                 the flush loop's intrusive drain or by the TLB Drop impl on thread exit"
+            );
+        }
+    }
+    }
 }

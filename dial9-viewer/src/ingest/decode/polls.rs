@@ -42,6 +42,7 @@ pub(crate) struct PollTimeline {
     records: Vec<PollRecord>,
     by_worker: FxHashMap<u64, Vec<usize>>,
     sample_counts: Vec<(u32, u32)>,
+    end_unproven: u64,
 }
 
 /// Per-task readiness bookkeeping used while reconstructing polls.
@@ -51,6 +52,25 @@ struct TaskState {
     instrumented: Option<bool>,
     polling: bool,
     terminated: bool,
+}
+
+/// Why a poll span is being closed, which decides whether its `end` is
+/// evidence or a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseReason {
+    /// An explicit `PollEnd`: the only event that proves when a poll stopped.
+    Explicit,
+    /// A `WorkerPark`. The worker parks on its own thread straight after the
+    /// poll yields, so the park bounds the poll even with its `PollEnd` lost
+    /// (the `block_in_place` handoff case).
+    Park,
+    /// Nothing proves when the poll ended - a later `PollStart` on the same
+    /// worker, the same task reappearing on another worker, or a `WorkerUnpark`
+    /// showing the worker sat parked meanwhile. The interval between the
+    /// `PollStart` and this event may be mostly or entirely unobserved, so no
+    /// span is emitted: a guessed `end` reads downstream as a long off-CPU poll
+    /// (0 CPU samples over a wide span) that never happened.
+    Unproven,
 }
 
 /// A poll open on a worker while its `PollEnd` has not yet arrived.
@@ -74,6 +94,9 @@ struct Reconstructor {
     open_worker_by_task: FxHashMap<u64, u64>,
     tasks: FxHashMap<u64, TaskState>,
     records: Vec<PollRecord>,
+    /// Polls dropped because nothing proved their end. Surfaced through
+    /// [`DecodeStats`](super::types::DecodeStats) so the loss stays visible.
+    end_unproven: u64,
 }
 
 impl Reconstructor {
@@ -124,14 +147,28 @@ impl Reconstructor {
     }
 
     fn poll_start(&mut self, event: &PollStart) {
-        // Missing end events are segment/recovery artifacts. Close the span for
-        // duration accounting, but do not infer readiness from a wake inside it:
-        // only an explicit PollEnd proves when the task stopped running.
-        self.close_poll(event.worker_id, MonoNs(event.timestamp_ns), false);
+        // A poll still open here lost its PollEnd, typically to a rotation that
+        // cut this worker's buffer mid-poll: threads flush independently, so one
+        // worker's stream can end early in a file while others run on, and the
+        // missing PollEnd is sitting in the NEXT file.
+        //
+        // This PollStart bounds the poll only from above, and when it arrives on
+        // a different worker the bound is "when the task next ran anywhere" -
+        // which grows with how idle the task was, so the worst fabrications land
+        // on the least busy tasks. Drop rather than guess.
+        self.close_poll(
+            event.worker_id,
+            MonoNs(event.timestamp_ns),
+            CloseReason::Unproven,
+        );
         if let Some(other_worker) = self.open_worker_by_task.get(&event.task_id).copied()
             && other_worker != event.worker_id
         {
-            self.close_poll(other_worker, MonoNs(event.timestamp_ns), false);
+            self.close_poll(
+                other_worker,
+                MonoNs(event.timestamp_ns),
+                CloseReason::Unproven,
+            );
         }
 
         let state = self.tasks.entry(event.task_id).or_default();
@@ -157,14 +194,33 @@ impl Reconstructor {
     }
 
     fn poll_end(&mut self, event: &PollEnd) {
-        self.close_poll(event.worker_id, MonoNs(event.timestamp_ns), true);
+        self.close_poll(
+            event.worker_id,
+            MonoNs(event.timestamp_ns),
+            CloseReason::Explicit,
+        );
     }
 
     fn worker_park(&mut self, event: &WorkerPark) {
-        self.close_poll(event.worker_id, MonoNs(event.timestamp_ns), false);
+        self.close_poll(
+            event.worker_id,
+            MonoNs(event.timestamp_ns),
+            CloseReason::Park,
+        );
     }
 
-    fn close_poll(&mut self, worker_id: u64, end: MonoNs, explicit_end: bool) {
+    /// An unpark proves the worker was parked up to this instant, so a poll
+    /// still open across it was not running: its `PollEnd`, and the park that
+    /// would have bounded it, were both lost. The true end is unrecoverable.
+    fn worker_unpark(&mut self, event: &super::events::WorkerUnpark) {
+        self.close_poll(
+            event.worker_id,
+            MonoNs(event.timestamp_ns),
+            CloseReason::Unproven,
+        );
+    }
+
+    fn close_poll(&mut self, worker_id: u64, end: MonoNs, reason: CloseReason) {
         let Some(open) = self.open_by_worker.remove(&worker_id) else {
             return;
         };
@@ -172,13 +228,20 @@ impl Reconstructor {
 
         let state = self.tasks.entry(open.task_id).or_default();
         state.polling = false;
-        if explicit_end
+        // Only an explicit PollEnd proves when the task stopped running, so only
+        // it can turn a wake seen mid-poll into readiness for the next poll.
+        if reason == CloseReason::Explicit
             && !state.terminated
             && let Some(mut wake) = open.wake_during_poll
         {
             wake.timestamp = end;
             wake.kind = SchedulingDelayKind::WakeDuringPoll;
             state.ready = Some(wake);
+        }
+
+        if reason == CloseReason::Unproven {
+            self.end_unproven += 1;
+            return;
         }
 
         self.records.push(PollRecord {
@@ -268,10 +331,12 @@ impl PollTimeline {
                 TraceEvent::PollStart(event) => reconstructor.poll_start(event),
                 TraceEvent::PollEnd(event) => reconstructor.poll_end(event),
                 TraceEvent::WorkerPark(event) => reconstructor.worker_park(event),
-                TraceEvent::CpuSample(_) | TraceEvent::WorkerUnpark(_) => {}
+                TraceEvent::WorkerUnpark(event) => reconstructor.worker_unpark(event),
+                TraceEvent::CpuSample(_) => {}
             }
         }
         // Unclosed polls are segment-boundary artifacts and remain discarded.
+        let end_unproven = reconstructor.end_unproven;
         let mut records = reconstructor.records;
 
         records.sort_unstable_by_key(|poll| poll.start);
@@ -287,7 +352,15 @@ impl PollTimeline {
             records,
             by_worker,
             sample_counts,
+            end_unproven,
         }
+    }
+
+    /// Polls dropped because no event proved their end. A nonzero count means
+    /// the file lost `PollEnd`s - usually to a rotation that cut a worker's
+    /// buffer mid-poll, leaving the close in the next file.
+    pub(crate) fn end_unproven(&self) -> u64 {
+        self.end_unproven
     }
 
     /// Attribute one sample and return `(worker, poll_duration, spawn_location)`.
@@ -471,6 +544,22 @@ mod tests {
         }
     }
 
+    fn start_on(worker_id: u64, timestamp_ns: u64, task_id: u64) -> PollStart {
+        PollStart {
+            timestamp_ns,
+            worker_id,
+            task_id,
+            spawn_loc: Some("src/test.rs:1".to_string()),
+        }
+    }
+
+    fn end_on(worker_id: u64, timestamp_ns: u64) -> PollEnd {
+        PollEnd {
+            timestamp_ns,
+            worker_id,
+        }
+    }
+
     #[test]
     fn spawn_infers_first_poll_without_wake_events() {
         let mut reconstructor = Reconstructor::default();
@@ -550,7 +639,134 @@ mod tests {
         reconstructor.poll_start(&start(500, 7));
         reconstructor.poll_end(&end(520));
 
-        assert_eq!(reconstructor.records.len(), 2);
-        assert!(reconstructor.records[1].readiness.is_none());
+        // The synthetically closed poll is dropped - a PollStart bounds the
+        // stranded poll only from above - so the explicitly ended one is the
+        // single record, and the mid-poll wake did not become its readiness.
+        assert_eq!(reconstructor.records.len(), 1);
+        assert_eq!(reconstructor.records[0].start, MonoNs(500));
+        assert!(reconstructor.records[0].readiness.is_none());
+        assert_eq!(reconstructor.end_unproven, 1);
+    }
+
+    fn park(timestamp_ns: u64) -> TraceEvent {
+        TraceEvent::WorkerPark(WorkerPark {
+            timestamp_ns,
+            worker_id: 0,
+            tid: 100,
+        })
+    }
+
+    fn unpark(timestamp_ns: u64) -> TraceEvent {
+        TraceEvent::WorkerUnpark(WorkerUnpark {
+            timestamp_ns,
+            worker_id: 0,
+            tid: 100,
+        })
+    }
+
+    /// A park bounds the poll it interrupts: the worker parks on its own thread
+    /// straight after the poll yields, so the span is real even with the
+    /// `PollEnd` missing.
+    #[test]
+    fn park_bounds_a_poll_whose_end_was_lost() {
+        let events = vec![
+            TraceEvent::PollStart(start(1_000, 7)),
+            park(1_100),
+            unpark(31_000),
+            TraceEvent::PollStart(start(31_000, 8)),
+            TraceEvent::PollEnd(end(31_100)),
+        ];
+
+        let timeline = PollTimeline::reconstruct(&events);
+        let spans: Vec<_> = timeline
+            .records()
+            .iter()
+            .map(|p| (p.task_id, p.start.raw(), p.end.raw()))
+            .collect();
+        assert_eq!(spans, vec![(7, 1_000, 1_100), (8, 31_000, 31_100)]);
+    }
+
+    /// An unpark proves the worker was parked, so a poll still open across it
+    /// was not running. Its true end is unrecoverable and must not be invented
+    /// from the next `PollStart`.
+    #[test]
+    fn unpark_refutes_a_poll_left_open_across_an_idle_stretch() {
+        let events = vec![
+            TraceEvent::PollStart(start(1_000, 7)),
+            // PollEnd and WorkerPark both lost to a rotation cut.
+            unpark(31_000),
+            TraceEvent::PollStart(start(31_000, 8)),
+            TraceEvent::PollEnd(end(31_100)),
+        ];
+
+        let timeline = PollTimeline::reconstruct(&events);
+        let spans: Vec<_> = timeline
+            .records()
+            .iter()
+            .map(|p| (p.task_id, p.start.raw(), p.end.raw()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![(8, 31_000, 31_100)],
+            "the idle stretch must not surface as a poll of task 7"
+        );
+    }
+
+    /// The shape a forced rotation actually produces, and the one that caused
+    /// the reported 33.6ms phantom: threads flush independently, so worker 0's
+    /// stream ends mid-poll while worker 1's runs on. The task is next polled on
+    /// worker 1 much later, and the cross-worker close in `poll_start` used to
+    /// emit the whole interval as worker 0's poll.
+    ///
+    /// The bound here is "when the task next ran ANYWHERE", so it grows with how
+    /// idle the task was - a metric anti-correlated with the long-poll signal it
+    /// pollutes. Worker 0's poll is unrecoverable from this file alone (its
+    /// PollEnd is in the next one) and must not be emitted.
+    #[test]
+    fn a_rotation_cut_does_not_become_a_poll_on_the_stale_worker() {
+        let events = vec![
+            TraceEvent::PollStart(start_on(0, 1_000, 7)),
+            // Worker 0's buffer ends here; its PollEnd landed in the next file.
+            TraceEvent::PollStart(start_on(1, 34_000, 7)),
+            TraceEvent::PollEnd(end_on(1, 34_100)),
+        ];
+
+        let timeline = PollTimeline::reconstruct(&events);
+        let spans: Vec<_> = timeline
+            .records()
+            .iter()
+            .map(|p| (p.worker_id, p.task_id, p.start.raw(), p.end.raw()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![(1, 7, 34_000, 34_100)],
+            "the rotation gap must not surface as a 33us poll on worker 0"
+        );
+        assert_eq!(timeline.end_unproven(), 1);
+    }
+
+    /// With every event in the gap dropped, a later `PollStart` is the only
+    /// thing that can close the stranded poll - and it is not evidence of when
+    /// the poll ended, so no span may be emitted.
+    #[test]
+    fn poll_start_does_not_invent_a_span_across_an_unobserved_gap() {
+        let events = vec![
+            TraceEvent::PollStart(start(1_000, 7)),
+            // Recording off: PollEnd, park and unpark all lost.
+            TraceEvent::PollStart(start(31_000, 8)),
+            TraceEvent::PollEnd(end(31_100)),
+        ];
+
+        let timeline = PollTimeline::reconstruct(&events);
+        let spans: Vec<_> = timeline
+            .records()
+            .iter()
+            .map(|p| (p.task_id, p.start.raw(), p.end.raw()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![(8, 31_000, 31_100)],
+            "an unproven end must not become a 30us poll of task 7"
+        );
     }
 }

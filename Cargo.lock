@@ -4338,6 +4338,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon-fanout"
+version = "0.1.0"
+dependencies = [
+ "dial9",
+ "rayon",
+ "tokio",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

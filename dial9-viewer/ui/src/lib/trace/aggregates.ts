@@ -114,6 +114,26 @@ export interface ApiFlamegraphNode {
   children?: ApiFlamegraphNode[];
 }
 
+/**
+ * Preorder `[parent_node, frame, count, self_count]` row. `frame` indexes the
+ * enclosing tree's frame table; row zero is the root, whose `parent` is ignored.
+ */
+export type FlatApiFlamegraphNode = [
+  parent: number,
+  frame: number,
+  count: number,
+  selfCount: number,
+];
+
+/** Negotiated compact response used by the canonical aggregate UI. */
+export interface FlatApiFlamegraphTree {
+  format: "flat-v1";
+  frames: string[];
+  nodes: FlatApiFlamegraphNode[];
+}
+
+export type ApiFlamegraphTree = ApiFlamegraphNode | FlatApiFlamegraphTree;
+
 /** One facet's values. */
 export interface FacetResult {
   /** Query-param / filter key name (e.g. "source", "thread_class"). */
@@ -168,7 +188,7 @@ export interface FlamegraphMetadata {
 }
 
 export interface FlamegraphResponse {
-  tree: ApiFlamegraphNode;
+  tree: ApiFlamegraphTree;
   total_samples: number;
   /**
    * Absent only outside demand-driven mode (a single complete fetch);

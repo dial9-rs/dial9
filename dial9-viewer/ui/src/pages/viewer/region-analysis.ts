@@ -39,13 +39,13 @@ import {
   formatHeapBytes,
   frameSampleTimeExtent,
   heapRegionView,
-  heapSamplesForMode,
   regionCoverage,
   regionModesPresent,
   regionTitle,
   type BlockingGroup,
   type BlockingView,
   type CpuRegionView,
+  type HeapBaseSample,
   type HeapRegionView,
   type RegionCoverage,
   type RegionMode,
@@ -200,7 +200,10 @@ export function createRegionAnalysis(
 
   // ── heap widget options (tooltip / export labels) ───────────────────────
 
-  function heapFgOpts(view: HeapRegionView, range: TimeRange): FlamegraphSetDataOptions {
+  function heapFgOpts(
+    view: HeapRegionView,
+    range: TimeRange,
+  ): FlamegraphSetDataOptions<HeapBaseSample> {
     const m = heapMode;
     const durStr = ` · ${((range.endNs - range.startNs) / 1e6).toFixed(1)}ms`;
     return {
@@ -213,6 +216,11 @@ export function createRegionAnalysis(
         m === "bytes"
           ? (count: number) => `~${formatHeapBytes(count)}`
           : (count: number) => `~${Math.round(count).toLocaleString()} allocs`,
+      treeOptions: {
+        weightKey: m === "bytes" ? "byteWeight" : "countWeight",
+        allocWeightKey: m === "bytes" ? "countWeight" : "byteWeight",
+        callchainStartKey: "callchainStart",
+      },
       formatCount(count: number, total: number, _self: number, treeNode: FlamegraphNode | null | undefined) {
         const pct = ((count / total) * 100).toFixed(1);
         if (m === "bytes") {
@@ -299,6 +307,7 @@ export function createRegionAnalysis(
         trace,
         computed: sig,
         blockingFlame,
+        ...(mode === "heap" ? { variant: heapMode } : {}),
       });
       fg.sync({
         hostEl: fgHost,
@@ -322,7 +331,7 @@ export function createRegionAnalysis(
     } else if (computedView.kind === "heap") {
       cpuSamplesForExtent = [];
       instance.setData(
-        heapSamplesForMode(computedView.heap.baseSamples, heapMode),
+        computedView.heap.baseSamples,
         trace.callframeSymbols,
         heapFgOpts(computedView.heap, range),
       );

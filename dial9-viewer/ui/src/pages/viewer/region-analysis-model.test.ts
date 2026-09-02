@@ -170,8 +170,10 @@ describe("heapRegionView", () => {
     });
     const view = heapRegionView(t, { startNs: 0, endNs: 100 }, {});
     expect(view.sampleCount).toBe(2);
-    // first sample: hook stripped -> ["site"], worker 0
-    expect(view.baseSamples[0]?.callchain).toEqual(["site"]);
+    // The hot path retains the original chain and skips its hook by offset.
+    expect(view.baseSamples[0]?.callchain).toEqual(["hook", "site"]);
+    expect(view.baseSamples[0]?.callchainStart).toBe(1);
+    expect(heapSamplesForMode(view.baseSamples, "bytes")[0]?.callchain).toEqual(["site"]);
     expect(view.baseSamples[0]?.workerId).toBe(0);
     expect(view.baseSamples[1]?.workerId).toBe(OFF);
     // size == R -> invP = 1/(1-e^-1) ~= 1.582; bytes ~= 524288 * that
@@ -281,6 +283,26 @@ describe("displayNamePath / frameSampleTimeExtent (frame->time)", () => {
       frameSampleTimeExtent(samples, { worker: [], offworker: ["root_fn"] }, cs),
     ).toEqual({ startNs: 42, endNs: 42 });
     expect(frameSampleTimeExtent(samples, { worker: [], offworker: [] }, cs)).toBeNull();
+  });
+
+  it("formats each repeated address once while matching a zoom prefix", () => {
+    const callframeSymbols = symbols({ leaf: "leaf_fn", root: "root_fn" });
+    const mapGet = callframeSymbols.get.bind(callframeSymbols);
+    let lookups = 0;
+    callframeSymbols.get = (key) => {
+      lookups += 1;
+      return mapGet(key);
+    };
+    const samples = Array.from({ length: 100 }, (_, timestamp) => ({
+      callchain: ["leaf", "root"],
+      workerId: 0,
+      timestamp,
+    }));
+
+    expect(
+      frameSampleTimeExtent(samples, { worker: ["root_fn"], offworker: [] }, callframeSymbols),
+    ).toEqual({ startNs: 0, endNs: 99 });
+    expect(lookups).toBe(1);
   });
 });
 

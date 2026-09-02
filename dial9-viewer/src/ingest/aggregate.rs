@@ -24,6 +24,7 @@
 
 use crate::storage::{ObjectInfo, StorageBackend};
 use arrow::array::Array;
+use lasso::{Rodeo, Spur};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -42,7 +43,7 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// repopulates lazily. The value is a monotonic cache namespace, not a schema
 /// revision, so skipped values are expected. The old tree is abandoned and
 /// GC'd out-of-band.
-pub const SAMPLES_FORMAT_VERSION: u32 = 8;
+pub const SAMPLES_FORMAT_VERSION: u32 = 9;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this
@@ -916,8 +917,8 @@ fn poll_hist_bars(hist: &PollHist) -> Vec<PollDurationBucket> {
 /// the large part), while `stack_counts` and `facets` are materialized because
 /// the caller iterates them to build the tree and toolbar.
 pub(crate) struct AggSnapshot<'a> {
-    pub stack_counts: Vec<(Vec<u8>, u64)>,
-    pub stacks_dict: &'a HashMap<Vec<u8>, Vec<String>>,
+    pub stack_counts: Vec<([u8; 16], u64)>,
+    pub stacks_dict: &'a StackDictionary,
     pub total_samples: usize,
     pub hosts: usize,
     pub min_ts: Option<i64>,
@@ -928,6 +929,57 @@ pub(crate) struct AggSnapshot<'a> {
     pub poll_duration_histogram: Vec<PollDurationBucket>,
 }
 
+pub(crate) type FrameId = Spur;
+
+/// Interned stack dictionary shared by every emitted flamegraph snapshot.
+///
+/// A production profile may contain millions of frame occurrences but only a
+/// few thousand distinct symbols. Keeping the strings in one interner makes
+/// each stack an array of fixed-width IDs instead of an array of owned strings.
+#[derive(Clone)]
+pub(crate) struct StackDictionary {
+    frames: Rodeo<FrameId>,
+    stacks: HashMap<[u8; 16], Vec<FrameId>>,
+}
+
+impl StackDictionary {
+    fn new() -> Self {
+        let mut frames = Rodeo::new();
+        frames.get_or_intern("(all)");
+        Self {
+            frames,
+            stacks: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn get(&self, stack_id: &[u8; 16]) -> Option<&[FrameId]> {
+        self.stacks.get(stack_id).map(Vec::as_slice)
+    }
+
+    pub(crate) fn resolve(&self, frame: FrameId) -> &str {
+        self.frames.resolve(&frame)
+    }
+
+    pub(crate) fn root(&self) -> FrameId {
+        self.frames
+            .get("(all)")
+            .expect("the root frame is interned when the dictionary is created")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_stacks(stacks: HashMap<[u8; 16], Vec<String>>) -> Self {
+        let mut dict = Self::new();
+        for (stack_id, names) in stacks {
+            let frames = names
+                .iter()
+                .map(|name| dict.frames.get_or_intern(name))
+                .collect();
+            dict.stacks.insert(stack_id, frames);
+        }
+        dict
+    }
+}
+
 /// Incremental flamegraph accumulator: merge folded part-files one at a time
 /// under a fixed [`SampleFilter`], so a streaming query can emit a fresh
 /// [`snapshot`](Self::snapshot) after every file rather than re-reading the whole
@@ -936,7 +988,7 @@ pub(crate) struct AggSnapshot<'a> {
 pub(crate) struct FlamegraphAccum {
     filter: SampleFilter,
     counts: HashMap<[u8; 16], u64>,
-    dict: HashMap<Vec<u8>, Vec<String>>,
+    dict: StackDictionary,
     facets: FacetAccum,
     total_samples: usize,
     min_ts: Option<i64>,
@@ -951,7 +1003,7 @@ impl FlamegraphAccum {
         Self {
             filter,
             counts: HashMap::new(),
-            dict: HashMap::new(),
+            dict: StackDictionary::new(),
             facets: FacetAccum::new(),
             total_samples: 0,
             min_ts: None,
@@ -979,7 +1031,6 @@ impl FlamegraphAccum {
         self.read_samples_part_into(
             samples,
             &mut staged_counts,
-            &mut staged_dict,
             &mut staged_facets,
             &mut staged_total,
             &mut staged_min_ts,
@@ -1012,7 +1063,6 @@ impl FlamegraphAccum {
         &self,
         data: Vec<u8>,
         counts: &mut HashMap<[u8; 16], u64>,
-        _dict: &mut HashMap<Vec<u8>, Vec<String>>,
         facets: &mut FacetAccum,
         total_samples: &mut usize,
         min_ts: &mut Option<i64>,
@@ -1157,8 +1207,8 @@ impl FlamegraphAccum {
 
     /// A borrowed snapshot of the current totals for emitting one SSE event.
     pub(crate) fn snapshot(&self) -> AggSnapshot<'_> {
-        let stack_counts: Vec<(Vec<u8>, u64)> =
-            self.counts.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        let stack_counts: Vec<([u8; 16], u64)> =
+            self.counts.iter().map(|(k, v)| (*k, *v)).collect();
         AggSnapshot {
             stack_counts,
             stacks_dict: &self.dict,
@@ -1392,7 +1442,7 @@ fn extract_facet_value(col: &ResolvedFacetCol, i: usize) -> Option<String> {
     }
 }
 
-fn read_dict_part(data: Vec<u8>, dict: &mut HashMap<Vec<u8>, Vec<String>>) -> anyhow::Result<()> {
+fn read_dict_part(data: Vec<u8>, dict: &mut StackDictionary) -> anyhow::Result<()> {
     // `Bytes::from(Vec<u8>)` reuses the allocation (no copy).
     let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
         bytes::Bytes::from(data),
@@ -1411,8 +1461,8 @@ fn read_dict_part(data: Vec<u8>, dict: &mut HashMap<Vec<u8>, Vec<String>>) -> an
             continue;
         };
         for i in 0..batch.num_rows() {
-            let id = stack_arr.value(i).to_vec();
-            if dict.contains_key(&id) {
+            let id: [u8; 16] = stack_arr.value(i).try_into()?;
+            if dict.stacks.contains_key(&id) {
                 continue;
             }
             let frame_list = frames_arr.value(i);
@@ -1420,10 +1470,10 @@ fn read_dict_part(data: Vec<u8>, dict: &mut HashMap<Vec<u8>, Vec<String>>) -> an
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
             {
-                let frames: Vec<String> = (0..str_arr.len())
-                    .map(|j| str_arr.value(j).to_string())
+                let frames: Vec<FrameId> = (0..str_arr.len())
+                    .map(|j| dict.frames.get_or_intern(str_arr.value(j)))
                     .collect();
-                dict.insert(id, frames);
+                dict.stacks.insert(id, frames);
             }
         }
     }
@@ -2311,7 +2361,7 @@ mod tests {
                     assert!(*count > 0, "a stack with zero count should not be present");
                     if let Some(fs) = snap.stacks_dict.get(stack_id) {
                         for f in fs {
-                            frames.insert(f.clone());
+                            frames.insert(snap.stacks_dict.resolve(*f).to_string());
                         }
                     }
                 }

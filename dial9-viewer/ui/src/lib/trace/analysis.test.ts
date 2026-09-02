@@ -35,6 +35,34 @@ describe("analysis.ts wiring", () => {
     });
   });
 
+  it("buildWorkerSpans drops a poll left open across an unpark", () => {
+    const base = {
+      workerId: 0,
+      localQueue: 0,
+      globalQueue: 0,
+      cpuTime: 0,
+      schedWait: 0,
+      spawnLocId: null,
+      spawnLoc: null,
+    };
+    // Task 7's PollEnd and the park that would have bounded it were both lost.
+    // The unpark proves the worker sat parked, so the 30ms up to it is not a
+    // poll of task 7 - only task 8's explicitly ended poll survives.
+    const events = [
+      { ...base, taskId: 7, eventType: EVENT_TYPES.PollStart, timestamp: 1_000 },
+      { ...base, taskId: 0, eventType: EVENT_TYPES.WorkerUnpark, timestamp: 31_000 },
+      { ...base, taskId: 8, eventType: EVENT_TYPES.PollStart, timestamp: 31_000 },
+      { ...base, taskId: 8, eventType: EVENT_TYPES.PollEnd, timestamp: 31_100 },
+    ];
+    const { workerSpans } = buildWorkerSpans(events, [0], 32_000);
+    expect(workerSpans[0]?.polls).toHaveLength(1);
+    expect(workerSpans[0]?.polls[0]).toMatchObject({
+      start: 31_000,
+      end: 31_100,
+      taskId: 8,
+    });
+  });
+
   it("buildActiveTaskTimeline steps on spawn and terminate", () => {
     const { activeTaskSamples } = buildActiveTaskTimeline(
       new Map([

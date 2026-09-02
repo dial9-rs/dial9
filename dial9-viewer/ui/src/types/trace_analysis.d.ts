@@ -304,11 +304,31 @@ declare module "*/trace_analysis.js" {
    * views pass pseudo-samples with explicit weights.
    */
   export interface FlamegraphSampleInput {
-    callchain: string[];
+    callchain: readonly string[];
     /** Per-sample weight; defaults to 1 (CPU sample counting). */
     weight?: number;
     /** Secondary weight (heap views: bytes or alloc count). */
     allocWeight?: number;
+  }
+
+  type RequiredNumericKey<S> = {
+    [K in keyof S]-?: undefined extends S[K]
+      ? never
+      : S[K] extends number
+        ? K
+        : never;
+  }[keyof S] & string;
+
+  export interface FlamegraphTreeOptions<S extends FlamegraphSampleInput> {
+    /** Sample property used as the primary weight instead of `weight`. */
+    weightKey?: RequiredNumericKey<S>;
+    /**
+     * Sample property used as the secondary weight. Supplying this selects the
+     * optimized path for profiles where every sample has both weight axes.
+     */
+    allocWeightKey?: RequiredNumericKey<S>;
+    /** Sample property containing the first callchain index to include. */
+    callchainStartKey?: RequiredNumericKey<S>;
   }
 
   export interface FlamegraphNode {
@@ -325,9 +345,10 @@ declare module "*/trace_analysis.js" {
     selfAllocCount?: number;
   }
 
-  export function buildFlamegraphTree(
-    samples: readonly FlamegraphSampleInput[],
-    callframeSymbols: CallframeSymbols
+  export function buildFlamegraphTree<S extends FlamegraphSampleInput>(
+    samples: readonly S[],
+    callframeSymbols: CallframeSymbols,
+    opts?: FlamegraphTreeOptions<S>
   ): FlamegraphNode;
 
   export interface FlatFlamegraphNode {

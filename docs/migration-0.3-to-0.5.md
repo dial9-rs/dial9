@@ -216,6 +216,46 @@ async fn main() { /* ... */ }
 
 Use `dial9::block_on(&runtime, fut)` rather than `Runtime::block_on`. Poll and wake events come from per-task hooks, and `Runtime::block_on` polls its future outside any task, so that future and everything awaited inline under it would be missing from the trace. `dial9::block_on` spawns it first.
 
+#### `block_on` bounds: `Send + 'static`
+
+Because `dial9::block_on` spawns the future as a Tokio task, both the future and its output must be `Send + 'static`:
+
+```rust
+pub fn block_on<F>(runtime: &tokio::runtime::Runtime, future: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+```
+
+This is stricter than `Runtime::block_on`, which has no `Send` or `'static` requirement at all. In practice the future itself is usually `Send` already, but the **output type** catches people: `Result<(), Box<dyn std::error::Error>>` is *not* `Send` because `Box<dyn Error>` defaults to `Box<dyn Error + 'static>` (no `Send`). Passing it to `dial9::block_on` produces a compile error on `F::Output: Send`.
+
+Remedies:
+
+- Use `Box<dyn std::error::Error + Send + Sync>` (or a type alias for it) as the error type through the affected call chain.
+- Use a concrete, `Send`-implementing error type such as `anyhow::Error` or a project-specific enum.
+- Narrow the scope: keep `dial9::block_on` around a thin wrapper and convert non-`Send` errors at its boundary.
+
+```rust
+// Before (does not compile with dial9::block_on):
+async fn run() -> Result<(), Box<dyn std::error::Error>> { /* ... */ Ok(()) }
+
+// After — make the output Send:
+async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { /* ... */ Ok(()) }
+
+dial9::block_on(&runtime, run());
+```
+
+### Lifecycle at a glance
+
+For a typical service that records Tokio runtime telemetry and uploads to S3:
+
+1. **Build the buffer** — `DiskBuffer::builder()…build()`.
+2. **Build the recorder** — `dial9::recorder(writer).with_s3_uploader_client_future(…).build()`. The S3 client future is stored but not yet polled.
+3. **Attach the application runtime** — `handle.attach_tokio_runtime(builder, opts)`.
+4. **`dial9::block_on(&runtime, root_future)`** — the pipeline worker starts on its own thread, polls the S3 client future, and begins uploading sealed segments.
+5. **`drop(runtime)`** — stops Tokio workers and flushes the final segment.
+6. **`recorder.graceful_shutdown(timeout)`** — drains the pipeline (symbolize, compress, upload) within the deadline, then returns.
+
 ---
 
 ## 5. Handles
@@ -462,6 +502,33 @@ The viewer reads both this and the historical layout, and custom `S3KeyFn` outpu
 ### Async client construction
 
 For custom credentials or endpoints, defer client construction to the pipeline worker runtime with `with_s3_uploader_client_future(config, fut)`. The future is polled when the worker starts, and the client (including credential refresh) stays on that runtime.
+
+The trait is `dial9::RecorderS3ClientExt`. The future must be `Send + 'static` and must resolve to `aws_sdk_s3::Client` directly — not `Result<Client, E>`. Handle credential or config initialization errors inside the future; a panic will take down the pipeline worker thread.
+
+```rust
+use dial9::RecorderS3ClientExt;
+use dial9::s3::S3Config;
+
+let s3_config = S3Config::builder()
+    .bucket("my-bucket")
+    .service_name("my-service")
+    .region("us-east-1")
+    .build();
+
+let recorder = dial9::recorder(writer)
+    .with_s3_uploader_client_future(s3_config, async {
+        // Credential/config errors must be handled here, not propagated.
+        // If initialization fails, degrade to a dummy client or log and
+        // disable telemetry rather than crashing the application.
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        aws_sdk_s3::Client::new(&config)
+    })
+    .build();
+```
+
+A good default policy for the error branch is to log the failure and return a client that will fail uploads (the worker retries and eventually drops segments), effectively degrading telemetry instead of taking down the process.
 
 ---
 

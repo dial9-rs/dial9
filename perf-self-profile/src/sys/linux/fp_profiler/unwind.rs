@@ -50,6 +50,12 @@ pub(crate) fn strip_pac(addr: usize) -> usize {
 /// Walk the frame-pointer chain starting from the given (pc, fp, sp) triple,
 /// usually obtained from a signal handler's ucontext.
 ///
+/// `pc` is trusted as-is and written directly to `out[0]` — the caller must
+/// already know it's a valid instruction pointer (e.g. the kernel-supplied
+/// interrupted PC). `fp` is *not* trusted: every frame from here on,
+/// including the first, goes through the same bounds/alignment check and
+/// `safe_load`-guarded reads.
+///
 /// `truncated` is `true` if the walk stopped because the output buffer (or
 /// [`MAX_FRAMES`]) was full *and* at least one additional frame would have been
 /// valid. A natural stop (end of chain, faulty load, implausible pointer)

@@ -273,6 +273,11 @@ macro_rules! shuttle_test {
     // Confirm the crash first (run `determinism` alone, repeatedly) before
     // using this -- don't use it defensively. Still runnable manually with
     // `--ignored`.
+    //
+    // If also using `replay = $schedule`: capture it from `pct`'s failure
+    // output, not `determinism`'s. `determinism`'s schedules come from
+    // the same record-twice mechanism that SIGABRTs, so replaying one
+    // could reproduce the abort instead of a catchable panic.
     (num_iters = $num_iters:expr, depth = $depth:expr, should_panic, flaky_sigabrt_determinism_only $(, expect_panic = $msg:expr)? $(, replay = $schedule:expr)?; $(#[$attr:meta])* fn $name:ident() $body:block) => {
         mod $name {
             use super::*;
@@ -415,6 +420,10 @@ pub mod fs {
         FailProb(f64),
     }
 
+    // Shuttle's threads are coroutines on one real OS thread, so this
+    // stays visible to every spawned thread instead of being isolated per
+    // logical thread. Swapping to `shuttle::thread` would silently stop fault injection
+    // from reaching spawned threads. Pinned by `fs_fault_visible_across_threads`.
     std::thread_local! {
         static FAULT: Cell<FaultPolicy> = const { Cell::new(FaultPolicy::None) };
     }

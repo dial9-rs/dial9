@@ -81,4 +81,38 @@ describe("analysis cache signatures", () => {
       }),
     );
   });
+
+  it("reuses heap derivation while invalidating the widget weight variant", () => {
+    const trace = {};
+    const shared = {
+      trace,
+      mode: "heap" as const,
+      range: { startNs: 100, endNs: 200 },
+      groupBy: "leaf" as const,
+    };
+    const bytesComputed = regionComputedCacheSignature({
+      ...shared,
+      heapMode: "bytes",
+    });
+    const countComputed = regionComputedCacheSignature({
+      ...shared,
+      heapMode: "count",
+    });
+    expect(countComputed).toBe(bytesComputed);
+    expect(
+      regionWidgetCacheSignature({
+        trace,
+        computed: bytesComputed,
+        blockingFlame: false,
+        variant: "bytes",
+      }),
+    ).not.toBe(
+      regionWidgetCacheSignature({
+        trace,
+        computed: countComputed,
+        blockingFlame: false,
+        variant: "count",
+      }),
+    );
+  });
 });

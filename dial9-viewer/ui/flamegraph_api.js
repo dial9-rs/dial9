@@ -156,6 +156,56 @@ function shouldAdoptRefinementSnapshot(preserveExisting, baselineFilesFolded, in
   if (!preserveExisting) return true;
   return Number(incomingFilesFolded || 0) >= Number(baselineFilesFolded || 0);
 }
+
+// Resolve the negotiated aggregate flamegraph encoding into the legacy
+// nested-name tree consumed by the existing renderers. Older servers return
+// that tree directly; flat-v1 sends every frame name once, plus one preorder
+// `[parent, frame, count, self]` row per node referencing it by index.
+function decodeFlamegraphTree(response) {
+  const tree = response && response.tree;
+  if (!tree || tree.format !== "flat-v1") return tree;
+  if (!Array.isArray(tree.frames)) {
+    throw new Error("flat-v1 flamegraph is missing its frame table");
+  }
+  if (!Array.isArray(tree.nodes) || tree.nodes.length === 0) {
+    throw new Error("flat-v1 flamegraph must contain a root node");
+  }
+
+  function frameName(frame) {
+    if (!Number.isInteger(frame) || frame < 0 || frame >= tree.frames.length) {
+      throw new Error(`flat-v1 flamegraph references invalid frame ${String(frame)}`);
+    }
+    const name = tree.frames[frame];
+    if (typeof name !== "string") {
+      throw new Error(`flat-v1 flamegraph frame ${frame} is not a string`);
+    }
+    return name;
+  }
+
+  const decoded = [];
+  for (let i = 0; i < tree.nodes.length; i++) {
+    const row = tree.nodes[i];
+    if (!Array.isArray(row) || row.length !== 4) {
+      throw new Error(`flat-v1 flamegraph node ${i} is not a four-field row`);
+    }
+    const node = {
+      name: frameName(row[1]),
+      count: row[2],
+      self: row[3],
+    };
+    decoded.push(node);
+    // Row 0 is the root, so its parent field carries no meaning; every later
+    // row must name a parent that already precedes it.
+    if (i === 0) continue;
+    const parent = row[0];
+    if (!Number.isInteger(parent) || parent < 0 || parent >= i) {
+      throw new Error(`flat-v1 flamegraph node ${i} has invalid parent ${String(parent)}`);
+    }
+    const parentNode = decoded[parent];
+    (parentNode.children || (parentNode.children = [])).push(node);
+  }
+  return decoded[0];
+}
 // --- Data-driven toolbar facet options ---------------------------------------
 //
 // The `/api/flamegraph` response carries a `metadata` block describing which
@@ -214,6 +264,7 @@ const FlamegraphApi = {
   nextMaxFiles,
   refinementWorkDepth,
   shouldAdoptRefinementSnapshot,
+  decodeFlamegraphTree,
   nsToPickerUtc,
   pickerUtcToNs,
   msToNs,

@@ -16,6 +16,7 @@ import type { StoreState } from "../../types/state.js";
 import type { IssueColKey, PoiSortKey, RailTab, TaskSortKey } from "../../types/state.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
+import { deriveLaneData } from "../../components/canvas/lanes/index.js";
 import {
   POI_FILTERS,
   derivePoiViewModel,
@@ -303,13 +304,22 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
    *  Indexes `sorted`, not `rows`: `n`/`p` step the whole list while only a
    *  window around the cursor is ever formatted. */
   function jumpTo(index: number): void {
-    const vm = viewModel(store.getState());
+    const state = store.getState();
+    const vm = viewModel(state);
     const poi = vm.sorted[index];
     if (poi === undefined) return;
-    const jump = poiJump(poi, store.getState().viewport);
+    const jump = poiJump(poi, state.viewport);
+    const taskId = poi.span.taskId;
+    const pollDetail =
+      state.trace.trace !== null && taskId !== undefined
+        ? deriveLaneData(state.trace.trace).workerSpans[poi.worker]?.polls.find(
+            (poll) => poll.start === poi.span.start && poll.taskId === taskId,
+          ) ?? null
+        : null;
     store.update("viewport", { viewStart: jump.viewStart, viewEnd: jump.viewEnd });
     store.update("selection", {
       selectedTaskId: jump.selectedTaskId,
+      pollDetail,
       taskDump: null,
     });
     store.update("poi", { index });

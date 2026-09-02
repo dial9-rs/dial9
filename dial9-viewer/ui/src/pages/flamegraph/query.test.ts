@@ -97,7 +97,7 @@ describe("seedFacetState", () => {
 describe("buildApiUrl", () => {
   it("SSE stream URL: scope + non-empty facets, no refine flag", () => {
     expect(buildApiUrl(state(), ORIGIN)).toBe(
-      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu`,
+      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu&format=flat-v1`,
     );
   });
   it("serializes repeated hosts, times and max_files in stable order", () => {
@@ -114,7 +114,7 @@ describe("buildApiUrl", () => {
     expect(u).toBe(
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&service=svc-a` +
         "&host=h1&host=h2&source=cpu&start_ns=1743000000000000000" +
-        "&end_ns=1743003600000000000&max_files=64",
+        "&end_ns=1743003600000000000&max_files=64&format=flat-v1",
     );
   });
   it("poll-duration band rides after the time window (min_poll_ns/max_poll_ns)", () => {
@@ -124,12 +124,14 @@ describe("buildApiUrl", () => {
     );
     expect(u).toBe(
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu` +
-        "&start_ns=1&end_ns=2&min_poll_ns=500000&max_poll_ns=10000000",
+        "&start_ns=1&end_ns=2&min_poll_ns=500000&max_poll_ns=10000000" +
+        "&format=flat-v1",
     );
   });
   it("an open-ended band emits only the bound that is set", () => {
     expect(buildApiUrl(state({ minPollNs: "1000000" }), ORIGIN)).toBe(
-      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu&min_poll_ns=1000000`,
+      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu` +
+        "&min_poll_ns=1000000&format=flat-v1",
     );
     expect(buildBrowserQuery(state({ maxPollNs: "2000000" }))).toBe(
       "api=1&bucket=demo-traces&credential_mode=ambient&prefix=traces&source=cpu&max_poll_ns=2000000",
@@ -150,7 +152,8 @@ describe("buildApiUrl", () => {
       ORIGIN,
     );
     expect(u).toBe(
-      `${ORIGIN}/api/flamegraph?data_dir=%2Fvar%2Ftraces&source=cpu&host_group=blue`,
+      `${ORIGIN}/api/flamegraph?data_dir=%2Fvar%2Ftraces&source=cpu` +
+        "&host_group=blue&format=flat-v1",
     );
   });
 });

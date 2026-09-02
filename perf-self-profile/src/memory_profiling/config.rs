@@ -69,6 +69,21 @@ pub struct MemoryProfilingConfig {
     /// The free queue is sized 8× this.
     #[builder(default = DEFAULT_RING_CAPACITY)]
     ring_capacity: usize,
+
+    /// Whether a failed frame-pointer self-test is a hard install error.
+    /// Default `true`.
+    ///
+    /// [`MemoryProfiler::install`] always runs the self-test and always logs
+    /// a warning on failure. By default a failure also returns
+    /// [`InstallError::MissingFramePointers`]; set this to `false` to have
+    /// `install()` proceed instead, relying on the warning alone. Only do
+    /// that if you've independently verified frame pointers are enabled, or
+    /// are prepared to accept near-empty allocation stacks.
+    ///
+    /// [`MemoryProfiler::install`]: crate::memory_profiling::MemoryProfiler::install
+    /// [`InstallError::MissingFramePointers`]: crate::memory_profiling::InstallError::MissingFramePointers
+    #[builder(default = true)]
+    fail_on_missing_frame_pointers: bool,
 }
 
 impl<S: memory_profiling_config_builder::IsComplete> MemoryProfilingConfigBuilder<S> {
@@ -114,6 +129,10 @@ impl MemoryProfilingConfig {
     pub fn ring_capacity(&self) -> usize {
         self.ring_capacity
     }
+    /// Whether a failed frame-pointer self-test is a hard install error.
+    pub fn fail_on_missing_frame_pointers(&self) -> bool {
+        self.fail_on_missing_frame_pointers
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +167,19 @@ mod tests {
     fn build_accepts_liveset() {
         let cfg = MemoryProfilingConfig::builder().track_liveset(true).build();
         assert!(cfg.track_liveset());
+    }
+
+    #[test]
+    fn fail_on_missing_frame_pointers_defaults_to_true() {
+        let cfg = MemoryProfilingConfig::default();
+        assert!(cfg.fail_on_missing_frame_pointers());
+    }
+
+    #[test]
+    fn fail_on_missing_frame_pointers_can_be_set() {
+        let cfg = MemoryProfilingConfig::builder()
+            .fail_on_missing_frame_pointers(false)
+            .build();
+        assert!(!cfg.fail_on_missing_frame_pointers());
     }
 }
