@@ -23,6 +23,7 @@
 //! [coverage]: Coverage
 
 use crate::storage::{ObjectInfo, StorageBackend};
+use anyhow::Context;
 use arrow::array::Array;
 use lasso::{Rodeo, Spur};
 use std::collections::{HashMap, HashSet};
@@ -784,7 +785,6 @@ pub(crate) type FacetFilters = HashMap<&'static str, String>;
 
 /// Accumulates distinct facet values across part-files. One `HashSet<String>`
 /// per facet definition.
-#[derive(Clone)]
 struct FacetAccum {
     /// Distinct values per facet (indexed same as [`FACETS`]).
     sets: Vec<HashSet<String>>,
@@ -936,7 +936,6 @@ pub(crate) type FrameId = Spur;
 /// A production profile may contain millions of frame occurrences but only a
 /// few thousand distinct symbols. Keeping the strings in one interner makes
 /// each stack an array of fixed-width IDs instead of an array of owned strings.
-#[derive(Clone)]
 pub(crate) struct StackDictionary {
     frames: Rodeo<FrameId>,
     stacks: HashMap<[u8; 16], Vec<FrameId>>,
@@ -964,6 +963,19 @@ impl StackDictionary {
         self.frames
             .get("(all)")
             .expect("the root frame is interned when the dictionary is created")
+    }
+
+    fn merge_raw(&mut self, stacks: HashMap<[u8; 16], Vec<String>>) {
+        for (stack_id, names) in stacks {
+            if self.stacks.contains_key(&stack_id) {
+                continue;
+            }
+            let frames = names
+                .iter()
+                .map(|name| self.frames.get_or_intern(name))
+                .collect();
+            self.stacks.insert(stack_id, frames);
+        }
     }
 
     #[cfg(test)]
@@ -998,6 +1010,32 @@ pub(crate) struct FlamegraphAccum {
     poll_hist: PollHist,
 }
 
+/// One fully parsed part-file contribution. Keeping this isolated makes
+/// [`FlamegraphAccum::merge`] transactional without cloning accumulated state.
+struct FlamegraphPartDelta {
+    counts: HashMap<[u8; 16], u64>,
+    dict: HashMap<[u8; 16], Vec<String>>,
+    facets: FacetAccum,
+    total_samples: usize,
+    min_ts: Option<i64>,
+    max_ts: Option<i64>,
+    poll_hist: PollHist,
+}
+
+impl FlamegraphPartDelta {
+    fn new() -> Self {
+        Self {
+            counts: HashMap::new(),
+            dict: HashMap::new(),
+            facets: FacetAccum::new(),
+            total_samples: 0,
+            min_ts: None,
+            max_ts: None,
+            poll_hist: HashMap::new(),
+        }
+    }
+}
+
 impl FlamegraphAccum {
     pub(crate) fn new(filter: SampleFilter) -> Self {
         Self {
@@ -1014,50 +1052,73 @@ impl FlamegraphAccum {
 
     /// Merge one folded file's samples part-file (and its optional stacks dict)
     /// into the running totals **transactionally**: both the sample counts and the
-    /// dict are staged into temporaries and committed only when the full merge
-    /// (samples + dict) succeeds. A failure in either step leaves `self` unchanged.
+    /// dict are parsed into a per-part delta and committed only when parsing and
+    /// overflow validation both succeed. A failure leaves `self` unchanged.
     pub(crate) fn merge(&mut self, samples: Vec<u8>, dict: Option<Vec<u8>>) -> anyhow::Result<()> {
-        // Stage: clone the mutable state that read_samples_part and read_dict_part
-        // would mutate, so a failure in either step leaves self unchanged.
-        let mut staged_counts = self.counts.clone();
-        let mut staged_dict = self.dict.clone();
-        let mut staged_facets = self.facets.clone();
-        let mut staged_total = self.total_samples;
-        let mut staged_min_ts = self.min_ts;
-        let mut staged_max_ts = self.max_ts;
-        let mut staged_poll_hist = self.poll_hist.clone();
-
-        // Apply samples into the staged state.
+        let mut delta = FlamegraphPartDelta::new();
         self.read_samples_part_into(
             samples,
-            &mut staged_counts,
-            &mut staged_facets,
-            &mut staged_total,
-            &mut staged_min_ts,
-            &mut staged_max_ts,
-            &mut staged_poll_hist,
+            &mut delta.counts,
+            &mut delta.facets,
+            &mut delta.total_samples,
+            &mut delta.min_ts,
+            &mut delta.max_ts,
+            &mut delta.poll_hist,
         )?;
-
-        // Apply dict into the staged state.
         if let Some(dict) = dict {
-            read_dict_part(dict, &mut staged_dict)?;
+            delta.dict = read_dict_part(dict)?;
         }
-
-        // Commit: both succeeded — swap staged state into self.
-        self.counts = staged_counts;
-        self.dict = staged_dict;
-        self.facets = staged_facets;
-        self.total_samples = staged_total;
-        self.min_ts = staged_min_ts;
-        self.max_ts = staged_max_ts;
-        self.poll_hist = staged_poll_hist;
+        self.validate_delta(&delta)?;
+        self.commit_delta(delta);
         Ok(())
     }
 
-    /// Parse a single samples part-file and merge its rows into the provided
-    /// staged accumulators, applying time/facet/band filters. Used by the
-    /// transactional [`merge`](Self::merge) to stage mutations without touching
-    /// `self` until both samples and dict succeed.
+    fn validate_delta(&self, delta: &FlamegraphPartDelta) -> anyhow::Result<()> {
+        self.total_samples
+            .checked_add(delta.total_samples)
+            .context("flamegraph total sample count overflow")?;
+        for (stack_id, count) in &delta.counts {
+            self.counts
+                .get(stack_id)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(*count)
+                .context("flamegraph stack count overflow")?;
+        }
+        for (bucket, count) in &delta.poll_hist {
+            self.poll_hist
+                .get(bucket)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(*count)
+                .context("flamegraph poll histogram overflow")?;
+        }
+        Ok(())
+    }
+
+    fn commit_delta(&mut self, delta: FlamegraphPartDelta) {
+        for (stack_id, count) in delta.counts {
+            *self.counts.entry(stack_id).or_insert(0) += count;
+        }
+        self.dict.merge_raw(delta.dict);
+        for (values, new_values) in self.facets.sets.iter_mut().zip(delta.facets.sets) {
+            values.extend(new_values);
+        }
+        self.facets.matched_hosts.extend(delta.facets.matched_hosts);
+        self.total_samples += delta.total_samples;
+        if let Some(min_ts) = delta.min_ts {
+            self.min_ts = Some(self.min_ts.map_or(min_ts, |current| current.min(min_ts)));
+        }
+        if let Some(max_ts) = delta.max_ts {
+            self.max_ts = Some(self.max_ts.map_or(max_ts, |current| current.max(max_ts)));
+        }
+        for (bucket, count) in delta.poll_hist {
+            *self.poll_hist.entry(bucket).or_insert(0) += count;
+        }
+    }
+
+    /// Parse a single samples part-file into isolated per-part accumulators,
+    /// applying time/facet/band filters.
     #[allow(clippy::too_many_arguments)]
     fn read_samples_part_into(
         &self,
@@ -1447,12 +1508,13 @@ fn extract_facet_value(col: &ResolvedFacetCol, i: usize) -> Option<String> {
     }
 }
 
-fn read_dict_part(data: Vec<u8>, dict: &mut StackDictionary) -> anyhow::Result<()> {
+fn read_dict_part(data: Vec<u8>) -> anyhow::Result<HashMap<[u8; 16], Vec<String>>> {
     // `Bytes::from(Vec<u8>)` reuses the allocation (no copy).
     let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
         bytes::Bytes::from(data),
         4096,
     )?;
+    let mut dict = HashMap::new();
     for batch in reader {
         let batch = batch?;
         let stack_arr = batch.column_by_name("stack_id").and_then(|c| {
@@ -1467,7 +1529,7 @@ fn read_dict_part(data: Vec<u8>, dict: &mut StackDictionary) -> anyhow::Result<(
         };
         for i in 0..batch.num_rows() {
             let id: [u8; 16] = stack_arr.value(i).try_into()?;
-            if dict.stacks.contains_key(&id) {
+            if dict.contains_key(&id) {
                 continue;
             }
             let frame_list = frames_arr.value(i);
@@ -1475,14 +1537,14 @@ fn read_dict_part(data: Vec<u8>, dict: &mut StackDictionary) -> anyhow::Result<(
                 .as_any()
                 .downcast_ref::<arrow::array::StringArray>()
             {
-                let frames: Vec<FrameId> = (0..str_arr.len())
-                    .map(|j| dict.frames.get_or_intern(str_arr.value(j)))
+                let frames: Vec<String> = (0..str_arr.len())
+                    .map(|j| str_arr.value(j).to_string())
                     .collect();
-                dict.stacks.insert(id, frames);
+                dict.insert(id, frames);
             }
         }
     }
-    Ok(())
+    Ok(dict)
 }
 
 fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
@@ -2463,5 +2525,85 @@ mod tests {
             0,
             "transactional merge must leave accum unchanged on samples failure"
         );
+    }
+
+    #[test]
+    fn flamegraph_merge_commits_part_delta_in_place() {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::{write_samples, write_stacks_dict};
+
+        let stack_id = [7u8; 16];
+        let sample = ResolvedSample {
+            timestamp_ns: 5000,
+            stack_id,
+            worker_id: Some(0),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: Vec::new(),
+        };
+        let mut samples = Vec::new();
+        write_samples(&mut samples, &[sample], &HashMap::new()).unwrap();
+        let mut raw_dict = HashMap::new();
+        raw_dict.insert(
+            stack_id,
+            vec!["leaf".to_string(), "shared-root".to_string()],
+        );
+        let mut dict = Vec::new();
+        write_stacks_dict(&mut dict, &raw_dict).unwrap();
+
+        let filter = SampleFilter {
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(samples.clone(), Some(dict.clone())).unwrap();
+        accum.merge(samples, Some(dict)).unwrap();
+
+        assert_eq!(accum.total_samples, 2);
+        assert_eq!(accum.counts[&stack_id], 2);
+        assert_eq!(accum.dict.stacks.len(), 1);
+        assert_eq!(accum.dict.frames.len(), 3, "(all) plus two stack frames");
+        assert!(accum.facets.matched_hosts.contains("myhost"));
+    }
+
+    #[test]
+    fn flamegraph_merge_overflow_leaves_accum_unchanged() {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::write_samples;
+
+        let stack_id = [9u8; 16];
+        let sample = ResolvedSample {
+            timestamp_ns: 5000,
+            stack_id,
+            worker_id: Some(0),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: Vec::new(),
+        };
+        let mut samples = Vec::new();
+        write_samples(&mut samples, &[sample], &HashMap::new()).unwrap();
+
+        let filter = SampleFilter {
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.counts.insert(stack_id, u64::MAX);
+
+        let error = accum.merge(samples, None).unwrap_err();
+        assert!(error.to_string().contains("stack count overflow"));
+        assert_eq!(accum.counts[&stack_id], u64::MAX);
+        assert_eq!(accum.total_samples, 0);
+        assert!(accum.facets.matched_hosts.is_empty());
     }
 }
