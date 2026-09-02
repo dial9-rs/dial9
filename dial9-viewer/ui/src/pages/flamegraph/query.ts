@@ -77,6 +77,8 @@ export interface ApiQueryState {
   spanTypeUid: string | null;
   minSpanNs: string | null;
   maxSpanNs: string | null;
+  /** Current aggregate inspect frame, retained by bounded server projections. */
+  inspect: string | null;
 }
 
 /** Seed the non-host facet filters from the page URL. */
@@ -110,6 +112,7 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
   if (state.spanTypeUid) p.set("span_type_uid", state.spanTypeUid);
   if (state.minSpanNs) p.set("min_span_ns", state.minSpanNs);
   if (state.maxSpanNs) p.set("max_span_ns", state.maxSpanNs);
+  if (state.inspect) p.set("inspect", state.inspect);
 }
 
 /**
