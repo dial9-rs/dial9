@@ -5,8 +5,8 @@
 //
 // The global + max-local + active-task series render against ONE explicit zero
 // baseline (queueScaleY) so a 0-valued global queue shows a VISIBLE flat line
-// instead of a stroke fused to the axis; the numbers are unchanged, only the
-// y-mapping and the labeling/legend.
+// instead of a stroke fused to the axis. A translucent, independently scaled
+// spawn histogram sits behind the lines to preserve short-lived task bursts.
 //
 // Hover info rides the overlay's at-cursor store contract (transient.atCursor),
 // not a corner div, so hovering this track already populates the inspector
@@ -39,6 +39,7 @@ import {
   type QueueWindow,
   type SpawnedTasksResult,
 } from "./queue-model.js";
+import { formatHumanDuration } from "../../lib/trace/index.js";
 
 /** Height reserved for the legend strip above the queue canvas. */
 const LEGEND_H = 18;
@@ -49,6 +50,7 @@ const GLOBAL_FILL = "rgba(79,195,247,0.3)";
 const GLOBAL_STROKE = "#4fc3f7";
 const LOCAL_STROKE = "#ff8a65";
 const ACTIVE_STROKE = "#81c784";
+const SPAWN_FILL = "rgba(129,199,132,0.16)";
 const AXIS_LABEL = "#666";
 const ACTIVE_LABEL = "#81c784";
 const EMPTY_TEXT = "#555";
@@ -198,10 +200,13 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
   /** The in-track legend, swatch encodings matching the draw. */
   function legendTemplate(): TemplateResult {
-    // Drop the local series when the trace has no per-worker depth.
-    const entries = queueData().hasLocalQueueDepth
-      ? QUEUE_LEGEND
-      : QUEUE_LEGEND.filter((e) => e.key !== "local");
+    const data = queueData();
+    // Drop encodings whose source is absent from this trace.
+    const entries = QUEUE_LEGEND.filter(
+      (e) =>
+        (e.key !== "local" || data.hasLocalQueueDepth) &&
+        (e.key !== "spawns" || data.taskSpawnTimes.length > 0),
+    );
     return html`
       <ul class="d9-queue-legend" aria-label="Queue depth legend">
         ${repeat(
@@ -387,9 +392,10 @@ function overlayBandRange(
 /**
  * Draw the queue chart into `ctx` (already DPR-scaled + sized to drawW x
  * canvasH) in order - background, global filled step-area, max-local step line,
- * active-task step line on its own scale, y-axis labels - every series mapped
- * through queueScaleY, which reserves a visible zero baseline so a 0-valued
- * global renders a flat line, not nothing. Then the window markers on top.
+ * translucent spawn histogram, active-task step line on its own scale, and
+ * y-axis labels. The line/area series use queueScaleY, which reserves a visible
+ * zero baseline so a 0-valued global renders a flat line, not nothing. Then the
+ * window markers on top.
  * Draw-area-relative coordinates (the canvas already omits LABEL_W; the DOM
  * label gutter supplies the shared offset).
  */
@@ -421,6 +427,7 @@ export function drawQueueCanvas(
   const maxQ = model.maxQ;
   const baselineY = queueBaselineY(chartTop, chartH);
 
+  const spawnHistogram = model.spawnHistogram;
   // ── Global queue as a filled step area with a visible zero baseline ──
   // The fill polygon's bottom edge is the baseline (queueScaleY(0)), NOT the
   // true canvas bottom, so a 0-valued global is a thin sliver + a stroke ON the
@@ -458,6 +465,26 @@ export function drawQueueCanvas(
     ctx.stroke();
   }
 
+  // ── Task spawns as a translucent, independently scaled histogram ────────
+  // Fixed-pixel-width bins adapt their time quantum as the viewport zooms.
+  // Draw after the queue series so the bars stay visible, but before the
+  // active-task total so that line remains the foreground signal.
+  if (spawnHistogram !== null) {
+    ctx.fillStyle = SPAWN_FILL;
+    for (let i = 0; i < spawnHistogram.counts.length; i++) {
+      const count = spawnHistogram.counts[i]!;
+      if (count === 0) continue;
+      const x = i * spawnHistogram.binWidthPx;
+      const y = queueScaleY(count, spawnHistogram.maxSpawns, chartTop, chartH);
+      ctx.fillRect(
+        x + 0.5,
+        y,
+        Math.max(1, spawnHistogram.binWidthPx - 1),
+        baselineY - y,
+      );
+    }
+  }
+
   // ── Y-axis labels (max at top, 0 at the visible baseline) ───────────────
   ctx.fillStyle = AXIS_LABEL;
   ctx.font = "10px monospace";
@@ -485,6 +512,17 @@ export function drawQueueCanvas(
     ctx.strokeStyle = ACTIVE_STROKE;
     ctx.lineWidth = 1.5;
     ctx.stroke();
+  }
+
+  if (spawnHistogram !== null) {
+    ctx.fillStyle = ACTIVE_LABEL;
+    ctx.font = "10px monospace";
+    ctx.textAlign = "right";
+    ctx.fillText(
+      `spawns:${spawnHistogram.maxSpawns}/${formatHumanDuration(spawnHistogram.binDurationNs)}`,
+      Math.max(0, drawW - 4),
+      Math.min(baselineY - 1, chartTop + 18),
+    );
   }
 
   // ── Surface a truncated / oversized window (never as complete) ─────

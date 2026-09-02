@@ -19,7 +19,7 @@ const COMPLETE: QueueWindow = { truncatedAt: null, oversized: false };
 /** A recording 2D context: captures path vertices, fills, strokes, labels. */
 interface Rec {
   pathYs: number[];
-  fillRects: { x: number; y: number; w: number; h: number }[];
+  fillRects: { x: number; y: number; w: number; h: number; style: string }[];
   strokes: number;
   labels: { text: string; x: number; y: number }[];
 }
@@ -33,7 +33,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Rec } {
     textAlign: "" as CanvasTextAlign,
     clearRect() {},
     fillRect(x: number, y: number, w: number, h: number) {
-      rec.fillRects.push({ x, y, w, h });
+      rec.fillRects.push({ x, y, w, h, style: String(this.fillStyle) });
     },
     strokeRect() {},
     beginPath() {},
@@ -68,6 +68,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: zeros(4),
       local: zeros(4),
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: true,
     };
@@ -100,6 +101,12 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: [1, 2, 2],
       local: [0, 1, 1],
       maxQ: 2,
+      spawnHistogram: {
+        counts: [0, 3, 1],
+        maxSpawns: 3,
+        binWidthPx: 10,
+        binDurationNs: 1_000_000,
+      },
       activeTask: { points: [{ x: 10, count: 4 }], startCount: 1, maxTasks: 4 },
       hasData: true,
     };
@@ -109,6 +116,8 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
     expect(texts).toContain("2"); // maxQ label
     expect(texts).toContain("0"); // zero-baseline label
     expect(texts).toContain("tasks:4"); // active-task right-axis label
+    expect(texts).toContain("spawns:3/1.00ms"); // spawn histogram peak + quantum
+    expect(rec.fillRects.filter((r) => r.style === "rgba(129,199,132,0.16)")).toHaveLength(2);
   });
 
   it("shows the empty message and no strokes when there is no data", () => {
@@ -117,6 +126,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: zeros(4),
       local: zeros(4),
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: false,
     };
@@ -132,6 +142,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: [0, 0],
       local: [0, 0],
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: true,
     };
