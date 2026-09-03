@@ -840,7 +840,14 @@ mod tests {
                 let retained_bytes: u64 = std::fs::read_dir(dir.path())
                     .expect("trace dir readable")
                     .map(|entry| entry.expect("trace directory entry"))
-                    .map(|entry| entry.metadata().expect("trace metadata").len())
+                    .filter_map(|entry| match entry.metadata() {
+                        Ok(metadata) => Some(metadata.len()),
+                        // Budget restoration removes files concurrently with
+                        // this observation; disappearance is the condition
+                        // this loop is waiting for.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => panic!("trace metadata: {error}"),
+                    })
                     .sum();
                 if retained_bytes <= one_segment_budget {
                     break;

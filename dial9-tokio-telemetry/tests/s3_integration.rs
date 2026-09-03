@@ -6,11 +6,13 @@ mod fake_s3;
 
 use aws_config::Region;
 use aws_sdk_s3::Client;
-use common::{fast_sealing_writer, wait_for_sealed_segment};
+use common::fast_sealing_writer;
+use dial9_core::source::{FlushContext, Source};
 use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, RecorderPipelineExt, RecorderS3ClientExt, TokioAttachOptions, recorder, spawn,
 };
+use dial9_trace_format::TraceEvent;
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
     fake_s3_client_with_region,
@@ -19,7 +21,7 @@ use flate2::read::GzDecoder;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Create a dummy S3 config + client for tests.
@@ -933,8 +935,31 @@ fn permanently_broken_s3_produces_failure_metrics() {
 /// `end_to_end_trace_to_s3_roundtrip` but on the on-demand path.
 #[test]
 fn dump_trigger_uploads_segments_and_writes_manifest() {
+    #[derive(TraceEvent)]
+    struct BoundaryEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
+
+    struct ArmedBoundarySource(Arc<AtomicBool>);
+
+    impl Source for ArmedBoundarySource {
+        fn flush(&mut self, ctx: &FlushContext<'_>) {
+            if self.0.load(Ordering::Acquire) {
+                ctx.record_event(&BoundaryEvent {
+                    timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
+                });
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "armed-boundary"
+        }
+    }
+
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
+    let armed = Arc::new(AtomicBool::new(false));
 
     std::fs::create_dir(s3_root.path().join("dump-bucket")).unwrap();
     let client = fake_s3_client(s3_root.path());
@@ -950,6 +975,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .build();
 
     let recorder = recorder(writer)
+        .source(ArmedBoundarySource(Arc::clone(&armed)))
         .worker_poll_interval(Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .with_dump_trigger(|_| {})
@@ -985,11 +1011,10 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         "triggered mode must not upload until a dump is requested"
     );
 
-    // End this bounded workload at the checkpoint. Closing the recording gate
-    // on the flush thread prevents a slow runner from producing enough
-    // post-boundary telemetry to evict the snapshot before the worker claims
-    // it.
-    wait_for_sealed_segment(&rt, trace_dir.path());
+    // Guarantee that the capture boundary itself contains data. Waiting for a
+    // previously sealed file is racy under a busy runner: queued telemetry can
+    // keep rotating and evict that file before the checkpoint is established.
+    armed.store(true, Ordering::Release);
 
     let receipt = rt.block_on(async {
         trigger
@@ -998,6 +1023,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
             .await
             .expect("dump resolves")
     });
+    armed.store(false, Ordering::Release);
 
     assert!(
         receipt.segments_processed > 0,
