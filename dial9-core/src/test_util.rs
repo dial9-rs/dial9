@@ -3,7 +3,17 @@
 //! Available under the `test-util` feature.
 
 use crate::buffer::{BufferMode, SegmentWriter};
+use crate::handle::Dial9Handle;
+use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
+
+/// A connected `Dial9Handle` with no flush thread behind it: mints a
+/// throwaway control channel instead of `Recorder::start`'s real one, for
+/// tests that don't need the full flush-thread setup.
+pub fn connected_handle(shared: Arc<SharedState>) -> Dial9Handle {
+    let (control_tx, _control_rx) = crate::primitives::sync::mpsc::sync_channel(0);
+    Dial9Handle::enabled(shared, control_tx)
+}
 
 /// Flush the calling thread's buffered events into `shared`'s collector,
 /// leaving them queued.
