@@ -43,13 +43,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::pipeline::ProcessErrorKind;
+use crate::primitives::sync::Arc;
 
 /// Mint a dump trigger + receiver pair. The builder wires the receiver into
 /// the worker and stashes the trigger in the recorder so it can be reached via
@@ -629,46 +629,46 @@ mod tests {
         let parsed: DumpId = a.to_string().parse().expect("round-trip");
         assert_eq!(parsed, a);
     }
-}
 
-#[cfg(all(test, shuttle))]
-mod shuttle_tests {
-    use super::*;
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
 
-    const CALLERS: usize = 4;
+        const CALLERS: usize = 4;
 
-    crate::shuttle_test! {
-        default;
-        // Multiple threads race a shared, debounced trigger; exactly one
-        // must dispatch a real request, the rest must coalesce into it.
-        fn shuttle_debounce_gate() {
-            let (trigger, mut rx) = channel();
-            let trigger = trigger.with_debounce(Duration::from_secs(60));
+        crate::shuttle_test! {
+            default;
+            // Multiple threads race a shared, debounced trigger; exactly one
+            // must dispatch a real request, the rest must coalesce into it.
+            fn shuttle_debounce_gate() {
+                let (trigger, mut rx) = channel();
+                let trigger = trigger.with_debounce(Duration::from_secs(60));
 
-            let handles: Vec<_> = (0..CALLERS)
-                .map(|_| {
-                    let trigger = trigger.clone();
-                    crate::primitives::thread::spawn(move || {
-                        // Dropped without awaiting: per `DumpRun`'s `Drop`
-                        // impl, dispatch (or no-op, if coalesced) happens
-                        // right here.
-                        drop(trigger.dump_current_data());
+                let handles: Vec<_> = (0..CALLERS)
+                    .map(|_| {
+                        let trigger = trigger.clone();
+                        crate::primitives::thread::spawn(move || {
+                            // Dropped without awaiting: per `DumpRun`'s `Drop`
+                            // impl, dispatch (or no-op, if coalesced) happens
+                            // right here.
+                            drop(trigger.dump_current_data());
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            for h in handles {
-                h.join().unwrap();
-            }
+                for h in handles {
+                    h.join().unwrap();
+                }
 
-            let mut dispatched = 0;
-            while rx.rx.try_recv().is_ok() {
-                dispatched += 1;
+                let mut dispatched = 0;
+                while rx.rx.try_recv().is_ok() {
+                    dispatched += 1;
+                }
+                assert_eq!(
+                    dispatched, 1,
+                    "exactly one trigger within the debounce window must dispatch a real request"
+                );
             }
-            assert_eq!(
-                dispatched, 1,
-                "exactly one trigger within the debounce window must dispatch a real request"
-            );
         }
     }
 }
