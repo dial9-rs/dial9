@@ -11,6 +11,9 @@
 //!
 //! The test relies on this naming and nesting for observation and cannot detect
 //! an incorrectly written fixture.
+//!
+//! Functions deliberately mix inline and non-inline frames to exercise both
+//! forms of symbolization.
 
 use clap::Parser;
 #[cfg(target_os = "linux")]
@@ -192,7 +195,7 @@ async fn dial9_fixture_mixed_cycle(cycle: u64) {
     .await;
 }
 
-#[inline(never)]
+#[inline(always)]
 async fn dial9_fixture_mixed_inner(parent_span_id: dial9_utils::span::SpanId) {
     let inner_span = dial9_span!(SPAN_INNER).with_parent_id(parent_span_id);
     async {
@@ -203,7 +206,7 @@ async fn dial9_fixture_mixed_inner(parent_span_id: dial9_utils::span::SpanId) {
     .await;
 }
 
-#[inline(never)]
+#[inline(always)]
 fn dial9_fixture_cpu_outer_weight_1() {
     busy_for(CPU_QUANTUM);
     black_box(1_u64);
@@ -215,7 +218,7 @@ fn dial9_fixture_cpu_inner_weight_3() {
     black_box(3_u64);
 }
 
-#[inline(never)]
+#[inline(always)]
 async fn dial9_fixture_wait_outer_weight_1() {
     tokio::time::sleep(WAIT_QUANTUM).await;
     // Give task-dump capture a distinct poll boundary before the inner wait.
@@ -229,6 +232,7 @@ async fn dial9_fixture_wait_inner_weight_2() {
     black_box(2_u64);
 }
 
+// Prevent inlining so sampled work retains a stable physical frame beneath the weighted caller.
 #[inline(never)]
 fn busy_for(duration: Duration) {
     let start = Instant::now();
