@@ -574,10 +574,7 @@ export function drawQueueCanvas(
     ctx.font = "10px monospace";
     ctx.textAlign = "right";
     ctx.fillText(
-      `spawn peak:${formatSpawnRate(
-        (spawnHistogram.maxSpawns * 1_000_000_000) /
-          spawnHistogram.binDurationNs,
-      )}`,
+      `spawn peak:${formatSpawnRate(spawnHistogram.peakSpawnsPerSecond)}`,
       Math.max(0, drawW - 4),
       Math.min(baselineY - 1, chartTop + 18),
     );

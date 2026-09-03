@@ -331,7 +331,7 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     // (q 7 / 194 tasks) - and the trace peak rides alongside it.
     expect(rec.fillTexts).toContain("global queue: 7 at view end \u00b7 peak 7");
     expect(rec.fillTexts).toContain("alive tasks: 194 at view end \u00b7 peak 194");
-    expect(rec.fillTexts.some((text) => text.startsWith("spawn peak:"))).toBe(true);
+    expect(rec.fillTexts).toContain("spawn peak:3 tasks/s");
   });
 
   it("a folded runtime-metrics lane keeps its numbers and drops the chart", () => {
