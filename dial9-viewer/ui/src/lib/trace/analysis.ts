@@ -24,6 +24,7 @@ export {
   computeRuntimeGroups,
   computeSchedulingDelays,
   computeSpanLayout,
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US as CORE_SPAWN_DELAY_THRESHOLD_US,
   filterPointsOfInterest,
   flattenFlamegraph,
   getTraceTimeRange,

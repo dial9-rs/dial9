@@ -8,7 +8,14 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parseTraceBuffer } from "./load.js";
-import { buildWorkerSpans, filterPointsOfInterest, computeSchedulingDelays, attachCpuSamples } from "./index.js";
+import {
+  CORE_SPAWN_DELAY_THRESHOLD_US,
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+  attachCpuSamples,
+  buildWorkerSpans,
+  computeSchedulingDelays,
+  filterPointsOfInterest,
+} from "./index.js";
 import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
 
@@ -21,11 +28,13 @@ let fatSched: any[];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let colSched: any[];
 let taskInstrumented: Map<number, boolean>;
+let taskSpawnTimes: Map<number, number>;
 
 beforeAll(async () => {
   const b = readFileSync(fileURLToPath(new URL("../../../public/demo-trace.bin", import.meta.url)));
   const raw = b[0] === 0x1f && b[1] === 0x8b ? new Uint8Array(gunzipSync(b)) : new Uint8Array(b);
   const trace = await parseTraceBuffer(raw);
+  taskSpawnTimes = trace.taskSpawnTimes;
   workerIds = deriveWorkerIds(trace);
   const r = buildWorkerSpans(trace.events, workerIds, trace.maxTs ?? 0, trace.blockInPlaceGaps);
   ws = r.workerSpans;
@@ -50,15 +59,57 @@ const key = (p: any) => `${p.time}|${p.worker}|${p.type}|${p.value}|${p.span?.st
 const bag = (arr: any[]) => arr.map(key).sort();
 
 describe("store.pointsOfInterest matches frozen filterPointsOfInterest", () => {
-  for (const type of ["long-poll", "sched", "cpu-sampled", "wake-delay", "uninstrumented"] as const) {
+  for (const type of ["long-poll", "sched", "cpu-sampled", "wake-delay", "uninstrumented", "spawn-delay"] as const) {
     it(`${type}: same POIs (time/worker/value/span)`, () => {
-      const opts = { hasSchedWait: true, sortByWorst: true, taskInstrumented };
+      const opts = { hasSchedWait: true, sortByWorst: true, taskInstrumented, taskSpawnTimes };
       const fat = filterPointsOfInterest(type, ws, workerIds, fatSched, opts);
       const col = store.pointsOfInterest(type, workerIds, colSched, opts);
       expect(col.length, `${type} count`).toBe(fat.length);
       expect(bag(col)).toEqual(bag(fat));
     });
   }
+
+  // Separate implementations, so a configured threshold must move them
+  // identically - not just the default one above.
+  for (const thresholdUs of [0, 250, 5_000, 10_000_000]) {
+    it(`spawn-delay: same POIs at threshold ${thresholdUs}us`, () => {
+      const opts = {
+        hasSchedWait: true,
+        sortByWorst: true,
+        taskInstrumented,
+        taskSpawnTimes,
+        spawnDelayThresholdUs: thresholdUs,
+      };
+      const fat = filterPointsOfInterest("spawn-delay", ws, workerIds, fatSched, opts);
+      const col = store.pointsOfInterest("spawn-delay", workerIds, colSched, opts);
+      expect(col.length, `count at ${thresholdUs}us`).toBe(fat.length);
+      expect(bag(col)).toEqual(bag(fat));
+    });
+  }
+
+  it("spawn-delay: a higher threshold never admits more points", () => {
+    const at = (spawnDelayThresholdUs: number): number =>
+      store.pointsOfInterest("spawn-delay", workerIds, colSched, {
+        hasSchedWait: true, sortByWorst: true, taskInstrumented, taskSpawnTimes,
+        spawnDelayThresholdUs,
+      }).length;
+    const counts = [0, 100, 1_000, 100_000].map(at);
+    for (let i = 1; i < counts.length; i++) {
+      expect(counts[i]!, `threshold step ${i}`).toBeLessThanOrEqual(counts[i - 1]!);
+    }
+    // Guards against a vacuous suite if the demo trace loses its spawn data.
+    expect(counts[0]).toBeGreaterThan(0);
+  });
+
+  it("spawn-delay: emits nothing without the spawn map", () => {
+    const opts = { hasSchedWait: true, sortByWorst: true, taskInstrumented };
+    expect(store.pointsOfInterest("spawn-delay", workerIds, colSched, opts)).toEqual([]);
+    expect(filterPointsOfInterest("spawn-delay", ws, workerIds, fatSched, opts)).toEqual([]);
+  });
+
+  it("spawn-delay: the frozen core's default threshold matches the TS one", () => {
+    expect(CORE_SPAWN_DELAY_THRESHOLD_US).toBe(DEFAULT_SPAWN_DELAY_THRESHOLD_US);
+  });
 });
 
 // The cap exists because "uninstrumented" matches essentially every poll on a

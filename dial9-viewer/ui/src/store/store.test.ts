@@ -54,7 +54,7 @@ function initialViewerState(): StoreState {
       hoveredWakerTaskId: null,
       spawnedTasksRange: null,
     },
-    poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
+    poi: { filter: "sched", spawnThresholdUs: 100, sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
     uiPrefs: {
       panelCollapsed: { spans: false, events: false, cpu: false, queue: false },
       trackOrder: [],

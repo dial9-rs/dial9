@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ReadonlyState } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
+import { DEFAULT_SPAWN_DELAY_THRESHOLD_US } from "./poi.js";
 import {
   hydrateViewerStore,
   projectViewerState,
@@ -57,6 +58,7 @@ function mkState(over: {
     },
     poi: {
       filter: "sched",
+      spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
       sortKey: "duration",
       sortDir: "desc",
       index: -1,
@@ -114,6 +116,29 @@ describe("viewer URL state: issues-rail (poi)", () => {
     expect(params.get("issue")).toBeNull();
     expect(params.get("issue-sort")).toBeNull();
     expect(params.get("issue-index")).toBeNull();
+    expect(params.get("issue-threshold")).toBeNull();
+  });
+
+  it("round-trips a non-default spawn-delay threshold", () => {
+    const { params, out } = roundTrip(
+      mkState({ poi: { filter: "spawn-delay", spawnThresholdUs: 2500 } }),
+    );
+    expect(params.get("issue-threshold")).toBe("2500");
+    expect(out.poiSpawnThresholdUs).toBe(2500);
+  });
+
+  it("carries a zero threshold rather than reading it as absent", () => {
+    const { params, out } = roundTrip(
+      mkState({ poi: { filter: "spawn-delay", spawnThresholdUs: 0 } }),
+    );
+    expect(params.get("issue-threshold")).toBe("0");
+    expect(out.poiSpawnThresholdUs).toBe(0);
+  });
+
+  it("clamps an out-of-range threshold and drops a non-numeric one", () => {
+    expect(readViewerUrlState("?issue-threshold=-500").poiSpawnThresholdUs).toBe(0);
+    expect(readViewerUrlState("?issue-threshold=abc").poiSpawnThresholdUs).toBeUndefined();
+    expect(readViewerUrlState("?issue-threshold=").poiSpawnThresholdUs).toBeUndefined();
   });
 
   it("omits index -1 (no current POI) but still carries a non-default sort", () => {

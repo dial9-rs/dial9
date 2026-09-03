@@ -325,6 +325,28 @@ body {
     border-radius: 3px;
 }
 .d9-rail-filter:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+/* The spawn-delay severity floor. Rendered beside the filter only while that
+   detector is active, so it must not compete with the dropdown for width. */
+.d9-rail-threshold-label {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 0.7em;
+    color: var(--d9-fg-muted);
+    white-space: nowrap;
+}
+.d9-rail-threshold {
+    width: 6ch;
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 1em;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+}
+.d9-rail-threshold:disabled { opacity: 0.5; cursor: not-allowed; }
+.d9-rail-threshold:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 .d9-rail-hint { font-size: 0.7em; color: var(--d9-fg-muted); white-space: nowrap; }
 .d9-rail-hint kbd {
     background: #26265a;

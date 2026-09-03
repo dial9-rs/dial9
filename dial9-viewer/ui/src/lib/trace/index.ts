@@ -195,6 +195,7 @@ export {
   computeRuntimeGroups,
   computeSchedulingDelays,
   computeSpanLayout,
+  CORE_SPAWN_DELAY_THRESHOLD_US,
   filterPointsOfInterest,
   flattenFlamegraph,
   getTraceTimeRange,
@@ -234,7 +235,13 @@ export type {
 
 // The lane union: a lane is fat objects on small traces and a columnar view on
 // big ones, so consumers take LaneSpans and narrow with isColumnarLane.
-export { fatLanes, isColumnarLane, laneSource } from "./columnar-worker-spans.js";
+export {
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+  fatLanes,
+  isColumnarLane,
+  laneSource,
+  spawnDelayThresholdNs,
+} from "./columnar-worker-spans.js";
 export type {
   LaneSource,
   LaneSpans,

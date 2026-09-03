@@ -22,11 +22,28 @@ import type {
   WorkerSpansResult,
 } from "../../types/trace.js";
 
+/** Severity floor for "spawn-delay", in microseconds. The frozen core keeps its
+ *  own copy (it must stay self-contained); columnar-pois.test.ts pins them. */
+export const DEFAULT_SPAWN_DELAY_THRESHOLD_US = 100;
+
+/** Zero is honoured; anything non-finite or negative falls back to the default
+ *  rather than admitting every task. */
+export function spawnDelayThresholdNs(thresholdUs?: number): number {
+  const us =
+    typeof thresholdUs === "number" && Number.isFinite(thresholdUs) && thresholdUs >= 0
+      ? thresholdUs
+      : DEFAULT_SPAWN_DELAY_THRESHOLD_US;
+  return us * 1000;
+}
+
 /** Options for pointsOfInterest, mirroring filterPointsOfInterest's opts. */
 export interface PoiOpts {
   hasSchedWait?: boolean;
   sortByWorst?: boolean;
   taskInstrumented?: Map<number, boolean>;
+  /** Required for the "spawn-delay" filter. */
+  taskSpawnTimes?: Map<number, number>;
+  spawnDelayThresholdUs?: number;
   /**
    * Keep at most this many points, under the ACTIVE order - the worst `limit`
    * when `sortByWorst`, else the earliest. Detectors like "uninstrumented" match
@@ -599,6 +616,36 @@ export class ColumnarWorkerSpans {
           if (tid && ti.get(tid) === false) {
             add({ time: c.start[i]!, worker: w, type: "uninstrumented", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
           }
+        }
+      }
+    }
+
+    if (filterType === "spawn-delay" && opts.taskSpawnTimes) {
+      const spawns = opts.taskSpawnTimes;
+      const thresholdNs = spawnDelayThresholdNs(opts.spawnDelayThresholdUs);
+      // Each CSR task slice is start-sorted, so slot 0 is the task's first poll
+      // across every worker - no reduction pass, no PollView materialized.
+      //
+      // `openEnded` is deliberately NOT filtered (unlike total/longest in
+      // taskAggregates): a PollStart proves the START this measures from, and
+      // only `end` is the unproven bound.
+      const csr = this.pollsByTaskCSR();
+      for (const [taskId, slot] of csr.slotOf) {
+        const lo = csr.off[slot]!;
+        if (csr.off[slot + 1]! <= lo) continue;
+        // Unknown spawn: task tracking off, or it fell outside a windowed load.
+        const spawnTs = spawns.get(taskId);
+        if (spawnTs === undefined) continue;
+        const start = csr.start[lo]!;
+        const delay = start - spawnTs;
+        if (delay > thresholdNs) {
+          add({
+            time: spawnTs,
+            worker: csr.worker[lo]!,
+            type: "spawn-delay",
+            value: delay / 1000,
+            span: { start, end: csr.end[lo]!, taskId },
+          });
         }
       }
     }

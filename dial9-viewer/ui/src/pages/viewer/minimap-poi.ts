@@ -10,9 +10,18 @@
 // "cpu-sampled" is deliberately excluded: it needs attachCpuSamples, which
 // MUTATES the shared poll objects the lanes/overlay caches also hold - the
 // minimap must not reach into that shared derivation. The remaining detectors
-// (long-poll, sched, wake-delay, uninstrumented) read the spans read-only.
+// (long-poll, sched, wake-delay, uninstrumented, spawn-delay) read the spans
+// read-only.
+//
+// "spawn-delay" runs at its DEFAULT threshold, not the rail's live one: these
+// ticks are cached on trace identity, and rebuilding them on every threshold
+// edit would trade a stable overview for a flickering one.
 
-import { EVENT_TYPES, filterPointsOfInterest } from "../../lib/trace/index.js";
+import {
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+  EVENT_TYPES,
+  filterPointsOfInterest,
+} from "../../lib/trace/index.js";
 import { lifecycleWorkerIds, sharedDetectorInputs } from "../../lib/trace/derived.js";
 import type {
   ParsedTrace,
@@ -58,6 +67,11 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   if (trace.taskInstrumented.size > 0) {
     types.push("uninstrumented");
   }
+  // `hasTaskTracking` is NOT the signal - the parser hardcodes it true - so the
+  // spawn map's own size is what says whether task tracking was on.
+  if (trace.taskSpawnTimes.size > 0) {
+    types.push("spawn-delay");
+  }
 
   const seen = new Set<string>();
   const out: MinimapPoi[] = [];
@@ -66,6 +80,8 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
       hasSchedWait: trace.hasSchedWait,
       sortByWorst: true,
       taskInstrumented: trace.taskInstrumented,
+      taskSpawnTimes: trace.taskSpawnTimes,
+      spawnDelayThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
     };
     const pois: PointOfInterest[] = lanes.columnar
       ? lanes.store.pointsOfInterest(type, workerIds, schedDelays, opts)
