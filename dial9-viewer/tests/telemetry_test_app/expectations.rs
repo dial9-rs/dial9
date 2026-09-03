@@ -1,3 +1,15 @@
+//! Reads the fixture's declared model from trace events.
+//!
+//! Flow:
+//! 1. `ExpectationEvent` and `MarkerEvent` deserialize fixture events.
+//! 2. Naming parsers extract domains, identities, and weights.
+//! 3. `ModelBuilder` validates and accumulates relationships.
+//! 4. `ExpectedModel` exposes symbols, stack/span edges, span associations,
+//!    and the measurement window to the observation checks.
+//!
+//! This module reads declarations only; it never derives expectations from
+//! CPU samples, task dumps, or spans.
+
 use anyhow::{Context as _, Result, bail, ensure};
 use dial9_trace_format::decoder::Decoder;
 use serde::{Deserialize, Deserializer, de};
