@@ -93,6 +93,7 @@ function baseInput(over: Partial<LanesRenderInput>): LanesRenderInput {
     workerIds: [0],
     workerSpans: { 0: emptyLane() },
     runtimeMetrics: EMPTY_RUNTIME_METRICS,
+    runtimeTaskSpawns: new Map(),
     laneIdentity: new Map(),
     runtimeAccents: new Map(),
     workerQueueSamples: {},
@@ -315,7 +316,11 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
   it("draws a runtime-metrics lane with its runtime name + current/peak values", () => {
     const rows = metricsRows(false);
     const rec = recordingCtx();
-    renderLanes(rec.ctx, { ...workersInput([0]), runtimeMetrics: metricsFixture() }, {
+    renderLanes(rec.ctx, {
+      ...workersInput([0]),
+      runtimeMetrics: metricsFixture(),
+      runtimeTaskSpawns: new Map([["main", [100, 101, 500]]]),
+    }, {
       time: layout(0, 1000, 300),
       height: 300,
       rowLayout: rows,
@@ -326,6 +331,7 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     // (q 7 / 194 tasks) - and the trace peak rides alongside it.
     expect(rec.fillTexts).toContain("global queue: 7 at view end \u00b7 peak 7");
     expect(rec.fillTexts).toContain("alive tasks: 194 at view end \u00b7 peak 194");
+    expect(rec.fillTexts.some((text) => text.startsWith("spawn peak:"))).toBe(true);
   });
 
   it("a folded runtime-metrics lane keeps its numbers and drops the chart", () => {
@@ -342,6 +348,22 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     // The title is NOT repeated: one line has no room for both, and the label
     // gutter names the row (labels.test.ts pins that).
     expect(rec.fillTexts).not.toContain("main runtime metrics");
+  });
+
+  it("labels alive tasks unavailable when an old runtime schema omitted them", () => {
+    const metrics = metricsFixture();
+    const main = metrics.byRuntime.get("")!;
+    main.aliveTasksAvailable = false;
+    main.samples = main.samples.map((sample) => ({ ...sample, aliveTasks: null }));
+    const rec = recordingCtx();
+    renderLanes(rec.ctx, { ...workersInput([0]), runtimeMetrics: metrics }, {
+      time: layout(0, 1000, 300),
+      height: 300,
+      rowLayout: metricsRows(false),
+      scrollTop: 0,
+    });
+    expect(rec.fillTexts).toContain("alive tasks: unavailable");
+    expect(rec.fillTexts.some((text) => text.startsWith("alive tasks: 0"))).toBe(false);
   });
 });
 
@@ -372,6 +394,7 @@ function metricsFixture() {
         "",
         {
           samples: [mk(100, 5, 190), mk(500, 7, 194)],
+          aliveTasksAvailable: true,
           maxAliveTasks: 194,
           maxGlobalQueue: 7,
         },

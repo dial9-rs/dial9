@@ -662,6 +662,10 @@
    * @returns {Array<{t: number, count: number}>} sorted by t
    */
   function sumActiveTasksByCycle(runtimeMetrics) {
+    // A single missing runtime contribution makes every process-wide sum
+    // incomplete. Return no sampled series so callers can use lifecycle data
+    // instead of rendering a plausible but false zero/partial total.
+    if (runtimeMetrics.some((s) => s.aliveTasks == null)) return [];
     const byTs = new Map();
     for (const s of runtimeMetrics) {
       byTs.set(s.t, (byTs.get(s.t) ?? 0) + s.aliveTasks);
@@ -713,7 +717,8 @@
   function activeTaskSeries(trace, taskTimeline) {
     const runtimeMetrics = trace.runtimeMetrics;
     if (runtimeMetrics && runtimeMetrics.length > 0) {
-      return sumActiveTasksByCycle(runtimeMetrics);
+      const sampled = sumActiveTasksByCycle(runtimeMetrics);
+      if (sampled.length > 0) return sampled;
     }
     const legacySamples = trace.legacyActiveTaskSamples;
     if (legacySamples && legacySamples.length > 0) {

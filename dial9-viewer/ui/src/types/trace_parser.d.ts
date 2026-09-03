@@ -188,8 +188,11 @@ declare module "*/trace_parser.js" {
     runtimeName: string;
     /** Tasks pending in this runtime's global (injection) queue. */
     globalQueue: number;
-    /** Tasks alive (spawned, not yet completed) in this runtime. */
-    aliveTasks: number;
+    /**
+     * Tasks alive (spawned, not yet completed) in this runtime. Null for old
+     * RuntimeMetricsEvent schemas that predate this field.
+     */
+    aliveTasks: number | null;
   }
 
   /** Process-wide active-task sample decoded from the superseded QueueSampleEvent. */

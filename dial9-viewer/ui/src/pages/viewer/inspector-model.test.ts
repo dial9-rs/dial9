@@ -285,6 +285,7 @@ describe("buildSpawnedTasksView", () => {
     const v = buildSpawnedTasksView(result, "1.0ms")!;
     expect(v.total).toBe(7);
     expect(v.rangeLabel).toBe("1.0ms");
+    expect(v.runtimeName).toBeNull();
     expect(v.groups[0]!.head).toHaveLength(5);
     expect(v.groups[0]!.head[0]!.hex).toBe("0x1");
     expect(v.groups[0]!.moreCount).toBe(2);

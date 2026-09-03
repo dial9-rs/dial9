@@ -568,6 +568,7 @@ describe("viewer deep-link reconstruction", () => {
       sidebarRange: null,
       hoveredWakerTaskId: null,
       spawnedTasksRange: null,
+      spawnedTasksRuntime: null,
     });
     expect(state.poi).toEqual({
       filter: "long-poll",
