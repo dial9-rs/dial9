@@ -43,6 +43,21 @@ const WAIT_INNER: &str = "dial9_fixture_wait_inner_weight_2";
 const SPAN_CYCLE: &str = "dial9_fixture_span_cycle";
 const SPAN_INNER: &str = "dial9_fixture_span_inner";
 
+// Expand work into each weighted function so no helper frame obscures its symbol.
+// An `inline(always)` helper may also work, but expansion avoids relying on that hint.
+macro_rules! busy_for {
+    ($duration:expr) => {{
+        let start = Instant::now();
+        let mut value = 0_u64;
+        while start.elapsed() < $duration {
+            for i in 0..1_000 {
+                value = value.wrapping_add(black_box(i));
+            }
+            black_box(value);
+        }
+    }};
+}
+
 #[derive(Debug, Parser)]
 #[command(about = "Generate a self-describing dial9 integration-test trace")]
 struct Args {
@@ -208,13 +223,13 @@ async fn dial9_fixture_mixed_inner(parent_span_id: dial9_utils::span::SpanId) {
 
 #[inline(always)]
 fn dial9_fixture_cpu_outer_weight_1() {
-    busy_for(CPU_QUANTUM);
+    busy_for!(CPU_QUANTUM);
     black_box(1_u64);
 }
 
 #[inline(never)]
 fn dial9_fixture_cpu_inner_weight_3() {
-    busy_for(CPU_QUANTUM * 3);
+    busy_for!(CPU_QUANTUM * 3);
     black_box(3_u64);
 }
 
@@ -230,17 +245,4 @@ async fn dial9_fixture_wait_outer_weight_1() {
 async fn dial9_fixture_wait_inner_weight_2() {
     tokio::time::sleep(WAIT_QUANTUM * 2).await;
     black_box(2_u64);
-}
-
-// Prevent inlining so sampled work retains a stable physical frame beneath the weighted caller.
-#[inline(never)]
-fn busy_for(duration: Duration) {
-    let start = Instant::now();
-    let mut value = 0_u64;
-    while start.elapsed() < duration {
-        for i in 0..1_000 {
-            value = value.wrapping_add(black_box(i));
-        }
-        black_box(value);
-    }
 }
