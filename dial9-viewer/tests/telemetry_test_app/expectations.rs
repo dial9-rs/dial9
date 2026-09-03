@@ -41,7 +41,7 @@ impl<'de> Deserialize<'de> for FixtureFeature {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct FunctionSymbol(String);
 
 impl FunctionSymbol {
@@ -54,13 +54,7 @@ impl FunctionSymbol {
     }
 }
 
-impl<'de> Deserialize<'de> for FunctionSymbol {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::new)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SpanName(String);
 
 impl SpanName {
@@ -70,12 +64,6 @@ impl SpanName {
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for SpanName {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::new)
     }
 }
 
