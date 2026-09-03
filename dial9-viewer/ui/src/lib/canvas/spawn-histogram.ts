@@ -1,12 +1,16 @@
 /** Target histogram resolution: one time bucket for roughly every 8 CSS px. */
 export const SPAWN_BIN_TARGET_PX = 8;
 
+const ONE_SECOND_NS = 1_000_000_000;
+
 /** Spawn counts in viewport-adaptive, fixed-pixel-width time buckets. */
 export interface SpawnHistogramModel {
   /** Spawn count per bucket, left-to-right across the viewport. */
   counts: readonly number[];
   /** Peak count across the visible buckets, >= 1. */
   maxSpawns: number;
+  /** Peak count in any actual one-second window across visible spawns. */
+  peakSpawnsPerSecond: number;
   /** Width of one bucket in CSS px. */
   binWidthPx: number;
   /** Duration represented by one bucket in trace nanoseconds. */
@@ -83,9 +87,11 @@ export function buildSpawnHistogram(
   const counts = new Array<number>(geom.numBins).fill(0);
   let maxSpawns = 0;
   const from = lowerBound(spawnTimes, viewStart);
-  for (let i = from; i < spawnTimes.length; i++) {
+  const to = upperBound(spawnTimes, viewEnd);
+  let peakSpawnsPerSecond = 0;
+  let windowStart = from;
+  for (let i = from; i < to; i++) {
     const t = spawnTimes[i]!;
-    if (t > viewEnd) break;
     const bin = Math.min(
       geom.numBins - 1,
       Math.floor(((t - viewStart) / (viewEnd - viewStart)) * geom.numBins),
@@ -93,11 +99,17 @@ export function buildSpawnHistogram(
     const count = counts[bin]! + 1;
     counts[bin] = count;
     if (count > maxSpawns) maxSpawns = count;
+
+    while (spawnTimes[windowStart]! <= t - ONE_SECOND_NS) {
+      windowStart++;
+    }
+    peakSpawnsPerSecond = Math.max(peakSpawnsPerSecond, i - windowStart + 1);
   }
   if (maxSpawns === 0) return null;
   return {
     counts,
     maxSpawns,
+    peakSpawnsPerSecond,
     binWidthPx: geom.binWidthPx,
     binDurationNs: geom.binDurationNs,
   };

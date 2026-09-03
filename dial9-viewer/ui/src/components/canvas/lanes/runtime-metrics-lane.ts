@@ -223,10 +223,7 @@ export function drawRuntimeMetricsLane(
     ctx.font = "9px monospace";
     ctx.textAlign = "right";
     ctx.fillText(
-      `spawn peak:${formatSpawnRate(
-        (spawnHistogram.maxSpawns * 1_000_000_000) /
-          spawnHistogram.binDurationNs,
-      )}`,
+      `spawn peak:${formatSpawnRate(spawnHistogram.peakSpawnsPerSecond)}`,
       Math.max(0, drawW - 4),
       titleY,
     );

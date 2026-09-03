@@ -169,6 +169,7 @@ describe("buildQueueRenderModel", () => {
     expect(m.spawnHistogram).toEqual({
       counts: [3, 1, 2],
       maxSpawns: 3,
+      peakSpawnsPerSecond: 6,
       binWidthPx: 8,
       binDurationNs: 40,
     });
@@ -195,15 +196,50 @@ describe("buildQueueRenderModel", () => {
     expect(m.spawnHistogram).toEqual({
       counts: [3],
       maxSpawns: 3,
+      peakSpawnsPerSecond: 3,
       binWidthPx: 4,
       binDurationNs: 10,
     });
+  });
+
+  it("computes peak spawn rate with an actual sliding one-second window", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        taskSpawnTimes: [
+          10_000_000,
+          11_000_000,
+          12_000_000,
+          13_000_000,
+          1_010_000_000,
+        ],
+      }),
+      viewStart: 0,
+      viewEnd: 2_000_000_000,
+      drawW: 800,
+    });
+    expect(m.spawnHistogram).toMatchObject({
+      maxSpawns: 4,
+      peakSpawnsPerSecond: 4,
+    });
+  });
+
+  it("excludes spawns exactly one second apart from the same rate window", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        taskSpawnTimes: [0, 999_999_999, 1_000_000_000, 1_999_999_999],
+      }),
+      viewStart: 0,
+      viewEnd: 2_000_000_000,
+      drawW: 100,
+    });
+    expect(m.spawnHistogram?.peakSpawnsPerSecond).toBe(2);
   });
 
   it("resolves exact nonempty spawn bins with boundary-safe selection ranges", () => {
     const histogram = {
       counts: [2, 0, 3],
       maxSpawns: 3,
+      peakSpawnsPerSecond: 5,
       binWidthPx: 8,
       binDurationNs: 40,
     };

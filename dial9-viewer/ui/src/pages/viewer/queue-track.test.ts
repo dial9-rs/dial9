@@ -108,6 +108,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       spawnHistogram: {
         counts: [0, 3, 1],
         maxSpawns: 3,
+        peakSpawnsPerSecond: 4,
         binWidthPx: 10,
         binDurationNs: 1_000_000,
       },
@@ -125,7 +126,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
     expect(texts).toContain("2"); // maxQ label
     expect(texts).toContain("0"); // zero-baseline label
     expect(texts).toContain("tasks:4"); // active-task right-axis label
-    expect(texts).toContain("spawn peak:3000 tasks/s"); // normalized peak rate
+    expect(texts).toContain("spawn peak:4 tasks/s"); // true sliding-window peak
     expect(rec.fillRects.filter((r) => r.style === "rgba(129,199,132,0.16)")).toHaveLength(2);
   });
 
