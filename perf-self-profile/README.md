@@ -22,6 +22,9 @@ let recorder = recorder(writer)
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+To sample only one GPU, select its NVML device index with
+`CudaGpuConfig::builder().device_index(index).build()`.
+
 Each sample includes GPU compute and memory-I/O utilization, used and total
 framebuffer memory, and PCIe throughput when the device supports it. PCIe
 throughput is aggregate device traffic, not traffic attributed to this process.

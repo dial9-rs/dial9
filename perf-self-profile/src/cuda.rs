@@ -97,6 +97,8 @@ pub struct CudaGpuConfig {
     /// Whether to sample aggregate PCIe transfer throughput.
     #[builder(default = true)]
     sample_pcie_throughput: bool,
+    /// NVML device index to sample. By default, all visible devices are sampled.
+    device_index: Option<u32>,
 }
 
 impl Default for CudaGpuConfig {
@@ -115,6 +117,11 @@ impl CudaGpuConfig {
     pub fn sample_pcie_throughput(&self) -> bool {
         self.sample_pcie_throughput
     }
+
+    /// NVML device index to sample, or `None` to sample all visible devices.
+    pub fn device_index(&self) -> Option<u32> {
+        self.device_index
+    }
 }
 
 #[derive(Debug)]
@@ -124,7 +131,7 @@ struct DeviceIdentity {
     name: String,
 }
 
-/// Flush-thread source that samples every NVIDIA GPU visible through NVML.
+/// Flush-thread source that samples the configured NVIDIA GPUs through NVML.
 #[derive(Debug)]
 pub struct CudaGpuSource {
     nvml: Nvml,
@@ -134,7 +141,7 @@ pub struct CudaGpuSource {
 }
 
 impl CudaGpuSource {
-    /// Initialize NVML and discover all currently visible NVIDIA GPUs.
+    /// Initialize NVML and discover the configured NVIDIA GPUs.
     ///
     /// This returns an error if the NVML shared library or driver is absent. No
     /// CUDA context is created, and the CUDA toolkit is not required.
@@ -144,8 +151,12 @@ impl CudaGpuSource {
         if device_count == 0 {
             return Err(CudaGpuStartError::NoDevices);
         }
-        let mut devices = Vec::with_capacity(device_count as usize);
-        for index in 0..device_count {
+        let device_indices = match config.device_index {
+            Some(index) => vec![index],
+            None => (0..device_count).collect(),
+        };
+        let mut devices = Vec::with_capacity(device_indices.len());
+        for index in device_indices {
             let device = nvml.device_by_index(index)?;
             devices.push(DeviceIdentity {
                 index,
@@ -241,6 +252,13 @@ mod tests {
         let config = CudaGpuConfig::default();
         assert_eq!(config.sample_interval(), Duration::from_millis(200));
         assert!(config.sample_pcie_throughput());
+        assert_eq!(config.device_index(), None);
+    }
+
+    #[test]
+    fn configuration_accepts_a_single_device_index() {
+        let config = CudaGpuConfig::builder().device_index(3).build();
+        assert_eq!(config.device_index(), Some(3));
     }
 
     #[test]
