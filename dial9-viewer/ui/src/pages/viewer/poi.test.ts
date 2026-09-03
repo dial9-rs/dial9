@@ -29,8 +29,12 @@ import type {
 } from "../../types/trace.js";
 import type { PoiSlice, ViewportSlice } from "../../types/state.js";
 import {
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   POI_FILTERS,
   RAIL_WINDOW,
+  SPAWN_DELAY_THRESHOLD_MAX_US,
+  SPAWN_DELAY_THRESHOLD_MIN_US,
+  parseSpawnThresholdUs,
   railWindow,
   derivePoiViewModel,
   durationLabel,
@@ -50,6 +54,7 @@ import {
 
 const DEFAULT_POI: PoiSlice = {
   filter: "sched",
+  spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   sortKey: "duration",
   sortDir: "desc",
   index: -1,
@@ -74,7 +79,11 @@ beforeAll(async () => {
 });
 
 /** Independently derive the detector count for one filter. */
-function referenceCount(t: ParsedTrace, filter: PointOfInterestType): number {
+function referenceCount(
+  t: ParsedTrace,
+  filter: PointOfInterestType,
+  spawnDelayThresholdUs: number = DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+): number {
   const set = new Set<number>();
   for (const e of t.events) {
     if (e.eventType === EVENT_TYPES.QueueSample || e.eventType === EVENT_TYPES.WakeEvent) {
@@ -91,6 +100,8 @@ function referenceCount(t: ParsedTrace, filter: PointOfInterestType): number {
     hasSchedWait: t.hasSchedWait,
     sortByWorst: true,
     taskInstrumented: t.taskInstrumented,
+    taskSpawnTimes: t.taskSpawnTimes,
+    spawnDelayThresholdUs,
   }).length;
 }
 
@@ -191,6 +202,75 @@ describe("red-flag counts", () => {
     // sched has matches on the demo trace, so it must appear.
     expect(vm.redFlags.some((r) => r.type === "sched")).toBe(true);
   });
+
+  it("re-counts spawn delays at the rail's threshold, not the default", () => {
+    const at = (spawnThresholdUs: number): number =>
+      derivePoiViewModel(
+        trace,
+        { ...DEFAULT_POI, filter: "spawn-delay", spawnThresholdUs },
+        trace.minTs ?? 0,
+      ).redFlags.find((r) => r.type === "spawn-delay")?.count ?? 0;
+    expect(at(0)).toBeGreaterThan(at(1e6));
+  });
+});
+
+describe("spawn-delay threshold", () => {
+  const vmAt = (spawnThresholdUs: number): ReturnType<typeof derivePoiViewModel> =>
+    derivePoiViewModel(
+      trace,
+      { ...DEFAULT_POI, filter: "spawn-delay", spawnThresholdUs },
+      trace.minTs ?? 0,
+    );
+
+  it("matches the reference detector count at each threshold", () => {
+    for (const t of [0, 250, 5_000]) {
+      expect(vmAt(t).total, `threshold=${t}`).toBe(referenceCount(trace, "spawn-delay", t));
+    }
+  });
+
+  it("narrows monotonically as the threshold rises", () => {
+    const counts = [0, 100, 1_000, 100_000].map((t) => vmAt(t).total);
+    for (let i = 1; i < counts.length; i++) {
+      expect(counts[i]!, `step ${i}`).toBeLessThanOrEqual(counts[i - 1]!);
+    }
+    expect(counts[0]).toBeGreaterThan(0);
+  });
+
+  it("reports every listed delay above the configured floor", () => {
+    const thresholdUs = 250;
+    const offenders = vmAt(thresholdUs).sorted.filter((p) => p.value <= thresholdUs);
+    expect(offenders).toEqual([]);
+  });
+
+  it("surfaces the live threshold and the trace's spawn-data availability", () => {
+    const vm = vmAt(777);
+    expect(vm.spawnThresholdUs).toBe(777);
+    expect(vm.hasSpawnTimes).toBe(true);
+  });
+
+  it("caches per threshold: re-deriving the same value reuses the detector run", () => {
+    const source = poiSourceFor(trace);
+    const first = poisForFilter(source, "spawn-delay", 250);
+    expect(poisForFilter(source, "spawn-delay", 250)).toBe(first);
+    // A different threshold must NOT hand back the previous list.
+    expect(poisForFilter(source, "spawn-delay", 0)).not.toBe(first);
+  });
+});
+
+describe("parseSpawnThresholdUs", () => {
+  it("clamps into the supported range", () => {
+    expect(parseSpawnThresholdUs("250")).toBe(250);
+    expect(parseSpawnThresholdUs("-5")).toBe(SPAWN_DELAY_THRESHOLD_MIN_US);
+    expect(parseSpawnThresholdUs(String(SPAWN_DELAY_THRESHOLD_MAX_US * 10))).toBe(
+      SPAWN_DELAY_THRESHOLD_MAX_US,
+    );
+  });
+
+  it("rejects a blank or non-numeric value instead of reading it as zero", () => {
+    expect(parseSpawnThresholdUs("")).toBeNull();
+    expect(parseSpawnThresholdUs("   ")).toBeNull();
+    expect(parseSpawnThresholdUs("abc")).toBeNull();
+  });
 });
 
 // ── Pure-logic units (no trace needed) ───────────────────────────────────
@@ -279,6 +359,19 @@ describe("poiJump", () => {
     expect(j.viewStart).toBe(Math.max(0, 4e8 - padded * 0.2));
   });
 
+  it("frames the spawn->first-poll window and selects the spawned task", () => {
+    // time is the spawn; span is the first poll it waited for.
+    const p = poi("spawn-delay", 4e8, 0, 1e5, poll(5e8, 5.2e8, 42));
+    const j = poiJump(p, vp);
+    expect(j.selectedTaskId).toBe(42);
+    const padded = Math.max((5.2e8 - 4e8) * 3, 1e6);
+    expect(j.viewStart).toBe(Math.max(0, 4e8 - padded * 0.2));
+    expect(j.viewEnd).toBe(Math.min(1e9, j.viewStart + padded));
+    // The point of the framing: both ends of the gap are on screen.
+    expect(j.viewStart).toBeLessThanOrEqual(4e8);
+    expect(j.viewEnd).toBeGreaterThanOrEqual(5.2e8);
+  });
+
   it("selects no task for a park (sched) POI", () => {
     const p = poi("sched", 1e8, 0, 84e6, park(1e8, 1e8 + 84e6));
     expect(poiJump(p, vp).selectedTaskId).toBeNull();
@@ -290,10 +383,19 @@ describe("value + label formatting", () => {
     expect(valueNs(poi("sched", 0, 0, 84e6, park(0, 1)))).toBe(84e6); // ns
     expect(valueNs(poi("long-poll", 0, 0, 5, poll(0, 1, 0)))).toBe(5e6); // ms->ns
     expect(valueNs(poi("wake-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
+    expect(valueNs(poi("spawn-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
   });
   it("labels worker / time columns in the mock format", () => {
     expect(workerLabel(1)).toBe("W1");
     expect(relTimeLabel(1.72e9, 0)).toBe("+1.72s");
+    expect(relTimeLabel(0, 0)).toBe("+0.00s");
+  });
+
+  it("signs a negative offset properly (a spawn can precede minTs)", () => {
+    expect(relTimeLabel(0, 1.2e7)).toBe("-0.01s");
+    expect(relTimeLabel(0, 5e8)).toBe("-0.50s");
+    // Rounds to zero -> "+0.00s", never the nonsense "+-0.00s"/"-0.00s".
+    expect(relTimeLabel(0, 1.198e6)).toBe("+0.00s");
   });
   it("formats the duration column as a human duration", () => {
     expect(durationLabel(poi("long-poll", 0, 0, 61, poll(0, 1, 0)))).toContain("ms");
