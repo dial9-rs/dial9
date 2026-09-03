@@ -344,9 +344,10 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   }
 
   function commitRange(range: TimeRange | null): void {
-    const cur = state().selection.spawnedTasksRange;
+    const selection = state().selection;
+    const cur = selection.spawnedTasksRange;
     if (range === null) {
-      if (cur !== null || state().selection.spawnedTasksRuntime != null) {
+      if (cur !== null || selection.spawnedTasksRuntime != null) {
         store.update("selection", {
           spawnedTasksRange: null,
           spawnedTasksRuntime: null,
@@ -354,7 +355,15 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
       }
       return;
     }
-    if (cur !== null && cur.startNs === range.startNs && cur.endNs === range.endNs) return;
+    const rangeUnchanged =
+      cur !== null && cur.startNs === range.startNs && cur.endNs === range.endNs;
+    const inspectorSelectionClear =
+      selection.spawnedTasksRuntime == null &&
+      selection.pollDetail == null &&
+      selection.pinnedEvent == null &&
+      selection.taskDump == null &&
+      selection.sidebarRange == null;
+    if (rangeUnchanged && inspectorSelectionClear) return;
     store.update("selection", {
       spawnedTasksRange: range,
       spawnedTasksRuntime: null,

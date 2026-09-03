@@ -214,6 +214,21 @@ describe("createQueueTrack (dispatch through the selection slice)", () => {
     track.dispose();
   });
 
+  it("clears a runtime filter when the process-wide range is unchanged", () => {
+    const { store } = newStore();
+    const track = createQueueTrack(store);
+    const range = { startNs: 100, endNs: 500 };
+    store.update("selection", {
+      spawnedTasksRange: range,
+      spawnedTasksRuntime: "io",
+    });
+
+    track.commitRange(range);
+    expect(store.getState().selection.spawnedTasksRange).toEqual(range);
+    expect(store.getState().selection.spawnedTasksRuntime).toBeNull();
+    track.dispose();
+  });
+
   it("commitRange(null) clears the range", () => {
     const { store } = newStore();
     const track = createQueueTrack(store);
