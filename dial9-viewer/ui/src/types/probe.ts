@@ -29,6 +29,7 @@ import type {
   SymbolFrame,
 } from "../../trace_parser.js";
 import {
+  activeTaskSeries,
   buildWorkerSpans,
   computeRuntimeGroups,
   buildRuntimeFilterData,
@@ -55,6 +56,7 @@ import {
   makeBarCoalescer,
   pixelDownsampleSpans,
   pixelCoverage,
+  sumActiveTasksByCycle,
 } from "../../trace_analysis.js";
 import type {
   WorkerLane,
@@ -263,7 +265,10 @@ export function probeAnalysis(trace: ParsedTrace): void {
 
   const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
   void atResult.taskFirstPoll.get(1);
-  const firstSample = atResult.activeTaskSamples[0];
+  const summedActiveTasks = sumActiveTasksByCycle(trace.runtimeMetrics);
+  const activeTasks = activeTaskSeries(trace, atResult);
+  void summedActiveTasks.length;
+  const firstSample = activeTasks[0];
   if (firstSample !== undefined) void (firstSample.t + firstSample.count);
 
   const schedDelays = computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);

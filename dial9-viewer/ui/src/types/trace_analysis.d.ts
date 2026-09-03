@@ -126,6 +126,11 @@ declare module "*/trace_analysis.js" {
     runtimeMetrics: readonly RuntimeMetricsSample[]
   ): { t: number; global: number }[];
 
+  /** Sum per-runtime alive-task counts into a process-wide timeline. */
+  export function sumActiveTasksByCycle(
+    runtimeMetrics: readonly RuntimeMetricsSample[]
+  ): { t: number; count: number }[];
+
   /**
    * The process-wide global injection-queue timeline, from whichever event
    * generation the trace carries: per-runtime `RuntimeMetricsEvent`s summed per
@@ -136,6 +141,16 @@ declare module "*/trace_analysis.js" {
     trace: Pick<ParsedTrace, "runtimeMetrics">,
     workerSpansResult: Pick<WorkerSpansResult, "queueSamples">
   ): { t: number; global: number }[];
+
+  /**
+   * The process-wide active-task timeline. Prefers sampled RuntimeMetrics,
+   * falls back to transitional QueueSample active-task samples, then to
+   * lifecycle-derived spawn/terminate counts.
+   */
+  export function activeTaskSeries(
+    trace: Pick<ParsedTrace, "runtimeMetrics" | "legacyActiveTaskSamples">,
+    taskTimeline: { activeTaskSamples: { t: number; count: number }[] }
+  ): { t: number; count: number }[];
 
   /**
    * Attach CPU samples to the poll spans they fall within. Mutates poll
