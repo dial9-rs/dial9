@@ -55,6 +55,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::fs::CheckpointGuard;
 use crate::pipeline::ProcessErrorKind;
 
 /// Mint a dump trigger + receiver pair. The builder wires the receiver into
@@ -160,11 +161,9 @@ pub(crate) struct DumpRequest {
     pub(crate) lookback: Lookback,
     pub(crate) lookforward: Duration,
     pub(crate) metadata: Vec<(String, String)>,
-    /// Ring snapshot protected by the flush-thread checkpoint until the
-    /// worker takes it through the pipeline. `None` for ordinary time-range
-    /// requests; `Some` also owns the sole checkpoint reservation when the
-    /// snapshot contains no segments.
-    pub(crate) checkpoint_segments: Option<Vec<u32>>,
+    /// Exact ring snapshot and its eviction-protection lease. `None` for
+    /// ordinary time-range requests.
+    pub(crate) checkpoint: Option<CheckpointGuard>,
     pub(crate) receipt_tx: oneshot::Sender<Result<DumpReceipt, DumpError>>,
 }
 
@@ -352,7 +351,7 @@ impl DumpTrigger {
                 lookback,
                 lookforward,
                 metadata: Vec::new(),
-                checkpoint_segments: None,
+                checkpoint: None,
                 receipt_tx,
             }),
             tx: &self.tx,
@@ -397,18 +396,11 @@ impl CheckpointDump {
         }
     }
 
-    pub(crate) fn dispatch(mut self, checkpoint_segments: Vec<u32>) -> Result<(), Vec<u32>> {
-        self.request.checkpoint_segments = Some(checkpoint_segments);
+    pub(crate) fn dispatch(mut self, checkpoint: CheckpointGuard) {
+        self.request.checkpoint = Some(checkpoint);
         if let Err(error) = self.worker_tx.send(self.request) {
-            let checkpoint_segments = error
-                .0
-                .checkpoint_segments
-                .clone()
-                .expect("checkpoint dispatch marks its reservation");
             let _ = error.0.receipt_tx.send(Err(DumpError::WorkerStopped));
-            return Err(checkpoint_segments);
         }
-        Ok(())
     }
 
     pub(crate) fn fail(self, error: std::io::Error) {

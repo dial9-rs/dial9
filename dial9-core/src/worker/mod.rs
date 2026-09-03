@@ -15,7 +15,7 @@ pub(crate) mod pipeline_metrics;
 pub mod processors;
 
 use crate::dump::{DumpError, DumpReceipt, DumpRequest, Lookback};
-use crate::fs::{EpochWindow, Fs, RemoveReason, TakenFiles, TakenSegment};
+use crate::fs::{CheckpointGuard, EpochWindow, Fs, RemoveReason, TakenFiles, TakenSegment};
 use crate::pipeline::{ProcessErrorKind, SegmentData, SegmentProcessor};
 use crate::rate_limit::rate_limited;
 use crate::sealed::{self, SegmentRef};
@@ -223,11 +223,10 @@ struct ActiveDump {
     /// registered until this elapses.
     deadline: Option<tokio::time::Instant>,
     metadata: Vec<(String, String)>,
-    /// Snapshot protected by a flush-thread checkpoint. Entries are released
-    /// as the worker finishes them; leftovers are released when the dump
-    /// resolves. `Some`, including an empty snapshot, owns the sole active
-    /// checkpoint reservation.
-    checkpoint_segments: Option<Vec<u32>>,
+    /// Exact flush-thread snapshot. Per-segment guards release protection as
+    /// processing finishes; dropping this guard releases any leftovers and
+    /// reopens the checkpoint gate.
+    checkpoint: Option<CheckpointGuard>,
     receipt_tx: Option<tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>>,
     segments_processed: usize,
     first_epoch: Option<u64>,
@@ -275,7 +274,7 @@ impl ActiveDump {
             window,
             deadline,
             metadata: req.metadata,
-            checkpoint_segments: req.checkpoint_segments,
+            checkpoint: req.checkpoint,
             receipt_tx: Some(req.receipt_tx),
             segments_processed: 0,
             first_epoch: None,
@@ -294,10 +293,14 @@ impl ActiveDump {
     /// authoritative even when coarse wall-clock timestamps straddle the
     /// boundary; ordinary and standalone dumps continue to match by window.
     fn matches(&self, index: u32, start_secs: u64, seal_secs: u64) -> bool {
-        match &self.checkpoint_segments {
+        match self.checkpoint_segments() {
             Some(indices) => indices.contains(&index),
             None => self.window.overlaps(start_secs, seal_secs),
         }
+    }
+
+    fn checkpoint_segments(&self) -> Option<&HashSet<u32>> {
+        self.checkpoint.as_ref().map(CheckpointGuard::segments)
     }
 
     /// Actual covered span: the captured segments' epoch extent, or the
@@ -503,10 +506,6 @@ impl WorkerLoop {
                 // Requests that never registered fail explicitly.
                 rx.rx.close();
                 while let Ok(req) = rx.rx.try_recv() {
-                    if let Some(indices) = &req.checkpoint_segments {
-                        self.fs.release_checkpoint_segments(indices);
-                        self.fs.finish_checkpoint();
-                    }
                     let _ = req.receipt_tx.send(Err(DumpError::WorkerStopped));
                 }
                 tracing::debug!(target: "dial9_worker", "Exiting triggered run loop");
@@ -544,16 +543,23 @@ impl WorkerLoop {
             }
             let windows: Vec<EpochWindow> = dumps
                 .iter()
-                .filter(|dump| dump.checkpoint_segments.is_none())
+                .filter(|dump| dump.checkpoint.is_none())
                 .map(|dump| dump.window)
                 .collect();
-            let checkpoint_segments: HashSet<u32> = dumps
+            let no_checkpoint_segments = HashSet::new();
+            let checkpoint_segments = dumps
                 .iter()
-                .filter_map(|dump| dump.checkpoint_segments.as_ref())
-                .flatten()
-                .copied()
-                .collect();
-            let mut taken = self.fs.take_files_matching(&windows, &checkpoint_segments);
+                .find_map(ActiveDump::checkpoint_segments)
+                .unwrap_or(&no_checkpoint_segments);
+            debug_assert!(
+                dumps
+                    .iter()
+                    .filter(|dump| dump.checkpoint.is_some())
+                    .count()
+                    <= 1,
+                "the checkpoint gate permits at most one active snapshot"
+            );
+            let mut taken = self.fs.take_files_matching(&windows, checkpoint_segments);
             // Prune cache entries for files no longer dispensed (disk
             // dispenses every unclaimed file per pass, so absence means the
             // writer evicted it).
@@ -620,10 +626,6 @@ impl WorkerLoop {
                 }
             }
         }
-        if let Some(indices) = &dump.checkpoint_segments {
-            self.fs.release_checkpoint_segments(indices);
-            self.fs.finish_checkpoint();
-        }
         let (tx, result) = dump.into_result(manifest_key);
         // The caller may have dropped the handle; that does not cancel.
         let _ = tx.send(result);
@@ -685,7 +687,9 @@ impl WorkerLoop {
             // re-reading its file.
             if !dumps.is_empty()
                 && let Some(&(start, seal)) = self.epoch_cache.get(&taken.seg_ref.index())
-                && !dumps.iter().any(|d| d.window.overlaps(start, seal))
+                && !dumps
+                    .iter()
+                    .any(|d| d.matches(taken.seg_ref.index(), start, seal))
             {
                 self.fs.release_claim(&taken.seg_ref);
                 continue;

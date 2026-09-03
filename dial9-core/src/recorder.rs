@@ -565,17 +565,12 @@ mod tests {
     }
 
     fn sealed_segment(dir: &Path) -> PathBuf {
-        std::fs::read_dir(dir)
-            .expect("trace dir readable")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| {
-                let name = p.file_name().unwrap().to_string_lossy();
-                name.ends_with(".bin") && !name.ends_with(".active")
-            })
+        sealed_segments(dir)
+            .into_iter()
+            .next()
             .expect("a sealed .bin segment")
     }
 
-    #[cfg(feature = "pipeline")]
     fn sealed_segments(dir: &Path) -> Vec<PathBuf> {
         let mut paths: Vec<_> = std::fs::read_dir(dir)
             .expect("trace dir readable")
@@ -596,6 +591,17 @@ mod tests {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .find(|p| p.to_string_lossy().ends_with(".bin.active"))
             .expect("an active .bin segment")
+    }
+
+    #[cfg(feature = "pipeline")]
+    fn checkpoint_disk_writer(dir: &Path) -> DiskBuffer {
+        DiskBuffer::builder()
+            .base_path(dir)
+            .max_file_size(1024 * 1024)
+            .max_total_size(8 * 1024 * 1024)
+            .rotation_period(Duration::MAX)
+            .build()
+            .expect("writer")
     }
 
     fn decoded_test_values(bytes: &[u8]) -> Vec<u64> {
@@ -681,13 +687,7 @@ mod tests {
     #[tokio::test]
     async fn dump_current_data_seals_and_continues_recording() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskBuffer::builder()
-            .base_path(dir.path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(8 * 1024 * 1024)
-            .rotation_period(Duration::MAX)
-            .build()
-            .expect("writer");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
         let handle = recorder.handle().clone();
         let trigger = handle.dump_trigger().expect("configured dump trigger");
@@ -865,13 +865,7 @@ mod tests {
     #[tokio::test]
     async fn stop_recording_takes_final_source_sample_before_checkpoint() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskBuffer::builder()
-            .base_path(dir.path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(8 * 1024 * 1024)
-            .rotation_period(Duration::MAX)
-            .build()
-            .expect("writer");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer)
             .source(OnceSource {
                 emitted: false,
@@ -925,13 +919,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskBuffer::builder()
-            .base_path(dir.path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(8 * 1024 * 1024)
-            .rotation_period(Duration::MAX)
-            .build()
-            .expect("writer");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
         let handle = recorder.handle().clone();
         let trigger = handle.dump_trigger().expect("configured dump trigger");
@@ -1001,13 +989,7 @@ mod tests {
 
         let flushes = StdArc::new(AtomicUsize::new(0));
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskBuffer::builder()
-            .base_path(dir.path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(8 * 1024 * 1024)
-            .rotation_period(Duration::MAX)
-            .build()
-            .expect("writer");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer)
             .source(CountingSource(StdArc::clone(&flushes)))
             .paused()
@@ -1099,13 +1081,7 @@ mod tests {
     #[tokio::test]
     async fn dump_current_data_returns_checkpoint_flush_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut writer = DiskBuffer::builder()
-            .base_path(dir.path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(8 * 1024 * 1024)
-            .rotation_period(Duration::MAX)
-            .build()
-            .expect("writer");
+        let mut writer = checkpoint_disk_writer(dir.path());
         writer
             .fail_after_flushes_for_test(0)
             .expect("install failing writer");
@@ -1135,13 +1111,7 @@ mod tests {
     #[tokio::test]
     async fn dump_current_data_reports_missing_active_and_recovers_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskBuffer::builder()
-            .base_path(dir.path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(8 * 1024 * 1024)
-            .rotation_period(Duration::MAX)
-            .build()
-            .expect("writer");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
         let handle = recorder.handle().clone();
         let trigger = handle.dump_trigger().expect("configured dump trigger");

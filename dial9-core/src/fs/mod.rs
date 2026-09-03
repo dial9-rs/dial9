@@ -277,6 +277,61 @@ pub(crate) enum Fs {
     Mem(MemFs),
 }
 
+/// Owns the sole active checkpoint reservation and its protected snapshot.
+///
+/// Cleanup is deliberately drop-based: construction failures, a closed worker
+/// channel, shutdown before registration, and normal dump resolution all
+/// release protection and reopen the checkpoint gate through the same path.
+#[cfg(feature = "pipeline")]
+pub(crate) struct CheckpointGuard {
+    fs: Arc<Fs>,
+    segments: HashSet<u32>,
+}
+
+#[cfg(feature = "pipeline")]
+impl CheckpointGuard {
+    pub(crate) fn reserve(fs: &Arc<Fs>) -> io::Result<Self> {
+        if !fs.try_reserve_checkpoint() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "another current-data checkpoint is still active",
+            ));
+        }
+        Ok(Self {
+            fs: Arc::clone(fs),
+            segments: HashSet::new(),
+        })
+    }
+
+    pub(crate) fn track(&mut self, segments: Vec<u32>) {
+        debug_assert!(self.segments.is_empty());
+        self.segments.extend(segments);
+    }
+
+    pub(crate) fn segments(&self) -> &HashSet<u32> {
+        &self.segments
+    }
+}
+
+#[cfg(feature = "pipeline")]
+impl std::fmt::Debug for CheckpointGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckpointGuard")
+            .field("segments", &self.segments)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "pipeline")]
+impl Drop for CheckpointGuard {
+    fn drop(&mut self) {
+        for &index in &self.segments {
+            self.fs.release_checkpoint_segment(index);
+        }
+        self.fs.finish_checkpoint();
+    }
+}
+
 impl Fs {
     /// Create a new active-segment write handle.
     pub(crate) fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
@@ -497,13 +552,6 @@ impl Fs {
         match self {
             Fs::Disk(d) => d.release_checkpoint_segment(index),
             Fs::Mem(m) => m.release_checkpoint_segment(index),
-        }
-    }
-
-    #[cfg(feature = "pipeline")]
-    pub(crate) fn release_checkpoint_segments(&self, indices: &[u32]) {
-        for &index in indices {
-            self.release_checkpoint_segment(index);
         }
     }
 

@@ -89,6 +89,36 @@ struct Queue {
     checkpoint_protected: HashSet<u32>,
 }
 
+impl Queue {
+    fn evict_to_budget(&mut self, max_total_size: u64) -> (u64, Option<u32>, Option<u32>) {
+        let mut evicted = 0;
+        let mut first = None;
+        let mut last = None;
+        while self.bytes > max_total_size && self.segments.len() > 1 {
+            #[cfg(feature = "pipeline")]
+            let evict_pos = self
+                .segments
+                .iter()
+                .position(|segment| !self.checkpoint_protected.contains(&segment.index));
+            #[cfg(not(feature = "pipeline"))]
+            let evict_pos = Some(0);
+            let Some(evict_pos) = evict_pos else {
+                break;
+            };
+            let old = self
+                .segments
+                .remove(evict_pos)
+                .expect("eviction position came from the queue");
+            self.bytes -= old.bytes.len() as u64;
+            evicted += 1;
+            first.get_or_insert(old.index);
+            last = Some(old.index);
+        }
+        self.dropped += evicted;
+        (evicted, first, last)
+    }
+}
+
 struct MemChannel {
     max_total_size: u64,
     queue: Mutex<Queue>,
@@ -185,31 +215,7 @@ impl MemFs {
             // unprotected entries; later production segments evict themselves
             // if the retained snapshot alone fills the budget. Without a
             // checkpoint this is the same oldest-first policy as before.
-            let mut evicted = 0u64;
-            let mut first: Option<u32> = None;
-            let mut last: Option<u32> = None;
-            while q.bytes > ch.max_total_size {
-                #[cfg(feature = "pipeline")]
-                let evict_pos = q
-                    .segments
-                    .iter()
-                    .position(|segment| !q.checkpoint_protected.contains(&segment.index));
-                #[cfg(not(feature = "pipeline"))]
-                let evict_pos = (!q.segments.is_empty()).then_some(0);
-                let Some(evict_pos) = evict_pos else {
-                    break;
-                };
-                let old = q
-                    .segments
-                    .remove(evict_pos)
-                    .expect("eviction position came from the queue");
-                q.bytes -= old.bytes.len() as u64;
-                evicted += 1;
-                first.get_or_insert(old.index);
-                last = Some(old.index);
-            }
-            q.dropped += evicted;
-            (evicted, first, last)
+            q.evict_to_budget(ch.max_total_size)
         };
 
         if let (Some(first), Some(last)) = (first_idx, last_idx) {
@@ -273,21 +279,7 @@ impl MemFs {
 
         // If the worker never took a protected entry (for example it stopped
         // before registering the request), restore the ring budget now.
-        while q.bytes > ch.max_total_size {
-            let Some(pos) = q
-                .segments
-                .iter()
-                .position(|segment| !q.checkpoint_protected.contains(&segment.index))
-            else {
-                break;
-            };
-            let old = q
-                .segments
-                .remove(pos)
-                .expect("eviction position came from the queue");
-            q.bytes -= old.bytes.len() as u64;
-            q.dropped += 1;
-        }
+        q.evict_to_budget(ch.max_total_size);
     }
 
     /// Re-enqueue `bytes` for re-dispense on the next `take_files` cycle.
@@ -474,6 +466,15 @@ mod tests {
     use super::*;
     use assert2::check;
 
+    fn seal_bytes(mem: &MemFs, index: u32, len: usize) {
+        let ActiveHandle::Mem(mut handle) = mem.create_segment(Path::new("dummy")).unwrap() else {
+            unreachable!("memory backend yields a memory handle")
+        };
+        handle.buf.resize(len, index as u8);
+        mem.seal(ActiveHandle::Mem(handle), Path::new("dummy"), index)
+            .unwrap();
+    }
+
     #[test]
     fn mem_fs_seal_take_roundtrip() {
         let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
@@ -508,13 +509,7 @@ mod tests {
         let mem = MemFs::with_capacity(60, 60).unwrap();
 
         for index in 0..2u32 {
-            let handle = mem.create_segment(Path::new("dummy")).unwrap();
-            let ActiveHandle::Mem(mut w) = handle else {
-                panic!()
-            };
-            w.buf.resize(60, index as u8);
-            mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), index)
-                .unwrap();
+            seal_bytes(&mem, index, 60);
         }
 
         // Only the most recent segment remains.
@@ -530,18 +525,22 @@ mod tests {
         // evicts everything that overflows. Final state: just segment 2.
         let mem = MemFs::with_capacity(100, 60).unwrap();
         for index in 0..3u32 {
-            let handle = mem.create_segment(Path::new("dummy")).unwrap();
-            let ActiveHandle::Mem(mut w) = handle else {
-                panic!()
-            };
-            w.buf.resize(60, index as u8);
-            mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), index)
-                .unwrap();
+            seal_bytes(&mem, index, 60);
         }
         let t = mem.take_files();
         check!(t.segments_dropped == 2);
         check!(t.segments.len() == 1);
         check!(t.segments[0].seg_ref.index() == 2);
+    }
+
+    #[test]
+    fn mem_fs_keeps_lone_oversized_segment() {
+        let mem = MemFs::with_capacity(4, 8).unwrap();
+        seal_bytes(&mem, 0, 8);
+
+        let taken = mem.take_files();
+        check!(taken.segments_dropped == 0);
+        check!(taken.segments[0].seg_ref.index() == 0);
     }
 
     #[test]
@@ -556,12 +555,7 @@ mod tests {
     fn mem_fs_queued_segments_after_pop() {
         let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
         for i in 0..3u32 {
-            let handle = mem.create_segment(Path::new("x")).unwrap();
-            let ActiveHandle::Mem(mut w) = handle else {
-                panic!()
-            };
-            w.buf.push(i as u8);
-            mem.seal(ActiveHandle::Mem(w), Path::new("x"), i).unwrap();
+            seal_bytes(&mem, i, 1);
         }
         let t = mem.take_files();
         check!(t.segments.len() == 1);
@@ -586,13 +580,7 @@ mod tests {
     fn mem_fs_take_pops_one_at_a_time() {
         let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
         for i in 0..3u32 {
-            let handle = mem.create_segment(Path::new("dummy")).unwrap();
-            let ActiveHandle::Mem(mut w) = handle else {
-                panic!()
-            };
-            w.buf.push(i as u8);
-            mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), i)
-                .unwrap();
+            seal_bytes(&mem, i, 1);
         }
 
         for _ in 0..3 {
@@ -607,24 +595,12 @@ mod tests {
     fn checkpoint_snapshot_uses_in_flight_reserve_instead_of_evicting() {
         let mem = MemFs::with_capacity(4, 4).unwrap();
         check!(mem.try_reserve_checkpoint());
-        let first = mem.create_segment(Path::new("first")).unwrap();
-        let ActiveHandle::Mem(mut first) = first else {
-            unreachable!("memory backend yields a memory handle")
-        };
-        first.buf.resize(4, 1);
-        mem.seal(ActiveHandle::Mem(first), Path::new("first"), 0)
-            .unwrap();
+        seal_bytes(&mem, 0, 4);
 
         let protected = mem.protect_checkpoint_segments(Some(1));
         check!(protected == vec![0, 1]);
 
-        let checkpoint = mem.create_segment(Path::new("checkpoint")).unwrap();
-        let ActiveHandle::Mem(mut checkpoint) = checkpoint else {
-            unreachable!("memory backend yields a memory handle")
-        };
-        checkpoint.buf.resize(4, 2);
-        mem.seal(ActiveHandle::Mem(checkpoint), Path::new("checkpoint"), 1)
-            .unwrap();
+        seal_bytes(&mem, 1, 4);
 
         let first_taken = mem.take_files();
         check!(first_taken.segments.len() == 1);
@@ -644,23 +620,11 @@ mod tests {
         check!(mem.try_reserve_checkpoint());
         check!(!mem.try_reserve_checkpoint());
 
-        let first = mem.create_segment(Path::new("first")).unwrap();
-        let ActiveHandle::Mem(mut first) = first else {
-            unreachable!("memory backend yields a memory handle")
-        };
-        first.buf.resize(4, 1);
-        mem.seal(ActiveHandle::Mem(first), Path::new("first"), 0)
-            .unwrap();
+        seal_bytes(&mem, 0, 4);
         let protected = mem.protect_checkpoint_segments(Some(1));
 
         for index in 1..=32 {
-            let segment = mem.create_segment(Path::new("later")).unwrap();
-            let ActiveHandle::Mem(mut segment) = segment else {
-                unreachable!("memory backend yields a memory handle")
-            };
-            segment.buf.resize(4, 2);
-            mem.seal(ActiveHandle::Mem(segment), Path::new("later"), index)
-                .unwrap();
+            seal_bytes(&mem, index, 4);
         }
 
         {

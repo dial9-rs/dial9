@@ -3,6 +3,8 @@ use dial9_trace_format::encoder::{Encoder, RawEncoder};
 use crate::clock::clock_pair;
 use crate::collector::Batch;
 use crate::format::{ClockSyncEvent, SegmentMetadataEvent};
+#[cfg(feature = "pipeline")]
+use crate::fs::CheckpointGuard;
 use crate::fs::{ActiveHandle, Fs, RemoveReason};
 use crate::primitives::fs;
 use crate::rate_limit::rate_limited;
@@ -842,15 +844,8 @@ impl<M: BufferMode> SegmentWriter<M> {
     /// recording gate, so a busy capture-stop request has no lifecycle side
     /// effects.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn reserve_checkpoint(&self) -> std::io::Result<()> {
-        if self.fs.try_reserve_checkpoint() {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "another current-data checkpoint is still active",
-            ))
-        }
+    pub(crate) fn reserve_checkpoint(&self) -> std::io::Result<CheckpointGuard> {
+        CheckpointGuard::reserve(&self.fs)
     }
 
     /// Protect the current ring snapshot, then seal a non-empty active
@@ -859,7 +854,10 @@ impl<M: BufferMode> SegmentWriter<M> {
     /// the disk segment's pipeline pass; this prevents the checkpoint's own
     /// rotation from evicting data it is about to dispatch.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn checkpoint_segments(&mut self) -> std::io::Result<Vec<u32>> {
+    pub(crate) fn seal_checkpoint(
+        &mut self,
+        mut checkpoint: CheckpointGuard,
+    ) -> std::io::Result<CheckpointGuard> {
         if matches!(self.state, WriterState::Finished) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -882,14 +880,12 @@ impl<M: BufferMode> SegmentWriter<M> {
         } else {
             self.fs.protect_memory_checkpoint_segments(current_index)
         };
+        checkpoint.track(protected);
 
-        if self.has_real_events
-            && let Err(error) = self.rotate_strict()
-        {
-            self.fs.release_checkpoint_segments(&protected);
-            return Err(error);
+        if self.has_real_events {
+            self.rotate_strict()?;
         }
-        Ok(protected)
+        Ok(checkpoint)
     }
 
     /// Re-apply the disk budget after the worker finishes checkpoint segments
@@ -900,16 +896,6 @@ impl<M: BufferMode> SegmentWriter<M> {
             self.evict_oldest()?;
         }
         Ok(())
-    }
-
-    #[cfg(feature = "pipeline")]
-    pub(crate) fn release_checkpoint_segments(&self, indices: &[u32]) {
-        self.fs.release_checkpoint_segments(indices);
-    }
-
-    #[cfg(feature = "pipeline")]
-    pub(crate) fn finish_checkpoint(&self) {
-        self.fs.finish_checkpoint();
     }
 
     #[cfg(test)]

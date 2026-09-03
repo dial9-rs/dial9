@@ -1535,31 +1535,17 @@ mod triggered_worker_tests {
 
     #[tokio::test(start_paused = true)]
     async fn checkpoint_uses_exact_snapshot_instead_of_wall_clock_window() {
-        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Fs::new_disk(dir.path(), "trace");
         let now = now_epoch();
 
         // Model a checkpoint segment whose creation timestamp crossed ahead
         // of the request timestamp, then a post-boundary segment whose clock
         // still falls inside the request's coarse one-second window.
-        seal_mem(&fs, 0, now + 1);
-        check!(fs.try_reserve_checkpoint());
-        let checkpoint_segments = fs.protect_memory_checkpoint_segments(None);
-        check!(checkpoint_segments == vec![0]);
-        seal_mem(&fs, 1, now);
+        std::fs::write(dir.path().join("trace.0.bin"), segment_with_epoch(now + 1)).unwrap();
+        std::fs::write(dir.path().join("trace.1.bin"), segment_with_epoch(now)).unwrap();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
-        tx.send(DumpRequest {
-            id: DumpId::new(),
-            triggered_at: UNIX_EPOCH + Duration::from_secs(now),
-            lookback: Lookback::Unbounded,
-            lookforward: Duration::ZERO,
-            metadata: Vec::new(),
-            checkpoint_segments: Some(checkpoint_segments),
-            receipt_tx,
-        })
-        .unwrap();
-
         let stop = tokio_util::sync::CancellationToken::new();
         let (capture, captured) = CapturingProcessor::new();
         let worker = spawn_worker(
@@ -1568,6 +1554,36 @@ mod triggered_worker_tests {
             crate::dump::DumpRx { rx },
             stop.clone(),
         );
+
+        // Seed the disk epoch cache with both segments as out of range. A
+        // later exact checkpoint must override this cached window decision.
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        tx.send(DumpRequest {
+            id: DumpId::new(),
+            triggered_at: UNIX_EPOCH + Duration::from_secs(now - 60),
+            lookback: Lookback::Window(Duration::ZERO),
+            lookforward: Duration::ZERO,
+            metadata: Vec::new(),
+            checkpoint: None,
+            receipt_tx,
+        })
+        .unwrap();
+        check!(receipt_rx.await.unwrap().unwrap().segments_processed == 0);
+
+        let mut checkpoint = crate::fs::CheckpointGuard::reserve(&fs).unwrap();
+        fs.protect_disk_checkpoint_segments(&[0]);
+        checkpoint.track(vec![0]);
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        tx.send(DumpRequest {
+            id: DumpId::new(),
+            triggered_at: UNIX_EPOCH + Duration::from_secs(now),
+            lookback: Lookback::Unbounded,
+            lookforward: Duration::ZERO,
+            metadata: Vec::new(),
+            checkpoint: Some(checkpoint),
+            receipt_tx,
+        })
+        .unwrap();
 
         let receipt = receipt_rx.await.unwrap().unwrap();
         check!(receipt.segments_processed == 1);

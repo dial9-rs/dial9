@@ -123,6 +123,8 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         let mut ack_tx = None;
         #[cfg(feature = "pipeline")]
         let mut checkpoint_dump = None;
+        #[cfg(feature = "pipeline")]
+        let mut checkpoint_guard = None;
         let mut exit = false;
         // Wait for control commands up to 5ms.
         match control_rx.recv_timeout(Duration::from_millis(5)) {
@@ -152,13 +154,14 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         // the recording gate. A busy capture-stop request must not disable
         // recording when it cannot establish its boundary.
         #[cfg(feature = "pipeline")]
-        if checkpoint_dump.is_some()
-            && let Err(error) = writer.reserve_checkpoint()
-        {
-            checkpoint_dump
-                .take()
-                .expect("checkpoint presence checked")
-                .fail(error);
+        if checkpoint_dump.is_some() {
+            match writer.reserve_checkpoint() {
+                Ok(guard) => checkpoint_guard = Some(guard),
+                Err(error) => checkpoint_dump
+                    .take()
+                    .expect("checkpoint presence checked")
+                    .fail(error),
+            }
         }
 
         // When disabled, skip all recording work (queue sampling, metadata
@@ -319,17 +322,16 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         if let Some(checkpoint) = checkpoint_dump.take() {
             let result = match flush_error {
                 Some(error) => Err(error),
-                None => writer
-                    .write_current_segment_metadata()
-                    .and_then(|()| writer.checkpoint_segments()),
+                None => writer.write_current_segment_metadata().and_then(|()| {
+                    writer.seal_checkpoint(
+                        checkpoint_guard
+                            .take()
+                            .expect("active checkpoint owns its reservation"),
+                    )
+                }),
             };
             match result {
-                Ok(protected) => {
-                    if let Err(protected) = checkpoint.dispatch(protected) {
-                        writer.release_checkpoint_segments(&protected);
-                        writer.finish_checkpoint();
-                    }
-                }
+                Ok(guard) => checkpoint.dispatch(guard),
                 Err(error) => {
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to checkpoint current trace data: {error}");
@@ -342,7 +344,6 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                         shared.disable();
                     }
                     checkpoint.fail(error);
-                    writer.finish_checkpoint();
                 }
             }
         }
