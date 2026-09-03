@@ -55,7 +55,7 @@ dial9-trace-format = { workspace = true }
 scc = { version = "2", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true, default-features = false }
 tracing = "0.1.44"
-nvml-wrapper = { version = "0.12.1", optional = true }
+nvml-wrapper = { version = "0.13", optional = true }
 
 [target.'cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))'.dependencies]
 blazesym = "0.2"

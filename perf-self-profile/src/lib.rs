@@ -157,9 +157,6 @@ pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
-#[cfg(feature = "cuda")]
-pub use cuda::{CudaGpuConfig, CudaGpuEvent, CudaGpuSource, CudaGpuStartError};
-
 #[cfg(any(
     feature = "cpu-profiling",
     feature = "cuda",

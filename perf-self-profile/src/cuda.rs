@@ -1,9 +1,10 @@
 //! NVIDIA CUDA GPU metrics sampled through NVML.
 //!
-//! NVML is loaded dynamically, so enabling the Cargo feature does not require
-//! the CUDA toolkit or NVIDIA driver at build time. [`CudaGpuSource::start`]
-//! returns an error when NVML is absent, allowing callers to disable the source
-//! cleanly on hosts without NVIDIA GPUs.
+//! [NVIDIA Management Library (NVML)](https://developer.nvidia.com/management-library-nvml)
+//! is loaded dynamically, so enabling the Cargo feature does not require the CUDA
+//! toolkit or NVIDIA driver at build time. [`CudaGpuSource::start`] returns an
+//! error when NVML is absent, allowing callers to disable the source cleanly on
+//! hosts without NVIDIA GPUs.
 
 use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::rate_limited;
