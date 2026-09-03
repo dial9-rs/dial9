@@ -735,6 +735,7 @@ export function createRegionAnalysis(
       pollDetail: null,
       taskDump: null,
       spawnedTasksRange: null,
+      spawnedTasksRuntime: null,
     });
   }
 

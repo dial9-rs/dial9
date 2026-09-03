@@ -32,14 +32,16 @@ import {
   computeQueueData,
   computeSpawnedTasks,
   deriveQueueWindow,
+  formatSpawnRate,
   queueBaselineY,
   queueScaleY,
+  spawnHistogramBinAt,
   type QueueData,
   type QueueRenderModel,
+  type QueueSpawnBin,
   type QueueWindow,
   type SpawnedTasksResult,
 } from "./queue-model.js";
-import { formatHumanDuration } from "../../lib/trace/index.js";
 
 /** Height reserved for the legend strip above the queue canvas. */
 const LEGEND_H = 18;
@@ -78,6 +80,10 @@ export interface QueueTrackController {
     viewEnd: number,
   ): void;
   queueSeries(): QueueData;
+  /** The nonempty spawn-histogram bin under a trace timestamp. */
+  spawnBinAt(ns: number): QueueSpawnBin | null;
+  /** Select the spawn bin under a timestamp and open its task list. */
+  selectSpawnBin(ns: number): boolean;
   /**
    * The spawned-tasks derivation for a range: tasks first polled in range,
    * grouped by spawn location. Exposed so the inspector reuses the logic and
@@ -205,7 +211,12 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     const entries = QUEUE_LEGEND.filter(
       (e) =>
         (e.key !== "local" || data.hasLocalQueueDepth) &&
-        (e.key !== "spawns" || data.taskSpawnTimes.length > 0),
+        (e.key !== "spawns" || data.taskSpawnTimes.length > 0) &&
+        (e.key !== "activeTask" || data.activeTaskMode !== "none"),
+    ).map((e) =>
+      e.key === "activeTask" && data.activeTaskMode === "relative"
+        ? { ...e, label: "Active tasks Δ (relative)" }
+        : e,
     );
     return html`
       <ul class="d9-queue-legend" aria-label="Queue depth legend">
@@ -242,8 +253,9 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
   function onCanvasMouseDown(ev: MouseEvent): void {
     const s = state();
-    // Only meaningful when the trace carries the active-task timeline.
-    if (s.trace.trace === null || !queueData().hasTaskTracking) return;
+    // A drag or click selects task-spawn time, independent of whether the old
+    // trace carries an absolute active-task count.
+    if (s.trace.trace === null || queueData().taskSpawnTimes.length === 0) return;
     if (s.viewport.viewEnd <= s.viewport.viewStart) return;
     const canvas = ev.currentTarget as HTMLCanvasElement;
     const startNs = xToNs(canvas, ev.clientX, s.viewport.viewStart, s.viewport.viewEnd);
@@ -296,6 +308,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   function onWindowMouseUp(): void {
     if (drag === null) return;
     const moved = drag.moved;
+    const clickNs = drag.endNs;
     const selStart = Math.min(drag.startNs, drag.endNs);
     const selEnd = Math.max(drag.startNs, drag.endNs);
     drag = null;
@@ -309,8 +322,8 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
       // Dispatch the range the inspector renders the spawned-task list from. A
       // plain click (no move) leaves the current range untouched.
       commitRange({ startNs: selStart, endNs: selEnd });
-    } else if (sizer !== null && lastPaint !== null) {
-      // Repaint clean (drop any band drawn before the 3px threshold).
+    } else if (!selectSpawnBin(clickNs) && sizer !== null && lastPaint !== null) {
+      // Repaint clean when the click missed a nonempty bar.
       const ctx = sizer.ensure(lastPaint.drawW, lastPaint.canvasH, lastPaint.dpr);
       drawQueueCanvas(ctx, lastPaint.model, lastPaint.window, lastPaint.drawW, lastPaint.canvasH);
     }
@@ -333,15 +346,44 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   function commitRange(range: TimeRange | null): void {
     const cur = state().selection.spawnedTasksRange;
     if (range === null) {
-      if (cur !== null) store.update("selection", { spawnedTasksRange: null });
+      if (cur !== null || state().selection.spawnedTasksRuntime != null) {
+        store.update("selection", {
+          spawnedTasksRange: null,
+          spawnedTasksRuntime: null,
+        });
+      }
       return;
     }
     if (cur !== null && cur.startNs === range.startNs && cur.endNs === range.endNs) return;
-    store.update("selection", { spawnedTasksRange: range, taskDump: null });
+    store.update("selection", {
+      spawnedTasksRange: range,
+      spawnedTasksRuntime: null,
+      pollDetail: null,
+      pinnedEvent: null,
+      taskDump: null,
+      sidebarRange: null,
+    });
   }
 
   function queueSeries(): QueueData {
     return queueData();
+  }
+
+  function spawnBinAt(ns: number): QueueSpawnBin | null {
+    if (lastPaint === null) return null;
+    return spawnHistogramBinAt(
+      lastPaint.model.spawnHistogram,
+      lastPaint.viewStart,
+      lastPaint.viewEnd,
+      ns,
+    );
+  }
+
+  function selectSpawnBin(ns: number): boolean {
+    const bin = spawnBinAt(ns);
+    if (bin === null) return false;
+    commitRange({ startNs: bin.startNs, endNs: bin.selectionEndNs });
+    return true;
   }
 
   function spawnedTasks(range: TimeRange): SpawnedTasksResult | null {
@@ -362,7 +404,16 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     sizerCanvas = null;
   }
 
-  return { rowTemplate, paint, queueSeries, spawnedTasks, commitRange, dispose };
+  return {
+    rowTemplate,
+    paint,
+    queueSeries,
+    spawnBinAt,
+    selectSpawnBin,
+    spawnedTasks,
+    commitRange,
+    dispose,
+  };
 }
 
 // ── Draw-area x mapping + selection band (module-local) ────────────────────
@@ -498,7 +549,11 @@ export function drawQueueCanvas(
     ctx.fillStyle = ACTIVE_LABEL;
     ctx.font = "10px monospace";
     ctx.textAlign = "right";
-    ctx.fillText(`tasks:${at.maxTasks}`, Math.max(0, drawW - 4), chartTop + 8);
+    ctx.fillText(
+      `${at.mode === "relative" ? "tasks Δ" : "tasks"}:${at.maxTasks}`,
+      Math.max(0, drawW - 4),
+      chartTop + 8,
+    );
 
     ctx.beginPath();
     let y = queueScaleY(at.startCount, at.maxTasks, chartTop, chartH);
@@ -519,7 +574,10 @@ export function drawQueueCanvas(
     ctx.font = "10px monospace";
     ctx.textAlign = "right";
     ctx.fillText(
-      `spawns:${spawnHistogram.maxSpawns}/${formatHumanDuration(spawnHistogram.binDurationNs)}`,
+      `spawn peak:${formatSpawnRate(
+        (spawnHistogram.maxSpawns * 1_000_000_000) /
+          spawnHistogram.binDurationNs,
+      )}`,
       Math.max(0, drawW - 4),
       Math.min(baselineY - 1, chartTop + 18),
     );

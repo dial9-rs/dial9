@@ -172,6 +172,11 @@ export interface SelectionSlice {
    * range is active.
    */
   spawnedTasksRange: TimeRange | null;
+  /**
+   * Runtime group filter for a range selected from a runtime-metrics spawn
+   * histogram. Null/absent means the process-wide queue histogram.
+   */
+  spawnedTasksRuntime?: string | null;
 }
 
 // ── poi slice (points-of-interest / issues rail) ────────────────────────

@@ -86,6 +86,8 @@ export interface LanesRenderInput {
   /** Per-runtime scheduler metrics, drawn into each runtime's summary lane.
    *  Empty for pre-RuntimeMetrics traces (no summary lanes emitted). */
   runtimeMetrics: RuntimeMetrics;
+  /** Runtime group name -> sorted task-spawn timestamps. */
+  runtimeTaskSpawns: ReadonlyMap<string, readonly number[]>;
   /** worker id -> its owning runtime's accent (the lane's left rail). A worker
    *  absent from this map falls back to the default accent, so a caller that has
    *  not built identities still gets a rail. */
@@ -299,6 +301,7 @@ export function renderLanes(
       drawRuntimeMetricsLane(
         ctx,
         series,
+        input.runtimeTaskSpawns.get(r.name) ?? [],
         r,
         input.runtimeAccents.get(r.name) ?? DEFAULT_ACCENT,
         viewStart,

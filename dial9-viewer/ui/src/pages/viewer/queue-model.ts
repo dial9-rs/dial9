@@ -22,10 +22,19 @@ import {
   buildActiveTaskTimeline,
 } from "../../lib/trace/index.js";
 import {
+  deriveRuntimeGroups,
   deriveRuntimeMetrics,
   deriveWorkerIds,
   sharedWorkerSpans,
 } from "../../lib/trace/derived.js";
+import { deriveRuntimeTaskSpawns } from "../../lib/trace/runtime-task-spawns.js";
+import {
+  buildSpawnHistogram,
+  formatSpawnRate,
+  spawnHistogramBinAt,
+  type SpawnHistogramBin,
+  type SpawnHistogramModel,
+} from "../../lib/canvas/spawn-histogram.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
 
@@ -46,6 +55,9 @@ export interface MergedLocalSample {
   local: number;
 }
 
+/** Whether the active-task line is an absolute total or lifecycle-relative. */
+export type ActiveTaskMode = "absolute" | "relative" | "none";
+
 /**
  * Everything the queue track needs for one render pass + the drag-select,
  * lifted out of the store so the render logic stays Node-testable. Built once
@@ -64,10 +76,17 @@ export interface QueueData {
   mergedLocalSamples: readonly MergedLocalSample[];
   /** Active-task-count timeline, sorted by t. */
   activeTaskSamples: readonly { t: number; count: number }[];
+  /**
+   * Absolute for sampled process-wide totals; relative when reconstructed from
+   * spawn/terminate deltas because the trace has no initial task-count sample.
+   */
+  activeTaskMode: ActiveTaskMode;
   /** Task-spawn timestamps, sorted ascending. */
   taskSpawnTimes: readonly number[];
   /** task id -> first-poll time, the spawn proxy. */
   taskFirstPoll: ReadonlyMap<number, number>;
+  /** task id -> runtime group name, inferred from the task's first poll. */
+  taskRuntime: ReadonlyMap<number, string>;
   /** task id -> spawn-location id (null when unknown). */
   taskSpawnLocs: ReadonlyMap<number, string | null>;
   /** spawn-location id -> human-readable location. */
@@ -83,8 +102,10 @@ export const EMPTY_QUEUE_DATA: QueueData = {
   queueSamples: [],
   mergedLocalSamples: [],
   activeTaskSamples: [],
+  activeTaskMode: "none",
   taskSpawnTimes: [],
   taskFirstPoll: new Map(),
+  taskRuntime: new Map(),
   taskSpawnLocs: new Map(),
   spawnLocations: new Map(),
   hasTaskTracking: false,
@@ -108,7 +129,23 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     trace.taskTerminateTimes,
   );
   const activeTaskSamples = activeTaskSeries(trace, timeline);
+  const runtimeMetricsSamples = trace.runtimeMetrics ?? [];
+  const hasRuntimeActiveTasks =
+    runtimeMetricsSamples.length > 0 &&
+    runtimeMetricsSamples.every((sample) => sample.aliveTasks !== null);
+  const hasLegacyActiveTasks = (trace.legacyActiveTaskSamples?.length ?? 0) > 0;
+  const activeTaskMode: ActiveTaskMode =
+    activeTaskSamples.length === 0
+      ? "none"
+      : hasRuntimeActiveTasks || hasLegacyActiveTasks
+        ? "absolute"
+        : "relative";
   const taskSpawnTimes = [...trace.taskSpawnTimes.values()].sort((a, b) => a - b);
+  const runtimeTaskSpawns = deriveRuntimeTaskSpawns(
+    trace.taskSpawnTimes,
+    deriveRuntimeGroups(trace),
+    spanResult.workerSpans,
+  );
   // The global-queue series comes from per-runtime RuntimeMetrics (summed per
   // cycle) when the trace has them; otherwise fall back to the legacy
   // pre-summed QueueSample series that buildWorkerSpans extracts.
@@ -134,8 +171,10 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     queueSamples,
     mergedLocalSamples: merged,
     activeTaskSamples,
+    activeTaskMode,
     taskSpawnTimes,
     taskFirstPoll: timeline.taskFirstPoll,
+    taskRuntime: runtimeTaskSpawns.taskRuntime,
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,
     hasTaskTracking: trace.hasTaskTracking,
@@ -173,19 +212,13 @@ export interface QueueActiveTaskModel {
   startCount: number;
   /** Right-axis magnitude, >= 1. */
   maxTasks: number;
+  /** Whether these values are absolute totals or trace-relative deltas. */
+  mode: Exclude<ActiveTaskMode, "none">;
 }
 
-/** Spawn counts in viewport-adaptive, fixed-pixel-width time buckets. */
-export interface QueueSpawnHistogramModel {
-  /** Spawn count per bucket, left-to-right across the viewport. */
-  counts: readonly number[];
-  /** Peak count across the visible buckets, >= 1. */
-  maxSpawns: number;
-  /** Width of one bucket in CSS px. */
-  binWidthPx: number;
-  /** Duration represented by one bucket in trace nanoseconds. */
-  binDurationNs: number;
-}
+export type QueueSpawnHistogramModel = SpawnHistogramModel;
+export type QueueSpawnBin = SpawnHistogramBin;
+export { formatSpawnRate, spawnHistogramBinAt };
 
 /**
  * The bucketed queue render model for one frame. `global[i]` / `local[i]` are
@@ -418,7 +451,12 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     local[i] = lastL;
   }
 
-  const spawnHistogram = buildSpawnHistogram(data, viewStart, viewEnd, viewDur, drawW);
+  const spawnHistogram = buildSpawnHistogram(
+    data.taskSpawnTimes,
+    viewStart,
+    viewEnd,
+    drawW,
+  );
   if (spawnHistogram !== null) hasData = true;
 
   const activeTask = buildActiveTaskModel(data, viewStart, viewEnd, viewDur, drawW);
@@ -432,58 +470,6 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     spawnHistogram,
     activeTask,
     hasData,
-  };
-}
-
-/** Target histogram resolution: one time bucket for roughly every 8 CSS px. */
-const SPAWN_BIN_TARGET_PX = 8;
-
-/** Binary search: index of the first number >= target. */
-function lowerBoundNumber(arr: readonly number[], target: number): number {
-  let lo = 0;
-  let hi = arr.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid]! < target) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
-/**
- * Count real task-spawn events into viewport-adaptive time buckets. The
- * independent scale preserves burst shape without letting a large spawn spike
- * flatten the active-task total.
- */
-function buildSpawnHistogram(
-  data: QueueData,
-  viewStart: number,
-  viewEnd: number,
-  viewDur: number,
-  drawW: number,
-): QueueSpawnHistogramModel | null {
-  const spawnTimes = data.taskSpawnTimes;
-  if (spawnTimes.length === 0) return null;
-
-  const numBins = Math.max(1, Math.ceil(drawW / SPAWN_BIN_TARGET_PX));
-  const counts = new Array<number>(numBins).fill(0);
-  let maxSpawns = 0;
-  const from = lowerBoundNumber(spawnTimes, viewStart);
-  for (let i = from; i < spawnTimes.length; i++) {
-    const t = spawnTimes[i]!;
-    if (t > viewEnd) break;
-    const bin = Math.min(numBins - 1, Math.floor(((t - viewStart) / viewDur) * numBins));
-    const count = counts[bin]! + 1;
-    counts[bin] = count;
-    if (count > maxSpawns) maxSpawns = count;
-  }
-  if (maxSpawns === 0) return null;
-
-  return {
-    counts,
-    maxSpawns,
-    binWidthPx: drawW / numBins,
-    binDurationNs: viewDur / numBins,
   };
 }
 
@@ -523,7 +509,8 @@ function buildActiveTaskModel(
     const x = ((s.t - viewStart) / viewDur) * drawW;
     points.push({ x, count: s.count });
   }
-  return { points, startCount, maxTasks };
+  if (data.activeTaskMode === "none") return null;
+  return { points, startCount, maxTasks, mode: data.activeTaskMode };
 }
 
 // ── Drag-select: tasks spawned in a time range ────────────────────────────
@@ -545,6 +532,8 @@ export interface SpawnedTaskGroup {
  */
 export interface SpawnedTasksResult {
   range: TimeRange;
+  /** Runtime group filter, or null for process-wide results. */
+  runtimeName: string | null;
   /** Total tasks found in range. */
   total: number;
   /** Groups sorted by task count desc. */
@@ -559,12 +548,16 @@ export interface SpawnedTasksResult {
 export function computeSpawnedTasks(
   data: QueueData,
   range: TimeRange,
+  runtimeName: string | null = null,
 ): SpawnedTasksResult | null {
   const { startNs, endNs } = range;
   const groups = new Map<string, { taskId: number; firstPoll: number }[]>();
   let total = 0;
   for (const [taskId, t] of data.taskFirstPoll) {
     if (t < startNs || t > endNs) continue;
+    if (runtimeName !== null && data.taskRuntime.get(taskId) !== runtimeName) {
+      continue;
+    }
     const locId = data.taskSpawnLocs.get(taskId);
     const raw = locId != null ? data.spawnLocations.get(locId) : null;
     // An empty/missing location groups as unknown.
@@ -581,7 +574,7 @@ export function computeSpawnedTasks(
   const sorted = [...groups.entries()]
     .sort((a, b) => b[1].length - a[1].length)
     .map(([loc, tasks]) => ({ loc, tasks }));
-  return { range, total, groups: sorted };
+  return { range, runtimeName, total, groups: sorted };
 }
 
 // ── Legend ─────────────────────────────────────────────────────────────────

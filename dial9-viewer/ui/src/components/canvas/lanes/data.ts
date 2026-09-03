@@ -19,6 +19,10 @@ import {
   type RuntimeMetrics,
 } from "../../../lib/trace/runtime-metrics-model.js";
 import { buildLaneIdentities, type LaneIdentity } from "./chrome.js";
+import {
+  deriveRuntimeTaskSpawns,
+  type RuntimeTaskSpawns,
+} from "../../../lib/trace/runtime-task-spawns.js";
 import { spansById as buildSpanByIdSingle } from "../../../lib/trace/index.js";
 import { LazySpansById, LazySpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
 import type { ColumnarSpans, SpanByIdMulti, SpanByIdSingle } from "../../../lib/trace/columnar-spans.js";
@@ -40,6 +44,8 @@ export interface LaneData {
   /** Per-runtime scheduler metrics, drawn in each runtime's summary lane. Empty
    *  for pre-RuntimeMetrics traces. */
   runtimeMetrics: RuntimeMetrics;
+  /** Task-spawn timestamps attributed to each runtime by first-poll worker. */
+  runtimeTaskSpawns: RuntimeTaskSpawns;
   /** Runtime names that have a metric series (so a summary lane is emitted).
    *  Pair with the store's fold map to build `laneRowLayout`'s metrics opts. */
   metricsRuntimes: ReadonlySet<string>;
@@ -91,6 +97,11 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
   // name so it matches laneRowLayout's per-group check.
   const runtimeMetrics = deriveRuntimeMetrics(trace);
   const metricsRuntimes = metricsRuntimeNames(runtimeGroups, runtimeMetrics);
+  const runtimeTaskSpawns = deriveRuntimeTaskSpawns(
+    trace.taskSpawnTimes,
+    runtimeGroups,
+    workerSpans,
+  );
 
   // Lane identity: each worker's runtime accent + group name, by group order.
   const identities = buildLaneIdentities(runtimeGroups);
@@ -120,6 +131,7 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
     workerIds,
     runtimeGroups,
     runtimeMetrics,
+    runtimeTaskSpawns,
     metricsRuntimes,
     laneIdentity: identities.byWorker,
     runtimeAccents: identities.byRuntime,

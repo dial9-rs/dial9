@@ -15,6 +15,7 @@
 
 import { html, render, type TemplateResult } from "lit-html";
 import { formatHumanDuration } from "../../lib/trace/index.js";
+import { formatSpawnRate, type SpawnHistogramBin } from "../../lib/canvas/spawn-histogram.js";
 import type { LaneHoverData } from "../canvas/lanes/index.js";
 
 // Placement (pure, cached-dimension - avoids measure-after-write).
@@ -70,6 +71,29 @@ export interface TooltipSegment {
 
 /** A tooltip line: one or more segments joined by " · " on render. */
 export type TooltipRow = TooltipSegment[];
+
+/** Shared hover content for a nonempty task-spawn histogram bin. */
+export function spawnHistogramTooltipRows(
+  bin: SpawnHistogramBin,
+  formatTs: (ns: number) => string,
+  runtimeName?: string,
+): TooltipRow[] {
+  return [
+    ...(runtimeName === undefined
+      ? []
+      : [[{ label: "Runtime:", value: runtimeName }] satisfies TooltipRow]),
+    [{ label: "Tasks spawned:", value: String(bin.count) }],
+    [{ label: "Spawn rate:", value: formatSpawnRate(bin.ratePerSecond) }],
+    [{ label: "Window:", value: `${formatTs(bin.startNs)} – ${formatTs(bin.endNs)}` }],
+    [
+      {
+        label: "Duration:",
+        value: formatHumanDuration(bin.durationNs),
+        hint: "(click bar to list tasks)",
+      },
+    ],
+  ];
+}
 
 /** Formatting hooks the model needs (kept out so the model stays Node-pure). */
 export interface TooltipFormatOpts {

@@ -364,6 +364,14 @@ describe("sumActiveTasksByCycle", () => {
   it("is empty for no samples", () => {
     expect(sumActiveTasksByCycle([])).toEqual([]);
   });
+
+  it("is empty when an old schema lacks alive_tasks", () => {
+    expect(
+      sumActiveTasksByCycle([
+        { t: 10, runtimeName: "", globalQueue: 5, aliveTasks: null },
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("globalQueueSeries", () => {
@@ -442,6 +450,20 @@ describe("activeTaskSeries", () => {
       ),
     ).toBe(lifecycle.activeTaskSamples);
     expect(activeTaskSeries({}, lifecycle)).toBe(lifecycle.activeTaskSamples);
+  });
+
+  it("falls back to lifecycle deltas when RuntimeMetrics lacks alive_tasks", () => {
+    expect(
+      activeTaskSeries(
+        {
+          runtimeMetrics: [
+            { t: 10, runtimeName: "", globalQueue: 5, aliveTasks: null },
+          ],
+          legacyActiveTaskSamples: [],
+        },
+        lifecycle,
+      ),
+    ).toBe(lifecycle.activeTaskSamples);
   });
 });
 

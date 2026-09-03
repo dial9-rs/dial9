@@ -221,6 +221,7 @@ export function createViewerReconstruction(
       sidebarRange: null,
       hoveredWakerTaskId: null,
       spawnedTasksRange: null,
+      spawnedTasksRuntime: null,
       ...resolved,
     });
   }
@@ -236,6 +237,7 @@ export function createViewerReconstruction(
       sidebarRange: null,
       hoveredWakerTaskId: null,
       spawnedTasksRange: null,
+      spawnedTasksRuntime: null,
     });
   }
 

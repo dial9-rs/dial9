@@ -635,6 +635,7 @@ export interface SpawnedGroupView {
 export interface SpawnedTasksView {
   total: number;
   rangeLabel: string;
+  runtimeName: string | null;
   groups: SpawnedGroupView[];
 }
 
@@ -650,6 +651,7 @@ export const SPAWNED_TASK_HEAD = 5;
 export function buildSpawnedTasksView(
   result: {
     total: number;
+    runtimeName?: string | null;
     groups: readonly {
       loc: string;
       tasks: readonly { taskId: number; firstPoll: number }[];
@@ -666,7 +668,12 @@ export function buildSpawnedTasksView(
     })),
     moreCount: Math.max(0, g.tasks.length - SPAWNED_TASK_HEAD),
   }));
-  return { total: result.total, rangeLabel, groups };
+  return {
+    total: result.total,
+    rangeLabel,
+    runtimeName: result.runtimeName ?? null,
+    groups,
+  };
 }
 
 // ── Tab availability ──────────────────────────────────────────────────────

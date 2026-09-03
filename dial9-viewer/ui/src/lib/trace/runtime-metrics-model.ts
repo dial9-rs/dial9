@@ -15,6 +15,8 @@ import { sumGlobalQueueByCycle } from "./analysis.js";
 export interface RuntimeSeries {
   /** Samples for this runtime, in wire (time) order. */
   samples: RuntimeMetricsSample[];
+  /** False when this old trace's runtime-metrics schema omitted alive_tasks. */
+  aliveTasksAvailable: boolean;
   /** Peak alive-task count across the trace. */
   maxAliveTasks: number;
   /** Peak global-queue depth across the trace (the chart's y autoscale). */
@@ -53,13 +55,18 @@ export function computeRuntimeMetrics(trace: ParsedTrace | null): RuntimeMetrics
     if (series === undefined) {
       series = {
         samples: [],
+        aliveTasksAvailable: true,
         maxAliveTasks: 0,
         maxGlobalQueue: 0,
       };
       byRuntime.set(s.runtimeName, series);
     }
     series.samples.push(s);
-    if (s.aliveTasks > series.maxAliveTasks) series.maxAliveTasks = s.aliveTasks;
+    if (s.aliveTasks === null) {
+      series.aliveTasksAvailable = false;
+    } else if (s.aliveTasks > series.maxAliveTasks) {
+      series.maxAliveTasks = s.aliveTasks;
+    }
     if (s.globalQueue > series.maxGlobalQueue) series.maxGlobalQueue = s.globalQueue;
   }
 

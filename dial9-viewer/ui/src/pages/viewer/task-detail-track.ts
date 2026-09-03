@@ -371,6 +371,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
       pollDetail: null,
       sidebarRange: null,
       spawnedTasksRange: null,
+      spawnedTasksRuntime: null,
     });
   }
 
