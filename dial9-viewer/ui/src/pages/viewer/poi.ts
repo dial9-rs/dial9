@@ -9,6 +9,7 @@
 // whole-trace truth.
 
 import {
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   EVENT_TYPES,
   filterPointsOfInterest,
   formatHumanDuration,
@@ -25,14 +26,31 @@ import type {
 } from "../../types/trace.js";
 import type { PoiSlice, PoiSortKey, ViewportSlice } from "../../types/state.js";
 
-/** The five detector filters, in issues-rail display order. */
+/** The detector filters, in issues-rail display order. */
 export const POI_FILTERS: readonly PointOfInterestType[] = [
   "sched",
   "long-poll",
   "cpu-sampled",
   "wake-delay",
   "uninstrumented",
+  "spawn-delay",
 ];
+
+export { DEFAULT_SPAWN_DELAY_THRESHOLD_US };
+
+/** Threshold input bounds, in microseconds. 0 lists every positive delay. */
+export const SPAWN_DELAY_THRESHOLD_MIN_US = 0;
+export const SPAWN_DELAY_THRESHOLD_MAX_US = 60_000_000;
+
+/** Clamp a DOM/URL threshold into range; null when unusable, so a half-typed
+ *  field never resets the rail to the default. */
+export function parseSpawnThresholdUs(value: string): number | null {
+  // Number("") is 0, which would read a cleared field as "list every task".
+  if (value.trim() === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(SPAWN_DELAY_THRESHOLD_MAX_US, Math.max(SPAWN_DELAY_THRESHOLD_MIN_US, n));
+}
 
 /** Validate a filter arriving from the DOM (a `<select>` value is just a
  * string) before it reaches the store and the detectors. */
@@ -55,6 +73,10 @@ export function filterLabel(type: PointOfInterestType): string {
       return "Wake->Poll Delays (>100us)";
     case "uninstrumented":
       return "Uninstrumented Polls";
+    case "spawn-delay":
+      // No threshold in the label, unlike its fixed-threshold siblings: the
+      // rail renders the live value in its own input.
+      return "Spawn->First Poll Delays";
   }
 }
 
@@ -71,6 +93,8 @@ export function kindLabel(type: PointOfInterestType): string {
       return "wake delay";
     case "uninstrumented":
       return "uninstrumented poll";
+    case "spawn-delay":
+      return "spawn delay";
   }
 }
 
@@ -93,9 +117,22 @@ export interface PoiSource {
   schedDelays: SchedDelay[];
   hasSchedWait: boolean;
   taskInstrumented: Map<number, boolean>;
-  /** Lazy per-filter detector output cache (keyed by filter type). The list is
-   *  capped at POI_DETECTOR_LIMIT; `matched` is the true pre-cap count. */
-  readonly _byFilter: Map<PointOfInterestType, { list: PointOfInterest[]; matched: number }>;
+  taskSpawnTimes: Map<number, number>;
+  /** Lazy detector output cache. Keyed by `detectorCacheKey`, which folds in
+   *  the threshold for the detectors that take one, so two thresholds never
+   *  share a result. The list is capped at POI_DETECTOR_LIMIT; `matched` is the
+   *  true pre-cap count. */
+  readonly _byFilter: Map<string, { list: PointOfInterest[]; matched: number }>;
+}
+
+function usesSpawnThreshold(filter: PointOfInterestType): boolean {
+  return filter === "spawn-delay";
+}
+
+/** Only the threshold-sensitive detector folds the threshold into its key, so
+ *  moving the input never invalidates the others. */
+function detectorCacheKey(filter: PointOfInterestType, spawnThresholdUs: number): string {
+  return usesSpawnThreshold(filter) ? `${filter}:${spawnThresholdUs}` : filter;
 }
 
 /**
@@ -132,6 +169,7 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
     schedDelays,
     hasSchedWait: trace.hasSchedWait,
     taskInstrumented: trace.taskInstrumented,
+    taskSpawnTimes: trace.taskSpawnTimes,
     _byFilter: new Map(),
   };
   sourceCache.set(trace, source);
@@ -147,14 +185,25 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
 function detectorResult(
   source: PoiSource,
   filter: PointOfInterestType,
+  spawnThresholdUs: number,
 ): { list: PointOfInterest[]; matched: number } {
-  const cached = source._byFilter.get(filter);
+  const cacheKey = detectorCacheKey(filter, spawnThresholdUs);
+  const cached = source._byFilter.get(cacheKey);
   if (cached !== undefined) return cached;
+  // One live entry per threshold-sensitive detector: the input is a spinner, so
+  // keeping every value passed through would retain a capped list per keystroke.
+  if (usesSpawnThreshold(filter)) {
+    for (const key of source._byFilter.keys()) {
+      if (key.startsWith(`${filter}:`)) source._byFilter.delete(key);
+    }
+  }
   let matched = -1;
   const opts = {
     hasSchedWait: source.hasSchedWait,
     sortByWorst: true,
     taskInstrumented: source.taskInstrumented,
+    taskSpawnTimes: source.taskSpawnTimes,
+    spawnDelayThresholdUs: spawnThresholdUs,
     limit: POI_DETECTOR_LIMIT,
     onTotal: (n: number) => {
       matched = n;
@@ -168,15 +217,16 @@ function detectorResult(
   // The frozen fat-path detector honours neither `limit` nor `onTotal`, so its
   // result is already complete and its length IS the true count.
   const result = { list, matched: matched >= 0 ? matched : list.length };
-  source._byFilter.set(filter, result);
+  source._byFilter.set(cacheKey, result);
   return result;
 }
 
 export function poisForFilter(
   source: PoiSource,
   filter: PointOfInterestType,
+  spawnThresholdUs: number = DEFAULT_SPAWN_DELAY_THRESHOLD_US,
 ): PointOfInterest[] {
-  return detectorResult(source, filter).list;
+  return detectorResult(source, filter, spawnThresholdUs).list;
 }
 
 /**
@@ -187,18 +237,20 @@ export function poisForFilter(
 export function poiMatchCount(
   source: PoiSource,
   filter: PointOfInterestType,
+  spawnThresholdUs: number = DEFAULT_SPAWN_DELAY_THRESHOLD_US,
 ): number {
-  return detectorResult(source, filter).matched;
+  return detectorResult(source, filter, spawnThresholdUs).matched;
 }
 
 /** Per-detector counts for the red-flags summary chip. Zero-count detectors
  *  are included; the chip filters them out. */
 export function redFlagCounts(
   source: PoiSource,
+  spawnThresholdUs: number = DEFAULT_SPAWN_DELAY_THRESHOLD_US,
 ): { type: PointOfInterestType; count: number }[] {
   return POI_FILTERS.map((type) => ({
     type,
-    count: poiMatchCount(source, type),
+    count: poiMatchCount(source, type, spawnThresholdUs),
   }));
 }
 
@@ -296,9 +348,16 @@ export function workerLabel(worker: number): string {
   return `W${worker}`;
 }
 
-/** `+1.72s` relative-offset time label (the rail's `t` column). */
+/**
+ * `+1.72s` relative-offset time label (the rail's `t` column).
+ *
+ * The offset can be NEGATIVE: `minTs` comes from the lifecycle events, and a
+ * spawn-delay POI is anchored on a spawn, which can precede the first of them.
+ */
 export function relTimeLabel(ns: number, minTs: number): string {
-  return `+${((ns - minTs) / 1e9).toFixed(2)}s`;
+  // Round before taking the sign, so an offset rounding to zero reads "+0.00s".
+  const rounded = Number(((ns - minTs) / 1e9).toFixed(2));
+  return `${rounded < 0 ? "-" : "+"}${Math.abs(rounded).toFixed(2)}s`;
 }
 
 /** The POI's severity value converted to nanoseconds (per detector units).
@@ -310,6 +369,7 @@ export function valueNs(poi: PointOfInterest): number {
     case "sched":
       return poi.value; // schedWait, already ns
     case "wake-delay":
+    case "spawn-delay":
       return poi.value * 1e3; // us -> ns
     case "long-poll":
     case "cpu-sampled":
@@ -355,9 +415,11 @@ export interface PoiJump {
 /**
  * Center the viewport on a POI: show ~5x the span duration (min 1ms) with 30%
  * left padding, clamped to [minTs, maxTs]. Wake-delay POIs instead frame the
- * full wake->poll window (~3x, 20% pad) and select the delayed task. Other
- * POIs select the poll's task when it has one, so the inspector and lane
- * highlight follow the jump.
+ * full wake->poll window (~3x, 20% pad) and select the delayed task, and
+ * spawn-delay POIs frame the equivalent spawn->first-poll window - for both,
+ * the whole point is the gap, so a window sized off the poll alone would leave
+ * the cause off-screen. Other POIs select the poll's task when it has one, so
+ * the inspector and lane highlight follow the jump.
  */
 export function poiJump(poi: PointOfInterest, vp: ViewportSlice): PoiJump {
   const { minTs, maxTs } = vp;
@@ -374,6 +436,12 @@ export function poiJump(poi: PointOfInterest, vp: ViewportSlice): PoiJump {
     viewStart = Math.max(minTs, sd.wakeTime - padded * 0.2);
     viewEnd = Math.min(maxTs, viewStart + padded);
     selectedTaskId = sd.taskId;
+  } else if (poi.type === "spawn-delay") {
+    // poi.time is the spawn; poi.span is the first poll it waited for.
+    const totalDur = poi.span.end - poi.time;
+    const padded = Math.max(totalDur * 3, 1e6);
+    viewStart = Math.max(minTs, poi.time - padded * 0.2);
+    viewEnd = Math.min(maxTs, viewStart + padded);
   }
 
   return { viewStart, viewEnd, selectedTaskId };
@@ -440,6 +508,10 @@ export interface PoiViewModel {
   retained: number;
   /** Per-detector counts for the red-flags summary chip. */
   redFlags: { type: PointOfInterestType; count: number }[];
+  spawnThresholdUs: number;
+  /** Whether the trace carries spawn timestamps at all, so the rail can say why
+   *  the list is empty instead of showing a dead control. */
+  hasSpawnTimes: boolean;
 }
 
 /**
@@ -482,10 +554,12 @@ export function derivePoiViewModel(
       total: 0,
       retained: 0,
       redFlags: [],
+      spawnThresholdUs: poi.spawnThresholdUs,
+      hasSpawnTimes: false,
     };
   }
   const source = poiSourceFor(trace);
-  const filtered = poisForFilter(source, poi.filter);
+  const filtered = poisForFilter(source, poi.filter, poi.spawnThresholdUs);
   const sorted = sortPois(filtered, poi.sortKey, poi.sortDir);
   const peak = peakValue(sorted);
   const index = poi.index < sorted.length ? poi.index : -1;
@@ -512,8 +586,10 @@ export function derivePoiViewModel(
     rows,
     windowStart: start,
     sorted,
-    total: poiMatchCount(source, poi.filter),
+    total: poiMatchCount(source, poi.filter, poi.spawnThresholdUs),
     retained: sorted.length,
-    redFlags: redFlagCounts(source).filter((r) => r.count > 0),
+    redFlags: redFlagCounts(source, poi.spawnThresholdUs).filter((r) => r.count > 0),
+    spawnThresholdUs: poi.spawnThresholdUs,
+    hasSpawnTimes: source.taskSpawnTimes.size > 0,
   };
 }

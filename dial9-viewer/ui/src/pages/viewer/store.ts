@@ -6,6 +6,7 @@
 // panel starts expanded (panelCollapsed all false) - the unified column shows
 // analysis surfaces by default.
 
+import { DEFAULT_SPAWN_DELAY_THRESHOLD_US } from "./poi.js";
 import { createStore } from "../../store/store.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -46,6 +47,7 @@ export function initialViewerState(): StoreState {
     // steps (`n`/`p`) or clicks a rail row.
     poi: {
       filter: "sched",
+      spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
       sortKey: "duration",
       sortDir: "desc",
       index: -1,

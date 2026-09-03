@@ -18,7 +18,7 @@ import {
 import { resolveUrlSelection } from "./url-selection.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
 import { taskIndexFor } from "./tasks-model.js";
-import { derivePoiViewModel } from "./poi.js";
+import { DEFAULT_SPAWN_DELAY_THRESHOLD_US, derivePoiViewModel } from "./poi.js";
 
 let settledTrace: ParsedTrace;
 let reconstructedTrace: ParsedTrace;
@@ -235,6 +235,7 @@ describe("viewer deep-link reconstruction", () => {
   it("resolves a legacy exemplar's stale issue index from its poll anchor", () => {
     const poi = {
       filter: "wake-delay" as const,
+      spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
       sortKey: "duration" as const,
       sortDir: "desc" as const,
       index: -1,
@@ -359,6 +360,7 @@ describe("viewer deep-link reconstruction", () => {
     });
     source.update("poi", {
       filter: "long-poll",
+      spawnThresholdUs: 2_500,
       sortKey: "time",
       sortDir: "asc",
       index: 4,
@@ -524,6 +526,7 @@ describe("viewer deep-link reconstruction", () => {
     });
     store.update("poi", {
       filter: "long-poll",
+      spawnThresholdUs: 2_500,
       sortKey: "time",
       sortDir: "asc",
       index: 4,
@@ -571,6 +574,8 @@ describe("viewer deep-link reconstruction", () => {
     });
     expect(state.poi).toEqual({
       filter: "long-poll",
+      // A detector setting, not source-scoped: it survives the replacement.
+      spawnThresholdUs: 2_500,
       sortKey: "time",
       sortDir: "asc",
       index: -1,

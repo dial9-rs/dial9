@@ -698,6 +698,68 @@ describe("filterPointsOfInterest", () => {
     ).toEqual([]);
   });
 
+  it("spawn-delay filter: one point per spawned task, delay above the floor", () => {
+    const spawnDelayThresholdUs = 100;
+    const pois = filterPointsOfInterest("spawn-delay", workerSpans, workerIds, schedDelays, {
+      hasSchedWait: trace.hasSchedWait,
+      taskSpawnTimes: trace.taskSpawnTimes,
+      spawnDelayThresholdUs,
+    });
+    expect(pois.length, "No spawn-delay points of interest found").toBeGreaterThan(0);
+
+    const offenders = pois.filter(
+      (p: any) => p.type !== "spawn-delay" || p.value <= spawnDelayThresholdUs,
+    );
+    expect(
+      offenders.map((p: any) => `type=${p.type} value=${p.value}`),
+      "spawn-delay results with wrong type or value <= the configured floor",
+    ).toEqual([]);
+
+    // `time` is the spawn and `span` the poll that followed, so the reported
+    // value must reconstruct exactly from the two.
+    const mismatched = pois.filter(
+      (p: any) => Math.abs((p.span.start - p.time) / 1000 - p.value) > 1e-6,
+    );
+    expect(
+      mismatched.map((p: any) => `task=${p.span.taskId} value=${p.value}`),
+      "spawn-delay value is not (first poll start - spawn) in microseconds",
+    ).toEqual([]);
+
+    // A task appearing twice would mean a per-worker minimum leaked through.
+    const seen = new Set<number>();
+    const duplicates = pois.filter((p: any) => {
+      if (seen.has(p.span.taskId)) return true;
+      seen.add(p.span.taskId);
+      return false;
+    });
+    expect(duplicates.map((p: any) => p.span.taskId), "task listed twice").toEqual([]);
+
+    const unspawned = pois.filter((p: any) => trace.taskSpawnTimes.get(p.span.taskId) !== p.time);
+    expect(unspawned.map((p: any) => p.span.taskId), "point not anchored on its spawn").toEqual([]);
+  });
+
+  it("spawn-delay filter: the threshold narrows the result, and is required input", () => {
+    const at = (spawnDelayThresholdUs: number): number =>
+      filterPointsOfInterest("spawn-delay", workerSpans, workerIds, schedDelays, {
+        hasSchedWait: trace.hasSchedWait,
+        taskSpawnTimes: trace.taskSpawnTimes,
+        spawnDelayThresholdUs,
+      }).length;
+    const counts = [0, 100, 1_000, 100_000].map(at);
+    const regressions = counts
+      .map((c, i) => (i > 0 && c > counts[i - 1]! ? `step ${i}: ${counts[i - 1]} -> ${c}` : null))
+      .filter((x) => x !== null);
+    expect(regressions, "a higher threshold admitted more points").toEqual([]);
+    expect(counts[0], "no spawn delays at all").toBeGreaterThan(0);
+
+    // No spawn map: report nothing rather than invent a delay from the poll.
+    expect(
+      filterPointsOfInterest("spawn-delay", workerSpans, workerIds, schedDelays, {
+        hasSchedWait: trace.hasSchedWait,
+      }),
+    ).toEqual([]);
+  });
+
   it("sortByWorst produces descending order", () => {
     const pois = filterPointsOfInterest("long-poll", workerSpans, workerIds, schedDelays, {
       hasSchedWait: trace.hasSchedWait,

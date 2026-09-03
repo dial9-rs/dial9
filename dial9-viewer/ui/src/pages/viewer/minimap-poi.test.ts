@@ -38,6 +38,7 @@ function fakeTrace(events: TraceEvent[], overrides: Partial<ParsedTrace> = {}): 
     blockInPlaceGaps: [],
     hasSchedWait: false,
     taskInstrumented: new Map<number, boolean>(),
+    taskSpawnTimes: new Map<number, number>(),
     ...overrides,
   } as unknown as ParsedTrace;
 }
@@ -84,14 +85,42 @@ describe("deriveMinimapPois", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  it("skips the sched/uninstrumented detectors when their inputs are absent", () => {
-    // hasSchedWait=false and empty taskInstrumented -> only long-poll runs, so
-    // no "sched"/"wake-delay"/"uninstrumented" ticks appear.
+  it("skips the sched/uninstrumented/spawn detectors when their inputs are absent", () => {
+    // No sched-wait, no instrumentation map, no spawn times -> long-poll only.
     const events = [
       ev(EVENT_TYPES.PollStart, 0, 1 * MS, 1),
       ev(EVENT_TYPES.PollEnd, 0, 4 * MS, 1),
     ];
     const pois = deriveMinimapPois(fakeTrace(events));
     for (const p of pois) expect(p.type).toBe("long-poll");
+  });
+
+  it("ticks a spawn delay at the spawn, once the trace carries spawn times", () => {
+    const spawnTs = 1 * MS;
+    const events = [
+      // Spawns at 1ms, first polled at 3ms: a 2ms delay, past the 100us floor.
+      ev(EVENT_TYPES.PollStart, 0, 3 * MS, 1),
+      ev(EVENT_TYPES.PollEnd, 0, 3 * MS + 100_000, 1),
+    ];
+    const pois = deriveMinimapPois(
+      fakeTrace(events, { taskSpawnTimes: new Map([[1, spawnTs]]) }),
+    );
+    const spawnTicks = pois.filter((p) => p.type === "spawn-delay");
+    expect(spawnTicks.length).toBe(1);
+    // The tick sits at the SPAWN, not the poll - that is where the wait began.
+    expect(spawnTicks[0]?.time).toBe(spawnTs);
+    expect(spawnTicks[0]?.value).toBe((3 * MS - spawnTs) / 1000);
+  });
+
+  it("emits no spawn tick for a delay under the default floor", () => {
+    const spawnTs = 3 * MS - 10_000; // 10us before the poll
+    const events = [
+      ev(EVENT_TYPES.PollStart, 0, 3 * MS, 1),
+      ev(EVENT_TYPES.PollEnd, 0, 3 * MS + 100_000, 1),
+    ];
+    const pois = deriveMinimapPois(
+      fakeTrace(events, { taskSpawnTimes: new Map([[1, spawnTs]]) }),
+    );
+    expect(pois.filter((p) => p.type === "spawn-delay")).toEqual([]);
   });
 });

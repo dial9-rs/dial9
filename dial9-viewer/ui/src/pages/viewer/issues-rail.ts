@@ -19,9 +19,12 @@ import type { KeyBinding } from "../../lib/interact/keyboard.js";
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
 import {
   POI_FILTERS,
+  SPAWN_DELAY_THRESHOLD_MAX_US,
+  SPAWN_DELAY_THRESHOLD_MIN_US,
   derivePoiViewModel,
   filterLabel,
   parsePoiFilter,
+  parseSpawnThresholdUs,
   poiJump,
   stepIndex,
   type PoiViewModel,
@@ -254,10 +257,14 @@ export interface IssuesRailController {
 /** Build the store-wired issues-rail controller. */
 export function createIssuesRail(store: ViewerStore): IssuesRailController {
   // Sort memo: derivePoiViewModel re-sorts the retained list and formats the
-  // visible window, so cache it on the (trace, filter, sortKey, sortDir, minTs,
-  // index) key and skip that work on a pan/zoom/selection repaint (the common
-  // frame). `index` is part of the key because the formatted window is anchored
-  // on it - stepping past the window edge has to re-slice.
+  // visible window, so cache it and skip that work on a pan/zoom/selection
+  // repaint (the common frame). `index` is part of the key because the
+  // formatted window is anchored on it - stepping past the window edge has to
+  // re-slice.
+  //
+  // INVARIANT: every `poi` field derivePoiViewModel reads must appear in the
+  // key. One left out shows the previous list after the control that owns it
+  // changes, which reads as the control being broken.
   let cacheKey = "";
   let cacheVm: PoiViewModel | null = null;
 
@@ -265,7 +272,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     const trace = state.trace.trace;
     const { poi, viewport } = state;
     const key = trace
-      ? `${idOf(trace)}|${poi.filter}|${poi.sortKey}|${poi.sortDir}|${viewport.minTs}|${poi.index}`
+      ? `${idOf(trace)}|${poi.filter}|${poi.spawnThresholdUs}|${poi.sortKey}|${poi.sortDir}|${viewport.minTs}|${poi.index}`
       : "none";
     if (cacheVm === null || key !== cacheKey) {
       cacheKey = key;
@@ -376,6 +383,15 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
   function setFilter(filter: PointOfInterestType): void {
     // A new filter rebuilds the list; the current index no longer maps.
     store.update("poi", { filter, index: -1 });
+  }
+
+  /** Rebuilds the list, so the current index is dropped. An unparseable value
+   *  is ignored rather than snapping the rail back to the default mid-edit. */
+  function setSpawnThreshold(raw: string): void {
+    const spawnThresholdUs = parseSpawnThresholdUs(raw);
+    if (spawnThresholdUs === null) return;
+    if (spawnThresholdUs === store.getState().poi.spawnThresholdUs) return;
+    store.update("poi", { spawnThresholdUs, index: -1 });
   }
 
   function sortTaskByColumn(col: TaskColumn): void {
@@ -495,6 +511,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
         {
           setTab,
           setFilter,
+          setSpawnThreshold,
           sortByColumn,
           jumpTo,
           sortTaskByColumn,
@@ -553,6 +570,7 @@ function revealTaskWindow(
 interface RailHandlers {
   setTab(tab: RailTab): void;
   setFilter(filter: PointOfInterestType): void;
+  setSpawnThreshold(raw: string): void;
   sortByColumn(col: Column): void;
   jumpTo(index: number): void;
   sortTaskByColumn(col: TaskColumn): void;
@@ -667,11 +685,43 @@ function issuesHead(vm: PoiViewModel, h: RailHandlers): TemplateResult {
             )}
           </select>
         </label>
+        ${vm.filter === "spawn-delay" ? spawnThresholdControl(vm, h) : nothing}
         <span class="d9-rail-hint" title="Step issues with the n / p keys"
           ><kbd>n</kbd>/<kbd>p</kbd> step</span
         >
       </div>
     </div>
+  `;
+}
+
+/**
+ * Rendered only while the spawn-delay filter is active; the other detectors
+ * have fixed thresholds, so the control would do nothing there.
+ *
+ * `change`, not `input`: each commit re-runs the detector over the whole trace.
+ */
+function spawnThresholdControl(vm: PoiViewModel, h: RailHandlers): TemplateResult {
+  return html`
+    <label class="d9-rail-threshold-label">
+      <span class="d9-rail-threshold-unit">&gt;</span>
+      <input
+        class="d9-rail-threshold"
+        data-poi-threshold
+        type="number"
+        inputmode="numeric"
+        min=${SPAWN_DELAY_THRESHOLD_MIN_US}
+        max=${SPAWN_DELAY_THRESHOLD_MAX_US}
+        step="10"
+        .value=${String(vm.spawnThresholdUs)}
+        aria-label="Spawn-to-first-poll delay threshold, microseconds"
+        title=${vm.hasSpawnTimes
+          ? "Only list tasks whose first poll came this long after the spawn"
+          : "This trace carries no task-spawn timestamps: record with task tracking enabled to use this detector"}
+        ?disabled=${!vm.hasSpawnTimes}
+        @change=${(e: Event) => h.setSpawnThreshold((e.target as HTMLInputElement).value)}
+      />
+      <span class="d9-rail-threshold-unit">us</span>
+    </label>
   `;
 }
 
