@@ -96,8 +96,11 @@ impl BackgroundTaskConfig {
 ///
 /// Creates a single-threaded tokio runtime for async processors (e.g. S3 upload).
 /// The worker is a "good citizen": it will lose data rather than disrupt the application.
+///
+/// Pure runtime provisioning; orchestration logic lives in
+/// [`run_background_task_inner`].
 pub(crate) fn run_background_task(
-    mut config: BackgroundTaskConfig,
+    config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
     fs: Arc<Fs>,
 ) {
@@ -107,58 +110,71 @@ pub(crate) fn run_background_task(
         .build()
         .expect("failed to create worker runtime");
 
+    rt.block_on(run_background_task_inner(config, shutdown, fs));
+}
+
+/// Builds the `WorkerLoop`, contains any panic escaping its initialization
+/// or run loop, and races the shutdown signal / drain timeout against it.
+/// Doesn't build its own Tokio runtime: [`run_background_task`] does that
+/// via `rt.block_on`. The panic-containment/shutdown-race portion is
+/// shuttle-drivable (`shuttle_tests`); the drain-timeout race isn't, since
+/// `tokio::time::timeout` needs a real reactor.
+async fn run_background_task_inner(
+    mut config: BackgroundTaskConfig,
+    shutdown: tokio::sync::oneshot::Receiver<Duration>,
+    fs: Arc<Fs>,
+) {
     let processors = std::mem::take(&mut config.processors);
     let metrics_sink = config.metrics_sink.clone();
     let trigger = config.trigger.take();
 
     tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");
-    rt.block_on(async {
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker_stop = stop.clone();
-        let worker = async move {
-            let mut worker = WorkerLoop::new(
-                fs,
-                config.poll_interval(),
-                processors,
-                worker_stop,
-                metrics_sink,
-                trigger,
-            )
-            .await?;
-            worker.run().await;
-            io::Result::Ok(())
-        };
-        let mut run_fut =
-            std::pin::pin!(std::panic::AssertUnwindSafe(worker).catch_unwind());
-        // Poll the worker until we receive a shutdown signal with a drain timeout.
-        let drain_timeout = tokio::select! {
-            result = &mut run_fut => {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
-                    }
-                    Err(_) => {
-                        tracing::error!(target: "dial9_worker", "worker panicked");
-                    }
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let worker_stop = stop.clone();
+    let worker = async move {
+        let mut worker = WorkerLoop::new(
+            fs,
+            config.poll_interval(),
+            processors,
+            worker_stop,
+            metrics_sink,
+            trigger,
+        )
+        .await?;
+        worker.run().await;
+        io::Result::Ok(())
+    };
+    let mut run_fut = std::pin::pin!(std::panic::AssertUnwindSafe(worker).catch_unwind());
+    // Poll the worker until we receive a shutdown signal with a drain timeout.
+    let drain_timeout = crate::shuttle_select! {
+        result = &mut run_fut => {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
                 }
-                return;
+                Err(_) => {
+                    tracing::error!(target: "dial9_worker", "worker panicked");
+                }
             }
-            msg = shutdown => msg.unwrap_or(Duration::ZERO),
-        };
-        tracing::info!(target: "dial9_worker", ?drain_timeout, "stop signal received, draining");
-        // Tell the worker to exit after its current processing cycle.
-        stop.cancel();
-        // Give it `drain_timeout` to finish; after that, drop the future.
-        match tokio::time::timeout(drain_timeout, run_fut).await {
-            Ok(Ok(Ok(()))) => tracing::info!(target: "dial9_worker", "drain complete"),
-            Ok(Ok(Err(error))) => {
-                tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
-            }
-            Ok(Err(_)) => tracing::error!(target: "dial9_worker", "worker panicked"),
-            Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
+            tracing::info!(target: "dial9_worker", "worker stopped");
+            return;
         }
-    });
+        msg = shutdown => msg.unwrap_or(Duration::ZERO),
+    };
+    tracing::info!(target: "dial9_worker", ?drain_timeout, "stop signal received, draining");
+    // Tell the worker to exit after its current processing cycle.
+    stop.cancel();
+    // Give it `drain_timeout` to finish; after that, drop the future.
+    match tokio::time::timeout(drain_timeout, run_fut).await {
+        Ok(Ok(Ok(()))) => tracing::info!(target: "dial9_worker", "drain complete"),
+        Ok(Ok(Err(error))) => {
+            tracing::error!(target: "dial9_worker", %error, "worker initialization failed");
+        }
+        Ok(Err(_)) => tracing::error!(target: "dial9_worker", "worker panicked"),
+        Err(_) => tracing::warn!(target: "dial9_worker", "drain timed out"),
+    }
     tracing::info!(target: "dial9_worker", "worker stopped");
 }
 
@@ -221,7 +237,7 @@ struct ActiveDump {
     window: EpochWindow,
     /// `Some` iff a non-zero look-forward was requested; the dump stays
     /// registered until this elapses.
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<crate::primitives::time::Instant>,
     metadata: Vec<(String, String)>,
     receipt_tx: Option<tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>>,
     segments_processed: usize,
@@ -248,8 +264,8 @@ impl ActiveDump {
         let deadline = (!req.lookforward.is_zero()).then(|| {
             // Anchor at trigger time so worker pickup latency does not
             // extend the forward window.
-            let elapsed = req.triggered_at.elapsed().unwrap_or_default();
-            tokio::time::Instant::now() + req.lookforward.saturating_sub(elapsed)
+            let elapsed = req.elapsed_since_trigger();
+            crate::primitives::time::now() + req.lookforward.saturating_sub(elapsed)
         });
         Self {
             id: req.id,
@@ -267,7 +283,7 @@ impl ActiveDump {
 
     /// Whether the dump can resolve once no matching work remains: no
     /// forward window, or its deadline elapsed.
-    fn due(&self, now: tokio::time::Instant) -> bool {
+    fn due(&self, now: crate::primitives::time::Instant) -> bool {
         self.deadline.is_none_or(|d| now >= d)
     }
 
@@ -450,7 +466,7 @@ impl WorkerLoop {
                 // there keeps everything open until the head of the ring
                 // settles (budget-bounded, brief).
                 let exhaustive = self.fs.take_is_exhaustive();
-                let now = tokio::time::Instant::now();
+                let now = crate::primitives::time::now();
                 let mut i = 0;
                 while i < dumps.len() {
                     let held = !retry_hold.is_empty()
@@ -481,7 +497,7 @@ impl WorkerLoop {
             }
 
             let min_deadline = dumps.iter().filter_map(|d| d.deadline).min();
-            tokio::select! {
+            crate::shuttle_select! {
                 _ = self.stop.cancelled() => {}
                 req = rx.rx.recv(), if rx_open => {
                     match req {
@@ -491,9 +507,12 @@ impl WorkerLoop {
                         None => rx_open = false,
                     }
                 }
-                _ = tokio::time::sleep_until(
-                    min_deadline.unwrap_or_else(tokio::time::Instant::now)
+                _ = crate::primitives::time::sleep_until(
+                    min_deadline.unwrap_or_else(crate::primitives::time::now)
                 ), if min_deadline.is_some() => {}
+                // Relies on every caller cancelling `self.stop` right after marking the
+                // writer done, which wakes this select via `stop.cancelled()`
+                // instead. Breaking that ordering can deadlock this loop.
                 _ = Self::wait_for_more(&self.fs, &self.stop, self.poll_interval),
                     if !dumps.is_empty() => {}
             }
@@ -594,12 +613,12 @@ impl WorkerLoop {
         poll_interval: Duration,
     ) {
         if fs.is_disk() {
-            tokio::select! {
+            crate::shuttle_select! {
                 _ = stop.cancelled() => {}
-                _ = tokio::time::sleep(poll_interval) => {}
+                _ = crate::primitives::time::sleep(poll_interval) => {}
             }
         } else {
-            tokio::select! {
+            crate::shuttle_select! {
                 _ = stop.cancelled() => {}
                 _ = fs.wait_for_wakeup() => {}
             }
@@ -819,7 +838,8 @@ impl WorkerLoop {
                                                     record_dump_error(dumps, &matched, err_kind);
                                                 }
                                             } else {
-                                                tokio::time::sleep(self.poll_interval).await;
+                                                crate::primitives::time::sleep(self.poll_interval)
+                                                    .await;
                                                 self.fs.release_for_retry(
                                                     data.segment(),
                                                     bytes.clone(),
@@ -943,3 +963,6 @@ impl WorkerLoop {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests;

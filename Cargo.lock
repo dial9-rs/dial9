@@ -1582,6 +1582,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot 0.5.0",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -1594,6 +1595,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -1895,6 +1897,7 @@ dependencies = [
  "proptest",
  "serde",
  "shuttle",
+ "shuttle-tokio-impl-inner",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -4880,6 +4883,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "shuttle-tokio-impl-inner"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b5e5de67dd9ac801b4299fc15f063ce00be1c64acc72850dcb045b14473187e"
+dependencies = [
+ "criterion 0.5.1",
+ "futures",
+ "pin-project",
+ "regex",
+ "shuttle",
+ "shuttle-tokio-macros-impl",
+ "smallvec",
+ "test-log",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "shuttle-tokio-macros-impl"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d0c94fc6e0f817b69ca12a686a8c6a0de3664b343ba09bee3ad850385532efb"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "shuttle",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5088,6 +5123,37 @@ checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "test-log"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b9c218384242b5c89b68303ab6f6fc53a312d923f0c14dc6bb860c6aeee40f1"
+dependencies = [
+ "test-log-macros",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "test-log-core"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c26ef8b00e4d382e59f6a8ddb3cd790b3a5bb29f21a358a9a69ea2f29f13f27b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "test-log-macros"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "944ad38adcbb71eaa682c56bceeb079e4ca82b4b3edc2a0fde5cb297b77dac8d"
+dependencies = [
+ "syn 2.0.119",
+ "test-log-core",
 ]
 
 [[package]]
