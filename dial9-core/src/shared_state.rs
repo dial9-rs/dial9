@@ -364,6 +364,31 @@ mod tests {
     }
 
     #[test]
+    fn event_buffer_counts_only_events_written() {
+        let ss = Arc::new(enabled_shared_state());
+        let recording = Arc::clone(&ss);
+        std::thread::spawn(move || {
+            recording.if_enabled(|events| events.record_encodable_event(&sample_event()));
+        })
+        .join()
+        .unwrap();
+
+        let batch = ss.collector.next().expect("thread exit flushes its event");
+        assert_eq!(batch.event_count(), 1);
+
+        let declining = Arc::clone(&ss);
+        std::thread::spawn(move || {
+            declining.if_enabled(|events| events.with_encoder(|_| {}));
+        })
+        .join()
+        .unwrap();
+        assert!(
+            ss.collector.next().is_none(),
+            "a callback that writes no event must not flush a header-only batch"
+        );
+    }
+
+    #[test]
     fn record_event_registers_tl_buffer_handle() {
         let ss = enabled_shared_state();
         // First event on this thread should register a handle.

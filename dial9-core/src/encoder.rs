@@ -429,7 +429,6 @@ pub(crate) fn with_encoder_if_enabled(
             return;
         }
         f(&mut buf.thread_local_encoder());
-        buf.event_count += 1;
         let current_epoch = drain_epoch.load(Ordering::Relaxed);
         if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
             collector.accept_flush(buf.flush());
