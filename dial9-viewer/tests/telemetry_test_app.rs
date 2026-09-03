@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! End-to-end coverage for the self-describing telemetry test application.
 //!
 //! The expectation reader is kept as a private helper because its event and
@@ -6,15 +8,12 @@
 #[path = "telemetry_test_app/expectations.rs"]
 mod expectations;
 
-#[cfg(target_os = "linux")]
 #[path = "telemetry_test_app/local_js.rs"]
 mod local_js;
 
-#[cfg(target_os = "linux")]
 #[path = "telemetry_test_app/observations.rs"]
 mod observations;
 
-#[cfg(target_os = "linux")]
 #[test]
 fn local_javascript_matches_the_self_described_fixture() {
     use flate2::read::GzDecoder;
