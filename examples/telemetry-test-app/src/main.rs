@@ -12,8 +12,9 @@
 //! The test relies on this naming and nesting for observation and cannot detect
 //! an incorrectly written fixture.
 //!
-//! Functions deliberately mix inline and non-inline frames to exercise both
-//! forms of symbolization.
+//! CPU functions provide the direct inline and non-inline symbolization cases.
+//! Async functions use the same mix for additional variety, though task dumps
+//! observe compiler-generated Future state machines.
 
 use clap::Parser;
 #[cfg(target_os = "linux")]
