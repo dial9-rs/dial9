@@ -47,8 +47,9 @@ process.stderr.write('\n');
 2. Extract worker IDs from non-queue, non-wake events
 3. `buildWorkerSpans(events, workerIds, maxTs)` reconstructs poll/park/active spans
 4. `attachCpuSamples(cpuSamples, workerSpans)` attaches profiling data to poll spans
-5. `buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)` builds task count over time
-6. `computeSchedulingDelays(workerSpans, workerIds, wakesByTask)` computes wake-to-poll latencies
+5. `buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)` builds the lifecycle fallback and task-first-poll index
+6. `activeTaskSeries(trace, taskTimeline)` selects the sampled process-wide task count when available
+7. `computeSchedulingDelays(workerSpans, workerIds, wakesByTask)` computes wake-to-poll latencies
 
 ## analyzeTraces return schema
 
@@ -187,7 +188,16 @@ Attaches each CPU sample to the poll span it falls within. After calling:
 
 ## buildActiveTaskTimeline(taskSpawnTimes, taskTerminateTimes)
 
-Returns `{activeTaskSamples: [{t, count}], taskFirstPoll}`. The count at each point is the number of tasks that have been spawned but not yet terminated. Useful for detecting task leaks.
+Returns `{activeTaskSamples: [{t, count}], taskFirstPoll}`. The count is derived from spawn/terminate events and is the fallback for traces without sampled counts.
+
+## activeTaskSeries(trace, taskTimeline)
+
+Returns the authoritative process-wide `[{t, count}]` series. Current
+per-runtime `RuntimeMetricsEvent.alive_tasks` samples are summed by flush cycle;
+transitional `QueueSampleEvent.active_tasks` samples are already process-wide;
+older traces fall back to `taskTimeline.activeTaskSamples`. Prefer this helper
+for charts, summaries, and leak detection because sampled counts include tasks
+that were already alive when a partial trace began.
 
 ## computeSchedulingDelays(workerSpans, workerIds, wakesByTask)
 

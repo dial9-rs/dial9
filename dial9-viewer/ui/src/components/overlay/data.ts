@@ -5,11 +5,14 @@
 //
 // LaneData omits the GLOBAL injection-queue series and the active-task timeline
 // (the lanes do not draw them); the tooltip/info readout need both, so we run
-// the core builders once more here. This is a one-time O(events) cost at trace
-// load (wired through store.derived over the `trace` slice), NOT a per-frame
-// cost.
+// the core builders once more here, including the sampled active-task series.
+// This is a one-time O(events) cost at trace load (wired through store.derived
+// over the `trace` slice), NOT a per-frame cost.
 
-import { buildActiveTaskTimeline } from "../../lib/trace/index.js";
+import {
+  activeTaskSeries,
+  buildActiveTaskTimeline,
+} from "../../lib/trace/index.js";
 import {
   deriveRuntimeGroups,
   deriveRuntimeMetrics,
@@ -77,6 +80,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,
   );
+  const activeTaskSamples = activeTaskSeries(trace, timeline);
 
   return {
     workerIds,
@@ -87,7 +91,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     columnarSpans: spanData.columnarSpans,
     workerQueueSamples: spanResult.workerQueueSamples,
     queueSamples: spanResult.queueSamples,
-    activeTaskSamples: timeline.activeTaskSamples,
+    activeTaskSamples,
     blockInPlaceGaps: trace.blockInPlaceGaps,
     hasCpuTime: trace.hasCpuTime,
     hasSchedWait: trace.hasSchedWait,
