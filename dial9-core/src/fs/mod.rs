@@ -6,6 +6,8 @@
 //! - `Fs::Disk(DiskFs)`: real filesystem. See [`disk`].
 //! - `Fs::Mem(MemFs)`: in-process ring channel. See [`mem`].
 
+#[cfg(feature = "pipeline")]
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -375,20 +377,24 @@ impl Fs {
         matches!(self, Fs::Disk(_))
     }
 
-    /// Like [`Self::take_files`], but only dispense segments whose
-    /// `[creation, seal]` span overlaps one of `windows`. Used by the
-    /// triggered worker so out-of-window history stays in the ring for
-    /// later dumps.
+    /// Like [`Self::take_files`], but only dispense exact checkpoint members
+    /// or segments whose `[creation, seal]` span overlaps one of `windows`.
+    /// Used by the triggered worker so out-of-window history stays in the ring
+    /// for later dumps without losing a checkpoint to clock-boundary races.
     ///
     /// Memory: pops the oldest matching slot, leaving non-matching slots in
     /// place (still at most one segment per call). Disk: returns all new
     /// claims; the worker filters after reading the header and releases
     /// unmatched claims.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn take_files_matching(&self, windows: &[EpochWindow]) -> TakenFiles {
+    pub(crate) fn take_files_matching(
+        &self,
+        windows: &[EpochWindow],
+        checkpoint_segments: &HashSet<u32>,
+    ) -> TakenFiles {
         match self {
             Fs::Disk(d) => d.take_files(),
-            Fs::Mem(m) => m.take_files_matching(windows),
+            Fs::Mem(m) => m.take_files_matching(windows, checkpoint_segments),
         }
     }
 

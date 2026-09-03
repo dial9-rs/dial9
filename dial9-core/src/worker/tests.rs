@@ -1407,7 +1407,7 @@ mod triggered_test_support {
 #[cfg(test)]
 mod triggered_worker_tests {
     use super::triggered_test_support::*;
-    use crate::dump::{self, DumpError};
+    use crate::dump::{self, DumpError, DumpId, DumpRequest, Lookback};
     use crate::fs::{EpochWindow, Fs};
     use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
     use crate::worker::epoch_to_system;
@@ -1531,6 +1531,55 @@ mod triggered_worker_tests {
 
         stop.cancel();
         worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn checkpoint_uses_exact_snapshot_instead_of_wall_clock_window() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let now = now_epoch();
+
+        // Model a checkpoint segment whose creation timestamp crossed ahead
+        // of the request timestamp, then a post-boundary segment whose clock
+        // still falls inside the request's coarse one-second window.
+        seal_mem(&fs, 0, now + 1);
+        check!(fs.try_reserve_checkpoint());
+        let checkpoint_segments = fs.protect_memory_checkpoint_segments(None);
+        check!(checkpoint_segments == vec![0]);
+        seal_mem(&fs, 1, now);
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        tx.send(DumpRequest {
+            id: DumpId::new(),
+            triggered_at: UNIX_EPOCH + Duration::from_secs(now),
+            lookback: Lookback::Unbounded,
+            lookforward: Duration::ZERO,
+            metadata: Vec::new(),
+            checkpoint_segments: Some(checkpoint_segments),
+            receipt_tx,
+        })
+        .unwrap();
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let (capture, captured) = CapturingProcessor::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(capture)],
+            crate::dump::DumpRx { rx },
+            stop.clone(),
+        );
+
+        let receipt = receipt_rx.await.unwrap().unwrap();
+        check!(receipt.segments_processed == 1);
+        check!(captured.lock().unwrap().len() == 1);
+
+        stop.cancel();
+        worker.await.unwrap();
+
+        // The post-boundary segment was not part of the checkpoint snapshot.
+        let remaining = fs.take_files();
+        check!(remaining.segments.len() == 1);
+        check!(remaining.segments[0].seg_ref.index() == 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1921,18 +1970,24 @@ mod triggered_worker_tests {
         seal_mem(&fs, 1, now);
 
         // Window matching nothing: ring untouched.
-        let none = fs.take_files_matching(&[EpochWindow {
-            start_secs: Some(now + 100),
-            end_secs: now + 200,
-        }]);
+        let none = fs.take_files_matching(
+            &[EpochWindow {
+                start_secs: Some(now + 100),
+                end_secs: now + 200,
+            }],
+            &Default::default(),
+        );
         check!(none.segments.is_empty());
         check!(none.queued_segments == Some(2));
 
         // Window matching only the fresh segment: the old slot stays.
-        let snap = fs.take_files_matching(&[EpochWindow {
-            start_secs: Some(now - 60),
-            end_secs: now + 60,
-        }]);
+        let snap = fs.take_files_matching(
+            &[EpochWindow {
+                start_secs: Some(now - 60),
+                end_secs: now + 60,
+            }],
+            &Default::default(),
+        );
         check!(snap.segments.len() == 1);
         check!(snap.segments[0].seg_ref.index() == 1);
         check!(snap.queued_segments == Some(1));

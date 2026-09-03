@@ -325,21 +325,29 @@ impl MemFs {
 
     #[cfg(feature = "pipeline")]
     pub(super) fn take_files(&self) -> TakenFiles {
-        self.take_files_inner(None)
+        self.take_files_inner(None, None)
     }
 
-    /// Windowed pop for the triggered worker: the oldest slot whose
-    /// `[creation, seal]` span overlaps one of `windows`. Non-matching
-    /// slots stay in the ring (history is preserved for later dumps); still
-    /// at most one segment per call so the in-flight memory bound is
-    /// unchanged.
+    /// Selective pop for the triggered worker: the oldest exact checkpoint
+    /// member or slot whose `[creation, seal]` span overlaps one of `windows`.
+    /// Non-matching slots stay in the ring (history is preserved for later
+    /// dumps); still at most one segment per call so the in-flight memory bound
+    /// is unchanged.
     #[cfg(feature = "pipeline")]
-    pub(super) fn take_files_matching(&self, windows: &[EpochWindow]) -> TakenFiles {
-        self.take_files_inner(Some(windows))
+    pub(super) fn take_files_matching(
+        &self,
+        windows: &[EpochWindow],
+        checkpoint_segments: &HashSet<u32>,
+    ) -> TakenFiles {
+        self.take_files_inner(Some(windows), Some(checkpoint_segments))
     }
 
     #[cfg(feature = "pipeline")]
-    fn take_files_inner(&self, windows: Option<&[EpochWindow]>) -> TakenFiles {
+    fn take_files_inner(
+        &self,
+        windows: Option<&[EpochWindow]>,
+        checkpoint_segments: Option<&HashSet<u32>>,
+    ) -> TakenFiles {
         let ch = &self.channel;
 
         // Floor peak at current in-flight, this cycle's pop seeds the next.
@@ -357,7 +365,10 @@ impl MemFs {
                 Some(ws) => q
                     .segments
                     .iter()
-                    .position(|s| ws.iter().any(|w| w.overlaps(s.epoch_secs, s.seal_secs)))
+                    .position(|s| {
+                        checkpoint_segments.is_some_and(|indices| indices.contains(&s.index))
+                            || ws.iter().any(|w| w.overlaps(s.epoch_secs, s.seal_secs))
+                    })
                     .and_then(|i| q.segments.remove(i)),
             };
             if let Some(s) = &popped {

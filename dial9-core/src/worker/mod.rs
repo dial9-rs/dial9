@@ -24,7 +24,7 @@ use crate::worker::pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetr
 use futures_util::FutureExt;
 use metrique::timers::Timer;
 use metrique::writer::BoxEntrySink;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -290,6 +290,16 @@ impl ActiveDump {
         self.deadline.is_none_or(|d| now >= d)
     }
 
+    /// Recorder checkpoints carry an exact ring snapshot. Its membership is
+    /// authoritative even when coarse wall-clock timestamps straddle the
+    /// boundary; ordinary and standalone dumps continue to match by window.
+    fn matches(&self, index: u32, start_secs: u64, seal_secs: u64) -> bool {
+        match &self.checkpoint_segments {
+            Some(indices) => indices.contains(&index),
+            None => self.window.overlaps(start_secs, seal_secs),
+        }
+    }
+
     /// Actual covered span: the captured segments' epoch extent, or the
     /// trigger instant for an empty dump.
     fn time_range(&self) -> (SystemTime, SystemTime) {
@@ -532,8 +542,18 @@ impl WorkerLoop {
             if dumps.is_empty() {
                 return Vec::new();
             }
-            let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
-            let mut taken = self.fs.take_files_matching(&windows);
+            let windows: Vec<EpochWindow> = dumps
+                .iter()
+                .filter(|dump| dump.checkpoint_segments.is_none())
+                .map(|dump| dump.window)
+                .collect();
+            let checkpoint_segments: HashSet<u32> = dumps
+                .iter()
+                .filter_map(|dump| dump.checkpoint_segments.as_ref())
+                .flatten()
+                .copied()
+                .collect();
+            let mut taken = self.fs.take_files_matching(&windows, &checkpoint_segments);
             // Prune cache entries for files no longer dispensed (disk
             // dispenses every unclaimed file per pass, so absence means the
             // writer evicted it).
@@ -713,7 +733,7 @@ impl WorkerLoop {
             let matched: Vec<usize> = dumps
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| d.window.overlaps(epoch_secs, seal_secs))
+                .filter(|(_, d)| d.matches(seg_ref.index(), epoch_secs, seal_secs))
                 .map(|(i, _)| i)
                 .collect();
             if !dumps.is_empty() && matched.is_empty() {
