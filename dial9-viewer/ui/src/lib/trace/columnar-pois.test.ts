@@ -59,9 +59,16 @@ const key = (p: any) => `${p.time}|${p.worker}|${p.type}|${p.value}|${p.span?.st
 const bag = (arr: any[]) => arr.map(key).sort();
 
 describe("store.pointsOfInterest matches frozen filterPointsOfInterest", () => {
-  for (const type of ["long-poll", "sched", "cpu-sampled", "wake-delay", "uninstrumented", "spawn-delay"] as const) {
+  for (const type of [
+    "long-poll", "sched", "cpu-sampled", "wake-delay", "uninstrumented",
+    "spawn-delay", "off-cpu-poll", "off-cpu-active",
+  ] as const) {
     it(`${type}: same POIs (time/worker/value/span)`, () => {
-      const opts = { hasSchedWait: true, sortByWorst: true, taskInstrumented, taskSpawnTimes };
+      const opts = {
+        hasSchedWait: true, sortByWorst: true, taskInstrumented, taskSpawnTimes,
+        // Forced on: both off-CPU detectors are gated on their input existing.
+        hasOnCpuSamples: true, hasWorkerCpuTime: true,
+      };
       const fat = filterPointsOfInterest(type, ws, workerIds, fatSched, opts);
       const col = store.pointsOfInterest(type, workerIds, colSched, opts);
       expect(col.length, `${type} count`).toBe(fat.length);
@@ -217,5 +224,88 @@ describe("taskAggregates matches a fat reduction", () => {
       expect(agg.firstPollWorker).toBe(f.firstPollWorker);
       expect(agg.workerCount).toBe(f.workers.size);
     }
+  });
+});
+
+// Over the demo trace the off-CPU detectors match nothing (workers ~97% on-CPU)
+// or everything (every long poll is sample-free), so parity there is vacuous.
+describe("off-CPU detectors: column scan matches the fat scan on crafted lanes", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const synthetic: any = {
+    0: {
+      polls: [
+        { start: 0, end: 5e6, taskId: 1, spawnLocId: null, spawnLoc: null },
+        { start: 10e6, end: 10.5e6, taskId: 2, spawnLocId: null, spawnLoc: null },
+        { start: 20e6, end: 30e6, taskId: 3, spawnLocId: null, spawnLoc: null, openEnded: true },
+      ],
+      parks: [],
+      actives: [
+        { start: 0, end: 10e6, ratio: 0.1 },
+        { start: 20e6, end: 30e6, ratio: 0.9 },
+        { start: 40e6, end: 40.5e6, ratio: 0 },
+      ],
+      cpuSampleTimes: [],
+    },
+  };
+  const opts = { sortByWorst: true, hasOnCpuSamples: true, hasWorkerCpuTime: true };
+
+  for (const type of ["off-cpu-active", "off-cpu-poll"] as const) {
+    it(`${type}: same POIs, and not an empty result`, () => {
+      const syntheticStore = ColumnarWorkerSpans.fromWorkerSpans(synthetic);
+      const fat = filterPointsOfInterest(type, synthetic, [0], [], opts);
+      const col = syntheticStore.pointsOfInterest(type, [0], [], opts);
+      expect(fat.length, `${type} matched nothing, so parity would be vacuous`)
+        .toBeGreaterThan(0);
+      expect(col.length, `${type} count`).toBe(fat.length);
+      expect(bag(col)).toEqual(bag(fat));
+    });
+  }
+
+  // Fat twin covered by minimap-poi.test.ts.
+  it("anyActiveCpuTime ignores the ratio a zero-length period fabricates", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lane = (actives: unknown[]): any => ({
+      0: { polls: [], parks: [], actives, cpuSampleTimes: [] },
+    });
+    // wall 0 => the builders stamp ratio 1.0, which says nothing about CPU time.
+    expect(
+      ColumnarWorkerSpans.fromWorkerSpans(
+        lane([{ start: 5e6, end: 5e6, ratio: 1 }, { start: 10e6, end: 20e6, ratio: 0 }]),
+      ).anyActiveCpuTime(),
+    ).toBe(false);
+    expect(
+      ColumnarWorkerSpans.fromWorkerSpans(
+        lane([{ start: 10e6, end: 20e6, ratio: 0.4 }]),
+      ).anyActiveCpuTime(),
+    ).toBe(true);
+  });
+
+  // Sample exclusion is the one branch reading different structures per path
+  // (`poll.cpuSamples` vs the `cpuOff` CSR), and no other case attaches a
+  // sample - so both paths could agree while both were wrong.
+  it("off-cpu-poll: both paths drop a long poll that caught an on-CPU sample", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const lanes: any = {
+      0: {
+        polls: [
+          { start: 0, end: 5e6, taskId: 1, spawnLocId: null, spawnLoc: null },
+          { start: 10e6, end: 15e6, taskId: 2, spawnLocId: null, spawnLoc: null },
+        ],
+        parks: [], actives: [], cpuSampleTimes: [],
+      },
+    };
+    // One on-CPU sample inside the FIRST poll only.
+    const samples = [
+      { timestamp: 2e6, workerId: 0, tid: 1, source: 0, callchain: ["0x1"], cpu: 0 },
+    ];
+    const store = ColumnarWorkerSpans.fromWorkerSpans(lanes);
+    attachCpuSamples(samples as never, lanes);
+    store.attachCpuSamples(samples as never);
+
+    const opts2 = { sortByWorst: true, hasOnCpuSamples: true };
+    const fat = filterPointsOfInterest("off-cpu-poll", lanes, [0], [], opts2);
+    const col = store.pointsOfInterest("off-cpu-poll", [0], [], opts2);
+    expect(fat.map((p) => p.span.start)).toEqual([10e6]);
+    expect(bag(col)).toEqual(bag(fat));
   });
 });
