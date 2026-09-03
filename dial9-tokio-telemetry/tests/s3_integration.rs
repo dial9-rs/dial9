@@ -6,13 +6,11 @@ mod fake_s3;
 
 use aws_config::Region;
 use aws_sdk_s3::Client;
-use common::fast_sealing_writer;
-use dial9_core::source::{FlushContext, Source};
+use common::{armed_boundary_source, fast_sealing_writer};
 use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, RecorderPipelineExt, RecorderS3ClientExt, TokioAttachOptions, recorder, spawn,
 };
-use dial9_trace_format::TraceEvent;
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
     fake_s3_client_with_region,
@@ -21,7 +19,7 @@ use flate2::read::GzDecoder;
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Create a dummy S3 config + client for tests.
@@ -935,31 +933,9 @@ fn permanently_broken_s3_produces_failure_metrics() {
 /// `end_to_end_trace_to_s3_roundtrip` but on the on-demand path.
 #[test]
 fn dump_trigger_uploads_segments_and_writes_manifest() {
-    #[derive(TraceEvent)]
-    struct BoundaryEvent {
-        #[traceevent(timestamp)]
-        timestamp_ns: u64,
-    }
-
-    struct ArmedBoundarySource(Arc<AtomicBool>);
-
-    impl Source for ArmedBoundarySource {
-        fn flush(&mut self, ctx: &FlushContext<'_>) {
-            if self.0.load(Ordering::Acquire) {
-                ctx.record_event(&BoundaryEvent {
-                    timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
-                });
-            }
-        }
-
-        fn name(&self) -> &'static str {
-            "armed-boundary"
-        }
-    }
-
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let armed = Arc::new(AtomicBool::new(false));
+    let (boundary_source, armed) = armed_boundary_source();
 
     std::fs::create_dir(s3_root.path().join("dump-bucket")).unwrap();
     let client = fake_s3_client(s3_root.path());
@@ -975,7 +951,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .build();
 
     let recorder = recorder(writer)
-        .source(ArmedBoundarySource(Arc::clone(&armed)))
+        .source(boundary_source)
         .worker_poll_interval(Duration::from_millis(50))
         .with_s3_uploader_client(s3_config.clone(), client.clone())
         .with_dump_trigger(|_| {})

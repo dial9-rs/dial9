@@ -1,14 +1,16 @@
 #![allow(dead_code)]
 use dial9_core::recording::Recorder;
+use dial9_core::source::{FlushContext, Source};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::{
     Dial9HandleTokioExt, DiskBuffer, MemoryBuffer, TokioAttachOptions,
 };
-use dial9_trace_format::decoder::Decoder;
+use dial9_trace_format::{TraceEvent, decoder::Decoder};
 use serde::de::DeserializeOwned;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +24,37 @@ pub const SEAL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const SEAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Trivial tasks spawned per workload burst; enough to seal a 64-byte segment.
 pub const WORKLOAD_BURST: usize = 200;
+
+#[derive(TraceEvent)]
+struct BoundaryEvent {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+}
+
+/// Test source that emits one event on every flush while armed. Use it to
+/// establish a checkpoint-local data precondition without racing retention of
+/// a segment sealed before the request.
+#[derive(Debug)]
+pub struct ArmedBoundarySource(Arc<AtomicBool>);
+
+impl Source for ArmedBoundarySource {
+    fn flush(&mut self, ctx: &FlushContext<'_>) {
+        if self.0.load(Ordering::Acquire) {
+            ctx.record_event(&BoundaryEvent {
+                timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
+            });
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "armed-boundary"
+    }
+}
+
+pub fn armed_boundary_source() -> (ArmedBoundarySource, Arc<AtomicBool>) {
+    let armed = Arc::new(AtomicBool::new(false));
+    (ArmedBoundarySource(Arc::clone(&armed)), armed)
+}
 
 /// Attach a multi-thread runtime with `workers` workers to `recorder`.
 pub fn attach(

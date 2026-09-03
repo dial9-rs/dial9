@@ -6,7 +6,7 @@
 mod common;
 mod fake_s3;
 
-use common::{fast_sealing_writer, wait_for_sealed_segment};
+use common::{armed_boundary_source, fast_sealing_writer, wait_for_sealed_segment};
 use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
@@ -259,40 +259,13 @@ fn lookforward_dump_resolves_after_deadline() {
 /// manifest (`manifest_key` is `None`).
 #[test]
 fn off_s3_pipeline_dumps_without_manifest() {
-    use dial9_core::source::{FlushContext, Source};
-    use dial9_trace_format::TraceEvent;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[derive(TraceEvent)]
-    struct BoundaryEvent {
-        #[traceevent(timestamp)]
-        timestamp_ns: u64,
-    }
-
-    struct ArmedBoundarySource(Arc<AtomicBool>);
-
-    impl Source for ArmedBoundarySource {
-        fn flush(&mut self, ctx: &FlushContext<'_>) {
-            if self.0.load(Ordering::Acquire) {
-                ctx.record_event(&BoundaryEvent {
-                    timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
-                });
-            }
-        }
-
-        fn name(&self) -> &'static str {
-            "armed-boundary"
-        }
-    }
-
     let trace_dir = tempfile::tempdir().unwrap();
-    let armed = Arc::new(AtomicBool::new(false));
+    let (boundary_source, armed) = armed_boundary_source();
 
     let writer = fast_sealing_writer(trace_dir.path());
 
     let recorder = recorder(writer)
-        .source(ArmedBoundarySource(Arc::clone(&armed)))
+        .source(boundary_source)
         .worker_poll_interval(Duration::from_millis(50))
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
@@ -303,13 +276,13 @@ fn off_s3_pipeline_dumps_without_manifest() {
     // Make the checkpoint's own source sample establish the test precondition:
     // data exists at the requested boundary. Waiting for a previously sealed
     // file would race ordinary ring retention before the request is made.
-    armed.store(true, Ordering::Release);
+    armed.store(true, std::sync::atomic::Ordering::Release);
 
     let check_rt = assertion_runtime();
     let receipt = check_rt
         .block_on(async { trigger.dump_current_data().await })
         .unwrap();
-    armed.store(false, Ordering::Release);
+    armed.store(false, std::sync::atomic::Ordering::Release);
     assert!(receipt.segments_processed >= 1);
     assert!(receipt.manifest_key.is_none(), "no manifest off S3");
 
