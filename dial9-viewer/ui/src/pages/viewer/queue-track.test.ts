@@ -37,7 +37,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Rec } {
     textAlign: "" as CanvasTextAlign,
     clearRect() {},
     fillRect(x: number, y: number, w: number, h: number) {
-      rec.fillRects.push({ x, y, w, h, style: String(this.fillStyle) });
+      rec.fillRects.push({ x, y, w, h, style: String(ctx.fillStyle) });
     },
     strokeRect() {},
     beginPath() {},

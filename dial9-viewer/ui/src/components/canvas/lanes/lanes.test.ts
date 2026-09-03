@@ -11,7 +11,10 @@ import {
   type LanesRenderInput,
 } from "./render.js";
 import { laneRowLayout } from "../../../lib/canvas/layout.js";
-import { EMPTY_RUNTIME_METRICS } from "../../../lib/trace/runtime-metrics-model.js";
+import {
+  EMPTY_RUNTIME_METRICS,
+  type RuntimeMetrics,
+} from "../../../lib/trace/runtime-metrics-model.js";
 import { resolveLaneClick } from "./click.js";
 import { assembleLaneHover } from "./hover.js";
 import type { PollSpan, TracingSpan, WorkerLane } from "../../../types/trace.js";
@@ -379,7 +382,7 @@ function metricsRows(collapsed: boolean) {
 }
 
 /** Two samples for the unnamed default runtime (the "main" group's wire key). */
-function metricsFixture() {
+function metricsFixture(): RuntimeMetrics {
   const mk = (t: number, q: number, tasks: number) => ({
     t,
     runtimeName: "",
