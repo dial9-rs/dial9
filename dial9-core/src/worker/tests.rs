@@ -1408,7 +1408,7 @@ mod triggered_test_support {
 mod triggered_worker_tests {
     use super::triggered_test_support::*;
     use crate::dump::{self, DumpError, DumpId, DumpRequest, Lookback};
-    use crate::fs::{EpochWindow, Fs};
+    use crate::fs::{CheckpointGuard, EpochWindow, Fs};
     use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
     use crate::worker::epoch_to_system;
     use assert2::check;
@@ -1467,6 +1467,80 @@ mod triggered_worker_tests {
                 }
             })
         }
+    }
+
+    struct ProtectedRetryProbe {
+        fs: Arc<Fs>,
+        observations: Arc<Mutex<Vec<bool>>>,
+        fail_once: bool,
+    }
+
+    impl SegmentProcessor for ProtectedRetryProbe {
+        fn name(&self) -> &'static str {
+            "ProtectedRetryProbe"
+        }
+
+        fn process(
+            &mut self,
+            data: SegmentData,
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+            self.observations.lock().unwrap().push(
+                self.fs
+                    .checkpoint_segment_is_protected(data.segment().index()),
+            );
+            let fail = std::mem::take(&mut self.fail_once);
+            Box::pin(async move {
+                if fail {
+                    Err(ProcessError::new(
+                        data,
+                        ProcessErrorKind::Transfer {
+                            source: Box::from("transient"),
+                            retryable: true,
+                        },
+                    ))
+                } else {
+                    Ok(data)
+                }
+            })
+        }
+    }
+
+    async fn assert_checkpoint_stays_protected_across_retry(
+        fs: Arc<Fs>,
+        checkpoint: CheckpointGuard,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(ProtectedRetryProbe {
+                fs: Arc::clone(&fs),
+                observations: Arc::clone(&observations),
+                fail_once: true,
+            })],
+            crate::dump::DumpRx { rx },
+            stop.clone(),
+        );
+
+        let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
+        tx.send(DumpRequest {
+            id: DumpId::new(),
+            triggered_at: std::time::SystemTime::now(),
+            lookback: Lookback::Unbounded,
+            lookforward: Duration::ZERO,
+            metadata: Vec::new(),
+            checkpoint: Some(checkpoint),
+            receipt_tx,
+        })
+        .unwrap();
+
+        check!(receipt_rx.await.unwrap().unwrap().segments_processed == 1);
+        check!(*observations.lock().unwrap() == vec![true, true]);
+        check!(!fs.checkpoint_segment_is_protected(0));
+
+        stop.cancel();
+        worker.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -1596,6 +1670,33 @@ mod triggered_worker_tests {
         let remaining = fs.take_files();
         check!(remaining.segments.len() == 1);
         check!(remaining.segments[0].seg_ref.index() == 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn memory_checkpoint_stays_protected_across_retry() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        seal_mem(&fs, 0, now_epoch());
+
+        let mut checkpoint = crate::fs::CheckpointGuard::reserve(&fs).unwrap();
+        let protected = fs.protect_memory_checkpoint_segments(None);
+        checkpoint.track(protected);
+        assert_checkpoint_stays_protected_across_retry(fs, checkpoint).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disk_checkpoint_stays_protected_across_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Fs::new_disk(dir.path(), "trace");
+        std::fs::write(
+            dir.path().join("trace.0.bin"),
+            segment_with_epoch(now_epoch()),
+        )
+        .unwrap();
+
+        let mut checkpoint = crate::fs::CheckpointGuard::reserve(&fs).unwrap();
+        fs.protect_disk_checkpoint_segments(&[0]);
+        checkpoint.track(vec![0]);
+        assert_checkpoint_stays_protected_across_retry(fs, checkpoint).await;
     }
 
     #[tokio::test(start_paused = true)]

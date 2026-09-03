@@ -169,16 +169,14 @@ pub(crate) struct DumpRequest {
 
 /// Leading-edge debounce gate shared across [`DumpTrigger`] clones.
 ///
-/// Records when the last accepted request was *built* and the [`DumpId`] it
-/// was given. The gate is armed in [`DumpTrigger::request`] (the coalescing
-/// decision has to be synchronous there so a folded trigger can return a
-/// [`DumpError::Coalesced`] run), not at the later drop/await that actually
-/// sends the request; the two coincide in the common temporary-statement
-/// usage. A request arriving within `window` of that instant coalesces into
-/// that id rather than starting a new dump. The window is measured from the
-/// last accepted request and is not extended by coalesced requests, so a
-/// burst all folds into the first dump and the effective rate is at most one
-/// dump per `window`.
+/// Records when the last request was accepted and the [`DumpId`] it was
+/// given. Recorder checkpoints arm the gate only after reserving their exact
+/// snapshot; other dumps arm it when the worker channel accepts them. A
+/// request arriving within `window` of that instant coalesces into that id
+/// rather than starting a new dump. The window is measured from the last
+/// accepted request and is not extended by coalesced requests, so a burst all
+/// folds into the first dump and the effective rate is at most one dump per
+/// `window`.
 #[derive(Debug)]
 struct Debounce {
     window: Duration,
@@ -324,25 +322,6 @@ impl DumpTrigger {
     ) -> DumpRun<'_> {
         let id = DumpId::new();
 
-        // Leading-edge debounce: a trigger within `window` of the last
-        // accepted request coalesces into it instead of starting a new one.
-        // Armed here at request-build time so a folded trigger can return a
-        // `Coalesced` run synchronously (see `Debounce`).
-        if allow_debounce && let Some(debounce) = &self.debounce {
-            let now = Instant::now();
-            let mut last = debounce.last.lock().expect("debounce mutex poisoned");
-            match *last {
-                Some((at, into)) if now.duration_since(at) < debounce.window => {
-                    return DumpRun::preempted(
-                        &self.tx,
-                        self.checkpoint_tx.as_ref(),
-                        DumpError::Coalesced { into },
-                    );
-                }
-                _ => *last = Some((now, id)),
-            }
-        }
-
         let (receipt_tx, receipt_rx) = oneshot::channel();
         DumpRun {
             request: Some(DumpRequest {
@@ -357,8 +336,10 @@ impl DumpTrigger {
             tx: &self.tx,
             checkpoint_tx: self.checkpoint_tx.as_ref(),
             checkpoint,
+            debounce: allow_debounce
+                .then(|| self.debounce.as_ref().map(Arc::clone))
+                .flatten(),
             receipt_rx: Some(receipt_rx),
-            preempt: None,
         }
     }
 }
@@ -381,6 +362,7 @@ pub(crate) struct CheckpointDump {
     request: DumpRequest,
     worker_tx: mpsc::UnboundedSender<DumpRequest>,
     pub(crate) stop_recording: bool,
+    debounce: Option<Arc<Debounce>>,
 }
 
 impl CheckpointDump {
@@ -388,11 +370,40 @@ impl CheckpointDump {
         request: DumpRequest,
         worker_tx: mpsc::UnboundedSender<DumpRequest>,
         stop_recording: bool,
+        debounce: Option<Arc<Debounce>>,
     ) -> Self {
         Self {
             request,
             worker_tx,
             stop_recording,
+            debounce,
+        }
+    }
+
+    /// Return the accepted dump this request would fold into, if any.
+    pub(crate) fn debounce_target(&self) -> Option<DumpId> {
+        let debounce = self.debounce.as_ref()?;
+        let now = Instant::now();
+        let last = debounce.last.lock().expect("debounce mutex poisoned");
+        match *last {
+            Some((at, into)) if now.duration_since(at) < debounce.window => Some(into),
+            _ => None,
+        }
+    }
+
+    /// Recheck and arm debounce after the checkpoint reservation succeeds.
+    pub(crate) fn accept_debounce(&self) -> Result<(), DumpId> {
+        let Some(debounce) = &self.debounce else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        let mut last = debounce.last.lock().expect("debounce mutex poisoned");
+        match *last {
+            Some((at, into)) if now.duration_since(at) < debounce.window => Err(into),
+            _ => {
+                *last = Some((now, self.request.id));
+                Ok(())
+            }
         }
     }
 
@@ -408,6 +419,13 @@ impl CheckpointDump {
             .request
             .receipt_tx
             .send(Err(DumpError::Checkpoint(error)));
+    }
+
+    pub(crate) fn coalesce(self, into: DumpId) {
+        let _ = self
+            .request
+            .receipt_tx
+            .send(Err(DumpError::Coalesced { into }));
     }
 }
 
@@ -426,32 +444,11 @@ pub struct DumpRun<'a> {
     checkpoint_tx:
         Option<&'a crate::primitives::sync::mpsc::SyncSender<crate::handle::ControlCommand>>,
     checkpoint: Checkpoint,
+    debounce: Option<Arc<Debounce>>,
     receipt_rx: Option<oneshot::Receiver<Result<DumpReceipt, DumpError>>>,
-    /// Set when the run never dispatches (debounced): awaiting resolves this
-    /// error directly. `request` is `None` for a preempted run, so
-    /// [`dispatch`](Self::dispatch) and `Drop` are no-ops.
-    preempt: Option<DumpError>,
 }
 
 impl<'a> DumpRun<'a> {
-    /// A run that never dispatches; awaiting resolves `err`.
-    fn preempted(
-        tx: &'a mpsc::UnboundedSender<DumpRequest>,
-        checkpoint_tx: Option<
-            &'a crate::primitives::sync::mpsc::SyncSender<crate::handle::ControlCommand>,
-        >,
-        err: DumpError,
-    ) -> Self {
-        DumpRun {
-            request: None,
-            tx,
-            checkpoint_tx,
-            checkpoint: Checkpoint::None,
-            receipt_rx: None,
-            preempt: Some(err),
-        }
-    }
-
     /// Attach a caller-supplied correlation pair. Chainable. Each pair is
     /// stamped onto every captured segment's metadata (namespaced as
     /// `dump.{key}`) before the pipeline runs; pipeline stages decide what
@@ -470,22 +467,25 @@ impl<'a> DumpRun<'a> {
         match self.request.take() {
             Some(req) => {
                 let Checkpoint::CurrentData { stop_recording } = self.checkpoint else {
-                    return self.tx.send(req).is_ok();
+                    return self.dispatch_direct(req);
                 };
                 let Some(checkpoint_tx) = self.checkpoint_tx else {
                     if stop_recording {
-                        CheckpointDump::new(req, self.tx.clone(), true).fail(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "capture-stop requires a recorder-installed dump trigger",
-                        ));
+                        CheckpointDump::new(req, self.tx.clone(), true, None).fail(
+                            std::io::Error::new(
+                                std::io::ErrorKind::Unsupported,
+                                "capture-stop requires a recorder-installed dump trigger",
+                            ),
+                        );
                         return true;
                     }
-                    return self.tx.send(req).is_ok();
+                    return self.dispatch_direct(req);
                 };
                 let command = crate::handle::ControlCommand::CheckpointDump(CheckpointDump::new(
                     req,
                     self.tx.clone(),
                     stop_recording,
+                    self.debounce.take(),
                 ));
                 match checkpoint_tx.try_send(command) {
                     Ok(()) => true,
@@ -517,6 +517,29 @@ impl<'a> DumpRun<'a> {
             None => true,
         }
     }
+
+    /// Dispatch a request that does not need a flush-thread reservation.
+    /// The debounce mutex stays held across the non-blocking send so only a
+    /// request actually accepted by the worker can arm the gate.
+    fn dispatch_direct(&self, req: DumpRequest) -> bool {
+        let Some(debounce) = &self.debounce else {
+            return self.tx.send(req).is_ok();
+        };
+        let now = Instant::now();
+        let mut last = debounce.last.lock().expect("debounce mutex poisoned");
+        if let Some((at, into)) = *last
+            && now.duration_since(at) < debounce.window
+        {
+            let _ = req.receipt_tx.send(Err(DumpError::Coalesced { into }));
+            return true;
+        }
+        let id = req.id;
+        if self.tx.send(req).is_err() {
+            return false;
+        }
+        *last = Some((now, id));
+        true
+    }
 }
 
 impl Drop for DumpRun<'_> {
@@ -532,11 +555,6 @@ impl<'a> IntoFuture for DumpRun<'a> {
     type IntoFuture = DumpFuture;
 
     fn into_future(mut self) -> Self::IntoFuture {
-        if let Some(err) = self.preempt.take() {
-            return DumpFuture {
-                inner: DumpFutureInner::Preempted(err),
-            };
-        }
         let sent = self.dispatch();
         let inner = match (sent, self.receipt_rx.take()) {
             (true, Some(rx)) => DumpFutureInner::Waiting(rx),
@@ -560,8 +578,6 @@ pub struct DumpFuture {
 enum DumpFutureInner {
     Waiting(oneshot::Receiver<Result<DumpReceipt, DumpError>>),
     Stopped,
-    /// Debounced: never dispatched, resolves this error.
-    Preempted(DumpError),
 }
 
 impl Future for DumpFuture {
@@ -577,13 +593,6 @@ impl Future for DumpFuture {
                 Poll::Pending => Poll::Pending,
             },
             DumpFutureInner::Stopped => Poll::Ready(Err(DumpError::WorkerStopped)),
-            // Move the error out; the future is not polled again after Ready.
-            DumpFutureInner::Preempted(_) => {
-                match std::mem::replace(inner, DumpFutureInner::Stopped) {
-                    DumpFutureInner::Preempted(err) => Poll::Ready(Err(err)),
-                    _ => unreachable!("matched Preempted above"),
-                }
-            }
         }
     }
 }

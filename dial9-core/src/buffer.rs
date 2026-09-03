@@ -239,6 +239,22 @@ enum WriterState {
     Finished,
 }
 
+struct RotationFailure {
+    error: std::io::Error,
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
+    sealed: bool,
+}
+
+impl RotationFailure {
+    fn new(error: std::io::Error, sealed: bool) -> Self {
+        Self { error, sealed }
+    }
+
+    fn before_seal(error: std::io::Error) -> Self {
+        Self::new(error, false)
+    }
+}
+
 #[bon::bon]
 impl SegmentWriter<Disk> {
     /// Create a `DiskBufferBuilder` for advanced configuration.
@@ -589,6 +605,7 @@ impl<M: BufferMode> SegmentWriter<M> {
 
     fn rotate(&mut self) -> std::io::Result<()> {
         self.rotate_with_flush_policy(false)
+            .map_err(|failure| failure.error)
     }
 
     /// Rotate while propagating every buffered-write failure to the caller.
@@ -597,11 +614,11 @@ impl<M: BufferMode> SegmentWriter<M> {
     /// checkpoints use this strict path because their acknowledgement must not
     /// claim a segment was sealed after data failed to reach the backend.
     #[cfg(any(feature = "pipeline", test))]
-    fn rotate_strict(&mut self) -> std::io::Result<()> {
+    fn rotate_strict(&mut self) -> Result<(), RotationFailure> {
         self.rotate_with_flush_policy(true)
     }
 
-    fn rotate_with_flush_policy(&mut self, strict_flush: bool) -> std::io::Result<()> {
+    fn rotate_with_flush_policy(&mut self, strict_flush: bool) -> Result<(), RotationFailure> {
         if matches!(self.state, WriterState::Finished) {
             return Ok(());
         }
@@ -615,14 +632,21 @@ impl<M: BufferMode> SegmentWriter<M> {
 
         // Take ownership of the encoder (state is Finished until new segment opens).
         let WriterState::Active {
-            writer: mut raw, ..
+            writer: mut raw,
+            need_metadata,
         } = std::mem::replace(&mut self.state, WriterState::Finished)
         else {
             return Ok(());
         };
 
         if strict_flush {
-            raw.flush()?;
+            if let Err(error) = raw.flush() {
+                self.state = WriterState::Active {
+                    writer: raw,
+                    need_metadata,
+                };
+                return Err(RotationFailure::before_seal(error));
+            }
         } else {
             // Automatic rotation is best-effort. If the underlying file is
             // gone the buffered bytes are already lost; proceed to rotate
@@ -632,12 +656,18 @@ impl<M: BufferMode> SegmentWriter<M> {
         let closed_size = raw.bytes_written();
         let current_index = self.next_index - 1;
 
-        // Extract the ActiveHandle for sealing.
+        // Strict rotation flushed the BufWriter above. Extract without a
+        // second fallible flush so a transient error cannot consume it.
+        // Automatic rotation retains its historical best-effort retry.
         let bw: BufWriter<ActiveHandle> = raw.into_inner();
-        let handle: ActiveHandle = match bw.into_inner() {
-            Ok(handle) => handle,
-            Err(error) if strict_flush => return Err(error.into_error()),
-            Err(error) => error.into_inner().into_parts().0,
+        let handle: ActiveHandle = if strict_flush {
+            debug_assert!(bw.buffer().is_empty());
+            bw.into_parts().0
+        } else {
+            match bw.into_inner() {
+                Ok(handle) => handle,
+                Err(error) => error.into_inner().into_parts().0,
+            }
         };
 
         // Seal the current segment. If `.active` was removed externally
@@ -645,8 +675,10 @@ impl<M: BufferMode> SegmentWriter<M> {
         // starting a fresh one. Explicit checkpoints still return the
         // `NotFound` after recovery so they never acknowledge missing data.
         let mut abandoned_error = None;
+        let mut segment_sealed = false;
         match self.fs.seal(handle, &self.active_path, current_index) {
             Ok(seg_ref) => {
+                segment_sealed = true;
                 if M::IS_DISK {
                     self.closed_files.push_back((seg_ref, closed_size));
                 }
@@ -665,7 +697,7 @@ impl<M: BufferMode> SegmentWriter<M> {
             }
             Err(e) => {
                 // state is already Finished from mem::replace above
-                return Err(e);
+                return Err(RotationFailure::before_seal(e));
             }
         }
 
@@ -676,13 +708,16 @@ impl<M: BufferMode> SegmentWriter<M> {
         // parent directory was removed underneath us, any other failure
         // leaves state = Finished so the writer stops cleanly rather than
         // retrying every drain cycle.
-        let handle: ActiveHandle = self.fs.create_segment(&new_path)?;
+        let handle: ActiveHandle = self
+            .fs
+            .create_segment(&new_path)
+            .map_err(|error| RotationFailure::new(error, segment_sealed))?;
 
         self.state = match Self::prepare_segment(BufWriter::new(handle)) {
             Ok(s) => s,
             Err(e) => {
                 let _ = self.fs.remove_active(&new_path);
-                return Err(e);
+                return Err(RotationFailure::new(e, segment_sealed));
             }
         };
         self.active_path = new_path;
@@ -692,9 +727,10 @@ impl<M: BufferMode> SegmentWriter<M> {
             segment_index = self.next_index - 1,
             "rotated to new trace segment"
         );
-        self.evict_oldest()?;
+        self.evict_oldest()
+            .map_err(|error| RotationFailure::new(error, segment_sealed))?;
         match abandoned_error {
-            Some(error) => Err(error),
+            Some(error) => Err(RotationFailure::before_seal(error)),
             None => Ok(()),
         }
     }
@@ -834,7 +870,7 @@ impl<M: BufferMode> SegmentWriter<M> {
         if !self.has_real_events {
             return Ok(false);
         }
-        self.rotate_strict()?;
+        self.rotate_strict().map_err(|failure| failure.error)?;
         Ok(true)
     }
 
@@ -850,14 +886,14 @@ impl<M: BufferMode> SegmentWriter<M> {
 
     /// Protect the current ring snapshot, then seal a non-empty active
     /// fragment. The caller must hold the checkpoint reservation. Protection
-    /// lasts until the triggered worker takes each memory segment or finishes
-    /// the disk segment's pipeline pass; this prevents the checkpoint's own
-    /// rotation from evicting data it is about to dispatch.
+    /// lasts until each segment reaches a terminal pipeline outcome; retries
+    /// remain protected. This prevents the checkpoint's own rotation and later
+    /// writes from evicting data the worker still needs.
     #[cfg(feature = "pipeline")]
     pub(crate) fn seal_checkpoint(
         &mut self,
         mut checkpoint: CheckpointGuard,
-    ) -> std::io::Result<CheckpointGuard> {
+    ) -> std::io::Result<(CheckpointGuard, Option<std::io::Error>)> {
         if matches!(self.state, WriterState::Finished) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
@@ -883,9 +919,15 @@ impl<M: BufferMode> SegmentWriter<M> {
         checkpoint.track(protected);
 
         if self.has_real_events {
-            self.rotate_strict()?;
+            match self.rotate_strict() {
+                Ok(()) => {}
+                Err(failure) if failure.sealed => {
+                    return Ok((checkpoint, Some(failure.error)));
+                }
+                Err(failure) => return Err(failure.error),
+            }
         }
-        Ok(checkpoint)
+        Ok((checkpoint, None))
     }
 
     /// Re-apply the disk budget after the worker finishes checkpoint segments
@@ -1247,6 +1289,10 @@ mod tests {
             .rotate_segment()
             .expect_err("checkpoint rotation must propagate its final flush failure");
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(
+            !writer.is_closed(),
+            "a strict flush failure must leave the active writer available for retry"
+        );
     }
 
     #[test]

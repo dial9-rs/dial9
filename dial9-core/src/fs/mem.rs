@@ -79,9 +79,9 @@ struct Queue {
     bytes: u64,
     /// Segments evicted since the last `take_files` swap.
     dropped: u64,
-    /// Segments belonging to a checkpoint that the worker has not taken yet.
-    /// The sole active checkpoint may temporarily keep its active segment
-    /// beyond the ring budget until the worker takes the protected snapshot.
+    /// Segments belonging to a checkpoint that has not reached a terminal
+    /// pipeline outcome. The sole active checkpoint may temporarily keep its
+    /// snapshot beyond the ring budget while the worker processes or retries it.
     /// Later, unprotected production segments evict themselves while every
     /// retained entry is protected, so the overshoot is bounded to that one
     /// checkpoint segment (though a batch may overshoot its size threshold).
@@ -365,7 +365,6 @@ impl MemFs {
             };
             if let Some(s) = &popped {
                 q.bytes -= s.bytes.len() as u64;
-                q.checkpoint_protected.remove(&s.index);
             }
             let segments_dropped = std::mem::take(&mut q.dropped);
             (popped, q.segments.len() as u64, q.bytes, segments_dropped)

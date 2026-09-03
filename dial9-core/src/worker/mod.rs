@@ -234,16 +234,26 @@ struct ActiveDump {
     first_error: Option<ProcessErrorKind>,
 }
 
-/// Releases checkpoint eviction protection on every segment exit path:
-/// success, terminal failure, retry, panic, or load failure.
+/// Releases checkpoint eviction protection on terminal segment exit paths.
+/// Retryable failures disarm this attempt guard so the active checkpoint
+/// continues to own the lease until a later attempt settles.
 struct CheckpointProtection {
     fs: Arc<Fs>,
     index: u32,
+    release_on_drop: bool,
+}
+
+impl CheckpointProtection {
+    fn retain_for_retry(&mut self) {
+        self.release_on_drop = false;
+    }
 }
 
 impl Drop for CheckpointProtection {
     fn drop(&mut self) {
-        self.fs.release_checkpoint_segment(self.index);
+        if self.release_on_drop {
+            self.fs.release_checkpoint_segment(self.index);
+        }
     }
 }
 
@@ -678,9 +688,10 @@ impl WorkerLoop {
         }
 
         'next_segment: for (seg_idx, taken) in segments.into_iter().enumerate() {
-            let _checkpoint_protection = CheckpointProtection {
+            let mut checkpoint_protection = CheckpointProtection {
                 fs: Arc::clone(&self.fs),
                 index: taken.seg_ref.index(),
+                release_on_drop: true,
             };
             // Cached-epoch fast path (triggered mode, disk): a segment
             // already inspected and found out-of-window is released without
@@ -881,6 +892,7 @@ impl WorkerLoop {
                                                     attempt,
                                                     (epoch_secs, seal_secs),
                                                 );
+                                                checkpoint_protection.retain_for_retry();
                                                 stats
                                                     .retry_dump_ids
                                                     .extend(matched.iter().map(|&i| dumps[i].id));
@@ -900,6 +912,7 @@ impl WorkerLoop {
                                 SegmentRef::Disk(_) => {
                                     tracing::debug!(target: "dial9_worker", id = %data.segment(), err = %kind_msg, "retryable error");
                                     self.fs.release_claim(data.segment());
+                                    checkpoint_protection.retain_for_retry();
                                     stats
                                         .retry_dump_ids
                                         .extend(matched.iter().map(|&i| dumps[i].id));

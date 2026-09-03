@@ -564,6 +564,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "pipeline")]
+    struct BlockingSource {
+        ready: Option<std::sync::mpsc::SyncSender<()>>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    #[cfg(feature = "pipeline")]
+    impl Source for BlockingSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {
+            let Some(ready) = self.ready.take() else {
+                return;
+            };
+            ready.send(()).expect("test receiver remains live");
+            self.release.recv().expect("test sender remains live");
+        }
+
+        fn name(&self) -> &'static str {
+            "blocking"
+        }
+    }
+
     fn sealed_segment(dir: &Path) -> PathBuf {
         sealed_segments(dir)
             .into_iter()
@@ -1019,25 +1040,6 @@ mod tests {
     async fn current_data_checkpoint_returns_would_block_when_control_queue_is_full() {
         use std::future::IntoFuture;
 
-        struct BlockingSource {
-            ready: Option<std::sync::mpsc::SyncSender<()>>,
-            release: std::sync::mpsc::Receiver<()>,
-        }
-
-        impl Source for BlockingSource {
-            fn flush(&mut self, _ctx: &FlushContext<'_>) {
-                let Some(ready) = self.ready.take() else {
-                    return;
-                };
-                ready.send(()).expect("test receiver remains live");
-                self.release.recv().expect("test sender remains live");
-            }
-
-            fn name(&self) -> &'static str {
-                "blocking"
-            }
-        }
-
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
@@ -1075,6 +1077,54 @@ mod tests {
             .await
             .expect("accepted checkpoint should complete")
             .expect("accepted checkpoint should succeed");
+    }
+
+    #[cfg(feature = "pipeline")]
+    #[tokio::test]
+    async fn rejected_current_data_checkpoint_does_not_arm_debounce() {
+        use std::future::IntoFuture;
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let recorder = recorder(writer)
+            .source(BlockingSource {
+                ready: Some(ready_tx),
+                release: release_rx,
+            })
+            .with_dump_trigger(|trigger| trigger.debounce(Duration::from_secs(60)))
+            .build();
+        let trigger = recorder
+            .handle()
+            .dump_trigger()
+            .expect("configured dump trigger");
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("flush thread is blocked in the source");
+        let capture_stop = trigger.stop_recording_and_dump_current_data().into_future();
+        let error = trigger
+            .dump_current_data()
+            .await
+            .expect_err("the occupied control slot must reject the dump");
+        assert!(
+            matches!(
+                error,
+                crate::dump::DumpError::Checkpoint(ref error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+            ),
+            "unexpected busy error: {error}"
+        );
+
+        release_tx.send(()).expect("flush thread remains live");
+        tokio::time::timeout(Duration::from_secs(2), capture_stop)
+            .await
+            .expect("accepted capture-stop should complete")
+            .expect("accepted capture-stop should succeed");
+        tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("retry should complete")
+            .expect("rejected dump must not poison debounce");
     }
 
     #[cfg(feature = "pipeline")]
@@ -1151,6 +1201,42 @@ mod tests {
         assert_eq!(
             decoded_test_values(&std::fs::read(sealed_segment(dir.path())).expect("read segment")),
             vec![82]
+        );
+    }
+
+    #[cfg(feature = "pipeline")]
+    #[tokio::test]
+    async fn dump_dispatches_sealed_checkpoint_when_replacement_open_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = checkpoint_disk_writer(dir.path());
+        let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
+
+        let current = active_segment(dir.path());
+        let current_name = current.file_name().unwrap().to_string_lossy();
+        let next_name = current_name.replace(".0.bin.active", ".1.bin.active");
+        assert_ne!(next_name, current_name, "test expects the first segment");
+        std::fs::create_dir(current.with_file_name(next_name))
+            .expect("directory collision makes replacement creation fail");
+
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 91,
+        });
+        let receipt = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+            .await
+            .expect("dump should complete")
+            .expect("the already-sealed checkpoint should still dispatch");
+
+        assert_eq!(receipt.segments_processed, 1);
+        assert!(
+            handle.shared().is_some_and(|shared| !shared.is_enabled()),
+            "failure to open the replacement closes recording"
+        );
+        assert_eq!(
+            decoded_test_values(&std::fs::read(sealed_segment(dir.path())).expect("read segment")),
+            vec![91]
         );
     }
 

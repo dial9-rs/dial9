@@ -154,9 +154,27 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         // the recording gate. A busy capture-stop request must not disable
         // recording when it cannot establish its boundary.
         #[cfg(feature = "pipeline")]
-        if checkpoint_dump.is_some() {
+        if let Some(into) = checkpoint_dump
+            .as_ref()
+            .and_then(crate::dump::CheckpointDump::debounce_target)
+        {
+            checkpoint_dump
+                .take()
+                .expect("checkpoint presence checked")
+                .coalesce(into);
+        } else if checkpoint_dump.is_some() {
             match writer.reserve_checkpoint() {
-                Ok(guard) => checkpoint_guard = Some(guard),
+                Ok(guard) => match checkpoint_dump
+                    .as_ref()
+                    .expect("checkpoint presence checked")
+                    .accept_debounce()
+                {
+                    Ok(()) => checkpoint_guard = Some(guard),
+                    Err(into) => checkpoint_dump
+                        .take()
+                        .expect("checkpoint presence checked")
+                        .coalesce(into),
+                },
                 Err(error) => checkpoint_dump
                     .take()
                     .expect("checkpoint presence checked")
@@ -331,7 +349,19 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 }),
             };
             match result {
-                Ok(guard) => checkpoint.dispatch(guard),
+                Ok((guard, post_seal_error)) => {
+                    if let Some(error) = post_seal_error {
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(
+                                "checkpoint sealed, but segment rotation reported a follow-up error: {error}"
+                            );
+                        });
+                        if writer.is_closed() {
+                            shared.disable();
+                        }
+                    }
+                    checkpoint.dispatch(guard);
+                }
                 Err(error) => {
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to checkpoint current trace data: {error}");
