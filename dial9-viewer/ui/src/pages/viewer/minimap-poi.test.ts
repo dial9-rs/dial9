@@ -14,6 +14,7 @@ function ev(
   workerId: number,
   timestamp: number,
   taskId: number,
+  cpuTime = 0,
 ): TraceEvent {
   return {
     eventType,
@@ -22,7 +23,7 @@ function ev(
     taskId,
     localQueue: 0,
     globalQueue: 0,
-    cpuTime: 0,
+    cpuTime,
     schedWait: 0,
     spawnLocId: null,
     spawnLoc: null,
@@ -37,6 +38,7 @@ function fakeTrace(events: TraceEvent[], overrides: Partial<ParsedTrace> = {}): 
     maxTs,
     blockInPlaceGaps: [],
     hasSchedWait: false,
+    cpuSamples: [],
     taskInstrumented: new Map<number, boolean>(),
     taskSpawnTimes: new Map<number, number>(),
     ...overrides,
@@ -122,5 +124,48 @@ describe("deriveMinimapPois", () => {
       fakeTrace(events, { taskSpawnTimes: new Map([[1, spawnTs]]) }),
     );
     expect(pois.filter((p) => p.type === "spawn-delay")).toEqual([]);
+  });
+
+  // A 10ms awake period that burned 1ms of CPU: ratio 0.1, so 9ms off CPU.
+  const descheduledWorker = (parkCpuTime: number): TraceEvent[] => [
+    ev(EVENT_TYPES.WorkerUnpark, 0, 0, 0, 0),
+    ev(EVENT_TYPES.WorkerPark, 0, 10 * MS, 0, parkCpuTime),
+  ];
+
+  it("ticks an off-cpu-active period when worker CPU time is real", () => {
+    const pois = deriveMinimapPois(fakeTrace(descheduledWorker(1 * MS)));
+    const offCpu = pois.filter((p) => p.type === "off-cpu-active");
+    expect(offCpu.map((p) => [p.time, p.worker, p.value])).toEqual([[0, 0, 9 * MS]]);
+  });
+
+  // Off Linux every ratio is 0, so ungated this ticks every active period.
+  it("omits off-cpu-active entirely when every CPU-time reading is zero", () => {
+    const pois = deriveMinimapPois(fakeTrace(descheduledWorker(0)));
+    expect(pois.filter((p) => p.type === "off-cpu-active")).toEqual([]);
+  });
+
+  // A zero-length period gets ratio 1.0 from the builders' fallback, not from
+  // real CPU time, so one of them must not vouch for the whole trace.
+  it("is not fooled into enabling off-cpu-active by a zero-length period", () => {
+    const events = [
+      // Same timestamp: wall 0, ratio falls back to 1.
+      ev(EVENT_TYPES.WorkerUnpark, 0, 0, 0, 0),
+      ev(EVENT_TYPES.WorkerPark, 0, 0, 0, 0),
+      // 10ms, entirely off CPU: cpuTime never advances.
+      ev(EVENT_TYPES.WorkerUnpark, 0, 1 * MS, 0, 0),
+      ev(EVENT_TYPES.WorkerPark, 0, 11 * MS, 0, 0),
+    ];
+    const pois = deriveMinimapPois(fakeTrace(events));
+    expect(pois.filter((p) => p.type === "off-cpu-active")).toEqual([]);
+  });
+
+  // Depends on attachCpuSamples, same reason cpu-sampled is left out.
+  it("never ticks off-cpu-poll", () => {
+    const events = [
+      ev(EVENT_TYPES.PollStart, 0, 1 * MS, 1),
+      ev(EVENT_TYPES.PollEnd, 0, 4 * MS, 1),
+    ];
+    const pois = deriveMinimapPois(fakeTrace(events));
+    expect(pois.filter((p) => p.type === "off-cpu-poll")).toEqual([]);
   });
 });

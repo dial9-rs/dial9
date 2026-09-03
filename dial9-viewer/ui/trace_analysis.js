@@ -967,7 +967,8 @@
 
   /**
    * Filter and sort points of interest from worker spans and scheduling delays.
-   * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay" | "uninstrumented" | "spawn-delay"
+   * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay"
+   *   | "uninstrumented" | "spawn-delay" | "off-cpu-poll" | "off-cpu-active"
    * @param {Object} workerSpans
    * @param {number[]} workerIds
    * @param {Array} schedDelays - as returned by computeSchedulingDelays
@@ -1026,6 +1027,39 @@
               type: "cpu-sampled",
               value: durMs,
               span: s,
+            });
+          }
+        }
+      } else if (filterType === "off-cpu-poll" && opts && opts.hasOnCpuSamples) {
+        // schedSamples are NOT counted: off-CPU stacks confirm the finding.
+        for (const s of spans.polls) {
+          // An open-ended poll's `end` is a fabricated bound, so an unobserved
+          // gap would otherwise rank as the worst off-CPU poll in the trace.
+          if (s.openEnded) continue;
+          const cpuCount = s.cpuSamples ? s.cpuSamples.length : 0;
+          if (cpuCount > 0) continue;
+          const durMs = (s.end - s.start) / 1e6;
+          if (durMs > 1) {
+            points.push({
+              time: s.start,
+              worker: w,
+              type: "off-cpu-poll",
+              value: durMs,
+              span: s,
+            });
+          }
+        }
+      } else if (filterType === "off-cpu-active" && opts && opts.hasWorkerCpuTime) {
+        // Thresholds mirror the red-flags script's `cpu-contention` check.
+        for (const a of spans.actives) {
+          const wall = a.end - a.start;
+          if (wall > 1e6 && a.ratio < 0.5) {
+            points.push({
+              time: a.start,
+              worker: w,
+              type: "off-cpu-active",
+              value: (1 - a.ratio) * wall,
+              span: a,
             });
           }
         }

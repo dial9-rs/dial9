@@ -230,7 +230,9 @@ declare module "*/trace_analysis.js" {
     | "cpu-sampled"
     | "wake-delay"
     | "uninstrumented"
-    | "spawn-delay";
+    | "spawn-delay"
+    | "off-cpu-poll"
+    | "off-cpu-active";
 
   /** Default severity floor for the "spawn-delay" detector, in microseconds. */
   export const DEFAULT_SPAWN_DELAY_THRESHOLD_US: number;
@@ -265,6 +267,10 @@ declare module "*/trace_analysis.js" {
       /** Required for the "spawn-delay" filter. */
       taskSpawnTimes?: Map<number, number>;
       spawnDelayThresholdUs?: number;
+      /** Required for the "off-cpu-poll" filter. */
+      hasOnCpuSamples?: boolean;
+      /** Required for the "off-cpu-active" filter. */
+      hasWorkerCpuTime?: boolean;
     }
   ): PointOfInterest[];
 

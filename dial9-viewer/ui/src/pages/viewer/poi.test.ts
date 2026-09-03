@@ -96,12 +96,22 @@ function referenceCount(
   const workerSpans = spanResult.workerSpans;
   if (t.cpuSamples.length > 0) attachCpuSamples(t.cpuSamples, workerSpans);
   const schedDelays = computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);
+  // Derived independently: without them this would compare a live detector
+  // against a disabled one.
+  const hasWorkerCpuTime = workerIds.some((w) =>
+    workerSpans[w]!.actives.some((a) => a.ratio > 0),
+  );
+  const hasOnCpuSamples = t.cpuSamples.some(
+    (s) => s.source !== 1 && s.callchain.length > 0,
+  );
   return filterPointsOfInterest(filter, workerSpans, workerIds, schedDelays, {
     hasSchedWait: t.hasSchedWait,
     sortByWorst: true,
     taskInstrumented: t.taskInstrumented,
     taskSpawnTimes: t.taskSpawnTimes,
     spawnDelayThresholdUs,
+    hasWorkerCpuTime,
+    hasOnCpuSamples,
   }).length;
 }
 
@@ -376,6 +386,16 @@ describe("poiJump", () => {
     const p = poi("sched", 1e8, 0, 84e6, park(1e8, 1e8 + 84e6));
     expect(poiJump(p, vp).selectedTaskId).toBeNull();
   });
+
+  // An active period spans many polls, so it names no single task.
+  it("frames an off-cpu-active POI on its own span and selects no task", () => {
+    const p = poi("off-cpu-active", 1e8, 0, 9e6, park(1e8, 1e8 + 1e7));
+    const j = poiJump(p, vp);
+    expect(j.selectedTaskId).toBeNull();
+    const viewDur = Math.max(1e7 * 5, 1e6);
+    expect(j.viewStart).toBe(Math.max(0, 1e8 - viewDur * 0.3));
+    expect(j.viewEnd).toBe(Math.min(1e9, j.viewStart + viewDur));
+  });
 });
 
 describe("value + label formatting", () => {
@@ -384,6 +404,8 @@ describe("value + label formatting", () => {
     expect(valueNs(poi("long-poll", 0, 0, 5, poll(0, 1, 0)))).toBe(5e6); // ms->ns
     expect(valueNs(poi("wake-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
     expect(valueNs(poi("spawn-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
+    expect(valueNs(poi("off-cpu-poll", 0, 0, 5, poll(0, 1, 0)))).toBe(5e6); // ms->ns
+    expect(valueNs(poi("off-cpu-active", 0, 0, 9e6, park(0, 10e6)))).toBe(9e6);
   });
   it("labels worker / time columns in the mock format", () => {
     expect(workerLabel(1)).toBe("W1");

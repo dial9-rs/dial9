@@ -773,6 +773,75 @@ describe("filterPointsOfInterest", () => {
   });
 });
 
+// ── filterPointsOfInterest: the off-CPU detectors ──
+//
+// Synthetic lanes: the demo trace's workers are ~97% on-CPU, so "off-cpu-active"
+// legitimately matches nothing there.
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const poll = (start: number, end: number, extra: Record<string, unknown> = {}): any => ({
+  start, end, taskId: 1, spawnLocId: null, spawnLoc: null, ...extra,
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const lanes = (parts: Record<string, unknown>): any => ({
+  0: { polls: [], parks: [], actives: [], cpuSampleTimes: [], ...parts },
+});
+
+describe("filterPointsOfInterest off-cpu-active", () => {
+  // 9ms off CPU; on CPU; below the duration floor.
+  const ws = lanes({
+    actives: [
+      { start: 0, end: 10e6, ratio: 0.1 },
+      { start: 20e6, end: 30e6, ratio: 0.9 },
+      { start: 40e6, end: 40.5e6, ratio: 0 },
+    ],
+  });
+
+  it("flags only long, low-ratio periods, valued by off-CPU nanoseconds", () => {
+    const pois = filterPointsOfInterest("off-cpu-active", ws, [0], [], {
+      hasWorkerCpuTime: true,
+    });
+    expect(pois.map((p: any) => [p.time, p.type, Math.round(p.value)])).toEqual([
+      [0, "off-cpu-active", 9e6],
+    ]);
+    expect(pois[0].span.start).toBe(0);
+    expect(pois[0].span.end).toBe(10e6);
+  });
+
+  // Off Linux every ratio is 0, so ungated this flags every active period.
+  it("returns nothing when the trace's worker CPU time is not real", () => {
+    expect(
+      filterPointsOfInterest("off-cpu-active", ws, [0], [], { hasWorkerCpuTime: false }),
+    ).toEqual([]);
+  });
+});
+
+describe("filterPointsOfInterest off-cpu-poll", () => {
+  const ws = lanes({
+    polls: [
+      poll(0, 5e6), // 5ms, no samples -> off CPU
+      poll(10e6, 15e6, { cpuSamples: [{}] }), // 5ms but sampled on CPU
+      poll(20e6, 20.5e6), // 0.5ms, under the floor
+      poll(30e6, 40e6, { openEnded: true }), // end is a fabricated bound
+      poll(50e6, 55e6, { schedSamples: [{}] }), // off-CPU stacks confirm it
+    ],
+  });
+  const opts = { hasOnCpuSamples: true };
+
+  it("flags long polls with no on-CPU samples, skipping open-ended ones", () => {
+    const pois = filterPointsOfInterest("off-cpu-poll", ws, [0], [], opts);
+    expect(pois.map((p: any) => [p.time, p.value])).toEqual([[0, 5], [50e6, 5]]);
+  });
+
+  it("returns nothing when the trace carries no on-CPU samples at all", () => {
+    // Zero samples is then every poll, which is the detector's match condition.
+    expect(
+      filterPointsOfInterest("off-cpu-poll", ws, [0], [], { hasOnCpuSamples: false }),
+    ).toEqual([]);
+  });
+});
+
 // ── buildFlamegraphTree / flattenFlamegraph ──
 
 describe("flamegraph", () => {
