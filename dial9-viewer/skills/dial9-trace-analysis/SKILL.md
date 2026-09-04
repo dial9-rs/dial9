@@ -212,9 +212,6 @@ Filters for notable events. `filterType` is one of:
 - `"wake-delay"` — Wake-to-poll delays >100µs
 - `"uninstrumented"` — Polls of tasks spawned via raw `tokio::spawn`
 - `"spawn-delay"` — Spawn-to-first-poll delays above a configurable floor (default 100µs)
-- `"off-cpu-poll"` - Polls longer than 1ms that caught no on-CPU sample, so the
-  worker was blocked synchronously inside the poll. Open-ended polls are
-  skipped (their end is a fabricated bound, not evidence)
 - `"off-cpu-active"` - Awake worker periods longer than 1ms whose CPU/wall ratio
   is under 0.5, i.e. the kernel is descheduling the worker. `value` is the
   off-CPU time in nanoseconds; the same signal as the `cpu-contention` check in
@@ -226,9 +223,6 @@ Filters for notable events. `filterType` is one of:
 - `taskInstrumented` — required by the `"uninstrumented"` filter (`trace.taskInstrumented`)
 - `taskSpawnTimes` — required by the `"spawn-delay"` filter (`trace.taskSpawnTimes`, empty unless the recorder had task tracking on)
 - `spawnDelayThresholdUs` — severity floor for `"spawn-delay"`, in microseconds
-- `hasOnCpuSamples: true` - enables `"off-cpu-poll"`. Without CPU profiling
-  every long poll trivially has zero samples, which is the filter's own match
-  condition
 - `hasWorkerCpuTime: true` - enables `"off-cpu-active"`. Worker CPU time reads
   as a hardcoded 0 off Linux, which pins every ratio to 0
 

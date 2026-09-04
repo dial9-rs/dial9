@@ -101,9 +101,6 @@ function referenceCount(
   const hasWorkerCpuTime = workerIds.some((w) =>
     workerSpans[w]!.actives.some((a) => a.ratio > 0),
   );
-  const hasOnCpuSamples = t.cpuSamples.some(
-    (s) => s.source !== 1 && s.callchain.length > 0,
-  );
   return filterPointsOfInterest(filter, workerSpans, workerIds, schedDelays, {
     hasSchedWait: t.hasSchedWait,
     sortByWorst: true,
@@ -111,7 +108,6 @@ function referenceCount(
     taskSpawnTimes: t.taskSpawnTimes,
     spawnDelayThresholdUs,
     hasWorkerCpuTime,
-    hasOnCpuSamples,
   }).length;
 }
 
@@ -404,7 +400,6 @@ describe("value + label formatting", () => {
     expect(valueNs(poi("long-poll", 0, 0, 5, poll(0, 1, 0)))).toBe(5e6); // ms->ns
     expect(valueNs(poi("wake-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
     expect(valueNs(poi("spawn-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
-    expect(valueNs(poi("off-cpu-poll", 0, 0, 5, poll(0, 1, 0)))).toBe(5e6); // ms->ns
     expect(valueNs(poi("off-cpu-active", 0, 0, 9e6, park(0, 10e6)))).toBe(9e6);
   });
   it("labels worker / time columns in the mock format", () => {

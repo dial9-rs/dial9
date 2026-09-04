@@ -109,13 +109,10 @@ export interface DetectorInputs {
   /**
    * Gates "off-cpu-active". `thread_cpu_time_nanos()` returns a hardcoded 0 off
    * Linux, so every active period on a workstation trace reports ratio 0 and an
-   * ungated detector would flag all of them. Both gates are derived from the
-   * data, never from `trace.hasCpuTime`/`hasSchedWait`/`hasTaskTracking` -
-   * trace_parser.js hardcodes those true at finalize.
+   * ungated detector would flag all of them. Derived from the data, never from
+   * `trace.hasCpuTime` - trace_parser.js hardcodes that true at finalize.
    */
   hasWorkerCpuTime: boolean;
-  /** Gates "off-cpu-poll": with no profiling, zero samples is every poll. */
-  hasOnCpuSamples: boolean;
 }
 
 /** `end > start` is load-bearing: both builders fall back to `ratio = 1.0` when
@@ -125,16 +122,6 @@ function anyWorkerCpuTime(lanes: LaneSource): boolean {
   if (lanes.columnar) return lanes.store.anyActiveCpuTime();
   for (const lane of Object.values(lanes.workerSpans)) {
     for (const a of lane.actives) if (a.ratio > 0 && a.end > a.start) return true;
-  }
-  return false;
-}
-
-/** The frozen core's `isCpuProfileSample` with the terms reversed, which is why
- *  this is not the exported `hasCpuProfileSamples`: `callchain` is a getter that
- *  rebuilds a frame array per read, and testing `source` first skips it. */
-function anyOnCpuSample(trace: ParsedTrace): boolean {
-  for (const s of trace.cpuSamples) {
-    if (s.source !== 1 && s.callchain.length > 0) return true;
   }
   return false;
 }
@@ -170,7 +157,6 @@ export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
     lanes,
     schedDelays,
     hasWorkerCpuTime: anyWorkerCpuTime(lanes),
-    hasOnCpuSamples: anyOnCpuSample(trace),
   };
   detectorInputsCache.set(trace, inputs);
   return inputs;
