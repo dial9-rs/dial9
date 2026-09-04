@@ -1,14 +1,19 @@
 //! Opt-in integrations for dial9.
 //!
 //! Provides [`dial9_axum`] (traced replacements for `axum::serve`), the
-//! [`tracing_layer`] subscriber layer, and (behind the `span` feature) ad-hoc
-//! `span` instrumentation.
+//! [`tracing_layer`] subscriber layer, (behind the `span` feature) ad-hoc
+//! `span` instrumentation, and (behind `metrics-rs`) [`metrics_rs`] sampling
+//! of the application's metrics.rs registry.
 
 #![warn(unreachable_pub)]
 
 /// Axum servers that spawn connection and HTTP/2 tasks through a dial9 executor.
 #[cfg(any(feature = "axum-07", feature = "axum-08"))]
 pub mod dial9_axum;
+
+/// Periodic sampling of the application's `metrics.rs` registry into dial9.
+#[cfg(feature = "metrics-rs")]
+pub mod metrics_rs;
 
 /// Ad-hoc span instrumentation (sync guard, future combinator, tower layer)
 /// that emits span events directly into a dial9 trace with no `tracing`
