@@ -468,6 +468,14 @@ impl RuntimeContext {
         self.runtime_id.get() == Some(&id)
     }
 
+    /// `is_runtime` without the `tokio_unstable` gate, for tests that need
+    /// to verify `bind_runtime` under a build where `is_runtime` doesn't exist
+    /// (`tokio_unstable` is unconditional in this repo, so that's always).
+    #[cfg(all(test, shuttle))]
+    pub(crate) fn bound_runtime_id_for_test(&self) -> Option<tokio::runtime::Id> {
+        self.runtime_id.get().copied()
+    }
+
     /// Build segment metadata entries for this runtime, e.g. `("runtime.main", "0,1,2,3")`.
     /// Returns `None` if unnamed or no workers resolved yet.
     pub(crate) fn metadata_entry(&self) -> Option<(String, String)> {
@@ -1057,6 +1065,121 @@ mod tests {
                 "steady-state flush cycles must not allocate; a source is \
                  rebuilding metadata or the reused buffer lost its capacity"
             );
+        }
+    }
+}
+
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::super::recorder_tokio;
+    use super::*;
+    use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+    use dial9_core::shared_state::SharedState;
+    use dial9_core::shuttle_test;
+
+    shuttle_test! {
+        default;
+        // Races concurrent attaches against a concurrent `segment_metadata`
+        // reader, sharing one `SharedState` so every attacher's
+        // `with_source_or_insert` races to install the same
+        // `TokioRuntimesSource`.
+        //
+        // Worker-ID claiming needs a live Tokio worker thread, which
+        // shuttle has none of. Looked up post-attach and inserted
+        // directly to stand in for it.
+        fn shuttle_concurrent_attach() {
+            const ATTACHERS: usize = 3;
+            let shared = Arc::new(SharedState::new(0));
+            shared.enable();
+
+            let attachers: Vec<_> = (0..ATTACHERS)
+                .map(|i| {
+                    let shared = shared.clone();
+                    crate::primitives::thread::spawn(move || {
+                        let handle = dial9_core::test_util::connected_handle(shared);
+                        let builder = tokio::runtime::Builder::new_current_thread();
+                        let options = TokioAttachOptions::builder()
+                            .runtime_name(format!("runtime-{i}"))
+                            .build();
+                        let runtime = handle.attach_tokio_runtime(builder, options).unwrap();
+                        let id = runtime.handle().id();
+                        drop(runtime);
+
+                        let state = recorder_tokio::tokio_attach_state(&handle)
+                            .expect("attach_tokio_runtime installed the source above");
+                        let registry = state.registry.lock().unwrap();
+                        let ctx = registry
+                            .iter()
+                            .find(|c| c.bound_runtime_id_for_test() == Some(id))
+                            .expect("attach_tokio_runtime bound this context above");
+                        ctx.worker_ids.lock().unwrap().insert(i as u64);
+                        id
+                    })
+                })
+                .collect();
+
+            // Accumulates across polls: `segment_metadata` re-emits the
+            // full snapshot on each change, not the delta, so one poll can
+            // see nothing new even though an earlier one already reported it.
+            let reader = {
+                let shared = shared.clone();
+                crate::primitives::thread::spawn(move || {
+                    let mut seen = Vec::new();
+                    let mut out = Vec::new();
+                    for _ in 0..ATTACHERS {
+                        out.clear();
+                        shared.with_sources_mut(|sources| {
+                            for source in sources.iter_mut() {
+                                source.segment_metadata(&mut out);
+                            }
+                        });
+                        seen.extend(out.iter().cloned());
+                    }
+                    seen
+                })
+            };
+
+            let bound_ids: Vec<_> = attachers.into_iter().map(|a| a.join().unwrap()).collect();
+            let mut seen = reader.join().unwrap();
+
+            let state = recorder_tokio::tokio_attach_state(
+                &dial9_core::test_util::connected_handle(shared.clone()),
+            )
+            .expect("source installed by the attaches above");
+
+            assert_eq!(
+                state.registry.lock().unwrap().len(),
+                ATTACHERS,
+                "every concurrent attach must be observed exactly once"
+            );
+
+            // bind_runtime's effect must land for every attacher.
+            {
+                let registry = state.registry.lock().unwrap();
+                for id in &bound_ids {
+                    assert!(
+                        registry
+                            .iter()
+                            .any(|c| c.bound_runtime_id_for_test() == Some(*id)),
+                        "no registered context is bound to {id:?}"
+                    );
+                }
+            }
+
+            // The racing reader may have finished its own polls before the last
+            // attach landed, so `seen` alone isn't guaranteed complete.
+            shared.with_sources_mut(|sources| {
+                for source in sources.iter_mut() {
+                    source.segment_metadata(&mut seen);
+                }
+            });
+            for i in 0..ATTACHERS {
+                let key = format!("runtime.runtime-{i}");
+                assert!(
+                    seen.iter().any(|(k, _)| *k == key),
+                    "runtime-{i}'s entry was never observed: {seen:?}"
+                );
+            }
         }
     }
 }
