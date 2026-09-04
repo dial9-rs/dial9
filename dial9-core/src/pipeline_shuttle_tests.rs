@@ -359,9 +359,15 @@ crate::shuttle_test! {
 /// under-lock gate check wins, the checkpoint drain must include its event; if
 /// the stop wins, encoding must not begin. An event attempted after the
 /// completed stop must always be rejected.
-fn checkpoint_stop_boundary() {
+fn run_checkpoint_stop_boundary() {
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(dir.path())
+        .max_file_size(1024 * 1024)
+        .max_total_size(8 * 1024 * 1024)
+        .rotation_period(std::time::Duration::MAX)
+        .build()
+        .unwrap();
     let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
     let recorder = Recorder::start(shared.clone(), writer, None, || || {});
     recorder.enable();
@@ -440,9 +446,11 @@ fn checkpoint_stop_boundary() {
     recorder.graceful_shutdown(std::time::Duration::ZERO);
 }
 
-#[test]
-fn shuttle_checkpoint_stop_boundary() {
-    shuttle::check_pct(checkpoint_stop_boundary, 1_000, 2);
+crate::shuttle_test! {
+    num_iters = 1_000, depth = 2;
+    fn checkpoint_stop_boundary() {
+        run_checkpoint_stop_boundary();
+    }
 }
 
 // ── Error injection ─────────────────────────────────────────────────

@@ -183,6 +183,10 @@ pub struct SegmentWriter<Mode: BufferMode = Disk> {
     /// How often to rotate based on monotonic time. `Duration::MAX` disables
     /// time-based rotation (used by `single_file()`).
     rotation_period: Duration,
+    /// Whether a current-data checkpoint may seal the active segment and open
+    /// a replacement. Disabled for the `single_file()` compatibility mode.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
+    checkpoint_rotation: bool,
     /// The next monotonic instant at which time-based rotation should fire,
     /// or `None` if time-based rotation is disabled.
     next_rotation_time: Option<Instant>,
@@ -302,6 +306,7 @@ impl SegmentWriter<Disk> {
         }
         let stem = SEGMENT_STEM.to_string();
         let fs = Fs::new_disk(&dir, stem.as_str());
+        fs.set_disk_max_total_size(max_total_size);
         let discovered = fs.discover_existing()?;
         let first_index = discovered.next_active_index;
         let next_index = first_index
@@ -319,6 +324,7 @@ impl SegmentWriter<Disk> {
             max_file_size,
             max_total_size,
             rotation_period,
+            checkpoint_rotation: true,
             next_rotation_time: Self::next_rotation_from(now, rotation_period),
             closed_files: discovered.closed_files,
             active_path: first_path,
@@ -354,7 +360,9 @@ impl SegmentWriter<Disk> {
     /// and gzip it to `{stem}.0.bin.gz`.
     ///
     /// Note: This API does not allow the ability to provide custom segment metadata.
-    /// Time-based rotation is disabled.
+    /// Time-based rotation is disabled. A non-empty current-data dump returns
+    /// `DumpError::Checkpoint` with `ErrorKind::Unsupported`, because sealing
+    /// it would violate this method's single-file contract.
     pub fn single_file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
         // Unlike rotating writers, `single_file` takes both the directory and
@@ -381,6 +389,7 @@ impl SegmentWriter<Disk> {
             max_file_size: u64::MAX,
             max_total_size: u64::MAX,
             rotation_period: Duration::MAX,
+            checkpoint_rotation: false,
             next_rotation_time: None,
             closed_files: VecDeque::new(),
             active_path,
@@ -496,6 +505,7 @@ impl SegmentWriter<Memory> {
             max_file_size: max_segment_size,
             max_total_size,
             rotation_period,
+            checkpoint_rotation: true,
             next_rotation_time: Self::next_rotation_from(now, rotation_period),
             closed_files: VecDeque::new(),
             active_path,
@@ -749,11 +759,12 @@ impl<M: BufferMode> SegmentWriter<M> {
         closed + active
     }
 
-    fn evict_oldest(&mut self) -> std::io::Result<()> {
+    fn evict_closed_to_budget(&mut self) {
         if !M::IS_DISK {
-            return Ok(());
+            return;
         }
-        // Always keep at least the current file.
+        // Always keep at least the current file. Protected checkpoint segments
+        // may temporarily exceed the budget until their worker pass resolves.
         while self.total_size() > self.max_total_size {
             #[cfg(feature = "pipeline")]
             let evict_pos = self
@@ -768,6 +779,13 @@ impl<M: BufferMode> SegmentWriter<M> {
             if let Some((seg_ref, _size)) = self.closed_files.remove(evict_pos) {
                 self.fs.remove_sealed(&seg_ref, RemoveReason::Eviction);
             }
+        }
+    }
+
+    fn evict_oldest(&mut self) -> std::io::Result<()> {
+        self.evict_closed_to_budget();
+        if !M::IS_DISK {
+            return Ok(());
         }
         // If even the current file alone exceeds total budget, stop writing.
         // Protected checkpoint segments may temporarily occupy the pipeline's
@@ -902,6 +920,13 @@ impl<M: BufferMode> SegmentWriter<M> {
             ));
         }
 
+        if self.has_real_events && !self.checkpoint_rotation {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "current-data checkpoints require a rotating trace buffer",
+            ));
+        }
+
         let current_index = self.has_real_events.then_some(self.next_index - 1);
         let protected = if M::IS_DISK {
             let mut indices: Vec<u32> = self
@@ -936,7 +961,11 @@ impl<M: BufferMode> SegmentWriter<M> {
     #[cfg(feature = "pipeline")]
     pub(crate) fn enforce_checkpoint_budget(&mut self) -> std::io::Result<()> {
         if self.fs.checkpoint_budget_dirty() {
-            self.evict_oldest()?;
+            // This check runs on arbitrary flush ticks, not only immediately
+            // after a write/rotation boundary. Reconcile closed segments but
+            // never finish a live writer merely because its active segment is
+            // temporarily larger than the total budget.
+            self.evict_closed_to_budget();
         }
         Ok(())
     }
@@ -1347,6 +1376,12 @@ mod tests {
         assert_eq!(writer.closed_files.len(), 1);
         assert!(writer.total_size() > max_total_size);
 
+        // Grow the replacement active segment beyond the total budget. The
+        // checkpoint-release reconciliation runs on an arbitrary flush tick;
+        // it must not finish this live writer mid-segment.
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
         let sealed = writer.closed_files.front().unwrap().0.clone();
         writer.fs.remove_sealed(&sealed, RemoveReason::Terminal);
         drop(checkpoint);
@@ -1356,8 +1391,28 @@ mod tests {
             writer.closed_files.is_empty(),
             "terminal removal must discard the writer's stale retention entry"
         );
-        assert!(writer.total_size() <= max_total_size);
+        assert!(writer.total_size() > max_total_size);
         assert!(!writer.is_closed());
+    }
+
+    #[cfg(feature = "pipeline")]
+    #[test]
+    fn single_file_rejects_nonempty_checkpoint_without_rotating() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
+        let active = writer.current_active_path().to_owned();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        let checkpoint = writer.reserve_checkpoint().unwrap();
+        let error = writer
+            .seal_checkpoint(checkpoint)
+            .expect_err("single-file mode cannot create a stable current-data segment");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(!writer.is_closed());
+        assert_eq!(writer.current_active_path(), active);
+        assert!(active.exists());
+        assert!(!dir.path().join("trace.0.bin").exists());
     }
 
     #[test]

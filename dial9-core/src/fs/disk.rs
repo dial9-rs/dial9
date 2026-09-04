@@ -46,6 +46,9 @@ pub(crate) struct DiskFs {
     /// active and makes overlapping protection sets unambiguous.
     #[cfg(feature = "pipeline")]
     checkpoint_active: AtomicBool,
+    /// Writer retention budget, copied here so the final checkpoint lease can
+    /// enforce it even after the flush thread and `SegmentWriter` are gone.
+    max_total_size: AtomicU64,
     dropped: AtomicU64,
     writer_done: AtomicBool,
 }
@@ -62,9 +65,14 @@ impl DiskFs {
             checkpoint_budget_dirty: AtomicBool::new(false),
             #[cfg(feature = "pipeline")]
             checkpoint_active: AtomicBool::new(false),
+            max_total_size: AtomicU64::new(u64::MAX),
             dropped: AtomicU64::new(0),
             writer_done: AtomicBool::new(false),
         }
+    }
+
+    pub(super) fn set_max_total_size(&self, max_total_size: u64) {
+        self.max_total_size.store(max_total_size, Ordering::Release);
     }
 
     pub(super) fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
@@ -170,6 +178,7 @@ impl DiskFs {
     pub(super) fn release_checkpoint_segment(&self, index: u32) {
         if self.checkpoint_protected.lock().unwrap().remove(&index) {
             self.checkpoint_budget_dirty.store(true, Ordering::Release);
+            self.enforce_final_checkpoint_budget();
         }
     }
 
@@ -189,6 +198,52 @@ impl DiskFs {
     /// next `take_files` scan.
     pub(super) fn mark_writer_done(&self) {
         self.writer_done.store(true, Ordering::Release);
+        #[cfg(feature = "pipeline")]
+        self.enforce_final_checkpoint_budget();
+    }
+
+    /// Reconcile checkpoint-delayed eviction once no writer remains to consume
+    /// `checkpoint_budget_dirty`. Every protection release retries the scan,
+    /// so entries that are still protected stay until their own lease ends.
+    #[cfg(feature = "pipeline")]
+    fn enforce_final_checkpoint_budget(&self) {
+        if !self.writer_done.load(Ordering::Acquire)
+            || !self.checkpoint_budget_dirty.swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+
+        if let Err(error) = self.try_enforce_final_checkpoint_budget() {
+            // Keep the work pending in case another lease release gives us a
+            // retry opportunity. There is no background thread after shutdown.
+            self.checkpoint_budget_dirty.store(true, Ordering::Release);
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    target: "dial9_worker",
+                    %error,
+                    "failed to enforce disk budget after checkpoint shutdown"
+                );
+            });
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    fn try_enforce_final_checkpoint_budget(&self) -> io::Result<()> {
+        let discovered = self.discover_existing()?;
+        let mut total_size: u64 = discovered.closed_files.iter().map(|(_, size)| size).sum();
+        let max_total_size = self.max_total_size.load(Ordering::Acquire);
+
+        for (segment, size) in discovered.closed_files {
+            if total_size <= max_total_size {
+                break;
+            }
+            if self.checkpoint_segment_is_protected(segment.index()) {
+                continue;
+            }
+            self.remove_sealed(&segment, RemoveReason::Eviction);
+            total_size = total_size.saturating_sub(size);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "pipeline")]
@@ -582,6 +637,31 @@ mod tests {
     fn strip_active_suffix_no_suffix() {
         let p = Path::new("/tmp/trace.0.bin");
         check!(strip_active_suffix(p) == PathBuf::from("/tmp/trace.0.bin"));
+    }
+
+    #[test]
+    fn final_checkpoint_release_reconciles_disk_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("trace.0.bin");
+        let second = dir.path().join("trace.1.bin");
+        std::fs::write(&first, b"four").unwrap();
+        std::fs::write(&second, b"more").unwrap();
+        let disk = DiskFs::new(dir.path(), "trace");
+        disk.set_max_total_size(4);
+        disk.protect_checkpoint_segments(&[0, 1]);
+
+        disk.mark_writer_done();
+        check!(
+            first.exists() && second.exists(),
+            "protected files survive finalize"
+        );
+
+        disk.release_checkpoint_segment(0);
+        check!(!first.exists(), "released oldest segment is evicted");
+        check!(second.exists(), "remaining protected segment is retained");
+
+        disk.release_checkpoint_segment(1);
+        check!(second.exists(), "retention is already within budget");
     }
 }
 

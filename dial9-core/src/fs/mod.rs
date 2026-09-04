@@ -345,6 +345,15 @@ impl Fs {
         Arc::new(Fs::Disk(DiskFs::new(dir, stem)))
     }
 
+    /// Record the writer's disk budget so checkpoint leases released after
+    /// shutdown can reconcile retention without access to `SegmentWriter`.
+    pub(crate) fn set_disk_max_total_size(&self, max_total_size: u64) {
+        match self {
+            Fs::Disk(d) => d.set_max_total_size(max_total_size),
+            Fs::Mem(_) => unreachable!("disk budget configured for memory backend"),
+        }
+    }
+
     /// Ring budget = `max_total_size - PIPELINE_RESERVE_SEGMENTS * max_segment_size`.
     pub(crate) fn new_in_memory(
         max_total_size: u64,

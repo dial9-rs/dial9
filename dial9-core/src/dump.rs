@@ -183,6 +183,19 @@ struct Debounce {
     last: Mutex<Option<(Instant, DumpId)>>,
 }
 
+impl Debounce {
+    /// Undo an accepted request that failed before reaching the worker.
+    ///
+    /// A later accepted request may already have replaced this slot, so only
+    /// clear it when it still names the request being rolled back.
+    fn clear_if(&self, id: DumpId) {
+        let mut last = self.last.lock().expect("debounce mutex poisoned");
+        if last.is_some_and(|(_, accepted)| accepted == id) {
+            *last = None;
+        }
+    }
+}
+
 /// Sending half of the trigger channel.
 ///
 /// Cloneable; reach it from any thread owned by the runtime via
@@ -410,11 +423,17 @@ impl CheckpointDump {
     pub(crate) fn dispatch(mut self, checkpoint: CheckpointGuard) {
         self.request.checkpoint = Some(checkpoint);
         if let Err(error) = self.worker_tx.send(self.request) {
+            if let Some(debounce) = &self.debounce {
+                debounce.clear_if(error.0.id);
+            }
             let _ = error.0.receipt_tx.send(Err(DumpError::WorkerStopped));
         }
     }
 
     pub(crate) fn fail(self, error: std::io::Error) {
+        if let Some(debounce) = &self.debounce {
+            debounce.clear_if(self.request.id);
+        }
         let _ = self
             .request
             .receipt_tx

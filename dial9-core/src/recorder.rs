@@ -308,12 +308,13 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 default_pipeline(source_stages, self.terminal_processor, M::IS_DISK)
             }
         };
-        // A current-data dump is also useful without processing stages: the
-        // flush-thread checkpoint makes the active fragment stable and the
+        // A disk current-data dump is also useful without processing stages:
+        // the flush-thread checkpoint makes the active fragment stable and the
         // retain stage lets the worker acknowledge it without rewriting or
-        // removing it.
+        // removing it. Memory has no retain-in-place worker path because
+        // taking a segment consumes its ring slot.
         #[cfg(feature = "pipeline")]
-        if self.trigger.is_some() && processors.is_empty() {
+        if self.trigger.is_some() && processors.is_empty() && M::IS_DISK {
             processors.push(Box::new(crate::worker::processors::RetainProcessor));
         }
 
@@ -1042,7 +1043,8 @@ mod tests {
 
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer)
             .source(BlockingSource {
                 ready: Some(ready_tx),
@@ -1086,7 +1088,8 @@ mod tests {
 
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer)
             .source(BlockingSource {
                 ready: Some(ready_tx),
@@ -1162,7 +1165,9 @@ mod tests {
     async fn dump_current_data_reports_missing_active_and_recovers_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = checkpoint_disk_writer(dir.path());
-        let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
+        let recorder = recorder(writer)
+            .with_dump_trigger(|trigger| trigger.debounce(Duration::from_secs(60)))
+            .build();
         let handle = recorder.handle().clone();
         let trigger = handle.dump_trigger().expect("configured dump trigger");
 
@@ -1206,6 +1211,38 @@ mod tests {
 
     #[cfg(feature = "pipeline")]
     #[tokio::test]
+    async fn memory_trigger_without_pipeline_retains_ring_and_rolls_back_debounce() {
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let fs = writer.fs_handle().expect("memory writer exposes its fs");
+        let recorder = recorder(writer)
+            .with_dump_trigger(|trigger| trigger.debounce(Duration::from_secs(60)))
+            .build();
+        let handle = recorder.handle().clone();
+        let trigger = handle.dump_trigger().expect("configured dump trigger");
+
+        handle.record_event(TestEvent {
+            timestamp_ns: clock::clock_monotonic_ns(),
+            value: 83,
+        });
+        for attempt in 1..=2 {
+            let error = tokio::time::timeout(Duration::from_secs(2), trigger.dump_current_data())
+                .await
+                .expect("dump should complete")
+                .expect_err("no pipeline worker is configured for a memory recorder");
+            assert!(
+                matches!(error, crate::dump::DumpError::WorkerStopped),
+                "attempt {attempt} should reach dispatch instead of coalescing: {error}"
+            );
+        }
+
+        let taken = fs.take_files();
+        assert_eq!(taken.segments.len(), 1, "the raw ring segment is retained");
+        let (_, payload, _) = taken.segments.into_iter().next().unwrap().load().unwrap();
+        assert_eq!(decoded_test_values(&payload.into_vec()), vec![83]);
+    }
+
+    #[cfg(feature = "pipeline")]
+    #[tokio::test]
     async fn dump_dispatches_sealed_checkpoint_when_replacement_open_fails() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = checkpoint_disk_writer(dir.path());
@@ -1243,7 +1280,8 @@ mod tests {
     #[cfg(feature = "pipeline")]
     #[tokio::test]
     async fn stop_recording_bypasses_dump_debounce() {
-        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = checkpoint_disk_writer(dir.path());
         let recorder = recorder(writer)
             .with_dump_trigger(|trigger| trigger.debounce(Duration::from_secs(60)))
             .build();

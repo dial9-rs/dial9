@@ -222,7 +222,10 @@ impl SharedState {
 
         for handle in &handles {
             // Skip buffers that self-flushed during the current epoch.
-            if handle.flush_epoch.load() >= epoch {
+            // The Acquire pairs with the producer's Release stamp. Skipping
+            // the buffer therefore observes the collector enqueue that
+            // completed before the producer advertised this epoch.
+            if handle.flush_epoch.load_acquire() >= epoch {
                 stats.buffers_skipped_busy += 1;
                 continue;
             }

@@ -61,9 +61,11 @@ async fn main() {
 ```
 
 `dump_trigger()` returns `Some` only when the runtime was built with
-`with_dump_trigger`; in continuous mode it returns `None`. If no pipeline is
-configured the worker never spawns and every dump resolves
-`DumpError::WorkerStopped`.
+`with_dump_trigger`; in continuous mode it returns `None`. A triggered disk
+recorder with no explicit pipeline gets an internal retain stage so
+current-data checkpoints can complete while leaving their raw segments in
+place. A memory recorder with no pipeline has no consumer: current-data dumps
+resolve `DumpError::WorkerStopped` and the sealed segment remains in the ring.
 
 ## Requesting a dump
 
@@ -135,7 +137,7 @@ match trigger.dump_current_data().with_metadata("reason", "idle-drop").await {
     Err(DumpError::Coalesced { into }) => {
         // A near-simultaneous trip already covers this; `into` is its id.
     }
-    Err(e) => { /* WorkerStopped or Pipeline */ }
+    Err(e) => { /* WorkerStopped, Checkpoint, or Pipeline */ }
 }
 ```
 
@@ -200,10 +202,19 @@ approach points at the files instead of moving them.
 
 ## Best-effort semantics
 
-Both sides of a dump are strictly best-effort. There is no ring resizing, no
-segment pinning, and no duplication of buffered data. If the requested window
-cannot be fully covered, the dump gets whatever survived and the application
-keeps running.
+Time-range dumps are strictly best-effort. There is no ring resizing, segment
+pinning, or duplication of buffered data for their look-back and look-forward
+windows. If the requested window cannot be fully covered, the dump gets
+whatever survived and the application keeps running.
+
+`dump_current_data` and `stop_recording_and_dump_current_data` establish a
+stronger boundary. The flush thread reserves the sole current-data checkpoint,
+drains registered thread-local buffers, protects the exact retained snapshot
+from eviction, and rotates a non-empty active segment before dispatch. The
+protection lasts through retries and is released at a terminal pipeline
+outcome. These operations therefore require a rotating buffer; a non-empty
+`DiskBuffer::single_file` request resolves `DumpError::Checkpoint` with
+`ErrorKind::Unsupported` rather than changing the single-file layout.
 
 The look-back is bounded by what the ring retained. The ring keeps only what
 `max_total_size` lets it keep, so a `lookback` wider than the retained history
@@ -223,8 +234,8 @@ window; it is the same seal/pop/upload path, gated by a deadline.
 
 A dump that captures some segments while others fail terminally still resolves
 `Ok`; `receipt.segments_processed` counts only the survivors. `Err` is reserved
-for `WorkerStopped`, `Coalesced`, and total `Pipeline` failure (every captured
-segment failed and nothing landed).
+for `WorkerStopped`, current-data `Checkpoint` failures, `Coalesced`, and total
+`Pipeline` failure (every captured segment failed and nothing landed).
 
 ## Custom pipelines
 
@@ -329,11 +340,12 @@ channel they already use (incidents-table row, Slack message, etc.).
 
 ## What the library does for you
 
-When you call `dump_current_data` or `dump_time_range`, the trigger mints a
-`DumpId`, packs the look-back and look-forward (either may be zero) and any
-`with_metadata` entries into a request, and (on drop/await) forwards it to the
-worker over the trigger channel. Awaiting the returned run is optional and only
-retrieves the receipt.
+Every request mints a `DumpId` and packs its window plus any `with_metadata`
+entries when the run is dropped or awaited. Time-range requests go directly to
+the worker. Recorder-bound current-data requests go through the bounded flush
+control channel first so it can establish the exact checkpoint described
+above, then the flush thread dispatches them to the worker. Awaiting the
+returned run is optional and only retrieves the receipt.
 
 The worker stamps the following onto each captured segment's metadata before
 the pipeline runs:
@@ -393,6 +405,12 @@ With a trigger set, the same loop selects on:
 - `self.fs.writer_done` (existing, used to start drain-to-empty)
 - the new trigger receiver populated by `DumpTrigger`
 - a deadline branch for the nearest open forward window
+
+Recorder-bound current-data requests first pass through the flush thread. It
+creates and temporarily protects an exact segment snapshot, then hands the
+request and its lease to the worker. At most one such snapshot may be active;
+an overlapping request reports bounded `WouldBlock` backpressure. Ordinary
+time-range requests continue to enter the worker directly and do not pin data.
 
 It does not call `take_files` between triggers. When a request arrives, it
 registers the dump with its window `[trigger - lookback, trigger +
@@ -457,6 +475,10 @@ impl DumpTrigger {
     /// Capture everything the ring still holds, right now. No forward window.
     pub fn dump_current_data(&self) -> DumpRun<'_>;
 
+    /// Close the recording gate after one final source sample, then capture
+    /// everything accumulated through that boundary. Never debounced.
+    pub fn stop_recording_and_dump_current_data(&self) -> DumpRun<'_>;
+
     /// Capture the window `[trigger - lookback, trigger + lookforward]`. Either
     /// side may be `Duration::ZERO`. Never errors and never resizes or pins the
     /// ring; the actual covered span is reported on `DumpReceipt::time_range`.
@@ -505,6 +527,9 @@ pub struct DumpReceipt {
 pub enum DumpError {
     /// The worker is shutting down or already stopped.
     WorkerStopped,
+    /// The flush thread could not reserve, drain, or seal a current-data
+    /// checkpoint. The wrapped kind includes `WouldBlock` and `Unsupported`.
+    Checkpoint(std::io::Error),
     /// Every captured segment failed in a pipeline stage (total failure).
     Pipeline(ProcessErrorKind),
     /// The trigger was coalesced into an in-flight dump by the debounce gate.

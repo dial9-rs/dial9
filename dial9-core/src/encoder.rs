@@ -154,10 +154,9 @@ impl ThreadLocalEncoder<'_> {
 pub trait Encodable {
     /// Encode this event into the thread-local trace buffer.
     ///
-    /// Implementations should call [`ThreadLocalEncoder::encode`] exactly once.
-    /// Each `encode` call is counted as one event for buffer flush decisions;
-    /// calling `encode` multiple times will produce multiple wire events but
-    /// only one event will be counted.
+    /// Each [`ThreadLocalEncoder::encode`] call is counted as one event for
+    /// buffer flush decisions. Implementations may decline to emit an event or
+    /// emit more than one when their input expands to multiple wire events.
     fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>);
 }
 
@@ -170,8 +169,9 @@ impl<T: dial9_trace_format::TraceEvent> Encodable for T {
 // ── Thread-local buffer internals ───────────────────────────────────────────
 
 /// Tracks the last drain epoch at which a particular thread-local buffer
-/// was flushed. The flush thread reads this (relaxed) to skip buffers
-/// that have self-flushed recently, avoiding contention with busy workers.
+/// was flushed. Producers publish completed collector flushes with a Release
+/// store. The flush thread uses an Acquire load before skipping a buffer, so a
+/// skip also observes the collector enqueue that made the lock unnecessary.
 #[derive(Clone)]
 pub(crate) struct FlushEpoch(Arc<AtomicU64>);
 
@@ -181,11 +181,15 @@ impl FlushEpoch {
     }
 
     pub(crate) fn store(&self, epoch: u64) {
-        self.0.store(epoch, Ordering::Relaxed);
+        self.0.store(epoch, Ordering::Release);
     }
 
     pub(crate) fn load(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn load_acquire(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -353,12 +357,7 @@ pub(crate) fn with_encoder(
             }
         };
         let first_call = buf.set_collector(collector);
-        f(&mut buf.thread_local_encoder());
-        let current_epoch = drain_epoch.load(Ordering::Relaxed);
-        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
-            collector.accept_flush(buf.flush());
-            buf.flush_epoch.store(current_epoch);
-        }
+        encode_and_maybe_flush(&mut buf, f, collector, drain_epoch);
         if first_call {
             Some(TlBufferHandle {
                 buffer: Arc::downgrade(arc),
@@ -428,13 +427,25 @@ pub(crate) fn with_encoder_if_enabled(
         if !is_enabled() {
             return;
         }
-        f(&mut buf.thread_local_encoder());
-        let current_epoch = drain_epoch.load(Ordering::Relaxed);
-        if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
-            collector.accept_flush(buf.flush());
-            buf.flush_epoch.store(current_epoch);
-        }
+        encode_and_maybe_flush(&mut buf, f, collector, drain_epoch);
     });
+}
+
+/// Shared encode/flush path for ordinary and capture-gated events. Registration
+/// intentionally remains in the wrappers because the gated path must publish a
+/// first-use handle before checking the recording boundary.
+fn encode_and_maybe_flush(
+    buf: &mut ThreadLocalBuffer,
+    f: impl FnOnce(&mut ThreadLocalEncoder<'_>),
+    collector: &Arc<CentralCollector>,
+    drain_epoch: &AtomicU64,
+) {
+    f(&mut buf.thread_local_encoder());
+    let current_epoch = drain_epoch.load(Ordering::Relaxed);
+    if buf.should_flush() || buf.flush_epoch.load() < current_epoch {
+        collector.accept_flush(buf.flush());
+        buf.flush_epoch.store(current_epoch);
+    }
 }
 
 #[cfg(test)]

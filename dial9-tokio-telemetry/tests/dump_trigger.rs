@@ -31,13 +31,26 @@ fn with_dump_trigger_compiles_in_all_pipeline_states() {
 /// resolves. Its internal retain stage leaves the raw segment on disk.
 #[test]
 fn trigger_without_pipeline_retains_raw_segment() {
-    let dir = tempfile::tempdir().unwrap();
-    let trace_path = dir.path().join("trace.bin");
+    #[derive(dial9_trace_format::TraceEvent)]
+    struct CheckpointEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
 
-    let writer = DiskBuffer::single_file(&trace_path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let writer = DiskBuffer::builder()
+        .base_path(dir.path())
+        .max_file_size(1024 * 1024)
+        .max_total_size(8 * 1024 * 1024)
+        .rotation_period(std::time::Duration::MAX)
+        .build()
+        .unwrap();
 
     let recorder = recorder(writer).with_dump_trigger(|_| {}).build();
     let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
+    recorder.handle().record_event(CheckpointEvent {
+        timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
+    });
 
     let trigger = recorder.handle().dump_trigger().expect("trigger wired");
 
@@ -45,6 +58,10 @@ fn trigger_without_pipeline_retains_raw_segment() {
         .block_on(async { trigger.dump_current_data().await })
         .expect("checkpoint-only dump should succeed");
     assert!(receipt.manifest_key.is_none());
+    assert!(
+        dir.path().join("trace.0.bin").exists(),
+        "the internal retain stage leaves the raw checkpoint on disk"
+    );
 
     drop(rt);
     drop(recorder);
