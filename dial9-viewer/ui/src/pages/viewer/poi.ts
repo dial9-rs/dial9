@@ -34,7 +34,6 @@ export const POI_FILTERS: readonly PointOfInterestType[] = [
   "wake-delay",
   "uninstrumented",
   "spawn-delay",
-  "off-cpu-poll",
   "off-cpu-active",
 ];
 
@@ -79,8 +78,6 @@ export function filterLabel(type: PointOfInterestType): string {
       // No threshold in the label, unlike its fixed-threshold siblings: the
       // rail renders the live value in its own input.
       return "Spawn->First Poll Delays";
-    case "off-cpu-poll":
-      return "Off-CPU Polls (>1ms, no CPU samples)";
     case "off-cpu-active":
       return "Descheduled Worker Periods (CPU <50%)";
   }
@@ -101,8 +98,6 @@ export function kindLabel(type: PointOfInterestType): string {
       return "uninstrumented poll";
     case "spawn-delay":
       return "spawn delay";
-    case "off-cpu-poll":
-      return "off-cpu poll";
     case "off-cpu-active":
       return "off-cpu active";
   }
@@ -130,8 +125,6 @@ export interface PoiSource {
   taskSpawnTimes: Map<number, number>;
   /** Gates "off-cpu-active"; see DetectorInputs.hasWorkerCpuTime. */
   hasWorkerCpuTime: boolean;
-  /** Gates "off-cpu-poll"; see DetectorInputs.hasOnCpuSamples. */
-  hasOnCpuSamples: boolean;
   /** Lazy detector output cache. Keyed by `detectorCacheKey`, which folds in
    *  the threshold for the detectors that take one, so two thresholds never
    *  share a result. The list is capped at POI_DETECTOR_LIMIT; `matched` is the
@@ -175,8 +168,7 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
 
   // Shared with the minimap ticks: same worker set, same lane source, same
   // scheduling delays, computed once per trace.
-  const { workerIds, lanes, schedDelays, hasWorkerCpuTime, hasOnCpuSamples } =
-    sharedDetectorInputs(trace);
+  const { workerIds, lanes, schedDelays, hasWorkerCpuTime } = sharedDetectorInputs(trace);
 
   source = {
     workerIds,
@@ -186,7 +178,6 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
     taskInstrumented: trace.taskInstrumented,
     taskSpawnTimes: trace.taskSpawnTimes,
     hasWorkerCpuTime,
-    hasOnCpuSamples,
     _byFilter: new Map(),
   };
   sourceCache.set(trace, source);
@@ -222,7 +213,6 @@ function detectorResult(
     taskSpawnTimes: source.taskSpawnTimes,
     spawnDelayThresholdUs: spawnThresholdUs,
     hasWorkerCpuTime: source.hasWorkerCpuTime,
-    hasOnCpuSamples: source.hasOnCpuSamples,
     limit: POI_DETECTOR_LIMIT,
     onTotal: (n: number) => {
       matched = n;
@@ -382,7 +372,7 @@ export function relTimeLabel(ns: number, minTs: number): string {
 /** The POI's severity value converted to nanoseconds (per detector units).
  *  `filterPointsOfInterest` stores `value` in different units per type
  *  (sched: ns schedWait; off-cpu-active: ns off-CPU time;
- *  long-poll/cpu-sampled/uninstrumented/off-cpu-poll: ms; wake-delay: us) -
+ *  long-poll/cpu-sampled/uninstrumented: ms; wake-delay: us) -
  *  normalize to ns so `formatHumanDuration` reads them uniformly. */
 export function valueNs(poi: PointOfInterest): number {
   switch (poi.type) {
@@ -396,7 +386,6 @@ export function valueNs(poi: PointOfInterest): number {
     case "long-poll":
     case "cpu-sampled":
     case "uninstrumented":
-    case "off-cpu-poll":
       return poi.value * 1e6; // ms -> ns
   }
 }

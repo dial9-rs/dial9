@@ -44,8 +44,6 @@ export interface PoiOpts {
   /** Required for the "spawn-delay" filter. */
   taskSpawnTimes?: Map<number, number>;
   spawnDelayThresholdUs?: number;
-  /** Required for "off-cpu-poll"; see DetectorInputs.hasOnCpuSamples. */
-  hasOnCpuSamples?: boolean;
   /** Required for "off-cpu-active"; see DetectorInputs.hasWorkerCpuTime. */
   hasWorkerCpuTime?: boolean;
   /**
@@ -606,19 +604,6 @@ export class ColumnarWorkerSpans {
           const schedCount = schedOff ? schedOff[i + 1]! - schedOff[i]! : 0;
           if (cpuCount + schedCount > 0) {
             add({ time: c.start[i]!, worker: w, type: "cpu-sampled", value: (c.end[i]! - c.start[i]!) / 1e6, span: pollSpanForJump(c, i) });
-          }
-        }
-      } else if (filterType === "off-cpu-poll" && opts.hasOnCpuSamples) {
-        // schedOff is NOT consulted: off-CPU stacks confirm the finding.
-        const cpuOff = c.cpuOff;
-        for (let i = 0; i < c.n; i++) {
-          // An open-ended poll's `end` is a fabricated bound, so an unobserved
-          // gap would otherwise rank as the worst off-CPU poll in the trace.
-          if (c.openEnded[i] === 1) continue;
-          if (cpuOff && cpuOff[i + 1]! - cpuOff[i]! > 0) continue;
-          const durMs = (c.end[i]! - c.start[i]!) / 1e6;
-          if (durMs > 1) {
-            add({ time: c.start[i]!, worker: w, type: "off-cpu-poll", value: durMs, span: pollSpanForJump(c, i) });
           }
         }
       } else if (filterType === "off-cpu-active" && opts.hasWorkerCpuTime) {

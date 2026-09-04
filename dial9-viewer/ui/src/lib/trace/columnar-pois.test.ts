@@ -61,13 +61,13 @@ const bag = (arr: any[]) => arr.map(key).sort();
 describe("store.pointsOfInterest matches frozen filterPointsOfInterest", () => {
   for (const type of [
     "long-poll", "sched", "cpu-sampled", "wake-delay", "uninstrumented",
-    "spawn-delay", "off-cpu-poll", "off-cpu-active",
+    "spawn-delay", "off-cpu-active",
   ] as const) {
     it(`${type}: same POIs (time/worker/value/span)`, () => {
       const opts = {
         hasSchedWait: true, sortByWorst: true, taskInstrumented, taskSpawnTimes,
-        // Forced on: both off-CPU detectors are gated on their input existing.
-        hasOnCpuSamples: true, hasWorkerCpuTime: true,
+        // Forced on: off-cpu-active is gated on its input existing.
+        hasWorkerCpuTime: true,
       };
       const fat = filterPointsOfInterest(type, ws, workerIds, fatSched, opts);
       const col = store.pointsOfInterest(type, workerIds, colSched, opts);
@@ -247,9 +247,9 @@ describe("off-CPU detectors: column scan matches the fat scan on crafted lanes",
       cpuSampleTimes: [],
     },
   };
-  const opts = { sortByWorst: true, hasOnCpuSamples: true, hasWorkerCpuTime: true };
+  const opts = { sortByWorst: true, hasWorkerCpuTime: true };
 
-  for (const type of ["off-cpu-active", "off-cpu-poll"] as const) {
+  for (const type of ["off-cpu-active"] as const) {
     it(`${type}: same POIs, and not an empty result`, () => {
       const syntheticStore = ColumnarWorkerSpans.fromWorkerSpans(synthetic);
       const fat = filterPointsOfInterest(type, synthetic, [0], [], opts);
@@ -280,32 +280,4 @@ describe("off-CPU detectors: column scan matches the fat scan on crafted lanes",
     ).toBe(true);
   });
 
-  // Sample exclusion is the one branch reading different structures per path
-  // (`poll.cpuSamples` vs the `cpuOff` CSR), and no other case attaches a
-  // sample - so both paths could agree while both were wrong.
-  it("off-cpu-poll: both paths drop a long poll that caught an on-CPU sample", () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const lanes: any = {
-      0: {
-        polls: [
-          { start: 0, end: 5e6, taskId: 1, spawnLocId: null, spawnLoc: null },
-          { start: 10e6, end: 15e6, taskId: 2, spawnLocId: null, spawnLoc: null },
-        ],
-        parks: [], actives: [], cpuSampleTimes: [],
-      },
-    };
-    // One on-CPU sample inside the FIRST poll only.
-    const samples = [
-      { timestamp: 2e6, workerId: 0, tid: 1, source: 0, callchain: ["0x1"], cpu: 0 },
-    ];
-    const store = ColumnarWorkerSpans.fromWorkerSpans(lanes);
-    attachCpuSamples(samples as never, lanes);
-    store.attachCpuSamples(samples as never);
-
-    const opts2 = { sortByWorst: true, hasOnCpuSamples: true };
-    const fat = filterPointsOfInterest("off-cpu-poll", lanes, [0], [], opts2);
-    const col = store.pointsOfInterest("off-cpu-poll", [0], [], opts2);
-    expect(fat.map((p) => p.span.start)).toEqual([10e6]);
-    expect(bag(col)).toEqual(bag(fat));
-  });
 });

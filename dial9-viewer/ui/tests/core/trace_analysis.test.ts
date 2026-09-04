@@ -817,30 +817,6 @@ describe("filterPointsOfInterest off-cpu-active", () => {
   });
 });
 
-describe("filterPointsOfInterest off-cpu-poll", () => {
-  const ws = lanes({
-    polls: [
-      poll(0, 5e6), // 5ms, no samples -> off CPU
-      poll(10e6, 15e6, { cpuSamples: [{}] }), // 5ms but sampled on CPU
-      poll(20e6, 20.5e6), // 0.5ms, under the floor
-      poll(30e6, 40e6, { openEnded: true }), // end is a fabricated bound
-      poll(50e6, 55e6, { schedSamples: [{}] }), // off-CPU stacks confirm it
-    ],
-  });
-  const opts = { hasOnCpuSamples: true };
-
-  it("flags long polls with no on-CPU samples, skipping open-ended ones", () => {
-    const pois = filterPointsOfInterest("off-cpu-poll", ws, [0], [], opts);
-    expect(pois.map((p: any) => [p.time, p.value])).toEqual([[0, 5], [50e6, 5]]);
-  });
-
-  it("returns nothing when the trace carries no on-CPU samples at all", () => {
-    // Zero samples is then every poll, which is the detector's match condition.
-    expect(
-      filterPointsOfInterest("off-cpu-poll", ws, [0], [], { hasOnCpuSamples: false }),
-    ).toEqual([]);
-  });
-});
 
 // ── buildFlamegraphTree / flattenFlamegraph ──
 

@@ -159,13 +159,4 @@ describe("deriveMinimapPois", () => {
     expect(pois.filter((p) => p.type === "off-cpu-active")).toEqual([]);
   });
 
-  // Depends on attachCpuSamples, same reason cpu-sampled is left out.
-  it("never ticks off-cpu-poll", () => {
-    const events = [
-      ev(EVENT_TYPES.PollStart, 0, 1 * MS, 1),
-      ev(EVENT_TYPES.PollEnd, 0, 4 * MS, 1),
-    ];
-    const pois = deriveMinimapPois(fakeTrace(events));
-    expect(pois.filter((p) => p.type === "off-cpu-poll")).toEqual([]);
-  });
 });

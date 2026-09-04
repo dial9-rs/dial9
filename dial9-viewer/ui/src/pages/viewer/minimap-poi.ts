@@ -9,10 +9,9 @@
 //
 // "cpu-sampled" is deliberately excluded: it needs attachCpuSamples, which
 // MUTATES the shared poll objects the lanes/overlay caches also hold - the
-// minimap must not reach into that shared derivation. "off-cpu-poll" is
-// excluded for the same reason (it too keys off the attached samples). The
-// remaining detectors (long-poll, sched, wake-delay, uninstrumented,
-// spawn-delay, off-cpu-active) read the spans read-only.
+// minimap must not reach into that shared derivation. The remaining detectors
+// (long-poll, sched, wake-delay, uninstrumented, spawn-delay, off-cpu-active)
+// read the spans read-only.
 //
 // "spawn-delay" runs at its DEFAULT threshold, not the rail's live one: these
 // ticks are cached on trace identity, and rebuilding them on every threshold
