@@ -69,7 +69,7 @@ use std::io;
 /// sample symbolization) run at build-time wiring, then segments are compressed
 /// and written back. If there are no stages and no upload target, no worker
 /// starts. These methods customize that behavior.
-pub trait RecorderPipelineExt<M: BufferMode>: Sized {
+pub trait RecorderPipelineExt<M: BufferMode>: sealed::Sealed + Sized {
     /// Replace the default pipeline with your own processors, run verbatim.
     ///
     /// Nothing is added for you, so chain
@@ -92,6 +92,14 @@ pub trait RecorderPipelineExt<M: BufferMode>: Sized {
     /// client (custom credentials, endpoint, or a test double).
     #[cfg(feature = "worker-s3")]
     fn with_s3_uploader_client(self, config: S3Config, client: aws_sdk_s3::Client) -> Self;
+}
+
+mod sealed {
+    use dial9_core::buffer::BufferMode;
+    use dial9_core::recorder::RecorderBuilder;
+
+    pub trait Sealed {}
+    impl<M: BufferMode> Sealed for RecorderBuilder<M> {}
 }
 
 impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
@@ -124,23 +132,12 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
 /// This is separate from [`RecorderPipelineExt`] to keep that existing public
 /// trait unchanged.
 #[cfg(feature = "worker-s3")]
-pub trait RecorderS3ClientExt<M: BufferMode>:
-    recorder_s3_client_ext_sealed::Sealed + Sized
-{
+pub trait RecorderS3ClientExt<M: BufferMode>: sealed::Sealed + Sized {
     /// Like [`RecorderPipelineExt::with_s3_uploader`], but constructs the S3
     /// client asynchronously on the pipeline worker's Tokio runtime.
     fn with_s3_uploader_client_future<F>(self, config: S3Config, client_future: F) -> Self
     where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static;
-}
-
-#[cfg(feature = "worker-s3")]
-mod recorder_s3_client_ext_sealed {
-    use dial9_core::buffer::BufferMode;
-    use dial9_core::recorder::RecorderBuilder;
-
-    pub trait Sealed {}
-    impl<M: BufferMode> Sealed for RecorderBuilder<M> {}
 }
 
 #[cfg(feature = "worker-s3")]

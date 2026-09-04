@@ -378,12 +378,12 @@ impl<M: BufferMode> RecorderBuilder<M> {
 
 // TODO(tokio-as-source): now that tokio attaches to a built `Recorder`, this
 // trait has a single implementor. Fold it into inherent `RecorderBuilder`
-// methods once the `RecorderPerfExt` blanket impl can be reworked.
+// methods.
 /// A builder that can register [`Source`]s.
 ///
-/// Implemented by [`RecorderBuilder`]; the `.with_*()` perf-source sugar is
-/// built on top of it.
-pub trait RecorderSourceExt: Sized {
+/// Implemented by [`RecorderBuilder`], the `.with_*()` perf-source
+/// sugar is built on top of it.
+pub trait RecorderSourceExt: recorder_source_ext_sealed::Sealed + Sized {
     /// Register a [`Source`] with the underlying recording recorder.
     fn source(self, source: impl Source + 'static) -> Self;
 
@@ -415,6 +415,13 @@ pub trait RecorderSourceExt: Sized {
             config, callback,
         ))
     }
+}
+
+mod recorder_source_ext_sealed {
+    use super::{BufferMode, RecorderBuilder};
+
+    pub trait Sealed {}
+    impl<M: BufferMode> Sealed for RecorderBuilder<M> {}
 }
 
 impl<M: BufferMode> RecorderSourceExt for RecorderBuilder<M> {
