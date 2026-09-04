@@ -554,14 +554,12 @@ mod shuttle_tests {
                 "recorder must be enabled for on_enter's gate to run"
             );
 
-            // Filtered to our own probe span only: shuttle's own scheduler
-            // uses `tracing` for its own diagnostics (see `Runner::run`'s
-            // `span!(Level::ERROR, "execution", i)`), dispatched through this
-            // same ambient default. Letting shuttle's own spans reach
-            // `Dial9TracingLayer` re-enters `ExecutionState` from inside
-            // shuttle's own bookkeeping (an unfiltered layer here panics with
-            // "ExecutionState is already borrowed"). The filter keeps our layer
-            // from ever seeing them.
+            // Removing this filter makes shuttle panic with "ExecutionState
+            // is already borrowed": shuttle emits its own `tracing` spans
+            // (e.g. `Runner::run`'s `span!(Level::ERROR, "execution", i)`)
+            // through this same ambient default, and dispatching those into
+            // `Dial9TracingLayer` re-enters shuttle's `ExecutionState` from
+            // inside its own bookkeeping.
             let filter = tracing_subscriber::filter::FilterFn::new(|meta| {
                 meta.name() == "shuttle_concurrent_get_schemas_probe"
             });
