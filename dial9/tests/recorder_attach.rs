@@ -3,8 +3,7 @@
 #![cfg(feature = "tokio")]
 
 use dial9::{
-    AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, Recorder, RecorderSourceExt,
-    TokioAttachOptions, recorder,
+    AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, Recorder, TokioAttachOptions, recorder,
 };
 use dial9_trace_format::decoder::Decoder;
 use std::{collections::BTreeMap, time::Duration};

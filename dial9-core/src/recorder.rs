@@ -374,36 +374,31 @@ impl<M: BufferMode> RecorderBuilder<M> {
         self.enabled = false;
         self
     }
-}
-
-// TODO(tokio-as-source): now that tokio attaches to a built `Recorder`, this
-// trait has a single implementor. Fold it into inherent `RecorderBuilder`
-// methods.
-/// A builder that can register [`Source`]s.
-///
-/// Implemented by [`RecorderBuilder`], the `.with_*()` perf-source
-/// sugar is built on top of it.
-pub trait RecorderSourceExt: recorder_source_ext_sealed::Sealed + Sized {
-    /// Register a [`Source`] with the underlying recording recorder.
-    fn source(self, source: impl Source + 'static) -> Self;
 
     /// Register a hook run once, with the live [`Dial9Handle`], when the recorder
     /// starts recording.
-    fn on_recording_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self;
+    pub fn on_recording_start(mut self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
+        self.recording_start_hooks.push(Box::new(hook));
+        self
+    }
 
     /// Register a hook run on each of dial9's own threads (the flush thread and,
     /// with `pipeline`, the background worker) before it starts, returning a
     /// teardown run when it stops. Defaults to a no-op.
-    fn on_recording_thread_start<F, T>(self, hook: F) -> Self
+    pub fn on_recording_thread_start<F, T>(mut self, hook: F) -> Self
     where
         F: Fn() -> T + Send + Sync + 'static,
-        T: FnOnce() + Send + 'static;
+        T: FnOnce() + Send + 'static,
+    {
+        self.thread_init = Arc::new(move || Box::new(hook()) as Box<dyn FnOnce() + Send>);
+        self
+    }
 
     /// Register a callback that dial9 invokes on the flush thread at the config's
     /// interval to emit custom events. Sugar for [`source`](Self::source) with a
     /// [`CustomEventsSource`](crate::custom_events::CustomEventsSource). Not
     /// tokio-coupled — works on the plain recorder and the tokio builder.
-    fn with_custom_events<F>(
+    pub fn with_custom_events<F>(
         self,
         config: crate::custom_events::CustomEventsConfig,
         callback: F,
@@ -414,34 +409,6 @@ pub trait RecorderSourceExt: recorder_source_ext_sealed::Sealed + Sized {
         self.source(crate::custom_events::CustomEventsSource::new(
             config, callback,
         ))
-    }
-}
-
-mod recorder_source_ext_sealed {
-    use super::{BufferMode, RecorderBuilder};
-
-    pub trait Sealed {}
-    impl<M: BufferMode> Sealed for RecorderBuilder<M> {}
-}
-
-impl<M: BufferMode> RecorderSourceExt for RecorderBuilder<M> {
-    fn source(mut self, source: impl Source + 'static) -> Self {
-        self.sources.push(Box::new(source));
-        self
-    }
-
-    fn on_recording_start(mut self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
-        self.recording_start_hooks.push(Box::new(hook));
-        self
-    }
-
-    fn on_recording_thread_start<F, T>(mut self, hook: F) -> Self
-    where
-        F: Fn() -> T + Send + Sync + 'static,
-        T: FnOnce() + Send + 'static,
-    {
-        self.thread_init = Arc::new(move || Box::new(hook()) as Box<dyn FnOnce() + Send>);
-        self
     }
 }
 
@@ -899,8 +866,8 @@ mod tests {
             let stopped = StdArc::new(AtomicUsize::new(0));
             let (s, t) = (StdArc::clone(&started), StdArc::clone(&stopped));
 
-            let recorder =
-                RecorderSourceExt::on_recording_thread_start(recorder(writer), move || {
+            let recorder = recorder(writer)
+                .on_recording_thread_start(move || {
                     s.fetch_add(1, Ordering::SeqCst);
                     let t = StdArc::clone(&t);
                     move || {

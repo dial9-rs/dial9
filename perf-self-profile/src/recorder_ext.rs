@@ -5,7 +5,7 @@
 //! propagate the failure instead.
 
 use dial9_core::buffer::BufferMode;
-use dial9_core::recorder::{RecorderBuilder, RecorderSourceExt};
+use dial9_core::recorder::RecorderBuilder;
 
 #[cfg(any(feature = "cpu-profiling", feature = "memory-profiling"))]
 use dial9_core::rate_limited;
