@@ -5103,6 +5103,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
+name = "telemetry-test-app"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dial9",
+ "dial9-utils",
+ "tokio",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
