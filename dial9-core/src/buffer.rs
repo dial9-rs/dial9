@@ -771,8 +771,9 @@ impl<M: BufferMode> SegmentWriter<M> {
         }
         // If even the current file alone exceeds total budget, stop writing.
         // Protected checkpoint segments may temporarily occupy the pipeline's
-        // in-flight reserve; they become evictable as soon as the worker loads
-        // them and must not make the active writer look irrecoverably full.
+        // in-flight reserve; they remain protected across retries and become
+        // evictable only after a terminal pipeline outcome or dump cleanup.
+        // They must not make the active writer look irrecoverably full.
         if self.total_size() > self.max_total_size && self.closed_files.is_empty() {
             self.state = WriterState::Finished;
         }
@@ -1324,6 +1325,39 @@ mod tests {
             writer.rotate_segment().unwrap(),
             "the recovered writer remains usable"
         );
+    }
+
+    #[cfg(feature = "pipeline")]
+    #[test]
+    fn terminal_checkpoint_removal_reconciles_disk_budget() {
+        let dir = TempDir::new().unwrap();
+        let max_total_size = single_event_file_size();
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(max_total_size)
+            .rotation_period(Duration::MAX)
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+
+        let checkpoint = writer.reserve_checkpoint().unwrap();
+        let (checkpoint, post_seal_error) = writer.seal_checkpoint(checkpoint).unwrap();
+        assert!(post_seal_error.is_none());
+        assert_eq!(writer.closed_files.len(), 1);
+        assert!(writer.total_size() > max_total_size);
+
+        let sealed = writer.closed_files.front().unwrap().0.clone();
+        writer.fs.remove_sealed(&sealed, RemoveReason::Terminal);
+        drop(checkpoint);
+
+        writer.enforce_checkpoint_budget().unwrap();
+        assert!(
+            writer.closed_files.is_empty(),
+            "terminal removal must discard the writer's stale retention entry"
+        );
+        assert!(writer.total_size() <= max_total_size);
+        assert!(!writer.is_closed());
     }
 
     #[test]

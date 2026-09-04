@@ -108,10 +108,7 @@ impl DiskFs {
         }
         self.claimed.lock().unwrap().remove(&seg.index());
         #[cfg(feature = "pipeline")]
-        self.checkpoint_protected
-            .lock()
-            .unwrap()
-            .remove(&seg.index());
+        self.release_checkpoint_segment(seg.index());
         if matches!(reason, RemoveReason::Eviction) {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
