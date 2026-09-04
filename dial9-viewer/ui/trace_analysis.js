@@ -967,7 +967,8 @@
 
   /**
    * Filter and sort points of interest from worker spans and scheduling delays.
-   * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay" | "uninstrumented" | "spawn-delay"
+   * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay"
+   *   | "uninstrumented" | "spawn-delay" | "off-cpu-active"
    * @param {Object} workerSpans
    * @param {number[]} workerIds
    * @param {Array} schedDelays - as returned by computeSchedulingDelays
@@ -1026,6 +1027,20 @@
               type: "cpu-sampled",
               value: durMs,
               span: s,
+            });
+          }
+        }
+      } else if (filterType === "off-cpu-active" && opts && opts.hasWorkerCpuTime) {
+        // Thresholds mirror the red-flags script's `cpu-contention` check.
+        for (const a of spans.actives) {
+          const wall = a.end - a.start;
+          if (wall > 1e6 && a.ratio < 0.5) {
+            points.push({
+              time: a.start,
+              worker: w,
+              type: "off-cpu-active",
+              value: (1 - a.ratio) * wall,
+              span: a,
             });
           }
         }

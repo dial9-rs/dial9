@@ -10,8 +10,8 @@
 // "cpu-sampled" is deliberately excluded: it needs attachCpuSamples, which
 // MUTATES the shared poll objects the lanes/overlay caches also hold - the
 // minimap must not reach into that shared derivation. The remaining detectors
-// (long-poll, sched, wake-delay, uninstrumented, spawn-delay) read the spans
-// read-only.
+// (long-poll, sched, wake-delay, uninstrumented, spawn-delay, off-cpu-active)
+// read the spans read-only.
 //
 // "spawn-delay" runs at its DEFAULT threshold, not the rail's live one: these
 // ticks are cached on trace identity, and rebuilding them on every threshold
@@ -53,13 +53,15 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   if (workerIds.length === 0) return [];
 
   // Shared with the issues rail. The minimap's detectors (long-poll, sched,
-  // wake-delay, uninstrumented) read the spans READ-ONLY, so one shared
-  // reconstruction (attachCpuSamples already applied) yields identical ticks.
-  const { lanes, schedDelays } = sharedDetectorInputs(trace);
+  // wake-delay, uninstrumented, off-cpu-active) read the spans READ-ONLY, so
+  // one shared reconstruction (attachCpuSamples already applied) yields
+  // identical ticks.
+  const { lanes, schedDelays, hasWorkerCpuTime } = sharedDetectorInputs(trace);
 
   // Applicable detectors: long-poll always; the sched-derived ones only when
   // the trace carries sched-wait data; uninstrumented only when the trace
-  // tracked per-task instrumentation (its required input).
+  // tracked per-task instrumentation (its required input); off-cpu-active only
+  // when the worker CPU-time readings are real.
   const types: PointOfInterestType[] = ["long-poll"];
   if (trace.hasSchedWait) {
     types.push("sched", "wake-delay");
@@ -72,6 +74,9 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   if (trace.taskSpawnTimes.size > 0) {
     types.push("spawn-delay");
   }
+  if (hasWorkerCpuTime) {
+    types.push("off-cpu-active");
+  }
 
   const seen = new Set<string>();
   const out: MinimapPoi[] = [];
@@ -82,6 +87,7 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
       taskInstrumented: trace.taskInstrumented,
       taskSpawnTimes: trace.taskSpawnTimes,
       spawnDelayThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+      hasWorkerCpuTime,
     };
     const pois: PointOfInterest[] = lanes.columnar
       ? lanes.store.pointsOfInterest(type, workerIds, schedDelays, opts)

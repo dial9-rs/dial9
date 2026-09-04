@@ -212,6 +212,10 @@ Filters for notable events. `filterType` is one of:
 - `"wake-delay"` — Wake-to-poll delays >100µs
 - `"uninstrumented"` — Polls of tasks spawned via raw `tokio::spawn`
 - `"spawn-delay"` — Spawn-to-first-poll delays above a configurable floor (default 100µs)
+- `"off-cpu-active"` - Awake worker periods longer than 1ms whose CPU/wall ratio
+  is under 0.5, i.e. the kernel is descheduling the worker. `value` is the
+  off-CPU time in nanoseconds; the same signal as the `cpu-contention` check in
+  `dial9-red-flags`
 
 `opts`:
 - `hasSchedWait: true` — enables the `"sched"` filter (requires schedWait data in trace)
@@ -219,6 +223,8 @@ Filters for notable events. `filterType` is one of:
 - `taskInstrumented` — required by the `"uninstrumented"` filter (`trace.taskInstrumented`)
 - `taskSpawnTimes` — required by the `"spawn-delay"` filter (`trace.taskSpawnTimes`, empty unless the recorder had task tracking on)
 - `spawnDelayThresholdUs` — severity floor for `"spawn-delay"`, in microseconds
+- `hasWorkerCpuTime: true` - enables `"off-cpu-active"`. Worker CPU time reads
+  as a hardcoded 0 off Linux, which pins every ratio to 0
 
 Returns `[{time, worker, type, value, span, schedDelay?}]`. `value` units vary by
 filter: nanoseconds for `"sched"`, milliseconds for the poll-duration filters,

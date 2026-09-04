@@ -773,6 +773,51 @@ describe("filterPointsOfInterest", () => {
   });
 });
 
+// ── filterPointsOfInterest: the off-CPU detectors ──
+//
+// Synthetic lanes: the demo trace's workers are ~97% on-CPU, so "off-cpu-active"
+// legitimately matches nothing there.
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const poll = (start: number, end: number, extra: Record<string, unknown> = {}): any => ({
+  start, end, taskId: 1, spawnLocId: null, spawnLoc: null, ...extra,
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const lanes = (parts: Record<string, unknown>): any => ({
+  0: { polls: [], parks: [], actives: [], cpuSampleTimes: [], ...parts },
+});
+
+describe("filterPointsOfInterest off-cpu-active", () => {
+  // 9ms off CPU; on CPU; below the duration floor.
+  const ws = lanes({
+    actives: [
+      { start: 0, end: 10e6, ratio: 0.1 },
+      { start: 20e6, end: 30e6, ratio: 0.9 },
+      { start: 40e6, end: 40.5e6, ratio: 0 },
+    ],
+  });
+
+  it("flags only long, low-ratio periods, valued by off-CPU nanoseconds", () => {
+    const pois = filterPointsOfInterest("off-cpu-active", ws, [0], [], {
+      hasWorkerCpuTime: true,
+    });
+    expect(pois.map((p: any) => [p.time, p.type, Math.round(p.value)])).toEqual([
+      [0, "off-cpu-active", 9e6],
+    ]);
+    expect(pois[0].span.start).toBe(0);
+    expect(pois[0].span.end).toBe(10e6);
+  });
+
+  // Off Linux every ratio is 0, so ungated this flags every active period.
+  it("returns nothing when the trace's worker CPU time is not real", () => {
+    expect(
+      filterPointsOfInterest("off-cpu-active", ws, [0], [], { hasWorkerCpuTime: false }),
+    ).toEqual([]);
+  });
+});
+
+
 // ── buildFlamegraphTree / flattenFlamegraph ──
 
 describe("flamegraph", () => {

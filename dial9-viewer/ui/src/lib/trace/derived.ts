@@ -106,6 +106,24 @@ export interface DetectorInputs {
   /** Which representation the detectors scan (columnar columns or fat spans). */
   lanes: LaneSource;
   schedDelays: SchedDelay[];
+  /**
+   * Gates "off-cpu-active". `thread_cpu_time_nanos()` returns a hardcoded 0 off
+   * Linux, so every active period on a workstation trace reports ratio 0 and an
+   * ungated detector would flag all of them. Derived from the data, never from
+   * `trace.hasCpuTime` - trace_parser.js hardcodes that true at finalize.
+   */
+  hasWorkerCpuTime: boolean;
+}
+
+/** `end > start` is load-bearing: both builders fall back to `ratio = 1.0` when
+ *  the wall delta is not positive, so an unpark and park sharing a timestamp
+ *  would otherwise vouch for a trace with no CPU-time readings at all. */
+function anyWorkerCpuTime(lanes: LaneSource): boolean {
+  if (lanes.columnar) return lanes.store.anyActiveCpuTime();
+  for (const lane of Object.values(lanes.workerSpans)) {
+    for (const a of lane.actives) if (a.ratio > 0 && a.end > a.start) return true;
+  }
+  return false;
 }
 
 const detectorInputsCache = new WeakMap<ParsedTrace, DetectorInputs>();
@@ -134,7 +152,12 @@ export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
       : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask),
   );
 
-  const inputs: DetectorInputs = { workerIds, lanes, schedDelays };
+  const inputs: DetectorInputs = {
+    workerIds,
+    lanes,
+    schedDelays,
+    hasWorkerCpuTime: anyWorkerCpuTime(lanes),
+  };
   detectorInputsCache.set(trace, inputs);
   return inputs;
 }
