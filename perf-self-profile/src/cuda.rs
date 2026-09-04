@@ -151,10 +151,7 @@ impl CudaGpuSource {
         if device_count == 0 {
             return Err(CudaGpuStartError::NoDevices);
         }
-        let index = match config.device_index {
-            Some(index) => index,
-            None => 0,
-        };
+        let index = config.device_index.unwrap_or_default();
 
         let device = nvml.device_by_index(index)?;
         let device = DeviceIdentity {
