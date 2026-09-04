@@ -8,7 +8,7 @@ Most users want the [`dial9`](https://crates.io/crates/dial9) crate, which wraps
 
 ## CUDA GPU profiling
 
-Enable the `cuda` feature to sample every NVIDIA GPU visible through NVML:
+Enable the `cuda` feature to sample an NVIDIA GPU visible through NVML:
 
 ```rust
 use dial9_core::buffer::MemoryBuffer;
@@ -22,7 +22,7 @@ let recorder = recorder(writer)
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-To sample only one GPU, select its NVML device index with
+To sample a specific GPU, select its NVML device index with
 `CudaGpuConfig::builder().device_index(index).build()`.
 
 Each sample includes GPU compute and memory-I/O utilization, used and total

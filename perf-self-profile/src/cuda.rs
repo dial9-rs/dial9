@@ -97,7 +97,7 @@ pub struct CudaGpuConfig {
     /// Whether to sample aggregate PCIe transfer throughput.
     #[builder(default = true)]
     sample_pcie_throughput: bool,
-    /// NVML device index to sample. By default, all visible devices are sampled.
+    /// NVML device index to sample. By default, the device at index 0 is sampled.
     device_index: Option<u32>,
 }
 
@@ -118,7 +118,7 @@ impl CudaGpuConfig {
         self.sample_pcie_throughput
     }
 
-    /// NVML device index to sample, or `None` to sample all visible devices.
+    /// NVML device index to sample, or `None` to sample just the first device.
     pub fn device_index(&self) -> Option<u32> {
         self.device_index
     }
@@ -136,7 +136,7 @@ struct DeviceIdentity {
 pub struct CudaGpuSource {
     nvml: Nvml,
     config: CudaGpuConfig,
-    devices: Vec<DeviceIdentity>,
+    device: DeviceIdentity,
     last_sample: Option<Instant>,
 }
 
@@ -151,24 +151,22 @@ impl CudaGpuSource {
         if device_count == 0 {
             return Err(CudaGpuStartError::NoDevices);
         }
-        let device_indices = match config.device_index {
-            Some(index) => vec![index],
-            None => (0..device_count).collect(),
+        let index = match config.device_index {
+            Some(index) => index,
+            None => 0,
         };
-        let mut devices = Vec::with_capacity(device_indices.len());
-        for index in device_indices {
-            let device = nvml.device_by_index(index)?;
-            devices.push(DeviceIdentity {
-                index,
-                uuid: device.uuid()?,
-                name: device.name()?,
-            });
-        }
+
+        let device = nvml.device_by_index(index)?;
+        let device = DeviceIdentity {
+            index,
+            uuid: device.uuid()?,
+            name: device.name()?,
+        };
 
         Ok(Self {
             nvml,
             config,
-            devices,
+            device,
             last_sample: None,
         })
     }
@@ -185,44 +183,42 @@ impl Source for CudaGpuSource {
         self.last_sample = Some(now);
 
         let timestamp_ns = clock_monotonic_ns();
-        for identity in &self.devices {
-            let result = (|| {
-                let device = self.nvml.device_by_index(identity.index)?;
-                let utilization = device.utilization_rates()?;
-                let memory = device.memory_info()?;
-                let (to_host, from_host) = if self.config.sample_pcie_throughput {
-                    (
-                        optional_pcie_throughput(&device, PcieUtilCounter::Send)?,
-                        optional_pcie_throughput(&device, PcieUtilCounter::Receive)?,
-                    )
-                } else {
-                    (None, None)
-                };
+        let result = (|| {
+            let device = self.nvml.device_by_index(self.device.index)?;
+            let utilization = device.utilization_rates()?;
+            let memory = device.memory_info()?;
+            let (to_host, from_host) = if self.config.sample_pcie_throughput {
+                (
+                    optional_pcie_throughput(&device, PcieUtilCounter::Send)?,
+                    optional_pcie_throughput(&device, PcieUtilCounter::Receive)?,
+                )
+            } else {
+                (None, None)
+            };
 
-                Ok::<_, NvmlError>(CudaGpuEvent {
-                    timestamp_ns,
-                    device_index: identity.index,
-                    device_uuid: identity.uuid.clone(),
-                    device_name: identity.name.clone(),
-                    compute_utilization_percent: utilization.gpu,
-                    memory_io_utilization_percent: utilization.memory,
-                    memory_used_bytes: memory.used,
-                    memory_total_bytes: memory.total,
-                    pcie_to_host_kib_per_second: to_host,
-                    pcie_from_host_kib_per_second: from_host,
-                })
-            })();
+            Ok::<_, NvmlError>(CudaGpuEvent {
+                timestamp_ns,
+                device_index: self.device.index,
+                device_uuid: self.device.uuid.clone(),
+                device_name: self.device.name.clone(),
+                compute_utilization_percent: utilization.gpu,
+                memory_io_utilization_percent: utilization.memory,
+                memory_used_bytes: memory.used,
+                memory_total_bytes: memory.total,
+                pcie_to_host_kib_per_second: to_host,
+                pcie_from_host_kib_per_second: from_host,
+            })
+        })();
 
-            match result {
-                Ok(event) => ctx.record_event(&event),
-                Err(e) => rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(
-                        device_index = identity.index,
-                        device_uuid = identity.uuid,
-                        "failed to sample NVIDIA GPU via NVML: {e}"
-                    );
-                }),
-            }
+        match result {
+            Ok(event) => ctx.record_event(&event),
+            Err(e) => rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    device_index = self.device.index,
+                    device_uuid = self.device.uuid,
+                    "failed to sample NVIDIA GPU via NVML: {e}"
+                );
+            }),
         }
     }
 
