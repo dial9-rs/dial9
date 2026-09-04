@@ -40,6 +40,7 @@ hyper-util = { version = "0.1", features = [
 tower = { version = "0.5", optional = true }
 tower-service = { version = "0.3", optional = true }
 tower-layer = { version = "0.3", optional = true }
+shuttle = { version = "0.9.1", optional = true }
 
 [features]
 ## Tracing-subscriber layer that emits span events into dial9 traces.
@@ -47,6 +48,19 @@ tracing-layer = [
     "dep:dial9-trace-format",
     "dep:tracing-subscriber",
     "tokio/rt",
+]
+## Internal: shuttle-based concurrency tests. Not for downstream use.
+##
+## Also enables dial9-tokio-telemetry/_shuttle on the dev-dependency:
+## RUSTFLAGS --cfg shuttle is global to the whole build (it can't be scoped
+## to just this crate), so dial9-tokio-telemetry's own primitives::thread_local!
+## usage takes the shuttle-cfg branch too and needs its own `shuttle` crate
+## linked to satisfy it.
+_shuttle = [
+    "dep:shuttle",
+    "dial9-core/_shuttle",
+    "dial9-tokio-telemetry/_shuttle",
+    "tracing-layer",
 ]
 ## A traced replacement for `axum::serve` from Axum 0.7.
 axum-07 = [
