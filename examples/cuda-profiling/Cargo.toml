@@ -7,4 +7,4 @@ edition = "2024"
 anyhow = "1"
 candle-core = { version = "0.11.0", features = ["cuda"] }
 dial9 = { path = "../../dial9", default-features = false }
-dial9-perf-self-profile = { path="../../perf-self-profile", default-features=false features = ["cuda"] }
+dial9-perf-self-profile = { path="../../perf-self-profile", default-features=false, features = ["cuda"] }
