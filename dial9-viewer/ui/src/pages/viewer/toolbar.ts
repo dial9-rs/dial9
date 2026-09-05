@@ -254,7 +254,7 @@ function analysisTemplate(
   const uninstrumented = uninstrumentedCount(trace);
 
   return html`
-    ${redFlagsChip(trace)}
+    ${redFlagsChip(trace, state.poi.spawnThresholdUs)}
     ${fieldChartsButton(deps.onOpenFieldCharts)}
     ${schedCount > 0
       ? analysisButton(
@@ -315,8 +315,13 @@ function fieldChartsButton(onClick: () => void): TemplateResult {
 
 /** The red-flags summary chip: existing detectors' COUNTS only. Non-zero
  *  detectors only. */
-function redFlagsChip(trace: ParsedTrace): TemplateResult | string {
-  const summary = redFlagCounts(poiSourceFor(trace)).filter((r) => r.count > 0);
+function redFlagsChip(
+  trace: ParsedTrace,
+  spawnThresholdUs: number,
+): TemplateResult | string {
+  const summary = redFlagCounts(poiSourceFor(trace), spawnThresholdUs).filter(
+    (r) => r.count > 0,
+  );
   if (summary.length === 0) return "";
   const plural = (s: { type: PointOfInterestType; count: number }): string =>
     `${s.count} ${kindLabel(s.type)}${s.count === 1 ? "" : "s"}`;

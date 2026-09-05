@@ -109,6 +109,8 @@ export interface ViewState {
   focusedSpanId?: string;
   /** Issues-rail detector filter (a PointOfInterestType), when not the default. */
   poiFilter?: string;
+  /** Issues-rail spawn-delay threshold in microseconds, when not the default. */
+  poiSpawnThresholdUs?: number;
   /** Issues-rail sort as `"<key>,<dir>"`, when not the default `duration,desc`. */
   poiSort?: string;
   /** Current POI index in the filtered+sorted rail list, when >= 0. */

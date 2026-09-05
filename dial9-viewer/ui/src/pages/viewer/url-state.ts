@@ -27,8 +27,10 @@ import {
   DEFAULT_RAIL_WIDTH,
 } from "./store.js";
 import {
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   POI_FILTERS,
   derivePoiViewModel,
+  parseSpawnThresholdUs,
   poiAnchor,
   type PoiAnchor,
 } from "./poi.js";
@@ -58,6 +60,7 @@ const P_REGION = "region";
 const P_SPAWNED = "spawned";
 const P_ISSUE = "issue";
 const P_ISSUE_SORT = "issue-sort";
+const P_ISSUE_THRESHOLD = "issue-threshold";
 const P_ISSUE_INDEX = "issue-index";
 const P_ISSUE_ANCHOR = "issue-anchor";
 const P_SPAN_PCT = "span-pct";
@@ -159,6 +162,7 @@ export const VIEWER_STATE_OWNERSHIP = {
   },
   poi: {
     filter: url(P_ISSUE),
+    spawnThresholdUs: url(P_ISSUE_THRESHOLD),
     sortKey: url(P_ISSUE_SORT),
     sortDir: url(P_ISSUE_SORT),
     index: url(P_ISSUE_INDEX, P_ISSUE_ANCHOR),
@@ -305,6 +309,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   // sort duration/desc, no current POI) so a pristine rail keeps the URL clean.
   const poi = state.poi;
   if (poi.filter !== "sched") vs.poiFilter = poi.filter;
+  if (poi.spawnThresholdUs !== DEFAULT_SPAWN_DELAY_THRESHOLD_US) {
+    vs.poiSpawnThresholdUs = poi.spawnThresholdUs;
+  }
   if (poi.sortKey !== "duration" || poi.sortDir !== "desc") {
     vs.poiSort = `${poi.sortKey},${poi.sortDir}`;
   }
@@ -440,6 +447,11 @@ export function mirrorViewerToQuery(
   set(params, P_SPAWNED, vs.spawnedRange ?? null);
   set(params, P_ISSUE, vs.poiFilter ?? null);
   set(params, P_ISSUE_SORT, vs.poiSort ?? null);
+  set(
+    params,
+    P_ISSUE_THRESHOLD,
+    vs.poiSpawnThresholdUs != null ? String(vs.poiSpawnThresholdUs) : null,
+  );
   set(params, P_ISSUE_INDEX, vs.poiIndex != null ? String(Math.round(vs.poiIndex)) : null);
   set(params, P_ISSUE_ANCHOR, vs.poiAnchor ?? null);
   set(params, P_SPAN_PCT, vs.spanPct != null ? String(vs.spanPct) : null);
@@ -576,6 +588,7 @@ export interface ViewerUrlState {
   spawnedRange?: { startNs: number; endNs: number };
   /** Issues-rail restore (applied at boot). */
   poiFilter?: PointOfInterestType;
+  poiSpawnThresholdUs?: number;
   poiSort?: { key: PoiSortKey; dir: "asc" | "desc" };
   poiIndex?: number;
   poiAnchor?: PoiAnchor;
@@ -723,6 +736,9 @@ export function hydrateViewerStore(
 
   const poi: Partial<StoreState["poi"]> = {};
   if (urlView.poiFilter !== undefined) poi.filter = urlView.poiFilter;
+  if (urlView.poiSpawnThresholdUs !== undefined) {
+    poi.spawnThresholdUs = urlView.poiSpawnThresholdUs;
+  }
   if (urlView.poiSort !== undefined) {
     poi.sortKey = urlView.poiSort.key;
     poi.sortDir = urlView.poiSort.dir;
@@ -792,6 +808,10 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (issue != null && (POI_FILTERS as readonly string[]).includes(issue)) {
     out.poiFilter = issue as PointOfInterestType;
   }
+  // The rail's own parse, so a hand-edited link cannot push the detector
+  // outside the range the input enforces.
+  const issueThreshold = parseSpawnThresholdUs(p.get(P_ISSUE_THRESHOLD) ?? "");
+  if (issueThreshold != null) out.poiSpawnThresholdUs = issueThreshold;
   const issueSort = p.get(P_ISSUE_SORT);
   if (issueSort != null) {
     const comma = issueSort.indexOf(",");

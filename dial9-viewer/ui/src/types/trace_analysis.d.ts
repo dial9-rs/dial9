@@ -229,7 +229,11 @@ declare module "*/trace_analysis.js" {
     | "long-poll"
     | "cpu-sampled"
     | "wake-delay"
-    | "uninstrumented";
+    | "uninstrumented"
+    | "spawn-delay";
+
+  /** Default severity floor for the "spawn-delay" detector, in microseconds. */
+  export const DEFAULT_SPAWN_DELAY_THRESHOLD_US: number;
 
   export interface PointOfInterest {
     time: number;
@@ -258,6 +262,9 @@ declare module "*/trace_analysis.js" {
       sortByWorst?: boolean;
       /** Required for the "uninstrumented" filter. */
       taskInstrumented?: Map<number, boolean>;
+      /** Required for the "spawn-delay" filter. */
+      taskSpawnTimes?: Map<number, number>;
+      spawnDelayThresholdUs?: number;
     }
   ): PointOfInterest[];
 

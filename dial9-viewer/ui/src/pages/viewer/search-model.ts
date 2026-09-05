@@ -109,7 +109,13 @@ function buildSpans(lane: Lane): SpanEntry[] {
   return out;
 }
 
-/** Points of interest across every detector, deduped by (type, time, worker). */
+/**
+ * Points of interest across every detector, deduped by (type, time, worker).
+ *
+ * Built ONCE per trace, so "spawn-delay" is indexed at its default threshold:
+ * re-indexing every task and span on each threshold edit would cost far more
+ * than the few jump targets it would add or drop.
+ */
 function buildPois(trace: ParsedTrace): PoiEntry[] {
   const source = poiSourceFor(trace);
   const out: PoiEntry[] = [];

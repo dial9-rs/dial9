@@ -210,12 +210,20 @@ Filters for notable events. `filterType` is one of:
 - `"long-poll"` — Polls longer than 1ms
 - `"cpu-sampled"` — Polls that have CPU or scheduling samples attached
 - `"wake-delay"` — Wake-to-poll delays >100µs
+- `"uninstrumented"` — Polls of tasks spawned via raw `tokio::spawn`
+- `"spawn-delay"` — Spawn-to-first-poll delays above a configurable floor (default 100µs)
 
 `opts`:
 - `hasSchedWait: true` — enables the `"sched"` filter (requires schedWait data in trace)
 - `sortByWorst: true` — sorts by severity instead of time
+- `taskInstrumented` — required by the `"uninstrumented"` filter (`trace.taskInstrumented`)
+- `taskSpawnTimes` — required by the `"spawn-delay"` filter (`trace.taskSpawnTimes`, empty unless the recorder had task tracking on)
+- `spawnDelayThresholdUs` — severity floor for `"spawn-delay"`, in microseconds
 
-Returns `[{time, worker, type, value, span, schedDelay?}]`.
+Returns `[{time, worker, type, value, span, schedDelay?}]`. `value` units vary by
+filter: nanoseconds for `"sched"`, milliseconds for the poll-duration filters,
+microseconds for `"wake-delay"` and `"spawn-delay"`. For `"spawn-delay"`, `time`
+is the spawn timestamp and `span` is the first poll that followed it.
 
 ## buildFgData(samples, callframeSymbols)
 

@@ -42,6 +42,19 @@ macro_rules! define_thread_local {
 #[cfg(not(shuttle))]
 pub use crate::define_thread_local as thread_local;
 
+#[cfg(all(not(shuttle), feature = "pipeline"))]
+pub mod time {
+    pub use tokio::time::{Instant, sleep, sleep_until};
+
+    pub fn now() -> Instant {
+        Instant::now()
+    }
+
+    pub fn elapsed_since(t: std::time::SystemTime) -> std::time::Duration {
+        t.elapsed().unwrap_or_default()
+    }
+}
+
 // ── shuttle path (deterministic testing) ────────────────────────────────────
 
 #[cfg(shuttle)]
@@ -126,6 +139,112 @@ macro_rules! define_thread_local {
 }
 #[cfg(shuttle)]
 pub use crate::define_thread_local as thread_local;
+
+#[cfg(all(shuttle, feature = "pipeline"))]
+pub mod time {
+    use std::cell::Cell;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    pub use tokio::time::Instant;
+
+    // `Instant::now()` is nondeterministic under shuttle replay (real
+    // clock). `now()` reads a thread-local logical clock instead, advanced
+    // one tick per genuine `Yield` suspend, isolated per concurrently
+    // running `#[test]`.
+    std::thread_local! {
+        static LOGICAL_CLOCK: (Instant, Cell<u64>) = (Instant::now(), Cell::new(0));
+    }
+
+    // Comfortably clears this crate's current millisecond-scale test
+    // deadlines; not derived from anything principled.
+    const LOGICAL_TICK: std::time::Duration = std::time::Duration::from_millis(10);
+
+    pub fn now() -> Instant {
+        LOGICAL_CLOCK.with(|(base, nanos)| *base + std::time::Duration::from_nanos(nanos.get()))
+    }
+
+    /// Always zero: `SystemTime::elapsed()` needs a real clock read, which
+    /// is nondeterministic under shuttle replay. Matches `sleep`/
+    /// `sleep_until` below, which also ignore their requested duration
+    /// rather than fake one.
+    pub fn elapsed_since(_t: std::time::SystemTime) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+
+    /// Shuttle has no virtual clock. Like `primitives::thread::sleep`, this
+    /// is a single scheduling point, not a real delay.
+    pub fn sleep(_duration: std::time::Duration) -> Yield {
+        Yield::default()
+    }
+
+    pub fn sleep_until(_deadline: Instant) -> Yield {
+        Yield::default()
+    }
+
+    #[derive(Debug, Default)]
+    pub struct Yield {
+        yielded: bool,
+    }
+
+    // Shuttle resets its own state every execution, but this must accumulate
+    // across a whole `check_pct` batch to answer "did any schedule in this batch
+    // actually suspend here."
+    static YIELD_PENDING_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Count of `Yield::poll` calls that returned `Pending` since the last call.
+    /// Lets a scenario built around `sleep`/`sleep_until`
+    /// assert it actually suspended at least once across a batch.
+    ///
+    /// Test-integrity check: a failure here means the scenario stopped exercising
+    /// the code path it exists to cover.
+    pub fn take_yield_pending_polls() -> usize {
+        YIELD_PENDING_POLLS.swap(0, Ordering::Relaxed)
+    }
+
+    impl Future for Yield {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.yielded {
+                Poll::Ready(())
+            } else {
+                self.yielded = true;
+                YIELD_PENDING_POLLS.fetch_add(1, Ordering::Relaxed);
+                LOGICAL_CLOCK
+                    .with(|(_, nanos)| nanos.set(nanos.get() + LOGICAL_TICK.as_nanos() as u64));
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// `tokio::select!` normally; `shuttle_tokio_impl_inner::select!` under
+/// `--cfg shuttle`, which patches `select!`'s branch tie-break to draw from
+/// `shuttle::rand::thread_rng()` instead of real OS entropy, so a replayed
+/// schedule picks the same branch every time.
+///
+/// Doesn't cover `sleep`/`sleep_until`: its `Sleep` resolves immediately on
+/// first poll instead of suspending, so `primitives::time` keeps its own
+/// `Yield` for those.
+#[cfg(all(shuttle, feature = "pipeline"))]
+#[macro_export]
+macro_rules! shuttle_select {
+    ($($arms:tt)*) => {
+        shuttle_tokio_impl_inner::select! { $($arms)* }
+    };
+}
+#[cfg(all(not(shuttle), feature = "pipeline"))]
+#[macro_export]
+macro_rules! shuttle_select {
+    ($($arms:tt)*) => {
+        tokio::select! { $($arms)* }
+    };
+}
+#[cfg(feature = "pipeline")]
+pub use crate::shuttle_select;
 
 /// Pairs a shuttle scenario with `check_pct` and `check_uncontrolled_nondeterminism`
 /// Nests the scenario in its own module so `pct`/`determinism` can be fixed leaf names.

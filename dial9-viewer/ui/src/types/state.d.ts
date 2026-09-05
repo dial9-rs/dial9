@@ -211,6 +211,9 @@ export interface PoiSlice {
    * option).
    */
   filter: PointOfInterestType;
+  /** Severity floor for "spawn-delay", in microseconds. The only user-tunable
+   *  detector threshold; the rest are fixed inside the detectors. */
+  spawnThresholdUs: number;
   /** Rail sort column. Default "duration" (worst-first). */
   sortKey: PoiSortKey;
   /** Sort direction. Default "desc" (worst-first = highest severity first). */

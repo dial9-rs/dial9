@@ -960,13 +960,19 @@
   }
 
   /**
+   * Severity floor for "spawn-delay", in microseconds. columnar-worker-spans.ts
+   * carries the same number; the golden parity test pins them together.
+   */
+  const DEFAULT_SPAWN_DELAY_THRESHOLD_US = 100;
+
+  /**
    * Filter and sort points of interest from worker spans and scheduling delays.
-   * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay"
+   * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay" | "uninstrumented" | "spawn-delay"
    * @param {Object} workerSpans
    * @param {number[]} workerIds
    * @param {Array} schedDelays - as returned by computeSchedulingDelays
    * @param {boolean} hasSchedWait
-   * @param {{ sortByWorst?: boolean }} opts
+   * @param {{ sortByWorst?: boolean, taskInstrumented?: Map<number, boolean>, taskSpawnTimes?: Map<number, number>, spawnDelayThresholdUs?: number }} opts
    * @returns {Array<{time: number, worker: number, type: string, value: number, span: Object, schedDelay?: Object}>}
    */
   function filterPointsOfInterest(
@@ -1058,12 +1064,57 @@
       }
     }
 
+    if (filterType === "spawn-delay" && opts && opts.taskSpawnTimes) {
+      const thresholdNs = spawnDelayThresholdNs(opts.spawnDelayThresholdUs);
+      // A task's first poll can land on any worker, so the minimum has to be
+      // taken GLOBALLY: a per-worker one reports the first poll on THAT worker.
+      const firstPoll = new Map();
+      for (const w of workerIds) {
+        for (const s of workerSpans[w].polls) {
+          if (!s.taskId) continue;
+          const cur = firstPoll.get(s.taskId);
+          if (cur === undefined || s.start < cur.span.start) {
+            firstPoll.set(s.taskId, { worker: w, span: s });
+          }
+        }
+      }
+      for (const [taskId, f] of firstPoll) {
+        // Unknown spawn: task tracking off, or it fell outside a windowed load.
+        const spawnTs = opts.taskSpawnTimes.get(taskId);
+        if (spawnTs === undefined) continue;
+        const delay = f.span.start - spawnTs;
+        if (delay > thresholdNs) {
+          points.push({
+            time: spawnTs,
+            worker: f.worker,
+            type: "spawn-delay",
+            value: delay / 1000,
+            span: f.span,
+          });
+        }
+      }
+    }
+
     if (opts && opts.sortByWorst) {
       points.sort((a, b) => b.value - a.value);
     } else {
       points.sort((a, b) => a.time - b.time);
     }
     return points;
+  }
+
+  /**
+   * Zero is honoured; anything non-finite or negative falls back to the default
+   * rather than admitting every task.
+   * @param {number|undefined} thresholdUs
+   * @returns {number}
+   */
+  function spawnDelayThresholdNs(thresholdUs) {
+    const us =
+      typeof thresholdUs === "number" && Number.isFinite(thresholdUs) && thresholdUs >= 0
+        ? thresholdUs
+        : DEFAULT_SPAWN_DELAY_THRESHOLD_US;
+    return us * 1000;
   }
 
   /**
@@ -2126,6 +2177,7 @@
     computeSchedulingDelays,
     computePollWakes,
     filterPointsOfInterest,
+    DEFAULT_SPAWN_DELAY_THRESHOLD_US,
     flamegraphColor,
     buildFlamegraphTree,
     flattenFlamegraph,

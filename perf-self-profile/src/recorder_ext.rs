@@ -4,15 +4,15 @@
 //! failure or unsupported platform. Use `.source(CpuProfiler::start(cfg)?)` to
 //! propagate the failure instead.
 
-use dial9_core::recorder::RecorderSourceExt;
+use dial9_core::buffer::BufferMode;
+use dial9_core::recorder::RecorderBuilder;
 
 #[cfg(any(feature = "cpu-profiling", feature = "memory-profiling"))]
 use dial9_core::rate_limited;
 
-/// `.with_*` convenience for this crate's profiling `Source`s, available on any
-/// [`RecorderSourceExt`]. The core [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder)
-/// and runtime wrappers that forward to it.
-pub trait RecorderPerfExt: Sized {
+/// `.with_*` convenience for this crate's profiling `Source`s on the core
+/// [`RecorderBuilder`].
+pub trait RecorderPerfExt: recorder_perf_ext_sealed::Sealed + Sized {
     /// Register the NVIDIA CUDA GPU sampler. Warns and skips when NVML is unavailable.
     #[cfg(feature = "cuda")]
     fn with_cuda_gpu_profiling(self, config: crate::cuda::CudaGpuConfig) -> Self;
@@ -47,7 +47,15 @@ pub trait RecorderPerfExt: Sized {
     fn with_memory_profiling(self, config: crate::memory_profiling::MemoryProfilingConfig) -> Self;
 }
 
-impl<T: RecorderSourceExt> RecorderPerfExt for T {
+mod recorder_perf_ext_sealed {
+    use dial9_core::buffer::BufferMode;
+    use dial9_core::recorder::RecorderBuilder;
+
+    pub trait Sealed {}
+    impl<M: BufferMode> Sealed for RecorderBuilder<M> {}
+}
+
+impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
     #[cfg(feature = "cuda")]
     fn with_cuda_gpu_profiling(self, config: crate::cuda::CudaGpuConfig) -> Self {
         match crate::cuda::CudaGpuSource::start(config) {

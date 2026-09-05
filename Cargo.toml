@@ -16,6 +16,7 @@ members = [
     "examples/simple-local",
     "examples/memory-local",
     "examples/rayon-fanout",
+    "examples/telemetry-test-app",
     "tests-build",
 ]
 exclude = [

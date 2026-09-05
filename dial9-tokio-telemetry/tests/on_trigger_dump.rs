@@ -6,7 +6,7 @@
 mod common;
 mod fake_s3;
 
-use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
+use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_destinations_s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{
     DiskBuffer, RecorderPipelineExt, TokioAttachOptions, recorder,
@@ -311,7 +311,7 @@ fn shutdown_truncates_open_lookforward_dump() {
 
     let recorder = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
-        .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client))
+        .with_custom_pipeline(|p| p.gzip().s3_with_client(test_s3_config(), client.clone()))
         .with_dump_trigger(|_| {})
         .build();
     let rt = common::attach(&recorder, 1, TokioAttachOptions::default());
@@ -322,7 +322,11 @@ fn shutdown_truncates_open_lookforward_dump() {
     let fut = trigger
         .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
-    drive_workload(&rt);
+
+    // The upload indirectly proves the worker registered this request as an `ActiveDump`.
+    // Without this barrier, shutdown may precede registration, making the test flaky
+    // with an intermittent `WorkerStopped` error.
+    wait_for_uploaded_segment(&rt, &client, "test-bucket");
 
     drop(rt);
     recorder.graceful_shutdown(Duration::from_secs(2));
