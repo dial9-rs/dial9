@@ -650,7 +650,7 @@ periodic snapshots without passing a [`Dial9Handle`] through your code:
 ```rust,no_run
 use dial9::core::CustomEventsConfig;
 use dial9::format::TraceEvent;
-use dial9::{RecorderSourceExt, recorder};
+use dial9::recorder;
 
 #[derive(TraceEvent)]
 struct CacheEvent {

@@ -420,7 +420,6 @@ Instead of threading a handle around, register a callback that runs on dial9's f
 
 ```rust
 use dial9::core::CustomEventsConfig;
-use dial9::RecorderSourceExt;
 
 let recorder = dial9::recorder(writer)
     .with_custom_events(CustomEventsConfig::default(), move |ctx| {
