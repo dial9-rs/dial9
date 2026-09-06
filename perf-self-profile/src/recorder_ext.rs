@@ -13,6 +13,17 @@ use dial9_core::rate_limited;
 /// `.with_*` convenience for this crate's profiling `Source`s on the core
 /// [`RecorderBuilder`].
 pub trait RecorderPerfExt: recorder_perf_ext_sealed::Sealed + Sized {
+    /// Register the NVIDIA CUDA GPU sampler. Warns and skips when NVML is unavailable.
+    #[cfg(feature = "cuda")]
+    fn with_cuda_gpu_profiling(self, config: crate::cuda::CudaGpuConfig) -> Self;
+
+    /// Register the NVIDIA CUDA GPU sampler. Returns an error when NVML is unavailable.
+    #[cfg(feature = "cuda")]
+    fn try_with_cuda_gpu_profiling(
+        self,
+        config: crate::cuda::CudaGpuConfig,
+    ) -> Result<Self, crate::cuda::CudaGpuStartError>;
+
     /// Register the process-wide CPU profiler. Warns and skips on start failure.
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
@@ -45,6 +56,26 @@ mod recorder_perf_ext_sealed {
 }
 
 impl<M: BufferMode> RecorderPerfExt for RecorderBuilder<M> {
+    #[cfg(feature = "cuda")]
+    fn with_cuda_gpu_profiling(self, config: crate::cuda::CudaGpuConfig) -> Self {
+        match crate::cuda::CudaGpuSource::start(config) {
+            Ok(source) => self.source(source),
+            Err(e) => {
+                tracing::debug!("CUDA GPU profiling disabled because NVML is unavailable: {e}");
+                self
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn try_with_cuda_gpu_profiling(
+        self,
+        config: crate::cuda::CudaGpuConfig,
+    ) -> Result<Self, crate::cuda::CudaGpuStartError> {
+        let source = crate::cuda::CudaGpuSource::start(config)?;
+        Ok(self.source(source))
+    }
+
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
         match crate::CpuProfiler::start(config) {
