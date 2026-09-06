@@ -980,7 +980,8 @@ export function mountInspector(
     }
     if (sel.spawnedTasksRange !== null) {
       const range = sel.spawnedTasksRange;
-      const result = computeSpawnedTasks(data().queueData, range);
+      const runtimeName = sel.spawnedTasksRuntime ?? null;
+      const result = computeSpawnedTasks(data().queueData, range, runtimeName);
       const rangeLabel = formatHumanDuration(range.endNs - range.startNs);
       const view = buildSpawnedTasksView(result, rangeLabel);
       if (view === null) {
@@ -991,7 +992,9 @@ export function mountInspector(
       return html`
         <div class="d9-spawned">
           <div class="d9-spawned-head">
-            ${view.total} task${view.total > 1 ? "s" : ""} spawned in ${view.rangeLabel}
+            ${view.total} task${view.total > 1 ? "s" : ""} spawned
+            ${view.runtimeName === null ? "" : html` on ${view.runtimeName}`}
+            in ${view.rangeLabel}
           </div>
           ${view.groups.map(
             (g) => html`
@@ -1154,6 +1157,7 @@ export function mountInspector(
       taskDump: null,
       sidebarRange: null,
       spawnedTasksRange: null,
+      spawnedTasksRuntime: null,
       hoveredWakerTaskId: null,
     });
   }
@@ -1238,6 +1242,7 @@ export function mountInspector(
         taskDump: null,
         sidebarRange: null,
         spawnedTasksRange: null,
+        spawnedTasksRuntime: null,
       });
     },
   });

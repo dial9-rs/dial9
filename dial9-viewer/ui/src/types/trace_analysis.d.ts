@@ -126,7 +126,10 @@ declare module "*/trace_analysis.js" {
     runtimeMetrics: readonly RuntimeMetricsSample[]
   ): { t: number; global: number }[];
 
-  /** Sum per-runtime alive-task counts into a process-wide timeline. */
+  /**
+   * Sum per-runtime alive-task counts into a process-wide timeline. Empty when
+   * any sample lacks the field, because that would make the sum incomplete.
+   */
   export function sumActiveTasksByCycle(
     runtimeMetrics: readonly RuntimeMetricsSample[]
   ): { t: number; count: number }[];

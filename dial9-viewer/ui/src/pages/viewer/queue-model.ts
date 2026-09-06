@@ -9,10 +9,11 @@
 // distance above the axis. The underlying numbers are unchanged - only the
 // y-mapping does.
 //
-// The three series (global injection queue, max per-worker local queue,
-// active-task count) share ONE explicit zero baseline even though the
+// The three line/area series (global injection queue, max per-worker local
+// queue, active-task count) share ONE explicit zero baseline even though the
 // active-task line keeps its own right-axis magnitude scale, so all three read
-// against the same floor.
+// against the same floor. Task spawns render as an independently scaled,
+// viewport-adaptive histogram behind those series.
 
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
@@ -21,10 +22,19 @@ import {
   buildActiveTaskTimeline,
 } from "../../lib/trace/index.js";
 import {
+  deriveRuntimeGroups,
   deriveRuntimeMetrics,
   deriveWorkerIds,
   sharedWorkerSpans,
 } from "../../lib/trace/derived.js";
+import { deriveRuntimeTaskSpawns } from "../../lib/trace/runtime-task-spawns.js";
+import {
+  buildSpawnHistogram,
+  formatSpawnRate,
+  spawnHistogramBinAt,
+  type SpawnHistogramBin,
+  type SpawnHistogramModel,
+} from "../../lib/canvas/spawn-histogram.js";
 
 // ── Windowing descriptor ─────────────────────────────────────────────────
 
@@ -45,6 +55,9 @@ export interface MergedLocalSample {
   local: number;
 }
 
+/** Whether the active-task line is an absolute total or lifecycle-relative. */
+export type ActiveTaskMode = "absolute" | "relative" | "none";
+
 /**
  * Everything the queue track needs for one render pass + the drag-select,
  * lifted out of the store so the render logic stays Node-testable. Built once
@@ -63,8 +76,17 @@ export interface QueueData {
   mergedLocalSamples: readonly MergedLocalSample[];
   /** Active-task-count timeline, sorted by t. */
   activeTaskSamples: readonly { t: number; count: number }[];
+  /**
+   * Absolute for sampled process-wide totals; relative when reconstructed from
+   * spawn/terminate deltas because the trace has no initial task-count sample.
+   */
+  activeTaskMode: ActiveTaskMode;
+  /** Task-spawn timestamps, sorted ascending. */
+  taskSpawnTimes: readonly number[];
   /** task id -> first-poll time, the spawn proxy. */
   taskFirstPoll: ReadonlyMap<number, number>;
+  /** task id -> runtime group name, inferred from the task's first poll. */
+  taskRuntime: ReadonlyMap<number, string>;
   /** task id -> spawn-location id (null when unknown). */
   taskSpawnLocs: ReadonlyMap<number, string | null>;
   /** spawn-location id -> human-readable location. */
@@ -80,7 +102,10 @@ export const EMPTY_QUEUE_DATA: QueueData = {
   queueSamples: [],
   mergedLocalSamples: [],
   activeTaskSamples: [],
+  activeTaskMode: "none",
+  taskSpawnTimes: [],
   taskFirstPoll: new Map(),
+  taskRuntime: new Map(),
   taskSpawnLocs: new Map(),
   spawnLocations: new Map(),
   hasTaskTracking: false,
@@ -104,6 +129,23 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     trace.taskTerminateTimes,
   );
   const activeTaskSamples = activeTaskSeries(trace, timeline);
+  const runtimeMetricsSamples = trace.runtimeMetrics ?? [];
+  const hasRuntimeActiveTasks =
+    runtimeMetricsSamples.length > 0 &&
+    runtimeMetricsSamples.every((sample) => sample.aliveTasks !== null);
+  const hasLegacyActiveTasks = (trace.legacyActiveTaskSamples?.length ?? 0) > 0;
+  const activeTaskMode: ActiveTaskMode =
+    activeTaskSamples.length === 0
+      ? "none"
+      : hasRuntimeActiveTasks || hasLegacyActiveTasks
+        ? "absolute"
+        : "relative";
+  const taskSpawnTimes = [...trace.taskSpawnTimes.values()].sort((a, b) => a - b);
+  const runtimeTaskSpawns = deriveRuntimeTaskSpawns(
+    trace.taskSpawnTimes,
+    deriveRuntimeGroups(trace),
+    spanResult.workerSpans,
+  );
   // The global-queue series comes from per-runtime RuntimeMetrics (summed per
   // cycle) when the trace has them; otherwise fall back to the legacy
   // pre-summed QueueSample series that buildWorkerSpans extracts.
@@ -129,7 +171,10 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
     queueSamples,
     mergedLocalSamples: merged,
     activeTaskSamples,
+    activeTaskMode,
+    taskSpawnTimes,
     taskFirstPoll: timeline.taskFirstPoll,
+    taskRuntime: runtimeTaskSpawns.taskRuntime,
     taskSpawnLocs: trace.taskSpawnLocs,
     spawnLocations: trace.spawnLocations,
     hasTaskTracking: trace.hasTaskTracking,
@@ -167,7 +212,13 @@ export interface QueueActiveTaskModel {
   startCount: number;
   /** Right-axis magnitude, >= 1. */
   maxTasks: number;
+  /** Whether these values are absolute totals or trace-relative deltas. */
+  mode: Exclude<ActiveTaskMode, "none">;
 }
+
+export type QueueSpawnHistogramModel = SpawnHistogramModel;
+export type QueueSpawnBin = SpawnHistogramBin;
+export { formatSpawnRate, spawnHistogramBinAt };
 
 /**
  * The bucketed queue render model for one frame. `global[i]` / `local[i]` are
@@ -185,6 +236,8 @@ export interface QueueRenderModel {
   local: readonly number[];
   /** Shared magnitude for the global + local series (>= 1). */
   maxQ: number;
+  /** Spawn histogram, or null when no task spawns fall inside the viewport. */
+  spawnHistogram: QueueSpawnHistogramModel | null;
   /** The active-task overlay, or null when the trace has no task timeline. */
   activeTask: QueueActiveTaskModel | null;
   /** True when any series has data in view (else the "no data" path). */
@@ -325,6 +378,7 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
       global,
       local: data.hasLocalQueueDepth ? local : [],
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: false,
     };
@@ -397,6 +451,14 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     local[i] = lastL;
   }
 
+  const spawnHistogram = buildSpawnHistogram(
+    data.taskSpawnTimes,
+    viewStart,
+    viewEnd,
+    drawW,
+  );
+  if (spawnHistogram !== null) hasData = true;
+
   const activeTask = buildActiveTaskModel(data, viewStart, viewEnd, viewDur, drawW);
   if (activeTask !== null) hasData = true;
 
@@ -405,6 +467,7 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     global,
     local: data.hasLocalQueueDepth ? local : [],
     maxQ,
+    spawnHistogram,
     activeTask,
     hasData,
   };
@@ -446,7 +509,8 @@ function buildActiveTaskModel(
     const x = ((s.t - viewStart) / viewDur) * drawW;
     points.push({ x, count: s.count });
   }
-  return { points, startCount, maxTasks };
+  if (data.activeTaskMode === "none") return null;
+  return { points, startCount, maxTasks, mode: data.activeTaskMode };
 }
 
 // ── Drag-select: tasks spawned in a time range ────────────────────────────
@@ -468,6 +532,8 @@ export interface SpawnedTaskGroup {
  */
 export interface SpawnedTasksResult {
   range: TimeRange;
+  /** Runtime group filter, or null for process-wide results. */
+  runtimeName: string | null;
   /** Total tasks found in range. */
   total: number;
   /** Groups sorted by task count desc. */
@@ -482,12 +548,16 @@ export interface SpawnedTasksResult {
 export function computeSpawnedTasks(
   data: QueueData,
   range: TimeRange,
+  runtimeName: string | null = null,
 ): SpawnedTasksResult | null {
   const { startNs, endNs } = range;
   const groups = new Map<string, { taskId: number; firstPoll: number }[]>();
   let total = 0;
   for (const [taskId, t] of data.taskFirstPoll) {
     if (t < startNs || t > endNs) continue;
+    if (runtimeName !== null && data.taskRuntime.get(taskId) !== runtimeName) {
+      continue;
+    }
     const locId = data.taskSpawnLocs.get(taskId);
     const raw = locId != null ? data.spawnLocations.get(locId) : null;
     // An empty/missing location groups as unknown.
@@ -504,7 +574,7 @@ export function computeSpawnedTasks(
   const sorted = [...groups.entries()]
     .sort((a, b) => b[1].length - a[1].length)
     .map(([loc, tasks]) => ({ loc, tasks }));
-  return { range, total, groups: sorted };
+  return { range, runtimeName, total, groups: sorted };
 }
 
 // ── Legend ─────────────────────────────────────────────────────────────────
@@ -512,22 +582,22 @@ export function computeSpawnedTasks(
 /** One queue-legend entry: a swatch encoding + its meaning (matches the draw). */
 export interface QueueLegendEntry {
   /** Which series this explains, so a caller can drop the ones it will not draw. */
-  key: "global" | "local" | "activeTask";
+  key: "global" | "local" | "spawns" | "activeTask";
   /** Swatch fill (CSS color). */
   swatch: string;
   label: string;
   /** Shape hint so the swatch reads as an area/line, matching the render. */
-  shape: "area" | "line";
+  shape: "area" | "bars" | "line";
 }
 
 /**
  * The queue track legend: every series the track draws is explained, with
- * swatch encodings that MATCH the in-track rendering. Ordered global -> local
- * -> active-task, the draw order.
+ * swatch encodings that MATCH the in-track rendering.
  */
 export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
   { key: "global", swatch: "#4fc3f7", label: "Global queue", shape: "area" },
   { key: "local", swatch: "#ff8a65", label: "Max local (q:NN)", shape: "line" },
+  { key: "spawns", swatch: "#81c784", label: "Task spawns / bucket", shape: "bars" },
   { key: "activeTask", swatch: "#81c784", label: "Active tasks", shape: "line" },
 ];
 

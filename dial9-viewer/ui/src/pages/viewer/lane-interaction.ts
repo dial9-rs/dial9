@@ -41,6 +41,7 @@ import { toggleRuntimeCollapsed, toggleRuntimeMetricsCollapsed } from "./track-m
 import { mountSelectionOverlay } from "./selection-overlay.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
+import { spawnHistogramBinAtTimes } from "../../lib/canvas/spawn-histogram.js";
 
 /** Cursor-extension step as a fraction of the visible duration (5%). */
 const KB_STEP_FRACTION = 0.05;
@@ -291,14 +292,38 @@ export function mountLaneInteraction(
       toggleRuntimeCollapsed(store, headerName);
       return;
     }
-    // A click on a runtime's SUMMARY lane folds/unfolds its chart - likewise
-    // never a worker select and never a selection clear.
+    const ns = geom.layout.panelXToNs(mouseXCol);
+    // A nonempty spawn bin in a runtime summary lane opens that runtime's
+    // spawned-task list. Empty space retains the lane's fold/unfold behavior.
     const metricsName = metricsLaneAtClientY(e.clientY, data);
     if (metricsName !== null) {
+      const state = store.getState();
+      if (state.uiPrefs.collapsedRuntimeMetrics[metricsName] !== true) {
+        const bin = spawnHistogramBinAtTimes(
+          data.runtimeTaskSpawns.byRuntime.get(metricsName) ?? [],
+          state.viewport.viewStart,
+          state.viewport.viewEnd,
+          geom.drawW,
+          ns,
+        );
+        if (bin !== null) {
+          store.update("selection", {
+            spawnedTasksRange: {
+              startNs: bin.startNs,
+              endNs: bin.selectionEndNs,
+            },
+            spawnedTasksRuntime: metricsName,
+            pinnedEvent: null,
+            pollDetail: null,
+            taskDump: null,
+            sidebarRange: null,
+          });
+          return;
+        }
+      }
       toggleRuntimeMetricsCollapsed(store, metricsName);
       return;
     }
-    const ns = geom.layout.panelXToNs(mouseXCol);
     const workerId = workerAtClientY(e.clientY, data);
     if (workerId === null) {
       store.update("selection", {

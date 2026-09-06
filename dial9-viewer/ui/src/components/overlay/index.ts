@@ -21,7 +21,13 @@ import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, TimePanelLayout } from "../../types/state.js";
 import type { TemplateResult } from "lit-html";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
+import {
+  LABEL_W,
+  laneRowLayout,
+  metricsLaneAtLaneY,
+  timePanelLayout,
+  workerAtLaneY,
+} from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../canvas/lanes/render.js";
 import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
 import { assembleLaneHover } from "../canvas/lanes/index.js";
@@ -29,7 +35,14 @@ import type { LaneHoverInput } from "../canvas/lanes/hover.js";
 import { deriveOverlayData, type OverlayData } from "./data.js";
 import { drawCrosshair, type CrosshairContext } from "./crosshair.js";
 import { computeAtCursorReadout, coverageAt } from "./readout.js";
-import { buildLaneTooltip, createTooltip, type TooltipHandle } from "./tooltip.js";
+import {
+  buildLaneTooltip,
+  createTooltip,
+  spawnHistogramTooltipRows,
+  tooltipRowsTemplate,
+  type TooltipHandle,
+} from "./tooltip.js";
+import { spawnHistogramBinAtTimes } from "../../lib/canvas/spawn-histogram.js";
 
 const OVERLAY_CLASS = "d9-crosshair-overlay";
 
@@ -93,16 +106,20 @@ function columnGeometry(
 /** Worker id under `clientY` in the lanes box, or null when off the lanes / over
  *  a runtime header. Fixed-height rows + box scrollTop, resolved through the same
  *  shared row layout the renderer + click use so hover never drifts from them. */
-function workerAtClientY(
+function laneTargetAtClientY(
   box: HTMLElement,
   clientY: number,
   data: OverlayData,
   collapsedRuntimes: Readonly<Record<string, boolean>>,
   collapsedRuntimeMetrics: Readonly<Record<string, boolean>>,
-): number | null {
-  if (data.workerIds.length === 0) return null;
+): { workerId: number | null; runtimeMetrics: string | null } {
+  if (data.workerIds.length === 0) {
+    return { workerId: null, runtimeMetrics: null };
+  }
   const rect = box.getBoundingClientRect();
-  if (clientY < rect.top || clientY >= rect.bottom || rect.height <= 0) return null;
+  if (clientY < rect.top || clientY >= rect.bottom || rect.height <= 0) {
+    return { workerId: null, runtimeMetrics: null };
+  }
   const localY = clientY - rect.top + box.scrollTop;
   const rowLayout = laneRowLayout(
     data.runtimeGroups,
@@ -111,7 +128,14 @@ function workerAtClientY(
     collapsedRuntimes,
     { runtimes: data.metricsRuntimes, collapsed: collapsedRuntimeMetrics },
   );
-  return workerAtLaneY(rowLayout, localY);
+  const runtimeMetrics = metricsLaneAtLaneY(rowLayout, localY);
+  return {
+    workerId: workerAtLaneY(rowLayout, localY),
+    runtimeMetrics:
+      runtimeMetrics !== null && collapsedRuntimeMetrics[runtimeMetrics] !== true
+        ? runtimeMetrics
+        : null,
+  };
 }
 
 /**
@@ -290,15 +314,16 @@ export function mountOverlay(
 
     const ns = geom.layout.panelXToNs(mouseX);
     const lanesBox = trackColumn.querySelector<HTMLElement>(".d9-lanes-viewport");
-    const workerId = lanesBox
-      ? workerAtClientY(
+    const laneTarget = lanesBox
+      ? laneTargetAtClientY(
           lanesBox,
           e.clientY,
           data,
           state.uiPrefs.collapsedRuntimes,
           state.uiPrefs.collapsedRuntimeMetrics,
         )
-      : null;
+      : { workerId: null, runtimeMetrics: null };
+    const workerId = laneTarget.workerId;
 
     const readout = computeAtCursorReadout(
       data,
@@ -318,6 +343,34 @@ export function mountOverlay(
         ns,
       };
       hidePending = false;
+    } else if (laneTarget.runtimeMetrics !== null) {
+      const runtimeName = laneTarget.runtimeMetrics;
+      const bin = spawnHistogramBinAtTimes(
+        data.runtimeTaskSpawns.get(runtimeName) ?? [],
+        viewStart,
+        viewEnd,
+        drawW,
+        ns,
+      );
+      const content =
+        bin === null
+          ? null
+          : tooltipRowsTemplate(
+              spawnHistogramTooltipRows(
+                bin,
+                (t) => formatTimestamp(state, t),
+                runtimeName,
+              ),
+            );
+      pendingTooltip =
+        content === null
+          ? null
+          : {
+              kind: "track",
+              cursor: { clientX: e.clientX, clientY: e.clientY },
+              content,
+            };
+      hidePending = content === null;
     } else {
       const content = trackTooltipAtTarget(e.target, state, ns, trackTooltipAt);
       pendingTooltip = content === null
@@ -370,6 +423,7 @@ export {
   laneTooltipModel,
   buildLaneTooltip,
   createTooltip,
+  spawnHistogramTooltipRows,
   tooltipRowsTemplate,
 } from "./tooltip.js";
 export type { TooltipHandle, TooltipRow, TooltipSegment } from "./tooltip.js";

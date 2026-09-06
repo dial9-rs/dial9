@@ -247,6 +247,8 @@ export interface MountedShell {
   toastRegion: HTMLElement;
   /** The track column element (canvas host for sizing). */
   trackColumn: HTMLElement;
+  /** Queue-track hover and spawned-task selection helpers. */
+  queueTrack: QueueTrackController;
   /**
    * The issues rail. Exposed so the entry can supply its lane-reveal action
    * after mounting the lanes, which happens after the shell constructs this.
@@ -378,6 +380,7 @@ export function mountShell(
   return {
     toastRegion,
     trackColumn,
+    queueTrack,
     // Exposed so the entry can hand the rail its lane-reveal action once the
     // lanes are mounted (they mount after the shell).
     rail,

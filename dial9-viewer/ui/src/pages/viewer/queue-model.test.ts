@@ -14,8 +14,10 @@ import {
   computeQueueData,
   computeSpawnedTasks,
   deriveQueueWindow,
+  formatSpawnRate,
   queueBaselineY,
   queueScaleY,
+  spawnHistogramBinAt,
   EMPTY_QUEUE_DATA,
   type QueueData,
 } from "./queue-model.js";
@@ -26,7 +28,12 @@ import type { ParsedTrace } from "../../types/trace.js";
 function queueData(over: Partial<QueueData> = {}): QueueData {
   // EMPTY_QUEUE_DATA is the no-trace default, where queue depth is
   // unavailable. These fixtures stand in for a real trace, so opt it back on.
-  return { ...EMPTY_QUEUE_DATA, hasLocalQueueDepth: true, ...over };
+  return {
+    ...EMPTY_QUEUE_DATA,
+    hasLocalQueueDepth: true,
+    activeTaskMode: "absolute",
+    ...over,
+  };
 }
 
 describe("queueScaleY (#282: 0 must render a visible baseline)", () => {
@@ -145,8 +152,119 @@ describe("buildQueueRenderModel", () => {
     expect(m.activeTask).not.toBeNull();
     expect(m.activeTask!.startCount).toBe(3);
     expect(m.activeTask!.maxTasks).toBe(8); // peak in-view, not the 99 past it
+    expect(m.activeTask!.mode).toBe("absolute");
     expect(m.activeTask!.points).toHaveLength(2);
     expect(m.activeTask!.points[0]).toEqual({ x: 25, count: 8 });
+  });
+
+  it("bins task spawns at viewport-adaptive fixed-pixel resolution", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        taskSpawnTimes: [0, 1, 39, 40, 80, 120, 121],
+      }),
+      viewStart: 0,
+      viewEnd: 120,
+      drawW: 24,
+    });
+    expect(m.spawnHistogram).toEqual({
+      counts: [3, 1, 2],
+      maxSpawns: 3,
+      peakSpawnsPerSecond: 6,
+      binWidthPx: 8,
+      binDurationNs: 40,
+    });
+    expect(m.hasData).toBe(true);
+  });
+
+  it("omits the spawn histogram when no spawn falls inside the viewport", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({ taskSpawnTimes: [-10, 110] }),
+      viewStart: 0,
+      viewEnd: 100,
+      drawW: 24,
+    });
+    expect(m.spawnHistogram).toBeNull();
+  });
+
+  it("uses one spawn bucket for canvases narrower than the target bin width", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({ taskSpawnTimes: [1, 2, 3] }),
+      viewStart: 0,
+      viewEnd: 10,
+      drawW: 4,
+    });
+    expect(m.spawnHistogram).toEqual({
+      counts: [3],
+      maxSpawns: 3,
+      peakSpawnsPerSecond: 3,
+      binWidthPx: 4,
+      binDurationNs: 10,
+    });
+  });
+
+  it("computes peak spawn rate with an actual sliding one-second window", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        taskSpawnTimes: [
+          10_000_000,
+          11_000_000,
+          12_000_000,
+          13_000_000,
+          1_010_000_000,
+        ],
+      }),
+      viewStart: 0,
+      viewEnd: 2_000_000_000,
+      drawW: 800,
+    });
+    expect(m.spawnHistogram).toMatchObject({
+      maxSpawns: 4,
+      peakSpawnsPerSecond: 4,
+    });
+  });
+
+  it("excludes spawns exactly one second apart from the same rate window", () => {
+    const m = buildQueueRenderModel({
+      data: queueData({
+        taskSpawnTimes: [0, 999_999_999, 1_000_000_000, 1_999_999_999],
+      }),
+      viewStart: 0,
+      viewEnd: 2_000_000_000,
+      drawW: 100,
+    });
+    expect(m.spawnHistogram?.peakSpawnsPerSecond).toBe(2);
+  });
+
+  it("resolves exact nonempty spawn bins with boundary-safe selection ranges", () => {
+    const histogram = {
+      counts: [2, 0, 3],
+      maxSpawns: 3,
+      peakSpawnsPerSecond: 5,
+      binWidthPx: 8,
+      binDurationNs: 40,
+    };
+    expect(spawnHistogramBinAt(histogram, 0, 120, 39.9)).toMatchObject({
+      index: 0,
+      count: 2,
+      startNs: 0,
+      endNs: 40,
+      selectionEndNs: 39,
+      durationNs: 40,
+      ratePerSecond: 50_000_000,
+    });
+    expect(spawnHistogramBinAt(histogram, 0, 120, 40)).toBeNull();
+    expect(spawnHistogramBinAt(histogram, 0, 120, 120)).toMatchObject({
+      index: 2,
+      count: 3,
+      startNs: 80,
+      endNs: 120,
+      selectionEndNs: 120,
+    });
+  });
+
+  it("formats spawn rates with an explicit tasks/s unit", () => {
+    expect(formatSpawnRate(336.2)).toBe("336 tasks/s");
+    expect(formatSpawnRate(0.25)).toBe("0.25 tasks/s");
   });
 
   it("carries the first sampled task count backward instead of inventing zero", () => {
@@ -285,6 +403,13 @@ describe("computeSpawnedTasks", () => {
       ["locA", "src/a.rs:1"],
       ["locB", "src/b.rs:2"],
     ]),
+    taskRuntime: new Map([
+      [0x1, "main"],
+      [0x2, "io"],
+      [0x3, "main"],
+      [0x4, "main"],
+      [0x5, "io"],
+    ]),
   });
 
   it("finds tasks first-polled in range, grouped by loc, sorted by count desc", () => {
@@ -307,6 +432,20 @@ describe("computeSpawnedTasks", () => {
 
   it("returns null when no task was first-polled in range", () => {
     expect(computeSpawnedTasks(data, { startNs: 500, endNs: 800 })).toBeNull();
+  });
+
+  it("filters a runtime histogram selection to that runtime's tasks", () => {
+    const result = computeSpawnedTasks(
+      data,
+      { startNs: 100, endNs: 200 },
+      "main",
+    );
+    expect(result?.runtimeName).toBe("main");
+    expect(result?.total).toBe(2);
+    expect(result?.groups.flatMap((group) => group.tasks.map((task) => task.taskId))).toEqual([
+      0x1,
+      0x4,
+    ]);
   });
 });
 
@@ -354,7 +493,62 @@ describe("computeQueueData / deriveQueueWindow", () => {
 
     const data = computeQueueData(trace);
     expect(data.activeTaskSamples).toEqual([{ t: 100, count: 43 }]);
+    expect(data.activeTaskMode).toBe("absolute");
+    expect(data.taskSpawnTimes).toEqual([110]);
     expect(data.taskFirstPoll.get(1)).toBe(110);
+  });
+
+  it("falls back to a relative lifecycle line when old runtime samples omit alive_tasks", () => {
+    const trace = {
+      events: [],
+      maxTs: 1000,
+      blockInPlaceGaps: [],
+      runtimeWorkers: new Map(),
+      runtimeMetrics: [
+        { t: 100, runtimeName: "", globalQueue: 0, aliveTasks: null },
+      ],
+      legacyActiveTaskSamples: [],
+      taskSpawnTimes: new Map([
+        [1, 110],
+        [2, 200],
+      ]),
+      taskTerminateTimes: new Map([[1, 300]]),
+      taskSpawnLocs: new Map(),
+      spawnLocations: new Map(),
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    } as unknown as ParsedTrace;
+
+    const data = computeQueueData(trace);
+    expect(data.activeTaskSamples).toEqual([
+      { t: 110, count: 1 },
+      { t: 200, count: 2 },
+      { t: 300, count: 1 },
+    ]);
+    expect(data.activeTaskMode).toBe("relative");
+  });
+
+  it("sorts task spawn timestamps for histogram windowing", () => {
+    const trace = {
+      events: [],
+      maxTs: 1000,
+      blockInPlaceGaps: [],
+      runtimeWorkers: new Map(),
+      runtimeMetrics: [],
+      legacyActiveTaskSamples: [],
+      taskSpawnTimes: new Map([
+        [1, 300],
+        [2, 100],
+        [3, 200],
+      ]),
+      taskTerminateTimes: new Map(),
+      taskSpawnLocs: new Map(),
+      spawnLocations: new Map(),
+      hasTaskTracking: true,
+      hasLocalQueueDepth: false,
+    } as unknown as ParsedTrace;
+
+    expect(computeQueueData(trace).taskSpawnTimes).toEqual([100, 200, 300]);
   });
 
   it("resolves complete for an empty segments slice, oversized when a segment is", () => {

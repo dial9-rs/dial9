@@ -20,6 +20,7 @@ import {
   sharedWorkerSpans,
 } from "../../lib/trace/derived.js";
 import { metricsRuntimeNames } from "../../lib/trace/runtime-metrics-model.js";
+import { deriveRuntimeTaskSpawns } from "../../lib/trace/runtime-task-spawns.js";
 import type {
   BlockInPlaceGap,
   ParsedTrace,
@@ -51,6 +52,8 @@ export interface OverlayData {
   queueSamples: { t: number; global: number }[];
   /** Active-task-count timeline, sorted by t (tooltip Active Tasks). */
   activeTaskSamples: { t: number; count: number }[];
+  /** Runtime group name -> sorted task-spawn timestamps. */
+  runtimeTaskSpawns: ReadonlyMap<string, readonly number[]>;
   blockInPlaceGaps: readonly BlockInPlaceGap[];
   hasCpuTime: boolean;
   hasSchedWait: boolean;
@@ -81,6 +84,11 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     trace.taskTerminateTimes,
   );
   const activeTaskSamples = activeTaskSeries(trace, timeline);
+  const runtimeTaskSpawns = deriveRuntimeTaskSpawns(
+    trace.taskSpawnTimes,
+    runtimeGroups,
+    workerSpans,
+  );
 
   return {
     workerIds,
@@ -92,6 +100,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     workerQueueSamples: spanResult.workerQueueSamples,
     queueSamples: spanResult.queueSamples,
     activeTaskSamples,
+    runtimeTaskSpawns: runtimeTaskSpawns.byRuntime,
     blockInPlaceGaps: trace.blockInPlaceGaps,
     hasCpuTime: trace.hasCpuTime,
     hasSchedWait: trace.hasSchedWait,

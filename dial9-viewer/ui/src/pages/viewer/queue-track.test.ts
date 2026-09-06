@@ -10,7 +10,11 @@
 
 import { describe, it, expect } from "vitest";
 import { createViewerStore } from "./store.js";
-import { createQueueTrack, drawQueueCanvas } from "./queue-track.js";
+import {
+  createQueueTrack,
+  drawQueueCanvas,
+} from "./queue-track.js";
+import { spawnHistogramTooltipRows } from "../../components/overlay/tooltip.js";
 import { ZERO_BASELINE_PX, queueBaselineY, type QueueRenderModel, type QueueWindow } from "./queue-model.js";
 import type { ParsedTrace } from "../../types/trace.js";
 
@@ -19,7 +23,7 @@ const COMPLETE: QueueWindow = { truncatedAt: null, oversized: false };
 /** A recording 2D context: captures path vertices, fills, strokes, labels. */
 interface Rec {
   pathYs: number[];
-  fillRects: { x: number; y: number; w: number; h: number }[];
+  fillRects: { x: number; y: number; w: number; h: number; style: string }[];
   strokes: number;
   labels: { text: string; x: number; y: number }[];
 }
@@ -33,7 +37,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Rec } {
     textAlign: "" as CanvasTextAlign,
     clearRect() {},
     fillRect(x: number, y: number, w: number, h: number) {
-      rec.fillRects.push({ x, y, w, h });
+      rec.fillRects.push({ x, y, w, h, style: String(ctx.fillStyle) });
     },
     strokeRect() {},
     beginPath() {},
@@ -68,6 +72,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: zeros(4),
       local: zeros(4),
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: true,
     };
@@ -100,7 +105,19 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: [1, 2, 2],
       local: [0, 1, 1],
       maxQ: 2,
-      activeTask: { points: [{ x: 10, count: 4 }], startCount: 1, maxTasks: 4 },
+      spawnHistogram: {
+        counts: [0, 3, 1],
+        maxSpawns: 3,
+        peakSpawnsPerSecond: 4,
+        binWidthPx: 10,
+        binDurationNs: 1_000_000,
+      },
+      activeTask: {
+        points: [{ x: 10, count: 4 }],
+        startCount: 1,
+        maxTasks: 4,
+        mode: "absolute",
+      },
       hasData: true,
     };
     const { ctx, rec } = recordingCtx();
@@ -109,6 +126,8 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
     expect(texts).toContain("2"); // maxQ label
     expect(texts).toContain("0"); // zero-baseline label
     expect(texts).toContain("tasks:4"); // active-task right-axis label
+    expect(texts).toContain("spawn peak:4 tasks/s"); // true sliding-window peak
+    expect(rec.fillRects.filter((r) => r.style === "rgba(129,199,132,0.16)")).toHaveLength(2);
   });
 
   it("shows the empty message and no strokes when there is no data", () => {
@@ -117,6 +136,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: zeros(4),
       local: zeros(4),
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: false,
     };
@@ -132,6 +152,7 @@ describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
       global: [0, 0],
       local: [0, 0],
       maxQ: 1,
+      spawnHistogram: null,
       activeTask: null,
       hasData: true,
     };
@@ -161,6 +182,24 @@ describe("createQueueTrack (dispatch through the selection slice)", () => {
     track.dispose();
   });
 
+  it("commitRange clears competing inspector selections so Stack opens", () => {
+    const { store } = newStore();
+    const track = createQueueTrack(store);
+    store.update("selection", {
+      pinnedEvent: { timestamp: 9 } as never,
+      sidebarRange: { startNs: 1, endNs: 2 },
+    });
+
+    track.commitRange({ startNs: 100, endNs: 500 });
+    expect(store.getState().selection.pinnedEvent).toBeNull();
+    expect(store.getState().selection.sidebarRange).toBeNull();
+    expect(store.getState().selection.spawnedTasksRange).toEqual({
+      startNs: 100,
+      endNs: 500,
+    });
+    track.dispose();
+  });
+
   it("does not re-dispatch when the range is unchanged (no store thrash)", () => {
     const { store, pending } = newStore();
     const track = createQueueTrack(store);
@@ -172,6 +211,21 @@ describe("createQueueTrack (dispatch through the selection slice)", () => {
     // An identical range commits nothing - no new frame is scheduled.
     track.commitRange({ startNs: 100, endNs: 500 });
     expect(pending.length).toBe(0);
+    track.dispose();
+  });
+
+  it("clears a runtime filter when the process-wide range is unchanged", () => {
+    const { store } = newStore();
+    const track = createQueueTrack(store);
+    const range = { startNs: 100, endNs: 500 };
+    store.update("selection", {
+      spawnedTasksRange: range,
+      spawnedTasksRuntime: "io",
+    });
+
+    track.commitRange(range);
+    expect(store.getState().selection.spawnedTasksRange).toEqual(range);
+    expect(store.getState().selection.spawnedTasksRuntime).toBeNull();
     track.dispose();
   });
 
@@ -202,5 +256,34 @@ describe("createQueueTrack (dispatch through the selection slice)", () => {
     store.update("trace", { trace });
     expect(track.spawnedTasks({ startNs: 0, endNs: 1000 })).toBeNull();
     track.dispose();
+  });
+});
+
+describe("spawnHistogramTooltipRows", () => {
+  it("shows exact count, normalized rate, window, duration, and click hint", () => {
+    const rows = spawnHistogramTooltipRows(
+      {
+        index: 2,
+        count: 133,
+        startNs: 1_000_000,
+        endNs: 396_400_000,
+        selectionEndNs: 396_399_999,
+        durationNs: 395_400_000,
+        ratePerSecond: 336.37,
+      },
+      (ns) => `${ns}ns`,
+    );
+    expect(rows).toEqual([
+      [{ label: "Tasks spawned:", value: "133" }],
+      [{ label: "Spawn rate:", value: "336 tasks/s" }],
+      [{ label: "Window:", value: "1000000ns – 396400000ns" }],
+      [
+        {
+          label: "Duration:",
+          value: "395.40ms",
+          hint: "(click bar to list tasks)",
+        },
+      ],
+    ]);
   });
 });

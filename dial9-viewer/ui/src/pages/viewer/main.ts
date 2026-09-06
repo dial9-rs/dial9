@@ -22,7 +22,11 @@ import { mountLoadChrome } from "./load-chrome.js";
 import { mountInspector } from "./inspector.js";
 import { createRegionAnalysis } from "./region-analysis.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
-import { mountOverlay, tooltipRowsTemplate } from "../../components/overlay/index.js";
+import {
+  mountOverlay,
+  spawnHistogramTooltipRows,
+  tooltipRowsTemplate,
+} from "../../components/overlay/index.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import {
   cpuIntervalAt,
@@ -209,6 +213,16 @@ function boot(): void {
     store,
     (state, ns) => fmtAxisTick(deriveAxisInputs(state), ns, false),
     (trackId, state, ns) => {
+      if (trackId === "queue") {
+        const bin = shell.queueTrack.spawnBinAt(ns);
+        return bin === null
+          ? null
+          : tooltipRowsTemplate(
+              spawnHistogramTooltipRows(bin, (t) =>
+                fmtAxisTick(deriveAxisInputs(state), t, false),
+              ),
+            );
+      }
       if (trackId !== "cpu" || state.trace.trace === null) return null;
       const series = cpuSeriesFor(state.trace.trace);
       const interval = cpuIntervalAt(series.intervals, ns);

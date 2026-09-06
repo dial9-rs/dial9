@@ -21,12 +21,17 @@ import type { LaneDrawContext } from "./render.js";
 import { RAIL_W } from "./chrome.js";
 import type { RuntimeSeries } from "../../../lib/trace/runtime-metrics-model.js";
 import { queueBaselineY, queueScaleY } from "../../../lib/canvas/zero-baseline.js";
+import {
+  buildSpawnHistogram,
+  formatSpawnRate,
+} from "../../../lib/canvas/spawn-histogram.js";
 
 const LANE_BG = "#1d2440";
 const TOP_RULE = "#3d4a7a";
 const GLOBAL_FILL = "rgba(79,195,247,0.30)";
 const GLOBAL_STROKE = "#4fc3f7";
 const TASK_STROKE = "#81c784";
+const SPAWN_FILL = "rgba(129,199,132,0.28)";
 const TITLE = "#aeb6e0";
 const CARET = "#8b93c0";
 const BASELINE_RULE = "#2b3358";
@@ -56,6 +61,7 @@ export interface RuntimeMetricsLaneRow {
 export function drawRuntimeMetricsLane(
   ctx: LaneDrawContext,
   series: RuntimeSeries | undefined,
+  spawnTimes: readonly number[],
   row: RuntimeMetricsLaneRow,
   accent: string,
   viewStart: number,
@@ -102,6 +108,8 @@ export function drawRuntimeMetricsLane(
 
   // The series' level at the right edge of the view: the "right now" reading.
   const atEdge = levelAt(series, viewEnd);
+  const aliveTasksAvailable =
+    series.aliveTasksAvailable && atEdge.aliveTasks !== null;
 
   // The one-line strip: keep the numbers, drop the chart. Drawn on the title row
   // (whose title the fold omits) so a folded lane costs one line of height.
@@ -114,9 +122,15 @@ export function drawRuntimeMetricsLane(
       RAIL_W + 15,
       titleY,
     );
-    ctx.fillStyle = TASK_STROKE;
+    ctx.fillStyle = aliveTasksAvailable ? TASK_STROKE : EMPTY_TEXT;
     ctx.textAlign = "right";
-    ctx.fillText(taskLabel(atEdge.aliveTasks, series.maxAliveTasks), Math.max(0, drawW - 4), titleY);
+    ctx.fillText(
+      aliveTasksAvailable
+        ? taskLabel(atEdge.aliveTasks!, series.maxAliveTasks)
+        : "alive tasks: unavailable",
+      Math.max(0, drawW - 4),
+      titleY,
+    );
     return;
   }
 
@@ -183,22 +197,57 @@ export function drawRuntimeMetricsLane(
   ctx.lineTo(drawW, qy(qLast));
   ctx.stroke();
 
-  // ── Alive tasks: step line on its own scale ─────────────────────────────
-  const maxT = Math.max(1, series.maxAliveTasks);
-  const ty = (v: number): number => queueScaleY(v, maxT, chartTop, chartH);
-  ctx.strokeStyle = TASK_STROKE;
-  ctx.lineWidth = 1.25;
-  ctx.beginPath();
-  let tLast = seed.aliveTasks;
-  ctx.moveTo(0, ty(tLast));
-  for (const s of inView) {
-    const x = xOf(s.t);
-    ctx.lineTo(x, ty(tLast));
-    tLast = s.aliveTasks;
-    ctx.lineTo(x, ty(tLast));
+  // ── Task spawns: runtime-specific histogram behind alive-task total ─────
+  const spawnHistogram = buildSpawnHistogram(
+    spawnTimes,
+    viewStart,
+    viewEnd,
+    drawW,
+  );
+  if (spawnHistogram !== null) {
+    ctx.fillStyle = SPAWN_FILL;
+    for (let i = 0; i < spawnHistogram.counts.length; i++) {
+      const count = spawnHistogram.counts[i]!;
+      if (count === 0) continue;
+      const x = i * spawnHistogram.binWidthPx;
+      const y = queueScaleY(count, spawnHistogram.maxSpawns, chartTop, chartH);
+      const barTop = Math.min(y, baseY - 2);
+      ctx.fillRect(
+        x + 0.5,
+        barTop,
+        Math.max(1, spawnHistogram.binWidthPx - 1),
+        baseY - barTop,
+      );
+    }
+    ctx.fillStyle = TASK_STROKE;
+    ctx.font = "9px monospace";
+    ctx.textAlign = "right";
+    ctx.fillText(
+      `spawn peak:${formatSpawnRate(spawnHistogram.peakSpawnsPerSecond)}`,
+      Math.max(0, drawW - 4),
+      titleY,
+    );
   }
-  ctx.lineTo(drawW, ty(tLast));
-  ctx.stroke();
+
+  // ── Alive tasks: step line on its own scale ─────────────────────────────
+  if (aliveTasksAvailable && seed.aliveTasks !== null) {
+    const maxT = Math.max(1, series.maxAliveTasks);
+    const ty = (v: number): number => queueScaleY(v, maxT, chartTop, chartH);
+    ctx.strokeStyle = TASK_STROKE;
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    let tLast = seed.aliveTasks;
+    ctx.moveTo(0, ty(tLast));
+    for (const s of inView) {
+      if (s.aliveTasks === null) continue;
+      const x = xOf(s.t);
+      ctx.lineTo(x, ty(tLast));
+      tLast = s.aliveTasks;
+      ctx.lineTo(x, ty(tLast));
+    }
+    ctx.lineTo(drawW, ty(tLast));
+    ctx.stroke();
+  }
 
   // ── Readouts: one label per series, colour-keyed to its stroke ───────────
   // Current value first (the number a backlog investigation wants), then the
@@ -208,9 +257,15 @@ export function drawRuntimeMetricsLane(
   ctx.fillStyle = GLOBAL_STROKE;
   ctx.textAlign = "left";
   ctx.fillText(queueLabel(atEdge.globalQueue, series.maxGlobalQueue), RAIL_W + 4, baselineY);
-  ctx.fillStyle = TASK_STROKE;
+  ctx.fillStyle = aliveTasksAvailable ? TASK_STROKE : EMPTY_TEXT;
   ctx.textAlign = "right";
-  ctx.fillText(taskLabel(atEdge.aliveTasks, series.maxAliveTasks), Math.max(0, drawW - 4), baselineY);
+  ctx.fillText(
+    aliveTasksAvailable
+      ? taskLabel(atEdge.aliveTasks!, series.maxAliveTasks)
+      : "alive tasks: unavailable",
+    Math.max(0, drawW - 4),
+    baselineY,
+  );
 }
 
 // The readouts pair a POINT reading with the trace peak. "at <right edge of the
@@ -248,7 +303,7 @@ function taskLabel(current: number, max: number): string {
 function levelAt(
   series: RuntimeSeries,
   t: number,
-): { globalQueue: number; aliveTasks: number } {
+): { globalQueue: number; aliveTasks: number | null } {
   const samples = series.samples;
   let lo = 0;
   let hi = samples.length - 1;

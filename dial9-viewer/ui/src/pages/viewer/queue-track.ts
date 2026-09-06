@@ -5,8 +5,8 @@
 //
 // The global + max-local + active-task series render against ONE explicit zero
 // baseline (queueScaleY) so a 0-valued global queue shows a VISIBLE flat line
-// instead of a stroke fused to the axis; the numbers are unchanged, only the
-// y-mapping and the labeling/legend.
+// instead of a stroke fused to the axis. A translucent, independently scaled
+// spawn histogram sits behind the lines to preserve short-lived task bursts.
 //
 // Hover info rides the overlay's at-cursor store contract (transient.atCursor),
 // not a corner div, so hovering this track already populates the inspector
@@ -32,10 +32,13 @@ import {
   computeQueueData,
   computeSpawnedTasks,
   deriveQueueWindow,
+  formatSpawnRate,
   queueBaselineY,
   queueScaleY,
+  spawnHistogramBinAt,
   type QueueData,
   type QueueRenderModel,
+  type QueueSpawnBin,
   type QueueWindow,
   type SpawnedTasksResult,
 } from "./queue-model.js";
@@ -49,6 +52,7 @@ const GLOBAL_FILL = "rgba(79,195,247,0.3)";
 const GLOBAL_STROKE = "#4fc3f7";
 const LOCAL_STROKE = "#ff8a65";
 const ACTIVE_STROKE = "#81c784";
+const SPAWN_FILL = "rgba(129,199,132,0.16)";
 const AXIS_LABEL = "#666";
 const ACTIVE_LABEL = "#81c784";
 const EMPTY_TEXT = "#555";
@@ -76,6 +80,10 @@ export interface QueueTrackController {
     viewEnd: number,
   ): void;
   queueSeries(): QueueData;
+  /** The nonempty spawn-histogram bin under a trace timestamp. */
+  spawnBinAt(ns: number): QueueSpawnBin | null;
+  /** Select the spawn bin under a timestamp and open its task list. */
+  selectSpawnBin(ns: number): boolean;
   /**
    * The spawned-tasks derivation for a range: tasks first polled in range,
    * grouped by spawn location. Exposed so the inspector reuses the logic and
@@ -198,10 +206,18 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
   /** The in-track legend, swatch encodings matching the draw. */
   function legendTemplate(): TemplateResult {
-    // Drop the local series when the trace has no per-worker depth.
-    const entries = queueData().hasLocalQueueDepth
-      ? QUEUE_LEGEND
-      : QUEUE_LEGEND.filter((e) => e.key !== "local");
+    const data = queueData();
+    // Drop encodings whose source is absent from this trace.
+    const entries = QUEUE_LEGEND.filter(
+      (e) =>
+        (e.key !== "local" || data.hasLocalQueueDepth) &&
+        (e.key !== "spawns" || data.taskSpawnTimes.length > 0) &&
+        (e.key !== "activeTask" || data.activeTaskMode !== "none"),
+    ).map((e) =>
+      e.key === "activeTask" && data.activeTaskMode === "relative"
+        ? { ...e, label: "Active tasks Δ (relative)" }
+        : e,
+    );
     return html`
       <ul class="d9-queue-legend" aria-label="Queue depth legend">
         ${repeat(
@@ -237,8 +253,9 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
 
   function onCanvasMouseDown(ev: MouseEvent): void {
     const s = state();
-    // Only meaningful when the trace carries the active-task timeline.
-    if (s.trace.trace === null || !queueData().hasTaskTracking) return;
+    // A drag or click selects task-spawn time, independent of whether the old
+    // trace carries an absolute active-task count.
+    if (s.trace.trace === null || queueData().taskSpawnTimes.length === 0) return;
     if (s.viewport.viewEnd <= s.viewport.viewStart) return;
     const canvas = ev.currentTarget as HTMLCanvasElement;
     const startNs = xToNs(canvas, ev.clientX, s.viewport.viewStart, s.viewport.viewEnd);
@@ -291,6 +308,7 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   function onWindowMouseUp(): void {
     if (drag === null) return;
     const moved = drag.moved;
+    const clickNs = drag.endNs;
     const selStart = Math.min(drag.startNs, drag.endNs);
     const selEnd = Math.max(drag.startNs, drag.endNs);
     drag = null;
@@ -304,8 +322,8 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
       // Dispatch the range the inspector renders the spawned-task list from. A
       // plain click (no move) leaves the current range untouched.
       commitRange({ startNs: selStart, endNs: selEnd });
-    } else if (sizer !== null && lastPaint !== null) {
-      // Repaint clean (drop any band drawn before the 3px threshold).
+    } else if (!selectSpawnBin(clickNs) && sizer !== null && lastPaint !== null) {
+      // Repaint clean when the click missed a nonempty bar.
       const ctx = sizer.ensure(lastPaint.drawW, lastPaint.canvasH, lastPaint.dpr);
       drawQueueCanvas(ctx, lastPaint.model, lastPaint.window, lastPaint.drawW, lastPaint.canvasH);
     }
@@ -326,17 +344,55 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
   }
 
   function commitRange(range: TimeRange | null): void {
-    const cur = state().selection.spawnedTasksRange;
+    const selection = state().selection;
+    const cur = selection.spawnedTasksRange;
     if (range === null) {
-      if (cur !== null) store.update("selection", { spawnedTasksRange: null });
+      if (cur !== null || selection.spawnedTasksRuntime != null) {
+        store.update("selection", {
+          spawnedTasksRange: null,
+          spawnedTasksRuntime: null,
+        });
+      }
       return;
     }
-    if (cur !== null && cur.startNs === range.startNs && cur.endNs === range.endNs) return;
-    store.update("selection", { spawnedTasksRange: range, taskDump: null });
+    const rangeUnchanged =
+      cur !== null && cur.startNs === range.startNs && cur.endNs === range.endNs;
+    const inspectorSelectionClear =
+      selection.spawnedTasksRuntime == null &&
+      selection.pollDetail == null &&
+      selection.pinnedEvent == null &&
+      selection.taskDump == null &&
+      selection.sidebarRange == null;
+    if (rangeUnchanged && inspectorSelectionClear) return;
+    store.update("selection", {
+      spawnedTasksRange: range,
+      spawnedTasksRuntime: null,
+      pollDetail: null,
+      pinnedEvent: null,
+      taskDump: null,
+      sidebarRange: null,
+    });
   }
 
   function queueSeries(): QueueData {
     return queueData();
+  }
+
+  function spawnBinAt(ns: number): QueueSpawnBin | null {
+    if (lastPaint === null) return null;
+    return spawnHistogramBinAt(
+      lastPaint.model.spawnHistogram,
+      lastPaint.viewStart,
+      lastPaint.viewEnd,
+      ns,
+    );
+  }
+
+  function selectSpawnBin(ns: number): boolean {
+    const bin = spawnBinAt(ns);
+    if (bin === null) return false;
+    commitRange({ startNs: bin.startNs, endNs: bin.selectionEndNs });
+    return true;
   }
 
   function spawnedTasks(range: TimeRange): SpawnedTasksResult | null {
@@ -357,7 +413,16 @@ export function createQueueTrack(store: ViewerStore): QueueTrackController {
     sizerCanvas = null;
   }
 
-  return { rowTemplate, paint, queueSeries, spawnedTasks, commitRange, dispose };
+  return {
+    rowTemplate,
+    paint,
+    queueSeries,
+    spawnBinAt,
+    selectSpawnBin,
+    spawnedTasks,
+    commitRange,
+    dispose,
+  };
 }
 
 // ── Draw-area x mapping + selection band (module-local) ────────────────────
@@ -387,9 +452,10 @@ function overlayBandRange(
 /**
  * Draw the queue chart into `ctx` (already DPR-scaled + sized to drawW x
  * canvasH) in order - background, global filled step-area, max-local step line,
- * active-task step line on its own scale, y-axis labels - every series mapped
- * through queueScaleY, which reserves a visible zero baseline so a 0-valued
- * global renders a flat line, not nothing. Then the window markers on top.
+ * translucent spawn histogram, active-task step line on its own scale, and
+ * y-axis labels. The line/area series use queueScaleY, which reserves a visible
+ * zero baseline so a 0-valued global renders a flat line, not nothing. Then the
+ * window markers on top.
  * Draw-area-relative coordinates (the canvas already omits LABEL_W; the DOM
  * label gutter supplies the shared offset).
  */
@@ -421,6 +487,7 @@ export function drawQueueCanvas(
   const maxQ = model.maxQ;
   const baselineY = queueBaselineY(chartTop, chartH);
 
+  const spawnHistogram = model.spawnHistogram;
   // ── Global queue as a filled step area with a visible zero baseline ──
   // The fill polygon's bottom edge is the baseline (queueScaleY(0)), NOT the
   // true canvas bottom, so a 0-valued global is a thin sliver + a stroke ON the
@@ -458,6 +525,26 @@ export function drawQueueCanvas(
     ctx.stroke();
   }
 
+  // ── Task spawns as a translucent, independently scaled histogram ────────
+  // Fixed-pixel-width bins adapt their time quantum as the viewport zooms.
+  // Draw after the queue series so the bars stay visible, but before the
+  // active-task total so that line remains the foreground signal.
+  if (spawnHistogram !== null) {
+    ctx.fillStyle = SPAWN_FILL;
+    for (let i = 0; i < spawnHistogram.counts.length; i++) {
+      const count = spawnHistogram.counts[i]!;
+      if (count === 0) continue;
+      const x = i * spawnHistogram.binWidthPx;
+      const y = queueScaleY(count, spawnHistogram.maxSpawns, chartTop, chartH);
+      ctx.fillRect(
+        x + 0.5,
+        y,
+        Math.max(1, spawnHistogram.binWidthPx - 1),
+        baselineY - y,
+      );
+    }
+  }
+
   // ── Y-axis labels (max at top, 0 at the visible baseline) ───────────────
   ctx.fillStyle = AXIS_LABEL;
   ctx.font = "10px monospace";
@@ -471,7 +558,11 @@ export function drawQueueCanvas(
     ctx.fillStyle = ACTIVE_LABEL;
     ctx.font = "10px monospace";
     ctx.textAlign = "right";
-    ctx.fillText(`tasks:${at.maxTasks}`, Math.max(0, drawW - 4), chartTop + 8);
+    ctx.fillText(
+      `${at.mode === "relative" ? "tasks Δ" : "tasks"}:${at.maxTasks}`,
+      Math.max(0, drawW - 4),
+      chartTop + 8,
+    );
 
     ctx.beginPath();
     let y = queueScaleY(at.startCount, at.maxTasks, chartTop, chartH);
@@ -485,6 +576,17 @@ export function drawQueueCanvas(
     ctx.strokeStyle = ACTIVE_STROKE;
     ctx.lineWidth = 1.5;
     ctx.stroke();
+  }
+
+  if (spawnHistogram !== null) {
+    ctx.fillStyle = ACTIVE_LABEL;
+    ctx.font = "10px monospace";
+    ctx.textAlign = "right";
+    ctx.fillText(
+      `spawn peak:${formatSpawnRate(spawnHistogram.peakSpawnsPerSecond)}`,
+      Math.max(0, drawW - 4),
+      Math.min(baselineY - 1, chartTop + 18),
+    );
   }
 
   // ── Surface a truncated / oversized window (never as complete) ─────

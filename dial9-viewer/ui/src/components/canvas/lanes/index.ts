@@ -175,6 +175,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       workerIds: data.workerIds,
       workerSpans: data.workerSpans,
       runtimeMetrics: data.runtimeMetrics,
+      runtimeTaskSpawns: data.runtimeTaskSpawns.byRuntime,
       laneIdentity: data.laneIdentity,
       runtimeAccents: data.runtimeAccents,
       workerQueueSamples: data.workerQueueSamples,
