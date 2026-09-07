@@ -1184,16 +1184,23 @@ mod shuttle_tests {
                     }
                 }
             }
-            let runtime_entries = seen.keys().filter(|k| k.starts_with("runtime.")).count();
+            let runtime_entries: std::collections::BTreeMap<String, String> = seen
+                .iter()
+                .filter(|(k, _)| k.starts_with("runtime."))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             assert_eq!(
-                runtime_entries, ATTACHERS,
-                "every concurrent attach must be observed exactly once in the trace: {seen:?}"
+                runtime_entries.len(),
+                ATTACHERS,
+                "every concurrent attach must be observed exactly once in the trace: \
+                 found these runtime.* entries: {runtime_entries:?}"
             );
             for i in 0..ATTACHERS {
                 let key = format!("runtime.runtime-{i}");
                 assert!(
-                    seen.contains_key(&key),
-                    "runtime-{i}'s entry was never observed in the trace: {seen:?}"
+                    runtime_entries.contains_key(&key),
+                    "runtime-{i}'s entry was never observed in the trace: \
+                     found these runtime.* entries: {runtime_entries:?}"
                 );
             }
         }
