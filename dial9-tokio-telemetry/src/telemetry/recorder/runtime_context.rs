@@ -1146,12 +1146,6 @@ mod shuttle_tests {
             let state = recorder_tokio::tokio_attach_state(&handle)
                 .expect("source installed by the attaches above");
 
-            assert_eq!(
-                state.registry.lock().unwrap().len(),
-                ATTACHERS,
-                "every concurrent attach must be observed exactly once"
-            );
-
             // bind_runtime's effect must land for every attacher.
             {
                 let registry = state.registry.lock().unwrap();
@@ -1190,6 +1184,11 @@ mod shuttle_tests {
                     }
                 }
             }
+            let runtime_entries = seen.keys().filter(|k| k.starts_with("runtime.")).count();
+            assert_eq!(
+                runtime_entries, ATTACHERS,
+                "every concurrent attach must be observed exactly once in the trace: {seen:?}"
+            );
             for i in 0..ATTACHERS {
                 let key = format!("runtime.runtime-{i}");
                 assert!(
