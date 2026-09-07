@@ -521,6 +521,10 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     addButton: document.getElementById("f-adddiff") as HTMLButtonElement,
     currentScope: () =>
       fullScopeQuery(new URLSearchParams(buildBrowserQuery(queryState()))),
+    // The accumulated host facet feeds the "different host" preset (#624).
+    // It is scoped to the current query, so it only ever offers hosts that
+    // actually have data in this view.
+    knownHosts: () => availFacets["host"]?.values ?? [],
   });
 
   startStreaming();

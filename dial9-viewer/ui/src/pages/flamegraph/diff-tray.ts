@@ -10,10 +10,21 @@
 // the first three are pure so the tray's behavior is testable without a
 // browser, and `mountDiffTray` is the thin DOM assembly over them.
 //
+// With A captured and B still open, the tray also offers the one-click "Quick
+// B" presets (#624) that derive B from A - see lib/canvas/diff-presets.ts.
+//
 // The tray is inserted AFTER the filter toolbar rather than inside #f-facets,
 // which renderFacets rebuilds on every streamed snapshot - a tray in there
 // would be destroyed mid-capture.
 
+import {
+  SHIFT_KEYS,
+  presetAvailability,
+  presetScope,
+  shiftLabel,
+  type Preset,
+  type PresetAvailability,
+} from "../../lib/canvas/diff-presets.js";
 import {
   addDiffCapture,
   diffSearch,
@@ -72,9 +83,18 @@ export interface TrayModel {
   canSwap: boolean;
   /** A diff needs both sides. */
   canOpen: boolean;
+  /**
+   * The "Quick B" presets (#624), or null when they do not apply. They only
+   * make sense with A captured and B still empty: with B already picked,
+   * deriving a new one would silently discard the user's choice.
+   */
+  presets: PresetAvailability | null;
 }
 
-export function trayModel(capture: DiffCapture): TrayModel {
+export function trayModel(
+  capture: DiffCapture,
+  knownHosts: Iterable<string> = [],
+): TrayModel {
   const both = !!(capture.a && capture.b);
   return {
     visible: !!(capture.a || capture.b),
@@ -82,6 +102,8 @@ export function trayModel(capture: DiffCapture): TrayModel {
     b: capture.b ? summarizeScope(capture.b) : null,
     canSwap: both,
     canOpen: both,
+    presets:
+      capture.a && !capture.b ? presetAvailability(capture.a, knownHosts) : null,
   };
 }
 
@@ -92,6 +114,11 @@ export interface DiffTrayDeps {
   openDiff(search: string): void;
   /** Paint the tray chrome. Called once at creation and after every change. */
   render(model: TrayModel): void;
+  /**
+   * Hosts this page knows about, for the "different host" preset. Read fresh
+   * on each render: the facet set grows as snapshots stream in.
+   */
+  knownHosts?(): Iterable<string>;
 }
 
 export interface DiffTray {
@@ -102,15 +129,24 @@ export interface DiffTray {
   remove(side: "a" | "b"): void;
   /** Open the A-vs-B diff; a no-op unless both sides are captured. */
   open(): void;
+  /**
+   * Derive side B from side A and open the diff directly (#624). A no-op
+   * unless A is captured - there is nothing to derive from otherwise.
+   */
+  applyPreset(preset: Preset): void;
   capture(): DiffCapture;
 }
 
 export function createDiffTray(deps: DiffTrayDeps): DiffTray {
   let capture: DiffCapture = { a: null, b: null };
 
+  function render(): void {
+    deps.render(trayModel(capture, deps.knownHosts?.() ?? []));
+  }
+
   function set(next: DiffCapture): void {
     capture = next;
-    deps.render(trayModel(capture));
+    render();
   }
 
   const tray: DiffTray = {
@@ -125,9 +161,16 @@ export function createDiffTray(deps: DiffTrayDeps): DiffTray {
       // fullScopeQuery over the live query), so no per-side flag fix-up.
       deps.openDiff(diffSearch(a, b));
     },
+    applyPreset: (preset) => {
+      const a = capture.a;
+      if (!a) return;
+      // A stays side A; the derived scope is B. Opened directly rather than
+      // parked in the tray - a one-click preset is the whole point.
+      deps.openDiff(diffSearch(a, presetScope(a, preset)));
+    },
     capture: () => capture,
   };
-  deps.render(trayModel(capture));
+  render();
   return tray;
 }
 
@@ -204,12 +247,98 @@ function makeSideCell(
   };
 }
 
+/**
+ * The "Quick B" preset row (#624): with A captured and B still open, derive
+ * B from A in one click - the same window on another host, or the same scope
+ * one hour / day / week earlier.
+ *
+ * Rebuilt host options on every render because the host facet grows as
+ * snapshots stream in.
+ */
+interface PresetRow {
+  root: HTMLDivElement;
+  render(available: PresetAvailability | null): void;
+}
+
+function makePresetRow(onPreset: (preset: Preset) => void): PresetRow {
+  const root = document.createElement("div");
+  root.style.cssText = "display:none;align-items:center;gap:8px;flex-wrap:wrap";
+
+  const label = document.createElement("span");
+  label.textContent = "Quick B:";
+  label.title = "Derive side B from side A without capturing it by hand";
+  label.style.cssText = "color:#888;font-weight:600";
+
+  const hostSelect = document.createElement("select");
+  hostSelect.style.cssText =
+    "background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px";
+  hostSelect.title = "Same window, a different host";
+  hostSelect.addEventListener("change", () => {
+    const host = hostSelect.value;
+    // Reset to the prompt so re-picking the same host fires again.
+    hostSelect.value = "";
+    if (host) onPreset({ kind: "host", host });
+  });
+
+  // Keep each button's enabled title alongside it: the disabled state swaps
+  // in an explanatory tooltip, and reading the live `title` back to restore
+  // it would latch the explanation permanently.
+  const shiftButtons = SHIFT_KEYS.map((shift) => {
+    const title = `Same scope, the equivalent window ${shift} earlier`;
+    return {
+      el: button(
+        shiftLabel(shift),
+        title,
+        () => onPreset({ kind: "shift", shift }),
+        GHOST + ";padding:2px 10px",
+      ),
+      title,
+    };
+  });
+
+  root.append(label, hostSelect, ...shiftButtons.map((b) => b.el));
+
+  return {
+    root,
+    render(available) {
+      root.style.display = available ? "flex" : "none";
+      if (!available) return;
+
+      hostSelect.textContent = "";
+      const prompt = document.createElement("option");
+      prompt.value = "";
+      prompt.textContent = available.otherHosts.length
+        ? "different host…"
+        : "no other host";
+      hostSelect.append(prompt);
+      for (const host of available.otherHosts) {
+        const option = document.createElement("option");
+        option.value = host;
+        // textContent, never innerHTML: host names are remote data.
+        option.textContent = host;
+        hostSelect.append(option);
+      }
+      hostSelect.disabled = available.otherHosts.length === 0;
+      hostSelect.style.opacity = available.otherHosts.length ? "1" : "0.4";
+
+      for (const b of shiftButtons) {
+        setEnabled(b.el, available.canTimeShift);
+        b.el.title = available.canTimeShift
+          ? b.title
+          : "This scope has no time window to shift";
+      }
+    },
+  };
+}
+
 export interface MountDiffTrayOptions {
   /** The tray is inserted after this element (the filter toolbar). */
   anchor: Element;
   /** The toolbar's "+ Add to diff" button. */
   addButton: HTMLButtonElement;
   currentScope(): URLSearchParams;
+  /** Hosts this page knows about, for the "different host" preset. */
+  knownHosts?(): Iterable<string>;
 }
 
 /** Build the tray chrome, wire it to a capture, and return the capture. */
@@ -257,11 +386,16 @@ export function mountDiffTray(opts: MountDiffTrayOptions): DiffTray {
     GHOST + ";cursor:pointer",
   );
 
-  root.append(title, cellA.root, cellB.root, swapBtn, openBtn, clearBtn);
+  const presetRow = makePresetRow((preset) => {
+    tray.applyPreset(preset);
+  });
+
+  root.append(title, cellA.root, cellB.root, swapBtn, openBtn, clearBtn, presetRow.root);
   opts.anchor.after(root);
 
   tray = createDiffTray({
     currentScope: opts.currentScope,
+    ...(opts.knownHosts ? { knownHosts: opts.knownHosts } : {}),
     openDiff: (search) => {
       window.open(window.location.pathname + "?" + search, "_blank");
     },
@@ -271,6 +405,7 @@ export function mountDiffTray(opts: MountDiffTrayOptions): DiffTray {
       cellB.render(model.b);
       setEnabled(swapBtn, model.canSwap);
       setEnabled(openBtn, model.canOpen);
+      presetRow.render(model.presets);
     },
   });
 

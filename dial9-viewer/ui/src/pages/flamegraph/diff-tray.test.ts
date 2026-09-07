@@ -57,6 +57,7 @@ describe("trayModel", () => {
       b: null,
       canSwap: false,
       canOpen: false,
+      presets: null,
     });
   });
 
@@ -83,16 +84,25 @@ describe("trayModel", () => {
  * the next one, standing in for the user changing the Host dropdown between
  * captures.
  */
-function setup(scopes: URLSearchParams[]) {
+function setup(scopes: URLSearchParams[], knownHosts: string[] = []) {
   let next = 0;
   const models: TrayModel[] = [];
   const openDiff = vi.fn();
   const tray = createDiffTray({
     currentScope: () => scopes[Math.min(next++, scopes.length - 1)]!,
     openDiff,
+    knownHosts: () => knownHosts,
     render: (model) => models.push(model),
   });
-  return { tray, openDiff, models };
+  return { tray, openDiff, models, last: () => models[models.length - 1]! };
+}
+
+/** The two scopes a diff link decodes back to. */
+function decode(openDiff: ReturnType<typeof vi.fn>) {
+  const search = openDiff.mock.calls[0]![0] as string;
+  const parsed = parseDiff(new URLSearchParams(search));
+  expect(parsed).not.toBeNull();
+  return parsed!;
 }
 
 describe("flamegraph diff capture tray", () => {
@@ -185,14 +195,12 @@ describe("flamegraph diff capture tray", () => {
     tray.open();
 
     expect(openDiff).toHaveBeenCalledTimes(1);
-    const search = openDiff.mock.calls[0]![0] as string;
-    const parsed = parseDiff(new URLSearchParams(search));
-    expect(parsed).not.toBeNull();
-    expect(parsed!.a.getAll("host")).toStrictEqual(["h1"]);
-    expect(parsed!.b.getAll("host")).toStrictEqual(["h2"]);
+    const parsed = decode(openDiff);
+    expect(parsed.a.getAll("host")).toStrictEqual(["h1"]);
+    expect(parsed.b.getAll("host")).toStrictEqual(["h2"]);
     // Both captured sides already carry api=1, so the diff needs no fix-up.
-    expect(parsed!.a.get("api")).toBe("1");
-    expect(parsed!.b.get("api")).toBe("1");
+    expect(parsed.a.get("api")).toBe("1");
+    expect(parsed.b.get("api")).toBe("1");
   });
 
   it("does nothing on open until both sides are captured", () => {
@@ -201,6 +209,98 @@ describe("flamegraph diff capture tray", () => {
     tray.open();
     tray.add();
     tray.open();
+
+    expect(openDiff).not.toHaveBeenCalled();
+  });
+});
+
+// The "Quick B" presets (#624): with A captured, derive B in one click
+// instead of navigating a second view and capturing it by hand.
+describe("flamegraph diff quick-B presets", () => {
+  it("offers presets only while A is set and B is empty", () => {
+    const { tray, last } = setup(
+      [scope({}, ["h1"]), scope({}, ["h2"])],
+      ["h1", "h2"],
+    );
+
+    // Nothing captured: nothing to derive from.
+    expect(last().presets).toBeNull();
+
+    tray.add();
+    expect(last().presets).not.toBeNull();
+    expect(last().presets!.otherHosts).toStrictEqual(["h2"]);
+    expect(last().presets!.canTimeShift).toBe(true);
+
+    // With B already chosen, deriving a new one would discard that choice.
+    tray.add();
+    expect(last().presets).toBeNull();
+
+    // Dropping B brings the presets back.
+    tray.remove("b");
+    expect(last().presets).not.toBeNull();
+  });
+
+  it("tracks the host facet as it grows across snapshots", () => {
+    const hosts: string[] = [];
+    let next = 0;
+    const scopes = [scope({}, ["h1"])];
+    const models: TrayModel[] = [];
+    const tray = createDiffTray({
+      currentScope: () => scopes[Math.min(next++, scopes.length - 1)]!,
+      openDiff: vi.fn(),
+      knownHosts: () => hosts,
+      render: (model) => models.push(model),
+    });
+
+    tray.add();
+    expect(models[models.length - 1]!.presets!.otherHosts).toStrictEqual([]);
+
+    // A later snapshot reveals more hosts; the next render picks them up.
+    hosts.push("h1", "h2");
+    tray.remove("b"); // no-op on the capture, but forces a re-render
+    expect(models[models.length - 1]!.presets!.otherHosts).toStrictEqual(["h2"]);
+  });
+
+  it("opens A vs the same window on another host", () => {
+    const { tray, openDiff } = setup([scope({}, ["h1"])], ["h1", "h2"]);
+
+    tray.add();
+    tray.applyPreset({ kind: "host", host: "h2" });
+
+    const parsed = decode(openDiff);
+    expect(parsed.a.getAll("host")).toStrictEqual(["h1"]);
+    expect(parsed.b.getAll("host")).toStrictEqual(["h2"]);
+    // Same window on both sides - that is what makes it a host comparison.
+    expect(parsed.b.get("start_ns")).toBe(parsed.a.get("start_ns"));
+    expect(parsed.b.get("end_ns")).toBe(parsed.a.get("end_ns"));
+  });
+
+  it("opens A vs the same scope an hour earlier", () => {
+    const { tray, openDiff } = setup([scope({}, ["h1"])]);
+
+    tray.add();
+    tray.applyPreset({ kind: "shift", shift: "1h" });
+
+    const parsed = decode(openDiff);
+    const shift = BigInt(parsed.a.get("start_ns")!) - BigInt(parsed.b.get("start_ns")!);
+    expect(shift).toBe(3_600_000_000_000n);
+    expect(parsed.b.getAll("host")).toStrictEqual(["h1"]);
+  });
+
+  it("leaves the capture alone - a preset opens a link, it does not fill B", () => {
+    const a = scope({}, ["h1"]);
+    const { tray } = setup([a], ["h1", "h2"]);
+
+    tray.add();
+    tray.applyPreset({ kind: "host", host: "h2" });
+
+    expect(tray.capture()).toStrictEqual({ a, b: null });
+  });
+
+  it("does nothing without an A to derive from", () => {
+    const { tray, openDiff } = setup([scope({}, ["h1"])], ["h1", "h2"]);
+
+    tray.applyPreset({ kind: "host", host: "h2" });
 
     expect(openDiff).not.toHaveBeenCalled();
   });
