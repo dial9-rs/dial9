@@ -1074,29 +1074,41 @@ mod shuttle_tests {
     use super::super::recorder_tokio;
     use super::*;
     use crate::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
-    use dial9_core::shared_state::SharedState;
     use dial9_core::shuttle_test;
 
     shuttle_test! {
-        default;
-        // Races concurrent attaches against a concurrent `segment_metadata`
-        // reader, sharing one `SharedState` so every attacher's
-        // `with_source_or_insert` races to install the same
-        // `TokioRuntimesSource`.
+        num_iters = 10_000, depth = 3;
+        // Races concurrent attaches on one cloned `Dial9Handle`, matching
+        // `attach_tokio_runtime`'s documented usage in `recorder_tokio.rs`.
+        // `num_iters` doubled from `default` for the real flush thread's
+        // own background cycling.
+        //
+        // Checked via the sealed trace, not `segment_metadata` directly:
+        // that method is single-consumer, and the real flush thread racing
+        // to poll it can consume a change before this test sees it.
         //
         // Worker-ID claiming needs a live Tokio worker thread, which
-        // shuttle has none of. Looked up post-attach and inserted
-        // directly to stand in for it.
+        // shuttle has none of. Looked up post-attach and inserted directly
+        // to stand in for it.
         fn shuttle_concurrent_attach() {
+            // Fixed time, like `test_core_pipeline`: otherwise the flush
+            // thread's rotation checks read real elapsed time, which can
+            // differ between a shuttle replay's record and re-run passes.
+            let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+                metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+            ));
+
             const ATTACHERS: usize = 3;
-            let shared = Arc::new(SharedState::new(0));
-            shared.enable();
+            let writer = dial9_core::buffer::MemoryBuffer::new(1 << 16).unwrap();
+            let sealed = dial9_core::test_util::writer_sealed_segments(&writer);
+            let recorder = dial9_core::recorder::recorder(writer).build();
+            recorder.handle().enable();
+            let handle = recorder.handle().clone();
 
             let attachers: Vec<_> = (0..ATTACHERS)
                 .map(|i| {
-                    let shared = shared.clone();
+                    let handle = handle.clone();
                     crate::primitives::thread::spawn(move || {
-                        let handle = dial9_core::test_util::connected_handle(shared);
                         let builder = tokio::runtime::Builder::new_current_thread();
                         let options = TokioAttachOptions::builder()
                             .runtime_name(format!("runtime-{i}"))
@@ -1118,34 +1130,21 @@ mod shuttle_tests {
                 })
                 .collect();
 
-            // Accumulates across polls: `segment_metadata` re-emits the
-            // full snapshot on each change, not the delta, so one poll can
-            // see nothing new even though an earlier one already reported it.
-            let reader = {
-                let shared = shared.clone();
-                crate::primitives::thread::spawn(move || {
-                    let mut seen = Vec::new();
-                    let mut out = Vec::new();
-                    for _ in 0..ATTACHERS {
-                        out.clear();
-                        shared.with_sources_mut(|sources| {
-                            for source in sources.iter_mut() {
-                                source.segment_metadata(&mut out);
-                            }
-                        });
-                        seen.extend(out.iter().cloned());
-                    }
-                    seen
-                })
-            };
-
             let bound_ids: Vec<_> = attachers.into_iter().map(|a| a.join().unwrap()).collect();
-            let mut seen = reader.join().unwrap();
 
-            let state = recorder_tokio::tokio_attach_state(
-                &dial9_core::test_util::connected_handle(shared.clone()),
-            )
-            .expect("source installed by the attaches above");
+            // A trivial marker event: `finalize()` discards a segment that
+            // never held a real event, so without this the metadata-only
+            // segment below would never get sealed at all.
+            handle.record_event(WorkerParkEvent {
+                timestamp_ns: 0,
+                worker_id: WorkerId::UNKNOWN,
+                local_queue: 0,
+                cpu_time_ns: 0,
+                tid: 0,
+            });
+
+            let state = recorder_tokio::tokio_attach_state(&handle)
+                .expect("source installed by the attaches above");
 
             assert_eq!(
                 state.registry.lock().unwrap().len(),
@@ -1166,18 +1165,36 @@ mod shuttle_tests {
                 }
             }
 
-            // The racing reader may have finished its own polls before the last
-            // attach landed, so `seen` alone isn't guaranteed complete.
-            shared.with_sources_mut(|sources| {
-                for source in sources.iter_mut() {
-                    source.segment_metadata(&mut seen);
+            drop(recorder); // Finalizes: seals the pending segment.
+
+            let mut seen = std::collections::HashMap::new();
+            for bytes in sealed.take() {
+                let mut dec =
+                    dial9_trace_format::decoder::Decoder::new(&bytes).expect("valid trace header");
+                while let Some(frame) = dec.next_frame_ref().expect("decode frame") {
+                    let dial9_trace_format::decoder::DecodedFrameRef::Event { type_id, values, .. } =
+                        frame
+                    else {
+                        continue;
+                    };
+                    if dec.registry().get(type_id).map(|s| s.name()) != Some("SegmentMetadataEvent")
+                    {
+                        continue;
+                    }
+                    if let Some(dial9_trace_format::types::FieldValueRef::StringMap(m)) =
+                        values.first()
+                    {
+                        for (k, v) in m.iter() {
+                            seen.insert(k.to_string(), v.to_string());
+                        }
+                    }
                 }
-            });
+            }
             for i in 0..ATTACHERS {
                 let key = format!("runtime.runtime-{i}");
                 assert!(
-                    seen.iter().any(|(k, _)| *k == key),
-                    "runtime-{i}'s entry was never observed: {seen:?}"
+                    seen.contains_key(&key),
+                    "runtime-{i}'s entry was never observed in the trace: {seen:?}"
                 );
             }
         }

@@ -65,6 +65,7 @@ pub use pipeline_helpers::*;
 /// `SegmentProcessor` end-to-end without touching the worker internals.
 #[cfg(feature = "pipeline")]
 mod pipeline_helpers {
+    use crate::buffer::{BufferMode, SegmentWriter};
     use crate::dump::{DumpId, DumpTrigger};
     use crate::fs::Fs;
     use crate::pipeline::SegmentProcessor;
@@ -94,6 +95,37 @@ mod pipeline_helpers {
     /// A fresh `DumpId`, for tests that hand-build a `DumpCompletion`.
     pub fn new_dump_id() -> DumpId {
         DumpId::new()
+    }
+
+    /// Opaque handle to `writer`'s in-memory sealed-segment store. Capture
+    /// this before `writer` moves into a `Recorder`/`RecorderBuilder`, so a
+    /// sibling-crate test can later inspect the real trace via
+    /// [`SealedSegments::take`] instead of a source's internal state.
+    pub fn writer_sealed_segments<M: BufferMode>(writer: &SegmentWriter<M>) -> SealedSegments {
+        SealedSegments(writer.fs_handle().expect("writer exposes its fs"))
+    }
+
+    /// See [`writer_sealed_segments`].
+    pub struct SealedSegments(Arc<Fs>);
+
+    impl std::fmt::Debug for SealedSegments {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SealedSegments").finish_non_exhaustive()
+        }
+    }
+
+    impl SealedSegments {
+        /// Every segment sealed since the last call, as raw trace bytes.
+        /// Decode each with [`dial9_trace_format::decoder::Decoder`] to
+        /// inspect its events.
+        pub fn take(&self) -> Vec<Vec<u8>> {
+            self.0
+                .take_files()
+                .segments
+                .into_iter()
+                .map(|seg| seg.load().expect("load sealed segment").1.into_vec())
+                .collect()
+        }
     }
 
     /// A disk-backed `SegmentRef` for sibling-crate processor tests that need
