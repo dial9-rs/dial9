@@ -102,4 +102,23 @@ declare module "*/heatmap.js" {
    * -> red -> yellow; 0 = page background).
    */
   export function densityColor(norm: number): string;
+
+  /**
+   * Whether a document-level click should clear the current browse
+   * selection. Control surfaces preserve it: the timeline itself, the
+   * actions bar, and the page header (the TZ toggle only relabels the
+   * axis). `wasDrag` suppresses the synthetic click that trails a
+   * selection drag ending outside the pane.
+   *
+   * Every flag is required so a caller cannot silently omit one and
+   * reintroduce the clicks-that-should-not-clear bugs (#644, #645).
+   */
+  export function shouldClearSelectionOnClick(o: {
+    isBrowseTab: boolean;
+    hasSelection: boolean;
+    wasDrag: boolean;
+    targetInHeatmap: boolean;
+    targetInActions: boolean;
+    targetInHeader: boolean;
+  }): boolean;
 }

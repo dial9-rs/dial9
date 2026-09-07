@@ -15,6 +15,7 @@ export {
   segmentGaps,
   segmentSpan,
   segmentsOverlapping,
+  shouldClearSelectionOnClick,
   tileSegments,
   totalBytes,
 } from "../../../heatmap.js";
