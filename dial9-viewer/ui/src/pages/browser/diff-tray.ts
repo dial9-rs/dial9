@@ -4,10 +4,22 @@
 // frozen) and appended next to the actions bar; capture state lives in the
 // store's `diff` slice, so this component only renders from it and dispatches
 // the diff verbs on click.
+//
+// With A captured and B still open, the tray also offers the "Quick B"
+// presets (#624) that derive B from A - the same window on another host in
+// the browse view, or the same scope 1h/24h/7d earlier. They fill B in the
+// tray rather than launching, so the user still picks the comparison view.
 
+import {
+  SHIFT_KEYS,
+  presetAvailability,
+  shiftLabel,
+  type Preset,
+} from "../../lib/canvas/diff-presets.js";
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { fmtTick } from "./format.js";
+import type { HeatmapRow } from "./state.js";
 
 // A row of theme-matched inline styles kept local to the tray because the
 // page's CSS is frozen.
@@ -42,6 +54,36 @@ function summarize(scope: URLSearchParams, localTz: boolean): string {
   const bucket = scope.get("bucket");
   if (bucket) bits.push(bucket);
   return bits.join(" · ") || "(empty scope)";
+}
+
+/** One option in the "different host" preset dropdown. */
+export interface HostOption {
+  /** The host to scope side B to. */
+  value: string;
+  /** "service / host" where the service is known, else the bare host. */
+  label: string;
+}
+
+/**
+ * Hosts offerable as side B, labelled from the browse view's rows.
+ *
+ * Rows are the hosts currently on screen, which is exactly the set the user
+ * could otherwise select and capture by hand. Availability itself comes from
+ * the shared preset rules, so this tray and the flamegraph's agree.
+ */
+export function presetHostOptions(
+  scopeA: URLSearchParams,
+  rows: readonly HeatmapRow[],
+): HostOption[] {
+  const services = new Map<string, string>();
+  for (const row of rows) {
+    if (row.host && !services.has(row.host)) services.set(row.host, row.service);
+  }
+  const { otherHosts } = presetAvailability(scopeA, services.keys());
+  return otherHosts.map((host) => {
+    const service = services.get(host);
+    return { value: host, label: service ? `${service} / ${host}` : host };
+  });
 }
 
 function formatDuration(seconds: number): string {
@@ -102,7 +144,45 @@ export function mountDiffTray({ store, els, actions }: PageCtx): void {
     button("⚡ Tokio Stats", () => actions.launchDiff("tokio"), launchStyle),
   );
 
-  tray.append(header, sides, launch);
+  // "Quick B" presets (#624), between the sides and the launch row: they are
+  // a way to finish filling the capture, so they read before "Compare in:".
+  const presets = document.createElement("div");
+  presets.style.cssText =
+    "display:none;margin-top:10px;align-items:center;gap:8px;flex-wrap:wrap";
+  const presetLabel = document.createElement("span");
+  presetLabel.textContent = "Quick B:";
+  presetLabel.style.color = "#8b949e";
+
+  const applyPreset = (preset: Preset): void => {
+    actions.applyDiffPreset(preset);
+  };
+  const shiftBtns = SHIFT_KEYS.map((shift) => {
+    const b = button(shiftLabel(shift), () => applyPreset({ kind: "shift", shift }), ghost);
+    b.title = `Side B = side A, the equivalent window ${shift} earlier`;
+    return b;
+  });
+
+  const hostSelect = document.createElement("select");
+  hostSelect.style.cssText =
+    "background:#14142a;color:#e0e0e0;border:1px solid #444;padding:3px 8px;border-radius:3px";
+  hostSelect.title = "Side B = side A on a different host, same time window";
+  hostSelect.addEventListener("change", () => {
+    const host = hostSelect.value;
+    // Back to the prompt so the same host can be re-picked after a Clear.
+    hostSelect.value = "";
+    if (host) applyPreset({ kind: "host", host });
+  });
+
+  presets.append(presetLabel, ...shiftBtns, hostSelect);
+
+  /** Enable a control and match its affordance to that state. */
+  const setEnabled = (el: HTMLButtonElement | HTMLSelectElement, on: boolean): void => {
+    el.disabled = !on;
+    el.style.opacity = on ? "1" : "0.4";
+    el.style.cursor = on ? "pointer" : "not-allowed";
+  };
+
+  tray.append(header, sides, presets, launch);
   els.actionsBar.after(tray);
 
   store.subscribe(["diff", "browse", "ui"], (state) => {
@@ -118,6 +198,30 @@ export function mountDiffTray({ store, els, actions }: PageCtx): void {
     cellB.render(b ? summarize(b, localTz) : null);
     launch.style.display = a && b ? "flex" : "none";
     swapBtn.disabled = !(a && b);
+
+    // Presets derive B from A, so they only apply with A set and B open.
+    presets.style.display = a && !b ? "flex" : "none";
+    if (a && !b) {
+      const options = presetHostOptions(a, state.browse.rows);
+      hostSelect.textContent = "";
+      const prompt = document.createElement("option");
+      prompt.value = "";
+      prompt.textContent = options.length
+        ? "same time, different host…"
+        : "no other host in view";
+      hostSelect.append(prompt);
+      for (const option of options) {
+        const el = document.createElement("option");
+        el.value = option.value;
+        // textContent, never innerHTML: service/host names are remote data.
+        el.textContent = option.label;
+        hostSelect.append(el);
+      }
+      setEnabled(hostSelect, options.length > 0);
+
+      const canShift = presetAvailability(a, []).canTimeShift;
+      for (const btn of shiftBtns) setEnabled(btn, canShift);
+    }
   });
 }
 

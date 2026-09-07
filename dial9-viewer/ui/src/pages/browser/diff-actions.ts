@@ -7,6 +7,7 @@
 // Leaf seam modules, NOT the lib barrels: the barrel indexes evaluate
 // modules that import trace_analysis.js / trace_parser.js at init (they
 // expect <script>-established globals), which this page must not load.
+import { presetScope, type Preset } from "../../lib/canvas/diff-presets.js";
 import {
   addDiffCapture,
   chooseTarget,
@@ -23,6 +24,7 @@ export interface DiffActions {
   swapDiff(): void;
   clearDiffSide(side: "a" | "b"): void;
   launchDiff(kind: "flamegraph" | "tokio"): void;
+  applyDiffPreset(preset: Preset): void;
 }
 
 export function createDiffActions(store: BrowserStore, els: BrowserEls): DiffActions {
@@ -59,5 +61,25 @@ export function createDiffActions(store: BrowserStore, els: BrowserEls): DiffAct
     window.open(page + "?" + search, "_blank");
   }
 
-  return { addToDiff, clearDiff, swapDiff, clearDiffSide, launchDiff };
+  // Quick-B preset (#624): derive side B from side A instead of navigating to
+  // a second scope and capturing it by hand. Only while A is set and B is
+  // still empty, so a preset can never silently replace a chosen B.
+  //
+  // Unlike the flamegraph tray's presets, this FILLS the tray rather than
+  // opening a diff: this page can compare in either the flamegraph or
+  // tokio-stats, so the target stays the user's choice.
+  function applyDiffPreset(preset: Preset): void {
+    const { a, b } = store.getState().diff;
+    if (!a || b) return;
+    store.update("diff", { a, b: presetScope(a, preset) });
+  }
+
+  return {
+    addToDiff,
+    clearDiff,
+    swapDiff,
+    clearDiffSide,
+    launchDiff,
+    applyDiffPreset,
+  };
 }
