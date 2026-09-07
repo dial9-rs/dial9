@@ -19,6 +19,10 @@ const { parseTrace, EVENT_TYPES, deduplicateSamples } = require(resolve('trace_p
 const { activeTaskSeries, buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, buildSpanData, globalQueueSeries } = require(resolve('trace_analysis.js'));
 
+/** How many offending polls each severity tier names before rolling the rest
+ *  into a single count line. */
+const LONG_POLL_REPORT_LIMIT = 5;
+
 async function redFlagScan(tracePath) {
   for await (const trace of parseTrace(tracePath)) {
     const workerIds = [...new Set(
@@ -49,22 +53,41 @@ async function redFlagScan(tracePath) {
     }
 
     // 1. Long polls (blocking the runtime)
+    //
+    // The tiers are the pass/fail signal and stay: "no long-poll finding" means
+    // a healthy runtime, which a pure worst-N ranking could never say. What is
+    // ranked is which offenders get REPORTED - a busy trace can cross 10ms
+    // thousands of times, and one finding per poll drowns the scan rather than
+    // informing it. Each tier reports its worst LONG_POLL_REPORT_LIMIT plus a
+    // rollup naming the true count.
+    const longPollTiers = [
+      { severity: 'critical', floorMs: 50, hits: [] },
+      { severity: 'warning', floorMs: 10, hits: [] },
+    ];
     for (const w of workerIds) {
       for (const p of spans.workerSpans[w].polls) {
         const durMs = (p.end - p.start) / 1e6;
-        if (durMs > 50) {
-          findings.push({
-            severity: 'critical',
-            check: 'long-poll',
-            message: `Poll of ${durMs.toFixed(1)}ms on worker ${w} at ${((p.start - minTs) / 1e6).toFixed(1)}ms (task ${p.taskId}, spawn: ${p.spawnLoc})`,
-          });
-        } else if (durMs > 10) {
-          findings.push({
-            severity: 'warning',
-            check: 'long-poll',
-            message: `Poll of ${durMs.toFixed(1)}ms on worker ${w} at ${((p.start - minTs) / 1e6).toFixed(1)}ms (task ${p.taskId}, spawn: ${p.spawnLoc})`,
-          });
-        }
+        const tier = longPollTiers.find(t => durMs > t.floorMs);
+        if (tier) tier.hits.push({ durMs, worker: w, poll: p });
+      }
+    }
+    for (const tier of longPollTiers) {
+      if (tier.hits.length === 0) continue;
+      tier.hits.sort((a, b) => b.durMs - a.durMs);
+      for (const h of tier.hits.slice(0, LONG_POLL_REPORT_LIMIT)) {
+        findings.push({
+          severity: tier.severity,
+          check: 'long-poll',
+          message: `Poll of ${h.durMs.toFixed(1)}ms on worker ${h.worker} at ${((h.poll.start - minTs) / 1e6).toFixed(1)}ms (task ${h.poll.taskId}, spawn: ${h.poll.spawnLoc})`,
+        });
+      }
+      const hidden = tier.hits.length - LONG_POLL_REPORT_LIMIT;
+      if (hidden > 0) {
+        findings.push({
+          severity: tier.severity,
+          check: 'long-poll',
+          message: `... and ${hidden} more poll(s) over ${tier.floorMs}ms (${tier.hits.length} total, worst ${tier.hits[0].durMs.toFixed(1)}ms)`,
+        });
       }
     }
 

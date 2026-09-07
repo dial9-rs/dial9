@@ -236,8 +236,12 @@ declare module "*/trace_analysis.js" {
     | "spawn-delay"
     | "off-cpu-active";
 
-  /** Default severity floor for the "spawn-delay" detector, in microseconds. */
+  /** Default severity floor for the "spawn-delay" detector, in microseconds.
+   *  Zero - the detectors rank rather than threshold. */
   export const DEFAULT_SPAWN_DELAY_THRESHOLD_US: number;
+
+  /** How many points a detector returns when the caller passes no `limit`. */
+  export const POI_DEFAULT_WORST_N: number;
 
   export interface PointOfInterest {
     time: number;
@@ -271,6 +275,10 @@ declare module "*/trace_analysis.js" {
       spawnDelayThresholdUs?: number;
       /** Required for the "off-cpu-active" filter. */
       hasWorkerCpuTime?: boolean;
+      /** Keep only the worst N by severity. Defaults to POI_DEFAULT_WORST_N. */
+      limit?: number;
+      /** Receives the true match count BEFORE the cap. */
+      onTotal?: (total: number) => void;
     }
   ): PointOfInterest[];
 

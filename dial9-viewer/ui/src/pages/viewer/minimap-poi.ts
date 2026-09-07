@@ -16,10 +16,15 @@
 // "spawn-delay" runs at its DEFAULT threshold, not the rail's live one: these
 // ticks are cached on trace identity, and rebuilding them on every threshold
 // edit would trade a stable overview for a flickering one.
+//
+// Each detector contributes its worst MINIMAP_POI_LIMIT points, not everything
+// it matched. The detectors rank instead of thresholding, so an uncapped union
+// would ink a tick for every poll in the trace and say nothing.
 
 import {
   DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   EVENT_TYPES,
+  POI_DEFAULT_WORST_N,
   filterPointsOfInterest,
 } from "../../lib/trace/index.js";
 import { lifecycleWorkerIds, sharedDetectorInputs } from "../../lib/trace/derived.js";
@@ -28,6 +33,9 @@ import type {
   PointOfInterest,
   PointOfInterestType,
 } from "../../lib/trace/index.js";
+
+/** How many ticks each detector contributes to the overview strip. */
+export const MINIMAP_POI_LIMIT = POI_DEFAULT_WORST_N;
 
 /** One overview tick: where a point of interest sits, and what kind. */
 export interface MinimapPoi {
@@ -43,10 +51,10 @@ export interface MinimapPoi {
 
 /**
  * Derive the overview POI ticks for one parsed trace: reconstruct worker
- * spans, compute scheduling delays, then union the applicable detectors. Each
- * detector runs with `sortByWorst` on; ticks are de-duplicated by (time,
- * worker, type) since a poll can satisfy more than one detector. Returns []
- * for an empty trace.
+ * spans, compute scheduling delays, then union each applicable detector's worst
+ * MINIMAP_POI_LIMIT points. Ticks are de-duplicated by (time, worker, type)
+ * since a poll can satisfy more than one detector. Returns [] for an empty
+ * trace.
  */
 export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   const workerIds = lifecycleWorkerIds(trace);
@@ -88,6 +96,7 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
       taskSpawnTimes: trace.taskSpawnTimes,
       spawnDelayThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
       hasWorkerCpuTime,
+      limit: MINIMAP_POI_LIMIT,
     };
     const pois: PointOfInterest[] = lanes.columnar
       ? lanes.store.pointsOfInterest(type, workerIds, schedDelays, opts)

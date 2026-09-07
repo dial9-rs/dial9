@@ -11,7 +11,7 @@ import { deriveWorkerIds } from "../../lib/trace/derived.js";
 import { buildWorkerSpans } from "../../lib/trace/index.js";
 import type { ParsedTrace } from "../../types/trace.js";
 import type { PoiSlice } from "../../types/state.js";
-import { DEFAULT_SPAWN_DELAY_THRESHOLD_US } from "./poi.js";
+import { DEFAULT_SPAWN_DELAY_THRESHOLD_US, POI_WORST_N_DEFAULT } from "./poi.js";
 import {
   deriveTaskViewModel,
   sortTasks,
@@ -25,6 +25,7 @@ import {
 const POI: PoiSlice = {
   filter: "sched",
   spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+  worstN: POI_WORST_N_DEFAULT,
   sortKey: "duration",
   sortDir: "desc",
   index: -1,

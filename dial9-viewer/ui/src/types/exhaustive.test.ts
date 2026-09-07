@@ -179,7 +179,7 @@ const initialState: StoreState = {
     scopedSpawnLoc: null,
     spawnedTasksRange: null,
   },
-  poi: { filter: "sched", spawnThresholdUs: 100, sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
+  poi: { filter: "sched", spawnThresholdUs: 100, worstN: 50, sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
   uiPrefs: {
     // All four foldable panels start collapsed;
     // Record<FoldablePanelKind, boolean> forces exactly these keys.

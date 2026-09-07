@@ -30,6 +30,7 @@ export {
   getTraceTimeRange,
   globalQueueSeries,
   hasCpuProfileSamples,
+  POI_DEFAULT_WORST_N as CORE_POI_DEFAULT_WORST_N,
   selectSpanRenderSet,
   sumActiveTasksByCycle,
   sumGlobalQueueByCycle,

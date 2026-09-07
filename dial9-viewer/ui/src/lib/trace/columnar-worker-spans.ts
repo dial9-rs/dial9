@@ -22,9 +22,22 @@ import type {
   WorkerSpansResult,
 } from "../../types/trace.js";
 
-/** Severity floor for "spawn-delay", in microseconds. The frozen core keeps its
+/** Default severity floor for "spawn-delay", in microseconds. Zero - the
+ *  detectors rank rather than threshold, so nothing is hidden by default; the
+ *  floor stays available as an explicit user filter. The frozen core keeps its
  *  own copy (it must stay self-contained); columnar-pois.test.ts pins them. */
-export const DEFAULT_SPAWN_DELAY_THRESHOLD_US = 100;
+export const DEFAULT_SPAWN_DELAY_THRESHOLD_US = 0;
+
+/**
+ * How many points a detector returns when the caller passes no `limit`.
+ *
+ * The detectors rank by severity instead of applying a fixed cutoff: a cutoff
+ * answers the wrong question in both directions - ">1ms" buries five real
+ * outliers under ten thousand borderline matches on a busy trace, and reports
+ * nothing at all on a fast one whose worst poll is 800us and still worth
+ * seeing. The frozen core keeps its own copy; columnar-pois.test.ts pins them.
+ */
+export const POI_DEFAULT_WORST_N = 50;
 
 /** Zero is honoured; anything non-finite or negative falls back to the default
  *  rather than admitting every task. */
@@ -47,11 +60,11 @@ export interface PoiOpts {
   /** Required for "off-cpu-active"; see DetectorInputs.hasWorkerCpuTime. */
   hasWorkerCpuTime?: boolean;
   /**
-   * Keep at most this many points, under the ACTIVE order - the worst `limit`
-   * when `sortByWorst`, else the earliest. Detectors like "uninstrumented" match
-   * essentially every poll on a lightly-instrumented trace (millions), and
-   * materializing them all costs more memory than the trace itself. Omit for
-   * the unbounded result.
+   * Keep only the worst `limit` points by severity. Selection is always by
+   * `value`, never by the active presentation order: the detectors no longer
+   * threshold, so "long-poll" matches every poll on the trace and a
+   * chronological cap would return the first N and drop every outlier behind
+   * them. Defaults to POI_DEFAULT_WORST_N.
    */
   limit?: number;
   /** Receives the TRUE match count, before `limit` truncates. Counts remain
@@ -562,16 +575,18 @@ export class ColumnarWorkerSpans {
       start: c.start[i]!, end: c.end[i]!, taskId: c.taskId[i]!,
     });
 
-    const order = opts.sortByWorst
-      ? (a: PointOfInterest, b: PointOfInterest): number => b.value - a.value
-      : (a: PointOfInterest, b: PointOfInterest): number => a.time - b.time;
-    const cap = opts.limit !== undefined && opts.limit > 0 ? opts.limit : Infinity;
+    const cap =
+      opts.limit !== undefined && opts.limit > 0 ? opts.limit : POI_DEFAULT_WORST_N;
     let matched = 0;
-    // Bounded retention: let the buffer grow to 2x the cap, then sort and drop
+    // Bounded retention: let the buffer grow to 2x the cap, then rank and drop
     // the tail. Amortized O(n) with O(cap) live objects, so a detector matching
     // millions of polls never holds more than a bounded slice of them.
+    //
+    // Retention ranks by SEVERITY even when the caller wants chronological
+    // output. Capping in time order would keep the first N points and discard
+    // every outlier after them.
     const compact = (): void => {
-      points.sort(order);
+      points.sort((a, b) => b.value - a.value);
       points.length = Math.min(points.length, cap);
     };
     const add = (p: PointOfInterest): void => {
@@ -586,7 +601,10 @@ export class ColumnarWorkerSpans {
       if (filterType === "sched") {
         for (let i = 0; i < c.nParks; i++) {
           const sw = c.parkSchedWait[i]!;
-          if (hasSchedWait && !Number.isNaN(sw) && sw > 100) {
+          // NaN = the park carries no kernel timing (missing data); zero = the
+          // kernel kept it off-CPU for no time, which is not a delay. Neither is
+          // a point of interest, and the zeros dominate a healthy trace.
+          if (hasSchedWait && sw > 0) {
             add({
               time: c.parkEnd[i]! - sw, worker: w, type: "sched", value: sw,
               span: { start: c.parkStart[i]!, end: c.parkEnd[i]! },
@@ -596,7 +614,7 @@ export class ColumnarWorkerSpans {
       } else if (filterType === "long-poll") {
         for (let i = 0; i < c.n; i++) {
           const durMs = (c.end[i]! - c.start[i]!) / 1e6;
-          if (durMs > 1) add({ time: c.start[i]!, worker: w, type: "long-poll", value: durMs, span: pollSpanForJump(c, i) });
+          if (durMs > 0) add({ time: c.start[i]!, worker: w, type: "long-poll", value: durMs, span: pollSpanForJump(c, i) });
         }
       } else if (filterType === "cpu-sampled") {
         const cpuOff = c.cpuOff, schedOff = c.schedOff;
@@ -608,12 +626,15 @@ export class ColumnarWorkerSpans {
           }
         }
       } else if (filterType === "off-cpu-active" && opts.hasWorkerCpuTime) {
-        // Thresholds mirror the red-flags script's `cpu-contention` check.
         for (let i = 0; i < c.nActives; i++) {
           const start = c.activeStart[i]!, end = c.activeEnd[i]!, ratio = c.activeRatio[i]!;
-          const wall = end - start;
-          if (wall > 1e6 && ratio < 0.5) {
-            add({ time: start, worker: w, type: "off-cpu-active", value: (1 - ratio) * wall, span: { start, end } });
+          // Ranked by off-CPU time, with no "busy for 1ms" or "under 50%
+          // on-CPU" gate: those hid a 900us period that was 95% descheduled
+          // behind a 2ms one that was 49%. Fully on-CPU scores 0, which is not
+          // a point of interest.
+          const offCpu = (1 - ratio) * (end - start);
+          if (offCpu > 0) {
+            add({ time: start, worker: w, type: "off-cpu-active", value: offCpu, span: { start, end } });
           }
         }
       }
@@ -621,10 +642,8 @@ export class ColumnarWorkerSpans {
 
     if (filterType === "wake-delay") {
       for (const sd of schedDelays) {
-        const delayUs = sd.delay / 1000;
-        if (delayUs > 100) {
-          add({ time: sd.wakeTime, worker: sd.worker, type: "wake-delay", value: delayUs, span: sd.poll, schedDelay: sd });
-        }
+        if (sd.delay <= 0) continue;
+        add({ time: sd.wakeTime, worker: sd.worker, type: "wake-delay", value: sd.delay / 1000, span: sd.poll, schedDelay: sd });
       }
     }
 
@@ -674,6 +693,9 @@ export class ColumnarWorkerSpans {
 
     compact();
     opts.onTotal?.(matched);
+    // `compact` left the survivors severity-ranked, so only the chronological
+    // presentation needs a re-sort.
+    if (!opts.sortByWorst) points.sort((a, b) => a.time - b.time);
     return points as PointOfInterest[];
   }
 

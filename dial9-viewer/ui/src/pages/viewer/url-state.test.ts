@@ -128,12 +128,26 @@ describe("viewer URL state: issues-rail (poi)", () => {
     expect(out.poiSpawnThresholdUs).toBe(2500);
   });
 
-  it("carries a zero threshold rather than reading it as absent", () => {
+  it("omits the zero threshold, which is now the default floor", () => {
     const { params, out } = roundTrip(
       mkState({ poi: { filter: "spawn-delay", spawnThresholdUs: 0 } }),
     );
-    expect(params.get("issue-threshold")).toBe("0");
-    expect(out.poiSpawnThresholdUs).toBe(0);
+    // 0 is the default floor now (the detectors rank rather than threshold), so
+    // it is the value the writer omits.
+    expect(params.get("issue-threshold")).toBeNull();
+    expect(out.poiSpawnThresholdUs).toBeUndefined();
+  });
+
+  it("round-trips a non-default list length and omits the default", () => {
+    const wide = roundTrip(mkState({ poi: { worstN: 200 } }));
+    expect(wide.params.get("issue-worst")).toBe("200");
+    expect(wide.out.poiWorstN).toBe(200);
+    expect(roundTrip(mkState({ poi: { worstN: 50 } })).params.get("issue-worst")).toBeNull();
+  });
+
+  it("drops a list length the rail does not offer", () => {
+    expect(readViewerUrlState("?issue-worst=37").poiWorstN).toBeUndefined();
+    expect(readViewerUrlState("?issue-worst=abc").poiWorstN).toBeUndefined();
   });
 
   it("clamps an out-of-range threshold and drops a non-numeric one", () => {

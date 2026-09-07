@@ -965,20 +965,44 @@
   }
 
   /**
-   * Severity floor for "spawn-delay", in microseconds. columnar-worker-spans.ts
-   * carries the same number; the golden parity test pins them together.
+   * Default severity floor for "spawn-delay", in microseconds.
+   *
+   * Zero: the detectors RANK rather than threshold (see filterPointsOfInterest),
+   * so nothing is hidden by default. The floor remains available as an explicit
+   * caller/user filter. columnar-worker-spans.ts carries the same number; the
+   * golden parity test pins them together.
    */
-  const DEFAULT_SPAWN_DELAY_THRESHOLD_US = 100;
+  const DEFAULT_SPAWN_DELAY_THRESHOLD_US = 0;
 
   /**
-   * Filter and sort points of interest from worker spans and scheduling delays.
+   * How many points a detector returns when the caller passes no `limit`.
+   *
+   * The detectors rank by severity instead of applying a fixed cutoff, because
+   * a cutoff answers the wrong question in both directions: ">1ms" buries five
+   * real outliers under ten thousand borderline matches on a busy trace, and
+   * reports nothing at all on a fast one whose worst poll is 800us and still
+   * worth looking at.
+   */
+  const POI_DEFAULT_WORST_N = 50;
+
+  /**
+   * The worst points of interest of one kind, ranked by severity.
+   *
+   * Selection is ALWAYS by `value` (the per-type severity), so `limit` keeps the
+   * worst N however `sortByWorst` is set; `sortByWorst` then chooses only how
+   * the survivors are PRESENTED - severity-first, or chronological. The worst 50
+   * shown chronologically is a meaningful answer; the FIRST 50 chronologically
+   * would silently drop every outlier after them.
+   *
+   * `opts.onTotal` receives the true match count before the cap, so a caller can
+   * report "worst 50 of 12,431" rather than implying the detector found 50.
+   *
    * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay"
    *   | "uninstrumented" | "spawn-delay" | "off-cpu-active"
    * @param {Object} workerSpans
    * @param {number[]} workerIds
    * @param {Array} schedDelays - as returned by computeSchedulingDelays
-   * @param {boolean} hasSchedWait
-   * @param {{ sortByWorst?: boolean, taskInstrumented?: Map<number, boolean>, taskSpawnTimes?: Map<number, number>, spawnDelayThresholdUs?: number }} opts
+   * @param {{ sortByWorst?: boolean, hasSchedWait?: boolean, taskInstrumented?: Map<number, boolean>, taskSpawnTimes?: Map<number, number>, spawnDelayThresholdUs?: number, limit?: number, onTotal?: (n: number) => void }} opts
    * @returns {Array<{time: number, worker: number, type: string, value: number, span: Object, schedDelay?: Object}>}
    */
   function filterPointsOfInterest(
@@ -989,16 +1013,38 @@
     opts
   ) {
     const hasSchedWait = opts && opts.hasSchedWait;
+    const cap =
+      opts && typeof opts.limit === "number" && opts.limit > 0
+        ? opts.limit
+        : POI_DEFAULT_WORST_N;
     const points = [];
+    let matched = 0;
+    // Bounded retention: let the buffer grow to 2x the cap, then rank and drop
+    // the tail. Without a threshold "long-poll" matches EVERY poll, so an
+    // unbounded push would materialize a point per poll on a 13M-event trace.
+    // Mirrors ColumnarWorkerSpans.pointsOfInterest; the parity test pins them.
+    const compact = () => {
+      points.sort((a, b) => b.value - a.value);
+      points.length = Math.min(points.length, cap);
+    };
+    const add = (p) => {
+      matched++;
+      points.push(p);
+      if (points.length >= cap * 2) compact();
+    };
 
     for (const w of workerIds) {
       const spans = workerSpans[w];
 
       if (filterType === "sched") {
         for (const s of spans.parks) {
-          if (hasSchedWait && s.schedWait > 100) {
+          // NaN = the park carries no kernel timing at all (missing data);
+          // zero = the kernel kept it off-CPU for no time, which is not a delay.
+          // Neither is a point of interest, and on a healthy trace the zeros are
+          // the overwhelming majority of parks.
+          if (hasSchedWait && s.schedWait > 0) {
             const wakeupShouldBe = s.end - s.schedWait;
-            points.push({
+            add({
               time: wakeupShouldBe,
               worker: w,
               type: "sched",
@@ -1010,8 +1056,8 @@
       } else if (filterType === "long-poll") {
         for (const s of spans.polls) {
           const durMs = (s.end - s.start) / 1e6;
-          if (durMs > 1) {
-            points.push({
+          if (durMs > 0) {
+            add({
               time: s.start,
               worker: w,
               type: "long-poll",
@@ -1024,27 +1070,32 @@
         for (const s of spans.polls) {
           const cpuCount = s.cpuSamples ? s.cpuSamples.length : 0;
           const schedCount = s.schedSamples ? s.schedSamples.length : 0;
+          // Carrying samples is a predicate, not a severity floor: a poll with
+          // no samples has no profile to show, so it is not a candidate.
           if (cpuCount + schedCount > 0) {
-            const durMs = (s.end - s.start) / 1e6;
-            points.push({
+            add({
               time: s.start,
               worker: w,
               type: "cpu-sampled",
-              value: durMs,
+              value: (s.end - s.start) / 1e6,
               span: s,
             });
           }
         }
       } else if (filterType === "off-cpu-active" && opts && opts.hasWorkerCpuTime) {
-        // Thresholds mirror the red-flags script's `cpu-contention` check.
         for (const a of spans.actives) {
           const wall = a.end - a.start;
-          if (wall > 1e6 && a.ratio < 0.5) {
+          // Ranked by how much of the period was spent OFF the CPU, with no
+          // "busy for 1ms" or "under 50% on-CPU" gate: those cutoffs hid a
+          // 900us period that was 95% descheduled behind a 2ms one that was
+          // 49%. A fully on-CPU period scores 0 and is not a point of interest.
+          const offCpu = (1 - a.ratio) * wall;
+          if (offCpu > 0) {
             points.push({
               time: a.start,
               worker: w,
               type: "off-cpu-active",
-              value: (1 - a.ratio) * wall,
+              value: offCpu,
               span: a,
             });
           }
@@ -1054,17 +1105,15 @@
 
     if (filterType === "wake-delay") {
       for (const sd of schedDelays) {
-        const delayUs = sd.delay / 1000;
-        if (delayUs > 100) {
-          points.push({
-            time: sd.wakeTime,
-            worker: sd.worker,
-            type: "wake-delay",
-            value: delayUs,
-            span: sd.poll,
-            schedDelay: sd,
-          });
-        }
+        if (sd.delay <= 0) continue;
+        add({
+          time: sd.wakeTime,
+          worker: sd.worker,
+          type: "wake-delay",
+          value: sd.delay / 1000,
+          span: sd.poll,
+          schedDelay: sd,
+        });
       }
     }
 
@@ -1072,7 +1121,7 @@
       for (const w of workerIds) {
         for (const s of workerSpans[w].polls) {
           if (s.taskId && opts.taskInstrumented.get(s.taskId) === false) {
-            points.push({
+            add({
               time: s.start,
               worker: w,
               type: "uninstrumented",
@@ -1104,7 +1153,7 @@
         if (spawnTs === undefined) continue;
         const delay = f.span.start - spawnTs;
         if (delay > thresholdNs) {
-          points.push({
+          add({
             time: spawnTs,
             worker: f.worker,
             type: "spawn-delay",
@@ -1115,11 +1164,11 @@
       }
     }
 
-    if (opts && opts.sortByWorst) {
-      points.sort((a, b) => b.value - a.value);
-    } else {
-      points.sort((a, b) => a.time - b.time);
-    }
+    compact();
+    if (opts && opts.onTotal) opts.onTotal(matched);
+    // `compact` left the survivors severity-ranked, so only the chronological
+    // presentation needs a re-sort.
+    if (!(opts && opts.sortByWorst)) points.sort((a, b) => a.time - b.time);
     return points;
   }
 
@@ -2198,6 +2247,7 @@
     computePollWakes,
     filterPointsOfInterest,
     DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+    POI_DEFAULT_WORST_N,
     flamegraphColor,
     buildFlamegraphTree,
     flattenFlamegraph,

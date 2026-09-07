@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { EVENT_TYPES } from "../../lib/trace/index.js";
 import type { ParsedTrace, TraceEvent } from "../../lib/trace/index.js";
-import { deriveMinimapPois } from "./minimap-poi.js";
+import { MINIMAP_POI_LIMIT, deriveMinimapPois } from "./minimap-poi.js";
 
 const MS = 1_000_000; // 1ms in ns; long-poll detector floor is 1ms.
 
@@ -50,7 +50,7 @@ describe("deriveMinimapPois", () => {
     expect(deriveMinimapPois(fakeTrace([]))).toEqual([]);
   });
 
-  it("finds long-poll ticks (>1ms polls) and sorts them by time", () => {
+  it("ticks every poll, worst-ranked, and sorts the union by time", () => {
     const events = [
       // worker 1: a 5ms poll (long) at 10ms
       ev(EVENT_TYPES.PollStart, 1, 10 * MS, 100),
@@ -68,13 +68,29 @@ describe("deriveMinimapPois", () => {
     for (const p of pois) expect(p.value).toBeGreaterThan(0);
     const times = pois.map((p) => p.time);
     expect([...times]).toEqual([...times].sort((a, b) => a - b));
-    // The two long polls' start times are present.
-    expect(times).toContain(2 * MS);
-    expect(times).toContain(10 * MS);
-    // The sub-ms poll at 6ms is not a long-poll tick.
-    expect(pois.filter((p) => p.type === "long-poll").map((p) => p.time)).not.toContain(
-      6 * MS,
+    // The detector ranks rather than thresholds, so the sub-ms poll is a
+    // candidate too - it simply ranks below the two long ones.
+    const longPollTimes = pois.filter((p) => p.type === "long-poll").map((p) => p.time);
+    expect(longPollTimes).toContain(2 * MS);
+    expect(longPollTimes).toContain(10 * MS);
+    expect(longPollTimes).toContain(6 * MS);
+  });
+
+  it("keeps only each detector's worst MINIMAP_POI_LIMIT ticks", () => {
+    // One more poll than the cap, each a distinct duration, so the shortest is
+    // the one that must fall off.
+    const events = [];
+    for (let i = 0; i <= MINIMAP_POI_LIMIT; i++) {
+      const start = i * MS;
+      events.push(ev(EVENT_TYPES.PollStart, 0, start, 100 + i));
+      events.push(ev(EVENT_TYPES.PollEnd, 0, start + (i + 1) * 1000, 100 + i));
+    }
+    const longPolls = deriveMinimapPois(fakeTrace(events)).filter(
+      (p) => p.type === "long-poll",
     );
+    expect(longPolls.length).toBe(MINIMAP_POI_LIMIT);
+    // The shortest poll (i = 0, at t = 0) is the one dropped.
+    expect(longPolls.map((p) => p.time)).not.toContain(0);
   });
 
   it("de-duplicates ticks that satisfy the same detector once", () => {
@@ -114,7 +130,7 @@ describe("deriveMinimapPois", () => {
     expect(spawnTicks[0]?.value).toBe((3 * MS - spawnTs) / 1000);
   });
 
-  it("emits no spawn tick for a delay under the default floor", () => {
+  it("ticks a small spawn delay too: the default floor admits everything", () => {
     const spawnTs = 3 * MS - 10_000; // 10us before the poll
     const events = [
       ev(EVENT_TYPES.PollStart, 0, 3 * MS, 1),
@@ -122,6 +138,18 @@ describe("deriveMinimapPois", () => {
     ];
     const pois = deriveMinimapPois(
       fakeTrace(events, { taskSpawnTimes: new Map([[1, spawnTs]]) }),
+    );
+    const spawnTicks = pois.filter((p) => p.type === "spawn-delay");
+    expect(spawnTicks.map((p) => p.value)).toEqual([10]);
+  });
+
+  it("emits no spawn tick when the first poll precedes the recorded spawn", () => {
+    const events = [
+      ev(EVENT_TYPES.PollStart, 0, 3 * MS, 1),
+      ev(EVENT_TYPES.PollEnd, 0, 3 * MS + 100_000, 1),
+    ];
+    const pois = deriveMinimapPois(
+      fakeTrace(events, { taskSpawnTimes: new Map([[1, 4 * MS]]) }),
     );
     expect(pois.filter((p) => p.type === "spawn-delay")).toEqual([]);
   });

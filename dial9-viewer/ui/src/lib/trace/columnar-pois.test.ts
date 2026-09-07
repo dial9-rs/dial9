@@ -175,15 +175,21 @@ describe("pointsOfInterest limit", () => {
     expect(all.length).toBe(matched);
   });
 
-  it("caps by time order when not sorting by worst", () => {
-    const uncapped = store.pointsOfInterest(
-      "uninstrumented", workerIds, colSched, opts({ sortByWorst: false }),
+  it("caps by severity even when presenting in time order", () => {
+    const worst = store.pointsOfInterest(
+      "uninstrumented", workerIds, colSched, opts({ sortByWorst: true, limit: 3 }),
     );
-    if (uncapped.length < 4) return;
-    const capped = store.pointsOfInterest(
+    if (worst.length < 3) return;
+    const chronological = store.pointsOfInterest(
       "uninstrumented", workerIds, colSched, opts({ sortByWorst: false, limit: 3 }),
     );
-    expect(capped.map((p) => p.time)).toEqual(uncapped.slice(0, 3).map((p) => p.time));
+    // The same three points, ordered differently. Capping in TIME order would
+    // keep the earliest three and silently drop every outlier after them.
+    expect(new Set(chronological.map((p) => p.value))).toEqual(
+      new Set(worst.map((p) => p.value)),
+    );
+    const times = chronological.map((p) => p.time);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
   });
 });
 
