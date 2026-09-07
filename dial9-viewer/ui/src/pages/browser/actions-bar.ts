@@ -1,5 +1,9 @@
 // Actions bar: View Selected / Flamegraph / Tokio Stats buttons, the
 // selection count and the size-cap warning, rendered from store state.
+//
+// When a full A/B diff is captured, the Flamegraph and Tokio Stats buttons
+// open the two-sided diff instead of a single-scope view (see
+// open-links.ts), so their labels say so.
 
 // Leaf heatmap seam, not the lib/canvas barrel (see actions.ts).
 import { MAX_OPEN_BYTES } from "../../lib/canvas/heatmap.js";
@@ -7,6 +11,45 @@ import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { fmtTick, formatSize } from "./format.js";
 import { effectiveProfileSelection } from "./open-links.js";
+
+interface ButtonLabel {
+  text: string;
+  title: string;
+}
+
+/**
+ * Labels for the two profiling buttons. `diffMode` is "both diff sides are
+ * captured" - the state in which these buttons retarget to the two-sided
+ * diff. A partial capture still opens the single-scope view, so it keeps the
+ * plain labels.
+ */
+export function profileButtonLabels(diffMode: boolean): {
+  flamegraph: ButtonLabel;
+  tokio: ButtonLabel;
+} {
+  if (diffMode) {
+    return {
+      flamegraph: {
+        text: "🔥 Flamegraph diff",
+        title: "Open a two-sided CPU flamegraph diff of the captured A/B scopes",
+      },
+      tokio: {
+        text: "⚡ Tokio Stats diff",
+        title: "Open a two-sided Tokio stats diff of the captured A/B scopes",
+      },
+    };
+  }
+  return {
+    flamegraph: {
+      text: "🔥 Flamegraph",
+      title: "Open a CPU flamegraph of the selected segments",
+    },
+    tokio: {
+      text: "⚡ Tokio Stats",
+      title: "Open Tokio stats view for the selected scope",
+    },
+  };
+}
 
 export function mountActionsBar({ store, els, actions }: PageCtx): void {
   els.viewBtn.addEventListener("click", () => {
@@ -22,9 +65,18 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
     actions.viewSpanExplorer();
   });
 
-  store.subscribe(["browse", "raw", "ui", "config"], (state) => {
+  store.subscribe(["browse", "raw", "ui", "config", "diff"], (state) => {
     assertInScheduledRender("actions-bar render");
     const agg = state.config.aggregationEnabled;
+
+    // Relabel BEFORE the per-tab branches below: they return early on an
+    // empty selection, and the label tracks the captured diff, not the
+    // selection.
+    const labels = profileButtonLabels(!!(state.diff.a && state.diff.b));
+    els.cpuBtn.textContent = labels.flamegraph.text;
+    els.cpuBtn.title = labels.flamegraph.title;
+    els.healthBtn.textContent = labels.tokio.text;
+    els.healthBtn.title = labels.tokio.title;
 
     if (state.ui.tab === "browse") {
       const sel = state.browse.selection;
