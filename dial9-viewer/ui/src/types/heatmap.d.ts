@@ -104,6 +104,19 @@ declare module "*/heatmap.js" {
   export function densityColor(norm: number): string;
 
   /**
+   * "Nice" axis tick times for the epoch-second range [tMin, tMax], at most
+   * `targetCount` of them. Ticks snap to human intervals (1/5/10/30s,
+   * 1/2/5/10/15/30m, 1/2/3/6/12h, 1/2/7d) and are aligned to multiples of the
+   * chosen step, so labels land on round wall-clock times. A degenerate range
+   * (tMax <= tMin) yields a single tick at tMin.
+   */
+  export function niceTimeTicks(
+    tMin: number,
+    tMax: number,
+    targetCount: number
+  ): number[];
+
+  /**
    * Whether a document-level click should clear the current browse
    * selection. Control surfaces preserve it: the timeline itself, the
    * actions bar, and the page header (the TZ toggle only relabels the

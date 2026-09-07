@@ -178,6 +178,18 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
     position: absolute; top: 0; pointer-events: none; display: none;
     background: rgba(108,99,255,0.22); border: 1px solid #6c63ff;
 }
+/* Hover cursor line + time readout: follow the pointer to answer "what time
+   am I looking at?" without having to drag. */
+#heatmap-cursor {
+    position: absolute; top: 0; width: 1px; pointer-events: none; display: none;
+    background: rgba(230,230,255,0.55);
+}
+#heatmap-cursor-label {
+    position: absolute; top: 2px; pointer-events: none; display: none;
+    transform: translateX(-50%); white-space: nowrap;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.72em;
+    background: rgba(20,20,40,0.92); color: #e6e6ff; border: 1px solid #3a3a5e;
+}
 /* Zoom rubber-band: cyan, left/right edges only, to read as a time cut. */
 #heatmap-sel.zoom {
     background: rgba(0,229,255,0.12);

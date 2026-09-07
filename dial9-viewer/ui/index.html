@@ -110,7 +110,7 @@
             </div>
             <div id="heatmap-view" style="display:none">
                 <div id="heatmap-hint">
-                    <span>Drag to select a window, then open or profile it. <b>⌥ Option+drag</b> to zoom, double-click to reset.</span>
+                    <span>Click a segment to select just one &middot; Drag to select a window &middot; <b>⌥ Option+drag</b> to zoom &middot; double-click to reset.</span>
                     <span class="legend">low <span class="bar"></span> high data density</span>
                     <span class="legend"><span class="gap-swatch"></span> gap (no data)</span>
                     <span style="color:#00e5ff">▏ boot change</span>
@@ -121,6 +121,10 @@
                     <div id="heatmap-plot">
                         <canvas id="heatmap-canvas"></canvas>
                         <div id="heatmap-sel"></div>
+                        <!-- Hover cursor line + time readout; hidden until the
+                             pointer enters the plot. -->
+                        <div id="heatmap-cursor"></div>
+                        <div id="heatmap-cursor-label"></div>
                     </div>
                 </div>
                 <div id="heatmap-axis"></div>

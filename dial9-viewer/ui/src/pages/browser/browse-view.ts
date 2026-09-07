@@ -18,7 +18,8 @@ import {
 import { assertInScheduledRender } from "../../store/store.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
-import { clamp, crossesDayBoundary, fmtTick, timeToX } from "./format.js";
+import { timeToX } from "./format.js";
+import { axisTicks, type AxisTick } from "./heatmap-axis.js";
 import type { HeatmapRow, TimeDomain } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
@@ -197,25 +198,35 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       ctx.fillRect(0, y + ROW_H - 1, W, 1);
     }
 
-    drawAxis(W, domain, tz);
+    // Faint full-height gridlines at each axis tick, drawn last so they sit
+    // above the density strips. They project the tick labels below onto the
+    // rows, which is what makes a segment's start/stop time readable off the
+    // timeline instead of merely estimable.
+    const ticks = axisTicks(domain, W, tz);
+    ctx.strokeStyle = "rgba(120,120,160,0.18)";
+    ctx.lineWidth = 1;
+    for (const tick of ticks) {
+      // Half-pixel offset so a 1px line lands on one device column.
+      const gx = Math.round(tick.x) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, H);
+      ctx.stroke();
+    }
+
+    drawAxis(ticks);
   }
 
-  // 2 to 8 TZ-aware ticks, aligned to the canvas left edge via
-  // --heatmap-label-w. When the visible span crosses a calendar-day
-  // boundary, ticks carry the date ("YYYY-MM-DD HH:MM:SS") - time-only
-  // ticks across a multi-day span were ambiguous. Tick COUNT is unchanged
-  // in both modes.
-  function drawAxis(W: number, domain: TimeDomain, tz: boolean): void {
+  // Tick labels under the plot, offset by the host-label column so they line
+  // up with the gridlines on the canvas. Times, placement and dating are the
+  // axis model's job (see heatmap-axis.ts); this only emits the DOM.
+  function drawAxis(ticks: readonly AxisTick[]): void {
     els.heatmapAxis.textContent = "";
-    const { tMin, tMax } = domain;
-    const withDate = crossesDayBoundary(tMin, tMax, tz);
-    const n = clamp(Math.floor(W / 130), 2, 8);
-    for (let i = 0; i <= n; i++) {
-      const frac = i / n;
+    for (const t of ticks) {
       const tick = document.createElement("div");
       tick.className = "tick";
-      tick.style.left = LABEL_W() + frac * W + "px";
-      tick.textContent = fmtTick(tMin + frac * (tMax - tMin), tz, withDate);
+      tick.style.left = LABEL_W() + t.x + "px";
+      tick.textContent = t.label;
       els.heatmapAxis.appendChild(tick);
     }
   }

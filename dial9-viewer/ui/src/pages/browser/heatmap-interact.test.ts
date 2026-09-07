@@ -22,6 +22,11 @@ class FakeEventTarget {
 
 class FakeElement extends FakeEventTarget {
   private readonly ancestors: readonly string[];
+  /** Only the properties the components write; enough to assert placement. */
+  readonly style: Record<string, string> = {};
+  textContent = "";
+  /** Measured label width, stubbed: there is no layout in this harness. */
+  offsetWidth = 120;
 
   constructor(ancestors: readonly string[] = []) {
     super();
@@ -36,6 +41,12 @@ class FakeElement extends FakeEventTarget {
     return { left: 0, top: 0, width: 100 } as DOMRect;
   }
 }
+
+/** 2026-01-15 10:00:00Z + 10 minutes, in epoch seconds. */
+const DOMAIN = {
+  tMin: Date.UTC(2026, 0, 15, 10, 0, 0) / 1000,
+  tMax: Date.UTC(2026, 0, 15, 10, 10, 0) / 1000,
+};
 
 const SELECTION: HeatmapSelection = {
   keys: ["trace.bin"],
@@ -60,9 +71,13 @@ function setup() {
   const plot = new FakeElement(["#heatmap-view"]);
   const canvas = new FakeElement() as FakeElement & { clientWidth: number };
   canvas.clientWidth = 100;
+  const cursor = new FakeElement();
+  const cursorLabel = new FakeElement();
   const els = {
     heatmapPlot: plot,
     heatmapCanvas: canvas,
+    heatmapCursor: cursor,
+    heatmapCursorLabel: cursorLabel,
     heatmapResetZoom: new FakeElement(),
   } as unknown as BrowserEls;
 
@@ -79,6 +94,7 @@ function setup() {
         gaps: [],
       },
     ],
+    domain: DOMAIN,
     selection: null,
   });
 
@@ -96,7 +112,7 @@ function setup() {
   } as unknown as BrowserActions;
 
   mountHeatmapInteraction({ store, els, actions });
-  return { win, doc, plot, store, actions, setHeatmapSelection };
+  return { win, doc, plot, cursor, cursorLabel, store, actions, setHeatmapSelection };
 }
 
 /** Drag across the plot and release, committing a region selection. */
@@ -162,5 +178,71 @@ describe("heatmap pointer interaction", () => {
 
     expect(store.getState().browse.selection).toBe(SELECTION);
     expect(setHeatmapSelection).not.toHaveBeenCalled();
+  });
+});
+
+// The hover readout (#631): pointing at the timeline answers "what time is
+// this?" without dragging out a selection to read its bounds.
+describe("heatmap hover time readout", () => {
+  it("follows the pointer with the timestamp beneath it", () => {
+    const { plot, cursor, cursorLabel } = setup();
+
+    // The canvas is 100px wide over a 10-minute window, so the midpoint is
+    // 5 minutes in.
+    plot.dispatch("mousemove", { clientX: 50, clientY: 5 });
+
+    expect(cursorLabel.textContent).toBe("2026-01-15 10:05:00");
+    expect(cursor.style["display"]).toBe("block");
+    expect(cursorLabel.style["display"]).toBe("block");
+    expect(cursor.style["left"]).toBe("50px");
+  });
+
+  it("clamps the label inside the plot at the edges", () => {
+    const { plot, cursorLabel } = setup();
+
+    // A 120px-wide label is wider than this 100px plot, so it centers.
+    plot.dispatch("mousemove", { clientX: 0, clientY: 5 });
+    expect(cursorLabel.style["left"]).toBe("50px");
+
+    cursorLabel.offsetWidth = 40;
+    plot.dispatch("mousemove", { clientX: 0, clientY: 5 });
+    expect(cursorLabel.style["left"]).toBe("20px");
+    plot.dispatch("mousemove", { clientX: 100, clientY: 5 });
+    expect(cursorLabel.style["left"]).toBe("80px");
+  });
+
+  it("hides on mouseleave", () => {
+    const { plot, cursor, cursorLabel } = setup();
+
+    plot.dispatch("mousemove", { clientX: 50, clientY: 5 });
+    plot.dispatch("mouseleave", {});
+
+    expect(cursor.style["display"]).toBe("none");
+    expect(cursorLabel.style["display"]).toBe("none");
+  });
+
+  // Mid-drag the rubber band already shows the span; a second floating time
+  // label on top of it is just clutter.
+  it("stays hidden while dragging", () => {
+    const { plot, cursor } = setup();
+
+    plot.dispatch("mousedown", {
+      clientX: 10,
+      clientY: 5,
+      altKey: false,
+      preventDefault: vi.fn(),
+    });
+    plot.dispatch("mousemove", { clientX: 50, clientY: 40 });
+
+    expect(cursor.style["display"]).toBe("none");
+  });
+
+  it("stays hidden when there is no data to point at", () => {
+    const { plot, cursor, store } = setup();
+    store.update("browse", { rows: [], domain: null });
+
+    plot.dispatch("mousemove", { clientX: 50, clientY: 5 });
+
+    expect(cursor.style["display"]).toBe("none");
   });
 });

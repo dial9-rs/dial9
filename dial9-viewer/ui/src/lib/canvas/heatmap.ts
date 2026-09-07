@@ -12,6 +12,7 @@ export {
   bootTransitions,
   densityColor,
   groupByHost,
+  niceTimeTicks,
   segmentGaps,
   segmentSpan,
   segmentsOverlapping,

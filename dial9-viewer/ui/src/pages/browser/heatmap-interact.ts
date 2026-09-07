@@ -14,6 +14,7 @@ import { DRAG_INTENT_PX } from "../../lib/interact/pointer.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
 import { clamp } from "./format.js";
+import { cursorPlacement, timestampAt } from "./heatmap-axis.js";
 
 export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void {
   let dragging = false;
@@ -81,6 +82,38 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
       );
     }
   });
+
+  // Hover readout: a thin cursor line follows the pointer with a label
+  // showing the timestamp beneath it, so "what time am I looking at?" is
+  // answerable without dragging out a selection to read its bounds.
+  // Suppressed mid-drag - the rubber band already communicates that span -
+  // and whenever there is no data to point at.
+  function hideCursor(): void {
+    els.heatmapCursor.style.display = "none";
+    els.heatmapCursorLabel.style.display = "none";
+  }
+
+  els.heatmapPlot.addEventListener("mousemove", (e) => {
+    const s = store.getState();
+    const domain = s.browse.domain;
+    if (dragging || !s.browse.rows.length || !domain) {
+      hideCursor();
+      return;
+    }
+    const { x } = localXY(e);
+    const W =
+      els.heatmapCanvas.clientWidth || parseFloat(els.heatmapCanvas.style.width) || 1;
+    // Write the text first: the placement clamp measures the label, and a
+    // date-carrying timestamp is materially wider than a bare time.
+    els.heatmapCursorLabel.textContent = timestampAt(x, domain, W, s.ui.useLocalTz);
+    const place = cursorPlacement(x, W, els.heatmapCursorLabel.offsetWidth);
+    els.heatmapCursor.style.left = place.lineLeft + "px";
+    els.heatmapCursor.style.height = s.browse.rows.length * ROW_H + "px";
+    els.heatmapCursor.style.display = "block";
+    els.heatmapCursorLabel.style.left = place.labelLeft + "px";
+    els.heatmapCursorLabel.style.display = "block";
+  });
+  els.heatmapPlot.addEventListener("mouseleave", hideCursor);
 
   // Double-click anywhere on the plot resets to the full time range.
   els.heatmapPlot.addEventListener("dblclick", () => {
