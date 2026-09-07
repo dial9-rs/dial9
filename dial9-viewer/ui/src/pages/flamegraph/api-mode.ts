@@ -32,6 +32,7 @@ import type {
 } from "../../lib/trace/index.js";
 import { createFlamegraph, diffSearch, fullScopeQuery } from "../../lib/canvas/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
+import { mountDiffTray } from "./diff-tray.js";
 import type { PageEls } from "./dom.js";
 import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
 import type { FgKeys } from "./fg-keys.js";
@@ -75,6 +76,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
         <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
         <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
+        <span style="flex:1"></span>
+        <button id="f-adddiff" title="Capture this view (current host/filters) as one side of a diff; pick a second host/scope and add it to compare" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};cursor:pointer">+ Add to diff</button>
     `;
   const pageHeader = document.querySelector(".fg-page-header");
   if (pageHeader === null) {
@@ -506,6 +509,18 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       b.delete("max_poll_ns");
       window.open(window.location.pathname + "?" + diffSearch(a, b), "_blank");
     },
+  });
+
+  // In-page A/B capture tray (#646). Mounted on the toolbar (not inside
+  // #f-facets, which renderFacets rebuilds per snapshot) so a capture
+  // survives every streamed refinement; mounted after the minimap so it
+  // lands directly beneath the toolbar its button belongs to. The captured
+  // scope is the live query as the Host dropdown currently narrows it.
+  mountDiffTray({
+    anchor: toolbar,
+    addButton: document.getElementById("f-adddiff") as HTMLButtonElement,
+    currentScope: () =>
+      fullScopeQuery(new URLSearchParams(buildBrowserQuery(queryState()))),
   });
 
   startStreaming();
