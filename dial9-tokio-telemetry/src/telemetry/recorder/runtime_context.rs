@@ -1071,23 +1071,17 @@ mod shuttle_tests {
     shuttle_test! {
         num_iters = 10_000, depth = 3;
         // Races concurrent attaches on one cloned `Dial9Handle`, matching
-        // `attach_tokio_runtime`'s documented usage in `recorder_tokio.rs`:
-        // "several threads can each attach their own runtime off the same
-        // recorder." `with_source_or_insert` and the registry push are
-        // both already atomic today (one lock each, no TOCTOU window). This
-        // guards against a future refactor splitting either into
-        // non-atomic steps, which no lint or other test would catch.
-        // `num_iters` doubled from `default` for the real flush thread's
-        // own background cycling.
+        // `attach_tokio_runtime`'s documented usage. Guards `with_source_or_insert`
+        // and the registry push staying atomic (both already are today; this is
+        // regression insurance, not a live bug). `num_iters` doubled for the real
+        // flush thread's own background cycling.
         //
-        // Checked via the sealed trace: `segment_metadata` is single-consumer,
-        // so the real flush thread's own concurrent polling can consume a
-        // change before this test observes it.
+        // Verified via the sealed trace, not `segment_metadata` directly: that
+        // method is single-consumer, so the real flush thread can eat a change
+        // before this test observes it.
         //
-        // Worker-ID claiming needs a live Tokio worker thread, which
-        // shuttle has none of. Looked up post-attach and registered through
-        // the real register_worker_if_needed, standing in only for the
-        // missing live worker thread.
+        // No live Tokio worker thread exists under shuttle to claim a real
+        // worker id, so one is registered directly via `register_worker_if_needed`.
         fn shuttle_concurrent_attach() {
             // Fixed time, like `test_core_pipeline`: otherwise the flush
             // thread's rotation checks read real elapsed time, which can
@@ -1115,12 +1109,8 @@ mod shuttle_tests {
                         let runtime = handle.attach_tokio_runtime(builder, options).unwrap();
                         drop(runtime);
 
-                        // Keyed by `runtime_name`: this crate's shuttle build
-                        // always sets `--cfg tokio_unstable`, where
-                        // `is_runtime` doesn't compile, so `bind_runtime`'s
-                        // `runtime_id` is unreadable here.
-                        // `register_worker_if_needed` below just needs *a*
-                        // handle on the context this attacher created.
+                        // Keyed by `runtime_name`, not runtime id: `is_runtime` needs
+                        // `cfg(not(tokio_unstable))`, which this crate's shuttle build never sets.
                         let state = recorder_tokio::tokio_attach_state(&handle)
                             .expect("attach_tokio_runtime installed the source above");
                         let ctx = state
