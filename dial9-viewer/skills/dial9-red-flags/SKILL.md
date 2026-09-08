@@ -1,6 +1,6 @@
 ---
 name: dial9-red-flags
-description: Automated health checks for dial9 Tokio runtime traces. Detects long polls, task leaks, scheduling delays, blocking calls, queue buildup, worker imbalance, CPU contention, and span anomalies. Use when you want a quick automated assessment of trace health.
+description: Automated health checks for dial9 Tokio runtime traces. Detects incomplete files, long polls, task leaks, scheduling delays, blocking calls, queue buildup, worker imbalance, CPU contention, and span anomalies. Use when you want a quick automated assessment of trace health.
 ---
 
 # Red Flags: Automated Health Checks
@@ -14,6 +14,9 @@ node scripts/red_flag_scan.js <trace.bin or directory>
 Each finding has a severity: critical, warning, or info.
 
 ## Checks performed
+
+### incomplete-file
+The file was sealed while threads still held events in their local buffers, or it follows one that was. The first case loses events, the second inherits events belonging to the previous file. Read this one first: every count and duration below it is understated, so a quiet worker may just be a worker whose events landed elsewhere. The recorder reports it in `segment.sealed_clean` and `segment.prior_sealed_clean`, surfaced on the parsed trace as `incompleteFiles` and `sealedFiles`. Traces recorded before those keys existed carry no seal record and are never flagged. Fix is recorder config: raise `max_file_size` or shorten `rotation_period` so files rotate on the clock rather than on size.
 
 ### long-poll
 A single `.poll()` call took too long. This blocks the worker from processing other tasks. The fixed >10ms warning / >50ms critical cutoffs here are a coarse default, not a universal truth — "long" is really *relative to this runtime's own poll distribution*. In a service whose p99 poll is 500µs, a 1ms poll is a severe tail outlier these cutoffs miss entirely; in a batch job whose p99 is 40ms, a 20ms poll is normal. Calibrate against `pollDurationByLoc` (p50/p99 per spawn location) before trusting an absolute threshold. Look at `poll.cpuSamples` and `poll.schedSamples` for stack traces. To root-cause *why* a flagged poll was long — especially an off-CPU one with no scheduling stacks — use the `dial9-diagnose-long-poll` skill (which thresholds on p99 by default), and `dial9-zoom-window` to inspect the surrounding instant.

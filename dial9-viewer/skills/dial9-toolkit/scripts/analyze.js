@@ -918,6 +918,7 @@ async function parseWorkerMain(traceFile, cachePath) {
     filterStartTime: trace.filterStartTime, filterEndTime: trace.filterEndTime,
     hasCpuTime: trace.hasCpuTime, hasSchedWait: trace.hasSchedWait, hasTaskTracking: trace.hasTaskTracking,
     hasFullTaskCoverage: trace.hasFullTaskCoverage, hasLocalQueueDepth: trace.hasLocalQueueDepth, hasTaskLifetimes: trace.hasTaskLifetimes,
+    sealedFiles: trace.sealedFiles, incompleteFiles: trace.incompleteFiles,
     spawnLocations: mapToEntries(trace.spawnLocations),
     taskSpawnLocs: mapToEntries(trace.taskSpawnLocs),
     taskSpawnTimes: mapToEntries(trace.taskSpawnTimes),
@@ -977,6 +978,9 @@ function loadCacheFile(cachePath) {
   if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
   if (!raw.runtimeMetrics) raw.runtimeMetrics = []; // pre-RuntimeMetrics cache files
   if (!raw.legacyActiveTaskSamples) raw.legacyActiveTaskSamples = [];
+  // Cache files written before the seal counters, and traces whose files carry
+  // no seal record.
+  if (raw.sealedFiles === undefined) { raw.sealedFiles = 0; raw.incompleteFiles = 0; }
   // Pre-capability cache files: re-derive from the cached metadata and spawn times.
   if (raw.hasFullTaskCoverage === undefined) Object.assign(raw, deriveCapabilities(raw.segmentMetadata, raw.taskSpawnTimes ?? new Map()));
   raw.allocEvents = allocEvents; raw.freeEvents = freeEvents;

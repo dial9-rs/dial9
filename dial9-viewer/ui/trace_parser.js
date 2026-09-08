@@ -722,6 +722,10 @@
             ambiguousTids: new Set(),
             runtimeWorkers: new Map(), // runtime name → [workerId, ...]
             segmentMetadata: new Map(), // latest segment metadata key → value
+            // Sealed files seen, and how many reported losing or inheriting
+            // events.
+            sealedFiles: 0,
+            incompleteFiles: 0,
             // Per-runtime scheduler-metrics samples (one per runtime per flush
             // cycle): { t, runtimeName, globalQueue, aliveTasks }. Low-volume
             // (a handful per 10ms), so kept as a plain side-channel array rather
@@ -1507,6 +1511,17 @@
                     state.legacySegmentMetaWallNs = ts;
                 }
                 const entries = v.entries || {};
+                // Written once per file, as it is sealed. Files predating the
+                // key carry no seal record, so they go uncounted.
+                if ("segment.sealed_clean" in entries) {
+                    state.sealedFiles++;
+                    if (
+                        String(entries["segment.sealed_clean"]) === "false" ||
+                        String(entries["segment.prior_sealed_clean"]) === "false"
+                    ) {
+                        state.incompleteFiles++;
+                    }
+                }
                 for (const [key, val] of Object.entries(entries)) {
                     const value = String(val);
                     segmentMetadata.set(key, value);
@@ -1759,6 +1774,8 @@
             hasSchedWait: true,
             hasTaskTracking: true,
             ...deriveCapabilities(segmentMetadata, taskSpawnTimes),
+            sealedFiles: state.sealedFiles,
+            incompleteFiles: state.incompleteFiles,
             spawnLocations,
             taskSpawnLocs,
             taskSpawnTimes,

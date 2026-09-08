@@ -36,6 +36,18 @@ async function redFlagScan(tracePath) {
 
     const findings = [];
 
+    // 0. Incomplete file. 
+    // Qualifies everything below it: a file sealed without fully draining 
+    // thread-local buffers is missing events, and the one after it
+    // holds events that belong to its predecessor.
+    if (trace.incompleteFiles > 0) {
+      findings.push({
+        severity: 'warning',
+        check: 'incomplete-file',
+        message: `This file lost buffered events when it was sealed, or inherited them from the file before it. Counts and durations below are understated. Raise max_file_size or shorten rotation_period so files rotate on the clock instead of on size.`,
+      });
+    }
+
     // 1. Long polls (blocking the runtime)
     for (const w of workerIds) {
       for (const p of spans.workerSpans[w].polls) {
