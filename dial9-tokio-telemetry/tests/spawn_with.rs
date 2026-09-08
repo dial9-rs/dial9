@@ -28,6 +28,10 @@ enum SpawnEvent {
         waker_task_id: u64,
         woken_task_id: u64,
     },
+    PollStartEvent {
+        worker_id: u64,
+        task_id: u64,
+    },
     #[serde(other)]
     Other,
 }
@@ -285,4 +289,119 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
             "expected WakeEvent for runtime handle task {expected:?}"
         );
     }
+}
+
+/// `cfg(not(tokio_unstable))` sibling of
+/// `runtime_handle_spawn_with_targets_correct_runtime`, whose attribution
+/// check needs tokio_unstable-only `TaskSpawnEvent`. Gated the other way:
+/// only `cfg(not(tokio_unstable))` exercises `current_runtime_ctx`'s
+/// registry lookup by runtime id; under `tokio_unstable`, attribution
+/// instead comes from a hook closure captured per runtime at attach time,
+/// correct by construction, so running there would prove nothing about
+/// the path this test targets.
+///
+/// Verified via `PollStartEvent.worker_id`: two runtimes attached to one
+/// recorder share one worker-id counter, so their tasks must resolve to
+/// disjoint ids. A misattributed poll would collapse the two sets together.
+#[cfg(not(tokio_unstable))]
+#[test]
+fn runtime_handle_spawn_with_targets_correct_runtime_worker_ids() {
+    let (capture, batches) = capture_processor();
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+
+    let mut builder_a = tokio::runtime::Builder::new_multi_thread();
+    builder_a.worker_threads(1).enable_all().thread_name("rt-a");
+    let rt_a = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder_a,
+            TokioAttachOptions::builder().runtime_name("a").build(),
+        )
+        .expect("attach runtime a");
+
+    let mut builder_b = tokio::runtime::Builder::new_multi_thread();
+    builder_b.worker_threads(1).enable_all().thread_name("rt-b");
+    let rt_b = recorder
+        .handle()
+        .attach_tokio_runtime(
+            builder_b,
+            TokioAttachOptions::builder().runtime_name("b").build(),
+        )
+        .expect("attach runtime b");
+
+    let handle_a = Dial9TokioHandle::current();
+    let handle_b = Dial9TokioHandle::current();
+
+    let task_id_a: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
+    let task_id_b: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
+
+    let mut set_a: JoinSet<()> = JoinSet::new();
+    let id_a = task_id_a.clone();
+    handle_a.spawn_with(
+        async move {
+            *id_a.lock().unwrap() = tokio::task::try_id().map(TaskId::from);
+            tokio::task::yield_now().await;
+        },
+        |f| set_a.spawn_on(f, rt_a.handle()),
+    );
+
+    let mut set_b: JoinSet<()> = JoinSet::new();
+    let id_b = task_id_b.clone();
+    handle_b.spawn_with(
+        async move {
+            *id_b.lock().unwrap() = tokio::task::try_id().map(TaskId::from);
+            tokio::task::yield_now().await;
+        },
+        |f| set_b.spawn_on(f, rt_b.handle()),
+    );
+
+    rt_a.block_on(async move { set_a.join_next().await.unwrap().unwrap() });
+    rt_b.block_on(async move { set_b.join_next().await.unwrap().unwrap() });
+
+    drop(rt_a);
+    drop(rt_b);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    let task_id_a = task_id_a
+        .lock()
+        .unwrap()
+        .expect("task id a captured")
+        .to_u64();
+    let task_id_b = task_id_b
+        .lock()
+        .unwrap()
+        .expect("task id b captured")
+        .to_u64();
+    let b = batches.lock().unwrap();
+    let events: Vec<SpawnEvent> = decode_all(&b);
+
+    let worker_ids_for = |task_id: u64| -> std::collections::BTreeSet<u64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SpawnEvent::PollStartEvent {
+                    worker_id,
+                    task_id: t,
+                } if *t == task_id => Some(*worker_id),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let workers_a = worker_ids_for(task_id_a);
+    let workers_b = worker_ids_for(task_id_b);
+    assert!(
+        !workers_a.is_empty(),
+        "expected a PollStartEvent for runtime a's task"
+    );
+    assert!(
+        !workers_b.is_empty(),
+        "expected a PollStartEvent for runtime b's task"
+    );
+    assert!(
+        workers_a.is_disjoint(&workers_b),
+        "runtime a's and b's tasks must resolve to disjoint worker ids, got a={workers_a:?} b={workers_b:?}"
+    );
 }
