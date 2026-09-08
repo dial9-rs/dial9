@@ -11,6 +11,7 @@ import { createStore } from "../../store/store.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import type { StoreOptions } from "../../store/store.js";
+import { DEFAULT_LABEL_WIDTH } from "./label-gutter.js";
 
 /** The default persistent inspector width (CSS px). */
 export const DEFAULT_INSPECTOR_WIDTH = 360;
@@ -25,6 +26,8 @@ export const DEFAULT_RAIL_WIDTH = 300;
  *  default so multi-runtime traces are not cramped to a couple of visible rows;
  *  folding a runtime (header click) reclaims the rest. */
 export const DEFAULT_LANES_HEIGHT = 360;
+
+export { DEFAULT_LABEL_WIDTH } from "./label-gutter.js";
 
 /** Build the viewer store's resting (no-trace) initial state. */
 export function initialViewerState(): StoreState {
@@ -70,6 +73,7 @@ export function initialViewerState(): StoreState {
       collapsedRuntimeMetrics: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       railWidth: DEFAULT_RAIL_WIDTH,
+      labelWidth: DEFAULT_LABEL_WIDTH,
       taskColWidths: {},
       issueColWidths: {},
       lanesViewportHeight: DEFAULT_LANES_HEIGHT,

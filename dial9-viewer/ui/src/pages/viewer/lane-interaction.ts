@@ -15,7 +15,6 @@
 // samples returns openStackFor, which drives the inspector's Poll Detail.
 
 import {
-  LABEL_W,
   headerAtLaneY,
   laneRowLayout,
   metricsLaneAtLaneY,
@@ -99,8 +98,14 @@ export function mountLaneInteraction(
     const scrollbarW = lanesScrollbarWidth(trackColumn);
     const { viewStart, viewEnd } = store.getState().viewport;
     return {
-      layout: timePanelLayout({ pw, scrollbarW, viewStart, viewEnd }),
-      drawW: pw - LABEL_W - scrollbarW,
+      layout: timePanelLayout({
+        pw,
+        scrollbarW,
+        labelW: store.getState().uiPrefs.labelWidth,
+        viewStart,
+        viewEnd,
+      }),
+      drawW: pw - store.getState().uiPrefs.labelWidth - scrollbarW,
       rectLeft: rect.left,
     };
   }
@@ -108,7 +113,8 @@ export function mountLaneInteraction(
   /** Timestamp under `clientX`, clamped to the draw area (region/press edge). */
   function nsAtClientX(clientX: number, geom: ColumnGeom): number {
     const x = clientX - geom.rectLeft;
-    const clamped = Math.max(LABEL_W, Math.min(LABEL_W + geom.drawW, x));
+    const labelW = geom.layout.labelW;
+    const clamped = Math.max(labelW, Math.min(labelW + geom.drawW, x));
     return geom.layout.panelXToNs(clamped);
   }
 
@@ -275,7 +281,7 @@ export function mountLaneInteraction(
     const geom = readColumnGeom();
     const mouseXCol = e.clientX - geom.rectLeft;
     // Any lanes click clears the pinned custom-event marker.
-    if (mouseXCol < LABEL_W || mouseXCol > LABEL_W + geom.drawW) {
+    if (mouseXCol < geom.layout.labelW || mouseXCol > geom.layout.labelW + geom.drawW) {
       store.update("selection", {
         selectedTaskId: null,
         pinnedEvent: null,
@@ -341,7 +347,7 @@ export function mountLaneInteraction(
     if (!e.ctrlKey && !e.metaKey) return;
     if (store.getState().trace.trace === null) return;
     const geom = readColumnGeom();
-    const mouseXInDraw = e.clientX - geom.rectLeft - LABEL_W;
+    const mouseXInDraw = e.clientX - geom.rectLeft - geom.layout.labelW;
     const intent = wheelZoomIntent({
       ctrlKey: e.ctrlKey,
       metaKey: e.metaKey,

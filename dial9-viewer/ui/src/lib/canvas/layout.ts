@@ -25,7 +25,7 @@ export type { TimePanelLayout };
  * time-based panel. The invariant is that ALL panels use this one
  * constant, never a private gutter width.
  */
-export const LABEL_W = 100;
+export const LABEL_W = 180;
 
 /**
  * Timestamp (ns) -> draw-area-relative x (px). THE alignment invariant: every
@@ -60,6 +60,8 @@ export interface TimePanelLayoutOpts {
    * panels that don't need to match the lane right edge.
    */
   scrollbarW?: number;
+  /** Shared left label gutter width for this viewer layout. */
+  labelW?: number;
   /** Visible-range start timestamp (ns). */
   viewStart: number;
   /** Visible-range end timestamp (ns). */
@@ -78,7 +80,7 @@ export interface TimePanelLayoutOpts {
 export function timePanelLayout(opts: TimePanelLayoutOpts): TimePanelLayout {
   return makeTimePanelLayout(
     opts.pw,
-    LABEL_W,
+    opts.labelW ?? LABEL_W,
     opts.scrollbarW,
     opts.viewStart,
     opts.viewEnd,

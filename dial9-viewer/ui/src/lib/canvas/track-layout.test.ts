@@ -46,6 +46,20 @@ describe("trackGeometry - shared axis", () => {
     expect(g.time.drawW).toBe(opts.pw - LABEL_W - 15);
   });
 
+  it("uses one caller-selected gutter width for every track", () => {
+    const labelW = 240;
+    const geometries = TRACKS.map((t) =>
+      trackGeometry(t, { ...opts, labelW, scrollbarW: 15 }),
+    );
+    expect(new Set(geometries.map((g) => g.time.drawW))).toEqual(
+      new Set([opts.pw - labelW - 15]),
+    );
+    for (const g of geometries) {
+      expect(g.time.labelW).toBe(labelW);
+      expect(g.time.nsToPanelX(opts.viewStart)).toBe(labelW);
+    }
+  });
+
   it("carries the track height into the geometry box", () => {
     for (const t of TRACKS) {
       expect(trackGeometry(t, opts).height).toBe(t.height);

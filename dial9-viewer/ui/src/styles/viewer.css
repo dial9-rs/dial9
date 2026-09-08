@@ -550,7 +550,7 @@ body {
 
 /* ── Tracks ──────────────────────────────────────────────────────────── */
 
-.d9-tracks { display: flex; flex-direction: column; }
+.d9-tracks { display: flex; flex-direction: column; position: relative; }
 .d9-track {
     display: flex;
     align-items: stretch;
@@ -599,6 +599,18 @@ body {
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
+.d9-label-resize {
+    position: absolute;
+    z-index: 8;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--d9-label-w) - 3px);
+    width: 7px;
+    cursor: col-resize;
+    touch-action: none;
+}
+.d9-label-resize:hover,
+.d9-label-resize:focus-visible { background: var(--d9-accent); outline: none; }
 
 /* CPU guide + visible-window summary share a real DOM header so they cannot
    overlap. The guide swatch mirrors the canvas line's 4px/3px dash pattern. */
@@ -898,6 +910,24 @@ body {
     overflow-y: auto;
     overflow-x: hidden;
 }
+/* Spans owns an in-flow heading so focused metadata always starts on the next
+   line. Its management strip retains the collapse/reorder controls only. */
+.d9-track-manage--spans .d9-track-strip-name {
+    display: none;
+}
+.d9-track-manage--spans .d9-track-manage-strip {
+    justify-content: space-between;
+}
+.d9-spans-heading {
+    display: block;
+    min-height: 20px;
+    padding-left: 28px;
+    padding-right: 28px;
+    font-size: 0.8em;
+    line-height: 20px;
+    color: var(--d9-fg);
+    flex: none;
+}
 .d9-spans-meta-name {
     font-size: 0.78em;
     color: #ccc;
@@ -911,7 +941,7 @@ body {
     margin-top: 2px;
     line-height: 1.3;
 }
-.d9-kv-key { color: var(--d9-fg-muted); font-size: 0.72em; white-space: nowrap; }
+.d9-kv-key { color: var(--d9-fg-muted); font-size: 0.72em; white-space: nowrap; flex: none; }
 .d9-kv-val {
     color: #cdd2f0;
     font-size: 0.72em;

@@ -97,6 +97,7 @@ function viewModel(state: StoreState): TracksViewModel {
     trackOrder: state.uiPrefs.trackOrder,
     collapsed: state.uiPrefs.collapsed,
     lanesViewportHeight: state.uiPrefs.lanesViewportHeight,
+    labelWidth: state.uiPrefs.labelWidth,
   };
 }
 
