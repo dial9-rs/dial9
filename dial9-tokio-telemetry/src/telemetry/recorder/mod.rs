@@ -534,6 +534,86 @@ mod tests {
         rec.graceful_shutdown(Duration::from_secs(1));
     }
 
+    #[cfg(feature = "analysis")]
+    fn park_event(timestamp_ns: u64) -> crate::telemetry::format::WorkerParkEvent {
+        use crate::telemetry::format::{WorkerId, WorkerParkEvent};
+        WorkerParkEvent {
+            timestamp_ns,
+            worker_id: WorkerId::from(0usize),
+            local_queue: 0,
+            cpu_time_ns: 0,
+            tid: 0,
+        }
+    }
+
+    /// Sealed segments in rotation order. `read_dir` is unordered and the
+    /// filenames sort lexically, so `trace.10.bin` would precede `trace.2.bin`.
+    #[cfg(feature = "analysis")]
+    fn segments_in_order(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .map(|p| {
+                let name = p.file_name().unwrap().to_str().unwrap().to_string();
+                let index = name.split('.').nth(1).unwrap().parse().unwrap();
+                (index, p)
+            })
+            .collect();
+        files.sort_by_key(|(index, _)| *index);
+        files.into_iter().map(|(_, p)| p).collect()
+    }
+
+    #[cfg(feature = "analysis")]
+    fn is_complete(path: &std::path::Path) -> Option<bool> {
+        crate::telemetry::analysis::TraceReader::new(path.to_str().unwrap())
+            .unwrap()
+            .is_complete()
+    }
+
+    /// A trace that never rotated is sealed by `finalize` after a drain.
+    #[test]
+    #[cfg(feature = "analysis")]
+    fn test_trace_reader_reports_a_complete_trace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer = crate::telemetry::buffer::DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(1_000_000)
+            .build()
+            .unwrap();
+        test_util::write_event(&mut writer, &park_event(1)).unwrap();
+        writer.finalize().unwrap();
+
+        let files = segments_in_order(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(is_complete(&files[0]), Some(true));
+    }
+
+    /// A segment sealed by overflow reports itself incomplete, and so does the
+    /// one that inherited its still-buffered events.
+    #[test]
+    #[cfg(feature = "analysis")]
+    fn test_trace_reader_reports_an_incomplete_trace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer = crate::telemetry::buffer::DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(4_000)
+            .max_total_size(1_000_000)
+            .build()
+            .unwrap();
+        for i in 0..500u64 {
+            test_util::write_event(&mut writer, &park_event(i)).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let files = segments_in_order(dir.path());
+        assert!(files.len() > 2, "expected several overflow rotations");
+        assert_eq!(is_complete(&files[0]), Some(false), "overflowed");
+        assert_eq!(is_complete(&files[1]), Some(false), "inherited its events");
+    }
+
     #[test]
     #[cfg(feature = "analysis")]
     fn test_spawn_locations_resolve_after_rotation() {
