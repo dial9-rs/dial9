@@ -3,17 +3,7 @@
 //! Available under the `test-util` feature.
 
 use crate::buffer::{BufferMode, SegmentWriter};
-use crate::handle::Dial9Handle;
-use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
-
-/// A connected `Dial9Handle` with no flush thread behind it: mints a
-/// throwaway control channel instead of `Recorder::start`'s real one, for
-/// tests that don't need the full flush-thread setup.
-pub fn connected_handle(shared: Arc<SharedState>) -> Dial9Handle {
-    let (control_tx, _control_rx) = crate::primitives::sync::mpsc::sync_channel(0);
-    Dial9Handle::enabled(shared, control_tx)
-}
 
 /// Flush the calling thread's buffered events into `shared`'s collector,
 /// leaving them queued.
@@ -116,15 +106,25 @@ mod pipeline_helpers {
 
     impl SealedSegments {
         /// Every segment sealed since the last call, as raw trace bytes.
-        /// Decode each with [`dial9_trace_format::decoder::Decoder`] to
-        /// inspect its events.
+        /// Loops the underlying `take_files` until it reports none left,
+        /// since the memory backend only pops one segment per call. Decode
+        /// each with [`dial9_trace_format::decoder::Decoder`] to inspect its
+        /// events.
         pub fn take(&self) -> Vec<Vec<u8>> {
-            self.0
-                .take_files()
-                .segments
-                .into_iter()
-                .map(|seg| seg.load().expect("load sealed segment").1.into_vec())
-                .collect()
+            let mut out = Vec::new();
+            loop {
+                let taken = self.0.take_files();
+                if taken.segments.is_empty() {
+                    break;
+                }
+                out.extend(
+                    taken
+                        .segments
+                        .into_iter()
+                        .map(|seg| seg.load().expect("load sealed segment").1.into_vec()),
+                );
+            }
+            out
         }
     }
 
