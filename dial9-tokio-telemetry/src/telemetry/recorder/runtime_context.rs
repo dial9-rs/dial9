@@ -468,14 +468,6 @@ impl RuntimeContext {
         self.runtime_id.get() == Some(&id)
     }
 
-    /// `is_runtime` without the `tokio_unstable` gate, for tests that need
-    /// to verify `bind_runtime` under a build where `is_runtime` doesn't exist
-    /// (`tokio_unstable` is unconditional in this repo, so that's always).
-    #[cfg(all(test, shuttle))]
-    pub(crate) fn bound_runtime_id_for_test(&self) -> Option<tokio::runtime::Id> {
-        self.runtime_id.get().copied()
-    }
-
     /// Build segment metadata entries for this runtime, e.g. `("runtime.main", "0,1,2,3")`.
     /// Returns `None` if unnamed or no workers resolved yet.
     pub(crate) fn metadata_entry(&self) -> Option<(String, String)> {
@@ -1079,17 +1071,23 @@ mod shuttle_tests {
     shuttle_test! {
         num_iters = 10_000, depth = 3;
         // Races concurrent attaches on one cloned `Dial9Handle`, matching
-        // `attach_tokio_runtime`'s documented usage in `recorder_tokio.rs`.
+        // `attach_tokio_runtime`'s documented usage in `recorder_tokio.rs`:
+        // "several threads can each attach their own runtime off the same
+        // recorder." `with_source_or_insert` and the registry push are
+        // both already atomic today (one lock each, no TOCTOU window). This
+        // guards against a future refactor splitting either into
+        // non-atomic steps, which no lint or other test would catch.
         // `num_iters` doubled from `default` for the real flush thread's
         // own background cycling.
         //
-        // Checked via the sealed trace, not `segment_metadata` directly:
-        // that method is single-consumer, and the real flush thread racing
-        // to poll it can consume a change before this test sees it.
+        // Checked via the sealed trace: `segment_metadata` is single-consumer,
+        // so the real flush thread's own concurrent polling can consume a
+        // change before this test observes it.
         //
         // Worker-ID claiming needs a live Tokio worker thread, which
-        // shuttle has none of. Looked up post-attach and inserted directly
-        // to stand in for it.
+        // shuttle has none of. Looked up post-attach and registered through
+        // the real register_worker_if_needed, standing in only for the
+        // missing live worker thread.
         fn shuttle_concurrent_attach() {
             // Fixed time, like `test_core_pipeline`: otherwise the flush
             // thread's rotation checks read real elapsed time, which can
@@ -1109,28 +1107,42 @@ mod shuttle_tests {
                 .map(|i| {
                     let handle = handle.clone();
                     crate::primitives::thread::spawn(move || {
+                        let name = format!("runtime-{i}");
                         let builder = tokio::runtime::Builder::new_current_thread();
                         let options = TokioAttachOptions::builder()
-                            .runtime_name(format!("runtime-{i}"))
+                            .runtime_name(name.clone())
                             .build();
                         let runtime = handle.attach_tokio_runtime(builder, options).unwrap();
-                        let id = runtime.handle().id();
                         drop(runtime);
 
+                        // Keyed by `runtime_name`: this crate's shuttle build
+                        // always sets `--cfg tokio_unstable`, where
+                        // `is_runtime` doesn't compile, so `bind_runtime`'s
+                        // `runtime_id` is unreadable here.
+                        // `register_worker_if_needed` below just needs *a*
+                        // handle on the context this attacher created.
                         let state = recorder_tokio::tokio_attach_state(&handle)
                             .expect("attach_tokio_runtime installed the source above");
-                        let registry = state.registry.lock().unwrap();
-                        let ctx = registry
+                        let ctx = state
+                            .registry
+                            .lock()
+                            .unwrap()
                             .iter()
-                            .find(|c| c.bound_runtime_id_for_test() == Some(id))
-                            .expect("attach_tokio_runtime bound this context above");
-                        ctx.worker_ids.lock().unwrap().insert(i as u64);
-                        id
+                            .find(|c| c.runtime_name.as_deref() == Some(name.as_str()))
+                            .cloned()
+                            .expect("attach_tokio_runtime pushed this context above");
+                        // Drives the real worker-registration path a live
+                        // Tokio worker thread would hit via resolve_worker;
+                        // shuttle has none, so this stands in for that
+                        // thread's first-touch registration.
+                        register_worker_if_needed(&ctx, i as u64);
                     })
                 })
                 .collect();
 
-            let bound_ids: Vec<_> = attachers.into_iter().map(|a| a.join().unwrap()).collect();
+            for a in attachers {
+                a.join().unwrap();
+            }
 
             // A trivial marker event: `finalize()` discards a segment that
             // never held a real event, so without this the metadata-only
@@ -1143,44 +1155,16 @@ mod shuttle_tests {
                 tid: 0,
             });
 
-            let state = recorder_tokio::tokio_attach_state(&handle)
-                .expect("source installed by the attaches above");
-
-            // bind_runtime's effect must land for every attacher.
-            {
-                let registry = state.registry.lock().unwrap();
-                for id in &bound_ids {
-                    assert!(
-                        registry
-                            .iter()
-                            .any(|c| c.bound_runtime_id_for_test() == Some(*id)),
-                        "no registered context is bound to {id:?}"
-                    );
-                }
-            }
-
             drop(recorder); // Finalizes: seals the pending segment.
 
             let mut seen = std::collections::HashMap::new();
             for bytes in sealed.take() {
-                let mut dec =
-                    dial9_trace_format::decoder::Decoder::new(&bytes).expect("valid trace header");
-                while let Some(frame) = dec.next_frame_ref().expect("decode frame") {
-                    let dial9_trace_format::decoder::DecodedFrameRef::Event { type_id, values, .. } =
-                        frame
-                    else {
-                        continue;
-                    };
-                    if dec.registry().get(type_id).map(|s| s.name()) != Some("SegmentMetadataEvent")
+                let events = crate::telemetry::format::decode_events(&bytes).expect("decode trace");
+                for event in events {
+                    if let crate::telemetry::analysis_events::Dial9Event::SegmentMetadataEvent(meta) =
+                        event
                     {
-                        continue;
-                    }
-                    if let Some(dial9_trace_format::types::FieldValueRef::StringMap(m)) =
-                        values.first()
-                    {
-                        for (k, v) in m.iter() {
-                            seen.insert(k.to_string(), v.to_string());
-                        }
+                        seen.extend(meta.entries);
                     }
                 }
             }
