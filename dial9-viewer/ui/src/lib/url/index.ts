@@ -28,5 +28,5 @@ export type {
   DebounceTimer,
 } from "./sync.js";
 
-export { mountCopyLink } from "./copy-link.js";
+export { copyText, mountCopyLink } from "./copy-link.js";
 export type { CopyLinkOptions, CopyLinkHandle } from "./copy-link.js";

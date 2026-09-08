@@ -476,6 +476,13 @@ declare module "*/trace_parser.js" {
   ): { text: string; docsUrl: string | null };
 
   /**
+   * The docs.rs source URL for a `file.rs:line[:col]` location, or null when the
+   * path does not identify a published crate. First-party code has no target:
+   * the trace records the path on the recording machine, not a repo or commit.
+   */
+  export function docsRsUrl(location: string | null): string | null;
+
+  /**
    * Resolve a callchain (address strings) to frames. Leaf→root in, leaf→root
    * out: an address's inlined frames are expanded in place innermost callee
    * first, so `[0]` is always the leaf.

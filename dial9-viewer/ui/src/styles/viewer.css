@@ -550,7 +550,7 @@ body {
 
 /* ── Tracks ──────────────────────────────────────────────────────────── */
 
-.d9-tracks { display: flex; flex-direction: column; }
+.d9-tracks { display: flex; flex-direction: column; position: relative; }
 .d9-track {
     display: flex;
     align-items: stretch;
@@ -599,6 +599,18 @@ body {
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
+.d9-label-resize {
+    position: absolute;
+    z-index: 8;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--d9-label-w) - 3px);
+    width: 7px;
+    cursor: col-resize;
+    touch-action: none;
+}
+.d9-label-resize:hover,
+.d9-label-resize:focus-visible { background: var(--d9-accent); outline: none; }
 
 /* CPU guide + visible-window summary share a real DOM header so they cannot
    overlap. The guide swatch mirrors the canvas line's 4px/3px dash pattern. */
@@ -898,6 +910,24 @@ body {
     overflow-y: auto;
     overflow-x: hidden;
 }
+/* Spans owns an in-flow heading so focused metadata always starts on the next
+   line. Its management strip retains the collapse/reorder controls only. */
+.d9-track-manage--spans .d9-track-strip-name {
+    display: none;
+}
+.d9-track-manage--spans .d9-track-manage-strip {
+    justify-content: space-between;
+}
+.d9-spans-heading {
+    display: block;
+    min-height: 20px;
+    padding-left: 28px;
+    padding-right: 28px;
+    font-size: 0.8em;
+    line-height: 20px;
+    color: var(--d9-fg);
+    flex: none;
+}
 .d9-spans-meta-name {
     font-size: 0.78em;
     color: #ccc;
@@ -911,7 +941,7 @@ body {
     margin-top: 2px;
     line-height: 1.3;
 }
-.d9-kv-key { color: var(--d9-fg-muted); font-size: 0.72em; white-space: nowrap; }
+.d9-kv-key { color: var(--d9-fg-muted); font-size: 0.72em; white-space: nowrap; flex: none; }
 .d9-kv-val {
     color: #cdd2f0;
     font-size: 0.72em;
@@ -1043,6 +1073,41 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
 }
+.d9-task-detail-spawn {
+    font-size: 0.66em;
+    color: var(--d9-fg-muted);
+    font-family: var(--d9-mono, monospace);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* Both variants are interactive; neutralise the button's chrome so the
+       link and the copy button read as one control. */
+    background: none;
+    border: none;
+    padding: 0;
+    text-align: left;
+    cursor: pointer;
+    text-decoration: none;
+    display: block;
+    width: 100%;
+}
+.d9-task-detail-spawn:hover { color: var(--d9-fg); text-decoration: underline; }
+.d9-task-detail-spawn:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+}
+.d9-task-detail-spawn.is-link { color: #7fb3ff; }
+/* The copy button's label and its transient flash are separate spans: the
+   label is a lit binding, so the flash must never be written into the button's
+   own textContent (that would delete lit's part markers with it). */
+.d9-spawn-label,
+.d9-spawn-flash {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.d9-task-detail-spawn.is-flashing .d9-spawn-label { display: none; }
+.d9-spawn-flash { color: var(--d9-accent); }
 .d9-task-detail-wrap { position: relative; }
 .d9-task-detail-status {
     position: absolute;

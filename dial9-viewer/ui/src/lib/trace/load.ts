@@ -27,6 +27,7 @@ import {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
+  docsRsUrl,
   fetchTraces,
   formatFrame,
   parseTrace,
@@ -56,6 +57,7 @@ export {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
+  docsRsUrl,
   formatFrame,
   symbolizeChain,
 };

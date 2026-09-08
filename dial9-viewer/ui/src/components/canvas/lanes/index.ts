@@ -35,7 +35,6 @@ import {
 } from "./render.js";
 import { ensureLanesLegend, mountLanesLegend } from "./legend.js";
 import { renderLaneLabels } from "./labels.js";
-import { LABEL_W } from "../../../lib/canvas/layout.js";
 
 const LANES_TRACK_ID: TrackId = "lanes";
 
@@ -123,6 +122,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const geometry = trackGeometry(track, {
       pw,
       scrollbarW,
+      labelW: state.uiPrefs.labelWidth,
       viewStart: state.viewport.viewStart,
       viewEnd: state.viewport.viewEnd,
       dpr,
@@ -232,11 +232,12 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     // leading track-name line (CSS makes that name sr-only). Any inset here would
     // shift every label relative to the lane it names.
     const labelH = viewportH;
-    const ctx = labelSizer.ensure(LABEL_W, labelH, dpr);
+    const labelW = store.getState().uiPrefs.labelWidth;
+    const ctx = labelSizer.ensure(labelW, labelH, dpr);
     renderLaneLabels(ctx, {
       rowLayout,
       scrollTop,
-      labelW: LABEL_W,
+      labelW,
       height: labelH,
       runtimeAccents: data.runtimeAccents,
       workerRuntime: data.workerRuntime,

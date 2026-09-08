@@ -313,9 +313,8 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
         style="height:${track.height}px"
       >
         <div class="d9-track-label d9-spans-label" id="d9-track-label-spans">
-          ${label === null
-            ? html`<span class="d9-track-name">${track.label}</span>`
-            : spanMetaTemplate(label)}
+          <span class="d9-spans-heading">${track.label}</span>
+          ${label === null ? null : spanMetaTemplate(label)}
         </div>
         <div class="d9-track-body d9-spans-body">
           ${hasSpans ? controlsTemplate(data, s, filter) : nothing}

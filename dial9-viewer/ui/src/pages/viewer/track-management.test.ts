@@ -405,6 +405,20 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(uiPrefs(s2).railWidth).toBe(420);
   });
 
+  it("persists + restores the shared label gutter width across a fresh store", () => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    const s1 = manualScheduler();
+    const dispose = mountTrackPrefsPersistence(s1.store);
+    s1.store.update("uiPrefs", { labelWidth: 240 });
+    s1.flush();
+    dispose();
+
+    const s2 = createViewerStore({ scheduler: () => {} });
+    expect(uiPrefs(s2).labelWidth).toBe(180);
+    hydrateTrackPrefs(s2);
+    expect(uiPrefs(s2).labelWidth).toBe(240);
+  });
+
   it("keeps the store default when no rail width was stored", () => {
     const ls = fakeLocalStorage();
     // A pref blob from before railWidth existed: order/collapse only.

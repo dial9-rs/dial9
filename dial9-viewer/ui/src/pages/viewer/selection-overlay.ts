@@ -143,7 +143,13 @@ export function mountSelectionOverlay(
       el.style.display = "none";
       return;
     }
-    const layout = timePanelLayout({ pw, scrollbarW, viewStart, viewEnd });
+    const layout = timePanelLayout({
+      pw,
+      scrollbarW,
+      labelW: state.uiPrefs.labelWidth,
+      viewStart,
+      viewEnd,
+    });
     const box = selectionBox(region, layout);
     el.classList.toggle(ZOOM_MODIFIER, region.mode === "zoom");
     el.style.left = `${box.left}px`;
@@ -161,7 +167,7 @@ export function mountSelectionOverlay(
   // contract and trips the dev assertion at boot. Nothing is drawable before
   // that first tick anyway
   // (no trace, no selection => the box is hidden).
-  const unsubscribe = store.subscribe(["transient", "viewport", "selection"], () => render());
+  const unsubscribe = store.subscribe(["transient", "viewport", "selection", "uiPrefs"], () => render());
 
   return {
     dispose(): void {

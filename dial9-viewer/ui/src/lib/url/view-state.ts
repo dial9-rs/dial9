@@ -134,6 +134,8 @@ export interface ViewState {
   /** Shareable layout geometry and vertical lane position. */
   inspectorWidth?: number;
   railWidth?: number;
+  /** Shared time-track label gutter width in CSS px. */
+  labelWidth?: number;
   /** Rail-table column widths (px by column key), when user-resized. */
   taskColWidths?: Record<string, number>;
   issueColWidths?: Record<string, number>;

@@ -21,7 +21,7 @@ import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, TimePanelLayout } from "../../types/state.js";
 import type { TemplateResult } from "lit-html";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
+import { laneRowLayout, timePanelLayout, workerAtLaneY } from "../../lib/canvas/layout.js";
 import { LANE_ROW_H, RUNTIME_HEADER_H } from "../canvas/lanes/render.js";
 import { lanesScrollbarWidth } from "../../lib/canvas/track-layout.js";
 import { assembleLaneHover } from "../canvas/lanes/index.js";
@@ -67,6 +67,7 @@ interface ColumnGeometry {
 /** Read the shared column geometry ONCE (the lanes use the identical inputs). */
 function columnGeometry(
   trackColumn: HTMLElement,
+  labelW: number,
   viewStart: number,
   viewEnd: number,
 ): ColumnGeometry {
@@ -84,7 +85,7 @@ function columnGeometry(
   const contentHeight =
     (hint?.offsetHeight ?? 0) + flowContent.offsetHeight;
   return {
-    layout: timePanelLayout({ pw, scrollbarW, viewStart, viewEnd }),
+    layout: timePanelLayout({ pw, scrollbarW, labelW, viewStart, viewEnd }),
     pw,
     scrollHeight: Math.max(trackColumn.clientHeight, contentHeight),
   };
@@ -187,7 +188,7 @@ export function mountOverlay(
     // ALL reads first (geometry), THEN all writes: on a hover-only frame this
     // subscriber is alone, so its reads precede every write in the frame and
     // force no layout.
-    const geom = columnGeometry(trackColumn, viewStart, viewEnd);
+    const geom = columnGeometry(trackColumn, state.uiPrefs.labelWidth, viewStart, viewEnd);
     const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
 
     const formatTs = (ns: number): string => formatTimestamp(state, ns);
@@ -274,12 +275,17 @@ export function mountOverlay(
 
     const { viewStart, viewEnd } = state.viewport;
     // Clean reads (fresh event, layout committed): column geometry + ns.
-    const geom = columnGeometry(trackColumn, viewStart, viewEnd);
+    const geom = columnGeometry(
+      trackColumn,
+      state.uiPrefs.labelWidth,
+      viewStart,
+      viewEnd,
+    );
     const rect = trackColumn.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const drawW = geom.layout.drawW;
     // Outside the draw area (label gutter, past drawW, degenerate view): clear.
-    if (mouseX < LABEL_W || mouseX > LABEL_W + drawW || viewEnd <= viewStart) {
+    if (mouseX < geom.layout.labelW || mouseX > geom.layout.labelW + drawW || viewEnd <= viewStart) {
       if (state.transient.mouseNs !== null || state.transient.atCursor !== null) {
         store.update("transient", { mouseNs: null, atCursor: null });
       }

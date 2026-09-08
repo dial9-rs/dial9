@@ -22,11 +22,14 @@ export interface CopyLinkHandle {
 }
 
 /**
- * Default clipboard write: the async Clipboard API, falling back to a
- * transient textarea + execCommand("copy") for non-secure contexts
- * (plain-http LAN hosts; the API exists only in secure contexts).
+ * Clipboard write: the async Clipboard API, falling back to a transient
+ * textarea + execCommand("copy") for non-secure contexts (plain-http LAN
+ * hosts; the API exists only in secure contexts).
+ *
+ * Rejects when the write genuinely failed, so callers can say so instead of
+ * flashing a success the user's clipboard does not back up.
  */
-async function defaultCopy(text: string): Promise<void> {
+export async function copyText(text: string): Promise<void> {
   if (navigator.clipboard !== undefined) {
     await navigator.clipboard.writeText(text);
     return;
@@ -82,7 +85,7 @@ export function mountCopyLink(
       return;
     }
     const text = options.getText !== undefined ? options.getText() : window.location.href;
-    const copy = options.copy ?? defaultCopy;
+    const copy = options.copy ?? copyText;
     copy(text).then(
       () => {
         flash("Copied");

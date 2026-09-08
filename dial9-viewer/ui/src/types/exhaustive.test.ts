@@ -190,6 +190,7 @@ const initialState: StoreState = {
     collapsedRuntimeMetrics: { main: true },
     sidebarWidth: 400,
     railWidth: 320,
+    labelWidth: 180,
     taskColWidths: { loc: 260, polls: 48 },
     issueColWidths: { dot: 14, kind: 120 },
     lanesViewportHeight: 220,

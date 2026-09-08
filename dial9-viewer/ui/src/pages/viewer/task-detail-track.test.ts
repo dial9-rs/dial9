@@ -18,6 +18,7 @@ import {
   type ParsedTrace,
 } from "../../lib/trace/index.js";
 import { createViewerStore } from "./store.js";
+import type { TrackSpec } from "../../lib/canvas/track-layout.js";
 import {
   createTaskDetailDerivation,
   createTaskDetailTrack,
@@ -473,5 +474,68 @@ describe("drawTaskDetailCanvas render input", () => {
     const { ctx, texts } = recordingCtx();
     drawTaskDetailCanvas(ctx, model, null, 2000, 160, COMPLETE_TASK_DETAIL_WINDOW);
     expect(texts.some((t) => t.text === "partial window")).toBe(false);
+  });
+});
+
+// ── 5. Spawn-location gutter control ──────────────────────────────────────
+
+/**
+ * Flatten a lit TemplateResult to its static HTML with a NUL standing in for
+ * each binding, so a test can assert WHERE the bindings sit.
+ */
+function markedHtml(tpl: unknown): string {
+  const t = tpl as { strings?: readonly string[]; values?: readonly unknown[] };
+  if (t.strings === undefined || t.values === undefined) return "";
+  let out = "";
+  t.strings.forEach((str, i) => {
+    out += str;
+    if (i < t.values!.length) out += "\u0000";
+  });
+  return out;
+}
+
+/** Depth-first search for the nested template carrying `needle`. */
+function findTemplate(tpl: unknown, needle: string): string | null {
+  const here = markedHtml(tpl);
+  if (here.includes(needle)) return here;
+  const values = (tpl as { values?: readonly unknown[] }).values ?? [];
+  for (const v of values) {
+    const hit = findTemplate(v, needle);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+function spawnLocTrace(): ParsedTrace {
+  const trace = traceWith([...pollEvents(0, 42, 1000, 1100)]);
+  // A first-party path: no published crate, so the gutter renders the COPY
+  // button rather than the docs.rs link.
+  (trace.spawnLocations as Map<string, string>).set("F", "examples/app/src/main.rs:334:14");
+  (trace.taskSpawnLocs as Map<number, string>).set(42, "F");
+  return trace;
+}
+
+describe("task-detail gutter: spawn location", () => {
+  const TRACK = { id: "task-detail", label: "task", height: 60 } as TrackSpec;
+
+  it("wraps the bound label in its own span, apart from the copy flash", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    store.update("trace", { trace: spawnLocTrace() });
+    store.update("selection", { selectedTaskId: 42 });
+    const track = createTaskDetailTrack(store);
+
+    const tpl = findTemplate(track.rowTemplate(TRACK), "d9-task-detail-spawn");
+    expect(tpl).not.toBeNull();
+
+    // The label binding sits INSIDE .d9-spawn-label. If it were a direct child
+    // of the button, the imperative copy flash would have to write the
+    // button's textContent - deleting lit's part markers with it, so every
+    // later re-render would update a detached node and the gutter would keep
+    // showing the previously selected task's path.
+    expect(tpl!).toContain('<span class="d9-spawn-label">\u0000</span');
+
+    // The flash slot is static: no binding between its tags, so writing its
+    // textContent is safe.
+    expect(tpl!).toContain('class="d9-spawn-flash" aria-live="polite"></span>');
   });
 });

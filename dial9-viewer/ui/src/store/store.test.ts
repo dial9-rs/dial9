@@ -63,6 +63,7 @@ function initialViewerState(): StoreState {
       collapsedRuntimeMetrics: {},
       sidebarWidth: 320,
       railWidth: 300,
+      labelWidth: 180,
       taskColWidths: {},
       issueColWidths: {},
       lanesViewportHeight: 200,

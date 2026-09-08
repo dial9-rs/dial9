@@ -15,7 +15,7 @@ import { html, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
 import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, lanesScrollbarWidth, trackGeometry } from "../../lib/canvas/track-layout.js";
+import { lanesScrollbarWidth, trackGeometry } from "../../lib/canvas/track-layout.js";
 import {
   isFieldChartTrackId,
   type TrackId,
@@ -42,6 +42,11 @@ import type { TaskDetailTrackController } from "./task-detail-track.js";
 import type { EventsTrackController } from "./events-track.js";
 import { fieldChartTrackSpecs } from "./field-chart-model.js";
 import type { FieldChartTrackController } from "./field-chart-track.js";
+import {
+  MAX_LABEL_WIDTH_VW,
+  MIN_LABEL_WIDTH,
+  clampLabelWidth,
+} from "./label-gutter.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -84,7 +89,11 @@ export interface TracksViewModel {
   /** Height (CSS px) of the worker-lanes scroll box. The lanes row sizes its
    *  viewport to this; the user drag-resizes it via the lanes bottom gutter. */
   lanesViewportHeight: number;
+  /** Shared, user-resizable DOM/canvas gutter width. */
+  labelWidth: number;
 }
+
+export { MAX_LABEL_WIDTH_VW, MIN_LABEL_WIDTH, clampLabelWidth } from "./label-gutter.js";
 
 /**
  * The tracks visible for a view model, in the user's order: apply `trackOrder`
@@ -141,7 +150,7 @@ export function tracksTemplate(
       class="d9-tracks"
       role="group"
       aria-label="Timeline tracks"
-      style="--d9-label-w:${LABEL_W}px"
+      style="--d9-label-w:${vm.labelWidth}px"
     >
       ${repeat(
         tracks,
@@ -169,6 +178,20 @@ export function tracksTemplate(
             : inner;
         },
       )}
+      <div
+        class="d9-label-resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize track labels"
+        aria-valuemin=${MIN_LABEL_WIDTH}
+        aria-valuemax=${Math.max(MIN_LABEL_WIDTH, Math.floor(window.innerWidth * MAX_LABEL_WIDTH_VW))}
+        aria-valuenow=${vm.labelWidth}
+        tabindex="0"
+        title="Drag to resize track labels; double-click to reset"
+        @mousedown=${(e: MouseEvent) => onLabelResizeDown(e, actions)}
+        @keydown=${(e: KeyboardEvent) => onLabelResizeKeyDown(e, actions)}
+        @dblclick=${() => actions.resetLabelWidth()}
+      ></div>
     </div>
   `;
 }
@@ -253,6 +276,48 @@ function lanesTrackRow(t: TrackSpec, viewportHeight: number): TemplateResult {
 // dragstart, cleared on dragend/drop. Transient, like the `sizers` memo below.
 let dragSourceId: TrackId | null = null;
 
+function onLabelResizeDown(e: MouseEvent, actions: TrackManageActions): void {
+  e.preventDefault();
+  const handle = e.currentTarget as HTMLElement;
+  const doc = handle.ownerDocument;
+  const win = doc.defaultView ?? window;
+  const onMove = (move: MouseEvent): void => {
+    const tracks = handle.closest<HTMLElement>(".d9-tracks");
+    if (tracks !== null) {
+      actions.setLabelWidth(
+        clampLabelWidth(move.clientX - tracks.getBoundingClientRect().left),
+      );
+    }
+  };
+  const onUp = (): void => {
+    doc.body.style.userSelect = "";
+    doc.body.style.cursor = "";
+    win.removeEventListener("mousemove", onMove);
+    win.removeEventListener("mouseup", onUp);
+  };
+  doc.body.style.userSelect = "none";
+  doc.body.style.cursor = "col-resize";
+  win.addEventListener("mousemove", onMove);
+  win.addEventListener("mouseup", onUp);
+}
+
+function onLabelResizeKeyDown(e: KeyboardEvent, actions: TrackManageActions): void {
+  const step = e.shiftKey ? 32 : 8;
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    actions.adjustLabelWidth(-step);
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    actions.adjustLabelWidth(step);
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    actions.setLabelWidth(MIN_LABEL_WIDTH);
+  } else if (e.key === "End") {
+    e.preventDefault();
+    actions.setLabelWidth(clampLabelWidth(Infinity));
+  }
+}
+
 function onGripDragStart(e: DragEvent, id: TrackId): void {
   dragSourceId = id;
   if (e.dataTransfer !== null) {
@@ -301,7 +366,8 @@ function manageWrapper(
   return html`
     <div
       class="d9-track-manage ${collapsed ? "is-collapsed" : ""}
-        ${isFieldChartTrackId(t.id) ? "is-dynamic" : ""}"
+        ${isFieldChartTrackId(t.id) ? "is-dynamic" : ""}
+        ${t.id === "spans" ? "d9-track-manage--spans" : ""}"
       data-track-manage=${t.id}
       @dragover=${(e: DragEvent) => onRowDragOver(e, t.id)}
       @drop=${(e: DragEvent) => onRowDrop(e, t.id, actions)}
@@ -450,6 +516,7 @@ export function sizeTracks(
     const geometry = trackGeometry(track, {
       pw,
       scrollbarW,
+      labelW: vm.labelWidth,
       viewStart: vm.viewStart,
       viewEnd: vm.viewEnd,
       dpr,

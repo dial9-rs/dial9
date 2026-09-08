@@ -27,6 +27,8 @@ import {
   closeFieldChart,
   fieldChartTrackSpecs,
 } from "./field-chart-model.js";
+import { DEFAULT_LABEL_WIDTH } from "./store.js";
+import { clampLabelWidth } from "./label-gutter.js";
 
 /** Collapsed (label-only) track height in CSS px. */
 export const COLLAPSED_TRACK_H = 36;
@@ -151,10 +153,21 @@ export interface TrackManageActions {
   reorder(dragged: TrackId, target: TrackId): void;
   /** Close a URL-defined dynamic chart and clean every reference to its id. */
   close(id: TrackId): void;
+  setLabelWidth(width: number): void;
+  adjustLabelWidth(delta: number): void;
+  resetLabelWidth(): void;
 }
 
 /** Bind the track-management actions to a store (dispatch uiPrefs updates). */
 export function createTrackManageActions(store: ViewerStore): TrackManageActions {
+  function setLabelWidth(width: number): void {
+    const next = clampLabelWidth(width);
+    if (next !== store.getState().uiPrefs.labelWidth) {
+      store.update("uiPrefs", { labelWidth: next });
+      store.update("viewport", {});
+    }
+  }
+
   return {
     toggleCollapse(id: TrackId): void {
       if (!isManageableTrack(id)) return;
@@ -176,6 +189,14 @@ export function createTrackManageActions(store: ViewerStore): TrackManageActions
     },
     close(id: TrackId): void {
       closeFieldChart(store, id);
+    },
+    setLabelWidth,
+    adjustLabelWidth(delta: number): void {
+      const cur = store.getState().uiPrefs.labelWidth;
+      setLabelWidth(cur + delta);
+    },
+    resetLabelWidth(): void {
+      setLabelWidth(DEFAULT_LABEL_WIDTH);
     },
   };
 }
@@ -235,6 +256,7 @@ export interface TrackPrefs {
   collapsedRuntimeMetrics?: Readonly<Record<string, boolean>>;
   lanesHeight?: number;
   railWidth?: number;
+  labelWidth?: number;
   taskColWidths?: Readonly<Record<string, number>>;
   issueColWidths?: Readonly<Record<string, number>>;
 }
@@ -314,6 +336,8 @@ export function loadTrackPrefs(): TrackPrefs | null {
     const lanesHeight = typeof lh === "number" && Number.isFinite(lh) && lh > 0 ? lh : undefined;
     const rw = (obj as { railWidth?: unknown }).railWidth;
     const railWidth = typeof rw === "number" && Number.isFinite(rw) && rw > 0 ? rw : undefined;
+    const lw = (obj as { labelWidth?: unknown }).labelWidth;
+    const labelWidth = typeof lw === "number" && Number.isFinite(lw) && lw > 0 ? lw : undefined;
     const tcw = (obj as { taskColWidths?: unknown }).taskColWidths;
     const taskColWidths = tcw !== undefined ? parseWidthMap(tcw) : undefined;
     const icw = (obj as { issueColWidths?: unknown }).issueColWidths;
@@ -325,6 +349,7 @@ export function loadTrackPrefs(): TrackPrefs | null {
       ...(collapsedRuntimeMetrics !== undefined ? { collapsedRuntimeMetrics } : {}),
       ...(lanesHeight !== undefined ? { lanesHeight } : {}),
       ...(railWidth !== undefined ? { railWidth } : {}),
+      ...(labelWidth !== undefined ? { labelWidth } : {}),
       ...(taskColWidths !== undefined ? { taskColWidths } : {}),
       ...(issueColWidths !== undefined ? { issueColWidths } : {}),
     };
@@ -355,6 +380,9 @@ export function saveTrackPrefs(prefs: TrackPrefs): void {
         : {}),
       ...(prefs.lanesHeight !== undefined ? { lanesHeight: prefs.lanesHeight } : {}),
       ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
+      ...(prefs.labelWidth !== undefined
+        ? { labelWidth: clampLabelWidth(prefs.labelWidth) }
+        : {}),
       ...(prefs.taskColWidths !== undefined ? { taskColWidths: prefs.taskColWidths } : {}),
       ...(prefs.issueColWidths !== undefined ? { issueColWidths: prefs.issueColWidths } : {}),
     }),
@@ -383,6 +411,9 @@ export function hydrateTrackPrefs(store: ViewerStore): void {
       : {}),
     ...(prefs.lanesHeight !== undefined ? { lanesViewportHeight: prefs.lanesHeight } : {}),
     ...(prefs.railWidth !== undefined ? { railWidth: prefs.railWidth } : {}),
+    ...(prefs.labelWidth !== undefined
+      ? { labelWidth: clampLabelWidth(prefs.labelWidth) }
+      : {}),
     ...(prefs.taskColWidths !== undefined ? { taskColWidths: prefs.taskColWidths } : {}),
     ...(prefs.issueColWidths !== undefined ? { issueColWidths: prefs.issueColWidths } : {}),
   });
@@ -404,6 +435,7 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       collapsedRuntimeMetrics,
       lanesViewportHeight,
       railWidth,
+      labelWidth,
       taskColWidths,
       issueColWidths,
     } = state.uiPrefs;
@@ -414,6 +446,7 @@ export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
       collapsedRuntimeMetrics,
       lanesHeight: lanesViewportHeight,
       railWidth,
+      labelWidth,
       taskColWidths,
       issueColWidths,
     });

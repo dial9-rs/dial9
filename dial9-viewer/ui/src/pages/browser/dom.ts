@@ -55,7 +55,9 @@ export interface BrowserEls {
   browseStatus: HTMLDivElement;
   // Heatmap
   heatmapView: HTMLDivElement;
+  heatmapBody: HTMLDivElement;
   heatmapLabels: HTMLDivElement;
+  heatmapLabelResizer: HTMLDivElement;
   heatmapPlot: HTMLDivElement;
   heatmapCanvas: HTMLCanvasElement;
   heatmapSel: HTMLDivElement;
@@ -122,7 +124,9 @@ export function queryEls(): BrowserEls {
     browseWarning: byId("browse-warning"),
     browseStatus: byId("browse-status"),
     heatmapView: byId("heatmap-view"),
+    heatmapBody: byId("heatmap-body"),
     heatmapLabels: byId("heatmap-labels"),
+    heatmapLabelResizer: byId("heatmap-label-resizer"),
     heatmapPlot: byId("heatmap-plot"),
     heatmapCanvas: byIdOf("heatmap-canvas", HTMLCanvasElement),
     heatmapSel: byId("heatmap-sel"),
