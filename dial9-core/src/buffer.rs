@@ -62,6 +62,32 @@ const DIAL9_VERSION_VALUE: &str = env!("CARGO_PKG_VERSION");
 /// process. Populated by default when the platform can report it.
 const PROCESS_AVAILABLE_PARALLELISM_KEY: &str = "process.available_parallelism";
 
+/// Seal-time segment-metadata key, `true` when thread-local buffers were
+/// drained into the segment before it was sealed. A `false` segment is missing
+/// events that were still buffered.
+const SEGMENT_SEALED_CLEAN_KEY: &str = "segment.sealed_clean";
+
+/// Seal-time segment-metadata key carrying the preceding segment's
+/// [`SEGMENT_SEALED_CLEAN_KEY`], so a segment can be judged without
+/// fetching its predecessor. A `false` segment carries events that belong to
+/// the segment before it. `true` for the first segment a writer opens.
+const SEGMENT_PRIOR_SEALED_CLEAN_KEY: &str = "segment.prior_sealed_clean";
+
+/// Whether a rotation drained thread-local buffers before sealing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SealKind {
+    /// The flush loop drained thread-local buffers first.
+    Drained,
+    /// The segment crossed `max_file_size` mid-write.
+    Overflow,
+}
+
+impl SealKind {
+    fn is_clean(self) -> bool {
+        matches!(self, SealKind::Drained)
+    }
+}
+
 #[derive(Clone)]
 struct SegmentMetadata {
     entries: Vec<(String, String)>,
@@ -216,6 +242,8 @@ pub struct SegmentWriter<Mode: BufferMode = Disk> {
     current_period: Duration,
     /// When the active segment was opened, for the byte-rate estimate.
     segment_started_at: Instant,
+    /// How the preceding segment was sealed, recorded into this one.
+    prior_seal_kind: SealKind,
     /// Next monotonic instant at which `should_drain()` returns true.
     next_drain_time: Instant,
     /// Unified filesystem/channel abstraction.
@@ -324,6 +352,7 @@ impl SegmentWriter<Disk> {
             has_real_events: false,
             current_period: rotation_period,
             segment_started_at: now,
+            prior_seal_kind: SealKind::Drained,
             next_drain_time: now + drain_interval,
             fs,
             boot_id: None,
@@ -387,6 +416,7 @@ impl SegmentWriter<Disk> {
             has_real_events: false,
             current_period: Duration::MAX,
             segment_started_at: now,
+            prior_seal_kind: SealKind::Drained,
             next_drain_time: now + DEFAULT_DRAIN_INTERVAL,
             fs,
             boot_id: None,
@@ -503,6 +533,7 @@ impl SegmentWriter<Memory> {
             has_real_events: false,
             current_period: rotation_period,
             segment_started_at: now,
+            prior_seal_kind: SealKind::Drained,
             next_drain_time: now + drain_interval,
             fs,
             boot_id: None,
@@ -569,6 +600,31 @@ impl<M: BufferMode> SegmentWriter<M> {
         }
     }
 
+    /// Record how this segment is being sealed, and how the one before it was.
+    ///
+    /// Repeats the full entry map, so readers that replace their metadata on
+    /// each `SegmentMetadataEvent` keep the entries written at segment start.
+    /// A failed write is logged and the segment is sealed without the keys.
+    fn write_seal_metadata(&mut self, kind: SealKind) {
+        let mut entries = self.segment_metadata.entries.clone();
+        entries.push((
+            SEGMENT_SEALED_CLEAN_KEY.to_string(),
+            kind.is_clean().to_string(),
+        ));
+        entries.push((
+            SEGMENT_PRIOR_SEALED_CLEAN_KEY.to_string(),
+            self.prior_seal_kind.is_clean().to_string(),
+        ));
+        let WriterState::Active { writer, .. } = &mut self.state else {
+            return;
+        };
+        if let Err(e) = Self::write_segment_metadata(writer, &entries) {
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("failed to write seal metadata: {e}");
+            });
+        }
+    }
+
     /// Write a `SegmentMetadataEvent` and a fresh `ClockSyncEvent` into
     /// the current active segment.
     fn write_segment_metadata(
@@ -601,17 +657,24 @@ impl<M: BufferMode> SegmentWriter<M> {
         (period != Duration::MAX).then(|| now + period)
     }
 
-    fn rotate(&mut self) -> std::io::Result<()> {
+    fn rotate(&mut self, kind: SealKind) -> std::io::Result<()> {
         if matches!(self.state, WriterState::Finished) {
             return Ok(());
         }
+        // Stamp before advancing: write_seal_metadata reports the previous
+        // segment's seal, so it has to run before `prior_seal_kind` moves on.
+        self.write_seal_metadata(kind);
+        self.prior_seal_kind = kind;
 
         // Advance timers up front. If anything below fails the flush loop must
         // NOT see should_drain() return true on the next 5ms tick — otherwise
         // it busy-spins re-attempting the same failing rotate.
         let now = time_source().instant().as_std();
         let filled = self.active_bytes();
-        self.adapt_rotation_period(filled, now.saturating_duration_since(self.segment_started_at));
+        self.adapt_rotation_period(
+            filled,
+            now.saturating_duration_since(self.segment_started_at),
+        );
         self.segment_started_at = now;
         self.next_rotation_time = Self::next_rotation_from(now, self.current_period);
         self.next_drain_time = now + self.drain_interval();
@@ -757,7 +820,7 @@ impl<M: BufferMode> SegmentWriter<M> {
             return Ok(());
         };
         if raw.bytes_written() > self.max_file_size {
-            self.rotate()?;
+            self.rotate(SealKind::Overflow)?;
         }
         Ok(())
     }
@@ -814,7 +877,7 @@ impl<M: BufferMode> SegmentWriter<M> {
             .next_rotation_time
             .is_some_and(|deadline| now >= deadline)
         {
-            self.rotate()?;
+            self.rotate(SealKind::Drained)?;
             return Ok(true);
         }
         // Periodic drain without rotation; advance the drain timer.
@@ -832,6 +895,7 @@ impl<M: BufferMode> SegmentWriter<M> {
             self.fs.mark_writer_done();
             return Ok(());
         }
+        self.write_seal_metadata(SealKind::Drained);
         // Best-effort flush: if the file is gone the bytes are already lost.
         let _ = self.flush();
 
@@ -1672,7 +1736,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(metadata.len(), 1);
+        // One written when the segment opened, one when it was sealed.
+        assert_eq!(metadata.len(), 2);
         assert!(
             metadata[0].get("service").map(String::as_str) == Some("checkout-api"),
             "missing service entry: {:?}",
@@ -1775,10 +1840,11 @@ mod tests {
                     _ => None,
                 })
                 .collect();
+            // One written when the segment opened, one when it was sealed.
             assert_eq!(
                 meta.len(),
-                1,
-                "{}: expected 1 metadata event",
+                2,
+                "{}: expected 2 metadata events",
                 file.display()
             );
             assert!(
@@ -2197,6 +2263,134 @@ mod tests {
 
         let events = read_trace_events(&rotating_file(&base, 0));
         assert_eq!(events.len(), 2, "both events should be in segment 0");
+    }
+
+    /// `(segment.sealed_clean, segment.prior_sealed_clean)` from the last
+    /// metadata event in a sealed segment.
+    fn seal_verdict(path: &str) -> (Option<String>, Option<String>) {
+        let all = decode_all(&std::fs::read(path).unwrap());
+        let entries = all
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Decoded::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .expect("sealed segment has metadata");
+        (
+            entries.get(SEGMENT_SEALED_CLEAN_KEY).cloned(),
+            entries.get(SEGMENT_PRIOR_SEALED_CLEAN_KEY).cloned(),
+        )
+    }
+
+    /// A segment that overflows `max_file_size` records the undrained seal,
+    /// and its successor records that it inherited the buffered events.
+    #[test]
+    fn test_seal_metadata_records_an_overflow_and_its_successor() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(2_000)
+            .max_total_size(10_000_000)
+            .rotation_period(Duration::from_secs(600))
+            .build()
+            .unwrap();
+
+        // Nothing drives should_drain here, so only maybe_rotate can rotate.
+        for _ in 0..10_000 {
+            if writer.next_index > 1 {
+                break;
+            }
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        assert_eq!(writer.next_index, 2, "expected an overflow rotation");
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.rotate(SealKind::Drained).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.finalize().unwrap();
+
+        let t = |b: bool| Some(b.to_string());
+        assert_eq!(
+            seal_verdict(&rotating_file(&base, 0)),
+            (t(false), t(true)),
+            "overflowed, and had no predecessor"
+        );
+        assert_eq!(
+            seal_verdict(&rotating_file(&base, 1)),
+            (t(true), t(false)),
+            "sealed cleanly, but follows an overflow"
+        );
+        assert_eq!(
+            seal_verdict(&rotating_file(&base, 2)),
+            (t(true), t(true)),
+            "a clean seal clears the inherited flag"
+        );
+    }
+
+    #[test]
+    fn test_seal_metadata_keeps_the_segment_entries() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(10_000_000)
+            .segment_metadata(vec![("service".into(), "checkout-api".into())])
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.finalize().unwrap();
+
+        let all = decode_all(&std::fs::read(rotating_file(&base, 0)).unwrap());
+        let last = all
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Decoded::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            last.get("service").map(String::as_str),
+            Some("checkout-api")
+        );
+        assert_eq!(
+            last.get(DIAL9_VERSION_KEY).map(String::as_str),
+            Some(DIAL9_VERSION_VALUE)
+        );
+        assert_eq!(
+            last.get(SEGMENT_SEALED_CLEAN_KEY).map(String::as_str),
+            Some("true")
+        );
+    }
+
+    /// Rotating from `drained()` marks both segments clean.
+    #[tokio::test(start_paused = true)]
+    async fn test_seal_metadata_records_a_drained_rotation() {
+        use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
+        let _guard = set_time_source_for_current_runtime(TimeSource::tokio(std::time::UNIX_EPOCH));
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = DiskBuffer::builder()
+            .base_path(dir.path())
+            .max_file_size(u64::MAX)
+            .max_total_size(10_000_000)
+            .rotation_period(Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(writer.drained().unwrap(), "deadline passed, should rotate");
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.finalize().unwrap();
+
+        let clean = (Some("true".to_string()), Some("true".to_string()));
+        assert_eq!(seal_verdict(&rotating_file(&base, 0)), clean);
+        assert_eq!(seal_verdict(&rotating_file(&base, 1)), clean);
     }
 
     fn test_writer(dir: &TempDir) -> DiskBuffer {
@@ -2653,8 +2847,9 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, Decoded::SegmentMetadata { .. }))
             .count();
+
         assert_eq!(
-            metadata_count, 1,
+            metadata_count, 2,
             "identical update_segment_metadata should not trigger another write"
         );
     }
@@ -2733,7 +2928,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
         // Rotate and then runtime-override on the next segment.
-        writer.rotate().unwrap();
+        writer.rotate(SealKind::Drained).unwrap();
         writer.update_segment_metadata(vec![(DIAL9_VERSION_KEY.into(), "runtime-override".into())]);
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
