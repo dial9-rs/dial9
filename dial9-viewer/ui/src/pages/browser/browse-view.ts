@@ -19,6 +19,7 @@ import { assertInScheduledRender } from "../../store/store.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
 import { clamp, crossesDayBoundary, fmtTick, timeToX } from "./format.js";
+import { contentFitLabelWidth } from "./heatmap-label-resize.js";
 import type { HeatmapRow, TimeDomain } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
@@ -61,6 +62,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
   // guessed "service / host" split.
   function rebuildLabels(rows: readonly HeatmapRow[]): void {
     els.heatmapLabels.textContent = "";
+    const labels: string[] = [];
     for (const row of rows) {
       const boots = bootTransitions(row.segments);
       const div = document.createElement("div");
@@ -69,11 +71,13 @@ export function mountBrowseView({ store, els }: PageCtx): void {
         // Raw display: `host` carries the group's raw directory path
         // (segments.ts unknownGroupPath); no service/host split exists.
         div.append(document.createTextNode(row.host));
+        labels.push(row.host);
       } else {
         const svc = document.createElement("span");
         svc.className = "svc";
         svc.textContent = row.service;
         div.append(svc, document.createTextNode(` / ${row.host}`));
+        labels.push(row.label);
       }
       if (boots.length) {
         div.append(document.createTextNode(" "));
@@ -88,6 +92,15 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       div.title = row.segments[0]?.layout === "unknown" ? row.host : row.label;
       els.heatmapLabels.appendChild(div);
     }
+    const firstRow = els.heatmapLabels.querySelector<HTMLDivElement>(".row");
+    const context = document.createElement("canvas").getContext("2d");
+    if (!firstRow || !context) return;
+    context.font = getComputedStyle(firstRow).font;
+    const width = contentFitLabelWidth(
+      labels.map((label) => context.measureText(label).width),
+      els.heatmapBody.clientWidth,
+    );
+    document.documentElement.style.setProperty("--heatmap-label-w", `${width}px`);
   }
 
   function drawCanvas(rows: readonly HeatmapRow[], domain: TimeDomain, tz: boolean): void {
@@ -200,8 +213,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
     drawAxis(W, domain, tz);
   }
 
-  // 2 to 8 TZ-aware ticks, aligned to the canvas left edge via
-  // --heatmap-label-w. When the visible span crosses a calendar-day
+  // 2 to 8 TZ-aware ticks, aligned to the canvas left edge. When the visible span crosses a calendar-day
   // boundary, ticks carry the date ("YYYY-MM-DD HH:MM:SS") - time-only
   // ticks across a multi-day span were ambiguous. Tick COUNT is unchanged
   // in both modes.
@@ -214,7 +226,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       const frac = i / n;
       const tick = document.createElement("div");
       tick.className = "tick";
-      tick.style.left = LABEL_W() + frac * W + "px";
+      tick.style.left = (els.heatmapPlot.offsetLeft || LABEL_W()) + frac * W + "px";
       tick.textContent = fmtTick(tMin + frac * (tMax - tMin), tz, withDate);
       els.heatmapAxis.appendChild(tick);
     }

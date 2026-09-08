@@ -19,6 +19,7 @@ import { dateToPickerStr } from "./format.js";
 import { mountHeader } from "./header.js";
 import { mountHeatmapInteraction } from "./heatmap-interact.js";
 import { mountHeatmapKeys } from "./heatmap-keys.js";
+import { mountHeatmapLabelResize } from "./heatmap-label-resize.js";
 import { mountBrowserPageKeys } from "./page-keys.js";
 import { mountRawView } from "./raw-view.js";
 import { mountSearchControls } from "./search-controls.js";
@@ -74,6 +75,7 @@ function boot(): void {
   mountBrowseView(ctx);
   mountSelectionOverlay(ctx);
   mountHeatmapInteraction(ctx);
+  mountHeatmapLabelResize(ctx);
   // Unified keyboard model: `?` help, `/` search focus, Enter submits,
   // heatmap keyboard window selection.
   mountBrowserPageKeys(ctx);
