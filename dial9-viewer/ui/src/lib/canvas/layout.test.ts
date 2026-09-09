@@ -40,11 +40,11 @@ describe("timePanelLayout", () => {
 
   it("known case: no scrollbar -> drawW = pw - LABEL_W", () => {
     const l = timePanelLayout({ pw: 1000, viewStart: 0, viewEnd: 1000 });
-    expect(l.drawW).toBe(900);
+    expect(l.drawW).toBe(1000 - LABEL_W);
     expect(l.nsToPanelX(0)).toBe(LABEL_W);
     expect(l.nsToPanelX(1000)).toBe(1000);
     // Midpoint is linear.
-    expect(l.nsToPanelX(500)).toBe(LABEL_W + 450);
+    expect(l.nsToPanelX(500)).toBe(LABEL_W + l.drawW / 2);
   });
 
   it("INVARIANT: the gutter is always LABEL_W - never caller-defined", () => {
@@ -128,7 +128,7 @@ describe("panelGeometry", () => {
     expect(g.kind).toBe("queue");
     expect(g.height).toBe(80);
     expect(g.dpr).toBe(2);
-    expect(g.time.drawW).toBe(1083);
+    expect(g.time.drawW).toBe(1200 - LABEL_W - 17);
     expect(g.time.nsToPanelX(0)).toBe(LABEL_W);
   });
 });

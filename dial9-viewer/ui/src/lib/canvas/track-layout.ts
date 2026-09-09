@@ -92,6 +92,8 @@ export interface TrackGeometryOpts {
   pw: number;
   /** Right gutter matching the lanes vertical scrollbar (0 if none). */
   scrollbarW?: number;
+  /** Shared left label gutter width for every track in this render pass. */
+  labelW?: number;
   /** Visible-range start timestamp (ns). */
   viewStart: number;
   /** Visible-range end timestamp (ns). */
@@ -117,6 +119,7 @@ export function trackGeometry(
     kind,
     pw: opts.pw,
     ...(opts.scrollbarW !== undefined ? { scrollbarW: opts.scrollbarW } : {}),
+    ...(opts.labelW !== undefined ? { labelW: opts.labelW } : {}),
     viewStart: opts.viewStart,
     viewEnd: opts.viewEnd,
     height: track.height,

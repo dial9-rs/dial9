@@ -376,6 +376,7 @@ describe("viewer deep-link reconstruction", () => {
       collapsedRuntimeMetrics: { runtime_b: true },
       sidebarWidth: 444,
       railWidth: 460,
+      labelWidth: 240,
       taskColWidths: { loc: 260, polls: 48 },
       issueColWidths: { dot: 14, kind: 120 },
       lanesViewportHeight: 280,

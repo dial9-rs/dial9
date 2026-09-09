@@ -44,6 +44,7 @@ function mkState(over: {
       collapsedRuntimeMetrics: {},
       sidebarWidth: 360,
       railWidth: 300,
+      labelWidth: 180,
       taskColWidths: {},
       issueColWidths: {},
       lanesViewportHeight: 360,
@@ -302,6 +303,7 @@ describe("viewer URL state: complete durable view", () => {
           collapsedRuntimes: { beta: true, alpha: true },
           sidebarWidth: 444,
           railWidth: 460,
+          labelWidth: 240,
           taskColWidths: { polls: 48, loc: 260 },
           issueColWidths: { kind: 120, dot: 14 },
           lanesViewportHeight: 280,
@@ -329,6 +331,7 @@ describe("viewer URL state: complete durable view", () => {
 
     expect(params.get("rail")).toBe("tasks");
     expect(params.get("rail-width")).toBe("460");
+    expect(params.get("label-width")).toBe("240");
     expect(params.get("task-cols")).toBe("v1:loc,260\tpolls,48");
     expect(params.get("issue-cols")).toBe("v1:dot,14\tkind,120");
     expect(params.get("task-sort")).toBe("lifetime,asc");
@@ -342,6 +345,7 @@ describe("viewer URL state: complete durable view", () => {
       collapsedRuntimes: ["alpha", "beta"],
       inspectorWidth: 444,
       railWidth: 460,
+      labelWidth: 240,
       taskColWidths: { loc: 260, polls: 48 },
       issueColWidths: { dot: 14, kind: 120 },
       lanesHeight: 280,

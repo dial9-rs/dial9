@@ -20,6 +20,7 @@ import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
 import { timeToX } from "./format.js";
 import { axisTicks, type AxisTick } from "./heatmap-axis.js";
+import { contentFitLabelWidth } from "./heatmap-label-resize.js";
 import type { HeatmapRow, TimeDomain } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
@@ -62,6 +63,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
   // guessed "service / host" split.
   function rebuildLabels(rows: readonly HeatmapRow[]): void {
     els.heatmapLabels.textContent = "";
+    const labels: string[] = [];
     for (const row of rows) {
       const boots = bootTransitions(row.segments);
       const div = document.createElement("div");
@@ -70,11 +72,13 @@ export function mountBrowseView({ store, els }: PageCtx): void {
         // Raw display: `host` carries the group's raw directory path
         // (segments.ts unknownGroupPath); no service/host split exists.
         div.append(document.createTextNode(row.host));
+        labels.push(row.host);
       } else {
         const svc = document.createElement("span");
         svc.className = "svc";
         svc.textContent = row.service;
         div.append(svc, document.createTextNode(` / ${row.host}`));
+        labels.push(row.label);
       }
       if (boots.length) {
         div.append(document.createTextNode(" "));
@@ -89,6 +93,15 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       div.title = row.segments[0]?.layout === "unknown" ? row.host : row.label;
       els.heatmapLabels.appendChild(div);
     }
+    const firstRow = els.heatmapLabels.querySelector<HTMLDivElement>(".row");
+    const context = document.createElement("canvas").getContext("2d");
+    if (!firstRow || !context) return;
+    context.font = getComputedStyle(firstRow).font;
+    const width = contentFitLabelWidth(
+      labels.map((label) => context.measureText(label).width),
+      els.heatmapBody.clientWidth,
+    );
+    document.documentElement.style.setProperty("--heatmap-label-w", `${width}px`);
   }
 
   function drawCanvas(rows: readonly HeatmapRow[], domain: TimeDomain, tz: boolean): void {
@@ -217,7 +230,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
     drawAxis(ticks);
   }
 
-  // Tick labels under the plot, offset by the host-label column so they line
+  // Tick labels under the plot, offset by its actual position so they line
   // up with the gridlines on the canvas. Times, placement and dating are the
   // axis model's job (see heatmap-axis.ts); this only emits the DOM.
   function drawAxis(ticks: readonly AxisTick[]): void {
@@ -225,7 +238,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
     for (const t of ticks) {
       const tick = document.createElement("div");
       tick.className = "tick";
-      tick.style.left = LABEL_W() + t.x + "px";
+      tick.style.left = (els.heatmapPlot.offsetLeft || LABEL_W()) + t.x + "px";
       tick.textContent = t.label;
       els.heatmapAxis.appendChild(tick);
     }

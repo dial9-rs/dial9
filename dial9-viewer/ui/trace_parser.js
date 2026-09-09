@@ -2361,12 +2361,18 @@
     /**
      * Try to build a docs.rs source link from a location path containing a crate-version segment.
      * Matches any path like: .../hyper-0.14.28/src/client/connect/http.rs:474
-     * Returns URL string or null.
+     * Returns URL string or null. Exported as `docsRsUrl`: first-party code has
+     * no target, since the trace records the path on the recording machine
+     * rather than a repo or commit.
      */
     function _docsRsUrl(location) {
         if (!location) return null;
+        // A stack frame's location ends at `:line`, but a task's spawn location
+        // carries `:line:col`. Without the optional column group the column is
+        // read as the line and the real line leaks into the file path, yielding
+        // ".../tokio.rs:115.html#9" instead of ".../tokio.rs.html#115".
         const m = location.match(
-            /\/([a-z][a-z0-9_-]*)-(\d+\.\d+[^/]*)\/(.+?)(?::(\d+))?$/,
+            /\/([a-z][a-z0-9_-]*)-(\d+\.\d+[^/]*)\/(.+?)(?::(\d+))?(?::\d+)?$/,
         );
         if (!m) return null;
         const [, crate_, version, rawPath, line] = m;
@@ -2524,6 +2530,7 @@
             fetchTracesStream,
             canStreamDecode,
             formatFrame,
+            docsRsUrl: _docsRsUrl,
             symbolizeChain,
             deduplicateSamples,
             deriveBlockInPlaceGaps,
@@ -2547,6 +2554,7 @@
             fetchTracesStream,
             canStreamDecode,
             formatFrame,
+            docsRsUrl: _docsRsUrl,
             symbolizeChain,
             deduplicateSamples,
             deriveBlockInPlaceGaps,

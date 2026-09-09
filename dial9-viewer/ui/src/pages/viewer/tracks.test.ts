@@ -19,6 +19,7 @@ function vm(over: Partial<TracksViewModel> = {}): TracksViewModel {
     collapsed: {},
     emptyTracks: new Set<TrackId>(),
     lanesViewportHeight: 130,
+    labelWidth: 180,
     ...over,
   };
 }

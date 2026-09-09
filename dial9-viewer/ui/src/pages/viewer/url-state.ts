@@ -23,6 +23,7 @@ import type { PointOfInterestType } from "../../types/trace.js";
 import type { ViewState } from "../../lib/url/index.js";
 import {
   DEFAULT_INSPECTOR_WIDTH,
+  DEFAULT_LABEL_WIDTH,
   DEFAULT_LANES_HEIGHT,
   DEFAULT_RAIL_WIDTH,
 } from "./store.js";
@@ -43,6 +44,7 @@ import {
   FIELD_CHART_TRACK_ID_PREFIX,
   isFieldChartTrackId,
 } from "../../lib/canvas/track-layout.js";
+import { clampLabelWidth } from "./label-gutter.js";
 
 const P_START = "start";
 const P_END = "end";
@@ -75,6 +77,7 @@ const P_RUNTIME_COLLAPSED = "runtime-collapsed";
 const P_RUNTIME_METRICS_COLLAPSED = "runtime-metrics-collapsed";
 const P_INSPECTOR_WIDTH = "inspector-width";
 const P_RAIL_WIDTH = "rail-width";
+const P_LABEL_WIDTH = "label-width";
 const P_LANES_HEIGHT = "lanes-height";
 const P_LANES_SCROLL = "lanes-scroll";
 const P_STACK_VIEW = "stack-view";
@@ -179,6 +182,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     collapsedRuntimeMetrics: url(P_RUNTIME_METRICS_COLLAPSED),
     sidebarWidth: url(P_INSPECTOR_WIDTH),
     railWidth: url(P_RAIL_WIDTH),
+    labelWidth: url(P_LABEL_WIDTH),
     taskColWidths: url(P_TASK_COLS),
     issueColWidths: url(P_ISSUE_COLS),
     lanesViewportHeight: url(P_LANES_HEIGHT),
@@ -352,6 +356,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (state.uiPrefs.railWidth !== DEFAULT_RAIL_WIDTH) {
     vs.railWidth = state.uiPrefs.railWidth;
   }
+  if (state.uiPrefs.labelWidth !== DEFAULT_LABEL_WIDTH) {
+    vs.labelWidth = state.uiPrefs.labelWidth;
+  }
   const taskColEntries = sortedWidthEntries(state.uiPrefs.taskColWidths);
   if (taskColEntries.length > 0) {
     vs.taskColWidths = Object.fromEntries(taskColEntries);
@@ -464,6 +471,7 @@ export function mirrorViewerToQuery(
   set(params, P_RUNTIME_METRICS_COLLAPSED, encodeList(vs.collapsedRuntimeMetrics));
   set(params, P_INSPECTOR_WIDTH, finiteString(vs.inspectorWidth));
   set(params, P_RAIL_WIDTH, finiteString(vs.railWidth));
+  set(params, P_LABEL_WIDTH, finiteString(vs.labelWidth));
   set(params, P_TASK_COLS, encodeWidthMap(vs.taskColWidths));
   set(params, P_ISSUE_COLS, encodeWidthMap(vs.issueColWidths));
   set(params, P_LANES_HEIGHT, finiteString(vs.lanesHeight));
@@ -602,6 +610,7 @@ export interface ViewerUrlState {
   collapsedRuntimeMetrics?: string[];
   inspectorWidth?: number;
   railWidth?: number;
+  labelWidth?: number;
   taskColWidths?: Record<string, number>;
   issueColWidths?: Record<string, number>;
   lanesHeight?: number;
@@ -667,6 +676,9 @@ export function hydrateViewerStore(
   }
   if (urlView.railWidth !== undefined) {
     uiPrefs.railWidth = urlView.railWidth;
+  }
+  if (urlView.labelWidth !== undefined) {
+    uiPrefs.labelWidth = clampLabelWidth(urlView.labelWidth);
   }
   if (urlView.taskColWidths !== undefined) {
     uiPrefs.taskColWidths = urlView.taskColWidths;
@@ -848,6 +860,8 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (inspectorWidth !== null) out.inspectorWidth = inspectorWidth;
   const railWidth = positiveInt(p.get(P_RAIL_WIDTH));
   if (railWidth !== null) out.railWidth = railWidth;
+  const labelWidth = positiveInt(p.get(P_LABEL_WIDTH));
+  if (labelWidth !== null) out.labelWidth = labelWidth;
   const taskCols = decodeWidthMap(
     p.get(P_TASK_COLS),
     TASK_SORT_KEYS as readonly string[],

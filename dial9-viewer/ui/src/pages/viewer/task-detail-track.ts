@@ -16,15 +16,18 @@
 //     contract; this track never reaches into the lanes.
 //
 // This file owns the timeline track (per-task polls/wakes over time) + the
-// derivation. The textual detail (task id, spawn location, counts, the
-// uninstrumented badge, the idle-flamegraph link) renders in the inspector Task
-// tab from the SAME derivation, exposed via createTaskDetailDerivation.
+// derivation. Its gutter carries the task id plus the spawn location in
+// `file.rs:line` form (the full path stays on the `title`). The rest of the
+// textual detail (counts, the uninstrumented badge, the idle-flamegraph link)
+// renders in the inspector Task tab from the SAME derivation, exposed via
+// createTaskDetailDerivation.
 
 import { drawWindowMarkers } from "./resident-window.js";
 import { html, nothing, type TemplateResult } from "lit-html";
 import { createCanvasSizer } from "../../lib/canvas/index.js";
 import type { CanvasSizer } from "../../lib/canvas/index.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
+import { copyText } from "../../lib/url/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import type { TrackSpec } from "../../lib/canvas/track-layout.js";
@@ -38,8 +41,10 @@ import {
   computeTaskDetailData,
   formatTaskDetailSummary,
   hitRegionAt,
+  spawnLocLink,
   statusTextAt,
   wakeRegionAt,
+  type SpawnLocLink,
   type TaskDetailData,
   type TaskDetailRenderModel,
   type TaskDetailWindow,
@@ -197,6 +202,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     const data = taskDetailData();
     const identity =
       data.taskId !== null ? formatTaskDetailSummary(data) : track.label;
+    const spawn = spawnLocLink(data.spawnLocation);
     return html`
       <div
         class="d9-track d9-track--task-detail"
@@ -210,6 +216,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
                 >Task 0x${data.taskId.toString(16)}</span
               >`
             : nothing}
+          ${spawn === null ? nothing : spawnTemplate(spawn)}
         </div>
         <div class="d9-track-canvas-wrap d9-task-detail-wrap">
           <span
@@ -229,6 +236,71 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
         </div>
       </div>
     `;
+  }
+
+  /**
+   * The spawn location as an actionable control: a docs.rs source link when the
+   * path names a published crate, else a button that copies the full path. The
+   * label is trimmed to fit the gutter either way, so the tooltip carries the
+   * whole thing.
+   */
+  function spawnTemplate(spawn: SpawnLocLink): TemplateResult {
+    if (spawn.href !== null) {
+      return html`<a
+        class="d9-task-detail-spawn is-link"
+        href=${spawn.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        title=${`${spawn.full}\nOpen on docs.rs`}
+        >${spawn.label}</a
+      >`;
+    }
+    // The label rides its own <span> and the flash rides a SEPARATE, static
+    // one. The label is a lit binding: writing the flash into the button's own
+    // textContent would delete lit's ChildPart markers with it, and every later
+    // re-render would then update a detached text node - the gutter would keep
+    // showing this task's path after the user selected another one.
+    return html`<button
+      type="button"
+      class="d9-task-detail-spawn is-copy"
+      title=${`${spawn.full}\nCopy path`}
+      @click=${(e: MouseEvent) => copySpawnLoc(e, spawn.full)}
+    >
+      <span class="d9-spawn-label">${spawn.label}</span
+      ><span class="d9-spawn-flash" aria-live="polite"></span>
+    </button>`;
+  }
+
+  let flashTimer: number | null = null;
+
+  /** Flash `text` over the label for 800ms. Writes only the binding-free flash
+   *  span, never the button's own children. */
+  function flashSpawn(btn: HTMLButtonElement, text: string): void {
+    const slot = btn.querySelector<HTMLElement>(".d9-spawn-flash");
+    if (slot === null) return;
+    if (flashTimer !== null) window.clearTimeout(flashTimer);
+    slot.textContent = text;
+    btn.classList.add("is-flashing");
+    flashTimer = window.setTimeout(() => {
+      flashTimer = null;
+      slot.textContent = "";
+      btn.classList.remove("is-flashing");
+    }, 800);
+  }
+
+  /** Copy the full path. Imperative, like the inspector's own copy buttons - no
+   *  store round-trip for an 800ms affordance - but the flash reports what
+   *  actually happened: the clipboard is unavailable outside secure contexts
+   *  and rejects on a denied permission or an unfocused document. */
+  function copySpawnLoc(e: MouseEvent, value: string): void {
+    const btn = e.currentTarget as HTMLButtonElement;
+    copyText(value).then(
+      () => flashSpawn(btn, "copied"),
+      (err: unknown) => {
+        console.warn("task-detail: spawn-location copy failed:", err);
+        flashSpawn(btn, "copy failed");
+      },
+    );
   }
 
   // ── Canvas interaction (status, waker hover/click) ─────────────────────
@@ -356,6 +428,10 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
   }
 
   function dispose(): void {
+    if (flashTimer !== null) {
+      window.clearTimeout(flashTimer);
+      flashTimer = null;
+    }
     modelCache = null;
     lastModel = null;
     sizer = null;

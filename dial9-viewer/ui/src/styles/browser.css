@@ -3,7 +3,7 @@
 :root {
     /* Width of the heatmap host-label column. Read from JS (see LABEL_W)
        so the timeline axis ticks line up with the canvas left edge. */
-    --heatmap-label-w: 220px;
+    --heatmap-label-w: 400px;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -160,8 +160,14 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
     background-image: repeating-linear-gradient(-45deg,
         rgba(120,120,160,0.35) 0 1px, transparent 1px 6px);
 }
-#heatmap-body { flex: 1; overflow: auto; display: flex; min-height: 0; }
+#heatmap-body { flex: 1; overflow: auto; display: flex; min-height: 0; position: relative; }
 #heatmap-labels { flex-shrink: 0; width: var(--heatmap-label-w); border-right: 2px solid #3a3a5e; }
+#heatmap-label-resizer {
+    position: absolute; top: 0; bottom: 0;
+    left: calc(var(--heatmap-label-w) - 4px); width: 8px;
+    cursor: col-resize; z-index: 1;
+}
+#heatmap-label-resizer:hover { background: rgba(126, 200, 227, 0.2); }
 #heatmap-labels .row {
     height: 26px; line-height: 26px; padding: 0 8px;
     font-size: 0.78em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

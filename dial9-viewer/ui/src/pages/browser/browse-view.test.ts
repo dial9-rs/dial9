@@ -22,6 +22,10 @@ interface StrokedLine {
  * a no-op, so a fill-heavy paint stays cheap.
  */
 class RecordingContext {
+  font = "";
+  measureText(text: string): { width: number } {
+    return { width: text.length * 8 };
+  }
   readonly lines: StrokedLine[] = [];
   fillStyle = "";
   strokeStyle = "";
@@ -76,6 +80,7 @@ class FakeElement {
   children: FakeElement[] = [];
   title = "";
   clientWidth = 0;
+  offsetLeft = 0;
   private text = "";
 
   get textContent(): string {
@@ -91,6 +96,9 @@ class FakeElement {
   appendChild(child: FakeElement): FakeElement {
     this.children.push(child);
     return child;
+  }
+  querySelector(selector: string): FakeElement | null {
+    return this.children.find((child) => `.${child.className}` === selector) ?? null;
   }
 }
 
@@ -134,16 +142,17 @@ function setup() {
   const axis = new FakeElement();
 
   vi.stubGlobal("document", {
-    createElement: () => new FakeElement(),
+    createElement: (tag: string) => tag === "canvas" ? canvas : new FakeElement(),
     createTextNode: (text: string) => {
       const node = new FakeElement();
       node.textContent = text;
       return node;
     },
-    documentElement: {},
+    documentElement: { style: { setProperty: vi.fn() } },
   });
   vi.stubGlobal("window", { devicePixelRatio: 1 });
   vi.stubGlobal("getComputedStyle", () => ({
+    font: "12px sans-serif",
     // Exercise the real custom-property path rather than the 220 fallback.
     getPropertyValue: () => "220px",
   }));
@@ -154,6 +163,7 @@ function setup() {
     heatmapView: new FakeElement(),
     heatmapResetZoom: new FakeElement(),
     heatmapLabels: new FakeElement(),
+    heatmapBody: { clientWidth: 1020 },
     heatmapPlot: plot,
     heatmapCanvas: canvas,
     heatmapAxis: axis,
@@ -161,7 +171,7 @@ function setup() {
 
   const store = createBrowserStore();
   mountBrowseView({ store, els, actions: {} as unknown as BrowserActions });
-  return { store, ctx, axis, canvas };
+  return { store, ctx, axis, canvas, plot };
 }
 
 afterEach(() => {
@@ -200,6 +210,27 @@ describe("browse timeline painter", () => {
     const expected = axisTicks(DOMAIN, W, false);
     expect(axis.children.map((tick) => tick.style["left"])).toStrictEqual(
       expected.map((tick) => 220 + tick.x + "px"),
+    );
+  });
+
+  it("keeps round-time ticks aligned after resizing the label column", async () => {
+    const { store, axis, plot } = setup();
+    plot.offsetLeft = 228;
+    store.update("browse", { rows: [row()], domain: DOMAIN, heatmapVisible: true });
+    await flushStore();
+    const ticks = axisTicks(DOMAIN, W, false);
+    expect(axis.children.map((tick) => tick.style["left"])).toStrictEqual(
+      ticks.map((tick) => 228 + tick.x + "px"),
+    );
+
+    plot.offsetLeft = 428;
+    store.update("browse", { renderEpoch: store.getState().browse.renderEpoch + 1 });
+    await flushStore();
+    expect(axis.children.map((tick) => tick.style["left"])).toStrictEqual(
+      ticks.map((tick) => 428 + tick.x + "px"),
+    );
+    expect(axis.children.map((tick) => tick.textContent)).toStrictEqual(
+      ticks.map((tick) => tick.label),
     );
   });
 

@@ -20,6 +20,8 @@ import {
   firstVisibleByEnd,
   formatTaskDetailSummary,
   hitRegionAt,
+  spawnLocLabel,
+  spawnLocLink,
   statusTextAt,
   wakeRegionAt,
   wakerLabelFor,
@@ -173,6 +175,61 @@ describe("formatTaskDetailSummary (label parts)", () => {
     const trace = fakeTrace({ taskInstrumented: { 42: false } });
     const data = computeTaskDetailData(base, trace, 42);
     expect(formatTaskDetailSummary(data)).toBe("Task 0x2a · 2 polls");
+  });
+});
+
+// ── spawnLocLabel ─────────────────────────────────────────────────────────
+
+describe("spawnLocLabel (the gutter form)", () => {
+  it("drops directories and the trailing column", () => {
+    expect(
+      spawnLocLabel(
+        "-cargobrazil/amzn_s3_cds_client-0.1.609/src/discovery/full_ok_view_discovery.rs:237:28",
+      ),
+    ).toBe("full_ok_view_discovery.rs:237");
+  });
+
+  it("keeps a location that carries no column", () => {
+    expect(spawnLocLabel("src/foo/bar.rs:12")).toBe("bar.rs:12");
+  });
+
+  it("passes through a location with no line info at all", () => {
+    expect(spawnLocLabel("src/foo/bar.rs")).toBe("bar.rs");
+    expect(spawnLocLabel("tokio::spawn")).toBe("tokio::spawn");
+  });
+
+  it("is null for a task with no recorded location", () => {
+    expect(spawnLocLabel(null)).toBeNull();
+  });
+});
+
+describe("spawnLocLink (what the label does when clicked)", () => {
+  const REGISTRY =
+    "/home/rcoh/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hyper-util-0.1.20/src/rt/tokio.rs:115:9";
+
+  it("links a dependency path to its exact source line on docs.rs", () => {
+    const link = spawnLocLink(REGISTRY);
+    expect(link).not.toBeNull();
+    expect(link!.label).toBe("tokio.rs:115");
+    expect(link!.full).toBe(REGISTRY);
+    // The line is the anchor and the column is dropped: a spawn location ends
+    // in `:line:col`, unlike the `:line` a stack frame carries.
+    expect(link!.href).toBe(
+      "https://docs.rs/hyper-util/0.1.20/src/hyper_util/rt/tokio.rs.html#115",
+    );
+  });
+
+  it("offers no link for first-party code, which names no published crate", () => {
+    const link = spawnLocLink("examples/metrics-service/src/main.rs:334:14");
+    expect(link).not.toBeNull();
+    expect(link!.label).toBe("main.rs:334");
+    expect(link!.href).toBeNull();
+    // The full path still travels, so the fallback has something to copy.
+    expect(link!.full).toBe("examples/metrics-service/src/main.rs:334:14");
+  });
+
+  it("is null for a task with no recorded location", () => {
+    expect(spawnLocLink(null)).toBeNull();
   });
 });
 

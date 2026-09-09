@@ -43,6 +43,7 @@ export {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
+  docsRsUrl,
   fetchTraceBytes,
   formatFrame,
   loadTrace,

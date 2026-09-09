@@ -298,6 +298,8 @@ export interface UiPrefsSlice {
   sidebarWidth: number;
   /** Issues/Tasks rail width in CSS px (drag-resizable via its right edge). */
   railWidth: number;
+  /** Shared time-track label gutter width in CSS px (drag-resizable). */
+  labelWidth: number;
   /**
    * Tasks-table column widths in CSS px, keyed by column sort key. Empty =
    * automatic (content-fit) layout. The first divider drag seeds every column
