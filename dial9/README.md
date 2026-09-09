@@ -24,9 +24,7 @@ If you are integrating dial9 into a production service, see the [`production_use
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9/blob/HEAD/examples).
 
-dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes
-under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime:
-poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
+dial9's Tokio instrumentation is built on runtime hooks that Tokio only exposes under `tokio_unstable`. With the flag set, dial9 sees every task on the runtime: poll spans, task spawn and terminate, and per-worker queue depth. Frame pointers are required by the `cpu-profiling` and `memory-profiling` features, which capture stacks with a frame-pointer unwinder. These flags go in your [Cargo build configuration](https://doc.rust-lang.org/cargo/reference/config.html) (for example `.cargo/config.toml` or the `RUSTFLAGS` environment variable), not in `Cargo.toml`.
 
 ```toml
 # .cargo/config.toml
@@ -38,8 +36,7 @@ rustflags = [
 ]
 ```
 
-The Tokio instrumentation still works without the flag, with narrower task coverage.
-CPU profiling, worker timelines, wake causality, memory and application events are unaffected. What narrows is task visibility: poll events come from dial9's own spawn helpers rather than the runtime, so they cover tasks started with `dial9::spawn`, `spawn_in`, `block_on` or `spawn_with` and miss the rest. Task spawn and terminate events and per-worker queue depth are not accessible without the flag.
+Without the flag, tokio instrumentation has narrower task coverage: poll events cover only tasks started through `dial9::spawn`, `spawn_in`, `block_on` or `spawn_with`, and there are no task spawn/terminate events or per-worker queue depth. Worker timelines and wake causality are unaffected.
 
 ```rust,no_run
 use std::io;
@@ -56,10 +53,6 @@ fn my_config() -> io::Result<AttachedRuntime> {
     // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
     let recorder = dial9::recorder_or_disabled(writer)
         .segment_metadata([("service".to_string(), "checkout".to_string())])
-        .segment_metadata([(
-            "application.version".to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        )])
         .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -84,12 +77,6 @@ async fn main() {
         .unwrap();
 }
 ```
-
-Use [`RecorderBuilder::segment_metadata`](https://docs.rs/dial9/latest/dial9/struct.RecorderBuilder.html#method.segment_metadata)
-for static context that should be available when any rotated segment is loaded
-independently, such as the service, host, deployment, or compiled application
-version. Calls are merged, including calls made by integration layers; when a
-key is repeated, the later value wins.
 
 For zero-code configuration in production, use `dial9::recorder_from_env`:
 
@@ -229,52 +216,27 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 ### Tokio events
 `dial9` uses Tokio runtime hooks to record events on each `poll`, task `spawn` and when runtime workers park and unpark. If you use `dial9`'s [`spawn`](https://docs.rs/dial9/latest/dial9/fn.spawn.html) your future will be instrumented to capture two additional pieces of info:
 1. The wake event, when your future was _ready_ to run vs. when Tokio actually started running it.
-2. When enabled, task dumps; only futures instrumented this way can produce them.
+2. A task dump, a backtrace of what your future was doing when it went idle (with the `taskdump` feature on).
 
-`recorder.handle().attach_tokio_runtime(..)` takes a Tokio runtime builder you configured, installs
-dial9's hooks on it, and builds it. Pair the recorder with the runtime to get a
-`dial9::AttachedRuntime`, which is what a `#[dial9::main]` config must produce.
+If you drive the runtime yourself, use [`dial9::block_on`](https://docs.rs/dial9/latest/dial9/fn.block_on.html) instead of `Runtime::block_on`. `dial9::block_on` spawns your root future as a task, so its polls and wakes reach the trace along with everything awaited inline under it. `Runtime::block_on` would poll it outside any task, where the per-task hooks never fire. `#[dial9::main]` does this for you.
 
-Driving that runtime yourself, reach for [`dial9::block_on`](https://docs.rs/dial9/latest/dial9/fn.block_on.html) rather than
-`Runtime::block_on`. Poll and wake events come from Tokio's per-task hooks, and `Runtime::block_on` would
-polls its future outside any task, so that future and everything awaited inline under it would be absent
-from the trace. `dial9::block_on` spawns it first. `#[dial9::main]` already does this for you.
+The wake event and task dump come from any dial9 spawner. Besides [`spawn`](https://docs.rs/dial9/latest/dial9/fn.spawn.html), there are variants for spawning onto another runtime and into a `JoinSet`:
 
 ```rust,no_run
-# #[cfg(feature = "worker-s3")]
-# mod inner {
-use std::io;
+use dial9::{JoinSetExt, spawn, spawn_in};
 
-use dial9::s3::S3Config;
-use dial9::{AttachedRuntime, Dial9HandleTokioExt, DiskBuffer, RecorderPipelineExt, TokioAttachOptions};
+# async fn work() {}
+# fn demo(runtime: &tokio::runtime::Runtime) {
+// From a thread the traced runtime owns:
+spawn(work());
 
-fn my_config() -> io::Result<AttachedRuntime> {
-    let s3_config = S3Config::builder()
-        .bucket("my-trace-bucket")
-        .service_name("my-service")
-        .build();
+// From any thread, onto a specific runtime:
+spawn_in(runtime.handle(), work());
 
-    let writer = DiskBuffer::builder()
-        .base_path("/tmp/my_traces")
-        .max_file_size(100 * 1024 * 1024)
-        .max_total_size(500 * 1024 * 1024)
-        .build()
-        .expect("build trace writer");
-    let recorder = dial9::recorder(writer)
-        .with_s3_uploader(s3_config)
-        .build();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.enable_all().worker_threads(4);
-    let runtime = recorder.handle().attach_tokio_runtime(
-        builder,
-        TokioAttachOptions::builder().task_tracking_enabled(true).build(),
-    )?;
-
-    Ok((recorder, runtime))
-}
+// Into a JoinSet:
+let mut set = tokio::task::JoinSet::new();
+set.spawn_traced(work());
 # }
-# fn main() {}
 ```
 
 #### Instrumenting multiple runtimes
@@ -563,7 +525,7 @@ Field units (from `#[metrics(unit = ..)]` or the value type) are carried into th
 
 `dial9` can capture async backtraces at yield points. This is the Tokio equivalent of scheduling events: You can see the stack trace your future was at when it went idle.
 
-Task dumps are captured only for futures spawned through a Dial9 spawner, such as `dial9::spawn`. Enabling the `taskdump` feature and configuring `TaskDumpConfig` do not instrument every task on the attached runtime. Tasks spawned directly with `tokio::spawn` are valid, but do not produce task dumps.
+Task dumps are captured only for futures spawned through a dial9 spawner, such as `dial9::spawn`, with the `taskdump` feature on and `TaskDumpConfig` set. `tokio::spawn` tasks are recorded as usual, minus the dump.
 
 > Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64) and only under `--cfg tokio_unstable`. Enabling it on another target, or without the flag, is a hard compile error from Tokio.
 
@@ -639,7 +601,9 @@ handle.record_event(RequestCompleted {
 # }
 ```
 
-`current()` resolves on threads marked tracked, either manually or by a source's thread hooks (e.g. tokio instrumentation). To record from a synchronous worker thread instead, call `Recorder::install_global_handle()` once at startup: `current()` then resolves everywhere, and `dial9::record_event` does the same without naming a handle. Such a thread can also opt into sched and CPU sampling with `Dial9Handle::track_current_thread()`.
+`Dial9Handle::current()` resolves on threads dial9 installed a handle on, which the Tokio integration does for its workers. On your own threads it resolves nothing until you call `Recorder::install_global_handle()` once at startup. After that `current()` works everywhere, and `dial9::record_event` records without naming a handle.
+
+The CPU and sched sources only sample threads that opt in. Tokio workers do it on their own. Call `Dial9Handle::track_current_thread()` from each of your own threads you want sampled, and hold the guard.
 
 ### Custom event callbacks
 
@@ -849,6 +813,27 @@ let recorder = recorder(writer)
 ### Exporting data to other destinations
 
 For custom upload destinations or post-processing (e.g. shipping to a different object store, running analysis on each segment), you can replace the built-in pipeline entirely with `with_custom_pipeline`. See [`examples/custom_pipeline.rs`](https://github.com/dial9-rs/dial9/blob/HEAD/dial9/examples/custom_pipeline.rs) for a complete example.
+
+### Segment metadata
+
+dial9 writes the trace in segments: every `rotation_period`, or once a file hits `max_file_size`, the current segment is sealed and shipped and a new one starts. You can use [`RecorderBuilder::segment_metadata`](https://docs.rs/dial9/latest/dial9/struct.RecorderBuilder.html#method.segment_metadata) to stamp whatever context you need into every segment header, like the service name and build version below. Repeated calls merge and the last value for a key wins. Sources add their own entries too, such as sample rates (CPU profiling, memory profiling) and poll coverage (Tokio events).
+
+```rust,no_run
+use dial9::{DiskBuffer, recorder_or_disabled};
+
+let writer = DiskBuffer::builder()
+    .base_path("/tmp/my_traces")
+    .max_total_size(64 * 1024 * 1024)
+    .build();
+
+let recorder = recorder_or_disabled(writer)
+    .segment_metadata([
+        ("service".to_string(), "checkout".to_string()),
+        ("application.version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+    ])
+    .build();
+# recorder.graceful_shutdown(std::time::Duration::ZERO);
+```
 
 ## Analyzing trace files
 [`dial9`](https://github.com/dial9-rs/dial9/tree/HEAD/dial9-viewer) is a CLI for browsing and analyzing traces. Use `dial9 serve` to start a local web UI that visualizes traces from a directory or S3 bucket. [Here's a demo.](https://www.youtube.com/watch?v=kr0RYMu57kU)
