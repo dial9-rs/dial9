@@ -803,6 +803,7 @@ const TAB_PARTS: Record<InspectorTab, readonly number[]> = {
  * preference is what changed - so a subordinate change (e.g. a Related row
  * focusing a span while its event stays pinned) never yanks the user off the
  * tab they are reading - or when the current tab just lost its content.
+ * A fresh span focus opens Span while an unchanged Stack analysis is retained.
  */
 export function autoActivateTab(
   prev: readonly string[] | null,
@@ -815,7 +816,14 @@ export function autoActivateTab(
   if (pref !== null && avail[pref]) {
     const changed =
       prev === null || TAB_PARTS[pref].some((i) => prev[i] !== next[i]);
-    return changed || !avail[current] ? pref : null;
+    if (changed) return pref;
+    if (
+      pref === "stack" &&
+      avail.span &&
+      prev !== null &&
+      TAB_PARTS.span.some((i) => prev[i] !== next[i])
+    ) return "span";
+    return !avail[current] ? pref : null;
   }
   if (!avail[current] && pref === null) return "task";
   return null;

@@ -406,8 +406,10 @@ export function mountInspector(
       const count = sel.taskDump.timestamps.length;
       return `Task dump trace selected · ${count} capture${count === 1 ? "" : "s"}`;
     }
-    if (sel.spawnedTasksRange !== null) return "Spawn-range selected";
-    if (sel.sidebarRange !== null) return "Region selected";
+    if (state().view.inspectorTab !== "span") {
+      if (sel.spawnedTasksRange !== null) return "Spawn-range selected";
+      if (sel.sidebarRange !== null) return "Region selected";
+    }
     if (sel.focusedSpanId !== null) {
       const name = data().laneData?.spanByIdSingle.get(sel.focusedSpanId)?.spanName;
       return `Span ${name ?? sel.focusedSpanId} selected · Esc clears`;

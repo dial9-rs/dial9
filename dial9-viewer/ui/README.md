@@ -220,7 +220,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `collapsed` | comma-separated track ids | Collapsed analysis tracks. |
 | `field-chart` | **repeatable** `<id>,<event>,<field>,<kind>` | Numeric custom-event chart definitions; event and field names containing commas are unsupported. `kind` is `gauge`, `counter`, or `updown-counter`. Dynamic ids may also appear in `track-order`/`collapsed`. |
 | `span` | span id | Lane-highlighted span (ancestor chain is re-derived). |
-| `span-focus` | span id | Span-panel subtree root. |
+| `span-focus` | span id | Span-panel subtree root and inspected span. Opens Span by default when no poll, event, or analysis takes precedence. |
 | `poll` | `<startNs>:<taskId>` | Poll-detail anchor. |
 | `task-dump` | `<taskId>:<timestamp>[,<timestamp>...]` | Selected task-dump captures. |
 | `event` | monotonic ns | Pinned custom-event cluster timestamp. |
@@ -247,7 +247,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `lanes-height` | positive CSS pixels | Worker-lanes viewport height. |
 | `lanes-scroll` | non-negative CSS pixels | Worker-lanes vertical position. |
 | `stack-view` | `list` \| `flame` | Poll/blocking stack presentation. |
-| `inspector` | `task` \| `poll` \| `event` \| `related` \| `stack` | Visible inspector tab. |
+| `inspector` | `task` \| `span` \| `poll` \| `event` \| `related` \| `stack` | Visible inspector tab. |
 | `poll-section` | `cpu` \| `sched` | Poll flamegraph sample family. |
 | `poll-expanded` | `v1:` + TAB-joined group ids | Expanded poll list groups. |
 | `poll-worker-zoom` | TAB-joined frame path | Poll worker-tree flamegraph zoom. |
@@ -344,6 +344,17 @@ Reserved hash keys claim the NAME only. Emitting them does nothing; the
 viewer query implementation does not activate or reinterpret them.
 
 ### Deep-link recipes for agents (issue #303)
+
+To inspect a span's fields in the right panel, use:
+
+```
+viewer.html?trace=<trace-url>&span-focus=<span-id>&inspector=span
+```
+
+The Span tab shows user fields with units and copy buttons, followed by timing
+and task details. Clicking a bar in the Spans track opens this tab, including
+when an analysis is already open. The retained analysis remains on Stack.
+Copy the resulting URL to preserve the selected span and active tab.
 
 The three asks from #303, in contract terms:
 

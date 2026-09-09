@@ -297,6 +297,20 @@ describe("viewer URL state: span focus + inspector tab inference", () => {
     expect(out.inspectorTab).toBe("task");
   });
 
+  it("restores the Span tab alongside a retained analysis", () => {
+    const range = { startNs: 0, endNs: 10 };
+    const { params, out } = roundTrip(
+      mkState({
+        selection: { ...spanSelection, sidebarRange: range },
+        view: { inspectorTab: "span" },
+      }),
+    );
+    expect(params.get("inspector")).toBe("span");
+    expect(out.inspectorTab).toBe("span");
+    expect(out.focusedSpanId).toBe("s1");
+    expect(out.sidebarRange).toEqual(range);
+  });
+
   it("a lane-click highlight (no panel focus) still infers the Task tab", () => {
     const { params } = roundTrip(
       mkState({

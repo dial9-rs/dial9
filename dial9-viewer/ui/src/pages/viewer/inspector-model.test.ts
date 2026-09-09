@@ -483,6 +483,42 @@ describe("autoActivateTab: re-scope only toward the surface that changed", () =>
     expect(autoActivateTab(parts(before), parts(after), "task", after)).toBe("span");
   });
 
+  it.each(["sidebarRange", "spawnedTasksRange"] as const)(
+    "a span click opens its fields while retaining %s",
+    (rangeKey) => {
+      const range = { startNs: 0, endNs: 10 };
+      const before = sel({ [rangeKey]: range });
+      const after = sel({
+        ...before,
+        selectedTaskId: 7,
+        focusedSpanId: "s1",
+        spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+      });
+      expect(autoActivateTab(parts(before), parts(after), "stack", after)).toBe("span");
+      expect(tabAvailability(after).stack).toBe(true);
+      expect(autoActivateTab(parts(after), parts(after), "stack", after)).toBeNull();
+    },
+  );
+
+  it("a span click clearing a poll opens Span with a retained analysis", () => {
+    const before = sel({
+      sidebarRange: { startNs: 0, endNs: 10 },
+      pollDetail: { start: 1, end: 9, taskId: 7 } as PollSpan,
+    });
+    const after = sel({
+      ...before,
+      pollDetail: null,
+      focusedSpanId: "s1",
+    });
+    expect(autoActivateTab(parts(before), parts(after), "poll", after)).toBe("span");
+  });
+
+  it("opening an analysis after focusing a span still opens Stack", () => {
+    const before = sel({ focusedSpanId: "s1" });
+    const after = sel({ ...before, sidebarRange: { startNs: 0, endNs: 10 } });
+    expect(autoActivateTab(parts(before), parts(after), "span", after)).toBe("stack");
+  });
+
   it("a lane click (task + highlight, no panel focus) re-scopes to Task", () => {
     const before = sel({});
     const after = sel({
