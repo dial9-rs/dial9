@@ -113,11 +113,10 @@ fn take_schema_build_count() -> usize {
     SCHEMA_BUILD_COUNT.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Serializes access to `SCHEMA_BUILD_COUNT` across `pct` and `determinism`,
-/// which `cargo test` runs concurrently (the concurrency `shuttle_test!`'s
-/// own docs warn can corrupt shared `static` state). Plain
-/// `std::sync::Mutex`: only needs to keep those two test threads apart, not
-/// participate in shuttle's own interleavings within one iteration.
+/// Serializes access to `SCHEMA_BUILD_COUNT` across `pct`, `determinism`,
+/// and `get_schemas_is_keyed_per_callsite` (all bump it via `get_schemas`),
+/// which `cargo test` runs concurrently. Plain `std::sync::Mutex`: only
+/// keeps those test threads apart, not shuttle's own interleavings.
 #[cfg(all(test, shuttle))]
 static SCHEMA_BUILD_COUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -471,8 +470,7 @@ mod tests {
     /// callsites into one entry: the shuttle test exercises just one
     /// callsite (it's checking the lock, not the keying), so per-callsite
     /// schema keying needs its own coverage here.
-    #[test]
-    fn get_schemas_is_keyed_per_callsite() {
+    fn get_schemas_is_keyed_per_callsite_body() {
         let layer = Dial9TracingLayer::new();
         let a = layer.get_schemas(callsite_a());
         let b = layer.get_schemas(callsite_b());
@@ -481,115 +479,125 @@ mod tests {
         assert_ne!(a.exit.name(), b.exit.name());
         assert_ne!(a.field_names, b.field_names);
     }
-}
 
-#[cfg(all(test, shuttle))]
-mod shuttle_tests {
-    use super::*;
-    use dial9_core::buffer::MemoryBuffer;
-    use dial9_core::handle::set_tl_handle;
-    use dial9_core::primitives::thread;
-    use dial9_core::recorder::recorder;
-    use dial9_core::shuttle_test;
-    use tracing_subscriber::prelude::*;
-
-    const CALLERS: usize = 4;
-
-    /// All racing threads call this one function so they hit the same
-    /// schema-cache entry. Each `info_span!` invocation site compiles to
-    /// its own callsite `Identifier`, even with identical arguments, so
-    /// calling the macro separately per thread would race four different
-    /// cache entries instead of one.
-    fn probe_span() -> tracing::Span {
-        tracing::info_span!(
-            "shuttle_concurrent_get_schemas_probe",
-            field_a = 1,
-            field_b = 2
-        )
+    #[cfg(not(shuttle))]
+    #[test]
+    fn get_schemas_is_keyed_per_callsite() {
+        get_schemas_is_keyed_per_callsite_body();
     }
 
-    shuttle_test! {
-        num_iters = 2_000, depth = 3;
-        // Drives `Dial9TracingLayer`'s dispatch path: `on_enter`'s enabled
-        // gate, thread-local encoder access, task-ID/clock lookups, and
-        // `Registry`'s span-extension storage, not just `get_schemas` alone.
-        //
-        // One subscriber, installed once as the ambient default for the
-        // whole race. `tracing-core`'s "current default" is
-        // a plain thread-local shared across all of shuttle's coroutines
-        // regardless of per-thread `set_default` calls. `Dial9Handle` still
-        // needs explicit `set_tl_handle` per thread, since `CURRENT_HANDLE`
-        // is a shuttle-virtualized thread-local instead.
-        //
-        // Value equality can't detect a cache that rebuilds every racing
-        // call instead of building once and cloning (see
-        // `SCHEMA_BUILD_COUNT`'s doc comment). A failure below means this
-        // test stopped proving the dedup, not that `Dial9TracingLayer`
-        // regressed some other way.
-        fn shuttle_concurrent_get_schemas() {
-            // Held for the whole iteration, including building/dropping the
-            // `Recorder` below (see `SCHEMA_BUILD_COUNT_LOCK` for the
-            // counter half). A `Recorder` also claims a process-wide "only
-            // one active recorder" guard (`SoleRecorderGuard`); two racing
-            // to claim it at once would silently disable one. Poison
-            // ignored, so one racing test's panic doesn't mask the other's.
-            let _serialize = SCHEMA_BUILD_COUNT_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(shuttle)]
+    #[test]
+    fn get_schemas_is_keyed_per_callsite() {
+        // Serializes against shuttle_concurrent_get_schemas, which shares
+        // SCHEMA_BUILD_COUNT and runs concurrently under cargo test.
+        let _serialize = SCHEMA_BUILD_COUNT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // No interleaving to explore; check_random(1) just gives the
+        // shuttle-mocked Mutex an ExecutionState to lock into.
+        shuttle::check_random(get_schemas_is_keyed_per_callsite_body, 1);
+    }
 
-            // Drain any count left over from a previous iteration: the
-            // counter is a plain static that outlives shuttle's own
-            // per-iteration reset, so each iteration must clear it itself.
-            take_schema_build_count();
+    #[cfg(shuttle)]
+    mod shuttle_tests {
+        use super::*;
+        use dial9_core::buffer::MemoryBuffer;
+        use dial9_core::handle::set_tl_handle;
+        use dial9_core::primitives::thread;
+        use dial9_core::recorder::recorder;
+        use dial9_core::shuttle_test;
+        use tracing_subscriber::prelude::*;
 
-            // An enabled `Dial9Handle`: `on_enter`'s gate requires one, and
-            // `with_encoder` needs a live recorder behind it to run its
-            // closure. In-memory writer: this scenario only cares about the
-            // schema cache, not the encoded bytes.
-            let writer = MemoryBuffer::new(1 << 16).expect("build in-memory writer");
-            let recorder = recorder(writer).build();
-            let handle = recorder.handle().clone();
-            assert!(
-                handle.is_enabled(),
-                "recorder must be enabled for on_enter's gate to run"
-            );
+        const CALLERS: usize = 4;
 
-            // Removing this filter makes shuttle panic with "ExecutionState
-            // is already borrowed": shuttle emits its own `tracing` spans
-            // (e.g. `Runner::run`'s `span!(Level::ERROR, "execution", i)`)
-            // through this same ambient default, and dispatching those into
-            // `Dial9TracingLayer` re-enters shuttle's `ExecutionState` from
-            // inside its own bookkeeping.
-            let filter = tracing_subscriber::filter::FilterFn::new(|meta| {
-                meta.name() == "shuttle_concurrent_get_schemas_probe"
-            });
-            let subscriber =
-                tracing_subscriber::registry().with(Dial9TracingLayer::new().with_filter(filter));
-            let _sub_guard = tracing::subscriber::set_default(subscriber);
+        /// All racing threads call this one function so they hit the same
+        /// schema-cache entry. Each `info_span!` invocation site compiles to
+        /// its own callsite `Identifier`, even with identical arguments, so
+        /// calling the macro separately per thread would race four different
+        /// cache entries instead of one.
+        fn probe_span() -> tracing::Span {
+            tracing::info_span!(
+                "shuttle_concurrent_get_schemas_probe",
+                field_a = 1,
+                field_b = 2
+            )
+        }
 
-            let handles: Vec<_> = (0..CALLERS)
-                .map(|_| {
-                    let handle = handle.clone();
-                    thread::spawn(move || {
-                        set_tl_handle(handle);
-                        let span = probe_span();
-                        let _enter = span.enter();
+        shuttle_test! {
+            default;
+            // Drives on_enter's gate, thread-local encoder access, task/clock
+            // lookups, and Registry's span-extension storage.
+            //
+            // One shared subscriber for the whole race (tracing-core's
+            // "current default" is a plain thread-local all of shuttle's
+            // coroutines see). `Dial9Handle` still needs `set_tl_handle` per
+            // thread: `CURRENT_HANDLE` is a shuttle-virtualized thread-local.
+            fn shuttle_concurrent_get_schemas() {
+                // Held for the whole iteration, including building/dropping the
+                // `Recorder` below (see `SCHEMA_BUILD_COUNT_LOCK` for the
+                // counter half). A `Recorder` also claims a process-wide "only
+                // one active recorder" guard (`SoleRecorderGuard`); two racing
+                // to claim it at once would silently disable one. Poison
+                // ignored, so one racing test's panic doesn't mask the other's.
+                let _serialize = SCHEMA_BUILD_COUNT_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+                // Drain any count left over from a previous iteration: the
+                // counter is a plain static that outlives shuttle's own
+                // per-iteration reset, so each iteration must clear it itself.
+                take_schema_build_count();
+
+                // An enabled `Dial9Handle`: `on_enter`'s gate requires one, and
+                // `with_encoder` needs a live recorder behind it to run its
+                // closure. In-memory writer: this scenario only cares about the
+                // schema cache, not the encoded bytes.
+                let writer = MemoryBuffer::new(1 << 16).expect("build in-memory writer");
+                let recorder = recorder(writer).build();
+                let handle = recorder.handle().clone();
+                assert!(
+                    handle.is_enabled(),
+                    "recorder must be enabled for on_enter's gate to run"
+                );
+
+                // Removing this filter makes shuttle panic with "ExecutionState
+                // is already borrowed": shuttle emits its own `tracing` spans
+                // (e.g. `Runner::run`'s `span!(Level::ERROR, "execution", i)`)
+                // through this same ambient default, and dispatching those into
+                // `Dial9TracingLayer` re-enters shuttle's `ExecutionState` from
+                // inside its own bookkeeping.
+                let filter = tracing_subscriber::filter::FilterFn::new(|meta| {
+                    meta.name() == "shuttle_concurrent_get_schemas_probe"
+                });
+                let subscriber = tracing_subscriber::registry()
+                    .with(Dial9TracingLayer::new().with_filter(filter));
+                let _sub_guard = tracing::subscriber::set_default(subscriber);
+
+                let handles: Vec<_> = (0..CALLERS)
+                    .map(|_| {
+                        let handle = handle.clone();
+                        thread::spawn(move || {
+                            set_tl_handle(handle);
+                            let span = probe_span();
+                            let _enter = span.enter();
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            for h in handles {
-                h.join().unwrap();
+                for h in handles {
+                    h.join().unwrap();
+                }
+
+                assert_eq!(
+                    take_schema_build_count(),
+                    1,
+                    "cache must build a callsite's schema exactly once, no matter how many real \
+                     concurrent span entries race for it"
+                );
+
+                drop(recorder);
             }
-
-            assert_eq!(
-                take_schema_build_count(),
-                1,
-                "cache must build a callsite's schema exactly once, no matter how many real \
-                 concurrent span entries race for it"
-            );
-
-            drop(recorder);
         }
     }
 }
