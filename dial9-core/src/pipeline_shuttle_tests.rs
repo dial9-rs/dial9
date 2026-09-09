@@ -226,12 +226,8 @@ crate::shuttle_test! {
 
 // ── Panic injection ─────────────────────────────────────────────────
 
-// `flush_sources` has no `catch_unwind`, so the panic propagates out of the
-// flush thread's main loop and kills it.
 crate::shuttle_test! {
-    num_iters = 500, depth = 3, should_panic,
-    expect_panic = "PanickingSource intentionally panics for shuttle coverage",
-    replay = "91011be187b1dcc7fc8f9dbc0100000058555515";
+    num_iters = 500, depth = 3;
     fn test_source_panic_does_not_wedge_pipeline() {
         let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
@@ -283,14 +279,10 @@ crate::shuttle_test! {
     }
 }
 
-// Companion to the scenario above: a TL-buffer write hits the same
-// unguarded-flush gap. Kept separate because the live buffer left behind at
-// panic time is what makes `determinism` crash (16/30 with the write vs
-// 0/30 without) -- hence `flaky_sigabrt_determinism_only`.
+// Companion to the scenario above: a TL-buffer write through the same
+// unguarded-flush path.
 crate::shuttle_test! {
-    num_iters = 500, depth = 3, should_panic, flaky_sigabrt_determinism_only,
-    expect_panic = "PanickingSource intentionally panics for shuttle coverage",
-    replay = "910124ca81ffb4a781e6ae0a000000006055555555";
+    num_iters = 500, depth = 3;
     fn test_source_panic_does_not_lose_tl_buffer_write() {
         let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),

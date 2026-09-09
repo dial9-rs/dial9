@@ -311,15 +311,10 @@ mod tests {
 
     /// `teardown()` should run even after an uncaught `Source::flush` panic:
     /// it's the flush thread's own cleanup, unrelated to whichever source
-    /// misbehaved. `#[should_panic]` because that invariant doesn't hold yet:
-    /// nothing catches a panicking `Source::flush`, so it unwinds straight out
-    /// of the flush thread's closure and skips `teardown()`, which only runs
-    /// after `run_flush_loop` returns normally. Once `flush_sources` gains
-    /// panic containment, remove `#[should_panic]`: no assertion to flip.
+    /// misbehaved. `flush_sources` now catches and drops a panicking
+    /// source's cycle, so `run_flush_loop` returns normally and `teardown()`
+    /// runs as it would for any clean stop.
     #[test]
-    #[should_panic(
-        expected = "teardown() should still run even after an uncaught Source panic during flush"
-    )]
     fn source_panic_does_not_skip_thread_teardown() {
         let teardown_ran = Arc::new(AtomicBool::new(false));
         let teardown_ran_for_thread = teardown_ran.clone();
@@ -345,13 +340,9 @@ mod tests {
         // panicking source guarantees the very first cycle panics.
         std::thread::sleep(Duration::from_millis(200));
 
-        // Explicitly ask the flush thread to stop. This is what
-        // distinguishes "teardown was skipped by the panic" from "teardown
-        // just hasn't run yet because nobody asked the loop to stop": if
-        // the panic already killed the thread, this call is a harmless
-        // no-op (the send fails since the receiver is gone); if the panic
-        // were instead contained and the loop were still alive, this is
-        // exactly what would make it return normally and run teardown().
+        // Explicitly ask the flush thread to stop, rather than relying on
+        // the sleep alone: this is what makes the loop return normally and
+        // run teardown().
         recorder.stop_flush_thread();
 
         assert!(
