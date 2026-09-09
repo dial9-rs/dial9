@@ -58,6 +58,13 @@ impl<'a> FlushContext<'a> {
 /// the source with [`RecorderBuilder::source`] before starting the flush
 /// thread; the flush thread calls [`flush`] once per cycle.
 ///
+/// # Panic safety
+///
+/// The flush thread catches panics from [`flush`](Self::flush) and drops
+/// that cycle's events for this source. The same instance is reused on the
+/// next cycle, so implementations **must** remain in a valid state after a
+/// panic.
+///
 /// [`flush`]: Source::flush
 /// [`RecorderBuilder::source`]: crate::recorder::RecorderBuilder::source
 pub trait Source: Any + Send {
