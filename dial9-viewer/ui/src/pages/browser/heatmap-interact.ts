@@ -41,6 +41,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     if (!store.getState().browse.rows.length) return;
     justDraggedOnHeatmap = false;
     dragging = true;
+    hideCursor();
     zooming = e.altKey;
     const { x, y } = localXY(e);
     startX = x;
@@ -106,12 +107,13 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     // Write the text first: the placement clamp measures the label, and a
     // date-carrying timestamp is materially wider than a bare time.
     els.heatmapCursorLabel.textContent = timestampAt(x, domain, W, s.ui.useLocalTz);
+    // display:none elements measure zero, including the first hover after leaving.
+    els.heatmapCursorLabel.style.display = "block";
     const place = cursorPlacement(x, W, els.heatmapCursorLabel.offsetWidth);
     els.heatmapCursor.style.left = place.lineLeft + "px";
     els.heatmapCursor.style.height = s.browse.rows.length * ROW_H + "px";
     els.heatmapCursor.style.display = "block";
     els.heatmapCursorLabel.style.left = place.labelLeft + "px";
-    els.heatmapCursorLabel.style.display = "block";
   });
   els.heatmapPlot.addEventListener("mouseleave", hideCursor);
 

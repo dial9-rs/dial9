@@ -221,6 +221,27 @@ describe("heatmap hover time readout", () => {
     expect(cursorLabel.style["display"]).toBe("none");
   });
 
+  it("measures a hidden label after showing it on the first hover", () => {
+    const { plot, cursorLabel } = setup();
+    cursorLabel.style["display"] = "none";
+    Object.defineProperty(cursorLabel, "offsetWidth", {
+      get: () => cursorLabel.style["display"] === "none" ? 0 : 40,
+    });
+
+    plot.dispatch("mousemove", { clientX: 100, clientY: 5 });
+    expect(cursorLabel.style["left"]).toBe("80px");
+  });
+
+  it("hides an existing readout as soon as a drag starts", () => {
+    const { plot, cursor, cursorLabel } = setup();
+    plot.dispatch("mousemove", { clientX: 50, clientY: 5 });
+    plot.dispatch("mousedown", {
+      clientX: 50, clientY: 5, altKey: false, preventDefault: vi.fn(),
+    });
+    expect(cursor.style["display"]).toBe("none");
+    expect(cursorLabel.style["display"]).toBe("none");
+  });
+
   // Mid-drag the rubber band already shows the span; a second floating time
   // label on top of it is just clutter.
   it("stays hidden while dragging", () => {

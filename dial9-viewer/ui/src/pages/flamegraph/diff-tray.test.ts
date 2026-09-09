@@ -255,10 +255,12 @@ describe("flamegraph diff quick-B presets", () => {
     tray.add();
     expect(models[models.length - 1]!.presets!.otherHosts).toStrictEqual([]);
 
-    // A later snapshot reveals more hosts; the next render picks them up.
+    // A later snapshot refreshes availability without changing the capture.
     hosts.push("h1", "h2");
-    tray.remove("b"); // no-op on the capture, but forces a re-render
+    const captured = tray.capture();
+    tray.refresh();
     expect(models[models.length - 1]!.presets!.otherHosts).toStrictEqual(["h2"]);
+    expect(tray.capture()).toBe(captured);
   });
 
   it("opens A vs the same window on another host", () => {
@@ -303,5 +305,14 @@ describe("flamegraph diff quick-B presets", () => {
     tray.applyPreset({ kind: "host", host: "h2" });
 
     expect(openDiff).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass a captured B when a preset is invoked", () => {
+    const { tray, openDiff } = setup([scope({}, ["h1"]), scope({}, ["h2"])]);
+    tray.add();
+    tray.add();
+    tray.applyPreset({ kind: "shift", shift: "1h" });
+    expect(openDiff).not.toHaveBeenCalled();
+    expect(tray.capture().b!.getAll("host")).toStrictEqual(["h2"]);
   });
 });

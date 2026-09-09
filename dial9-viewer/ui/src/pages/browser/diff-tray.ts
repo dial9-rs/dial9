@@ -76,7 +76,11 @@ export function presetHostOptions(
   rows: readonly HeatmapRow[],
 ): HostOption[] {
   const services = new Map<string, string>();
+  const serviceA = scopeA.get("service");
   for (const row of rows) {
+    // A host preset preserves A's service filter; other services would yield
+    // an empty comparison even though that host has data in the browse view.
+    if (serviceA && row.service !== serviceA) continue;
     if (row.host && !services.has(row.host)) services.set(row.host, row.service);
   }
   const { otherHosts } = presetAvailability(scopeA, services.keys());

@@ -122,6 +122,8 @@ export interface DiffTrayDeps {
 }
 
 export interface DiffTray {
+  /** Refresh available hosts after a streamed snapshot without changing A/B. */
+  refresh(): void;
   /** Capture the current view into the next free side (A, then B). */
   add(): void;
   swap(): void;
@@ -131,7 +133,7 @@ export interface DiffTray {
   open(): void;
   /**
    * Derive side B from side A and open the diff directly (#624). A no-op
-   * unless A is captured - there is nothing to derive from otherwise.
+   * unless A is captured and B is still empty.
    */
   applyPreset(preset: Preset): void;
   capture(): DiffCapture;
@@ -150,6 +152,7 @@ export function createDiffTray(deps: DiffTrayDeps): DiffTray {
   }
 
   const tray: DiffTray = {
+    refresh: render,
     add: () => set(addDiffCapture(capture, deps.currentScope())),
     swap: () => set(swapDiffCapture(capture)),
     clear: () => set({ a: null, b: null }),
@@ -163,7 +166,7 @@ export function createDiffTray(deps: DiffTrayDeps): DiffTray {
     },
     applyPreset: (preset) => {
       const a = capture.a;
-      if (!a) return;
+      if (!a || capture.b) return;
       // A stays side A; the derived scope is B. Opened directly rather than
       // parked in the tray - a one-click preset is the whole point.
       deps.openDiff(diffSearch(a, presetScope(a, preset)));

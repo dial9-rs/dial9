@@ -32,7 +32,7 @@ import type {
 } from "../../lib/trace/index.js";
 import { createFlamegraph, diffSearch, fullScopeQuery } from "../../lib/canvas/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
-import { mountDiffTray } from "./diff-tray.js";
+import { mountDiffTray, type DiffTray } from "./diff-tray.js";
 import type { PageEls } from "./dom.js";
 import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
 import type { FgKeys } from "./fg-keys.js";
@@ -131,6 +131,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // read into the query via minimap.band(); a brush/Apply re-streams. Assigned
   // below (before the first startStreaming), so queryState always sees it.
   let minimap: PollMinimap | undefined;
+  let diffTray: DiffTray | undefined;
 
   function queryState(): ApiQueryState {
     const band = minimap?.band() ?? { minPollNs: null, maxPollNs: null };
@@ -190,6 +191,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     );
     if (key === renderedFacetKey) return;
     renderedFacetKey = key;
+    diffTray?.refresh();
 
     const container = document.getElementById("f-facets");
     if (container === null) return;
@@ -516,14 +518,14 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // survives every streamed refinement; mounted after the minimap so it
   // lands directly beneath the toolbar its button belongs to. The captured
   // scope is the live query as the Host dropdown currently narrows it.
-  mountDiffTray({
+  diffTray = mountDiffTray({
     anchor: toolbar,
     addButton: document.getElementById("f-adddiff") as HTMLButtonElement,
     currentScope: () =>
       fullScopeQuery(new URLSearchParams(buildBrowserQuery(queryState()))),
     // The accumulated host facet feeds the "different host" preset (#624).
-    // It is scoped to the current query, so it only ever offers hosts that
-    // actually have data in this view.
+    // Includes hosts discovered by earlier snapshots so narrowing the view
+    // does not remove the other hosts available for comparison.
     knownHosts: () => availFacets["host"]?.values ?? [],
   });
 

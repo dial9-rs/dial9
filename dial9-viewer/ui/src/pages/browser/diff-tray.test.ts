@@ -43,7 +43,19 @@ describe("presetHostOptions", () => {
 
     expect(options).toStrictEqual([
       { value: "h2", label: "api / h2" },
-      { value: "h3", label: "web / h3" },
+    ]);
+  });
+
+  it("only offers hosts with data in the captured service", () => {
+    const options = presetHostOptions(scopeA(), [row("web", "h2")]);
+    expect(options).toStrictEqual([]);
+  });
+
+  it("allows hosts from any service when A has no service filter", () => {
+    const a = scopeA();
+    a.delete("service");
+    expect(presetHostOptions(a, [row("web", "h2")])).toStrictEqual([
+      { value: "h2", label: "web / h2" },
     ]);
   });
 
