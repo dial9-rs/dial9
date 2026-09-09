@@ -273,7 +273,17 @@ impl SharedState {
             let ctx = self.flush_context();
             let mut sources = self.sources.lock().unwrap();
             for source in sources.iter_mut() {
-                source.flush(&ctx);
+                // A panicking `Source::flush` must not poison the flush
+                // thread or skip sibling sources' flushes this cycle.
+                let flushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    source.flush(&ctx);
+                }));
+                if flushed.is_err() {
+                    let name = source.name();
+                    crate::rate_limit::rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(source = name, "source panicked during flush; event dropped");
+                    });
+                }
             }
         }
     }
