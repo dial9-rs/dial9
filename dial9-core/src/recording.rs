@@ -294,7 +294,7 @@ impl Drop for Recorder {
 mod tests {
     use super::*;
     use crate::buffer::MemoryBuffer;
-    use crate::clock::clock_monotonic_ns;
+    use crate::recorder::{RecorderSourceExt, recorder};
     use crate::source::{FlushContext, Source};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -309,13 +309,13 @@ mod tests {
         }
     }
 
-    /// `teardown()` should run even after an uncaught `Source::flush` panic --
+    /// `teardown()` should run even after an uncaught `Source::flush` panic:
     /// it's the flush thread's own cleanup, unrelated to whichever source
     /// misbehaved. `#[should_panic]` because that invariant doesn't hold yet:
     /// nothing catches a panicking `Source::flush`, so it unwinds straight out
     /// of the flush thread's closure and skips `teardown()`, which only runs
     /// after `run_flush_loop` returns normally. Once `flush_sources` gains
-    /// panic containment, remove `#[should_panic]` -- no assertion to flip.
+    /// panic containment, remove `#[should_panic]`: no assertion to flip.
     #[test]
     #[should_panic(
         expected = "teardown() should still run even after an uncaught Source panic during flush"
@@ -329,17 +329,19 @@ mod tests {
             .max_segment_size(256)
             .build()
             .unwrap();
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        shared.push_source(Box::new(PanickingSource));
 
-        let mut recorder = Recorder::start(shared, writer, None, move || {
-            move || {
-                teardown_ran_for_thread.store(true, Ordering::Relaxed);
-            }
-        });
+        let mut recorder = recorder(writer)
+            .source(PanickingSource)
+            .on_recording_thread_start(move || {
+                let teardown_ran_for_thread = teardown_ran_for_thread.clone();
+                move || {
+                    teardown_ran_for_thread.store(true, Ordering::Relaxed);
+                }
+            })
+            .build();
         recorder.handle().enable();
 
-        // Give the flush thread time to run at least one cycle -- the
+        // Give the flush thread time to run at least one cycle: the
         // panicking source guarantees the very first cycle panics.
         std::thread::sleep(Duration::from_millis(200));
 
