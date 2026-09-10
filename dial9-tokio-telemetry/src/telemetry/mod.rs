@@ -19,7 +19,9 @@ pub(crate) mod task_metadata;
 pub(crate) use dial9_core::buffer;
 
 pub use crate::traced::TracedFuture;
-pub use buffer::{BufferMode, Disk, DiskBuffer, Memory, MemoryBuffer, SegmentWriter};
+pub use buffer::{
+    AdaptiveRotationConfig, BufferMode, Disk, DiskBuffer, Memory, MemoryBuffer, SegmentWriter,
+};
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};
 pub use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 pub use dial9_core::recorder::{RecorderBuilder, recorder};

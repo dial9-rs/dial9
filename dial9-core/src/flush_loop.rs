@@ -224,6 +224,7 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                     last_flush: exit,
                     write_metadata_failed: false,
                     finalize_failed: false,
+                    seals: writer.seal_counts(),
                 }
                 .append_on_drop(flush_metrics_sink.clone())
             });

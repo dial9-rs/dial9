@@ -46,6 +46,17 @@ pub(crate) struct FlushStats {
     pub cpu_flush_duration: Duration,
 }
 
+/// Running totals of how segments were sealed, since the writer started.
+#[metrics(subfield, rename_all = "PascalCase")]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SealCounts {
+    /// Segments sealed after their thread-local buffers were drained.
+    pub segments_sealed_clean: u64,
+    /// Segments that crossed `max_file_size` and sealed on the spot, losing
+    /// whatever was still buffered.
+    pub segments_sealed_undrained: u64,
+}
+
 /// Metrics emitted by the flush thread each cycle.
 #[metrics(rename_all = "PascalCase")]
 #[derive(Debug)]
@@ -62,6 +73,8 @@ pub(crate) struct FlushMetrics {
     pub write_metadata_failed: bool,
     /// True when finalizing (sealing) the segment failed during the final flush.
     pub finalize_failed: bool,
+    #[metrics(flatten)]
+    pub seals: SealCounts,
 }
 
 /// Metrics emitted every time the flush thread runs the intrusive
