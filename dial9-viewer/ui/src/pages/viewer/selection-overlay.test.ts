@@ -9,6 +9,7 @@ import {
   measureText,
   measureWidth,
   selectionBox,
+  selectionSpan,
 } from "./selection-overlay.js";
 import { timePanelLayout, LABEL_W } from "../../lib/canvas/layout.js";
 import type { SelectionSlice, TransientSlice } from "../../types/state.js";
@@ -33,6 +34,7 @@ function selection(over: Partial<SelectionSlice> = {}): SelectionSlice {
     pinnedEvent: null,
     taskDump: null,
     sidebarRange: null,
+    poiRange: null,
     hoveredWakerTaskId: null,
     scopedSpawnLoc: null,
     spawnedTasksRange: null,
@@ -42,6 +44,11 @@ function selection(over: Partial<SelectionSlice> = {}): SelectionSlice {
 
 /** The trace extent the retained-box rule compares against. */
 const EXTENT = { minTs: 0, maxTs: 10_000 };
+
+/** A jump marker; only its range matters to the precedence rules. */
+const marker = (startNs: number, endNs: number): SelectionSlice["poiRange"] => ({
+  startNs, endNs, worker: 0, severityNs: 1_000, kind: "off-cpu-active",
+});
 
 describe("activeSelectionRegion - precedence", () => {
   it("a live keyboard selection wins over everything", () => {
@@ -114,8 +121,96 @@ describe("activeSelectionRegion - precedence", () => {
     });
   });
 
+  it("an issues-rail jump range draws the amber POI box", () => {
+    const region = activeSelectionRegion(
+      transient(),
+      selection({ poiRange: marker(3_000, 4_000) }),
+      EXTENT,
+    );
+    expect(region).toEqual({ startNs: 3_000, endNs: 4_000, mode: "poi" });
+  });
+
+  it("a POI jump range yields to a retained analysis and to a live gesture", () => {
+    const poiRange = marker(3_000, 4_000);
+    expect(
+      activeSelectionRegion(
+        transient(),
+        selection({ poiRange, sidebarRange: { startNs: 1_000, endNs: 2_000 } }),
+        EXTENT,
+      ),
+    ).toEqual({ startNs: 1_000, endNs: 2_000, mode: "region" });
+    expect(
+      activeSelectionRegion(
+        transient({ drag: { kind: "region-select", startX: 0, startNs: 400, curNs: 100, moved: true } }),
+        selection({ poiRange }),
+        EXTENT,
+      ),
+    ).toEqual({ startNs: 100, endNs: 400, mode: "region" });
+  });
+
+  it("a POI jump range covering the whole trace still draws its box", () => {
+    // Unlike a retained analysis, this box IS the subject: an off-cpu-active
+    // period that happens to span the resident window is still the thing the
+    // rail row points at.
+    const region = activeSelectionRegion(
+      transient(),
+      selection({ poiRange: marker(EXTENT.minTs, EXTENT.maxTs) }),
+      EXTENT,
+    );
+    expect(region).toEqual({
+      startNs: EXTENT.minTs,
+      endNs: EXTENT.maxTs,
+      mode: "poi",
+    });
+  });
+
   it("nothing selected => null (box hidden)", () => {
     expect(activeSelectionRegion(transient(), selection(), EXTENT)).toBeNull();
+  });
+});
+
+describe("selectionSpan - vertical extent", () => {
+  // The real stack: hint chips above the tracks, then the 30px ruler, lanes,
+  // and the analysis tracks under them.
+  const stack = {
+    tracksTop: 35,
+    rulerBottom: 65,
+    tracksBottom: 800,
+    columnHeight: 800,
+  };
+
+  it("starts below the ruler and ends at the last track", () => {
+    expect(selectionSpan(stack)).toEqual({ top: 65, height: 735 });
+  });
+
+  it("never covers the hint chips or the ruler above the tracks", () => {
+    const { top } = selectionSpan(stack);
+    expect(top).toBeGreaterThanOrEqual(stack.rulerBottom);
+  });
+
+  it("follows the stack when a track grows, rather than the column", () => {
+    // An expanded Events track makes the stack taller than the visible column;
+    // sizing off the column would stop the box short of the track it marks.
+    expect(selectionSpan({ ...stack, tracksBottom: 1_240 }).height).toBe(1_175);
+    // ...and shorter than the column when the tracks do not fill it, so the box
+    // does not trail off into the empty space below the last track.
+    expect(selectionSpan({ ...stack, tracksBottom: 400, columnHeight: 900 }).height)
+      .toBe(335);
+  });
+
+  it("falls back through the landmarks it cannot measure", () => {
+    // Ruler hidden by track management: start at the first track instead.
+    expect(selectionSpan({ ...stack, rulerBottom: null }).top).toBe(35);
+    // Nothing mounted: the whole column, which is the pre-measurement default.
+    expect(
+      selectionSpan({
+        tracksTop: null, rulerBottom: null, tracksBottom: null, columnHeight: 500,
+      }),
+    ).toEqual({ top: 0, height: 500 });
+  });
+
+  it("clamps a degenerate stack to zero rather than a negative height", () => {
+    expect(selectionSpan({ ...stack, tracksBottom: 40 }).height).toBe(0);
   });
 });
 

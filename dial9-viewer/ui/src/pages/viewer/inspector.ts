@@ -39,9 +39,11 @@ import type { RegionAnalysisController } from "./region-analysis.js";
 import type { ViewerStore } from "../../store/store.js";
 import type {
   AtCursorReadout,
+  PoiHighlight,
   SelectionSlice,
   StoreState,
 } from "../../types/state.js";
+import { poiHighlightSummary, poiHighlightTitle } from "./poi.js";
 import {
   INSPECTOR_TABS,
   autoActivateTab,
@@ -351,6 +353,7 @@ export function mountInspector(
       ></div>
       <div class="d9-inspector-inner">
         ${statusTemplate(s.selection)}
+        ${poiCardTemplate(s.selection.poiRange, s.viewport.minTs)}
         <div class="d9-atcursor-host"></div>
         <div class="d9-inspector-tabs" role="tablist" aria-label="Inspector tabs">
           ${INSPECTOR_TABS.map((t) => tabButton(t, avail[t]))}
@@ -379,6 +382,30 @@ export function mountInspector(
     >
       ${TAB_LABELS[tab]}
     </button>`;
+  }
+
+  /**
+   * The issues-rail jump marker's facts. Above the tabs rather than inside one:
+   * a descheduled worker period is neither a task nor a poll, so every tab is
+   * the wrong home for it, and it is a standing annotation like the status line
+   * rather than something the user tabs to.
+   */
+  function poiCardTemplate(
+    highlight: PoiHighlight | null,
+    minTs: number,
+  ): TemplateResult | typeof nothing {
+    if (highlight === null) return nothing;
+    const card = poiHighlightSummary(highlight, minTs);
+    return html`
+      <div class="d9-poi-card" role="group" aria-label="Selected issue">
+        <div class="d9-poi-card-title">${card.title}</div>
+        ${card.rows.map(
+          (r) => html`<div class="d9-poi-card-row">
+            <span>${r.label}</span><span>${r.value}</span>
+          </div>`,
+        )}
+      </div>
+    `;
   }
 
   // ── "What is selected" line + explicit clear affordance ──────────────────
@@ -425,6 +452,13 @@ export function mountInspector(
     if (sel.focusedSpanId !== null) {
       const name = data().laneData?.spanByIdSingle.get(sel.focusedSpanId)?.spanName;
       return `Span ${name ?? sel.focusedSpanId} selected · Esc clears`;
+    }
+    // Last of the ranges, mirroring the overlay's own precedence: a retained
+    // region analysis is what the user is doing now, this is a passive marker.
+    // Terse on purpose - the card right below carries the numbers, and the box
+    // caption carries them again on the canvas.
+    if (sel.poiRange !== null) {
+      return `${poiHighlightTitle(sel.poiRange)} period selected`;
     }
     if (sel.selectedTaskId !== null) {
       return `Task 0x${sel.selectedTaskId.toString(16)} selected · Esc clears`;
@@ -1418,6 +1452,7 @@ export function mountInspector(
       pollDetail: null,
       taskDump: null,
       sidebarRange: null,
+      poiRange: null,
       spawnedTasksRange: null,
       spawnedTasksRuntime: null,
       hoveredWakerTaskId: null,
@@ -1494,6 +1529,9 @@ export function mountInspector(
         sel.taskDump !== null ||
         sel.pinnedEvent !== null ||
         sel.sidebarRange !== null ||
+        // The issues-rail jump marker: no sidebar behind it, but it is a
+        // visible mark, so Esc must be able to take it back off the lanes.
+        sel.poiRange !== null ||
         sel.spawnedTasksRange !== null
       );
     },
@@ -1503,6 +1541,7 @@ export function mountInspector(
         pollDetail: null,
         taskDump: null,
         sidebarRange: null,
+        poiRange: null,
         spawnedTasksRange: null,
         spawnedTasksRuntime: null,
       });

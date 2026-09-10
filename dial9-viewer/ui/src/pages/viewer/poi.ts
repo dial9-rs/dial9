@@ -36,7 +36,12 @@ import type {
   PollSpan,
   SchedDelay,
 } from "../../types/trace.js";
-import type { PoiSlice, PoiSortKey, ViewportSlice } from "../../types/state.js";
+import type {
+  PoiHighlight,
+  PoiSlice,
+  PoiSortKey,
+  ViewportSlice,
+} from "../../types/state.js";
 
 /** The detector filters, in issues-rail display order. */
 export const POI_FILTERS: readonly PointOfInterestType[] = [
@@ -543,13 +548,25 @@ export function peakValue(pois: readonly PointOfInterest[]): number {
 
 // ── Jump semantics ───────────────────────────────────────────────────────
 
-/** The viewport window + optional task selection a POI jump produces. */
+/** The viewport window, task selection, and lane highlight a POI jump makes. */
 export interface PoiJump {
   viewStart: number;
   viewEnd: number;
   /** Task to select; null when the POI resolves to none. */
   selectedTaskId: number | null;
+  /**
+   * The lane marker to draw, or null to leave the lanes unboxed. Set only for a
+   * POI whose subject the lanes do not already draw as a bar - without it,
+   * "off-cpu-active" moves the viewport and marks nothing, so the jump reads as
+   * a no-op.
+   */
+  highlight: PoiHighlight | null;
 }
+
+/** Padding added on EACH side when framing a whole-interval POI, as a fraction
+ *  of its length: the interval then fills ~2/3 of the view with both edges
+ *  clearly inside it. */
+const INTERVAL_PAD_FRACTION = 0.25;
 
 /**
  * Center the viewport on a POI: show ~5x the span duration (min 1ms) with 30%
@@ -557,8 +574,10 @@ export interface PoiJump {
  * full wake->poll window (~3x, 20% pad) and select the delayed task, and
  * spawn-delay POIs frame the equivalent spawn->first-poll window - for both,
  * the whole point is the gap, so a window sized off the poll alone would leave
- * the cause off-screen. Other POIs select the poll's task when it has one, so
- * the inspector and lane highlight follow the jump.
+ * the cause off-screen. Off-cpu-active POIs frame the descheduled period itself
+ * and ask for a highlight box (see PoiJump.highlight). Other POIs select the
+ * poll's task when it has one, so the inspector and lane highlight follow the
+ * jump.
  */
 export function poiJump(poi: PointOfInterest, vp: ViewportSlice): PoiJump {
   const { minTs, maxTs } = vp;
@@ -567,6 +586,7 @@ export function poiJump(poi: PointOfInterest, vp: ViewportSlice): PoiJump {
   let viewStart = Math.max(minTs, poi.time - viewDur * 0.3);
   let viewEnd = Math.min(maxTs, viewStart + viewDur);
   let selectedTaskId: number | null = pollTaskId(poi.span);
+  let highlight: PoiHighlight | null = null;
 
   if (poi.schedDelay) {
     const sd = poi.schedDelay;
@@ -581,9 +601,99 @@ export function poiJump(poi: PointOfInterest, vp: ViewportSlice): PoiJump {
     const padded = Math.max(totalDur * 3, 1e6);
     viewStart = Math.max(minTs, poi.time - padded * 0.2);
     viewEnd = Math.min(maxTs, viewStart + padded);
+  } else if (poi.type === "off-cpu-active") {
+    // The POI *is* the interval: the worker was awake across all of it and off
+    // the CPU for `value` of it, with no record of WHEN inside it. So frame the
+    // period rather than a multiple of it - at 5x, a 17ms period is a fifth of
+    // the window and nothing says which fifth.
+    const pad = Math.max(spanDur * INTERVAL_PAD_FRACTION, 5e5);
+    viewStart = Math.max(minTs, poi.span.start - pad);
+    viewEnd = Math.min(maxTs, poi.span.end + pad);
+    highlight = {
+      startNs: poi.span.start,
+      endNs: poi.span.end,
+      worker: poi.worker,
+      severityNs: valueNs(poi),
+      kind: poi.type,
+    };
   }
 
-  return { viewStart, viewEnd, selectedTaskId };
+  return { viewStart, viewEnd, selectedTaskId, highlight };
+}
+
+// ── The jump marker's wording (box caption + inspector card) ─────────────
+
+/** How a detector words its severity against the boxed wall time. */
+function severityNoun(kind: PointOfInterestType): string {
+  return kind === "off-cpu-active" ? "off-CPU" : kindLabel(kind);
+}
+
+/**
+ * The caption drawn at the box's leading edge.
+ *
+ * Carries what the box's shape cannot: WHICH worker (it spans every lane, so it
+ * attributes nothing) and how much of the span the severity accounts for.
+ *
+ * It deliberately does NOT restate the boxed duration: the selection measuring
+ * bar sits in the ruler row directly above and already gives it, so "1.41ms
+ * off-CPU" reads against a "17ms" that is right there - and the pair is what
+ * stops the hard box edges being read as a 17ms outage.
+ */
+export function poiHighlightCaption(h: PoiHighlight): string {
+  const severity = formatHumanDuration(h.severityNs);
+  return `${workerLabel(h.worker)} · ${severity} ${severityNoun(h.kind)}`;
+}
+
+/** One `label: value` line of the inspector's jump-marker card. */
+export interface PoiHighlightRow {
+  label: string;
+  value: string;
+}
+
+/** The inspector's card for the current jump marker. */
+export interface PoiHighlightSummary {
+  title: string;
+  rows: PoiHighlightRow[];
+}
+
+/** Who the marker is about, in a few words: the status line's subject and the
+ *  card's heading. The numbers live in the caption and the card rows, so this
+ *  deliberately carries none. */
+export function poiHighlightTitle(h: PoiHighlight): string {
+  const what = h.kind === "off-cpu-active" ? "descheduled" : kindLabel(h.kind);
+  return `${workerLabel(h.worker)} ${what}`;
+}
+
+/**
+ * The facts behind the box, for the inspector.
+ *
+ * This is where the numbers belong: the canvas can hold one caption, and the
+ * jump otherwise left the inspector reading "No selection" - the one POI kind
+ * that populated nothing after a click.
+ */
+export function poiHighlightSummary(
+  h: PoiHighlight,
+  minTs: number,
+): PoiHighlightSummary {
+  const wall = h.endNs - h.startNs;
+  // A zero-length period cannot happen (the detectors need positive off-CPU
+  // time inside it) but the share is user-facing arithmetic, so guard the
+  // divide rather than print NaN%.
+  const share = wall > 0 ? ` (${((h.severityNs / wall) * 100).toFixed(1)}%)` : "";
+  return {
+    title: poiHighlightTitle(h),
+    rows: [
+      {
+        label: "window",
+        value: `${relTimeLabel(h.startNs, minTs)} -> ${relTimeLabel(h.endNs, minTs)}`,
+      },
+      { label: "awake", value: formatHumanDuration(wall) },
+      {
+        label: severityNoun(h.kind),
+        value: `${formatHumanDuration(h.severityNs)}${share}`,
+      },
+    ],
+  };
 }
 
 /** The task id of a POI's span when it is a poll (ParkSpans have none). */

@@ -579,6 +579,7 @@ describe("viewer deep-link reconstruction", () => {
       pollDetail: null,
       taskDump: null,
       sidebarRange: null,
+      poiRange: null,
       hoveredWakerTaskId: null,
       // Resets with the source: a pinned spawn location names a call site in
       // the REPLACED trace, which the new one need not contain.

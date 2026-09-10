@@ -128,6 +128,26 @@ export interface TaskDumpSelection {
 }
 
 /**
+ * The issues-rail jump's lane marker: the boxed range plus the facts behind
+ * it, so the box can name what it marks and the inspector can report it.
+ *
+ * The range is WALL time and the severity is a fraction of it - a 17ms period
+ * that was off-CPU for 1.4ms - so both travel together. Carrying the range
+ * alone would leave every surface implying the whole window was the outage.
+ */
+export interface PoiHighlight {
+  startNs: number;
+  endNs: number;
+  /** The worker the period belongs to; the box spans every lane, so this is
+   *  the only thing that attributes it. */
+  worker: number;
+  /** The detector's severity, normalized to ns. */
+  severityNs: number;
+  /** Which detector produced it, so consumers can word the severity. */
+  kind: PointOfInterestType;
+}
+
+/**
  * Cross-highlight state. All fields are independently clearable, hence all
  * explicitly nullable.
  */
@@ -162,6 +182,15 @@ export interface SelectionSlice {
    * the sidebar closes.
    */
   sidebarRange: TimeRange | null;
+  /**
+   * The current issues-rail jump's lane marker. Set only for a POI whose
+   * subject the lanes draw no bar for - a descheduled worker period is a
+   * property of a stretch of wall time, not of a poll or a park - so without
+   * it the jump moves the viewport and marks nothing. Distinct from
+   * `sidebarRange`: that one retains a region ANALYSIS and gates keyboard
+   * selection; this is a passive marker with no sidebar behind it.
+   */
+  poiRange: PoiHighlight | null;
   /** Waker task hovered in the task-detail panel (orange polls). */
   hoveredWakerTaskId: number | null;
   /**

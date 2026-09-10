@@ -339,6 +339,8 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       spanFocus: null,
       focusedSpanId: null,
       taskDump: null,
+      // Always written, so the previous jump's box never outlives its row.
+      poiRange: jump.highlight,
     });
     store.update("poi", { index });
     // Moving the time window is not enough: the lanes box scrolls
@@ -366,6 +368,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       pinnedEvent: null,
       pollDetail: null,
       taskDump: null,
+      poiRange: null,
     });
     store.update("poi", { taskIndex: index });
     if (task.firstPollWorker >= 0) revealWorker(task.firstPollWorker);
@@ -406,9 +409,18 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     store.update("poi", { railTab });
   }
 
+  /** Drop the current issue: every control that re-derives the list unselects,
+   *  and the jump's highlight box has to go with the row it belonged to. */
+  function deselectIssue(patch: Partial<StoreState["poi"]>): void {
+    store.update("poi", { ...patch, index: -1 });
+    if (store.getState().selection.poiRange !== null) {
+      store.update("selection", { poiRange: null });
+    }
+  }
+
   function setFilter(filter: PointOfInterestType): void {
     // A new filter rebuilds the list; the current index no longer maps.
-    store.update("poi", { filter, index: -1 });
+    deselectIssue({ filter });
   }
 
   /** Resizes the list, so the current index no longer maps. The detector is not
@@ -417,7 +429,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     const worstN = parsePoiWorstN(raw);
     if (worstN === null) return;
     if (worstN === store.getState().poi.worstN) return;
-    store.update("poi", { worstN, index: -1 });
+    deselectIssue({ worstN });
   }
 
   /** Rebuilds the list, so the current index is dropped. An unparseable value
@@ -426,7 +438,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     const spawnThresholdUs = parseSpawnThresholdUs(raw);
     if (spawnThresholdUs === null) return;
     if (spawnThresholdUs === store.getState().poi.spawnThresholdUs) return;
-    store.update("poi", { spawnThresholdUs, index: -1 });
+    deselectIssue({ spawnThresholdUs });
   }
 
   function sortTaskByColumn(col: TaskColumn): void {
@@ -451,7 +463,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
           ? "desc"
           : "asc"
         : col.defaultDir;
-    store.update("poi", { sortKey: col.key, sortDir: dir, index: -1 });
+    deselectIssue({ sortKey: col.key, sortDir: dir });
   }
 
   // ── Resize drag (the rail's right-edge handle) ──────────────────────────

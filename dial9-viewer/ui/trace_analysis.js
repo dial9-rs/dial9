@@ -1091,7 +1091,7 @@
           // 49%. A fully on-CPU period scores 0 and is not a point of interest.
           const offCpu = (1 - a.ratio) * wall;
           if (offCpu > 0) {
-            points.push({
+            add({
               time: a.start,
               worker: w,
               type: "off-cpu-active",

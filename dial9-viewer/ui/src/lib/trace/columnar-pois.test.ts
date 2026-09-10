@@ -74,6 +74,28 @@ describe("store.pointsOfInterest matches frozen filterPointsOfInterest", () => {
       expect(col.length, `${type} count`).toBe(fat.length);
       expect(bag(col)).toEqual(bag(fat));
     });
+
+    // The rail prints this number ("worst 50 of 12,431"), so a detector that
+    // forgets to report through `add` reads as "found nothing" while listing
+    // rows.
+    it(`${type}: same pre-cap match count`, () => {
+      const base = {
+        hasSchedWait: true, sortByWorst: true, taskInstrumented, taskSpawnTimes,
+        hasWorkerCpuTime: true, limit: 5,
+      };
+      let fatTotal = -1;
+      let colTotal = -1;
+      const fat = filterPointsOfInterest(type, ws, workerIds, fatSched, {
+        ...base, onTotal: (n: number) => { fatTotal = n; },
+      });
+      const col = store.pointsOfInterest(type, workerIds, colSched, {
+        ...base, onTotal: (n: number) => { colTotal = n; },
+      });
+      expect(colTotal, `${type} total`).toBe(fatTotal);
+      expect(fatTotal, `${type} total is at least the capped list`)
+        .toBeGreaterThanOrEqual(fat.length);
+      expect(col.length, `${type} honours the cap`).toBe(fat.length);
+    });
   }
 
   // Separate implementations, so a configured threshold must move them

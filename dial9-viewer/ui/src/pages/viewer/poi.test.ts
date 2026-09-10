@@ -50,6 +50,8 @@ import {
   redFlagLabel,
   redFlagSummary,
   POI_WORST_N_DEFAULT,
+  poiHighlightCaption,
+  poiHighlightSummary,
   poiJump,
   poisForFilter,
   poiSourceFor,
@@ -554,9 +556,72 @@ describe("poiJump", () => {
     const p = poi("off-cpu-active", 1e8, 0, 9e6, park(1e8, 1e8 + 1e7));
     const j = poiJump(p, vp);
     expect(j.selectedTaskId).toBeNull();
-    const viewDur = Math.max(1e7 * 5, 1e6);
-    expect(j.viewStart).toBe(Math.max(0, 1e8 - viewDur * 0.3));
-    expect(j.viewEnd).toBe(Math.min(1e9, j.viewStart + viewDur));
+    // The period itself, padded 25% each side - not a multiple of it: at 5x a
+    // 10ms period is a fifth of the window and nothing says which fifth.
+    const pad = 1e7 * 0.25;
+    expect(j.viewStart).toBe(1e8 - pad);
+    expect(j.viewEnd).toBe(1e8 + 1e7 + pad);
+    expect(j.viewEnd - j.viewStart).toBeLessThan(1e7 * 2);
+  });
+
+  it("boxes the off-cpu-active period, since the lanes draw no bar for it", () => {
+    const p = poi("off-cpu-active", 1e8, 3, 9e6, park(1e8, 1e8 + 1e7));
+    // Worker and severity ride along: the box spans every lane, so nothing
+    // else attributes it, and its edges are wall time, not the 9ms off-CPU.
+    expect(poiJump(p, vp).highlight).toEqual({
+      startNs: 1e8,
+      endNs: 1e8 + 1e7,
+      worker: 3,
+      severityNs: 9e6,
+      kind: "off-cpu-active",
+    });
+  });
+
+  it("leaves POIs the lanes already draw unboxed", () => {
+    const long = poi("long-poll", 5e8, 1, 3, poll(5e8, 5e8 + 2e7, 7));
+    expect(poiJump(long, vp).highlight).toBeNull();
+    const parked = poi("sched", 1e8, 0, 84e6, park(1e8, 1e8 + 84e6));
+    expect(poiJump(parked, vp).highlight).toBeNull();
+  });
+
+  it("keeps a sub-millisecond off-cpu-active period inside a legible window", () => {
+    const p = poi("off-cpu-active", 1e8, 0, 4e4, park(1e8, 1e8 + 5e4));
+    const j = poiJump(p, vp);
+    expect(j.viewEnd - j.viewStart).toBeGreaterThanOrEqual(1e6);
+  });
+});
+
+describe("jump-marker wording", () => {
+  const highlight = {
+    startNs: 1_000_000_000 + 17_010_000,
+    endNs: 1_000_000_000 + 34_020_000,
+    worker: 0,
+    severityNs: 1_410_000,
+    kind: "off-cpu-active" as const,
+  };
+
+  it("names the worker and the severity, leaving the span to the measure bar", () => {
+    // The box spans every lane, so nothing else says W0. The boxed duration is
+    // omitted on purpose - the measuring bar states it one row above.
+    expect(poiHighlightCaption(highlight)).toBe("W0 · 1.41ms off-CPU");
+  });
+
+  it("drops the caption's severity claim to the share it really is", () => {
+    const card = poiHighlightSummary(highlight, 1_000_000_000);
+    expect(card.title).toBe("W0 descheduled");
+    expect(card.rows.map((r) => r.label)).toEqual(["window", "awake", "off-CPU"]);
+    expect(card.rows[1]!.value).toBe("17ms");
+    expect(card.rows[2]!.value).toBe("1.41ms (8.3%)");
+  });
+
+  it("reports the window as trace-relative offsets", () => {
+    const card = poiHighlightSummary(highlight, 1_000_000_000);
+    expect(card.rows[0]!.value).toBe("+0.02s -> +0.03s");
+  });
+
+  it("prints no share for a zero-length span rather than NaN%", () => {
+    const degenerate = { ...highlight, endNs: highlight.startNs };
+    expect(poiHighlightSummary(degenerate, 0).rows[2]!.value).toBe("1.41ms");
   });
 });
 
