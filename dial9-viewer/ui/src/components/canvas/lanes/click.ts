@@ -37,10 +37,14 @@ export interface LaneClickInput {
 export interface LaneClickResult {
   /** New selected task (null clears it). */
   selectedTaskId: number | null;
-  /** New focused span + highlight chain (null clears it). */
+  /** New span highlight chain (null clears it). */
   spanFocus: SpanFocus | null;
-  /** New span-panel focus id (mirrors spanFocus.spanId; null clears). */
-  focusedSpanId: string | null;
+  /** Always null: a lane click targets the task, so it clears any span-PANEL
+   * focus rather than granting it. Panel focus (the Span tab + spans-track
+   * label) follows explicit span clicks only - the containing span here is
+   * time-overlap on the worker, which can be unrelated to the clicked task
+   * (issue #828). */
+  focusedSpanId: null;
   /** Always: any lane click clears the pinned custom-event marker. */
   clearPinnedEvent: true;
   /** Poll to open in Poll Detail when it has CPU/sched samples, else null. */
@@ -54,7 +58,7 @@ export interface LaneClickResult {
  *  - find the poll at `ns`; its task becomes the selection;
  *  - clicking the SAME task again clears task AND span focus (single un-click);
  *  - additively, walk the outermost span containing `ns` on this worker and
- *    focus it + its ancestor chain;
+ *    highlight it + its ancestor chain (without granting panel focus);
  *  - open Poll Detail if the poll carries CPU or sched samples.
  */
 export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
@@ -77,7 +81,6 @@ export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
     const ancestry = spanAncestryAt(containing, input.spanById, input.ns);
     spanFocus = { spanId: ancestry.outermost.spanId, chain: ancestry.ids };
   }
-  const focusedSpanId = spanFocus ? spanFocus.spanId : null;
 
   // Toggle off when re-clicking the selected task; else adopt the new
   // selection (task may be null - clears task but keeps additive span focus).
@@ -95,7 +98,7 @@ export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
   return {
     selectedTaskId: foundTask,
     spanFocus,
-    focusedSpanId,
+    focusedSpanId: null,
     clearPinnedEvent: true,
     openStackFor,
     toggledOff: false,

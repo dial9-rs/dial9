@@ -36,6 +36,7 @@ import {
   resolveRequestedService,
   resolveServiceSelection,
 } from "./browse-query.js";
+import type { Preset } from "../../lib/canvas/diff-presets.js";
 import { createDiffActions } from "./diff-actions.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
@@ -90,6 +91,7 @@ export interface BrowserActions {
   swapDiff(): void;
   clearDiffSide(side: "a" | "b"): void;
   launchDiff(kind: "flamegraph" | "tokio"): void;
+  applyDiffPreset(preset: Preset): void;
 }
 
 export function createActions(store: BrowserStore, els: BrowserEls): BrowserActions {

@@ -102,4 +102,36 @@ declare module "*/heatmap.js" {
    * -> red -> yellow; 0 = page background).
    */
   export function densityColor(norm: number): string;
+
+  /**
+   * "Nice" axis tick times for the epoch-second range [tMin, tMax], at most
+   * `targetCount` of them. Ticks snap to human intervals (1/5/10/30s,
+   * 1/2/5/10/15/30m, 1/2/3/6/12h, 1/2/7d) and are aligned to multiples of the
+   * chosen step, so labels land on round wall-clock times. A degenerate range
+   * (tMax <= tMin) yields a single tick at tMin.
+   */
+  export function niceTimeTicks(
+    tMin: number,
+    tMax: number,
+    targetCount: number
+  ): number[];
+
+  /**
+   * Whether a document-level click should clear the current browse
+   * selection. Control surfaces preserve it: the timeline itself, the
+   * actions bar, and the page header (the TZ toggle only relabels the
+   * axis). `wasDrag` suppresses the synthetic click that trails a
+   * selection drag ending outside the pane.
+   *
+   * Every flag is required so a caller cannot silently omit one and
+   * reintroduce the clicks-that-should-not-clear bugs (#644, #645).
+   */
+  export function shouldClearSelectionOnClick(o: {
+    isBrowseTab: boolean;
+    hasSelection: boolean;
+    wasDrag: boolean;
+    targetInHeatmap: boolean;
+    targetInActions: boolean;
+    targetInHeader: boolean;
+  }): boolean;
 }

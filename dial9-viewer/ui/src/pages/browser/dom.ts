@@ -61,6 +61,8 @@ export interface BrowserEls {
   heatmapPlot: HTMLDivElement;
   heatmapCanvas: HTMLCanvasElement;
   heatmapSel: HTMLDivElement;
+  heatmapCursor: HTMLDivElement;
+  heatmapCursorLabel: HTMLDivElement;
   heatmapAxis: HTMLDivElement;
   heatmapResetZoom: HTMLButtonElement;
   // Raw search
@@ -130,6 +132,8 @@ export function queryEls(): BrowserEls {
     heatmapPlot: byId("heatmap-plot"),
     heatmapCanvas: byIdOf("heatmap-canvas", HTMLCanvasElement),
     heatmapSel: byId("heatmap-sel"),
+    heatmapCursor: byId("heatmap-cursor"),
+    heatmapCursorLabel: byId("heatmap-cursor-label"),
     heatmapAxis: byId("heatmap-axis"),
     heatmapResetZoom: byId("heatmap-reset-zoom"),
     rawSearchInput: byId("raw-search-input"),

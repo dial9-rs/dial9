@@ -270,6 +270,67 @@ describe("viewer URL state: task dump", () => {
   });
 });
 
+describe("viewer URL state: span focus + inspector tab inference", () => {
+  const spanSelection = {
+    selectedTaskId: 7,
+    spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    focusedSpanId: "s1",
+  };
+
+  it("omits the tab when the Span tab is the inferred preference", () => {
+    const { params, out } = roundTrip(
+      mkState({ selection: spanSelection, view: { inspectorTab: "span" } }),
+    );
+    expect(params.get("span")).toBe("s1");
+    expect(params.get("span-focus")).toBe("s1");
+    expect(params.get("inspector")).toBeNull();
+    expect(out.selectedSpanId).toBe("s1");
+    expect(out.focusedSpanId).toBe("s1");
+    expect(out.inspectorTab).toBeUndefined();
+  });
+
+  it("writes an explicit tab when the user moved off the inferred Span tab", () => {
+    const { params, out } = roundTrip(
+      mkState({ selection: spanSelection, view: { inspectorTab: "task" } }),
+    );
+    expect(params.get("inspector")).toBe("task");
+    expect(out.inspectorTab).toBe("task");
+  });
+
+  it("restores the Span tab alongside a retained analysis", () => {
+    const range = { startNs: 0, endNs: 10 };
+    const { params, out } = roundTrip(
+      mkState({
+        selection: { ...spanSelection, sidebarRange: range },
+        view: { inspectorTab: "span" },
+      }),
+    );
+    expect(params.get("inspector")).toBe("span");
+    expect(out.inspectorTab).toBe("span");
+    expect(out.focusedSpanId).toBe("s1");
+    expect(out.sidebarRange).toEqual(range);
+  });
+
+  it("a lane-click highlight (no panel focus) still infers the Task tab", () => {
+    const { params } = roundTrip(
+      mkState({
+        selection: {
+          selectedTaskId: 7,
+          spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+        },
+        view: { inspectorTab: "task" },
+      }),
+    );
+    expect(params.get("span")).toBe("s1");
+    expect(params.get("span-focus")).toBeNull();
+    expect(params.get("inspector")).toBeNull();
+  });
+
+  it("parses inspector=span as a valid inspector tab", () => {
+    expect(readViewerUrlState("?inspector=span").inspectorTab).toBe("span");
+  });
+});
+
 describe("viewer URL state: embedded flamegraph focus", () => {
   it("round-trips a region flamegraph inspect focus", () => {
     const { params, out } = roundTrip(

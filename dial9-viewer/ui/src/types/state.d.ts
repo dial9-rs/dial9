@@ -369,7 +369,7 @@ export interface UiPrefsSlice {
 // ── durable view slice ──────────────────────────────────────────────────
 
 /** Inspector surface currently visible. */
-export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
+export type InspectorTab = "task" | "span" | "poll" | "event" | "related" | "stack";
 /** Region analysis selected for a retained range. */
 export type RegionAnalysisMode = "cpu" | "blocking" | "heap";
 /** Rendering semantics for a custom-event numeric field chart. */

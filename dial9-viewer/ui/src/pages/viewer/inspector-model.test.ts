@@ -5,17 +5,21 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  autoActivateTab,
   buildEventDetail,
   buildPollDetail,
   buildRelated,
+  buildSpanDetail,
   buildSpawnedTasksView,
   hasNoSelection,
   preferredTab,
+  selectionParts,
   resolveTaskDumpCaptures,
   tabAvailability,
   type RelatedContext,
   type RelatedUiState,
 } from "./inspector-model.js";
+import { formatHumanDuration } from "../../lib/trace/index.js";
 import type {
   CallframeSymbols,
   CpuSample,
@@ -357,5 +361,224 @@ describe("tab availability + preferred tab", () => {
     expect(hasNoSelection(sel({}))).toBe(true);
     expect(preferredTab(sel({}))).toBeNull();
     expect(hasNoSelection(sel({ selectedTaskId: 1 }))).toBe(false);
+  });
+});
+
+describe("span focus: Span tab + detail (issue #803)", () => {
+  const span: TracingSpan = {
+    start: 1_000,
+    end: 5_000,
+    spanId: "s1",
+    spanName: "QueryMetric",
+    fields: { table: "metrics", rows: 42 } as TracingSpan["fields"],
+    units: null,
+    parentSpanId: null,
+    segments: [
+      { start: 1_000, end: 2_000, workerId: 1 },
+      { start: 3_000, end: 5_000, workerId: 0 },
+    ],
+    activeNs: 3_000,
+    depth: 0,
+    taskId: 7,
+  };
+  const focus = {
+    focusedSpanId: "s1",
+    spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+  };
+
+  it("a span click enables + prefers Span over the co-selected task", () => {
+    const s = sel({ ...focus, selectedTaskId: 7 });
+    expect(tabAvailability(s).span).toBe(true);
+    expect(preferredTab(s)).toBe("span");
+  });
+
+  it("a poll click still outranks a span focus", () => {
+    const s = sel({ ...focus, pollDetail: { start: 0, end: 10 } as PollSpan });
+    expect(preferredTab(s)).toBe("poll");
+  });
+
+  it("a pinned event still outranks a span focus", () => {
+    const pinned = {
+      events: [{ timestamp: 5, name: "e" }],
+      timestamp: 5,
+      taskId: null,
+      name: "e",
+      poll: null,
+      detailEvent: null,
+    } as unknown as SelectionSlice["pinnedEvent"];
+    expect(preferredTab(sel({ ...focus, pinnedEvent: pinned }))).toBe("event");
+  });
+
+  it("no span focus: the tab is unavailable and a task prefers Task", () => {
+    const s = sel({ selectedTaskId: 7 });
+    expect(tabAvailability(s).span).toBe(false);
+    expect(preferredTab(s)).toBe("task");
+  });
+
+  it("hasNoSelection is false with only a span focused", () => {
+    expect(hasNoSelection(sel(focus))).toBe(false);
+  });
+
+  it("buildSpanDetail resolves the focused span's name, timing, and fields", () => {
+    const view = buildSpanDetail(
+      { focusedSpanId: "s1", selectedTaskId: 7 },
+      { allSpans: [span] },
+      (ns) => `@${ns}`,
+    );
+    expect(view).not.toBeNull();
+    expect(view!.title).toBe("QueryMetric");
+    expect(view!.taskId).toBe(7);
+    const byKey = Object.fromEntries(view!.rows.map((r) => [r.key, r.value]));
+    // The two user fields lead the list, unit-formatted.
+    expect(view!.rows[0]!.key).toBe("table");
+    expect(byKey["table"]).toBe("metrics");
+    expect(byKey["rows"]).toBe("42");
+    expect(byKey["duration"]).toBe(formatHumanDuration(4_000));
+    expect(byKey["active"]).toBe(formatHumanDuration(3_000));
+    expect(byKey["idle"]).toBe(formatHumanDuration(1_000));
+    expect(byKey["polls"]).toBe("2");
+    expect(byKey["workers"]).toBe("0, 1");
+    expect(byKey["@"]).toBe("@1000");
+    expect(byKey["Task"]).toBe("0x7 (selected)");
+  });
+
+  it("the Task row drops '(selected)' when the task is not co-selected", () => {
+    const view = buildSpanDetail(
+      { focusedSpanId: "s1", selectedTaskId: null },
+      { allSpans: [span] },
+      String,
+    );
+    const task = view!.rows.find((r) => r.key === "Task");
+    expect(task!.value).toBe("0x7");
+  });
+
+  it("buildSpanDetail is null when nothing is focused or the id is unknown", () => {
+    expect(
+      buildSpanDetail(
+        { focusedSpanId: null, selectedTaskId: null },
+        { allSpans: [span] },
+        String,
+      ),
+    ).toBeNull();
+    expect(
+      buildSpanDetail(
+        { focusedSpanId: "nope", selectedTaskId: null },
+        { allSpans: [span] },
+        String,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("autoActivateTab: re-scope only toward the surface that changed", () => {
+  const parts = (s: SelectionSlice) => selectionParts(s);
+
+  it("a fresh span focus (spans-track click) re-scopes to Span", () => {
+    const before = sel({ selectedTaskId: 7 });
+    const after = sel({
+      selectedTaskId: 7,
+      focusedSpanId: "s1",
+      spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    });
+    expect(autoActivateTab(parts(before), parts(after), "task", after)).toBe("span");
+  });
+
+  it.each(["sidebarRange", "spawnedTasksRange"] as const)(
+    "a span click opens its fields while retaining %s",
+    (rangeKey) => {
+      const range = { startNs: 0, endNs: 10 };
+      const before = sel({ [rangeKey]: range });
+      const after = sel({
+        ...before,
+        selectedTaskId: 7,
+        focusedSpanId: "s1",
+        spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+      });
+      expect(autoActivateTab(parts(before), parts(after), "stack", after)).toBe("span");
+      expect(tabAvailability(after).stack).toBe(true);
+      expect(autoActivateTab(parts(after), parts(after), "stack", after)).toBeNull();
+    },
+  );
+
+  it("a span click clearing a poll opens Span with a retained analysis", () => {
+    const before = sel({
+      sidebarRange: { startNs: 0, endNs: 10 },
+      pollDetail: { start: 1, end: 9, taskId: 7 } as PollSpan,
+    });
+    const after = sel({
+      ...before,
+      pollDetail: null,
+      focusedSpanId: "s1",
+    });
+    expect(autoActivateTab(parts(before), parts(after), "poll", after)).toBe("span");
+  });
+
+  it("opening an analysis after focusing a span still opens Stack", () => {
+    const before = sel({ focusedSpanId: "s1" });
+    const after = sel({ ...before, sidebarRange: { startNs: 0, endNs: 10 } });
+    expect(autoActivateTab(parts(before), parts(after), "span", after)).toBe("stack");
+  });
+
+  it("a lane click (task + highlight, no panel focus) re-scopes to Task", () => {
+    const before = sel({});
+    const after = sel({
+      selectedTaskId: 7,
+      spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    });
+    expect(autoActivateTab(parts(before), parts(after), "task", after)).toBe("task");
+  });
+
+  it("a Related span row (pin retained) stays put instead of yanking", () => {
+    const pinned = {
+      events: [{ timestamp: 5, name: "e" }],
+      timestamp: 5,
+      taskId: null,
+      name: "e",
+      poll: null,
+      detailEvent: { timestamp: 5, name: "e" },
+    } as unknown as SelectionSlice["pinnedEvent"];
+    const before = sel({ pinnedEvent: pinned });
+    const after = sel({
+      pinnedEvent: pinned,
+      focusedSpanId: "s1",
+      spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    });
+    expect(autoActivateTab(parts(before), parts(after), "related", after)).toBeNull();
+  });
+
+  it("a span click clearing an open poll re-scopes Poll -> Span", () => {
+    const poll = { start: 1, end: 9, taskId: 7 } as PollSpan;
+    const before = sel({ selectedTaskId: 7, pollDetail: poll });
+    const after = sel({
+      selectedTaskId: 7,
+      focusedSpanId: "s1",
+      spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    });
+    expect(autoActivateTab(parts(before), parts(after), "poll", after)).toBe("span");
+  });
+
+  it("rescues a tab that just lost its content (Esc clears the poll)", () => {
+    const poll = { start: 1, end: 9, taskId: 7 } as PollSpan;
+    const before = sel({ selectedTaskId: 7, pollDetail: poll });
+    const after = sel({ selectedTaskId: 7 });
+    expect(autoActivateTab(parts(before), parts(after), "poll", after)).toBe("task");
+  });
+
+  it("falls back to Task when everything clears", () => {
+    const before = sel({
+      focusedSpanId: "s1",
+      spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    });
+    const after = sel({});
+    expect(autoActivateTab(parts(before), parts(after), "span", after)).toBe("task");
+  });
+
+  it("a first-ever selection (no prior parts) applies the preference", () => {
+    const after = sel({
+      selectedTaskId: 7,
+      focusedSpanId: "s1",
+      spanFocus: { spanId: "s1", chain: new Set(["s1"]) },
+    });
+    expect(autoActivateTab(null, parts(after), "task", after)).toBe("span");
   });
 });

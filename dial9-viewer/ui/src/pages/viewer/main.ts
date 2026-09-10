@@ -120,6 +120,8 @@ function boot(): void {
       if (j.selectedTaskId !== null) {
         store.update("selection", {
           selectedTaskId: j.selectedTaskId,
+          spanFocus: null,
+          focusedSpanId: null,
           taskDump: null,
         });
       }
@@ -130,12 +132,16 @@ function boot(): void {
     if (r.nav.kind === "task") {
       store.update("selection", {
         selectedTaskId: r.nav.taskId,
+        spanFocus: null,
+        focusedSpanId: null,
         taskDump: null,
       });
     } else {
       store.update("selection", {
         spanFocus: { spanId: r.nav.spanId, chain: new Set([r.nav.spanId]) },
         focusedSpanId: r.nav.spanId,
+        pinnedEvent: null,
+        pollDetail: null,
         taskDump: null,
       });
     }
@@ -306,8 +312,13 @@ function boot(): void {
       key: "Escape",
       onKey: () => {
         if (esc.handle()) return true;
-        if (store.getState().selection.selectedTaskId !== null) {
-          store.update("selection", { selectedTaskId: null });
+        const sel = store.getState().selection;
+        if (sel.selectedTaskId !== null || sel.spanFocus !== null || sel.focusedSpanId !== null) {
+          store.update("selection", {
+            selectedTaskId: null,
+            spanFocus: null,
+            focusedSpanId: null,
+          });
         }
         shell.trackColumn.focus();
         return true;

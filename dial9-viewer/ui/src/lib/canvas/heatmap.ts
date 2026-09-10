@@ -12,9 +12,11 @@ export {
   bootTransitions,
   densityColor,
   groupByHost,
+  niceTimeTicks,
   segmentGaps,
   segmentSpan,
   segmentsOverlapping,
+  shouldClearSelectionOnClick,
   tileSegments,
   totalBytes,
 } from "../../../heatmap.js";

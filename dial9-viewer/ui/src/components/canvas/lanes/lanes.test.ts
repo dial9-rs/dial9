@@ -430,7 +430,7 @@ describe("resolveLaneClick", () => {
   const allSpans = [parent, child];
   const spanById = new Map(allSpans.map((s) => [s.spanId, s]));
 
-  it("selects the poll's task and focuses the outermost containing span", () => {
+  it("selects the poll's task and highlights the outermost containing span", () => {
     const r = resolveLaneClick({
       workerId: 0,
       ns: 50,
@@ -440,9 +440,12 @@ describe("resolveLaneClick", () => {
       currentSelectedTaskId: null,
     });
     expect(r.selectedTaskId).toBe(42);
-    expect(r.focusedSpanId).toBe("p"); // outermost ancestor still containing 50
+    expect(r.spanFocus?.spanId).toBe("p"); // outermost ancestor still containing 50
     expect(r.spanFocus?.chain.has("c")).toBe(true);
     expect(r.spanFocus?.chain.has("p")).toBe(true);
+    // The task is the click's target: highlight the span chain but never grant
+    // span-PANEL focus (the Span tab / spans-track label) - issue #828.
+    expect(r.focusedSpanId).toBeNull();
     expect(r.clearPinnedEvent).toBe(true);
     expect(r.toggledOff).toBe(false);
   });

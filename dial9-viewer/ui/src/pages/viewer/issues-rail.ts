@@ -327,6 +327,8 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     store.update("selection", {
       selectedTaskId: jump.selectedTaskId,
       pollDetail,
+      spanFocus: null,
+      focusedSpanId: null,
       taskDump: null,
     });
     store.update("poi", { index });
@@ -350,6 +352,8 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     }
     store.update("selection", {
       selectedTaskId: task.taskId,
+      spanFocus: null,
+      focusedSpanId: null,
       pinnedEvent: null,
       pollDetail: null,
       taskDump: null,

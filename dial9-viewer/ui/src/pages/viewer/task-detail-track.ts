@@ -338,6 +338,8 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     if (waker !== null) {
       store.update("selection", {
         selectedTaskId: waker.wakerTaskId,
+        spanFocus: null,
+        focusedSpanId: null,
         hoveredWakerTaskId: null,
         taskDump: null,
       });

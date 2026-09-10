@@ -135,15 +135,15 @@ export function resolveUrlSelection(
   const hasSpan = (id: string): boolean =>
     lane.columnarSpans?.spanIdToRow.has(id) ?? lane.spanByIdSingle.has(id);
 
-  // Span: focus + the same ancestor chain a live click computes.
+  // Span highlight: the same ancestor chain a live click computes. Carried
+  // independently of the panel focus below - a lane click highlights without
+  // granting panel focus, and its URL must restore the same way.
   if (url.selectedSpanId !== undefined && hasSpan(url.selectedSpanId)) {
     patch.spanFocus = { spanId: url.selectedSpanId, chain: focusChain(lane, url.selectedSpanId) };
-    patch.focusedSpanId = url.selectedSpanId;
   }
 
-  // Span-panel subtree focus, carried independently of the lane highlight. When
-  // present it wins over the fallback the span block set above; otherwise that
-  // fallback stands (so an old `span`-only URL keeps its prior behavior).
+  // Span-panel focus (the Span tab + spans-track label), from explicit span
+  // clicks only.
   if (url.focusedSpanId !== undefined && hasSpan(url.focusedSpanId)) {
     patch.focusedSpanId = url.focusedSpanId;
   }

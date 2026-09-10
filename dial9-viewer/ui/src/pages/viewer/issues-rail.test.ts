@@ -112,6 +112,21 @@ describe("issues-rail n/p stepping", () => {
     expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(false);
     expect(binding(rail.keyBindings, "p").onKey(FAKE_KEY)).toBe(false);
   });
+
+  it("a POI jump clears a stale span-panel focus (task is the new selection)", () => {
+    const store = loadedStore();
+    store.update("selection", {
+      focusedSpanId: "stale",
+      spanFocus: { spanId: "stale", chain: new Set(["stale"]) },
+    });
+    const rail = createIssuesRail(store);
+
+    binding(rail.keyBindings, "n").onKey(FAKE_KEY);
+
+    const sel = store.getState().selection;
+    expect(sel.focusedSpanId).toBeNull();
+    expect(sel.spanFocus).toBeNull();
+  });
 });
 
 describe("rail width clamp (resize drag bounds)", () => {
