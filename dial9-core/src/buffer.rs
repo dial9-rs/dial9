@@ -62,16 +62,11 @@ const DIAL9_VERSION_VALUE: &str = env!("CARGO_PKG_VERSION");
 /// process. Populated by default when the platform can report it.
 const PROCESS_AVAILABLE_PARALLELISM_KEY: &str = "process.available_parallelism";
 
-/// Seal-time segment-metadata key, `true` when thread-local buffers were
-/// drained into the segment before it was sealed. A `false` segment is missing
-/// events that were still buffered.
-const SEGMENT_SEALED_CLEAN_KEY: &str = "segment.sealed_clean";
-
-/// Seal-time segment-metadata key carrying the preceding segment's
-/// [`SEGMENT_SEALED_CLEAN_KEY`], so a segment can be judged without
-/// fetching its predecessor. A `false` segment carries events that belong to
-/// the segment before it. `true` for the first segment a writer opens.
-const SEGMENT_PRIOR_SEALED_CLEAN_KEY: &str = "segment.prior_sealed_clean";
+/// Seal-time segment-metadata key, `false` when the segment is incomplete.
+///
+/// An incomplete segment is missing events that were still buffered when it was
+/// sealed, holds events belonging to its predecessor, or both.
+const SEGMENT_COMPLETE_KEY: &str = "segment.complete";
 
 /// Whether a rotation drained thread-local buffers before sealing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -675,21 +670,15 @@ impl<M: BufferMode> SegmentWriter<M> {
         }
     }
 
-    /// Record how this segment is being sealed, and how the one before it was.
+    /// Record whether this segment holds its own time window.
     ///
     /// Repeats the full entry map, so readers that replace their metadata on
     /// each `SegmentMetadataEvent` keep the entries written at segment start.
-    /// A failed write is logged and the segment is sealed without the keys.
+    /// A failed write is logged and the segment is sealed without the key.
     fn write_seal_metadata(&mut self, kind: SealKind) {
+        let complete = kind.is_clean() && self.prior_seal_kind.is_clean();
         let mut entries = self.segment_metadata.entries.clone();
-        entries.push((
-            SEGMENT_SEALED_CLEAN_KEY.to_string(),
-            kind.is_clean().to_string(),
-        ));
-        entries.push((
-            SEGMENT_PRIOR_SEALED_CLEAN_KEY.to_string(),
-            self.prior_seal_kind.is_clean().to_string(),
-        ));
+        entries.push((SEGMENT_COMPLETE_KEY.to_string(), complete.to_string()));
         let WriterState::Active { writer, .. } = &mut self.state else {
             return;
         };
@@ -2367,9 +2356,8 @@ mod tests {
         assert_eq!(events.len(), 2, "both events should be in segment 0");
     }
 
-    /// `(segment.sealed_clean, segment.prior_sealed_clean)` from the last
-    /// metadata event in a sealed segment.
-    fn seal_verdict(path: &str) -> (Option<String>, Option<String>) {
+    /// `segment.complete` from the last metadata event in a sealed segment.
+    fn seal_verdict(path: &str) -> Option<String> {
         let all = decode_all(&std::fs::read(path).unwrap());
         let entries = all
             .iter()
@@ -2379,10 +2367,7 @@ mod tests {
                 _ => None,
             })
             .expect("sealed segment has metadata");
-        (
-            entries.get(SEGMENT_SEALED_CLEAN_KEY).cloned(),
-            entries.get(SEGMENT_PRIOR_SEALED_CLEAN_KEY).cloned(),
-        )
+        entries.get(SEGMENT_COMPLETE_KEY).cloned()
     }
 
     /// A segment that overflows `max_file_size` records the undrained seal,
@@ -2416,18 +2401,18 @@ mod tests {
         let t = |b: bool| Some(b.to_string());
         assert_eq!(
             seal_verdict(&rotating_file(&base, 0)),
-            (t(false), t(true)),
-            "overflowed, and had no predecessor"
+            t(false),
+            "overflowed"
         );
         assert_eq!(
             seal_verdict(&rotating_file(&base, 1)),
-            (t(true), t(false)),
-            "sealed cleanly, but follows an overflow"
+            t(false),
+            "sealed cleanly, but holds the events segment 0 lost"
         );
         assert_eq!(
             seal_verdict(&rotating_file(&base, 2)),
-            (t(true), t(true)),
-            "a clean seal clears the inherited flag"
+            t(true),
+            "a clean seal after a clean one"
         );
     }
 
@@ -2463,12 +2448,12 @@ mod tests {
             Some(DIAL9_VERSION_VALUE)
         );
         assert_eq!(
-            last.get(SEGMENT_SEALED_CLEAN_KEY).map(String::as_str),
+            last.get(SEGMENT_COMPLETE_KEY).map(String::as_str),
             Some("true")
         );
     }
 
-    /// Rotating from `drained()` marks both segments clean.
+    /// Rotating from `drained()` leaves both segments complete.
     #[tokio::test(start_paused = true)]
     async fn test_seal_metadata_records_a_drained_rotation() {
         use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
@@ -2490,7 +2475,7 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.finalize().unwrap();
 
-        let clean = (Some("true".to_string()), Some("true".to_string()));
+        let clean = Some("true".to_string());
         assert_eq!(seal_verdict(&rotating_file(&base, 0)), clean);
         assert_eq!(seal_verdict(&rotating_file(&base, 1)), clean);
     }

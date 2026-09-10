@@ -112,24 +112,19 @@ impl TraceReader {
         })
     }
 
-    /// Whether this trace holds a clean, self-contained time window: its
-    /// thread-local buffers were drained before the segment was sealed, and so
-    /// were the previous segment's.
+    /// Whether the trace is complete.
     ///
-    /// An incomplete trace is missing events that were still buffered, holds
-    /// events belonging to the segment before it, or both. Counts and rates
-    /// computed from one are understated.
+    /// An incomplete trace is missing events that were still buffered when it
+    /// was sealed, holds events belonging to the segment before it, or both.
     ///
     /// `None` for traces written before dial9 recorded this.
     pub fn is_complete(&self) -> Option<bool> {
-        let flag = |key: &str| match self.segment_metadata.get(key)?.as_str() {
+        // Key name is the writer's SEGMENT_COMPLETE_KEY in `dial9_core::buffer`.
+        match self.segment_metadata.get("segment.complete")?.as_str() {
             "true" => Some(true),
             "false" => Some(false),
             _ => None,
-        };
-        // Key names are the writer's SEGMENT_SEALED_CLEAN_KEY and
-        // SEGMENT_PRIOR_SEALED_CLEAN_KEY in `dial9_core::buffer`.
-        Some(flag("segment.sealed_clean")? && flag("segment.prior_sealed_clean")?)
+        }
     }
 }
 

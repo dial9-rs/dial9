@@ -1513,12 +1513,9 @@
                 const entries = v.entries || {};
                 // Written once per file, as it is sealed. Files predating the
                 // key carry no seal record, so they go uncounted.
-                if ("segment.sealed_clean" in entries) {
+                if ("segment.complete" in entries) {
                     state.sealedFiles++;
-                    if (
-                        String(entries["segment.sealed_clean"]) === "false" ||
-                        String(entries["segment.prior_sealed_clean"]) === "false"
-                    ) {
+                    if (String(entries["segment.complete"]) === "false") {
                         state.incompleteFiles++;
                     }
                 }
