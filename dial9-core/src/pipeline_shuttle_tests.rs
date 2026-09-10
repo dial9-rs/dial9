@@ -10,6 +10,7 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::recording::Recorder;
 use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
+use crate::test_support::decode_segment_metadata;
 use dial9_trace_format::TraceEvent;
 use shuttle::rand::Rng;
 use std::collections::HashMap;
@@ -279,8 +280,101 @@ crate::shuttle_test! {
     }
 }
 
-// Companion to the scenario above: a TL-buffer write through the same
-// unguarded-flush path.
+/// A Source whose `segment_metadata` pushes a partial entry then panics.
+/// Used to check that the partial push doesn't survive and sibling
+/// sources' metadata isn't corrupted.
+struct PanickingMetadataSource;
+
+impl Source for PanickingMetadataSource {
+    fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        out.push((
+            "panicking.partial".to_string(),
+            "should not survive".to_string(),
+        ));
+        panic!("PanickingMetadataSource intentionally panics for shuttle coverage");
+    }
+
+    fn name(&self) -> &'static str {
+        "panicking_metadata"
+    }
+}
+
+struct HealthyMetadataSource;
+
+impl Source for HealthyMetadataSource {
+    fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        out.push(("healthy.key".to_string(), "healthy-value".to_string()));
+    }
+
+    fn name(&self) -> &'static str {
+        "healthy_metadata"
+    }
+}
+
+// A panicking `segment_metadata` must not corrupt sibling sources'
+// metadata for the same cycle, and its own partial push must not survive.
+crate::shuttle_test! {
+    num_iters = 500, depth = 3;
+    fn test_source_panic_during_segment_metadata_skips_only_that_source() {
+        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+        ));
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(PanickingMetadataSource));
+        shared.push_source(Box::new(HealthyMetadataSource));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+
+        // A trivial marker event: `finalize()` discards a segment that
+        // never held a real event, so without this the metadata-only
+        // segment would never get sealed at all.
+        recorder.handle().record_event(ValidationEvent {
+            timestamp_ns: 0,
+            thread_id: 0,
+            seq: 0,
+            id: 0,
+        });
+
+        recorder.stop_flush_thread();
+
+        let mut entries = HashMap::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                entries.extend(decode_segment_metadata(&payload.into_vec()));
+            }
+        }
+
+        assert_eq!(
+            entries.get("healthy.key").map(String::as_str),
+            Some("healthy-value"),
+            "sibling source's metadata must survive a panicking source in the same cycle"
+        );
+        assert!(
+            !entries.contains_key("panicking.partial"),
+            "a panicking source's partial push must not survive in the cycle's metadata"
+        );
+    }
+}
+
+// Checks the TL-buffer-write path specifically, through the same
+// panic-guarded flush cycle above.
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     fn test_source_panic_does_not_lose_tl_buffer_write() {
