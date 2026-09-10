@@ -47,7 +47,7 @@ pub(crate) struct FlushStats {
 }
 
 /// Running totals of how segments were sealed, since the writer started.
-#[metrics(subfield, rename_all = "PascalCase")]
+#[metrics(subfield)]
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct SealCounts {
     /// Segments sealed after their thread-local buffers were drained.
