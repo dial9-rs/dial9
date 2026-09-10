@@ -446,7 +446,7 @@ describe("spanLabelModel + focusInfoLine", () => {
     const label = spanLabelModel("1", data);
     expect(label?.name).toBe("auth");
     expect(label?.rows).toEqual([
-      { key: "latency", display: "1.50ms", copy: "1500000" },
+      { key: "latency", display: "1.5ms", copy: "1500000" },
     ]);
   });
 

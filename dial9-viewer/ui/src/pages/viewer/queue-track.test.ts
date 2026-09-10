@@ -280,7 +280,7 @@ describe("spawnHistogramTooltipRows", () => {
       [
         {
           label: "Duration:",
-          value: "395.40ms",
+          value: "395ms",
           hint: "(click bar to list tasks)",
         },
       ],

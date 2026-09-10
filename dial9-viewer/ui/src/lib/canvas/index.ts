@@ -81,7 +81,6 @@ export type {
 
 export {
   brushToBand,
-  fmtDurationNs,
   histogramLayout,
   normalizeHistogram,
   pxToNs,

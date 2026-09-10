@@ -12,7 +12,6 @@
 
 import {
   brushToBand,
-  fmtDurationNs,
   histogramLayout,
   normalizeHistogram,
   pxToNs,
@@ -20,7 +19,7 @@ import {
   type HistogramColumn,
   type PollHistogramBar,
 } from "../../lib/canvas/index.js";
-import { msToNs, nsToMs } from "../../lib/trace/index.js";
+import { formatHumanDuration, msToNs, nsToMs } from "../../lib/trace/index.js";
 import type { PollDurationBar } from "../../lib/trace/index.js";
 
 const MINIMAP_H = 46; // px, bar-area height
@@ -146,7 +145,7 @@ export function createPollMinimap(opts: PollMinimapOptions): PollMinimap {
       mmFastSlow.style.display = "none";
       return;
     }
-    const s = fmtDurationNs(splitNs);
+    const s = formatHumanDuration(splitNs);
     mmFastSlow.style.display = "";
     mmFastSlow.textContent = `Diff fast vs slow polls (split @ ${s})`;
     mmFastSlow.title =
@@ -264,13 +263,13 @@ export function createPollMinimap(opts: PollMinimapOptions): PollMinimap {
       if (i % stride !== 0) continue;
       const c = cols[i]!;
       const t = document.createElement("span");
-      t.textContent = fmtDurationNs(c.lo_ns);
+      t.textContent = formatHumanDuration(c.lo_ns);
       t.style.cssText = `position:absolute;left:${(c.x / width) * 100}%;white-space:nowrap;transform:translateX(-1px)`;
       axis.appendChild(t);
     }
     if (nBars > 0) {
       const last = document.createElement("span");
-      last.textContent = fmtDurationNs(cols[nBars - 1]!.hi_ns);
+      last.textContent = formatHumanDuration(cols[nBars - 1]!.hi_ns);
       last.style.cssText = "position:absolute;right:0;white-space:nowrap;color:#6a6a80";
       axis.appendChild(last);
     }
@@ -304,7 +303,7 @@ export function createPollMinimap(opts: PollMinimapOptions): PollMinimap {
         return;
       }
       tipEl.textContent =
-        `${fmtDurationNs(c.lo_ns)}–${fmtDurationNs(c.hi_ns)} · ${c.samples.toLocaleString()} samples`;
+        `${formatHumanDuration(c.lo_ns)}–${formatHumanDuration(c.hi_ns)} · ${c.samples.toLocaleString()} samples`;
       tipEl.style.display = "block";
       tipEl.style.left = `${e.clientX + 12}px`;
       tipEl.style.top = `${e.clientY - 28}px`;

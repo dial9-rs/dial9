@@ -3,9 +3,11 @@
 
 declare module "*/format.js" {
   /**
-   * Format a duration in nanoseconds as a human-friendly string
-   * ("500ns", "1.5µs", "123.46ms", "5m 12.0s", "2d 4h 30m").
-   * Non-finite or negative input renders as "0ns".
+   * Format a duration in nanoseconds as a human-friendly string: 3 significant
+   * digits (at most 2 decimals) in the unit that keeps the mantissa under 1000
+   * ("100ps", "500ns", "1.5µs", "123ms", "30s"), switching to the composite
+   * form at a minute and above ("5m 12.0s", "2d 4h 30m"). Non-finite or
+   * negative input renders as "0ns". The viewer's ONE duration format.
    */
   export function formatHumanDuration(ns: number): string;
 

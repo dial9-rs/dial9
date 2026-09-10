@@ -197,7 +197,7 @@ describe("drawSpansCanvas duration axis", () => {
 
     drawSpansCanvas(ctx, model, emptyData, stateWithFocus(null), 400, canvasH, 0, 400, colorOf);
 
-    expect(labels.map((label) => label.text)).toEqual(["120.0µs", "180.0µs"]);
+    expect(labels.map((label) => label.text)).toEqual(["120µs", "180µs"]);
     expect(labels.every((label) => label.y >= 9 && label.y <= canvasH - 2)).toBe(true);
   });
 
@@ -207,7 +207,7 @@ describe("drawSpansCanvas duration axis", () => {
 
     drawSpansCanvas(ctx, model, emptyData, stateWithFocus(null), 400, 120, 0, 400, colorOf);
 
-    expect(labels.map((label) => label.text)).toEqual(["150.0µs"]);
+    expect(labels.map((label) => label.text)).toEqual(["150µs"]);
   });
 });
 

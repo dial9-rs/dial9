@@ -28,19 +28,6 @@ function shouldAdoptCatalogSnapshot(mode, baselineFilesFolded, incomingFilesFold
   }
   return false;
 }
-// ── Duration formatting (reuse from flamegraph_histogram.js when available) ──
-
-function fmtNs(ns) {
-  if (ns == null) return "—";
-  const n = Number(ns);
-  if (!Number.isFinite(n) || n < 0) return "—";
-  if (n === 0) return "0";
-  if (n < 1e3) return n + "ns";
-  if (n < 1e6) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "µs";
-  if (n < 1e9) return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "ms";
-  return (n / 1e9).toFixed(2).replace(/\.?0+$/, "") + "s";
-}
-
 // ── Span type catalog helpers ────────────────────────────────────────────────
 
 // Sort span types by a given key. Default: descending by count.
@@ -597,7 +584,6 @@ function exemplarRequestMatches(requestUid, requestScopeKey, currentUid, current
 var SpanExplorer = {
   setMaxFilesParam,
   shouldAdoptCatalogSnapshot,
-  fmtNs,
   sortSpanTypes,
   spanTypeLabel,
   normalizeSpanHistogram,

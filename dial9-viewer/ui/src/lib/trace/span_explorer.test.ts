@@ -64,6 +64,8 @@ describe("scope and catalog helpers", () => {
     expect([fmtNs(500), fmtNs(1_500_000), fmtNs(2_000_000_000)])
       .toEqual(["500ns", "1.5ms", "2s"]);
     expect([fmtNs(null), fmtNs(-1), fmtNs(0)]).toEqual(["—", "—", "0"]);
+    // A minute or more reaches the shared composite form.
+    expect(fmtNs(90_000_000_000)).toBe("1m 30.0s");
     expect(
       spanTypeLabel({
         name: "handle_request",

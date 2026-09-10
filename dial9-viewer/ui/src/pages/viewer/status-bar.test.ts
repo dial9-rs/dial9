@@ -92,7 +92,19 @@ describe("statusViewModel (selection + range + progress bindings)", () => {
 
   it("renders the visible range as offsets + duration off the trace start", () => {
     const vm = statusViewModel(loadedState());
-    expect(vm.viewRangeLabel).toMatch(/^view \+1\.00s - \+2\.00s \(/);
+    // Both ends carry the zoom's precision (a 1s window resolves to ms), so a
+    // deep zoom no longer prints the same offset twice.
+    expect(vm.viewRangeLabel).toBe("view +1.000s - +2.000s (1s)");
+  });
+
+  it("keeps the two ends distinct at deep zoom", () => {
+    const s = loadedState();
+    // A 140µs window 2.28s in: at a fixed 2 decimals both ends read "+2.29s".
+    s.viewport = { ...s.viewport, viewStart: 2.286886e9, viewEnd: 2.287026e9 };
+    const vm = statusViewModel(s);
+    const [, start, , end] = vm.viewRangeLabel.split(" ");
+    expect(start).not.toBe(end);
+    expect(vm.viewRangeLabel).toContain("(140µs)");
   });
 
   it("reflects a live selection and segment progress together", () => {

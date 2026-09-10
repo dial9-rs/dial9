@@ -79,7 +79,7 @@ describe("file-info stats line", () => {
       recordMinTs: 0,
       recordMaxTs: 3e9,
     });
-    expect(text).toContain("3.00s");
+    expect(text).toContain("3s");
   });
 });
 

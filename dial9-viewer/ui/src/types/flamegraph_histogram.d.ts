@@ -36,12 +36,6 @@ declare module "*/flamegraph_histogram.js" {
   }
 
   /**
-   * Format a nanosecond duration as a short axis/tooltip label
-   * ("500µs", "1.5ms", "2s"). Empty string for non-finite/negative input.
-   */
-  export function fmtDurationNs(ns: number | string): string;
-
-  /**
    * Validate + sort the backend histogram ascending by `lo_ns`, dropping
    * malformed entries (non-finite / negative / hi<=lo). Non-array -> [].
    */

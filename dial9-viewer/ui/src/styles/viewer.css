@@ -1869,6 +1869,39 @@ body {
     border-color: rgba(0, 188, 180, 0.6);
 }
 
+/* The measuring bar, in the time-lane row at the top of the selection box: a
+   rail spanning the box (its side borders are the end caps) with the duration
+   sitting on top, breaking the line. The label is a child of the box, so its
+   `left` is box-relative and may be negative when it parks outside a pinched
+   selection. */
+.d9-selection-rail {
+    position: absolute;
+    top: calc(var(--d9-lane-top, 0px) + 15px);
+    left: 0;
+    right: 0;
+    height: 0;
+    border-top: 1px solid rgba(66, 133, 244, 0.6);
+}
+.d9-selection-overlay.zoom .d9-selection-rail {
+    border-top-color: rgba(0, 188, 180, 0.6);
+}
+.d9-selection-measure {
+    position: absolute;
+    top: calc(var(--d9-lane-top, 0px) + 6px);
+    height: 13px;
+    padding: 0 4px;
+    font: 10px monospace;
+    line-height: 13px;
+    color: var(--d9-fg);
+    background: rgba(22, 33, 62, 0.92);
+    border: 1px solid rgba(66, 133, 244, 0.6);
+    border-radius: 3px;
+    white-space: nowrap;
+}
+.d9-selection-overlay.zoom .d9-selection-measure {
+    border-color: rgba(0, 188, 180, 0.6);
+}
+
 /* Floating viewport controls: zoom in / out / fit, bottom-right glass
    panel. Fixed so it stays in the corner while the track column scrolls; its
    buttons stopPropagation so a click is never treated as a lane click. */

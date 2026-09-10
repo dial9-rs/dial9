@@ -5,6 +5,22 @@
 // lib/trace is the sanctioned shared-core import boundary; the Span Explorer
 // page consumes all of this through the barrel.
 
+import { formatHumanDuration } from "../../../format.js";
+
+/**
+ * Duration for a Span Explorer table cell. The missing/invalid and zero
+ * contracts are this page's ("—" reads as no measurement, a bare "0" as a
+ * measured nothing); the number itself goes through the viewer's one duration
+ * format.
+ */
+export function fmtNs(ns: number | string | null | undefined): string {
+  if (ns == null) return "—";
+  const n = Number(ns);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n === 0) return "0";
+  return formatHumanDuration(n);
+}
+
 export {
   TIME_CATEGORIES,
   addAttrFilter,
@@ -19,7 +35,6 @@ export {
   exemplarRequestMatches,
   exemplarsInBand,
   flamegraphUrl,
-  fmtNs,
   fmtPercentile,
   formatAttrFilterParams,
   hasAttrFilter,

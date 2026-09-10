@@ -8,13 +8,13 @@
 import {
   durationAtPercentile,
   fmtNs,
+  formatHumanDuration,
   normalizeSpanHistogram,
   spanBrushToBand,
   spanHistogramLayout,
   spanNsToPx,
 } from "../../lib/trace/index.js";
 import type { DurationBand, HistogramBarLike } from "../../lib/trace/index.js";
-import { fmtDurationNs } from "../../lib/canvas/index.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 /** Drawing width in viewBox units; the SVG scales to its container. */
@@ -174,7 +174,7 @@ export function renderHistogram(
   cols.forEach((c, i) => {
     if (i % stride !== 0) return;
     const t = document.createElement("span");
-    t.textContent = fmtDurationNs(c.lo_ns);
+    t.textContent = formatHumanDuration(c.lo_ns);
     t.style.cssText = `position:absolute;left:${(c.x / W) * 100}%;white-space:nowrap;transform:translateX(-1px)`;
     axis.appendChild(t);
   });

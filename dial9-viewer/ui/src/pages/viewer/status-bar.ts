@@ -11,6 +11,7 @@ import { html, render, nothing, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, SegmentsSlice } from "../../types/state.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
+import { cursorPrecisionNs, fmtDuration } from "./axis.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { CopyLinkHandle } from "../../lib/url/index.js";
 
@@ -36,11 +37,6 @@ export interface StatusViewModel {
 }
 
 const KEY_HINTS = "/ search · n/p POI · f fit · z undo zoom · g goto · ? help";
-
-/** Relative offset from the trace start, e.g. `+1.23s`. */
-function relOffset(ns: number, minTs: number): string {
-  return `+${((ns - minTs) / 1e9).toFixed(2)}s`;
-}
 
 /** Selection line: the primary highlighted entity, or "No selection". */
 export function selectionState(sel: StoreState["selection"]): StatusSelection {
@@ -86,8 +82,14 @@ export function segmentProgress(segments: SegmentsSlice): StatusProgress {
 export function statusViewModel(state: StoreState): StatusViewModel {
   const hasTrace = state.trace.trace !== null;
   const { viewStart, viewEnd, minTs } = state.viewport;
+  // Both ends carry the zoom's precision (a fixed 2 decimals collapsed the
+  // range to the same reading twice at depth) in the unit of the later end, so
+  // the two offsets stay comparable digit by digit.
+  const precisionNs = cursorPrecisionNs(viewStart, viewEnd);
+  const unitBasisNs = viewEnd - minTs;
   const viewRangeLabel = hasTrace
-    ? `view ${relOffset(viewStart, minTs)} - ${relOffset(viewEnd, minTs)} ` +
+    ? `view ${fmtDuration(viewStart - minTs, precisionNs, unitBasisNs)} - ` +
+      `${fmtDuration(viewEnd - minTs, precisionNs, unitBasisNs)} ` +
       `(${formatHumanDuration(Math.max(0, viewEnd - viewStart))})`
     : "no trace loaded";
   return {

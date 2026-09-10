@@ -13,19 +13,6 @@
 // declarations. The rendering and brush wiring live in
 // src/pages/flamegraph/minimap.ts.
 
-// Format a nanosecond duration as a short human string for axis ticks/tooltips:
-//   500000 -> "500µs", 1500000 -> "1.5ms", 50000000 -> "50ms", 2e9 -> "2s".
-// Sub-microsecond values fall back to "ns". Trailing ".0" is trimmed.
-function fmtDurationNs(ns) {
-  const n = Number(ns);
-  if (!Number.isFinite(n) || n < 0) return "";
-  const trim = (x) => String(Number(x.toFixed(1)));
-  if (n < 1e3) return n + "ns";
-  if (n < 1e6) return trim(n / 1e3) + "µs";
-  if (n < 1e9) return trim(n / 1e6) + "ms";
-  return trim(n / 1e9) + "s";
-}
-
 // Normalize + validate the backend histogram into ascending bars with numeric
 // fields. Drops malformed entries (non-finite / negative). Empty in → empty out.
 function normalizeHistogram(hist) {
@@ -127,7 +114,6 @@ function brushToBand(bars, width, x0, x1) {
 }
 
 var FlamegraphHistogram = {
-  fmtDurationNs,
   normalizeHistogram,
   sampleWeightedMedianNs,
   histogramLayout,

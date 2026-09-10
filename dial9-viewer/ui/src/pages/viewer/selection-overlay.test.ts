@@ -3,7 +3,13 @@
 // under test is these two pure functions.
 
 import { describe, it, expect } from "vitest";
-import { activeSelectionRegion, selectionBox } from "./selection-overlay.js";
+import {
+  activeSelectionRegion,
+  measureLabelPlacement,
+  measureText,
+  measureWidth,
+  selectionBox,
+} from "./selection-overlay.js";
 import { timePanelLayout, LABEL_W } from "../../lib/canvas/layout.js";
 import type { SelectionSlice, TransientSlice } from "../../types/state.js";
 
@@ -131,5 +137,57 @@ describe("selectionBox - placement (shared ns<->x mapping)", () => {
 
   it("guarantees at least 1px width for a degenerate region", () => {
     expect(selectionBox({ startNs: 500, endNs: 500, mode: "region" }, layout).width).toBe(1);
+  });
+});
+
+describe("measuring bar", () => {
+  it("states the selection duration, and nothing for a zero-length one", () => {
+    expect(measureText({ startNs: 0, endNs: 5e5, mode: "region" })).toBe("500µs");
+    expect(measureText({ startNs: 7, endNs: 7, mode: "region" })).toBeNull();
+  });
+
+  const drawArea = { left: 100, right: 900 };
+
+  it("centres the label inside a box that can hold it", () => {
+    const labelW = measureWidth("500µs");
+    const { placement, offsetX } = measureLabelPlacement(
+      { left: 200, width: 300 },
+      drawArea,
+      labelW,
+    );
+    expect(placement).toBe("inside");
+    expect(offsetX).toBe((300 - labelW) / 2);
+  });
+
+  it("parks the label to the right of a pinched box", () => {
+    const labelW = measureWidth("500µs");
+    const { placement, offsetX } = measureLabelPlacement(
+      { left: 200, width: 4 },
+      drawArea,
+      labelW,
+    );
+    expect(placement).toBe("right");
+    expect(offsetX).toBe(8);
+  });
+
+  it("parks the label to the left when the right edge has no room", () => {
+    const labelW = measureWidth("500µs");
+    const { placement, offsetX } = measureLabelPlacement(
+      { left: 890, width: 4 },
+      drawArea,
+      labelW,
+    );
+    expect(placement).toBe("left");
+    expect(offsetX).toBe(-labelW - 4);
+  });
+
+  it("falls back to inside when neither side fits (a sliver of draw area)", () => {
+    const labelW = measureWidth("500µs");
+    const { placement } = measureLabelPlacement(
+      { left: 100, width: 4 },
+      { left: 100, right: 110 },
+      labelW,
+    );
+    expect(placement).toBe("inside");
   });
 });

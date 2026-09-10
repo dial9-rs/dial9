@@ -4,23 +4,11 @@
 import { describe, it, expect } from "vitest";
 import {
   brushToBand,
-  fmtDurationNs,
   histogramLayout,
   normalizeHistogram,
   pxToNs,
   sampleWeightedMedianNs,
 } from "./flamegraph_histogram.js";
-
-describe("fmtDurationNs", () => {
-  it("formats ns/µs/ms/s and rejects negatives", () => {
-    expect(fmtDurationNs(500)).toBe("500ns");
-    expect(fmtDurationNs(500000)).toBe("500µs");
-    expect(fmtDurationNs(1500000)).toBe("1.5ms");
-    expect(fmtDurationNs(50000000)).toBe("50ms");
-    expect(fmtDurationNs(2000000000)).toBe("2s");
-    expect(fmtDurationNs(-1)).toBe("");
-  });
-});
 
 describe("normalizeHistogram", () => {
   it("sorts ascending and drops malformed entries", () => {

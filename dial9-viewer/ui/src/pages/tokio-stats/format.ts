@@ -30,15 +30,10 @@ export function datetimeToNs(val: string, utc: boolean): string | null {
 }
 
 /**
- * Human duration with the unit ladder: s / ms / us (U+00B5 micro sign) / ns.
- * The threshold label and every P50/P99/Max cell render through this.
+ * Human duration for the threshold label and every P50/P99/Max cell: the
+ * viewer's one duration format, aliased so the page's call sites read locally.
  */
-export function formatDuration(ns: number): string {
-  if (ns >= 1e9) return (ns / 1e9).toFixed(2) + "s";
-  if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
-  if (ns >= 1e3) return (ns / 1e3).toFixed(0) + "µs";
-  return ns + "ns";
-}
+export { formatHumanDuration as formatDuration } from "../../lib/trace/api_format.js";
 
 /**
  * The threshold slider's log-scale mapping: value v in [-1, 3] -> 10^v ms in ns
