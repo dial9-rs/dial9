@@ -2,7 +2,7 @@
 //! writer -> flush thread -> sealed segment -> drain, plus the flush loop's
 //! rate-limited error handling under fs faults. No tokio, no telemetry sources.
 
-use crate::buffer::{DiskBuffer, MemoryBuffer};
+use crate::buffer::DiskBuffer;
 use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
@@ -147,22 +147,15 @@ crate::shuttle_test! {
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
 
-        // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
-        // so the ring never evicts before we drain it.
-        let writer = MemoryBuffer::builder()
-            .max_total_size(100 * 1024 * 1024)
-            .max_segment_size(256)
-            .build()
-            .unwrap();
-        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
-
         // Mock source: worker threads push events here, flush thread drains them.
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        shared.push_source(Box::new(MockSource::new(source_pending.clone())));
-        let mut recorder = Recorder::start(shared, writer, None, || || {});
-        recorder.handle().enable();
+        // Small segments force frequent rotation: the 100 MiB budget (set by
+        // `start_shuttle_memory_recorder`) is far above the test's data, so
+        // the ring never evicts before we drain it.
+        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(vec![Box::new(
+            MockSource::new(source_pending.clone()),
+        )]);
         let handle = recorder.handle().clone();
 
         let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -205,18 +198,10 @@ crate::shuttle_test! {
         // Final flush + seal the last segment, then join the flush thread.
         recorder.stop_flush_thread();
 
-        // Drain the in-memory ring (memory pops one sealed segment per call).
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
         let expected = expected.lock().unwrap();
 
         // Run all invariants.
@@ -234,19 +219,11 @@ crate::shuttle_test! {
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
         ));
 
-        let writer = MemoryBuffer::builder()
-            .max_total_size(100 * 1024 * 1024)
-            .max_segment_size(256)
-            .build()
-            .unwrap();
-        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
-
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        shared.push_source(Box::new(PanickingSource));
-        shared.push_source(Box::new(MockSource::new(source_pending.clone())));
-        let mut recorder = Recorder::start(shared, writer, None, || || {});
-        recorder.handle().enable();
+        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(vec![
+            Box::new(PanickingSource),
+            Box::new(MockSource::new(source_pending.clone())),
+        ]);
 
         let healthy_source_event = ValidationEvent {
             timestamp_ns: 1,
@@ -262,16 +239,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
 
         assert!(
             all_decoded.iter().any(|e| e.id == healthy_source_event.id),
@@ -324,18 +294,10 @@ crate::shuttle_test! {
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
         ));
 
-        let writer = MemoryBuffer::builder()
-            .max_total_size(100 * 1024 * 1024)
-            .max_segment_size(256)
-            .build()
-            .unwrap();
-        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
-
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        shared.push_source(Box::new(PanickingMetadataSource));
-        shared.push_source(Box::new(HealthyMetadataSource));
-        let mut recorder = Recorder::start(shared, writer, None, || || {});
-        recorder.handle().enable();
+        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(vec![
+            Box::new(PanickingMetadataSource),
+            Box::new(HealthyMetadataSource),
+        ]);
 
         // A trivial marker event: `finalize()` discards a segment that
         // never held a real event, so without this the metadata-only
@@ -350,16 +312,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut entries = HashMap::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                entries.extend(decode_segment_metadata(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            entries.extend(decode_segment_metadata(&bytes));
+        });
 
         assert_eq!(
             entries.get("healthy.key").map(String::as_str),
@@ -382,17 +337,8 @@ crate::shuttle_test! {
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
         ));
 
-        let writer = MemoryBuffer::builder()
-            .max_total_size(100 * 1024 * 1024)
-            .max_segment_size(256)
-            .build()
-            .unwrap();
-        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
-
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        shared.push_source(Box::new(PanickingSource));
-        let mut recorder = Recorder::start(shared, writer, None, || || {});
-        recorder.handle().enable();
+        let (mut recorder, fs) =
+            crate::test_support::start_shuttle_memory_recorder(vec![Box::new(PanickingSource)]);
         let handle = recorder.handle().clone();
 
         let tl_buffer_event = ValidationEvent {
@@ -406,16 +352,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
 
         assert!(
             all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
