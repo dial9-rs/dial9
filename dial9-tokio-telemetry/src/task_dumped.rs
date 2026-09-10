@@ -18,11 +18,13 @@
 //!
 //! # Capture mechanics
 //!
-//! If the current poll returns `Pending`, a fresh capture is taken via
-//! [`tokio::runtime::dump::trace_with`] so that the next poll's sampling
-//! decision has fresh data. The capture runs a second `poll` of the inner
-//! future under the real waker inside `trace_with`, preserving registrations
-//! made by the future without scheduling an extra wake on Tokio 1.53 and later.
+//! After a normal poll returns `Pending`, capture runs a second `poll` of the
+//! inner future under the real waker inside [`tokio::runtime::dump::trace_with`].
+//! Tokio may defer a wake for each captured leaf. To avoid a wake-and-capture
+//! loop, the poll immediately following a capture polls the future normally
+//! but skips capture, retaining any un-emitted frames and their timestamp.
+//! On Tokio versions without capture-induced wakes, this also skips capture
+//! on the next real wake; it never skips the normal poll.
 //!
 //! # Allocation
 //!
@@ -88,6 +90,8 @@ pin_project! {
         sample_mean_ns: u64,
         // Per-task PRNG for drawing exponential gaps.
         rng: SplitMix64,
+        // Skip the next capture, but not the normal poll, to break capture-wake loops.
+        just_captured: bool,
         // Whether task dumps are configured for this recorder. `None` until the
         // first poll reads the per-thread config. The wrapping thread may lack
         // it (e.g. an explicit handle spawned from elsewhere), but the polling
@@ -108,6 +112,7 @@ impl<F> TaskDumped<F> {
             next_sample_ns: 0,
             sample_mean_ns: 0,
             rng: SplitMix64::new(0),
+            just_captured: false,
             enabled: None,
         }
     }
@@ -145,6 +150,7 @@ impl<F: Future> Future for TaskDumped<F> {
         // Fast path: forward without any capture work when either task dumps
         // are disabled, or telemetry as a whole is paused.
         if !enabled || !this.handle.is_enabled() {
+            *this.just_captured = false;
             if this.frames.has_data() {
                 this.frames.clear();
                 *this.pending_capture_ts = None;
@@ -180,6 +186,9 @@ impl<F: Future> Future for TaskDumped<F> {
                 *this.pending_capture_ts = None;
             }
             Poll::Pending => {
+                if std::mem::take(this.just_captured) {
+                    return Poll::Pending;
+                }
                 let repoll_result = this.frames.capture(this.inner.as_mut(), cx);
                 // In rare circumstances, repoll will now be ready.
                 if repoll_result.is_ready() {
@@ -187,6 +196,7 @@ impl<F: Future> Future for TaskDumped<F> {
                     *this.pending_capture_ts = None;
                     return repoll_result;
                 }
+                *this.just_captured = true;
                 let capture_ts = crate::telemetry::recorder::poll_start_ts_monotonic();
                 *this.pending_capture_ts = NonZeroU64::new(capture_ts);
             }
