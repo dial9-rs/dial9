@@ -489,9 +489,9 @@ mod tests {
     use super::*;
     use crate::buffer::{DiskBuffer, MemoryBuffer};
     use crate::source::FlushContext;
+    use crate::test_support::sealed_segment;
     use dial9_trace_format::TraceEvent;
     use dial9_trace_format::decoder::Decoder;
-    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     #[derive(Debug, serde::Deserialize, TraceEvent)]
@@ -520,17 +520,6 @@ mod tests {
         fn name(&self) -> &'static str {
             "once"
         }
-    }
-
-    fn sealed_segment(dir: &Path) -> PathBuf {
-        std::fs::read_dir(dir)
-            .expect("trace dir readable")
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| {
-                let name = p.file_name().unwrap().to_string_lossy();
-                name.ends_with(".bin") && !name.ends_with(".active")
-            })
-            .expect("a sealed .bin segment")
     }
 
     fn decoded_test_values(bytes: &[u8]) -> Vec<u64> {
