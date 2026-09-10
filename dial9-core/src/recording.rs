@@ -293,9 +293,10 @@ impl Drop for Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::MemoryBuffer;
-    use crate::recorder::{RecorderSourceExt, recorder};
+    use crate::buffer::{DiskBuffer, MemoryBuffer};
+    use crate::recorder::recorder;
     use crate::source::{FlushContext, Source};
+    use crate::test_support::{decode_segment_metadata, sealed_segment};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -349,6 +350,74 @@ mod tests {
             teardown_ran.load(Ordering::Relaxed),
             "teardown() should still run even after an uncaught Source panic during flush, \
              but it was skipped"
+        );
+    }
+
+    struct PanickingMetadataSource;
+    impl Source for PanickingMetadataSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            out.push((
+                "panicking.partial".to_string(),
+                "should not survive".to_string(),
+            ));
+            panic!("PanickingMetadataSource intentionally panics for segment_metadata test");
+        }
+        fn name(&self) -> &'static str {
+            "panicking_metadata"
+        }
+    }
+
+    struct HealthyMetadataSource;
+    impl Source for HealthyMetadataSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            out.push(("healthy.key".to_string(), "healthy-value".to_string()));
+        }
+        fn name(&self) -> &'static str {
+            "healthy_metadata"
+        }
+    }
+
+    #[derive(Debug, dial9_trace_format::TraceEvent)]
+    struct MarkerEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
+
+    /// A panicking `Source::segment_metadata` must not corrupt sibling
+    /// sources' entries for the same cycle, and its own partial push must
+    /// not survive. `flush_loop` now catches the panic and truncates
+    /// `source_entries` back to its pre-call length.
+    #[test]
+    fn source_panic_during_segment_metadata_skips_only_that_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+
+        let recorder = recorder(writer)
+            .source(PanickingMetadataSource)
+            .source(HealthyMetadataSource)
+            .build();
+        recorder.handle().enable();
+        // A trivial marker event: `finalize()` discards a segment that never
+        // held a real event, so without this the metadata-only segment
+        // below would never get sealed at all.
+        recorder
+            .handle()
+            .record_event(MarkerEvent { timestamp_ns: 0 });
+        recorder.graceful_shutdown(Duration::ZERO);
+
+        let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
+        let entries = decode_segment_metadata(&bytes);
+
+        assert_eq!(
+            entries.get("healthy.key").map(String::as_str),
+            Some("healthy-value"),
+            "sibling source's metadata must survive a panicking source in the same cycle"
+        );
+        assert!(
+            !entries.contains_key("panicking.partial"),
+            "a panicking source's partial push must not survive in the cycle's metadata"
         );
     }
 }
