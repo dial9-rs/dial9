@@ -79,6 +79,42 @@ let _entered = span.enter();
 The field is a marker: the filter selects spans that declare `dial9`, so use
 `dial9 = true` consistently rather than expecting its value to be inspected.
 
+## metrics.rs sampling
+
+Behind the `metrics-rs` feature. Samples the application's 
+[metrics.rs](https://docs.rs/metrics)  registry into the trace on an interval, 
+so counters and gauges the application already emits land  on the same timeline 
+as runtime telemetry.
+
+```rust
+use dial9_utils::metrics_rs::{self, MetricsRsConfig, RecorderMetricsRsExt};
+
+let metrics_recorder = metrics_rs::recorder();
+metrics::set_global_recorder(metrics_recorder.clone())?;
+
+let dial9_recorder = dial9_core::recorder::recorder(writer)
+    .with_metrics_rs(metrics_recorder, MetricsRsConfig::default())
+    .build();
+```
+
+If you already send metrics.rs somewhere else, Prometheus say, install both
+recorders together so every metric reaches both. (`FanoutBuilder` comes from the
+`metrics-util` crate, which you need to add yourself)
+
+```rust
+metrics::set_global_recorder(
+    metrics_util::layers::FanoutBuilder::default()
+        .add_recorder(prometheus)
+        .add_recorder(metrics_recorder.clone())
+        .build(),
+)?;
+```
+
+Each metric becomes its own trace event, named `metricsrs:<metric>{labels}`,
+carrying a `value` field for counters and gauges, or `count`, `sum` and
+percentiles for histograms. The viewer charts them from the `kind` and `unit`
+schema annotations with no extra configuration.
+
 ## License
 
 This project is licensed under the Apache-2.0 License.
