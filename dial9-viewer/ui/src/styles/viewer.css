@@ -836,6 +836,11 @@ body {
 
 /* ── Worker-lanes legend: non-interactive ribbon over the
    lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */
+/* Normally UNDER the lane canvas, showing through only where no lane is drawn -
+   that is what keeps this key from covering lane data. It is lifted over the
+   selection box only while one is on screen (see BOXED_CLASS), since a tinted
+   colour key is an unreadable one and the box is already covering that area. */
+.d9-track-column.d9-has-selection-box .d9-lanes-legend { z-index: 6; }
 .d9-lanes-legend {
     position: absolute;
     left: 6px;

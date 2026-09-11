@@ -170,47 +170,39 @@ describe("activeSelectionRegion - precedence", () => {
 });
 
 describe("selectionSpan - vertical extent", () => {
-  // The real stack: hint chips above the tracks, then the 30px ruler, lanes,
-  // and the analysis tracks under them.
-  const stack = {
-    tracksTop: 35,
-    rulerBottom: 65,
-    tracksBottom: 800,
-    columnHeight: 800,
-  };
+  // The worker-lanes viewport sits below the ruler and above the analysis
+  // tracks; the column scrolls past both.
+  const extent = { lanes: { top: 65, bottom: 516 }, columnHeight: 846 };
 
-  it("starts below the ruler and ends at the last track", () => {
-    expect(selectionSpan(stack)).toEqual({ top: 65, height: 735 });
+  it("bounds the worker-lanes viewport, not the track stack", () => {
+    expect(selectionSpan(extent)).toEqual({ top: 65, height: 451 });
   });
 
-  it("never covers the hint chips or the ruler above the tracks", () => {
-    const { top } = selectionSpan(stack);
-    expect(top).toBeGreaterThanOrEqual(stack.rulerBottom);
+  it("covers the viewport WHOLE, legend included", () => {
+    // The legend floats over the bottom third and is mostly hidden behind the
+    // canvas; carving it out cost ~150px and left the box short of the bottom
+    // workers, which is what the box is for.
+    const { top, height } = selectionSpan(extent);
+    expect(top + height).toBe(extent.lanes.bottom);
   });
 
-  it("follows the stack when a track grows, rather than the column", () => {
-    // An expanded Events track makes the stack taller than the visible column;
-    // sizing off the column would stop the box short of the track it marks.
-    expect(selectionSpan({ ...stack, tracksBottom: 1_240 }).height).toBe(1_175);
-    // ...and shorter than the column when the tracks do not fill it, so the box
-    // does not trail off into the empty space below the last track.
-    expect(selectionSpan({ ...stack, tracksBottom: 400, columnHeight: 900 }).height)
-      .toBe(335);
+  it("follows the viewport's height, which the user drags by hand", () => {
+    expect(selectionSpan({ ...extent, lanes: { top: 65, bottom: 300 } }).height)
+      .toBe(235);
+    // Taller than the visible column: sizing off the column would stop the box
+    // short of the lanes it marks.
+    expect(selectionSpan({ ...extent, lanes: { top: 65, bottom: 1_240 } }).height)
+      .toBe(1_175);
   });
 
-  it("falls back through the landmarks it cannot measure", () => {
-    // Ruler hidden by track management: start at the first track instead.
-    expect(selectionSpan({ ...stack, rulerBottom: null }).top).toBe(35);
-    // Nothing mounted: the whole column, which is the pre-measurement default.
-    expect(
-      selectionSpan({
-        tracksTop: null, rulerBottom: null, tracksBottom: null, columnHeight: 500,
-      }),
-    ).toEqual({ top: 0, height: 500 });
+  it("falls back to the column before the lanes mount", () => {
+    expect(selectionSpan({ lanes: null, columnHeight: 500 }))
+      .toEqual({ top: 0, height: 500 });
   });
 
-  it("clamps a degenerate stack to zero rather than a negative height", () => {
-    expect(selectionSpan({ ...stack, tracksBottom: 40 }).height).toBe(0);
+  it("clamps an inverted viewport to zero rather than a negative height", () => {
+    expect(selectionSpan({ ...extent, lanes: { top: 65, bottom: 40 } }).height)
+      .toBe(0);
   });
 });
 

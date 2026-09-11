@@ -44,7 +44,20 @@ const RAIL_CLASS = "d9-selection-rail";
 const MEASURE_CLASS = "d9-selection-measure";
 const LANE_TOP_PROP = "--d9-lane-top";
 const TIMELINE_TRACK_SELECTOR = '[data-track-id="timeline"]';
-const TRACKS_CLASS = "d9-tracks";
+/** The worker-lanes viewport: the box's vertical subject, and the element the
+ *  lanes resize drag sizes. */
+const LANES_VIEWPORT_CLASS = "d9-lanes-viewport";
+/**
+ * Marks the track column while a box is on screen, so CSS can lift the lanes
+ * legend over it (see viewer.css).
+ *
+ * A class rather than a static z-index because the layering is a CYCLE: the box
+ * must sit over the lane canvas to be seen at all, the legend must sit over the
+ * box to stay readable, and the legend sits UNDER that same canvas the rest of
+ * the time - which is what keeps it from hiding lane data. No single z-index
+ * satisfies all three; scoping the lift to the moments a box exists does.
+ */
+const BOXED_CLASS = "d9-has-selection-box";
 const CAPTION_CLASS = "d9-selection-caption";
 const ZOOM_MODIFIER = "zoom";
 const POI_MODIFIER = "poi";
@@ -135,18 +148,12 @@ export function selectionBox(region: SelectionRegion, layout: TimePanelLayout): 
 }
 
 /**
- * The track stack's vertical landmarks, column-local px, read from the DOM once
- * per render. Nulls mean "not mounted" (empty state, or a hidden ruler), which
- * the placement degrades through rather than guessing a pixel.
+ * What the box is sized to, column-local px, read from the DOM once per render.
  */
-export interface TrackStackMetrics {
-  /** Top of the first track. */
-  tracksTop: number | null;
-  /** Bottom of the last track - grows as tracks are added, resized, expanded. */
-  tracksBottom: number | null;
-  /** Bottom of the time-ruler track. */
-  rulerBottom: number | null;
-  /** The scrollable column height: the last-resort bottom. */
+export interface SelectionExtent {
+  /** The worker-lanes viewport, or null before the lanes mount. */
+  lanes: { top: number; bottom: number } | null;
+  /** The scrollable column height: the last-resort extent. */
   columnHeight: number;
 }
 
@@ -157,19 +164,29 @@ export interface SelectionSpan {
 }
 
 /**
- * Box top/height from the track stack.
+ * Box top/height: the worker-lanes viewport, whole.
  *
- * The box covers the TRACKS and nothing else. It starts below the time ruler,
- * which is a reading surface rather than data - a box over it hides the very
- * labels that say which window you are looking at - and it ends at the last
- * track, so it neither stops short of the bottom track nor trails off into the
- * empty column below it. Measured per render, so adding, resizing, expanding or
- * hiding a track moves the box with it. Pure.
+ * The lanes are what a time selection is ABOUT - every other track is a derived
+ * summary of the same window, and covering them tinted the ruler's own labels,
+ * the span filter and the event chips without saying anything extra. Bounding
+ * the viewport also means the box tracks its height for free, which is the one
+ * part of the column the user resizes by hand.
+ *
+ * The lanes legend is NOT carved out. It floats over the viewport's bottom
+ * third and is mostly invisible (it paints behind the canvas, showing through
+ * only where no lane is drawn), so stopping above it cost ~150px of box to
+ * dodge something barely on screen - the box then fell short of the bottom
+ * workers, which is the thing it exists to mark.
+ *
+ * Falls back to the whole column only before the lanes mount, where there is
+ * nothing to bound and nothing drawn either. Pure.
  */
-export function selectionSpan(m: TrackStackMetrics): SelectionSpan {
-  const top = m.rulerBottom ?? m.tracksTop ?? 0;
-  const bottom = m.tracksBottom ?? m.columnHeight;
-  return { top, height: Math.max(0, bottom - top) };
+export function selectionSpan(m: SelectionExtent): SelectionSpan {
+  if (m.lanes === null) return { top: 0, height: m.columnHeight };
+  return {
+    top: m.lanes.top,
+    height: Math.max(0, m.lanes.bottom - m.lanes.top),
+  };
 }
 
 // Measuring-bar metrics: the label's padding and borders on top of the ruler's
@@ -277,40 +294,32 @@ export function mountSelectionOverlay(
     return el;
   }
 
-  function tracksEl(): HTMLElement | null {
-    return trackColumn.querySelector<HTMLElement>(`.${TRACKS_CLASS}`);
+  function lanesEl(): HTMLElement | null {
+    return trackColumn.querySelector<HTMLElement>(`.${LANES_VIEWPORT_CLASS}`);
   }
 
   /**
-   * Column-local landmarks for `selectionSpan`, in the same scroll-content
-   * coordinates the box is positioned in, so it scrolls with the tracks.
+   * Column-local extent for `selectionSpan`, in the same scroll-content
+   * coordinates the box is positioned in, so it scrolls with the lanes.
    *
    * Measured through `getBoundingClientRect`, NOT `offsetTop`: what the offset
    * parent is depends on whether some ancestor happens to be positioned, and
    * the track stack gained a positioned overlay child once already - which
    * silently reinterpreted every `offsetTop` here as tracks-local and slid the
-   * box up over the ruler.
-   *
-   * The stack's bottom comes from the CONTAINER rather than its last child for
-   * the same reason: a full-height overlay appended after the tracks is a
-   * plausible last child and is not the bottom track.
+   * box out of place.
    */
-  function trackStackMetrics(tracks: HTMLElement | null): TrackStackMetrics {
+  function selectionExtent(lanes: HTMLElement | null): SelectionExtent {
     const origin =
       trackColumn.getBoundingClientRect().top - trackColumn.scrollTop;
-    const edge = (el: Element | null | undefined, side: "top" | "bottom"):
-      number | null =>
-      el instanceof HTMLElement
-        ? Math.round(el.getBoundingClientRect()[side] - origin)
-        : null;
+    const columnHeight = trackColumn.scrollHeight;
+    if (lanes === null) return { lanes: null, columnHeight };
+    const rect = lanes.getBoundingClientRect();
     return {
-      tracksTop: edge(tracks, "top"),
-      tracksBottom: edge(tracks, "bottom"),
-      rulerBottom: edge(
-        tracks?.querySelector<HTMLElement>(TIMELINE_TRACK_SELECTOR),
-        "bottom",
-      ),
-      columnHeight: trackColumn.scrollHeight,
+      lanes: {
+        top: Math.round(rect.top - origin),
+        bottom: Math.round(rect.bottom - origin),
+      },
+      columnHeight,
     };
   }
 
@@ -324,8 +333,8 @@ export function mountSelectionOverlay(
    * the store until mouseup, precisely so a shell re-render cannot fight it, so
    * no store tick exists to ride.
    */
-  function applySpan(el: HTMLElement, tracks: HTMLElement | null): SelectionSpan {
-    const span = selectionSpan(trackStackMetrics(tracks));
+  function applySpan(el: HTMLElement, lanes: HTMLElement | null): SelectionSpan {
+    const span = selectionSpan(selectionExtent(lanes));
     el.style.top = `${span.top}px`;
     el.style.height = `${span.height}px`;
     return span;
@@ -359,10 +368,11 @@ export function mountSelectionOverlay(
     caption.textContent = text;
   }
 
-  // The stack's height changes without a store update (the lanes resize drag),
-  // and with one that arrives before the DOM has reflowed. Observing the stack
-  // itself covers both, and cannot loop: the box is a sibling of `.d9-tracks`,
-  // so resizing it never resizes what is observed.
+  // The lanes viewport is resized WITHOUT a store update - the drag sets its
+  // height imperatively and commits only on mouseup, so a shell re-render
+  // cannot fight it. Observing that element is therefore the only way to track
+  // the drag, and it cannot loop: the box is not inside the lanes, so resizing
+  // it never resizes what is observed.
   let observed: HTMLElement | null = null;
   const resizeObserver =
     typeof ResizeObserver === "undefined"
@@ -372,13 +382,19 @@ export function mountSelectionOverlay(
           if (el !== null && el.style.display !== "none") applySpan(el, observed);
         });
 
-  /** Follow the CURRENT stack element: a reparse re-renders the track list, and
+  /** Follow the CURRENT lanes element: a reparse re-renders the track list, and
    *  an observer left on the detached one would go quiet. */
-  function watchTracks(tracks: HTMLElement | null): void {
-    if (resizeObserver === null || tracks === observed) return;
+  function watchLanes(lanes: HTMLElement | null): void {
+    if (resizeObserver === null || lanes === observed) return;
     if (observed !== null) resizeObserver.unobserve(observed);
-    observed = tracks;
-    if (tracks !== null) resizeObserver.observe(tracks);
+    observed = lanes;
+    if (lanes !== null) resizeObserver.observe(lanes);
+  }
+
+  /** Hide the box and drop the legend back under the canvas with it. */
+  function hideBox(el: HTMLElement): void {
+    el.style.display = "none";
+    trackColumn.classList.remove(BOXED_CLASS);
   }
 
   function render(): void {
@@ -391,7 +407,7 @@ export function mountSelectionOverlay(
       state.viewport,
     );
     if (region === null) {
-      el.style.display = "none";
+      hideBox(el);
       return;
     }
     // Read geometry once: column width + the lanes-matching scrollbar gutter,
@@ -401,10 +417,10 @@ export function mountSelectionOverlay(
     // Read with the other geometry, BEFORE any style write: a rect read after
     // a write forces a synchronous layout, and this runs every drag frame.
     const laneTop = timeLaneTop(trackColumn);
-    const tracks = tracksEl();
+    const lanes = lanesEl();
     const { viewStart, viewEnd } = state.viewport;
     if (viewEnd <= viewStart) {
-      el.style.display = "none";
+      hideBox(el);
       return;
     }
     const layout = timePanelLayout({
@@ -420,8 +436,9 @@ export function mountSelectionOverlay(
     el.style.left = `${box.left}px`;
     el.style.width = `${box.width}px`;
     el.style.display = "block";
-    watchTracks(tracks);
-    const span = applySpan(el, tracks);
+    trackColumn.classList.add(BOXED_CLASS);
+    watchLanes(lanes);
+    const span = applySpan(el, lanes);
     // Only the POI tier has a marker to name; a drag box labels nothing.
     renderCaption(
       el,
@@ -429,8 +446,8 @@ export function mountSelectionOverlay(
       box.width,
     );
 
-    // Box-relative, so NEGATIVE: the box starts at the ruler's bottom edge, and
-    // the bar belongs in the ruler row above it.
+    // Box-relative, so NEGATIVE: the box starts at the worker lanes, and the bar
+    // belongs in the ruler row above them.
     el.style.setProperty(LANE_TOP_PROP, `${laneTop - span.top}px`);
     const rail = ensureChild(el, RAIL_CLASS);
     const measure = ensureChild(el, MEASURE_CLASS);
@@ -468,6 +485,7 @@ export function mountSelectionOverlay(
       unsubscribe();
       resizeObserver?.disconnect();
       observed = null;
+      trackColumn.classList.remove(BOXED_CLASS);
       trackColumn.querySelector<HTMLElement>(`.${OVERLAY_CLASS}`)?.remove();
     },
   };
