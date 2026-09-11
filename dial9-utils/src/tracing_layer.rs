@@ -69,7 +69,7 @@ use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::callsite::Identifier;
 use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
@@ -90,7 +90,6 @@ struct SpanCloseEvent {
 // ── Per-callsite schema cache ───────────────────────────────────────────────
 
 /// Cached schemas for a single callsite (one for enter, one for exit).
-#[derive(Clone)]
 struct CallsiteSchemas {
     enter: Schema,
     exit: Schema,
@@ -139,6 +138,7 @@ fn build_callsite_schemas(meta: &'static tracing::Metadata<'static>) -> Callsite
 /// Data stored in span extensions, captured at `on_new_span` and updated by `on_record`.
 struct SpanData {
     meta: &'static tracing::Metadata<'static>,
+    schemas: Arc<CallsiteSchemas>,
     parent_id: Option<span::Id>,
     /// Field values keyed by field name.
     field_values: Vec<(&'static str, String)>,
@@ -209,7 +209,7 @@ impl FieldVisitor<'_> {
 ///     .init();
 /// ```
 pub struct Dial9TracingLayer {
-    schemas: Mutex<HashMap<Identifier, CallsiteSchemas>>,
+    schemas: Mutex<HashMap<Identifier, Arc<CallsiteSchemas>>>,
 }
 
 impl fmt::Debug for Dial9TracingLayer {
@@ -226,12 +226,12 @@ impl Dial9TracingLayer {
         }
     }
 
-    fn get_schemas(&self, meta: &'static tracing::Metadata<'static>) -> CallsiteSchemas {
+    fn get_schemas(&self, meta: &'static tracing::Metadata<'static>) -> Arc<CallsiteSchemas> {
         let id = meta.callsite();
         let mut cache = self.schemas.lock().unwrap();
         cache
             .entry(id)
-            .or_insert_with(|| build_callsite_schemas(meta))
+            .or_insert_with(|| Arc::new(build_callsite_schemas(meta)))
             .clone()
     }
 }
@@ -294,6 +294,7 @@ where
 
         let data = SpanData {
             meta: attrs.metadata(),
+            schemas: self.get_schemas(attrs.metadata()),
             parent_id: attrs.parent().cloned(),
             field_values,
         };
@@ -333,7 +334,7 @@ where
                 return;
             };
 
-            let schemas = self.get_schemas(data.meta);
+            let schemas = &data.schemas;
 
             // We only use explicit parents (span!(parent: &x, ..)), not contextual
             // parents (ctx.current_span()), because contextual parenting is
@@ -385,7 +386,7 @@ where
                 return;
             };
 
-            let schemas = self.get_schemas(data.meta);
+            let schemas = &data.schemas;
             let span_name = data.meta.name();
 
             let mut values = Vec::with_capacity(3 + schemas.field_names.len());
