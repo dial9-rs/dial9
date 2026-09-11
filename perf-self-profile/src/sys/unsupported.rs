@@ -10,6 +10,11 @@ fn unsupported<T>() -> io::Result<T> {
     ))
 }
 
+#[cfg(feature = "cpu-profiling")]
+pub(crate) fn system_metadata() -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Stub `PerfSampler` for non-Linux platforms.
 ///
 /// All constructors return [`io::ErrorKind::Unsupported`].
