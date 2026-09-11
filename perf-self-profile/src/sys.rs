@@ -23,6 +23,14 @@ pub(crate) use linux::offline_symbolize::write_symbol_data;
     all(target_os = "android", target_arch = "aarch64")
 ))]
 pub(crate) use linux::symbolize_one_shot;
+#[cfg(all(
+    feature = "cpu-profiling",
+    any(
+        target_os = "linux",
+        all(target_os = "android", target_arch = "aarch64")
+    )
+))]
+pub(crate) use linux::system_metadata;
 #[cfg(any(
     target_os = "linux",
     all(target_os = "android", target_arch = "aarch64")
@@ -42,6 +50,14 @@ mod unsupported;
     all(target_os = "android", target_arch = "aarch64")
 )))]
 pub(crate) use unsupported::symbolize_one_shot;
+#[cfg(all(
+    feature = "cpu-profiling",
+    not(any(
+        target_os = "linux",
+        all(target_os = "android", target_arch = "aarch64")
+    ))
+))]
+pub(crate) use unsupported::system_metadata;
 #[cfg(not(any(
     target_os = "linux",
     all(target_os = "android", target_arch = "aarch64")

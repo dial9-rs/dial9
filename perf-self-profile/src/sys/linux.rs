@@ -5,6 +5,11 @@ mod perf_sampler;
 mod ring_buffer;
 mod sampler;
 mod symbolize;
+#[cfg(feature = "cpu-profiling")]
+mod system_metadata;
+
+#[cfg(feature = "cpu-profiling")]
+pub(crate) use system_metadata::system_metadata;
 
 /// Upper bound of userspace virtual addresses. Addresses at or above this limit
 /// are kernel addresses.

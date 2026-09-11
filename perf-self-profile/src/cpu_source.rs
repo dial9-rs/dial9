@@ -6,7 +6,7 @@
 //! - [`CpuProfiler`] — process-wide frequency-based CPU sampling.
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
-use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active};
+use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::types::{EventEncoder, FieldType};
@@ -428,6 +428,7 @@ impl Source for CpuProfiler {
             "cpu.profile.backend".to_string(),
             self.effective_backend.to_string(),
         ));
+        out.extend(sys::system_metadata());
         // When ctimer is the effective backend, it always samples thread CPU time
         // (CLOCK_THREAD_CPUTIME_ID), regardless of what EventSource was
         // originally requested. Report the *effective* source honestly.
