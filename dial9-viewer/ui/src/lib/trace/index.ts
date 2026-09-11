@@ -196,6 +196,7 @@ export {
   computeRuntimeGroups,
   computeSchedulingDelays,
   computeSpanLayout,
+  CORE_POI_DEFAULT_WORST_N,
   CORE_SPAWN_DELAY_THRESHOLD_US,
   filterPointsOfInterest,
   flattenFlamegraph,
@@ -241,6 +242,7 @@ export {
   fatLanes,
   isColumnarLane,
   laneSource,
+  POI_DEFAULT_WORST_N,
   spawnDelayThresholdNs,
 } from "./columnar-worker-spans.js";
 export type {

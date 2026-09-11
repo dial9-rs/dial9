@@ -10,16 +10,21 @@
 // "cpu-sampled" is deliberately excluded: it needs attachCpuSamples, which
 // MUTATES the shared poll objects the lanes/overlay caches also hold - the
 // minimap must not reach into that shared derivation. The remaining detectors
-// (long-poll, sched, wake-delay, uninstrumented, spawn-delay) read the spans
-// read-only.
+// (long-poll, sched, wake-delay, uninstrumented, spawn-delay, off-cpu-active)
+// read the spans read-only.
 //
 // "spawn-delay" runs at its DEFAULT threshold, not the rail's live one: these
 // ticks are cached on trace identity, and rebuilding them on every threshold
 // edit would trade a stable overview for a flickering one.
+//
+// Each detector contributes its worst MINIMAP_POI_LIMIT points, not everything
+// it matched. The detectors rank instead of thresholding, so an uncapped union
+// would ink a tick for every poll in the trace and say nothing.
 
 import {
   DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   EVENT_TYPES,
+  POI_DEFAULT_WORST_N,
   filterPointsOfInterest,
 } from "../../lib/trace/index.js";
 import { lifecycleWorkerIds, sharedDetectorInputs } from "../../lib/trace/derived.js";
@@ -28,6 +33,9 @@ import type {
   PointOfInterest,
   PointOfInterestType,
 } from "../../lib/trace/index.js";
+
+/** How many ticks each detector contributes to the overview strip. */
+export const MINIMAP_POI_LIMIT = POI_DEFAULT_WORST_N;
 
 /** One overview tick: where a point of interest sits, and what kind. */
 export interface MinimapPoi {
@@ -43,23 +51,25 @@ export interface MinimapPoi {
 
 /**
  * Derive the overview POI ticks for one parsed trace: reconstruct worker
- * spans, compute scheduling delays, then union the applicable detectors. Each
- * detector runs with `sortByWorst` on; ticks are de-duplicated by (time,
- * worker, type) since a poll can satisfy more than one detector. Returns []
- * for an empty trace.
+ * spans, compute scheduling delays, then union each applicable detector's worst
+ * MINIMAP_POI_LIMIT points. Ticks are de-duplicated by (time, worker, type)
+ * since a poll can satisfy more than one detector. Returns [] for an empty
+ * trace.
  */
 export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   const workerIds = lifecycleWorkerIds(trace);
   if (workerIds.length === 0) return [];
 
   // Shared with the issues rail. The minimap's detectors (long-poll, sched,
-  // wake-delay, uninstrumented) read the spans READ-ONLY, so one shared
-  // reconstruction (attachCpuSamples already applied) yields identical ticks.
-  const { lanes, schedDelays } = sharedDetectorInputs(trace);
+  // wake-delay, uninstrumented, off-cpu-active) read the spans READ-ONLY, so
+  // one shared reconstruction (attachCpuSamples already applied) yields
+  // identical ticks.
+  const { lanes, schedDelays, hasWorkerCpuTime } = sharedDetectorInputs(trace);
 
   // Applicable detectors: long-poll always; the sched-derived ones only when
   // the trace carries sched-wait data; uninstrumented only when the trace
-  // tracked per-task instrumentation (its required input).
+  // tracked per-task instrumentation (its required input); off-cpu-active only
+  // when the worker CPU-time readings are real.
   const types: PointOfInterestType[] = ["long-poll"];
   if (trace.hasSchedWait) {
     types.push("sched", "wake-delay");
@@ -72,6 +82,9 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   if (trace.taskSpawnTimes.size > 0) {
     types.push("spawn-delay");
   }
+  if (hasWorkerCpuTime) {
+    types.push("off-cpu-active");
+  }
 
   const seen = new Set<string>();
   const out: MinimapPoi[] = [];
@@ -82,6 +95,8 @@ export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
       taskInstrumented: trace.taskInstrumented,
       taskSpawnTimes: trace.taskSpawnTimes,
       spawnDelayThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+      hasWorkerCpuTime,
+      limit: MINIMAP_POI_LIMIT,
     };
     const pois: PointOfInterest[] = lanes.columnar
       ? lanes.store.pointsOfInterest(type, workerIds, schedDelays, opts)

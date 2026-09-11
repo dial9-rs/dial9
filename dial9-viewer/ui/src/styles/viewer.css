@@ -325,6 +325,20 @@ body {
     border-radius: 3px;
 }
 .d9-rail-filter:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+/* How many of the worst points to list. Always present, so it is sized to its
+   own content rather than sharing the filter dropdown's flex. */
+.d9-rail-worst-label { display: flex; align-items: center; }
+.d9-rail-worst {
+    flex: 0 0 auto;
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg-muted);
+    font-size: 0.7em;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+}
+.d9-rail-worst:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 /* The spawn-delay severity floor. Rendered beside the filter only while that
    detector is active, so it must not compete with the dropdown for width. */
 .d9-rail-threshold-label {
@@ -822,6 +836,11 @@ body {
 
 /* ── Worker-lanes legend: non-interactive ribbon over the
    lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */
+/* Normally UNDER the lane canvas, showing through only where no lane is drawn -
+   that is what keeps this key from covering lane data. It is lifted over the
+   selection box only while one is on screen (see BOXED_CLASS), since a tinted
+   colour key is an unreadable one and the box is already covering that area. */
+.d9-track-column.d9-has-selection-box .d9-lanes-legend { z-index: 6; }
 .d9-lanes-legend {
     position: absolute;
     left: 6px;
@@ -1867,6 +1886,78 @@ body {
 .d9-selection-overlay.zoom {
     background: rgba(0, 188, 180, 0.15);
     border-color: rgba(0, 188, 180, 0.6);
+}
+/* The issues-rail jump marker. Amber, and only edge-tinted: it can cover the
+   whole visible window, and a filled box that wide would wash out the lanes it
+   exists to point at. */
+/* Hatched, not flat: the span is wall time the worker was AWAKE, of which only
+   a fraction was off-CPU, and a solid wash reads as "all of this was bad". The
+   EDGES stay solid - unlike the fill they are exact, since the period's start
+   and end are recorded; it is only the distribution inside that is unknown. */
+.d9-selection-overlay.poi {
+    background: repeating-linear-gradient(
+        45deg,
+        rgba(255, 176, 32, 0.11) 0 5px,
+        rgba(255, 176, 32, 0.02) 5px 10px
+    );
+    border-color: rgba(255, 176, 32, 0.85);
+    border-left-width: 2px;
+    border-right-width: 2px;
+}
+
+/* The marker's own label, pinned inside its leading edge. Clipped on ITSELF,
+   not by the box: the measuring bar is a sibling sitting at a negative offset
+   (it belongs in the ruler row above the box), so `overflow: hidden` on the box
+   would swallow it. Below CAPTION_MIN_WIDTH the overlay drops the caption
+   entirely rather than clip it to noise. */
+.d9-selection-caption {
+    position: absolute;
+    top: 0;
+    left: 0;
+    max-width: 100%;
+    overflow: hidden;
+    padding: 1px 5px;
+    font: 10px monospace;
+    white-space: nowrap;
+    color: #0a0e1c;
+    background: rgba(255, 176, 32, 0.85);
+    border-bottom-right-radius: 3px;
+}
+/* The measuring bar follows the box's colour. */
+.d9-selection-overlay.poi .d9-selection-rail {
+    border-top-color: rgba(255, 176, 32, 0.85);
+}
+.d9-selection-overlay.poi .d9-selection-measure {
+    border-color: rgba(255, 176, 32, 0.85);
+}
+
+/* The jump marker's facts, above the inspector tabs: the box holds one
+   caption, and this is the POI kind that selects no task or poll, so without
+   it the inspector reads "No selection" right after a click. */
+.d9-poi-card {
+    margin: 0 8px 6px;
+    padding: 5px 7px;
+    border: 1px solid rgba(255, 176, 32, 0.5);
+    border-left: 2px solid rgba(255, 176, 32, 0.85);
+    border-radius: 3px;
+    background: rgba(255, 176, 32, 0.06);
+}
+.d9-poi-card-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--d9-fg);
+    margin-bottom: 3px;
+}
+.d9-poi-card-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font: 10px monospace;
+    color: var(--d9-fg-muted);
+}
+.d9-poi-card-row > span:last-child {
+    color: var(--d9-fg);
+    font-variant-numeric: tabular-nums;
 }
 
 /* The measuring bar, in the time-lane row at the top of the selection box: a

@@ -18,7 +18,11 @@ import {
 import { resolveUrlSelection } from "./url-selection.js";
 import { createViewerReconstruction } from "./viewer-reconstruction.js";
 import { taskIndexFor } from "./tasks-model.js";
-import { DEFAULT_SPAWN_DELAY_THRESHOLD_US, derivePoiViewModel } from "./poi.js";
+import {
+  DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+  POI_WORST_N_DEFAULT,
+  derivePoiViewModel,
+} from "./poi.js";
 
 let settledTrace: ParsedTrace;
 let reconstructedTrace: ParsedTrace;
@@ -236,6 +240,7 @@ describe("viewer deep-link reconstruction", () => {
     const poi = {
       filter: "wake-delay" as const,
       spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+      worstN: POI_WORST_N_DEFAULT,
       sortKey: "duration" as const,
       sortDir: "desc" as const,
       index: -1,
@@ -362,6 +367,7 @@ describe("viewer deep-link reconstruction", () => {
     source.update("poi", {
       filter: "long-poll",
       spawnThresholdUs: 2_500,
+      worstN: 200,
       sortKey: "time",
       sortDir: "asc",
       index: 4,
@@ -530,6 +536,7 @@ describe("viewer deep-link reconstruction", () => {
     store.update("poi", {
       filter: "long-poll",
       spawnThresholdUs: 2_500,
+      worstN: 200,
       sortKey: "time",
       sortDir: "asc",
       index: 4,
@@ -572,6 +579,7 @@ describe("viewer deep-link reconstruction", () => {
       pollDetail: null,
       taskDump: null,
       sidebarRange: null,
+      poiRange: null,
       hoveredWakerTaskId: null,
       // Resets with the source: a pinned spawn location names a call site in
       // the REPLACED trace, which the new one need not contain.
@@ -581,8 +589,9 @@ describe("viewer deep-link reconstruction", () => {
     });
     expect(state.poi).toEqual({
       filter: "long-poll",
-      // A detector setting, not source-scoped: it survives the replacement.
+      // Detector settings, not source-scoped: they survive the replacement.
       spawnThresholdUs: 2_500,
+      worstN: 200,
       sortKey: "time",
       sortDir: "asc",
       index: -1,

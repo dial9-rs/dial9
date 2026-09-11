@@ -175,11 +175,12 @@ const initialState: StoreState = {
     pollDetail: null,
     taskDump: null,
     sidebarRange: null,
+    poiRange: null,
     hoveredWakerTaskId: null,
     scopedSpawnLoc: null,
     spawnedTasksRange: null,
   },
-  poi: { filter: "sched", spawnThresholdUs: 100, sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
+  poi: { filter: "sched", spawnThresholdUs: 100, worstN: 50, sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
   uiPrefs: {
     // All four foldable panels start collapsed;
     // Record<FoldablePanelKind, boolean> forces exactly these keys.
@@ -278,6 +279,7 @@ function populatedState(): StoreState {
         timestamps: [2_500],
       },
       sidebarRange: range,
+      poiRange: { ...range, worker: 1, severityNs: 500, kind: "off-cpu-active" },
       hoveredWakerTaskId: 7,
       scopedSpawnLoc: null,
       spawnedTasksRange: range,

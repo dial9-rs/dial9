@@ -34,6 +34,7 @@ const {
   buildActiveTaskTimeline,
   computeSchedulingDelays,
   filterPointsOfInterest,
+  POI_DEFAULT_WORST_N,
   buildFlamegraphTree,
   flattenFlamegraph,
   buildFgData,
@@ -684,16 +685,44 @@ describe("computeSchedulingDelays", () => {
 // ── filterPointsOfInterest ──
 
 describe("filterPointsOfInterest", () => {
-  it("long-poll filter: results all > 1ms", () => {
+  it("long-poll filter: returns the worst N, severity-ranked, not a cutoff", () => {
+    let matched = -1;
     const pois = filterPointsOfInterest("long-poll", workerSpans, workerIds, schedDelays, {
       hasSchedWait: trace.hasSchedWait,
+      sortByWorst: true,
+      onTotal: (n: number) => (matched = n),
     });
     expect(pois.length, "No long-poll points of interest found").toBeGreaterThan(0);
-    const offenders = pois.filter((p: any) => p.type !== "long-poll" || p.value <= 1);
-    expect(
-      offenders.map((p: any) => `type=${p.type} value=${p.value}`),
-      "long-poll results with wrong type or value <= 1ms",
-    ).toEqual([]);
+    const offenders = pois.filter((p: any) => p.type !== "long-poll");
+    expect(offenders.map((p: any) => p.type), "wrong type in long-poll results").toEqual([]);
+
+    // Ranked worst-first, and capped at the default rather than by a duration.
+    const values = pois.map((p: any) => p.value);
+    expect(values).toEqual([...values].sort((a, b) => b - a));
+    expect(pois.length).toBeLessThanOrEqual(POI_DEFAULT_WORST_N);
+
+    // Every poll is a candidate now, so the true match count is the poll count.
+    const pollCount = workerIds.reduce(
+      (n: number, w: number) => n + workerSpans[w].polls.length,
+      0,
+    );
+    expect(matched).toBe(pollCount);
+  });
+
+  it("long-poll filter: a cap keeps the worst, even in chronological order", () => {
+    const opts = { hasSchedWait: trace.hasSchedWait, limit: 5 };
+    const worstFirst = filterPointsOfInterest("long-poll", workerSpans, workerIds, schedDelays, {
+      ...opts, sortByWorst: true,
+    });
+    const chronological = filterPointsOfInterest("long-poll", workerSpans, workerIds, schedDelays, {
+      ...opts, sortByWorst: false,
+    });
+    // Same five points, presented differently: capping in time order would have
+    // returned the FIRST five polls and dropped every outlier behind them.
+    expect(new Set(chronological.map((p: any) => p.value)))
+      .toEqual(new Set(worstFirst.map((p: any) => p.value)));
+    const times = chronological.map((p: any) => p.time);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
   });
 
   it("cpu-sampled filter: results all with samples", () => {
@@ -794,6 +823,64 @@ describe("filterPointsOfInterest", () => {
     expect(unsorted, "sortByWorst not descending").toBe(0);
   });
 });
+
+// ── filterPointsOfInterest: the off-CPU detectors ──
+//
+// Synthetic lanes: the demo trace's workers are ~97% on-CPU, so "off-cpu-active"
+// legitimately matches nothing there.
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const poll = (start: number, end: number, extra: Record<string, unknown> = {}): any => ({
+  start, end, taskId: 1, spawnLocId: null, spawnLoc: null, ...extra,
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const lanes = (parts: Record<string, unknown>): any => ({
+  0: { polls: [], parks: [], actives: [], cpuSampleTimes: [], ...parts },
+});
+
+describe("filterPointsOfInterest off-cpu-active", () => {
+  // 9ms off CPU; 1ms off CPU; 0.5ms and ENTIRELY off CPU.
+  const ws = lanes({
+    actives: [
+      { start: 0, end: 10e6, ratio: 0.1 },
+      { start: 20e6, end: 30e6, ratio: 0.9 },
+      { start: 40e6, end: 40.5e6, ratio: 0 },
+    ],
+  });
+
+  it("ranks every descheduled period by off-CPU nanoseconds", () => {
+    const pois = filterPointsOfInterest("off-cpu-active", ws, [0], [], {
+      hasWorkerCpuTime: true,
+      sortByWorst: true,
+    });
+    // The old `wall > 1ms && ratio < 0.5` gate reported only the first of these.
+    // It hid the third outright - a period the kernel descheduled for its ENTIRE
+    // life - because it was half a millisecond long.
+    expect(pois.map((p: any) => [p.time, p.type, Math.round(p.value)])).toEqual([
+      [0, "off-cpu-active", 9e6],
+      [20e6, "off-cpu-active", 1e6],
+      [40e6, "off-cpu-active", 0.5e6],
+    ]);
+    expect(pois[0].span.start).toBe(0);
+    expect(pois[0].span.end).toBe(10e6);
+  });
+
+  it("skips a period that never left the CPU, which has no off-CPU time", () => {
+    const onCpu = lanes({ actives: [{ start: 0, end: 10e6, ratio: 1 }] });
+    expect(
+      filterPointsOfInterest("off-cpu-active", onCpu, [0], [], { hasWorkerCpuTime: true }),
+    ).toEqual([]);
+  });
+
+  // Off Linux every ratio is 0, so ungated this flags every active period.
+  it("returns nothing when the trace's worker CPU time is not real", () => {
+    expect(
+      filterPointsOfInterest("off-cpu-active", ws, [0], [], { hasWorkerCpuTime: false }),
+    ).toEqual([]);
+  });
+});
+
 
 // ── buildFlamegraphTree / flattenFlamegraph ──
 

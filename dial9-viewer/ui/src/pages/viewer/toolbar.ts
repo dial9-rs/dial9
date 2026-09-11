@@ -25,8 +25,7 @@ import {
   type IdentityField,
   type ReconciledIdentity,
 } from "../../lib/trace/index.js";
-import { poiSourceFor, kindLabel, redFlagCounts } from "./poi.js";
-import type { PointOfInterestType } from "../../types/trace.js";
+import { poiSourceFor, redFlagLabel, redFlagSummary } from "./poi.js";
 import { traceDisplayBounds } from "./trace-bounds.js";
 
 /** Which whole-trace analysis an analysis button opens. */
@@ -319,26 +318,21 @@ function redFlagsChip(
   trace: ParsedTrace,
   spawnThresholdUs: number,
 ): TemplateResult | string {
-  const summary = redFlagCounts(poiSourceFor(trace), spawnThresholdUs).filter(
-    (r) => r.count > 0,
-  );
+  const summary = redFlagSummary(poiSourceFor(trace), spawnThresholdUs);
   if (summary.length === 0) return "";
-  const plural = (s: { type: PointOfInterestType; count: number }): string =>
-    `${s.count} ${kindLabel(s.type)}${s.count === 1 ? "" : "s"}`;
-  const title = summary.map(plural).join(", ");
+  const title = summary.map(redFlagLabel).join(", ");
   return html`
     <span
       class="d9-redflags"
       data-redflags
       role="status"
-      title=${`Detected issues: ${title}`}
+      title=${`Worst in this trace: ${title}`}
     >
-      <span aria-hidden="true">⚠</span>
       ${summary.map(
         (s, i) =>
           html`${i > 0 ? html`<span class="d9-redflags-sep">·</span>` : ""}<span
               class="d9-redflags-item"
-              >${plural(s)}</span
+              >${redFlagLabel(s)}</span
             >`,
       )}
     </span>

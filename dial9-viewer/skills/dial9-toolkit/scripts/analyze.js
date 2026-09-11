@@ -21,7 +21,7 @@ function resolve(name) {
 
 const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples, deriveCapabilities } = require(resolve('trace_parser.js'));
 const { activeTaskSeries, buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations,
+        computeSchedulingDelays, buildSpanData, analyzeAllocations,
         globalQueueSeries } = require(resolve('trace_analysis.js'));
 const { diagnoseSetup } = require(resolve('diagnose_setup.js'));
 
@@ -140,7 +140,9 @@ function createAccumulator() {
     taskSpawnCount: 0, taskAliveAtEnd: 0,
     maxLocalQueue: 0,
     workerStats: {},
-    longPolls: [],
+    // `longPolls` retains only the worst; `longPollCount` is how many there
+    // actually were, so the report never says "found 100" after truncating.
+    longPolls: [], longPollCount: 0,
     schedDelayTotal: 0, schedDelayHighCount: 0, schedDelayWorst: [],
     queueMax: 0, queueSum: 0, queueCount: 0,
     taskTimelineSamples: [],
@@ -216,6 +218,7 @@ function accumulateTrace(acc, trace, sourceFile) {
       h.record(Math.max(1, Math.round(dur)));
 
       if (dur > 1e6) {
+        acc.longPollCount++;
         acc.longPolls.push({ dur, poll: p, worker: w, file: sourceFile });
         if (acc.longPolls.length > 200) { acc.longPolls.sort((a, b) => b.dur - a.dur); acc.longPolls.length = 100; }
       }
@@ -325,7 +328,7 @@ function finalizeAccumulator(acc) {
     taskSpawnCount: acc.taskSpawnCount, taskAliveAtEnd: acc.taskAliveAtEnd,
     maxLocalQueue: acc.maxLocalQueue,
     workerSpans,
-    longPolls: acc.longPolls,
+    longPolls: acc.longPolls, longPollCount: acc.longPollCount,
     schedDelayStats: { total: acc.schedDelayTotal, highCount: acc.schedDelayHighCount, worst: acc.schedDelayWorst },
     schedDelays: acc.schedDelayWorst,
     queueDepthStats: { max: acc.queueMax, avg: acc.queueCount > 0 ? acc.queueSum / acc.queueCount : 0, samples: acc.queueCount },
@@ -383,15 +386,23 @@ function reportAnalysis(a, label) {
   }
 
   // ── Long polls ──
+  //
+  // Severity-ranked: the >1ms line is the pass/fail signal ("none found" means
+  // a healthy trace), and what follows is the WORST few of however many
+  // crossed it - never a count of the truncated list.
   console.log(`\n${'─'.repeat(60)}`);
   console.log(`LONG POLLS (>1ms)`);
   console.log(`${'─'.repeat(60)}`);
   const longPolls = a.longPolls;
+  const longPollCount = a.longPollCount != null ? a.longPollCount : longPolls.length;
 
-  if (longPolls.length === 0) {
+  if (longPollCount === 0) {
     console.log('  None found ✅');
   } else {
-    console.log(`  Found ${longPolls.length} long poll(s)\n`);
+    const shown = Math.min(longPolls.length, 10);
+    const worst = longPolls.length > 0 ? fmtDur(longPolls[0].dur) : 'n/a';
+    console.log(`  Found ${longPollCount} long poll(s) — worst ${worst}`);
+    console.log(`  Showing the worst ${shown}, ranked by duration\n`);
     for (const lp of longPolls.slice(0, 10)) {
       const p = lp.poll;
       console.log(`  ▸ ${fmtDur(lp.dur)} on worker ${lp.worker} at ${fmtRel(p.start, minTs)}${lp.file ? ' [' + lp.file + ']' : ''}`);
@@ -833,6 +844,7 @@ function mergePartial(acc, p) {
   }
 
   // Long polls
+  acc.longPollCount += p.longPollCount;
   for (const lp of p.longPolls) acc.longPolls.push(lp);
   if (acc.longPolls.length > 200) { acc.longPolls.sort((a, b) => b.dur - a.dur); acc.longPolls.length = 100; }
 
@@ -1009,7 +1021,7 @@ function analyzeWorkerMain(cachePath) {
     taskSpawnCount: trace.taskSpawnTimes.size,
     taskAliveAtEnd: trace.taskSpawnTimes.size - trace.taskTerminateTimes.size,
     maxLocalQueue: spans.maxLocalQueue,
-    workerStats: {}, longPolls: [],
+    workerStats: {}, longPolls: [], longPollCount: 0,
     queueMax: 0, queueSum: 0, queueCount: 0,
     schedDelayTotal: schedDelays.length, schedDelayHighCount: 0, schedDelayWorst: [],
     schedDelayValues: schedDelays.map(sd => Math.max(1, Math.round(sd.delay))),
@@ -1039,7 +1051,7 @@ function analyzeWorkerMain(cachePath) {
       const dur = p.end - p.start;
       const loc = p.spawnLoc || '(unknown)';
       (partial.pollDurationsByLoc[loc] || (partial.pollDurationsByLoc[loc] = [])).push(Math.max(1, Math.round(dur)));
-      if (dur > 1e6) partial.longPolls.push({ dur, poll: p, worker: w, file: sourceFile });
+      if (dur > 1e6) { partial.longPollCount++; partial.longPolls.push({ dur, poll: p, worker: w, file: sourceFile }); }
     }
   }
   partial.longPolls.sort((a, b) => b.dur - a.dur);

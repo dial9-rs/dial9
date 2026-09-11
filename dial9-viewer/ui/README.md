@@ -229,6 +229,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `issue` | POI detector id | Issues filter. |
 | `issue-sort` | `<worker\|kind\|time\|duration>,<asc\|desc>` | Issues ordering. |
 | `issue-threshold` | non-negative integer (microseconds) | Severity floor for the spawn-to-first-poll delay detector. Omitted at its default. |
+| `issue-worst` | `10` \| `50` \| `200` | How many of the worst points the issues rail lists. The detectors rank by severity, so this resizes the list rather than filtering it. Omitted at its default. |
 | `issue-index` | non-negative integer | Current issues cursor. |
 | `issue-anchor` | `<worker>:<timeNs>:<spanStartNs>:<taskId\|->` | Stable identity for the current issue; takes precedence over its sorted index. |
 | `span-pct` | `50` \| `90` \| `95` \| `99` | Span percentile floor. |

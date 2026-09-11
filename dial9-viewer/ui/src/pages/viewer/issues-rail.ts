@@ -20,14 +20,17 @@ import { deriveLaneData } from "../../components/canvas/lanes/index.js";
 import { spawnLocLabel } from "./task-detail-model.js";
 import {
   POI_FILTERS,
+  POI_WORST_N_CHOICES,
   SPAWN_DELAY_THRESHOLD_MAX_US,
   SPAWN_DELAY_THRESHOLD_MIN_US,
   derivePoiViewModel,
   filterLabel,
   parsePoiFilter,
+  parsePoiWorstN,
   parseSpawnThresholdUs,
   poiJump,
   stepIndex,
+  worstNLabel,
   type PoiViewModel,
 } from "./poi.js";
 import {
@@ -273,7 +276,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     const trace = state.trace.trace;
     const { poi, viewport } = state;
     const key = trace
-      ? `${idOf(trace)}|${poi.filter}|${poi.spawnThresholdUs}|${poi.sortKey}|${poi.sortDir}|${viewport.minTs}|${poi.index}`
+      ? `${idOf(trace)}|${poi.filter}|${poi.spawnThresholdUs}|${poi.worstN}|${poi.sortKey}|${poi.sortDir}|${viewport.minTs}|${poi.index}`
       : "none";
     if (cacheVm === null || key !== cacheKey) {
       cacheKey = key;
@@ -336,6 +339,8 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       spanFocus: null,
       focusedSpanId: null,
       taskDump: null,
+      // Always written, so the previous jump's box never outlives its row.
+      poiRange: jump.highlight,
     });
     store.update("poi", { index });
     // Moving the time window is not enough: the lanes box scrolls
@@ -363,6 +368,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
       pinnedEvent: null,
       pollDetail: null,
       taskDump: null,
+      poiRange: null,
     });
     store.update("poi", { taskIndex: index });
     if (task.firstPollWorker >= 0) revealWorker(task.firstPollWorker);
@@ -403,9 +409,27 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     store.update("poi", { railTab });
   }
 
+  /** Drop the current issue: every control that re-derives the list unselects,
+   *  and the jump's highlight box has to go with the row it belonged to. */
+  function deselectIssue(patch: Partial<StoreState["poi"]>): void {
+    store.update("poi", { ...patch, index: -1 });
+    if (store.getState().selection.poiRange !== null) {
+      store.update("selection", { poiRange: null });
+    }
+  }
+
   function setFilter(filter: PointOfInterestType): void {
     // A new filter rebuilds the list; the current index no longer maps.
-    store.update("poi", { filter, index: -1 });
+    deselectIssue({ filter });
+  }
+
+  /** Resizes the list, so the current index no longer maps. The detector is not
+   *  re-run: every choice is a prefix of the same severity-ranked result. */
+  function setWorstN(raw: string): void {
+    const worstN = parsePoiWorstN(raw);
+    if (worstN === null) return;
+    if (worstN === store.getState().poi.worstN) return;
+    deselectIssue({ worstN });
   }
 
   /** Rebuilds the list, so the current index is dropped. An unparseable value
@@ -414,7 +438,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     const spawnThresholdUs = parseSpawnThresholdUs(raw);
     if (spawnThresholdUs === null) return;
     if (spawnThresholdUs === store.getState().poi.spawnThresholdUs) return;
-    store.update("poi", { spawnThresholdUs, index: -1 });
+    deselectIssue({ spawnThresholdUs });
   }
 
   function sortTaskByColumn(col: TaskColumn): void {
@@ -439,7 +463,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
           ? "desc"
           : "asc"
         : col.defaultDir;
-    store.update("poi", { sortKey: col.key, sortDir: dir, index: -1 });
+    deselectIssue({ sortKey: col.key, sortDir: dir });
   }
 
   // ── Resize drag (the rail's right-edge handle) ──────────────────────────
@@ -534,6 +558,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
         {
           setTab,
           setFilter,
+          setWorstN,
           setSpawnThreshold,
           sortByColumn,
           jumpTo,
@@ -594,6 +619,7 @@ function revealTaskWindow(
 interface RailHandlers {
   setTab(tab: RailTab): void;
   setFilter(filter: PointOfInterestType): void;
+  setWorstN(raw: string): void;
   setSpawnThreshold(raw: string): void;
   sortByColumn(col: Column): void;
   jumpTo(index: number): void;
@@ -671,33 +697,38 @@ function issuesHead(vm: PoiViewModel, h: RailHandlers): TemplateResult {
     vm.total === 0
       ? "None found"
       : `${vm.index >= 0 ? vm.index + 1 : 0}/${vm.total.toLocaleString()}`;
-  // Never let a capped list read as the whole story: say plainly that only the
-  // worst `retained` of `total` are navigable.
-  const truncated = vm.retained < vm.total;
+  // The detectors rank rather than threshold, so a list shorter than the match
+  // count is the NORMAL case, not an overflow. The denominator is printed only
+  // when it tells the reader something (vm.showTotal), because "worst 50 of
+  // 56,125" otherwise reads as "found 56,125 problems".
+  const showing = vm.retained < vm.total;
   return html`
     <div class="d9-rail-head">
       <div class="d9-rail-title">
         <span class="d9-rail-heading">ISSUES</span>
         <span class="d9-rail-pos" data-poi-position>${positionLabel}</span>
       </div>
-      ${truncated
+      ${showing
         ? html`<div
             class="d9-rail-truncated"
             data-poi-truncated
-            title="Too many matches to list. The worst ${vm.retained.toLocaleString()} are shown, ranked by severity."
+            title=${vm.cappedAtCeiling
+              ? `Too many to list: the worst ${vm.retained.toLocaleString()} of ${vm.total.toLocaleString()} are shown.`
+              : `Ranked by severity: the worst ${vm.retained.toLocaleString()} are shown.`}
           >
-            showing worst ${vm.retained.toLocaleString()} of
-            ${vm.total.toLocaleString()}
+            showing worst ${vm.retained.toLocaleString()}${vm.showTotal
+              ? ` of ${vm.total.toLocaleString()}`
+              : ""}
           </div>`
         : nothing}
       <div class="d9-rail-controls">
         <label class="d9-rail-filter-label">
-          <span class="d9-sr-only">Point-of-interest filter</span>
+          <span class="d9-sr-only">Point-of-interest kind</span>
           <select
             class="d9-rail-filter"
             data-poi-filter
-            aria-label="Point-of-interest filter"
-            title="Which class of issue to list"
+            aria-label="Point-of-interest kind"
+            title="Which kind of point to list, worst first"
             @change=${(e: Event) => {
               const filter = parsePoiFilter((e.target as HTMLSelectElement).value);
               if (filter !== null) h.setFilter(filter);
@@ -710,6 +741,7 @@ function issuesHead(vm: PoiViewModel, h: RailHandlers): TemplateResult {
             )}
           </select>
         </label>
+        ${worstNControl(vm, h)}
         ${vm.filter === "spawn-delay" ? spawnThresholdControl(vm, h) : nothing}
         <span class="d9-rail-hint" title="Step issues with the n / p keys"
           ><kbd>n</kbd>/<kbd>p</kbd> step</span
@@ -720,8 +752,34 @@ function issuesHead(vm: PoiViewModel, h: RailHandlers): TemplateResult {
 }
 
 /**
- * Rendered only while the spawn-delay filter is active; the other detectors
- * have fixed thresholds, so the control would do nothing there.
+ * How many of the worst points to list. The detectors rank by severity, so this
+ * resizes the answer rather than filtering it - and it never re-runs a detector,
+ * because every choice is a prefix of the same ranked list.
+ */
+function worstNControl(vm: PoiViewModel, h: RailHandlers): TemplateResult {
+  return html`
+    <label class="d9-rail-worst-label">
+      <span class="d9-sr-only">How many issues to list</span>
+      <select
+        class="d9-rail-worst"
+        data-poi-worst
+        aria-label="How many issues to list"
+        title="How many of the worst issues to list"
+        @change=${(e: Event) => h.setWorstN((e.target as HTMLSelectElement).value)}
+      >
+        ${POI_WORST_N_CHOICES.map(
+          (n) => html`<option value=${n} ?selected=${n === vm.worstN}>
+            ${worstNLabel(n)}
+          </option>`,
+        )}
+      </select>
+    </label>
+  `;
+}
+
+/**
+ * Rendered only while the spawn-delay filter is active; it is the only detector
+ * that takes a floor at all, so the control would do nothing elsewhere.
  *
  * `change`, not `input`: each commit re-runs the detector over the whole trace.
  */

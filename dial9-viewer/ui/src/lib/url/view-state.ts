@@ -111,6 +111,8 @@ export interface ViewState {
   poiFilter?: string;
   /** Issues-rail spawn-delay threshold in microseconds, when not the default. */
   poiSpawnThresholdUs?: number;
+  /** How many points the issues rail lists, when not the default. */
+  poiWorstN?: number;
   /** Issues-rail sort as `"<key>,<dir>"`, when not the default `duration,desc`. */
   poiSort?: string;
   /** Current POI index in the filtered+sorted rail list, when >= 0. */

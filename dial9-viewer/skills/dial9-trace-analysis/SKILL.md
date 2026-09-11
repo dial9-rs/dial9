@@ -94,6 +94,7 @@ process.stderr.write('\n');
 
   // ── Long polls ──
   longPolls: [{dur, poll, worker, file}], // polls > 1ms, top 100 sorted by duration descending
+  longPollCount: number,            // how many polls crossed 1ms in total; longPolls holds only the worst of them
                                     // poll: {start, end, taskId, spawnLoc}; file: source trace filename
 
   // ── Queue depth ──
@@ -205,20 +206,43 @@ Returns `[{wakeTime, pollTime, delay, taskId, wakerTaskId, worker, poll}]` sorte
 
 ## filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, opts)
 
-Filters for notable events. `filterType` is one of:
-- `"sched"` — Kernel scheduling delays >100µs on worker unpark
-- `"long-poll"` — Polls longer than 1ms
-- `"cpu-sampled"` — Polls that have CPU or scheduling samples attached
-- `"wake-delay"` — Wake-to-poll delays >100µs
-- `"uninstrumented"` — Polls of tasks spawned via raw `tokio::spawn`
-- `"spawn-delay"` — Spawn-to-first-poll delays above a configurable floor (default 100µs)
+Returns the **worst N** events of one kind, ranked by severity. There is no
+fixed cutoff: a cutoff answers the wrong question in both directions — ">1ms"
+buries five real outliers under ten thousand borderline matches on a busy trace,
+and reports nothing at all on a fast one whose worst poll is 800µs and still
+worth seeing.
+
+`filterType` is one of:
+- `"sched"` — Kernel scheduling delay on worker unpark, ranked by delay
+- `"long-poll"` — Polls, ranked by duration
+- `"cpu-sampled"` — Polls that have CPU or scheduling samples attached, ranked by duration
+- `"wake-delay"` — Wake-to-poll delays, ranked by delay
+- `"uninstrumented"` — Polls of tasks spawned via raw `tokio::spawn`, ranked by duration
+- `"spawn-delay"` — Spawn-to-first-poll delays, ranked by delay
+- `"off-cpu-active"` — Awake worker periods, ranked by how much of the period the
+  kernel spent descheduling the worker (`value` is off-CPU nanoseconds); the same
+  signal as the `cpu-contention` check in `dial9-red-flags`
 
 `opts`:
+- `limit` — how many of the worst to return (default 50, exported as `POI_DEFAULT_WORST_N`)
+- `onTotal(n)` — receives the TRUE match count before the cap, so you can report "worst 50 of 12,431"
 - `hasSchedWait: true` — enables the `"sched"` filter (requires schedWait data in trace)
-- `sortByWorst: true` — sorts by severity instead of time
+- `sortByWorst: true` — presents the survivors severity-first instead of chronologically
 - `taskInstrumented` — required by the `"uninstrumented"` filter (`trace.taskInstrumented`)
 - `taskSpawnTimes` — required by the `"spawn-delay"` filter (`trace.taskSpawnTimes`, empty unless the recorder had task tracking on)
-- `spawnDelayThresholdUs` — severity floor for `"spawn-delay"`, in microseconds
+- `spawnDelayThresholdUs` — optional severity floor for `"spawn-delay"`, in microseconds (default 0: no floor)
+- `hasWorkerCpuTime: true` - enables `"off-cpu-active"`. Worker CPU time reads
+  as a hardcoded 0 off Linux, which pins every ratio to 0
+
+Selection is always by severity, and `sortByWorst` only chooses how the
+survivors are *presented*. Asking for the worst 50 in chronological order is
+meaningful; the first 50 chronologically would silently drop every outlier
+behind them.
+
+Because the detectors rank rather than threshold, a non-zero result is **not**
+by itself a problem — every trace has a worst poll. Read `value`, not the count.
+For a pass/fail signal, compare against your own floor, or use the
+`dial9-red-flags` scan, whose severity tiers stay fixed.
 
 Returns `[{time, worker, type, value, span, schedDelay?}]`. `value` units vary by
 filter: nanoseconds for `"sched"`, milliseconds for the poll-duration filters,

@@ -106,6 +106,40 @@ describe("issues-rail n/p stepping", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("boxes the period when stepping to a descheduled-worker issue", () => {
+    const store = loadedStore();
+    store.update("poi", { filter: "off-cpu-active" });
+    const rail = createIssuesRail(store);
+
+    expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(true);
+
+    const state = store.getState();
+    const box = state.selection.poiRange;
+    // The lanes draw no bar for an awake-but-descheduled stretch, so without
+    // the box the jump moves the viewport and marks nothing.
+    expect(box).not.toBeNull();
+    expect(box!.endNs).toBeGreaterThan(box!.startNs);
+    // And the view frames the period rather than a multiple of it.
+    expect(state.viewport.viewStart).toBeLessThanOrEqual(box!.startNs);
+    expect(state.viewport.viewEnd).toBeGreaterThanOrEqual(box!.endNs);
+    expect(state.viewport.viewEnd - state.viewport.viewStart).toBeLessThan(
+      (box!.endNs - box!.startNs) * 2 + 1e6,
+    );
+  });
+
+  it("drops a previous box when stepping to an issue the lanes already draw", () => {
+    const store = loadedStore();
+    store.update("selection", {
+      poiRange: { startNs: 1, endNs: 2, worker: 0, severityNs: 1, kind: "off-cpu-active" },
+    });
+    store.update("poi", { filter: "cpu-sampled" });
+    const rail = createIssuesRail(store);
+
+    expect(binding(rail.keyBindings, "n").onKey(FAKE_KEY)).toBe(true);
+
+    expect(store.getState().selection.poiRange).toBeNull();
+  });
+
   it("declines (returns false) when no trace is loaded - the key falls through", () => {
     const store = createViewerStore({ scheduler: () => {} });
     const rail = createIssuesRail(store);

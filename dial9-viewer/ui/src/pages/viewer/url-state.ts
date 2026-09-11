@@ -30,7 +30,9 @@ import {
 import {
   DEFAULT_SPAWN_DELAY_THRESHOLD_US,
   POI_FILTERS,
+  POI_WORST_N_DEFAULT,
   derivePoiViewModel,
+  parsePoiWorstN,
   parseSpawnThresholdUs,
   poiAnchor,
   type PoiAnchor,
@@ -65,6 +67,7 @@ const P_SPAWNED = "spawned";
 const P_ISSUE = "issue";
 const P_ISSUE_SORT = "issue-sort";
 const P_ISSUE_THRESHOLD = "issue-threshold";
+const P_ISSUE_WORST_N = "issue-worst";
 const P_ISSUE_INDEX = "issue-index";
 const P_ISSUE_ANCHOR = "issue-anchor";
 const P_SPAN_PCT = "span-pct";
@@ -162,6 +165,9 @@ export const VIEWER_STATE_OWNERSHIP = {
     pollDetail: url(P_POLL),
     taskDump: url(P_TASK_DUMP),
     sidebarRange: url(P_REGION),
+    // Reconstructed from the anchored POI on load, not carried itself: it is
+    // that POI's own span, so a second encoding of it could disagree.
+    poiRange: derived,
     hoveredWakerTaskId: transient,
     scopedSpawnLoc: url(P_TASK_SCOPE),
     spawnedTasksRange: url(P_SPAWNED),
@@ -169,6 +175,7 @@ export const VIEWER_STATE_OWNERSHIP = {
   poi: {
     filter: url(P_ISSUE),
     spawnThresholdUs: url(P_ISSUE_THRESHOLD),
+    worstN: url(P_ISSUE_WORST_N),
     sortKey: url(P_ISSUE_SORT),
     sortDir: url(P_ISSUE_SORT),
     index: url(P_ISSUE_INDEX, P_ISSUE_ANCHOR),
@@ -319,6 +326,7 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   if (poi.spawnThresholdUs !== DEFAULT_SPAWN_DELAY_THRESHOLD_US) {
     vs.poiSpawnThresholdUs = poi.spawnThresholdUs;
   }
+  if (poi.worstN !== POI_WORST_N_DEFAULT) vs.poiWorstN = poi.worstN;
   if (poi.sortKey !== "duration" || poi.sortDir !== "desc") {
     vs.poiSort = `${poi.sortKey},${poi.sortDir}`;
   }
@@ -455,6 +463,7 @@ export function mirrorViewerToQuery(
     P_ISSUE_THRESHOLD,
     vs.poiSpawnThresholdUs != null ? String(vs.poiSpawnThresholdUs) : null,
   );
+  set(params, P_ISSUE_WORST_N, vs.poiWorstN != null ? String(vs.poiWorstN) : null);
   set(params, P_ISSUE_INDEX, vs.poiIndex != null ? String(Math.round(vs.poiIndex)) : null);
   set(params, P_ISSUE_ANCHOR, vs.poiAnchor ?? null);
   set(params, P_SPAN_PCT, vs.spanPct != null ? String(vs.spanPct) : null);
@@ -594,6 +603,7 @@ export interface ViewerUrlState {
   /** Issues-rail restore (applied at boot). */
   poiFilter?: PointOfInterestType;
   poiSpawnThresholdUs?: number;
+  poiWorstN?: number;
   poiSort?: { key: PoiSortKey; dir: "asc" | "desc" };
   poiIndex?: number;
   poiAnchor?: PoiAnchor;
@@ -755,6 +765,7 @@ export function hydrateViewerStore(
   if (urlView.poiSpawnThresholdUs !== undefined) {
     poi.spawnThresholdUs = urlView.poiSpawnThresholdUs;
   }
+  if (urlView.poiWorstN !== undefined) poi.worstN = urlView.poiWorstN;
   if (urlView.poiSort !== undefined) {
     poi.sortKey = urlView.poiSort.key;
     poi.sortDir = urlView.poiSort.dir;
@@ -828,6 +839,9 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   // outside the range the input enforces.
   const issueThreshold = parseSpawnThresholdUs(p.get(P_ISSUE_THRESHOLD) ?? "");
   if (issueThreshold != null) out.poiSpawnThresholdUs = issueThreshold;
+  // Same discipline: a hand-edited link can only name a length the rail offers.
+  const issueWorstN = parsePoiWorstN(p.get(P_ISSUE_WORST_N) ?? "");
+  if (issueWorstN != null) out.poiWorstN = issueWorstN;
   const issueSort = p.get(P_ISSUE_SORT);
   if (issueSort != null) {
     const comma = issueSort.indexOf(",");

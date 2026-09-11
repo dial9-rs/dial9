@@ -6,7 +6,7 @@
 // panel starts expanded (panelCollapsed all false) - the unified column shows
 // analysis surfaces by default.
 
-import { DEFAULT_SPAWN_DELAY_THRESHOLD_US } from "./poi.js";
+import { DEFAULT_SPAWN_DELAY_THRESHOLD_US, POI_WORST_N_DEFAULT } from "./poi.js";
 import { createStore } from "../../store/store.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -42,6 +42,7 @@ export function initialViewerState(): StoreState {
       pollDetail: null,
       taskDump: null,
       sidebarRange: null,
+      poiRange: null,
       hoveredWakerTaskId: null,
       scopedSpawnLoc: null,
       spawnedTasksRange: null,
@@ -53,6 +54,7 @@ export function initialViewerState(): StoreState {
     poi: {
       filter: "sched",
       spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+      worstN: POI_WORST_N_DEFAULT,
       sortKey: "duration",
       sortDir: "desc",
       index: -1,

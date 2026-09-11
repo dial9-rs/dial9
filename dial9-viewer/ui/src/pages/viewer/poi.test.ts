@@ -40,7 +40,18 @@ import {
   durationLabel,
   filterLabel,
   kindLabel,
+  isPredicateFilter,
+  parsePoiWorstN,
   peakValue,
+  poiMatchCount,
+  POI_WORST_N_ALL,
+  POI_WORST_N_CHOICES,
+  worstNLabel,
+  redFlagLabel,
+  redFlagSummary,
+  POI_WORST_N_DEFAULT,
+  poiHighlightCaption,
+  poiHighlightSummary,
   poiJump,
   poisForFilter,
   poiSourceFor,
@@ -55,6 +66,7 @@ import {
 const DEFAULT_POI: PoiSlice = {
   filter: "sched",
   spawnThresholdUs: DEFAULT_SPAWN_DELAY_THRESHOLD_US,
+  worstN: POI_WORST_N_DEFAULT,
   sortKey: "duration",
   sortDir: "desc",
   index: -1,
@@ -78,7 +90,9 @@ beforeAll(async () => {
   expect(trace.minTs).not.toBeNull();
 });
 
-/** Independently derive the detector count for one filter. */
+/** Independently derive the TRUE detector match count for one filter - the
+ *  population the rail's worst-N came from, which `onTotal` reports because the
+ *  returned list is capped. */
 function referenceCount(
   t: ParsedTrace,
   filter: PointOfInterestType,
@@ -96,13 +110,24 @@ function referenceCount(
   const workerSpans = spanResult.workerSpans;
   if (t.cpuSamples.length > 0) attachCpuSamples(t.cpuSamples, workerSpans);
   const schedDelays = computeSchedulingDelays(workerSpans, workerIds, spanResult.wakesByTask);
-  return filterPointsOfInterest(filter, workerSpans, workerIds, schedDelays, {
+  // Derived independently: without them this would compare a live detector
+  // against a disabled one.
+  const hasWorkerCpuTime = workerIds.some((w) =>
+    workerSpans[w]!.actives.some((a) => a.ratio > 0),
+  );
+  let matched = 0;
+  filterPointsOfInterest(filter, workerSpans, workerIds, schedDelays, {
     hasSchedWait: t.hasSchedWait,
     sortByWorst: true,
     taskInstrumented: t.taskInstrumented,
     taskSpawnTimes: t.taskSpawnTimes,
     spawnDelayThresholdUs,
-  }).length;
+    hasWorkerCpuTime,
+    onTotal: (n: number) => {
+      matched = n;
+    },
+  });
+  return matched;
 }
 
 describe("rail count contract", () => {
@@ -121,15 +146,33 @@ describe("rail count contract", () => {
   });
 
   it("the displayed sort never changes the count", () => {
-    const base = derivePoiViewModel(trace, DEFAULT_POI, trace.minTs ?? 0).total;
+    const base = derivePoiViewModel(trace, DEFAULT_POI, trace.minTs ?? 0);
     for (const sortKey of ["worker", "kind", "time", "duration"] as const) {
       for (const sortDir of ["asc", "desc"] as const) {
         const vm = derivePoiViewModel(trace, { ...DEFAULT_POI, sortKey, sortDir }, trace.minTs ?? 0);
+        expect(vm.total).toBe(base.total);
         // `retained`, not `rows`: rows is a bounded window into the list.
-        expect(vm.retained).toBe(base);
-        expect(vm.rows.length).toBe(Math.min(base, RAIL_WINDOW));
+        expect(vm.retained).toBe(base.retained);
+        expect(vm.rows.length).toBe(Math.min(base.retained, RAIL_WINDOW));
       }
     }
+  });
+
+  it("lists the worst N of the matched population, and says which", () => {
+    for (const worstN of POI_WORST_N_CHOICES) {
+      const vm = derivePoiViewModel(trace, { ...DEFAULT_POI, worstN }, trace.minTs ?? 0);
+      expect(vm.worstN, `worstN=${worstN}`).toBe(worstN);
+      expect(vm.retained, `worstN=${worstN}`).toBe(Math.min(worstN, vm.total));
+      // The count reported is the population, never the list length: "worst 10"
+      // must not read as "found 10".
+      expect(vm.total).toBe(referenceCount(trace, DEFAULT_POI.filter));
+    }
+  });
+
+  it("a shorter list is a prefix of a longer one (same ranking, fewer rows)", () => {
+    const wide = derivePoiViewModel(trace, { ...DEFAULT_POI, worstN: 200 }, trace.minTs ?? 0);
+    const narrow = derivePoiViewModel(trace, { ...DEFAULT_POI, worstN: 10 }, trace.minTs ?? 0);
+    expect(narrow.sorted).toEqual(wide.sorted.slice(0, narrow.sorted.length));
   });
 });
 
@@ -211,6 +254,137 @@ describe("red-flag counts", () => {
         trace.minTs ?? 0,
       ).redFlags.find((r) => r.type === "spawn-delay")?.count ?? 0;
     expect(at(0)).toBeGreaterThan(at(1e6));
+  });
+});
+
+describe("zero-severity points are not points of interest", () => {
+  it("drops parks the kernel delayed for 0ns", () => {
+    const source = poiSourceFor(trace);
+    const all = poisForFilter(source, "sched", DEFAULT_SPAWN_DELAY_THRESHOLD_US, POI_WORST_N_ALL);
+    expect(all.length).toBeGreaterThan(0);
+    // The demo trace has 8,194 parks but only 148 real waits: a 0ns delay is
+    // not a delay, and without this the list is 98% non-events.
+    for (const poi of all) expect(poi.value).toBeGreaterThan(0);
+    expect(all.length).toBeLessThan(8_194);
+  });
+
+  it("every ranked detector reports only nonzero severity", () => {
+    const source = poiSourceFor(trace);
+    for (const filter of POI_FILTERS) {
+      if (isPredicateFilter(filter)) continue;
+      const list = poisForFilter(source, filter, DEFAULT_SPAWN_DELAY_THRESHOLD_US, POI_WORST_N_ALL);
+      const zeros = list.filter((p) => p.value <= 0);
+      expect(zeros.map((p) => p.type), `${filter} listed zero-severity points`).toEqual([]);
+    }
+  });
+
+  it("the excluded points leave the true count too, not just the list", () => {
+    const source = poiSourceFor(trace);
+    const total = poiMatchCount(source, "sched", DEFAULT_SPAWN_DELAY_THRESHOLD_US, POI_WORST_N_ALL);
+    const all = poisForFilter(source, "sched", DEFAULT_SPAWN_DELAY_THRESHOLD_US, POI_WORST_N_ALL);
+    // Otherwise "of N" would still be counting the non-events.
+    expect(total).toBe(all.length);
+  });
+});
+
+describe("the denominator, and showing everything", () => {
+  const vm = (over: Partial<PoiSlice>): ReturnType<typeof derivePoiViewModel> =>
+    derivePoiViewModel(trace, { ...DEFAULT_POI, ...over }, trace.minTs ?? 0);
+
+  it("hides 'of N' for a detector that ranks the whole population", () => {
+    // "worst 50 of 56,125" reads as 56,125 problems; it is just the poll count.
+    const v = vm({ filter: "long-poll", worstN: 50 });
+    expect(v.total).toBeGreaterThan(v.retained);
+    expect(v.showTotal).toBe(false);
+  });
+
+  it("shows 'of N' for a detector that genuinely narrowed the population", () => {
+    const v = vm({ filter: "uninstrumented", worstN: 50 });
+    expect(v.total).toBeGreaterThan(v.retained);
+    expect(v.showTotal).toBe(true);
+  });
+
+  it("lists everything when 'all' fits under the ceiling", () => {
+    const v = vm({ filter: "spawn-delay", worstN: POI_WORST_N_ALL });
+    expect(v.retained).toBe(v.total);
+    expect(v.cappedAtCeiling).toBe(false);
+    // Nothing was withheld, so there is no denominator to print.
+    expect(v.showTotal).toBe(false);
+  });
+
+  it("'all' reaches past the fixed choices", () => {
+    const capped = vm({ filter: "long-poll", worstN: 200 });
+    const all = vm({ filter: "long-poll", worstN: POI_WORST_N_ALL });
+    expect(all.retained).toBeGreaterThan(capped.retained);
+    expect(all.retained).toBe(Math.min(all.total, POI_WORST_N_ALL));
+  });
+
+  it("says so when 'all' hits the ceiling", () => {
+    const v = vm({ filter: "long-poll", worstN: POI_WORST_N_ALL });
+    if (v.total > POI_WORST_N_ALL) {
+      expect(v.cappedAtCeiling).toBe(true);
+      expect(v.showTotal).toBe(true);
+    } else {
+      expect(v.cappedAtCeiling).toBe(false);
+    }
+  });
+
+  it("offers 'all' as a choice and labels it", () => {
+    expect(POI_WORST_N_CHOICES).toContain(POI_WORST_N_ALL);
+    expect(worstNLabel(POI_WORST_N_ALL)).toBe("all");
+    expect(worstNLabel(10)).toBe("worst 10");
+    expect(parsePoiWorstN(String(POI_WORST_N_ALL))).toBe(POI_WORST_N_ALL);
+  });
+});
+
+describe("red-flag summary (the toolbar chip)", () => {
+  const summary = (): ReturnType<typeof redFlagSummary> =>
+    redFlagSummary(poiSourceFor(trace), DEFAULT_SPAWN_DELAY_THRESHOLD_US);
+
+  it("reports the WORST value for a ranked detector, never its population", () => {
+    const longPoll = summary().find((r) => r.type === "long-poll");
+    expect(longPoll).toBeDefined();
+    expect(longPoll!.counted).toBe(false);
+    // The regression this pins: with no cutoff, "long-poll" matches every poll
+    // in the trace, so rendering its COUNT read as "56,125 problems" on a trace
+    // whose polls are almost all microseconds.
+    expect(longPoll!.count).toBe(
+      poiMatchCount(poiSourceFor(trace), "long-poll", DEFAULT_SPAWN_DELAY_THRESHOLD_US),
+    );
+    expect(redFlagLabel(longPoll!)).toMatch(/^worst long poll /);
+    expect(redFlagLabel(longPoll!)).not.toContain(String(longPoll!.count));
+  });
+
+  it("keeps the count for a predicate detector, whose count is a real fact", () => {
+    for (const type of ["cpu-sampled", "uninstrumented"] as const) {
+      const flag = summary().find((r) => r.type === type);
+      if (flag === undefined) continue;
+      expect(flag.counted, type).toBe(true);
+      expect(redFlagLabel(flag), type).toContain(String(flag.count));
+    }
+  });
+
+  it("classifies every detector as ranked or predicate", () => {
+    for (const type of POI_FILTERS) {
+      expect(typeof isPredicateFilter(type), type).toBe("boolean");
+    }
+    expect(isPredicateFilter("long-poll")).toBe(false);
+    expect(isPredicateFilter("sched")).toBe(false);
+    expect(isPredicateFilter("wake-delay")).toBe(false);
+    expect(isPredicateFilter("spawn-delay")).toBe(false);
+    expect(isPredicateFilter("uninstrumented")).toBe(true);
+    expect(isPredicateFilter("cpu-sampled")).toBe(true);
+  });
+
+  it("drops a detector with no matches at all", () => {
+    for (const flag of summary()) expect(flag.count).toBeGreaterThan(0);
+  });
+
+  it("carries the worst severity of the ranked list it summarizes", () => {
+    const source = poiSourceFor(trace);
+    const sched = summary().find((r) => r.type === "sched");
+    const worstRow = poisForFilter(source, "sched", DEFAULT_SPAWN_DELAY_THRESHOLD_US, 1)[0];
+    expect(sched!.worstNs).toBe(valueNs(worstRow!));
   });
 });
 
@@ -376,6 +550,79 @@ describe("poiJump", () => {
     const p = poi("sched", 1e8, 0, 84e6, park(1e8, 1e8 + 84e6));
     expect(poiJump(p, vp).selectedTaskId).toBeNull();
   });
+
+  // An active period spans many polls, so it names no single task.
+  it("frames an off-cpu-active POI on its own span and selects no task", () => {
+    const p = poi("off-cpu-active", 1e8, 0, 9e6, park(1e8, 1e8 + 1e7));
+    const j = poiJump(p, vp);
+    expect(j.selectedTaskId).toBeNull();
+    // The period itself, padded 25% each side - not a multiple of it: at 5x a
+    // 10ms period is a fifth of the window and nothing says which fifth.
+    const pad = 1e7 * 0.25;
+    expect(j.viewStart).toBe(1e8 - pad);
+    expect(j.viewEnd).toBe(1e8 + 1e7 + pad);
+    expect(j.viewEnd - j.viewStart).toBeLessThan(1e7 * 2);
+  });
+
+  it("boxes the off-cpu-active period, since the lanes draw no bar for it", () => {
+    const p = poi("off-cpu-active", 1e8, 3, 9e6, park(1e8, 1e8 + 1e7));
+    // Worker and severity ride along: the box spans every lane, so nothing
+    // else attributes it, and its edges are wall time, not the 9ms off-CPU.
+    expect(poiJump(p, vp).highlight).toEqual({
+      startNs: 1e8,
+      endNs: 1e8 + 1e7,
+      worker: 3,
+      severityNs: 9e6,
+      kind: "off-cpu-active",
+    });
+  });
+
+  it("leaves POIs the lanes already draw unboxed", () => {
+    const long = poi("long-poll", 5e8, 1, 3, poll(5e8, 5e8 + 2e7, 7));
+    expect(poiJump(long, vp).highlight).toBeNull();
+    const parked = poi("sched", 1e8, 0, 84e6, park(1e8, 1e8 + 84e6));
+    expect(poiJump(parked, vp).highlight).toBeNull();
+  });
+
+  it("keeps a sub-millisecond off-cpu-active period inside a legible window", () => {
+    const p = poi("off-cpu-active", 1e8, 0, 4e4, park(1e8, 1e8 + 5e4));
+    const j = poiJump(p, vp);
+    expect(j.viewEnd - j.viewStart).toBeGreaterThanOrEqual(1e6);
+  });
+});
+
+describe("jump-marker wording", () => {
+  const highlight = {
+    startNs: 1_000_000_000 + 17_010_000,
+    endNs: 1_000_000_000 + 34_020_000,
+    worker: 0,
+    severityNs: 1_410_000,
+    kind: "off-cpu-active" as const,
+  };
+
+  it("names the worker and the severity, leaving the span to the measure bar", () => {
+    // The box spans every lane, so nothing else says W0. The boxed duration is
+    // omitted on purpose - the measuring bar states it one row above.
+    expect(poiHighlightCaption(highlight)).toBe("W0 · 1.41ms off-CPU");
+  });
+
+  it("drops the caption's severity claim to the share it really is", () => {
+    const card = poiHighlightSummary(highlight, 1_000_000_000);
+    expect(card.title).toBe("W0 descheduled");
+    expect(card.rows.map((r) => r.label)).toEqual(["window", "awake", "off-CPU"]);
+    expect(card.rows[1]!.value).toBe("17ms");
+    expect(card.rows[2]!.value).toBe("1.41ms (8.3%)");
+  });
+
+  it("reports the window as trace-relative offsets", () => {
+    const card = poiHighlightSummary(highlight, 1_000_000_000);
+    expect(card.rows[0]!.value).toBe("+0.02s -> +0.03s");
+  });
+
+  it("prints no share for a zero-length span rather than NaN%", () => {
+    const degenerate = { ...highlight, endNs: highlight.startNs };
+    expect(poiHighlightSummary(degenerate, 0).rows[2]!.value).toBe("1.41ms");
+  });
 });
 
 describe("value + label formatting", () => {
@@ -384,6 +631,7 @@ describe("value + label formatting", () => {
     expect(valueNs(poi("long-poll", 0, 0, 5, poll(0, 1, 0)))).toBe(5e6); // ms->ns
     expect(valueNs(poi("wake-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
     expect(valueNs(poi("spawn-delay", 0, 0, 500, poll(0, 1, 0)))).toBe(500e3); // us->ns
+    expect(valueNs(poi("off-cpu-active", 0, 0, 9e6, park(0, 10e6)))).toBe(9e6);
   });
   it("labels worker / time columns in the mock format", () => {
     expect(workerLabel(1)).toBe("W1");
