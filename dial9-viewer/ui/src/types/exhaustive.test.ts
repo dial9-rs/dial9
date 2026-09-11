@@ -176,6 +176,7 @@ const initialState: StoreState = {
     taskDump: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
+    scopedSpawnLoc: null,
     spawnedTasksRange: null,
   },
   poi: { filter: "sched", spawnThresholdUs: 100, sortKey: "duration", sortDir: "desc", index: -1, railTab: "issues", taskSort: "total", taskSortDir: "desc", taskIndex: -1 },
@@ -278,6 +279,7 @@ function populatedState(): StoreState {
       },
       sidebarRange: range,
       hoveredWakerTaskId: 7,
+      scopedSpawnLoc: null,
       spawnedTasksRange: range,
     },
     transient: {

@@ -26,6 +26,10 @@ const VIEWER_HELP_SECTIONS: readonly HelpSection[] = [
       { keys: "Option / Alt", text: "Start a zoom selection" },
       { keys: "Esc", text: "Close the topmost surface, then clear selection" },
       { keys: "?", text: "Toggle this help" },
+      {
+        keys: "Cmd/Ctrl + F",
+        text: "Search frames in an open flamegraph (`/` stays the viewer search)",
+      },
     ],
   },
   {

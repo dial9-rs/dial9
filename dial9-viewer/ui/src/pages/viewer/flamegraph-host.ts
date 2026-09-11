@@ -67,7 +67,12 @@ export function createFlamegraphHost(opts: FlamegraphHostOptions): FlamegraphHos
     if (container === null || instance === null) {
       container = opts.doc.createElement("div");
       container.className = opts.className;
-      instance = createFlamegraph(container, opts.onZoom ?? (() => {}));
+      // captureSlash: the widget's `/` handler is bound to the document, so an
+      // embedded instance would swallow the viewer's own `/` search whenever it
+      // is on screen. Frame search stays on Cmd/Ctrl + F here.
+      instance = createFlamegraph(container, opts.onZoom ?? (() => {}), {
+        captureSlash: false,
+      });
     }
     return instance;
   }

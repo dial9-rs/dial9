@@ -22,9 +22,19 @@ import type { TimePanelLayout } from "../../../types/state.js";
 
 // ── Recording context ────────────────────────────────────────────────────
 
+interface FillRectCall {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  fill: string;
+}
+
 interface Recording {
   ctx: LaneDrawContext;
   fillRects: number;
+  /** Each fillRect with the fillStyle in force, for colour-ordering checks. */
+  fillRectCalls: FillRectCall[];
   strokes: number;
   setLineDashes: number;
   fills: number;
@@ -34,6 +44,7 @@ interface Recording {
 function recordingCtx(): Recording {
   const rec: Recording = {
     fillRects: 0,
+    fillRectCalls: [],
     strokes: 0,
     setLineDashes: 0,
     fills: 0,
@@ -48,8 +59,9 @@ function recordingCtx(): Recording {
     font: "",
     textAlign: "left",
     clearRect: () => {},
-    fillRect: () => {
+    fillRect: (x: number, y: number, w: number, h: number) => {
       rec.fillRects++;
+      rec.fillRectCalls.push({ x, y, w, h, fill: String(rec.ctx.fillStyle) });
     },
     fillText: (t: string) => {
       rec.fillTexts.push(t);
@@ -111,6 +123,7 @@ function baseInput(over: Partial<LanesRenderInput>): LanesRenderInput {
     selectedTaskId: null,
     selectedSpanIds: new Set(),
     hoveredWakerTaskId: null,
+    spawnScopeTaskIds: new Set<number>(),
     pinnedPoll: null,
     sharedMaxQ: 1,
     dimmer: (c) => c,
@@ -597,5 +610,74 @@ describe("assembleLaneHover", () => {
     expect(data.parkDurationNs).toBe(500);
     expect(data.kernelSchedDelayNs).toBe(250);
     expect(data.hasClickableStack).toBe(false);
+  });
+});
+
+// ── Spawn-scope tint ──────────────────────────────────────────────────────
+
+const SPAWN_SCOPE_VIOLET = "#9575cd";
+const SELECTED_YELLOW = "#ffeb3b";
+
+describe("renderLanes: spawn-scope tint", () => {
+  // Poll-band geometry for a single 60px lane (LANE_REF_H reference, sf = 1),
+  // so the assertions ignore the lane background, rail and divider fills.
+  const BAND_TOP = 10;
+  const BAND_H = 20;
+  const inBand = (r: FillRectCall): boolean => r.y === BAND_TOP && r.h === BAND_H;
+
+  function renderScoped(over: Partial<LanesRenderInput>, polls: PollSpan[], drawW = 200) {
+    const rec = recordingCtx();
+    renderLanes(
+      rec.ctx,
+      baseInput({ workerSpans: { 0: { ...emptyLane(), polls } }, ...over }),
+      { time: layout(0, 1000, drawW), height: 60 },
+    );
+    return rec;
+  }
+
+  it("tints the siblings but leaves the selected task's yellow on top", () => {
+    // Task 1 is selected AND a member of its own spawn-location group.
+    const rec = renderScoped(
+      { selectedTaskId: 1, spawnScopeTaskIds: new Set([1, 2]) },
+      [poll(0, 100, 1), poll(400, 500, 2), poll(800, 900, 3)],
+    );
+    const violet = rec.fillRectCalls.filter((r) => r.fill === SPAWN_SCOPE_VIOLET);
+    // Only task 2: the selected task is excluded, task 3 is not a sibling.
+    expect(violet).toHaveLength(1);
+
+    // The selected task's poll sits at x=0; nothing violet covers it, and its
+    // yellow is the last fill painted there.
+    expect(violet.every((r) => r.x > 0)).toBe(true);
+    const atZero = rec.fillRectCalls.filter((r) => inBand(r) && r.x === 0);
+    expect(atZero.at(-1)!.fill).toBe(SELECTED_YELLOW);
+  });
+
+  it("still tints every sibling when nothing is selected", () => {
+    const rec = renderScoped({ selectedTaskId: null, spawnScopeTaskIds: new Set([1, 2]) }, [
+      poll(0, 100, 1),
+      poll(400, 500, 2),
+    ]);
+    expect(rec.fillRectCalls.filter((r) => r.fill === SPAWN_SCOPE_VIOLET)).toHaveLength(2);
+  });
+
+  it("coalesces the tint instead of one fillRect per sibling poll", () => {
+    const n = 100_000;
+    const polls: PollSpan[] = [];
+    for (let i = 0; i < n; i++) polls.push(poll(i, i + 1, 2));
+    const rec = recordingCtx();
+    renderLanes(
+      rec.ctx,
+      baseInput({
+        workerSpans: { 0: { ...emptyLane(), polls } },
+        spawnScopeTaskIds: new Set([2]),
+        viewStart: 0,
+        viewEnd: n,
+      }),
+      { time: layout(0, n, 200), height: 60 },
+    );
+    // Contiguous same-colour bars collapse into a handful of runs, not 100k.
+    const violet = rec.fillRectCalls.filter((r) => r.fill === SPAWN_SCOPE_VIOLET);
+    expect(violet.length).toBeGreaterThan(0);
+    expect(violet.length).toBeLessThan(10);
   });
 });

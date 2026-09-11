@@ -65,6 +65,11 @@ export const RUNTIME_HEADER_H = 24;
 /** Divider between adjacent worker lanes, so row boundaries are unambiguous. */
 const LANE_DIVIDER = "#0b0e18";
 
+/** Sibling tasks from the scoped spawn location. Violet, so it reads as a
+ *  different question from the selected task (yellow) and the hovered waker
+ *  (orange) rather than competing with them. */
+const SPAWN_SCOPE_FILL = "#9575cd";
+
 /** The minimal 2D-context surface renderLanes needs (Node-testable). */
 export interface LaneDrawContext extends StrokePathContext {
   fillStyle: string | CanvasGradient | CanvasPattern;
@@ -115,6 +120,12 @@ export interface LanesRenderInput {
   selectedSpanIds: ReadonlySet<string>;
   /** Hovered waker task -> orange polls. */
   hoveredWakerTaskId: number | null;
+  /**
+   * Every task spawned at the Task tab's scoped spawn location -> violet polls.
+   * This is how "show me the other tasks from this call site" reads on the
+   * timeline. Empty when the tab is scoped to a single task.
+   */
+  spawnScopeTaskIds: ReadonlySet<number>;
   /** Pinned custom-event poll -> single yellow bar (the in-lane mark). */
   pinnedPoll: PollSpan | null;
   /** Shared visible local-queue max across all workers (scale). */
@@ -331,7 +342,8 @@ export function renderLanes(
     drawPolls(ctx, batcher, row, spans, input, nsToX, drawW, bandTop, bandH);
     drawCpuTicks(ctx, spans.cpuSampleTimes, viewStart, viewEnd, nsToX, drawW, bandTop, bandH);
     drawSchedTriangles(ctx, spans.polls, input, nsToX, bandTop, bandH);
-    drawWakerHighlight(ctx, spans.polls, input, nsToX, drawW, bandTop, bandH);
+    drawSpawnScopeHighlight(ctx, spans, input, nsToX, drawW, bandTop, bandH);
+    drawWakerHighlight(ctx, spans, input, nsToX, drawW, bandTop, bandH);
     drawSelectedSpanOutlines(ctx, spans.polls, workerId, input, nsToX, drawW, bandTop, bandH);
     drawWakeMarkers(ctx, workerId, input, nsToX, top, sf);
     drawQueueStepLine(ctx, batcher, row, workerId, input, nsToX, drawW, qTop, qH, sf);
@@ -731,9 +743,92 @@ function drawSchedTriangles(
   }
 }
 
+/**
+ * Tint the polls `match` selects, over the poll band, coalescing adjacent runs
+ * into one fillRect. Shared by the spawn-scope and hovered-waker highlights:
+ * same bounded walk and geometry, different question.
+ *
+ * On the columnar path the task id comes straight off the column - `polls.at(i)`
+ * would materialize a PollView plus its CSR sample slices for every visible
+ * poll, every frame, which is exactly what drawPolls avoids.
+ */
+function drawPollTint(
+  ctx: LaneDrawContext,
+  spans: LaneSpans,
+  input: LanesRenderInput,
+  match: (taskId: number) => boolean,
+  fill: string,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  bandTop: number,
+  bandH: number,
+): void {
+  const { viewStart, viewEnd } = input;
+  const polls = spans.polls;
+  const n = polls.length;
+  const merge = makeBarCoalescer((x: number, w: number, color: string) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, bandTop, w, bandH);
+  }, 2);
+  if (isColumnarLane(spans)) {
+    const { store, w } = spans;
+    for (let i = store.firstVisiblePoll(w, viewStart); i < n; i++) {
+      const start = store.pollStartAt(w, i);
+      if (start > viewEnd) break;
+      if (!match(store.pollTaskIdAt(w, i))) continue;
+      merge.push(
+        Math.max(0, nsToX(start)),
+        Math.min(drawW, nsToX(store.pollEndAt(w, i))),
+        fill,
+      );
+    }
+  } else {
+    for (let i = firstVisible(polls, viewStart); i < n; i++) {
+      const s = polls.at(i)!;
+      if (s.start > viewEnd) break;
+      if (!match(s.taskId)) continue;
+      merge.push(Math.max(0, nsToX(s.start)), Math.min(drawW, nsToX(s.end)), fill);
+    }
+  }
+  merge.flush();
+}
+
+/**
+ * Tint every poll of every OTHER task sharing the scoped spawn location. The
+ * selected task is excluded so the yellow drawPolls just painted survives:
+ * "which one did I click?" must not be answered with "all of them".
+ *
+ * Drawn BEFORE the waker highlight so a task that is both a sibling and the
+ * hovered waker still reads as the waker - the more specific signal wins.
+ */
+function drawSpawnScopeHighlight(
+  ctx: LaneDrawContext,
+  spans: LaneSpans,
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  bandTop: number,
+  bandH: number,
+): void {
+  const siblings = input.spawnScopeTaskIds;
+  if (siblings.size === 0) return;
+  const selected = input.selectedTaskId;
+  drawPollTint(
+    ctx,
+    spans,
+    input,
+    (taskId) => taskId !== selected && siblings.has(taskId),
+    SPAWN_SCOPE_FILL,
+    nsToX,
+    drawW,
+    bandTop,
+    bandH,
+  );
+}
+
 function drawWakerHighlight(
   ctx: LaneDrawContext,
-  polls: SpanList<PollSpan>,
+  spans: LaneSpans,
   input: LanesRenderInput,
   nsToX: (ns: number) => number,
   drawW: number,
@@ -742,17 +837,17 @@ function drawWakerHighlight(
 ): void {
   const waker = input.hoveredWakerTaskId;
   if (!waker) return;
-  const { viewStart, viewEnd } = input;
-  const pollStart = firstVisible(polls, viewStart);
-  ctx.fillStyle = "#ff8a65";
-  for (let i = pollStart; i < polls.length; i++) {
-    const s = polls.at(i)!;
-    if (s.start > viewEnd) break;
-    if (s.taskId !== waker) continue;
-    const x1 = Math.max(0, nsToX(s.start));
-    const x2 = Math.min(drawW, nsToX(s.end));
-    ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 2), bandH);
-  }
+  drawPollTint(
+    ctx,
+    spans,
+    input,
+    (taskId) => taskId === waker,
+    "#ff8a65",
+    nsToX,
+    drawW,
+    bandTop,
+    bandH,
+  );
 }
 
 function drawSelectedSpanOutlines(

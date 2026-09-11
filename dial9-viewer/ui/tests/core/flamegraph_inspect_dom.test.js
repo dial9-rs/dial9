@@ -4,9 +4,9 @@ import { test } from "vitest";
 
 const require = createRequire(import.meta.url);
 
-// DOM-level smoke test for the inspect/butterfly UI (#652) and the search
-// results dropdown (#653). The repo has no jsdom, so this installs a minimal
-// DOM. The stub is
+// DOM-level smoke test for the inspect/butterfly UI (#652), the search
+// results dropdown (#653), and the widget's document-level search shortcut.
+// The repo has no jsdom, so this installs a minimal DOM. The stub is
 // richer: elements record event listeners and can dispatch synthetic events, so
 // the test can drive the real event handlers (right-click → context menu →
 // Inspect, plain click → re-pivot, Esc → exit) end to end through the renderer.
@@ -284,6 +284,91 @@ test("re-pivot: clicking a caller frame on the canvas while inspecting", () => {
     const band = dom.byClass["fg-focus-band"][0];
     assert.ok(band.children.some((c) => c.textContent === "a"),
       "focus band re-pivoted to 'a' after clicking its caller frame");
+  } finally {
+    dom.restore();
+  }
+});
+
+// The `/` shortcut is bound to the DOCUMENT, so an embedded instance would
+// swallow the host app's own `/` search whenever it is on screen. Callers that
+// do not own the page pass captureSlash: false and keep Cmd/Ctrl + F.
+function fireDocKey(dom, key, props) {
+  let prevented = false;
+  const ev = Object.assign(
+    {
+      type: "keydown",
+      key,
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      preventDefault() {
+        prevented = true;
+      },
+    },
+    props || {},
+  );
+  for (const fn of (dom.document._listeners.keydown || []).slice()) fn(ev);
+  return { prevented };
+}
+
+/** Count focus() calls on the widget's search field. */
+function watchSearchFocus(dom) {
+  const input = dom.registry[".fg-search-input"];
+  assert.ok(input, "search input exists");
+  let focused = 0;
+  input.focus = () => {
+    focused += 1;
+  };
+  return { input, focusCount: () => focused };
+}
+
+test("captureSlash defaults on: bare / focuses the frame search", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("../../flamegraph.js");
+    createFlamegraph(dom.makeEl());
+    const watch = watchSearchFocus(dom);
+
+    const { prevented } = fireDocKey(dom, "/");
+    assert.strictEqual(watch.focusCount(), 1, "/ focused the frame search");
+    assert.strictEqual(prevented, true, "/ was consumed by the widget");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("captureSlash: false leaves bare / to the host app", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("../../flamegraph.js");
+    createFlamegraph(dom.makeEl(), undefined, { captureSlash: false });
+    const watch = watchSearchFocus(dom);
+
+    const { prevented } = fireDocKey(dom, "/");
+    assert.strictEqual(watch.focusCount(), 0, "/ ignored by an embedded widget");
+    assert.strictEqual(prevented, false, "/ left for the host app's search");
+
+    // Cmd/Ctrl + F still reaches the frame search.
+    const meta = fireDocKey(dom, "f", { metaKey: true });
+    assert.strictEqual(watch.focusCount(), 1, "Cmd + F focused the frame search");
+    assert.strictEqual(meta.prevented, true, "Cmd + F was consumed by the widget");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("captureSlash: false drops / from the search placeholder and help", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("../../flamegraph.js");
+    createFlamegraph(dom.makeEl(), undefined, { captureSlash: false });
+    const bar = dom.byClass["fg-search-bar"][0];
+    assert.ok(
+      bar.innerHTML.includes("Search frames... (Ctrl + F)"),
+      "placeholder advertises only Cmd/Ctrl + F",
+    );
+    const help = dom.byClass["fg-help-overlay"][0];
+    assert.ok(!help.innerHTML.includes("Ctrl + F or /"), "help drops the / row");
   } finally {
     dom.restore();
   }

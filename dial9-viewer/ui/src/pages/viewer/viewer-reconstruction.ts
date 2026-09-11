@@ -236,6 +236,9 @@ export function createViewerReconstruction(
       taskDump: null,
       sidebarRange: null,
       hoveredWakerTaskId: null,
+      // "All from this spawn location" names a location in the trace being
+      // replaced, and the task it was anchored to is going away with it.
+      scopedSpawnLoc: null,
       spawnedTasksRange: null,
       spawnedTasksRuntime: null,
     });

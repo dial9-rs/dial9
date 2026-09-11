@@ -146,6 +146,8 @@ export interface ViewState {
   /** Inspector and poll-detail view controls. */
   inspectorTab?: string;
   pollSection?: string;
+  /** The pinned spawn location; omitted when nothing is pinned. */
+  taskScope?: string;
   expandedPollGroups?: readonly string[];
   pollWorkerZoom?: readonly string[];
   pollOffworkerZoom?: readonly string[];

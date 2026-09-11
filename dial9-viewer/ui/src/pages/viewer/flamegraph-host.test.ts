@@ -26,6 +26,7 @@ vi.mock("../../lib/canvas/flamegraph.js", () => ({
   }),
 }));
 
+import { createFlamegraph } from "../../lib/canvas/flamegraph.js";
 import { createFlamegraphHost } from "./flamegraph-host.js";
 
 // ── Minimal fake DOM (node env has none) ─────────────────────────────────────
@@ -78,6 +79,13 @@ function makeHost() {
 }
 
 describe("createFlamegraphHost", () => {
+  it("never lets an embedded widget claim the document-level / key", () => {
+    const h = makeHost();
+    h.sync({ hostEl: host() as unknown as HTMLElement, sig: "a", apply: () => {} });
+    const call = vi.mocked(createFlamegraph).mock.calls[0];
+    expect(call?.[2]).toEqual({ captureSlash: false });
+  });
+
   it("creates the instance lazily on first sync, not at construction", () => {
     const fg = makeHost();
     expect(created).toHaveLength(0);

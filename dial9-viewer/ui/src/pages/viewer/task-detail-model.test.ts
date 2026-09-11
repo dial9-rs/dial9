@@ -98,6 +98,10 @@ describe("computeTaskDetailData", () => {
     });
     const trace = fakeTrace({
       spawnLocations: { loc: "src/foo/bar.rs:12" },
+      // A real parse fills taskSpawnLocs from every poll's spawn_loc, so a
+      // fixture that sets only the poll's spawnLocId is not a shape the
+      // parser can emit.
+      taskSpawnLocs: { 42: "loc" },
       taskSpawnTimes: { 42: 40 },
       taskTerminateTimes: { 42: 700 },
       taskInstrumented: { 42: true },
@@ -157,6 +161,10 @@ describe("formatTaskDetailSummary (label parts)", () => {
   it("assembles id, location, poll/wake counts, lifetime, and completion mark", () => {
     const trace = fakeTrace({
       spawnLocations: { loc: "src/foo/bar.rs:12" },
+      // A real parse fills taskSpawnLocs from every poll's spawn_loc, so a
+      // fixture that sets only the poll's spawnLocId is not a shape the
+      // parser can emit.
+      taskSpawnLocs: { 42: "loc" },
       taskSpawnTimes: { 42: 40 },
       taskTerminateTimes: { 42: 700 },
       taskInstrumented: { 42: true },

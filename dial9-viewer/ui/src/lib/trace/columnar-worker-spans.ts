@@ -508,6 +508,7 @@ export class ColumnarWorkerSpans {
   }
   pollStartAt(w: number, i: number): number { return this.columnsFor(w).start[i]!; }
   pollEndAt(w: number, i: number): number { return this.columnsFor(w).end[i]!; }
+  pollTaskIdAt(w: number, i: number): number { return this.columnsFor(w).taskId[i]!; }
   pollOpenEndedAt(w: number, i: number): boolean { return this.columnsFor(w).openEnded[i] === 1; }
 
   /** Per-worker cpu-sample tick timestamps (source!==1), for drawCpuTicks. */

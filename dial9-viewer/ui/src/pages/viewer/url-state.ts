@@ -36,6 +36,7 @@ import {
   type PoiAnchor,
 } from "./poi.js";
 import { INSPECTOR_TABS, preferredTab } from "./inspector-model.js";
+import { parseSpawnPin, type SpawnPin } from "./task-flamegraph-model.js";
 import {
   FIELD_CHART_KINDS,
   FIELD_CHART_URL_SEPARATOR,
@@ -84,6 +85,7 @@ const P_LANES_SCROLL = "lanes-scroll";
 const P_STACK_VIEW = "stack-view";
 const P_INSPECTOR_TAB = "inspector";
 const P_POLL_SECTION = "poll-section";
+const P_TASK_SCOPE = "task-scope";
 const P_POLL_EXPANDED = "poll-expanded";
 const P_POLL_WORKER_ZOOM = "poll-worker-zoom";
 const P_POLL_OFFWORKER_ZOOM = "poll-offworker-zoom";
@@ -161,6 +163,7 @@ export const VIEWER_STATE_OWNERSHIP = {
     taskDump: url(P_TASK_DUMP),
     sidebarRange: url(P_REGION),
     hoveredWakerTaskId: transient,
+    scopedSpawnLoc: url(P_TASK_SCOPE),
     spawnedTasksRange: url(P_SPAWNED),
   },
   poi: {
@@ -378,6 +381,7 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   const inferredInspectorTab: InspectorTab = preferredTab(sel) ?? "task";
   if (view.inspectorTab !== inferredInspectorTab) vs.inspectorTab = view.inspectorTab;
   if (view.pollFlamegraphSection !== "cpu") vs.pollSection = view.pollFlamegraphSection;
+  if (sel.scopedSpawnLoc !== null) vs.taskScope = sel.scopedSpawnLoc;
   if (view.expandedPollGroups.size > 0) {
     vs.expandedPollGroups = [...view.expandedPollGroups].sort();
   }
@@ -471,6 +475,7 @@ export function mirrorViewerToQuery(
   set(params, P_STACK_VIEW, vs.stackView ?? null);
   set(params, P_INSPECTOR_TAB, vs.inspectorTab ?? null);
   set(params, P_POLL_SECTION, vs.pollSection ?? null);
+  set(params, P_TASK_SCOPE, vs.taskScope ?? null);
   set(params, P_POLL_EXPANDED, encodeList(vs.expandedPollGroups));
   set(params, P_POLL_WORKER_ZOOM, encodePath(vs.pollWorkerZoom));
   set(params, P_POLL_OFFWORKER_ZOOM, encodePath(vs.pollOffworkerZoom));
@@ -610,6 +615,7 @@ export interface ViewerUrlState {
   stacksAsFlamegraph?: boolean;
   inspectorTab?: InspectorTab;
   pollSection?: "cpu" | "sched";
+  taskScope?: SpawnPin;
   expandedPollGroups?: string[];
   pollWorkerZoom?: string[];
   pollOffworkerZoom?: string[];
@@ -688,6 +694,12 @@ export function hydrateViewerStore(
     uiPrefs.stacksAsFlamegraph = urlView.stacksAsFlamegraph;
   }
   if (Object.keys(uiPrefs).length > 0) store.update("uiPrefs", uiPrefs);
+
+  // The scope rides `selection` (the lanes consume it there), so it hydrates
+  // alongside it rather than with the Task tab's other control.
+  if (urlView.taskScope !== undefined) {
+    store.update("selection", { scopedSpawnLoc: urlView.taskScope });
+  }
 
   const view: Partial<StoreState["view"]> = {};
   if (urlView.fieldCharts !== undefined) {
@@ -875,6 +887,13 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   }
   const pollSection = p.get(P_POLL_SECTION);
   if (pollSection === "cpu" || pollSection === "sched") out.pollSection = pollSection;
+  // Carries the spawn location itself, so a link reproduces the family
+  // without depending on which task happens to be selected. The pre-pin
+  // encoding was the bare word "spawn-location", which named no family at all;
+  // it is dropped rather than guessed at.
+  const rawPin = p.get(P_TASK_SCOPE);
+  const taskScope = parseSpawnPin(rawPin === "spawn-location" ? null : rawPin);
+  if (taskScope !== null) out.taskScope = taskScope;
   const expandedPollGroups = decodeList(p.get(P_POLL_EXPANDED));
   if (expandedPollGroups !== null) out.expandedPollGroups = expandedPollGroups;
   const pollWorkerZoom = decodePath(p.get(P_POLL_WORKER_ZOOM));

@@ -16,6 +16,7 @@ import {
 } from "../../lib/trace/columnar-worker-spans.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
 import { railWindow } from "./poi.js";
+import { spawnLocationOf, type SpawnPin } from "./task-flamegraph-model.js";
 import type { ParsedTrace, PollSpan, WorkerLane } from "../../types/trace.js";
 import type { PoiSlice } from "../../types/state.js";
 
@@ -84,9 +85,7 @@ export function taskIndexFor(trace: ParsedTrace): TaskIndex {
   const rows: TaskIndexRow[] = [];
   for (const taskId of taskIds) {
     const agg = byTask.get(taskId);
-    const spawnLocId = trace.taskSpawnLocs.get(taskId);
-    const spawnLoc =
-      spawnLocId != null ? trace.spawnLocations.get(spawnLocId) ?? null : null;
+    const spawnLoc = spawnLocationOf(trace, taskId);
     const spawnTs = trace.taskSpawnTimes.get(taskId) ?? null;
     const terminateTs = trace.taskTerminateTimes.get(taskId) ?? null;
     const lifetimeNs =
@@ -245,8 +244,11 @@ export interface TaskViewModel {
   windowStart: number;
   /** The full sorted list; `n`/`p` step across all of it. */
   sorted: readonly TaskIndexRow[];
-  /** Total task count (the "N/total" position). */
+  /** Total task count (the "N/total" position). Under a pin this is the
+   *  family's size, which is what the position label should count against. */
   total: number;
+  /** The pinned spawn location the list is filtered to, or null. */
+  pin: SpawnPin;
   /**
    * False when this list covers only dial9-spawned tasks. Drives the empty
    * state, which then explains why the list may be short.
@@ -268,6 +270,8 @@ export interface TaskViewModel {
 export function deriveTaskViewModel(
   trace: ParsedTrace | null,
   poi: PoiSlice,
+  pin: SpawnPin = null,
+  selectedTaskId: number | null = null,
 ): TaskViewModel {
   if (trace === null) {
     return {
@@ -278,12 +282,31 @@ export function deriveTaskViewModel(
       windowStart: 0,
       sorted: [],
       total: 0,
+      pin,
       hasFullTaskCoverage: true,
       taskLifetimeCoverage: "all",
     };
   }
-  const sorted = sortTasks(taskIndexFor(trace).rows, poi.taskSort, poi.taskSortDir);
-  const index = poi.taskIndex < sorted.length ? poi.taskIndex : -1;
+  const all = taskIndexFor(trace).rows;
+  const scoped = pin === null ? all : all.filter((r) => r.spawnLoc === pin);
+  const sorted = sortTasks(scoped, poi.taskSort, poi.taskSortDir);
+  // The cursor tracks the SELECTED task, not a stored ordinal. poi.taskIndex is
+  // a position in a list that the pin, the sort and the trace all reshape, so
+  // trusting the number across any of those points the cursor at whatever task
+  // now happens to sit there. Fall back to the stored index only when nothing
+  // is selected to look up.
+  const selectedIndex =
+    selectedTaskId === null
+      ? -1
+      : sorted.findIndex((r) => r.taskId === selectedTaskId);
+  const index =
+    selectedIndex >= 0
+      ? selectedIndex
+      : selectedTaskId !== null
+        ? -1
+        : poi.taskIndex < sorted.length
+          ? poi.taskIndex
+          : -1;
   const { start, end } = railWindow(sorted.length, index);
   const rows: TaskRow[] = [];
   for (let i = start; i < end; i++) {
@@ -312,5 +335,6 @@ export function deriveTaskViewModel(
         : "all",
     sorted,
     total: sorted.length,
+    pin,
   };
 }

@@ -111,6 +111,16 @@ declare module "*/flamegraph.js" {
     getRuntimeFilter(): string;
   }
 
+  export interface CreateFlamegraphOptions {
+    /**
+     * Whether bare `/` focuses the frame search. The handler is document-level,
+     * so only a widget that owns its page may claim it; an embedded host passes
+     * false and leaves `/` to the surrounding app. Cmd/Ctrl + F works either
+     * way. Defaults to true.
+     */
+    captureSlash?: boolean;
+  }
+
   /**
    * Create the flamegraph widget inside `container`. `onViewChange` fires
    * whenever the view changes (zoom, inspect focus, search, or a filter),
@@ -118,7 +128,8 @@ declare module "*/flamegraph.js" {
    */
   export function createFlamegraph(
     container: HTMLElement,
-    onViewChange?: () => void
+    onViewChange?: () => void,
+    options?: CreateFlamegraphOptions
   ): FlamegraphInstance;
 
   /**

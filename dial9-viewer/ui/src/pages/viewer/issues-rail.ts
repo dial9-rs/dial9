@@ -17,6 +17,7 @@ import type { IssueColKey, PoiSortKey, RailTab, TaskSortKey } from "../../types/
 import type { PointOfInterestType } from "../../types/trace.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
 import { deriveLaneData } from "../../components/canvas/lanes/index.js";
+import { spawnLocLabel } from "./task-detail-model.js";
 import {
   POI_FILTERS,
   SPAWN_DELAY_THRESHOLD_MAX_US,
@@ -289,12 +290,17 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
   function taskViewModel(state: StoreState): TaskViewModel {
     const trace = state.trace.trace;
     const { poi } = state;
+    const pin = state.selection.scopedSpawnLoc;
+    const selectedTaskId = state.selection.selectedTaskId;
+    // The pin reshapes the list and the selection places the cursor in it, so
+    // both belong in the key: without them the memo serves the previous
+    // family, or the previous row highlighted.
     const key = trace
-      ? `${idOf(trace)}|${poi.taskSort}|${poi.taskSortDir}|${poi.taskIndex}`
+      ? `${idOf(trace)}|${poi.taskSort}|${poi.taskSortDir}|${poi.taskIndex}|${pin ?? ""}|${selectedTaskId ?? ""}`
       : "none";
     if (taskCacheVm === null || key !== taskCacheKey) {
       taskCacheKey = key;
-      taskCacheVm = deriveTaskViewModel(trace, poi);
+      taskCacheVm = deriveTaskViewModel(trace, poi, pin, selectedTaskId);
     }
     return taskCacheVm;
   }
@@ -362,13 +368,26 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     if (task.firstPollWorker >= 0) revealWorker(task.firstPollWorker);
   }
 
+  /**
+   * Pin (or clear) the spawn location the task list is filtered to. The same
+   * state the Task tab's scope switch writes, so the rail, the lanes and the
+   * inspector cannot disagree about which family is in view.
+   *
+   * The cursor is not touched: it is derived from the selected task, so it
+   * re-resolves against the new list on its own.
+   */
+  function pinSpawnLoc(location: string | null): void {
+    if (store.getState().selection.scopedSpawnLoc === location) return;
+    store.update("selection", { scopedSpawnLoc: location });
+  }
+
   /** `n`/`p`: step the current tab's cursor and jump. Steps across the whole
    *  retained/sorted list, which is what the index addresses. */
   function step(dir: 1 | -1): boolean {
     const state = store.getState();
     if (state.poi.railTab === "tasks") {
       const vm = taskViewModel(state);
-      const next = stepIndex(vm.total, state.poi.taskIndex, dir);
+      const next = stepIndex(vm.total, vm.index, dir);
       if (next < 0) return false;
       jumpToTask(next);
       return true;
@@ -520,6 +539,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
           jumpTo,
           sortTaskByColumn,
           jumpToTask,
+          pinSpawnLoc,
           onResizeDown,
           taskCols,
           issueCols,
@@ -579,6 +599,7 @@ interface RailHandlers {
   jumpTo(index: number): void;
   sortTaskByColumn(col: TaskColumn): void;
   jumpToTask(index: number): void;
+  pinSpawnLoc(location: string | null): void;
   onResizeDown(e: MouseEvent): void;
   taskCols: ColResizeHandlers<TaskSortKey>;
   issueCols: ColResizeHandlers<IssueColKey>;
@@ -618,7 +639,7 @@ function railTemplate(
       style="width:${width}px"
     >
       ${railTabs(tab, h)}
-      ${tab === "tasks" ? tasksHead(taskVm) : issuesHead(vm, h)}
+      ${tab === "tasks" ? tasksHead(taskVm, h) : issuesHead(vm, h)}
       ${tab === "tasks"
         ? taskVm.total === 0
           ? taskVm.hasFullTaskCoverage
@@ -729,10 +750,12 @@ function spawnThresholdControl(vm: PoiViewModel, h: RailHandlers): TemplateResul
   `;
 }
 
-function tasksHead(vm: TaskViewModel): TemplateResult {
+function tasksHead(vm: TaskViewModel, h: RailHandlers): TemplateResult {
   const positionLabel =
     vm.total === 0
-      ? "No tasks"
+      ? vm.pin !== null
+        ? "No tasks here"
+        : "No tasks"
       : `${vm.index >= 0 ? vm.index + 1 : 0}/${vm.total.toLocaleString()}`;
   return html`
     <div class="d9-rail-head">
@@ -741,11 +764,34 @@ function tasksHead(vm: TaskViewModel): TemplateResult {
         <span class="d9-rail-pos" data-task-position>${positionLabel}</span>
       </div>
       <div class="d9-rail-controls">
+        ${vm.pin !== null ? pinChip(vm.pin, h) : nothing}
         <span class="d9-rail-hint" title="Step tasks with the n / p keys"
           ><kbd>n</kbd>/<kbd>p</kbd> step</span
         >
       </div>
     </div>
+  `;
+}
+
+/**
+ * The active spawn-location filter, shown where the Issues tab shows its own
+ * filter control. A short list with no visible reason for being short is the
+ * failure mode this exists to prevent: the chip names the family and clears it.
+ */
+function pinChip(pin: string, h: RailHandlers): TemplateResult {
+  return html`
+    <span class="d9-rail-pin" title=${`Task list filtered to tasks spawned at ${pin}`}>
+      <bdi class="d9-rail-pin-loc">${spawnLocLabel(pin)}</bdi>
+      <button
+        type="button"
+        class="d9-rail-pin-clear"
+        aria-label="Clear the spawn-location filter"
+        title="Show all tasks again"
+        @click=${() => h.pinSpawnLoc(null)}
+      >
+        x
+      </button>
+    </span>
   `;
 }
 
@@ -926,7 +972,24 @@ function taskTable(
                 @click=${() => h.jumpToTask(abs)}
               >
                 <td class="d9-task-id" title="" @pointerenter=${titleWhenClipped}>${row.id}</td>
-                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}><bdi>${row.loc}</bdi></td>
+                <td class="d9-task-loc" title="" @pointerenter=${titleWhenClipped}>
+                  <bdi>${row.loc}</bdi>
+                  ${row.task.spawnLoc !== null && row.task.spawnLoc !== vm.pin
+                    ? html`<button
+                        type="button"
+                        class="d9-task-loc-pin"
+                        title="Show only tasks spawned here"
+                        aria-label=${`Filter to tasks spawned at ${row.task.spawnLoc}`}
+                        @click=${(e: Event) => {
+                          // The row click selects; this must not also do that.
+                          e.stopPropagation();
+                          h.pinSpawnLoc(row.task.spawnLoc);
+                        }}
+                      >
+                        pin
+                      </button>`
+                    : nothing}
+                </td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.polls}</td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.total}</td>
                 <td class="d9-rail-num" title="" @pointerenter=${titleWhenClipped}>${row.longest}</td>

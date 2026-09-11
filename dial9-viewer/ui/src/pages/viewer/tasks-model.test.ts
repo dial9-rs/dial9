@@ -109,6 +109,68 @@ describe("taskIndexFor", () => {
   });
 });
 
+describe("deriveTaskViewModel: pinned spawn location", () => {
+  /** The location the demo trace spawns the most tasks at. */
+  function busiestLocation(): { loc: string; count: number } {
+    const counts = new Map<string, number>();
+    for (const r of taskIndexFor(trace).rows) {
+      if (r.spawnLoc === null) continue;
+      counts.set(r.spawnLoc, (counts.get(r.spawnLoc) ?? 0) + 1);
+    }
+    let best: { loc: string; count: number } = { loc: "", count: 0 };
+    for (const [loc, count] of counts) if (count > best.count) best = { loc, count };
+    return best;
+  }
+
+  it("lists only the family, and counts against it", () => {
+    const { loc, count } = busiestLocation();
+    const all = deriveTaskViewModel(trace, POI);
+    const pinned = deriveTaskViewModel(trace, POI, loc);
+    expect(count).toBeGreaterThan(1);
+    expect(pinned.total).toBe(count);
+    expect(pinned.total).toBeLessThan(all.total);
+    expect(pinned.sorted.every((r) => r.spawnLoc === loc)).toBe(true);
+    expect(pinned.pin).toBe(loc);
+  });
+
+  it("is empty for a location the trace never recorded", () => {
+    const vm = deriveTaskViewModel(trace, POI, "nowhere.rs:1:1");
+    expect(vm.total).toBe(0);
+    expect(vm.rows).toEqual([]);
+  });
+
+  // The cursor is the reason a filter is risky: poi.taskIndex is an ordinal in
+  // a list the pin reshapes, so a stored index would point at whatever task
+  // now sits there.
+  it("resolves the cursor to the selected task, not a stale ordinal", () => {
+    const { loc } = busiestLocation();
+    const family = deriveTaskViewModel(trace, POI, loc);
+    const target = family.sorted[family.sorted.length - 1]!;
+    const stale: PoiSlice = { ...POI, taskIndex: 0 };
+    const vm = deriveTaskViewModel(trace, stale, loc, target.taskId);
+    expect(vm.index).toBe(family.sorted.length - 1);
+    expect(vm.sorted[vm.index]!.taskId).toBe(target.taskId);
+  });
+
+  it("survives the same task across a pin change", () => {
+    const { loc } = busiestLocation();
+    const member = deriveTaskViewModel(trace, POI, loc).sorted[0]!;
+    const unpinned = deriveTaskViewModel(trace, POI, null, member.taskId);
+    const pinned = deriveTaskViewModel(trace, POI, loc, member.taskId);
+    // Different ordinals in the two lists, same task under the cursor.
+    expect(unpinned.sorted[unpinned.index]!.taskId).toBe(member.taskId);
+    expect(pinned.sorted[pinned.index]!.taskId).toBe(member.taskId);
+  });
+
+  it("has no cursor when the selected task is outside the family", () => {
+    const { loc } = busiestLocation();
+    const outsider = taskIndexFor(trace).rows.find((r) => r.spawnLoc !== loc);
+    if (outsider === undefined) return;
+    const vm = deriveTaskViewModel(trace, { ...POI, taskIndex: 3 }, loc, outsider.taskId);
+    expect(vm.index).toBe(-1);
+  });
+});
+
 describe("deriveTaskViewModel", () => {
   it("is empty with no trace", () => {
     const vm = deriveTaskViewModel(null, POI);

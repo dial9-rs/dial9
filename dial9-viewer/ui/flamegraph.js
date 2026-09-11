@@ -349,8 +349,14 @@
     return out;
   }
 
-  function createFlamegraph(container, onZoomChange) {
+  function createFlamegraph(container, onZoomChange, options) {
     onZoomChange = onZoomChange || function () {};
+    // Bare `/` is a document-level grab, so it only belongs to a widget that
+    // owns the page. Embedded hosts pass false and keep Cmd/Ctrl+F, leaving `/`
+    // to the surrounding app's own search.
+    const captureSlash = !options || options.captureSlash !== false;
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+    const searchHint = (isMac ? "\u2318" : "Ctrl") + " + F" + (captureSlash ? " or /" : "");
     // While restoring view state from a URL we mutate zoom/inspect/search/filters
     // programmatically; those must NOT fire the persist callback (which would
     // rewrite the address bar mid-restore, and — via writeState's delete-on-
@@ -400,10 +406,9 @@
     // DOM
     const searchBar = document.createElement("div");
     searchBar.className = "fg-search-bar";
-    const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
     searchBar.innerHTML =
       '<input type="text" class="fg-search-input" placeholder="Search frames... (' +
-      (isMac ? '\u2318' : 'Ctrl') + ' + F or /)" />' +
+      searchHint + ')" />' +
       '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
       '<span class="fg-search-stats"></span>' +
       '<select class="fg-runtime-filter" style="display:none"></select>' +
@@ -441,7 +446,7 @@
       '<tr><td class="fg-help-key">' + (isMac ? '\u2318' : 'Ctrl') + ' + click</td><td>Open docs.rs (when available)</td></tr>' +
       '<tr><td class="fg-help-key">Right-click</td><td>Menu: Inspect frame / Zoom out / Copy name</td></tr>' +
       '<tr><td class="fg-help-key">Inspect</td><td>All paths into (below) &amp; out of (above) a frame</td></tr>' +
-      '<tr><td class="fg-help-key">' + (isMac ? '\u2318' : 'Ctrl') + ' + F or /</td><td>Search frames \u2192 click a result to inspect</td></tr>' +
+      '<tr><td class="fg-help-key">' + searchHint + '</td><td>Search frames \u2192 click a result to inspect</td></tr>' +
       '<tr><td class="fg-help-key">Esc</td><td>Unpin \u2192 close menu \u2192 clear search \u2192 exit inspect \u2192 reset zoom</td></tr>' +
       '</table>' +
       '<div class="fg-help-dismiss">Press Esc or click outside to close</div>' +
@@ -1412,7 +1417,10 @@
 
     function onKeyDown(e) {
       if (container.offsetHeight === 0) return;
-      if (((e.ctrlKey || e.metaKey) && e.key === "f") || (e.key === "/" && document.activeElement !== searchInput)) {
+      const wantsSearch =
+        ((e.ctrlKey || e.metaKey) && e.key === "f") ||
+        (captureSlash && e.key === "/" && document.activeElement !== searchInput);
+      if (wantsSearch) {
         e.preventDefault();
         searchInput.focus();
         searchInput.select();

@@ -60,7 +60,8 @@ function traceWith(events: unknown[]): ParsedTrace {
     blockInPlaceGaps: [],
     runtimeWorkers: new Map(),
     spawnLocations: new Map([["L", "src/app/task.rs:7"]]),
-    taskSpawnLocs: new Map(),
+    // Mirrors a real parse: every polled task lands in taskSpawnLocs.
+    taskSpawnLocs: new Map([[42, "L"]]),
     taskSpawnTimes: new Map([[42, 100]]),
     taskTerminateTimes: new Map([[42, 1500]]),
     taskInstrumented: new Map(),

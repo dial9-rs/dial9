@@ -24,6 +24,7 @@ import {
 } from "../../../lib/canvas/track-layout.js";
 import type { TrackId } from "../../../lib/canvas/track-layout.js";
 import { claimTrack } from "../../../lib/canvas/track-renderers.js";
+import { spawnScopeTaskIds } from "../../../pages/viewer/task-flamegraph-model.js";
 import { deriveLaneData } from "./data.js";
 import type { LaneData } from "./data.js";
 import {
@@ -190,6 +191,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       selectedTaskId: sel.selectedTaskId,
       selectedSpanIds,
       hoveredWakerTaskId: sel.hoveredWakerTaskId,
+      spawnScopeTaskIds: spawnScopeTaskIds(state.trace.trace, sel.scopedSpawnLoc),
       pinnedPoll: sel.pinnedEvent ? sel.pinnedEvent.poll : null,
       sharedMaxQ,
       dimmer,

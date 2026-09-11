@@ -68,6 +68,12 @@ import {
   type PollDetailView,
 } from "./inspector-model.js";
 import { createFlamegraphHost } from "./flamegraph-host.js";
+import {
+  buildTaskFlamegraphView,
+  taskFlamegraphCacheSignature,
+  type TaskFlamegraphView,
+} from "./task-flamegraph-model.js";
+import { meanLifetimeNs, spawnFamilyStats } from "./task-scope-model.js";
 import { pollFlamegraphCacheSignature } from "./analysis-cache-signature.js";
 
 /** Clamp bounds for the resize drag ([200px, 92vw]). */
@@ -197,6 +203,10 @@ export function mountInspector(
     doc: host.ownerDocument,
     className: "d9-task-dump-fg",
   });
+  const taskFg = createFlamegraphHost({
+    doc: host.ownerDocument,
+    className: "d9-task-fg",
+  });
   const traceIds = new WeakMap<object, number>();
   let nextTraceId = 1;
   function traceId(trace: StoreState["trace"]["trace"]): number {
@@ -318,6 +328,8 @@ export function mountInspector(
     // A task-dump click also renders a flamegraph in the Stack tab from the
     // selection stored by the task-detail track.
     syncTaskDumpFlamegraph(s);
+    // And the Task tab's own scope flamegraph.
+    syncTaskFlamegraph(s);
   }
 
   /** Readout-only render (transient channel; the at-moment surface). */
@@ -490,15 +502,191 @@ export function mountInspector(
               >`}
         </div>
         ${d.spawnLocation != null ? kv("spawn", d.spawnLocation) : nothing}
-        ${kv("polls", String(d.pollCount))}
-        ${d.isInstrumented ? kv("wakes", String(d.wakeCount)) : nothing}
-        ${d.lifetimeNs != null ? kv("lifetime", formatHumanDuration(d.lifetimeNs)) : nothing}
-        ${kv("status", d.hasTerminate ? "completed ✓" : "running")}
-        ${d.taskDumps.length > 0
-          ? kv("idle stacks", `${d.taskDumps.length} captured (flamegraph)`)
-          : nothing}
+        ${taskScopeControls(d)}
+        ${offFamilyNote(d)}
+        ${showsFamily(d) ? familyStats(d) : singleTaskStats(d)}
+        ${taskFlamegraphBody(d)}
       </div>
     `;
+  }
+
+  /** The selected task's own numbers. */
+  function singleTaskStats(d: TaskDetailData): TemplateResult {
+    return html`
+      ${kv("polls", String(d.pollCount))}
+      ${d.isInstrumented ? kv("wakes", String(d.wakeCount)) : nothing}
+      ${d.lifetimeNs != null ? kv("lifetime", formatHumanDuration(d.lifetimeNs)) : nothing}
+      ${kv("status", d.hasTerminate ? "completed ✓" : "running")}
+      ${d.taskDumps.length > 0
+        ? kv("idle stacks", `${d.taskDumps.length} captured (flamegraph)`)
+        : nothing}
+    `;
+  }
+
+  /**
+   * The same block for the whole spawn location. Every row here describes the
+   * family, so the tab never mixes one task's numbers with the family's
+   * flamegraph below them.
+   */
+  function familyStats(d: TaskDetailData): TemplateResult {
+    const trace = state().trace.trace;
+    const pin = state().selection.scopedSpawnLoc;
+    if (trace === null || pin === null) return singleTaskStats(d);
+    const f = spawnFamilyStats(trace, pin);
+    const mean = meanLifetimeNs(f);
+    const longestOwner =
+      f.longestPollTaskId !== null ? ` (0x${f.longestPollTaskId.toString(16)})` : "";
+    return html`
+      ${kv("tasks", String(f.taskCount))}
+      ${kv("polls", String(f.pollCount))}
+      ${kv("total poll time", formatHumanDuration(f.totalPollNs))}
+      ${f.longestPollTaskId !== null
+        ? kv("longest poll", `${formatHumanDuration(f.longestPollNs)}${longestOwner}`)
+        : nothing}
+      ${mean !== null
+        ? kv(
+            "mean lifetime",
+            `${formatHumanDuration(mean)} over ${f.lifetimeKnownCount} of ${f.taskCount}`,
+          )
+        : nothing}
+      ${f.runningCount > 0 ? kv("still running", String(f.runningCount)) : nothing}
+    `;
+  }
+
+  /**
+   * The scope switch: pin this task's spawn location, or clear the pin.
+   *
+   * "All from spawn" reads as active only when the pin IS this task's location.
+   * With a pin held on some other location the tab describes the selected task,
+   * so neither the family view nor a second family is implied here - the pin
+   * itself is surfaced by offFamilyNote instead.
+   */
+  function taskScopeControls(d: TaskDetailData): TemplateResult {
+    const family = showsFamily(d);
+    const groupable = d.spawnLocation != null;
+    const btn = (
+      on: boolean,
+      label: string,
+      title: string,
+      disabled: boolean,
+      onClick: () => void,
+    ): TemplateResult => html`<button
+      type="button"
+      class=${classMap({ "d9-task-scope-btn": true, on })}
+      aria-pressed=${on ? "true" : "false"}
+      ?disabled=${disabled}
+      title=${title}
+      @click=${onClick}
+    >
+      ${label}
+    </button>`;
+    return html`
+      <div class="d9-task-scope">
+        <span class="d9-task-scope-switch" role="group" aria-label="Task scope">
+          ${btn(!family, "This task", "Look at this task alone", false, () =>
+            setPin(null),
+          )}
+          ${btn(
+            family,
+            "All from spawn",
+            groupable
+              ? "Pin this spawn location: filter the task list to it, tint its tasks, and fold their samples together"
+              : "This task has no recorded spawn location to group by",
+            !groupable,
+            () => setPin(d.spawnLocation),
+          )}
+        </span>
+      </div>
+    `;
+  }
+
+  /**
+   * Shown when a pin is held on a location the selected task is not from. The
+   * rail and the lanes still answer for the pinned family, so the tab has to
+   * say why its own numbers do not.
+   */
+  function offFamilyNote(d: TaskDetailData): TemplateResult | typeof nothing {
+    const pin = state().selection.scopedSpawnLoc;
+    if (pin === null || showsFamily(d)) return nothing;
+    return html`
+      <div class="d9-task-offfamily">
+        <span
+          >Pinned to <bdi>${pin}</bdi>, which this task is not from. The lanes
+          and the task list still show that family.</span
+        >
+        <button
+          type="button"
+          class="d9-task-offfamily-clear"
+          title="Clear the pinned spawn location"
+          @click=${() => setPin(null)}
+        >
+          Unpin
+        </button>
+      </div>
+    `;
+  }
+
+  /** Whether the tab describes the pinned family rather than the one task. */
+  function showsFamily(d: TaskDetailData): boolean {
+    const pin = state().selection.scopedSpawnLoc;
+    return pin !== null && pin === d.spawnLocation;
+  }
+
+  function setPin(location: string | null): void {
+    if (state().selection.scopedSpawnLoc === location) return;
+    store.update("selection", { scopedSpawnLoc: location });
+  }
+
+  /**
+   * The CPU profile for the active scope. Always rendered: it is the tab's only
+   * expandable surface, so a toggle bought a click and no choice.
+   *
+   * `[data-task-fg-host]` is binding-free so the post-render sync can own the
+   * canvas without lit-html reconciling it away (same technique as the poll and
+   * region hosts).
+   */
+  function taskFlamegraphBody(d: TaskDetailData): TemplateResult {
+    const view = taskFlamegraphViewFor(d);
+    if (view.samples.length === 0) {
+      return html`<p class="d9-inspector-hint" id="d9-task-fg">
+        No CPU samples were captured for
+        ${view.isFamily ? "these tasks" : "this task"}.
+      </p>`;
+    }
+    const scopeNote = view.isFamily
+      ? `${view.taskCount} task${view.taskCount === 1 ? "" : "s"} from this spawn location`
+      : "this task only";
+    return html`
+      <div class="d9-task-fg-note">
+        ${view.samples.length} sample${view.samples.length === 1 ? "" : "s"} ·
+        ${scopeNote}
+      </div>
+      <div class="d9-task-fg-host" id="d9-task-fg" data-task-fg-host></div>
+    `;
+  }
+
+  /**
+   * The Task tab's scope view, memoized on the inputs that determine it.
+   *
+   * Both the template and the post-render sync need the view, and the
+   * spawn-location scope is a full pass over `trace.cpuSamples` - millions of
+   * them on a large trace. Without this, every frame the inspector re-renders
+   * for (a selection change, a sidebar-resize drag) pays that pass twice.
+   */
+  let taskFgView: { sig: string; view: TaskFlamegraphView } | null = null;
+  function taskFlamegraphViewFor(d: TaskDetailData): TaskFlamegraphView {
+    const trace = state().trace.trace;
+    const pin = state().selection.scopedSpawnLoc;
+    const sig = [
+      trace === null ? 0 : traceId(trace),
+      d.taskId,
+      pin ?? "",
+      d.spawnLocation ?? "",
+    ].join("|");
+    if (taskFgView !== null && taskFgView.sig === sig) return taskFgView.view;
+    const view = buildTaskFlamegraphView(trace, d.taskId, d.polls, pin);
+    taskFgView = { sig, view };
+    return view;
   }
 
   function kv(k: string, v: string): TemplateResult {
@@ -770,6 +958,46 @@ export function mountInspector(
       apply: (instance) =>
         instance.setData(samples, data().callframeSymbols, {
           exportTitle: `Waiting on — ${count} async stack capture${count === 1 ? "" : "s"}`,
+        }),
+    });
+  }
+
+  /**
+   * Feed the Task tab's flamegraph after the frame render (the host node exists
+   * only then). A no-op unless the Task tab is showing a scope with samples;
+   * otherwise it detaches, so the widget parks with its removed host exactly
+   * like the poll and region hosts.
+   */
+  function syncTaskFlamegraph(s: StoreState): void {
+    if (s.view.inspectorTab !== "task") {
+      taskFg.detach();
+      return;
+    }
+    const hostEl = host.querySelector<HTMLElement>("[data-task-fg-host]");
+    if (hostEl === null) {
+      taskFg.detach();
+      return;
+    }
+    const d = taskDetail();
+    const view = taskFlamegraphViewFor(d);
+    if (view.samples.length === 0) {
+      taskFg.detach();
+      return;
+    }
+    const sig = taskFlamegraphCacheSignature({
+      traceId: traceId(s.trace.trace),
+      taskId: d.taskId,
+      isFamily: view.isFamily,
+      pin: s.selection.scopedSpawnLoc,
+      sampleCount: view.samples.length,
+    });
+    taskFg.sync({
+      hostEl,
+      sig,
+      apply: (instance) =>
+        instance.setData(view.samples, data().callframeSymbols, {
+          exportTitle: view.title,
+          runtimeWorkers: data().runtimeWorkers,
         }),
     });
   }
@@ -1291,6 +1519,7 @@ export function mountInspector(
       unregisterEsc();
       pollFg.destroy();
       taskDumpFg.destroy();
+      taskFg.destroy();
       window.removeEventListener("mousemove", onResizeMove);
       window.removeEventListener("mouseup", onResizeUp);
     },

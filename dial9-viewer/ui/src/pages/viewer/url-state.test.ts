@@ -158,6 +158,42 @@ describe("viewer URL state: issues-rail (poi)", () => {
   });
 });
 
+describe("viewer URL state: pinned spawn location", () => {
+  const LOC = "examples/metrics-service/src/main.rs:418:25";
+
+  it("round-trips the pinned location itself", () => {
+    const { params, out } = roundTrip(mkState({ selection: { scopedSpawnLoc: LOC } }));
+    // The location, not a mode word: the link reproduces the family without
+    // depending on which task happens to be selected alongside it.
+    expect(params.get("task-scope")).toBe(LOC);
+    expect(out.taskScope).toBe(LOC);
+  });
+
+  it("emits nothing at the resting defaults", () => {
+    const { params } = roundTrip(mkState({}));
+    expect(params.get("task-scope")).toBeNull();
+  });
+
+  it("drops a blank pin", () => {
+    expect(readViewerUrlState("?task-scope=").taskScope).toBeUndefined();
+    expect(readViewerUrlState("?task-scope=%20%20").taskScope).toBeUndefined();
+  });
+
+  // Links minted before the pin named a mode, not a location, so they identify
+  // no family at all. Dropping beats guessing at one.
+  it("drops the pre-pin mode word", () => {
+    expect(readViewerUrlState("?task-scope=spawn-location").taskScope).toBeUndefined();
+  });
+
+  // The Task tab's profile is no longer behind a toggle; a link carrying the
+  // retired key must still load rather than trip the parser.
+  it("ignores the retired task-flame key", () => {
+    const out = readViewerUrlState(`?task-flame=1&task-scope=${encodeURIComponent(LOC)}`);
+    expect(out.taskScope).toBe(LOC);
+    expect("taskFlame" in out).toBe(false);
+  });
+});
+
 describe("viewer URL state: span filters", () => {
   it("round-trips the percentile filter", () => {
     const { params, out } = roundTrip(mkState({ uiPrefs: { spanPctFilter: 99 } }));

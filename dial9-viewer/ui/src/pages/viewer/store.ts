@@ -43,6 +43,7 @@ export function initialViewerState(): StoreState {
       taskDump: null,
       sidebarRange: null,
       hoveredWakerTaskId: null,
+      scopedSpawnLoc: null,
       spawnedTasksRange: null,
       spawnedTasksRuntime: null,
     },

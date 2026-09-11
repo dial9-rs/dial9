@@ -28,6 +28,7 @@ import {
   docsRsUrl,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
+import { spawnLocationOf } from "./task-flamegraph-model.js";
 import type {
   ParsedTrace,
   PollSpan,
@@ -186,10 +187,8 @@ export function wakerLabelFor(
   ) {
     return "io";
   }
-  const wakerLoc = trace.taskSpawnLocs.get(wakerTaskId);
-  const wakerLocStr =
-    wakerLoc != null ? trace.spawnLocations.get(wakerLoc) : null;
-  return wakerLocStr != null
+  const wakerLocStr = spawnLocationOf(trace, wakerTaskId);
+  return wakerLocStr !== null
     ? wakerLocStr.replace(/.*\//, "")
     : `task 0x${wakerTaskId.toString(16)}`;
 }
@@ -246,12 +245,11 @@ export function computeTaskDetailData(
         },
   );
 
-  const firstPoll = polls[0]!;
-  // spawnLocations is string-keyed; the frozen builder's numeric 0 fallback
-  // means "no recorded location" and has no entry to find.
-  const spawnLocId = firstPoll.spawnLocId;
-  const spawnLocation =
-    typeof spawnLocId === "string" ? trace.spawnLocations.get(spawnLocId) ?? null : null;
+  // One resolve for the whole app: spawnLocationOf reads the trace's task maps,
+  // which the lanes and the scope model read too. Deriving it from
+  // firstPoll.spawnLocId instead would give the Task tab a second source that
+  // can disagree with the sibling set the lanes tint.
+  const spawnLocation = spawnLocationOf(trace, taskId);
 
   const spawnTs = trace.taskSpawnTimes.get(taskId) ?? null;
   const terminateTs = trace.taskTerminateTimes.get(taskId) ?? null;

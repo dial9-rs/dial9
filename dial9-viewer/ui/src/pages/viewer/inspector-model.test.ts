@@ -73,6 +73,7 @@ function sel(over: Partial<SelectionSlice>): SelectionSlice {
     taskDump: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
+    scopedSpawnLoc: null,
     spawnedTasksRange: null,
     ...over,
   };
