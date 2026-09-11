@@ -92,9 +92,19 @@ fn bench_multi_thread(c: &mut Criterion) {
     let mut group = c.benchmark_group("multi_thread");
     group.measurement_time(std::time::Duration::from_secs(8));
 
+    let recorder = recorder(MemoryBuffer::new(64 * 1024 * 1024).unwrap()).build();
+    recorder.install_global_handle().unwrap();
+
     // One shared subscriber (one Dial9TracingLayer, one schemas Mutex).
     // All threads dispatch through this single layer, contending on the mutex.
     let dispatch = Dispatch::new(tracing_subscriber::registry().with(Dial9TracingLayer::new()));
+
+    assert!(
+        std::thread::spawn(|| Dial9Handle::current().is_enabled())
+            .join()
+            .unwrap(),
+        "benchmark worker threads must resolve the process-global dial9 handle"
+    );
 
     let spans_per_thread = 100;
 
