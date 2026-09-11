@@ -1890,8 +1890,16 @@ body {
 /* The issues-rail jump marker. Amber, and only edge-tinted: it can cover the
    whole visible window, and a filled box that wide would wash out the lanes it
    exists to point at. */
+/* Hatched, not flat: the span is wall time the worker was AWAKE, of which only
+   a fraction was off-CPU, and a solid wash reads as "all of this was bad". The
+   EDGES stay solid - unlike the fill they are exact, since the period's start
+   and end are recorded; it is only the distribution inside that is unknown. */
 .d9-selection-overlay.poi {
-    background: rgba(255, 176, 32, 0.07);
+    background: repeating-linear-gradient(
+        45deg,
+        rgba(255, 176, 32, 0.11) 0 5px,
+        rgba(255, 176, 32, 0.02) 5px 10px
+    );
     border-color: rgba(255, 176, 32, 0.85);
     border-left-width: 2px;
     border-right-width: 2px;
