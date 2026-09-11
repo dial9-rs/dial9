@@ -58,7 +58,16 @@ impl<'a> FlushContext<'a> {
 /// the source with [`RecorderBuilder::source`] before starting the flush
 /// thread; the flush thread calls [`flush`] once per cycle.
 ///
+/// # Panic safety
+///
+/// The flush thread catches panics from [`flush`](Self::flush) and
+/// [`segment_metadata`](Self::segment_metadata), dropping that cycle's
+/// events or metadata for this source. The same instance is reused on the
+/// next cycle, so implementations **must** remain in a valid state after a
+/// panic.
+///
 /// [`flush`]: Source::flush
+/// [`segment_metadata`]: Source::segment_metadata
 /// [`RecorderBuilder::source`]: crate::recorder::RecorderBuilder::source
 pub trait Source: Any + Send {
     /// Drain pending data into the trace. Called once per flush cycle.
