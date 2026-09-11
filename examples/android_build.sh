@@ -23,7 +23,7 @@ usage() {
 			    FEATURES="" \\
 			    "${0}"
 			or:
-			    CARGO_PKG="dial9-tokio-telemetry" \\
+			    CARGO_PKG="dial9" \\
 			    EXAMPLE="cpu_profile_workload" \\
 			    FEATURES="-Fcpu-profiling" \\
 			    "${0}"
@@ -106,7 +106,7 @@ cat <<-'EOF' >&2
 	You may also pull the files from there by running:
 
 	    adb pull \
-	        /data/local/tmp/cpu_profile_trace.0.bin.gz \
+	        /data/local/tmp/cpu_profile_trace/trace.0.bin.gz \
 	        ~/Downloads/cpu_profile_trace_"$(date +"%Y-%m-%d_%H-%M-%S")".bin.gz \
 	    ;
 EOF
