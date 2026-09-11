@@ -43,6 +43,24 @@ const VIEWER_HELP_SECTIONS: readonly HelpSection[] = [
       { keys: "Option/Alt + Drag", text: "Zoom into a region" },
     ],
   },
+  {
+    // Three boxes share one slot over the lanes and differ only by colour, so
+    // the vocabulary has to be written down somewhere; here beats always-on
+    // chrome, which would spend permanent screen space on a rare lookup.
+    title: "Selection boxes",
+    rows: [
+      { keys: "Blue", text: "A region held for analysis - clears with the sidebar" },
+      { keys: "Teal", text: "The zoom about to be applied" },
+      {
+        keys: "Amber",
+        text: "The issue you jumped to from the rail; its label names the worker and how much of the span was bad",
+      },
+      {
+        keys: "Ruler bar",
+        text: "How long the box is, shown in the time ruler above it",
+      },
+    ],
+  },
 ];
 
 export interface ViewerHelp {
