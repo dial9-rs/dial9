@@ -8,7 +8,7 @@ use dial9_tokio_telemetry::telemetry::{
     recorder,
 };
 use serde::Deserialize;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -90,10 +90,9 @@ fn task_dump_emitted_for_long_sleep() {
     }
 }
 
-/// Tokio 1.53 stopped waking a task from `trace_with`. Each real poll that
-/// reaches a new idle point must therefore refresh the pending capture.
+/// Skipping one capture must not suppress captures for the rest of the task.
 #[test]
-fn task_dump_captures_each_sequential_idle() {
+fn task_dump_resumes_capture_after_skip() {
     let (capture, batches) = capture_processor();
 
     let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
@@ -116,8 +115,9 @@ fn task_dump_captures_each_sequential_idle() {
     rt.block_on(async {
         handle
             .spawn(async {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                for _ in 0..3 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             })
             .await
             .unwrap();
@@ -132,10 +132,61 @@ fn task_dump_captures_each_sequential_idle() {
         .iter()
         .filter(|e| matches!(e, DumpEvent::TaskDumpEvent { .. }))
         .count();
-    assert_eq!(
-        dump_count, 2,
-        "each sequential idle point should produce a fresh task dump"
+    // Without capture-induced wakes, the second idle is skipped. With them,
+    // the extra polls consume the skip and all three idles can be captured.
+    assert!(
+        (2..=3).contains(&dump_count),
+        "capture must resume after a skipped poll; got {dump_count} dumps"
     );
+}
+
+fn assert_idle_task_does_not_spin(multi_thread: bool) {
+    let (capture, _batches) = capture_processor();
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let options = TokioAttachOptions::builder()
+        .task_tracking_enabled(true)
+        .maybe_task_dump_config(Some(TaskDumpConfig::builder().rng_seed(42).build()))
+        .build();
+    let rt = if multi_thread {
+        common::attach(&recorder, 2, options)
+    } else {
+        common::attach_current_thread(&recorder, options)
+    };
+
+    let handle = Dial9TokioHandle::current();
+    let result = rt.block_on(async {
+        handle
+            .spawn(async {
+                let sleep = tokio::time::sleep(Duration::from_millis(50));
+                tokio::pin!(sleep);
+                let mut polls = 0;
+                poll_fn(|cx| {
+                    polls += 1;
+                    // Includes capture re-polls and allows a few spurious
+                    // wakes, but fails promptly on a wake-and-capture loop.
+                    assert!(polls <= 10, "task-dump capture keeps polling an idle task");
+                    sleep.as_mut().poll(cx)
+                })
+                .await;
+            })
+            .await
+    });
+
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+    result.expect("idle task must complete without a capture loop");
+}
+
+#[test]
+fn task_dump_does_not_spin_current_thread() {
+    assert_idle_task_does_not_spin(false);
+}
+
+#[test]
+fn task_dump_does_not_spin_multi_thread() {
+    assert_idle_task_does_not_spin(true);
 }
 
 /// A task spawned directly through Tokio should not produce task dumps.
