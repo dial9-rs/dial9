@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0...dial9-v0.6.0) - 2026-09-11
+
+### Added
+
+- improve FreeBSD runtime telemetry ([#721](https://github.com/dial9-rs/dial9/pull/721))
+- *(viewer)* add spawn-to-first-poll delay POI ([#874](https://github.com/dial9-rs/dial9/pull/874))
+
+### Fixed
+
+- *(taskdump)* remove unreleased capture changes ([#899](https://github.com/dial9-rs/dial9/pull/899))
+- [**breaking**] seal ext traits ([#883](https://github.com/dial9-rs/dial9/pull/883))
+- correct task dumps on Tokio 1.53 ([#830](https://github.com/dial9-rs/dial9/pull/830))
+- *(perf-self-profile)* detect missing frame pointers before install ([#814](https://github.com/dial9-rs/dial9/pull/814))
+- *(core)* stop rotation stranding events between files ([#891](https://github.com/dial9-rs/dial9/pull/891))
+- *(viewer)* use sampled active-task totals in analysis ([#868](https://github.com/dial9-rs/dial9/pull/868))
+- *(viewer)* don't report a rotation-stranded poll as a long poll ([#865](https://github.com/dial9-rs/dial9/pull/865))
+- *(viewer)* expand inlined frames innermost-first ([#856](https://github.com/dial9-rs/dial9/pull/856))
+
+### Other
+
+- cleanup README ([#894](https://github.com/dial9-rs/dial9/pull/894))
+- *(dial9-core)* add shuttle coverage for the dump-trigger debounce gate ([#877](https://github.com/dial9-rs/dial9/pull/877))
+- test(dial-9-core) add shuttle worker time coverage ([#857](https://github.com/dial9-rs/dial9/pull/857))
+- *(dial9-core)* add shuttle coverage for SharedState concurrency ([#851](https://github.com/dial9-rs/dial9/pull/851))
+- Reuse tracing schemas across span lifecycle events ([#900](https://github.com/dial9-rs/dial9/pull/900))
+- Add in NVML based GPU profiling. ([#844](https://github.com/dial9-rs/dial9/pull/844))
+- *(viewer)* flatten aggregate flamegraph trees ([#847](https://github.com/dial9-rs/dial9/pull/847))
+- *(viewer)* intern aggregate flamegraph frames ([#846](https://github.com/dial9-rs/dial9/pull/846))
+- wait for active dump ([#884](https://github.com/dial9-rs/dial9/pull/884))
+
 ### Fixed
 
 - The viewer attaches each captured task stack to the idle gap it describes.
