@@ -6,3 +6,6 @@ RUSTFLAGS="--cfg shuttle" \
 
 RUSTFLAGS="--cfg tokio_unstable --cfg shuttle" \
   cargo test -p dial9-tokio-telemetry --lib --features _shuttle -- shuttle "$@"
+
+RUSTFLAGS="--cfg tokio_unstable --cfg shuttle" \
+  cargo test -p dial9-utils --lib --features _shuttle -- shuttle "$@"
