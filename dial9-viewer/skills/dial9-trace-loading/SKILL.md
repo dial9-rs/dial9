@@ -1,9 +1,16 @@
 ---
 name: dial9-trace-loading
-description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTrace schema, event types, field definitions, parse options, time filtering, symbol resolution, and timestamp conversion. Use when loading traces or understanding the trace data model.
+description: Parse already-local dial9 Tokio runtime trace files or buffers and understand the ParsedTrace data model. Use when trace bytes are available locally or in memory; do not use to retrieve a viewer URL, API object, or S3 object.
 ---
 
 # Loading and Parsing Traces
+
+## Scope
+
+This skill begins after trace bytes are local or already in memory. A viewer URL,
+API endpoint, or S3 location requires the environment's request or retrieval
+skill first. Do not select this skill merely because the eventual operation may
+decompress or parse a trace.
 
 ## ParsedTrace structure
 
@@ -180,38 +187,6 @@ const groups = deduplicateSamples(trace.cpuSamples, trace.callframeSymbols);
 ## Handling gzip
 
 `parseTrace` automatically decompresses gzip input. Pass `.bin.gz` files directly.
-
-## Fetching traces from S3
-
-Start the viewer (`dial9-viewer --bucket BUCKET`, default port 3000), then fetch traces:
-
-```javascript
-// List traces in a time range
-const resp = await fetch('http://localhost:3000/api/browse?bucket=BUCKET&prefix=2026-04-09/19&from=0&to=' + Math.floor(Date.now()/1000));
-const objects = (await resp.json()).objects; // [{key, size, last_modified}, ...]
-
-// Single file: fetch and parse one trace. /api/object serves the file's raw
-// (still-gzipped) bytes; parseTrace decompresses transparently.
-const traceResp = await fetch(`http://localhost:3000/api/object?bucket=BUCKET&key=${encodeURIComponent(objects[0].key)}`);
-const buf = Buffer.from(await traceResp.arrayBuffer());
-const trace = await parseTrace(buf);
-
-// Multiple files: download to a local directory, then analyze
-const fs = require('fs');
-const dir = '/tmp/traces';
-fs.mkdirSync(dir, { recursive: true });
-// Download in parallel (20 at a time)
-const limit = 20;
-for (let i = 0; i < objects.length; i += limit) {
-  await Promise.all(objects.slice(i, i + limit).map(async (obj) => {
-    const r = await fetch(`http://localhost:3000/api/object?bucket=BUCKET&key=${encodeURIComponent(obj.key)}`);
-    fs.writeFileSync(`${dir}/${obj.key.split('/').pop()}`, Buffer.from(await r.arrayBuffer()));
-  }));
-}
-for await (const trace of parseTrace(dir)) {
-  // analyze each trace
-}
-```
 
 ## Merging multiple trace files
 
