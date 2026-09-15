@@ -289,3 +289,135 @@ impl Drop for Recorder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::{DiskBuffer, MemoryBuffer};
+    use crate::recorder::recorder;
+    use crate::source::{FlushContext, Source};
+    use crate::test_support::{decode_segment_metadata, sealed_segment};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    struct PanickingSource;
+    impl Source for PanickingSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {
+            panic!("PanickingSource intentionally panics for teardown test");
+        }
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+    }
+
+    /// `teardown()` should run even after an uncaught `Source::flush` panic:
+    /// it's the flush thread's own cleanup, unrelated to whichever source
+    /// misbehaved. `flush_sources` now catches and drops a panicking
+    /// source's cycle, so `run_flush_loop` returns normally and `teardown()`
+    /// runs as it would for any clean stop.
+    #[test]
+    fn source_panic_does_not_skip_thread_teardown() {
+        let teardown_ran = Arc::new(AtomicBool::new(false));
+        let teardown_ran_for_thread = teardown_ran.clone();
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+
+        let mut recorder = recorder(writer)
+            .source(PanickingSource)
+            .on_recording_thread_start(move || {
+                let teardown_ran_for_thread = teardown_ran_for_thread.clone();
+                move || {
+                    teardown_ran_for_thread.store(true, Ordering::Relaxed);
+                }
+            })
+            .build();
+        recorder.handle().enable();
+
+        // Give the flush thread time to run at least one cycle: the
+        // panicking source guarantees the very first cycle panics.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Explicitly ask the flush thread to stop, rather than relying on
+        // the sleep alone: this is what makes the loop return normally and
+        // run teardown().
+        recorder.stop_flush_thread();
+
+        assert!(
+            teardown_ran.load(Ordering::Relaxed),
+            "teardown() should still run even after an uncaught Source panic during flush, \
+             but it was skipped"
+        );
+    }
+
+    struct PanickingMetadataSource;
+    impl Source for PanickingMetadataSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            out.push((
+                "panicking.partial".to_string(),
+                "should not survive".to_string(),
+            ));
+            panic!("PanickingMetadataSource intentionally panics for segment_metadata test");
+        }
+        fn name(&self) -> &'static str {
+            "panicking_metadata"
+        }
+    }
+
+    struct HealthyMetadataSource;
+    impl Source for HealthyMetadataSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            out.push(("healthy.key".to_string(), "healthy-value".to_string()));
+        }
+        fn name(&self) -> &'static str {
+            "healthy_metadata"
+        }
+    }
+
+    #[derive(Debug, dial9_trace_format::TraceEvent)]
+    struct MarkerEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
+
+    /// A panicking `Source::segment_metadata` must not corrupt sibling
+    /// sources' entries for the same cycle, and its own partial push must
+    /// not survive. `flush_loop` now catches the panic and truncates
+    /// `source_entries` back to its pre-call length.
+    #[test]
+    fn source_panic_during_segment_metadata_skips_only_that_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+
+        let recorder = recorder(writer)
+            .source(PanickingMetadataSource)
+            .source(HealthyMetadataSource)
+            .build();
+        recorder.handle().enable();
+        // A trivial marker event: `finalize()` discards a segment that never
+        // held a real event, so without this the metadata-only segment
+        // below would never get sealed at all.
+        recorder
+            .handle()
+            .record_event(MarkerEvent { timestamp_ns: 0 });
+        recorder.graceful_shutdown(Duration::ZERO);
+
+        let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
+        let entries = decode_segment_metadata(&bytes);
+
+        assert_eq!(
+            entries.get("healthy.key").map(String::as_str),
+            Some("healthy-value"),
+            "sibling source's metadata must survive a panicking source in the same cycle"
+        );
+        assert!(
+            !entries.contains_key("panicking.partial"),
+            "a panicking source's partial push must not survive in the cycle's metadata"
+        );
+    }
+}
