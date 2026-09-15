@@ -387,6 +387,32 @@ declare module "*/trace_analysis.js" {
     opts?: FlamegraphTreeOptions<S>
   ): FlamegraphNode;
 
+  export interface ApiFlamegraphTreeNode {
+    name: string;
+    count: number;
+    self: number;
+    children?: ApiFlamegraphTreeNode[];
+    fullName?: string;
+    location?: string | null;
+  }
+
+  /**
+   * Convert a server-built aggregate tree to the canonical display tree.
+   * Children remain keyed by their unshortened symbols.
+   */
+  export function buildFlamegraphTreeFromApi(
+    root: ApiFlamegraphTreeNode,
+    frameCache?: Map<
+      string,
+      {
+        key: string;
+        text: string;
+        location: string | null;
+        docsUrl: string | null;
+      }
+    >
+  ): FlamegraphNode;
+
   export interface FlatFlamegraphNode {
     name: string;
     depth: number;

@@ -2366,16 +2366,341 @@
         return s.split("::").pop();
     }
 
+    function _isRustClosureSegment(s) {
+        return s === "{{closure}}" || /^\{closure#\d+\}$/.test(s);
+    }
+
     function _shortenPath(s) {
         const parts = s.split("::");
         let closures = 0;
         for (let i = parts.length - 1; i >= 0; i--) {
-            if (parts[i] === "{{closure}}") closures++;
+            if (_isRustClosureSegment(parts[i])) closures++;
             else break;
         }
         const meaningful = parts.length - closures;
         if (meaningful <= 3) return s;
         return parts.slice(meaningful - 3).join("::");
+    }
+
+    function _matchingAngle(s, open) {
+        let depth = 0;
+        for (let i = open; i < s.length; i++) {
+            if (s[i] === "<") depth++;
+            else if (s[i] === ">" && --depth === 0) return i;
+        }
+        return -1;
+    }
+
+    function _stripOuterAngles(s) {
+        s = s.trim();
+        while (s[0] === "<") {
+            const close = _matchingAngle(s, 0);
+            if (close !== s.length - 1) break;
+            s = s.slice(1, -1).trim();
+        }
+        return s;
+    }
+
+    function _topLevelIndex(s, needle) {
+        let angles = 0;
+        let parens = 0;
+        let brackets = 0;
+        for (let i = 0; i <= s.length - needle.length; i++) {
+            const ch = s[i];
+            if (ch === "<") angles++;
+            else if (ch === ">") angles--;
+            else if (ch === "(") parens++;
+            else if (ch === ")") parens--;
+            else if (ch === "[") brackets++;
+            else if (ch === "]") brackets--;
+            if (
+                angles === 0 &&
+                parens === 0 &&
+                brackets === 0 &&
+                s.startsWith(needle, i)
+            ) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    function _lastTopLevelPathSep(s) {
+        let targetAngles = 0;
+        let targetParens = 0;
+        let targetBrackets = 0;
+        for (const ch of s) {
+            if (ch === "<") targetAngles++;
+            else if (ch === ">") targetAngles--;
+            else if (ch === "(") targetParens++;
+            else if (ch === ")") targetParens--;
+            else if (ch === "[") targetBrackets++;
+            else if (ch === "]") targetBrackets--;
+        }
+        let angles = 0;
+        let parens = 0;
+        let brackets = 0;
+        let found = -1;
+        for (let i = 0; i < s.length - 1; i++) {
+            const ch = s[i];
+            if (ch === "<") angles++;
+            else if (ch === ">") angles--;
+            else if (ch === "(") parens++;
+            else if (ch === ")") parens--;
+            else if (ch === "[") brackets++;
+            else if (ch === "]") brackets--;
+            if (
+                angles === targetAngles &&
+                parens === targetParens &&
+                brackets === targetBrackets &&
+                ch === ":" &&
+                s[i + 1] === ":"
+            ) {
+                found = i++;
+            }
+        }
+        return found;
+    }
+
+    function _tailAtFinalNesting(s) {
+        let targetAngles = 0;
+        let targetParens = 0;
+        let targetBrackets = 0;
+        for (const ch of s) {
+            if (ch === "<") targetAngles++;
+            else if (ch === ">") targetAngles--;
+            else if (ch === "(") targetParens++;
+            else if (ch === ")") targetParens--;
+            else if (ch === "[") targetBrackets++;
+            else if (ch === "]") targetBrackets--;
+        }
+
+        let angles = 0;
+        let parens = 0;
+        let brackets = 0;
+        let start = 0;
+        for (let i = 0; i < s.length; i++) {
+            const ch = s[i];
+            if (ch === "<") {
+                angles++;
+                if (
+                    angles === targetAngles &&
+                    parens === targetParens &&
+                    brackets === targetBrackets
+                ) {
+                    start = i + 1;
+                }
+            } else if (ch === ">") {
+                angles--;
+            } else if (ch === "(") {
+                parens++;
+            } else if (ch === ")") {
+                parens--;
+            } else if (ch === "[") {
+                brackets++;
+            } else if (ch === "]") {
+                brackets--;
+            } else if (
+                ch === "," &&
+                angles === targetAngles &&
+                parens === targetParens &&
+                brackets === targetBrackets
+            ) {
+                start = i + 1;
+            }
+        }
+        return s.slice(start).trim();
+    }
+
+    function _rustOuterTypeName(type_) {
+        let s = _stripOuterAngles(type_)
+            .replace(/^&(?:mut\s+)?/, "")
+            .replace(/^dyn\s+/, "")
+            .trim();
+        const asAt = _topLevelIndex(s, " as ");
+        if (asAt >= 0) s = s.slice(0, asAt).trim();
+        const closure = s.match(/(?:\{\{closure\}\}|\{closure#\d+\})$/);
+        if (closure) return closure[0].replace(/[{}]/g, "");
+        const genericAt = s.indexOf("<");
+        if (genericAt >= 0) s = s.slice(0, genericAt);
+        const name = s.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+        return name ? name[1] : _lastSeg(s);
+    }
+
+    function _rustTypeLabel(type_, includeModule = true) {
+        let s = _stripOuterAngles(type_)
+            .replace(/^&(?:mut\s+)?/, "")
+            .replace(/^dyn\s+/, "")
+            .trim();
+        const asAt = _topLevelIndex(s, " as ");
+        if (asAt >= 0) s = s.slice(0, asAt).trim();
+        const boundAt = _topLevelIndex(s, " + ");
+        if (boundAt >= 0) s = s.slice(0, boundAt).trim();
+        const assignedAt = _topLevelIndex(s, " = ");
+        if (assignedAt >= 0) {
+            return _rustTypeLabel(s.slice(assignedAt + 3), includeModule);
+        }
+
+        const genericAt = s.indexOf("<");
+        const path = (genericAt >= 0 ? s.slice(0, genericAt) : s).trim();
+        const pathParts = path.split("::").filter(Boolean);
+        const outerName = _rustOuterTypeName(s);
+        const shortPath = includeModule
+            ? pathParts.slice(-2).join("::") || outerName
+            : outerName;
+        if (genericAt < 0) {
+            return /^[A-Z]$|^'[A-Za-z_][A-Za-z0-9_]*$|^\d+$/.test(
+                shortPath,
+            )
+                ? ""
+                : shortPath;
+        }
+
+        const args = _rustGenericArgs(s);
+        const transparent =
+            /^(Arc|Box|Pin|Mutex|RwLock|Option|Result|Poll|Stream|Future)$/;
+        if (transparent.test(outerName)) {
+            for (const arg of args) {
+                const nested = _rustTypeLabel(arg, includeModule);
+                if (nested) return nested;
+            }
+            return "";
+        }
+
+        const genericNames = args
+            .map((arg) => _rustTypeLabel(arg, false))
+            .filter(Boolean);
+        return genericNames.length
+            ? `${shortPath}<${genericNames.join(", ")}>`
+            : shortPath;
+    }
+
+    function _rustGenericArgs(type_) {
+        const s = _stripOuterAngles(type_);
+        const open = s.indexOf("<");
+        if (open < 0) return [];
+        const close = _matchingAngle(s, open);
+        if (close < 0) return [];
+        const inner = s.slice(open + 1, close);
+        const args = [];
+        let start = 0;
+        let angles = 0;
+        let parens = 0;
+        let brackets = 0;
+        for (let i = 0; i < inner.length; i++) {
+            const ch = inner[i];
+            if (ch === "<") angles++;
+            else if (ch === ">") angles--;
+            else if (ch === "(") parens++;
+            else if (ch === ")") parens--;
+            else if (ch === "[") brackets++;
+            else if (ch === "]") brackets--;
+            else if (
+                ch === "," &&
+                angles === 0 &&
+                parens === 0 &&
+                brackets === 0
+            ) {
+                args.push(inner.slice(start, i).trim());
+                start = i + 1;
+            }
+        }
+        args.push(inner.slice(start).trim());
+        return args.filter(Boolean);
+    }
+
+    function _stripTrailingRustGenerics(s) {
+        s = s.trim();
+        while (s.endsWith(">")) {
+            let depth = 0;
+            let open = -1;
+            for (let i = s.length - 1; i >= 0; i--) {
+                if (s[i] === ">") depth++;
+                else if (s[i] === "<" && --depth === 0) {
+                    open = i;
+                    break;
+                }
+            }
+            if (open <= 0) break;
+            s = s.slice(0, open).trim();
+        }
+        return s;
+    }
+
+    function _splitRustQualifiedMethod(sym) {
+        if (!sym.startsWith("<")) return null;
+        const close = _matchingAngle(sym, 0);
+        if (close < 0 || sym.slice(close + 1, close + 3) !== "::") return null;
+        const inside = sym.slice(1, close);
+        const asAt = _topLevelIndex(inside, " as ");
+        return {
+            implType:
+                asAt >= 0 ? inside.slice(0, asAt).trim() : inside.trim(),
+            trait: asAt >= 0 ? inside.slice(asAt + 4).trim() : null,
+            method: sym.slice(close + 3),
+        };
+    }
+
+    function _rustPayloadLabel(type_) {
+        const boring =
+            /^[A-Z]$|^(Arc|Box|Pin|Handle|Schedule|BlockingSchedule)$/;
+        const args = _rustGenericArgs(type_);
+        const outerName = _rustOuterTypeName(type_);
+        // Tokio's TaskLocalFuture stores the scoped value first and the future
+        // being polled second. Prefer that semantic payload over context types.
+        const candidates =
+            outerName === "TaskLocalFuture" && args.length > 1
+                ? [args[1], args[0], ...args.slice(2)]
+                : args;
+        for (const arg of candidates) {
+            const name = _rustOuterTypeName(arg);
+            if (name && !boring.test(name)) return _rustTypeLabel(arg);
+        }
+        return null;
+    }
+
+    /**
+     * Recover the function that produced a Rust async closure hidden inside a
+     * Future/Stream wrapper. This is usually the most useful identity in a
+     * flamegraph: `TransformStage::into_stream` distinguishes stacks that
+     * otherwise all format as `{closure#0}>::poll_next`.
+     */
+    function _rustClosureOwner(type_) {
+        const closureRe = /::(?:\{\{closure\}\}|\{closure#\d+\})/g;
+        let match;
+        let last = null;
+        while ((match = closureRe.exec(type_))) last = match;
+        if (!last) return null;
+
+        let before = type_.slice(0, last.index);
+        const trailingClosureRe =
+            /::(?:\{\{closure\}\}|\{closure#\d+\})$/;
+        while (trailingClosureRe.test(before)) {
+            before = before.replace(trailingClosureRe, "");
+        }
+        before = _stripTrailingRustGenerics(before);
+        const sep = _lastTopLevelPathSep(before);
+        if (sep < 0) return null;
+
+        const method = before.slice(sep + 2);
+        const receiverPrefix = before.slice(0, sep);
+        const receiver = _stripOuterAngles(
+            _tailAtFinalNesting(receiverPrefix),
+        );
+        const receiverName = _rustOuterTypeName(receiver);
+        if (!receiverName || !method) return null;
+
+        // Multi-parameter transform wrappers often differ only in their final
+        // transform type. Keep that one concise discriminator without exposing
+        // the enormous nested Future/Stream payload.
+        const args = _rustGenericArgs(receiver);
+        const argLabel =
+            args.length > 1 ? _rustTypeLabel(args[args.length - 1]) : "";
+        const qualifiedReceiver =
+            argLabel && argLabel.length > 1
+                ? `${argLabel} · ${receiverName}`
+                : receiverName;
+        return `${qualifiedReceiver}::${method}`;
     }
 
     /**
@@ -2435,14 +2760,29 @@
             return { text: sym || "(unknown)", docsUrl: null };
 
         let result = sym;
-        const traitImplMatch = result.match(/^<(.+?) as (.+?)>::(.+)$/);
-        if (traitImplMatch) {
-            let [, implType, trait_, method] = traitImplMatch;
-            const shortType = _lastSeg(_stripBoringGenerics(implType));
-            result =
-                shortType.length <= 2
-                    ? `${_lastSeg(_stripBoringGenerics(trait_))}::${method}`
-                    : `${shortType}::${method}`;
+        const traitImpl = _splitRustQualifiedMethod(result);
+        if (traitImpl) {
+            const shortType = _rustOuterTypeName(traitImpl.implType);
+            const traitName = traitImpl.trait
+                ? _rustOuterTypeName(traitImpl.trait)
+                : null;
+            const method = _shortenPath(
+                _stripBoringGenerics(traitImpl.method),
+            );
+            const closureOwner = _rustClosureOwner(traitImpl.implType);
+            if (closureOwner) {
+                result = closureOwner;
+            } else {
+                const payload = _rustPayloadLabel(traitImpl.implType);
+                if (payload && payload !== shortType) {
+                    result = payload;
+                } else {
+                    result =
+                        shortType.length <= 2 && traitName
+                            ? `${traitName}::${method}`
+                            : `${shortType}::${method}`;
+                }
+            }
         } else if (result.includes("::")) {
             result = _shortenPath(_stripBoringGenerics(result));
         }

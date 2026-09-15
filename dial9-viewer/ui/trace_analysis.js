@@ -1202,6 +1202,52 @@
     return `hsl(${hue},${sat}%,${lit}%)`;
   }
 
+  function flamegraphFrame(symbol, location) {
+    const formatted = formatFrame({ symbol: symbol, location: location || null });
+    return {
+      key: symbol,
+      text: formatted.text,
+      location: location || null,
+      docsUrl: formatted.docsUrl,
+    };
+  }
+
+  /**
+   * Convert a server-built aggregate tree into the same display/identity shape
+   * as buildFlamegraphTree. Display names use formatFrame; child maps remain
+   * keyed by the unshortened symbol so equal-looking labels never merge.
+   */
+  function buildFlamegraphTreeFromApi(root, frameCache) {
+    const cache = frameCache || new Map();
+
+    function visit(node, isRoot) {
+      const rawName = node.fullName || node.name;
+      const location = node.location || null;
+      const cacheKey = `${rawName}\u0000${location || ""}`;
+      let frame = cache.get(cacheKey);
+      if (frame === undefined) {
+        frame = flamegraphFrame(rawName, location);
+        cache.set(cacheKey, frame);
+      }
+      const children = new Map();
+      for (const child of node.children || []) {
+        const formattedChild = visit(child, false);
+        children.set(formattedChild.fullName || formattedChild.name, formattedChild);
+      }
+      const formatted = {
+        name: frame.text,
+        children: children,
+        count: node.count,
+        self: node.self,
+      };
+      if (!isRoot || rawName !== "(all)") formatted.fullName = rawName;
+      if (frame.location) formatted.location = frame.location;
+      if (frame.docsUrl) formatted.docsUrl = frame.docsUrl;
+      return formatted;
+    }
+    return visit(root, true);
+  }
+
   /**
    * Build a flamegraph tree from CPU samples with reversed callchains.
    * @param {import('./trace_parser.js').CpuSample[]} samples
@@ -1231,15 +1277,10 @@
     function resolveFrames(addr) {
       const entry = callframeSymbols.get(addr);
       if (!Array.isArray(entry)) {
-        const formatted = entry
-          ? formatFrame(entry)
-          : formatFrame(addr, callframeSymbols);
-        return {
-          key: entry ? entry.symbol : addr || "??",
-          text: formatted.text,
-          location: entry ? entry.location : null,
-          docsUrl: formatted.docsUrl,
-        };
+        if (typeof entry === "string") return flamegraphFrame(entry, null);
+        return entry
+          ? flamegraphFrame(entry.symbol, entry.location)
+          : flamegraphFrame(addr || "??", null);
       }
 
       // Expand inlined frames. Per blazesym, an array entry is ordered
@@ -1253,15 +1294,11 @@
       for (let fi = 0; fi < entry.length; fi++) {
         const resolved = entry[fi];
         if (fi > 0 && !resolved) continue;
-        const formatted = resolved
-          ? formatFrame(resolved)
-          : formatFrame(addr, callframeSymbols);
-        frames.push({
-          key: resolved ? resolved.symbol : addr || "??",
-          text: formatted.text,
-          location: resolved ? resolved.location : null,
-          docsUrl: formatted.docsUrl,
-        });
+        frames.push(
+          resolved
+            ? flamegraphFrame(resolved.symbol, resolved.location)
+            : flamegraphFrame(addr || "??", null),
+        );
       }
       return frames;
     }
@@ -2249,6 +2286,7 @@
     DEFAULT_SPAWN_DELAY_THRESHOLD_US,
     POI_DEFAULT_WORST_N,
     flamegraphColor,
+    buildFlamegraphTreeFromApi,
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,

@@ -49,9 +49,9 @@ export type TimeZoneMode = "utc" | "local";
  * this interface additively.
  */
 export interface ViewState {
-  /** Flamegraph worker-tree zoom path, root -> target frame names. */
+  /** Flamegraph worker-tree zoom path, root -> target frame identity keys. */
   fgWorkerZoom?: readonly string[];
-  /** Flamegraph off-worker-tree zoom path, root -> target frame names. */
+  /** Flamegraph off-worker-tree zoom path, root -> target frame identity keys. */
   fgOffworkerZoom?: readonly string[];
   /** Flamegraph inspect (butterfly) focus display name (legacy `inspect`). */
   fgInspect?: string | undefined;

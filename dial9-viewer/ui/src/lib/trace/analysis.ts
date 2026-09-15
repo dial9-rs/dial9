@@ -16,6 +16,7 @@ export {
   buildActiveTaskTimeline,
   buildFgData,
   buildFlamegraphTree,
+  buildFlamegraphTreeFromApi,
   buildProcessCpuUsageSeries,
   buildRuntimeFilterData,
   buildSpanData,

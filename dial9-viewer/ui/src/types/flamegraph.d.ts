@@ -72,7 +72,7 @@ declare module "*/flamegraph.js" {
     ): void;
     /**
      * API mode: render a pre-built tree directly (no worker/off-worker
-     * split, filters hidden). Preserves the current zoom by node name.
+     * split, filters hidden). Preserves the current structural zoom path.
      */
     setTreeDirect(tree: FlamegraphNode, totalCount: number): void;
     /** Re-render after a container resize. */
@@ -85,9 +85,9 @@ declare module "*/flamegraph.js" {
      */
     handleEscape(): boolean;
     isZoomed(): boolean;
-    /** Frame-name paths of the current zoom, per panel. */
+    /** Frame identity-key paths (`fullName || name`) of the current zoom. */
     getZoomPath(): { worker: string[]; offworker: string[] };
-    /** Restore a zoom from a frame-name path. */
+    /** Restore a zoom from an identity-key path; legacy name paths also work. */
     zoomToPath(key: "worker" | "offworker", names: readonly string[]): void;
     /** The complete, serializable view state (see FlamegraphViewState). */
     getViewState(): FlamegraphViewState;

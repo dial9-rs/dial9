@@ -9,6 +9,7 @@ import {
   Dial9Creds,
   Dial9Session,
   applyToCreds,
+  buildFlamegraphTreeFromApi,
   decodeFlamegraphTree,
   formatCoverageBadge,
   formatHumanDuration,
@@ -24,10 +25,8 @@ import {
   sourceScopeFromStored,
 } from "../../lib/trace/index.js";
 import type {
-  ApiFlamegraphNode,
   Coverage,
   FlamegraphMetadata,
-  FlamegraphNode,
   FlamegraphResponse,
 } from "../../lib/trace/index.js";
 import { createFlamegraph, diffSearch, fullScopeQuery } from "../../lib/canvas/index.js";
@@ -279,16 +278,6 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       : `Flamegraph \u2014 ${svc}`;
   }
 
-  // Convert the wire tree (children as an optional array) into the widget's
-  // shape (children as a Map).
-  function toFgTree(node: ApiFlamegraphNode): FlamegraphNode {
-    const m = new Map<string, FlamegraphNode>();
-    for (const child of node.children || []) {
-      m.set(child.name, toFgTree(child));
-    }
-    return { name: node.name, count: node.count, self: node.self, children: m };
-  }
-
   // Canvas zoom is not URL-synced in api mode. Inspection is, using its stable
   // frame identity so a shared link can restore it as snapshots arrive.
   let keys: FgKeys | null = null;
@@ -332,6 +321,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   let lastBadge = "";
   let lastCoverage: Coverage | null = null;
   let gotEvent = false;
+  const frameCache = new Map();
   const stopBtn = document.getElementById("f-stop") as HTMLButtonElement;
   const moreBtn = document.getElementById("f-more") as HTMLButtonElement;
   const applyBtn = document.getElementById("f-apply") as HTMLButtonElement;
@@ -376,7 +366,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     loadingEl.classList.add("hidden");
     containerEl.style.display = "flex";
     const tree = decodeFlamegraphTree(resp);
-    fg.setTreeDirect(toFgTree(tree), tree.count);
+    fg.setTreeDirect(buildFlamegraphTreeFromApi(tree, frameCache), tree.count);
 
     const cov = resp.coverage;
     lastCoverage = cov ?? null;

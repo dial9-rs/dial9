@@ -128,6 +128,12 @@ function tree(name, count, self, children) {
   return { name, fullName: name, location: null, count, self, children: m };
 }
 
+function identifiedTree(name, fullName, count, self, children) {
+  const node = tree(name, count, self, children);
+  node.fullName = fullName;
+  return node;
+}
+
 // root → a(10) → mid(10) → leaf(10 self)
 // root → b(5)  → mid(5)  → leaf(5 self)
 function sampleTree() {
@@ -383,12 +389,17 @@ test("captured full view state survives replacement with duplicate terminal name
     fg.zoomToPath("worker", ["a", "mid", "leaf"]);
     const preserved = fg.getViewState();
 
-    // Put branch b first. setTreeDirect's best-effort terminal-name retention
-    // may choose b/…/leaf, but the page reapplies this captured full path.
+    // Put branch b first. Both setTreeDirect's live preservation and the
+    // page's subsequent captured-state restore must retain branch a.
     const reordered = sampleTree();
     fg.setTreeDirect(
       tree("", 15, 0, [reordered.children.get("b"), reordered.children.get("a")]),
       15,
+    );
+    assert.deepStrictEqual(
+      fg.getZoomPath().worker,
+      ["a", "mid", "leaf"],
+      "live snapshot replacement preserves the complete structural path",
     );
     fg.applyViewState(preserved);
 
@@ -396,6 +407,76 @@ test("captured full view state survives replacement with duplicate terminal name
       fg.getZoomPath().worker,
       ["a", "mid", "leaf"],
       "full path returns to branch a rather than the first duplicate leaf",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("streamed tree replacement preserves zoom by raw frame identity", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("../../flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    const first = identifiedTree("same label", "example_a::same", 5, 5, []);
+    const second = identifiedTree("same label", "example_b::same", 7, 7, []);
+    fg.setTreeDirect(tree("", 12, 0, [first, second]), 12);
+
+    fg.zoomToPath("worker", ["example_b::same"]);
+    assert.deepStrictEqual(
+      fg.getZoomPath().worker,
+      ["example_b::same"],
+      "canonical zoom state stores the raw frame identity",
+    );
+
+    const nextFirst = identifiedTree("same label", "example_a::same", 6, 6, []);
+    const nextSecond = identifiedTree("same label", "example_b::same", 8, 8, []);
+    fg.setTreeDirect(tree("", 14, 0, [nextFirst, nextSecond]), 14);
+
+    assert.deepStrictEqual(
+      fg.getZoomPath().worker,
+      ["example_b::same"],
+      "snapshot replacement does not jump to an equal-looking sibling",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+test("streamed tree replacement preserves the full caller path", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("../../flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    const sharedA = identifiedTree("shared", "example::shared", 5, 5, []);
+    const sharedB = identifiedTree("shared", "example::shared", 7, 7, []);
+    const callerA = identifiedTree("caller a", "example::caller_a", 5, 0, [sharedA]);
+    const callerB = identifiedTree("caller b", "example::caller_b", 7, 0, [sharedB]);
+    fg.setTreeDirect(tree("", 12, 0, [callerA, callerB]), 12);
+    fg.zoomToPath("worker", ["example::caller_b", "example::shared"]);
+
+    const nextSharedA = identifiedTree("shared", "example::shared", 6, 6, []);
+    const nextSharedB = identifiedTree("shared", "example::shared", 8, 8, []);
+    const nextCallerA = identifiedTree(
+      "caller a",
+      "example::caller_a",
+      6,
+      0,
+      [nextSharedA],
+    );
+    const nextCallerB = identifiedTree(
+      "caller b",
+      "example::caller_b",
+      8,
+      0,
+      [nextSharedB],
+    );
+    fg.setTreeDirect(tree("", 14, 0, [nextCallerA, nextCallerB]), 14);
+
+    assert.deepStrictEqual(
+      fg.getZoomPath().worker,
+      ["example::caller_b", "example::shared"],
+      "repeated symbols stay attached to the selected caller branch",
     );
   } finally {
     dom.restore();

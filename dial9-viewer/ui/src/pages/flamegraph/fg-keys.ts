@@ -20,7 +20,7 @@ import {
 } from "../../lib/interact/index.js";
 import type { HelpOverlay, HelpSection } from "../../lib/interact/index.js";
 
-/** The widget's zoom state as frame-name paths (getZoomPath's shape). */
+/** The widget's zoom state as frame identity-key paths (getZoomPath's shape). */
 type ZoomPaths = { worker: string[]; offworker: string[] };
 
 function pathsEqual(a: ZoomPaths, b: ZoomPaths): boolean {

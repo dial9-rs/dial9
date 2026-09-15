@@ -1647,7 +1647,7 @@
         // DFS is ambiguous when different branches end in the same frame name.
         const target = stack[stack.length - 1];
         const path = findAncestorPath(tree, target);
-        return path ? path.map((n) => n.name) : stack.map((n) => n.name);
+        return path ? path.map(frameKey) : stack.map(frameKey);
       }
       return {
         worker: fullPath(workerTree, workerZoomStack),
@@ -1655,12 +1655,12 @@
       };
     }
 
-    // Find a node by name anywhere in the tree via DFS, return path from root.
-    function findNodePath(tree, name) {
+    // Find a node anywhere in the tree via DFS, return path from root.
+    function findNodePathMatching(tree, matches) {
       const path = [];
       function dfs(node) {
         path.push(node);
-        if (node.name === name) return true;
+        if (matches(node)) return true;
         for (const child of node.children.values()) {
           if (dfs(child)) return true;
         }
@@ -1671,6 +1671,13 @@
         if (dfs(child)) return path;
       }
       return null;
+    }
+
+    // Prefer raw-symbol identity. The name fallback keeps old shared URLs and
+    // trees without fullName metadata working.
+    function findNodePath(tree, value) {
+      return findNodePathMatching(tree, (node) => frameKey(node) === value) ||
+        findNodePathMatching(tree, (node) => node.name === value);
     }
 
     // Like findNodePath but uses object identity instead of name matching.
@@ -1691,23 +1698,24 @@
       return null;
     }
 
-    function zoomToPath(key, names) {
-      const tree = key === "worker" ? workerTree : offworkerTree;
-      if (!tree || !names.length) return;
-      const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
-      // The URL carries a structural path so duplicate terminal names resolve
-      // deterministically. The live breadcrumb stack, however, records user
-      // zoom targets, not every structural ancestor. Restoring one URL target
-      // must therefore produce the same single breadcrumb as one live click.
+    function resolveZoomTarget(tree, names) {
+      if (!tree || !names.length) return null;
       let target = null;
       let node = tree;
       for (let i = 0; i < names.length; i++) {
         let found = null;
         for (const child of node.children.values()) {
-          if (child.name === names[i]) { found = child; break; }
+          if (frameKey(child) === names[i]) { found = child; break; }
         }
         if (!found) {
-          // Legacy paths may contain only a terminal name.
+          // Backward compatibility for URLs captured before zoom paths stored
+          // raw symbol identities.
+          for (const child of node.children.values()) {
+            if (child.name === names[i]) { found = child; break; }
+          }
+        }
+        if (!found) {
+          // Paths may contain only a terminal frame identity or legacy name.
           const path = findNodePath(tree, names[names.length - 1]);
           if (path) target = path[path.length - 1];
           break;
@@ -1715,11 +1723,21 @@
         target = found;
         node = found;
       }
-      if (target) {
-        stack.length = 0;
-        stack.push(target);
-        renderAll();
-      }
+      return target;
+    }
+
+    function zoomToPath(key, names) {
+      const tree = key === "worker" ? workerTree : offworkerTree;
+      const target = resolveZoomTarget(tree, names);
+      if (!target) return;
+      const stack = key === "worker" ? workerZoomStack : offworkerZoomStack;
+      // The URL carries a structural path so duplicate terminal names resolve
+      // deterministically. The live breadcrumb stack, however, records user
+      // zoom targets, not every structural ancestor. Restoring one URL target
+      // must therefore produce the same single breadcrumb as one live click.
+      stack.length = 0;
+      stack.push(target);
+      renderAll();
     }
 
     // Deep-link support for the inspect (butterfly) focus. The focus is
@@ -1879,18 +1897,16 @@
     function setTreeDirect(tree, totalCount) {
       directMode = true;
       // For API mode: set a pre-built tree directly (no worker/off-worker split)
-      // Preserve the current zoom by finding the same node in the new tree.
-      const prevTarget = workerZoomStack.length > 0
-          ? workerZoomStack[workerZoomStack.length - 1].name
-          : null;
+      // Preserve the complete structural path: the same raw symbol can occur
+      // under several caller branches.
+      const prevPath = getZoomPath().worker;
       workerTree = tree;
       offworkerTree = null;
       offworkerZoomStack = [];
-      // Re-resolve: find the zoom target by name in the new tree via DFS.
       workerZoomStack = [];
-      if (prevTarget) {
-        const path = findNodePath(workerTree, prevTarget);
-        if (path) workerZoomStack = path;
+      if (prevPath.length > 0) {
+        const target = resolveZoomTarget(workerTree, prevPath);
+        if (target) workerZoomStack.push(target);
       }
       // Aggregated trees are not split into worker/off-worker lanes, so the
       // exported section header should read "All threads" to match the label
