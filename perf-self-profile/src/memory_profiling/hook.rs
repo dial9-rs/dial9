@@ -300,10 +300,22 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
         let Ok(_state) = cell.try_borrow_mut() else {
             return;
         };
-        // Use the entry() API for atomic peek + remove. The bucket lock
-        // is held for the duration of the Entry, so a concurrent on_alloc
-        // overwriting the same address cannot interleave between our read
-        // and remove — preventing stale metadata on the emitted RawFree.
+        // Fast path: most deallocations are for addresses that were never
+        // sampled, so the liveset misses. `peek_with` is a lock-free read —
+        // a miss costs one hash and nothing else, whereas `entry()` reserves
+        // a vacant entry in the bucket before we can observe the miss. This
+        // is symmetric with `on_alloc`, where the hot path stays on the cheap
+        // lock-free `insert` and only the rare case pays the bucket-lock cost.
+        if liveset.peek_with(&addr, |_, _| ()).is_none() {
+            return;
+        }
+        // Hit: re-resolve through the entry() API for atomic peek + remove.
+        // The bucket lock is held for the duration of the Entry, so a
+        // concurrent on_alloc overwriting the same address cannot interleave
+        // between our read and remove — preventing stale metadata on the
+        // emitted RawFree. The entry can have gone vacant since the peek (a
+        // concurrent dealloc of the same address, or the shutdown drain), in
+        // which case there is nothing to emit.
         use scc::hash_index::Entry;
         if let Entry::Occupied(o) = liveset.entry(addr) {
             let (size, alloc_ts_ns) = *o.get();
@@ -838,6 +850,38 @@ mod tests {
             inner.rings.free_queue.is_empty(),
             "re-entrant on_dealloc must skip the RawFree push; the queue is \
              non-empty (the guard is not in place)"
+        );
+    }
+
+    /// Pins the `on_dealloc` liveset miss branch. The overwhelming majority
+    /// of deallocs are for addresses that were never sampled, so the hook
+    /// takes a lock-free `peek_with` and returns before reaching `entry()`.
+    /// A miss must push no `RawFree` and must leave no entry behind — if the
+    /// peek ever reported a false hit, the `entry()` below it would emit a
+    /// free carrying another allocation's metadata.
+    #[test]
+    fn on_dealloc_ignores_address_that_was_never_sampled() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        let addr_u64 = 0x0BAD_0BAD_u64;
+
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xDEAD_C0DE, 1);
+            // Deliberately no matching `on_alloc`: this address has never
+            // been in the liveset.
+            on_dealloc(&inner_for_thread, addr_u64 as usize as *mut u8, 64);
+        })
+        .join()
+        .expect("scenario thread");
+
+        let liveset = inner.liveset.as_ref().expect("liveset configured");
+        assert!(
+            liveset.peek_with(&addr_u64, |_, _| ()).is_none(),
+            "a dealloc miss must not leave an entry in the liveset"
+        );
+        assert!(
+            inner.rings.free_queue.is_empty(),
+            "a dealloc for a never-sampled address must not push a RawFree"
         );
     }
 }
