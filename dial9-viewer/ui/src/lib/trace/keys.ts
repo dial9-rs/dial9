@@ -206,31 +206,37 @@ export interface EpochFormatOptions {
    * UTC). Pages pass their live preference here.
    */
   localTz?: boolean;
+  /** Append the zone name ("UTC"/"Local") so the value stands on its own. */
+  withZone?: boolean;
 }
 
 /**
- * Format a unix-seconds epoch as "YYYY-MM-DD HH:MM:SS" (UTC by default,
- * local time with `localTz`). Returns "" for 0/missing epochs - the
- * "filename didn't carry an epoch" case, not a hidden error.
+ * Format a unix-seconds epoch as "YYYY/MM/DD HH:MM:SS" (UTC by default,
+ * local time with `localTz`), optionally suffixed with the zone name.
+ * Returns "" for 0/missing epochs - the "filename didn't carry an epoch"
+ * case, not a hidden error.
  */
 export function formatEpoch(epoch: number, opts: EpochFormatOptions = {}): string {
   if (!epoch) return "";
   const d = new Date(epoch * 1000);
+  const zone = opts.withZone ? (opts.localTz ? " Local" : " UTC") : "";
   if (opts.localTz) {
     const pad = (n: number) => String(n).padStart(2, "0");
     return (
       d.getFullYear() +
-      "-" +
+      "/" +
       pad(d.getMonth() + 1) +
-      "-" +
+      "/" +
       pad(d.getDate()) +
       " " +
       pad(d.getHours()) +
       ":" +
       pad(d.getMinutes()) +
       ":" +
-      pad(d.getSeconds())
+      pad(d.getSeconds()) +
+      zone
     );
   }
-  return d.toISOString().replace("T", " ").slice(0, 19);
+  const iso = d.toISOString();
+  return iso.slice(0, 10).replace(/-/g, "/") + " " + iso.slice(11, 19) + zone;
 }

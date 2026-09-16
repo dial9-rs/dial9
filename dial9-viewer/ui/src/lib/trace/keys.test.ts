@@ -222,16 +222,26 @@ describe("extractPrefix (features/01 I8)", () => {
 describe("formatEpoch", () => {
   it("formats UTC by default", () => {
     // 2025-04-09 18:40:00 UTC.
-    expect(formatEpoch(1744224000)).toBe("2025-04-09 18:40:00");
+    expect(formatEpoch(1744224000)).toBe("2025/04/09 18:40:00");
   });
 
   it("returns '' for a missing (0) epoch", () => {
     expect(formatEpoch(0)).toBe("");
+    expect(formatEpoch(0, { withZone: true })).toBe("");
+  });
+
+  it("withZone names the zone it rendered in", () => {
+    expect(formatEpoch(1744224000, { withZone: true })).toBe(
+      "2025/04/09 18:40:00 UTC",
+    );
+    expect(formatEpoch(1744224000, { withZone: true, localTz: true })).toMatch(
+      /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} Local$/,
+    );
   });
 
   it("localTz variant formats with the same shape", () => {
     expect(formatEpoch(1744224000, { localTz: true })).toMatch(
-      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
+      /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/
     );
   });
 });

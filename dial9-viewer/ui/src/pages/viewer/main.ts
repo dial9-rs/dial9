@@ -242,9 +242,10 @@ function boot(): void {
         return bin === null
           ? null
           : tooltipRowsTemplate(
-              spawnHistogramTooltipRows(bin, (t) =>
-                fmtAxisTick(deriveAxisInputs(state), t, false),
-              ),
+              spawnHistogramTooltipRows(bin, (t) => {
+                const axis = deriveAxisInputs(state);
+                return fmtAxisTick(axis, t, false) + axisZoneSuffix(axis, t);
+              }),
             );
       }
       if (trackId !== "cpu" || state.trace.trace === null) return null;

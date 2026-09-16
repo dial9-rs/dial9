@@ -24,7 +24,7 @@ function scope(over: Record<string, string> = {}, hosts: string[] = ["h1"]): URL
 describe("summarizeScope", () => {
   it("names the service, host count, window and bucket", () => {
     expect(summarizeScope(scope())).toBe(
-      "api · 1 host · 01-15 10:00 UTC · 10m 0.0s · traces",
+      "api · 1 host · 2026/01/15 10:00 UTC · 10m 0.0s · traces",
     );
   });
 

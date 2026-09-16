@@ -18,8 +18,8 @@ describe("traceTitleParams", () => {
     const p = traceTitleParams([KEY_A_HOST1, KEY_B_HOST1]);
     expect(p.get("svc")).toBe("checkout-api");
     expect(p.get("host")).toBe("host1");
-    expect(p.get("from")).toBe("2025-04-09 18:40:00");
-    expect(p.get("to")).toBe("2025-04-09 18:50:00");
+    expect(p.get("from")).toBe("2025/04/09 18:40:00 UTC");
+    expect(p.get("to")).toBe("2025/04/09 18:50:00 UTC");
     expect(p.get("segs")).toBe("2");
   });
 
@@ -37,7 +37,7 @@ describe("traceTitleParams", () => {
 
   it("single epoch: from only, no to", () => {
     const p = traceTitleParams([KEY_A_HOST1]);
-    expect(p.get("from")).toBe("2025-04-09 18:40:00");
+    expect(p.get("from")).toBe("2025/04/09 18:40:00 UTC");
     expect(p.get("to")).toBeNull();
   });
 
@@ -45,8 +45,8 @@ describe("traceTitleParams", () => {
     // Legacy sorts ALL epochs (not deduped): two segments at the same
     // minute plus one earlier yields from=min, to=max.
     const p = traceTitleParams([KEY_A_HOST1, KEY_B_HOST1, KEY_C_HOST2]);
-    expect(p.get("from")).toBe("2025-04-09 18:40:00");
-    expect(p.get("to")).toBe("2025-04-09 18:50:00");
+    expect(p.get("from")).toBe("2025/04/09 18:40:00 UTC");
+    expect(p.get("to")).toBe("2025/04/09 18:50:00 UTC");
     expect(p.get("segs")).toBe("3");
   });
 
@@ -57,7 +57,7 @@ describe("traceTitleParams", () => {
     expect(p.get("svc")).toBeNull();
     expect(p.get("host")).toBeNull();
     // The filename epoch is layout-independent: the from window survives.
-    expect(p.get("from")).toBe("2025-04-09 18:40:00");
+    expect(p.get("from")).toBe("2025/04/09 18:40:00 UTC");
     expect(p.get("segs")).toBe("1");
   });
 

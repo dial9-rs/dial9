@@ -33,11 +33,12 @@ export function traceTitleParams(
   const params = new URLSearchParams();
   if (services.length) params.set("svc", services.join(", "));
   if (hosts.length === 1) params.set("host", hosts[0]!);
+  const stamp = { ...opts, withZone: true };
   if (epochs.length >= 2) {
-    params.set("from", formatEpoch(epochs[0]!, opts));
-    params.set("to", formatEpoch(epochs[epochs.length - 1]!, opts));
+    params.set("from", formatEpoch(epochs[0]!, stamp));
+    params.set("to", formatEpoch(epochs[epochs.length - 1]!, stamp));
   } else if (epochs.length === 1) {
-    params.set("from", formatEpoch(epochs[0]!, opts));
+    params.set("from", formatEpoch(epochs[0]!, stamp));
   }
   params.set("segs", String(keys.length));
   return params;

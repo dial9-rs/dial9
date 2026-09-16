@@ -61,10 +61,8 @@ export function summarizeScope(scope: URLSearchParams | null): string {
   const startNs = scope.get("start_ns");
   const endNs = scope.get("end_ns");
   if (startNs && endNs) {
-    const from = new Date(Number(startNs) / 1e6)
-      .toISOString()
-      .slice(5, 16)
-      .replace("T", " ");
+    const iso = new Date(Number(startNs) / 1e6).toISOString();
+    const from = `${iso.slice(0, 10).replace(/-/g, "/")} ${iso.slice(11, 16)}`;
     bits.push(`${from} UTC · ${formatHumanDuration(Number(endNs) - Number(startNs))}`);
   }
   const bucket = scope.get("bucket");
