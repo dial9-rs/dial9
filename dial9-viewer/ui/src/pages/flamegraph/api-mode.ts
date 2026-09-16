@@ -263,6 +263,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       const current = facetState[name] || "";
       addSelect(label + ":", opts, current, (v) => {
         facetState[name] = v;
+        if (name === "thread_class" && v === "off-worker") minimap?.clearBand();
         applyFacetChange();
       });
     }
@@ -520,6 +521,17 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       window.open(window.location.pathname + "?" + diffSearch(a, b), "_blank");
     },
   });
+
+  if (
+    facetState.thread_class === "off-worker" &&
+    (params.has("min_poll_ns") || params.has("max_poll_ns"))
+  ) {
+    minimap.clearBand();
+    const url = new URL(window.location.href);
+    url.searchParams.delete("min_poll_ns");
+    url.searchParams.delete("max_poll_ns");
+    history.replaceState(history.state, "", url);
+  }
 
   // In-page A/B capture tray (#646). Mounted on the toolbar (not inside
   // #f-facets, which renderFacets rebuilds per snapshot) so a capture
