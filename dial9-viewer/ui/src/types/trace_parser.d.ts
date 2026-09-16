@@ -169,6 +169,8 @@ declare module "*/trace_parser.js" {
   export interface TaskDump {
     timestamp: number;
     callchain: string[];
+    /** Absent on traces recorded before capture sampling. */
+    inclusionProbability?: number;
   }
 
   export interface ClockSyncAnchor {

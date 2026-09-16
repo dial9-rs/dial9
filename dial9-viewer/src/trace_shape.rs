@@ -340,7 +340,14 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
                 ("callchain", Stack),
             ],
         ]),
-        "TaskDumpEvent" => Some(&[&[("task_id", V), ("callchain", PStack)]]),
+        "TaskDumpEvent" => Some(&[
+            &[("task_id", V), ("callchain", PStack)],
+            &[
+                ("task_id", V),
+                ("callchain", PStack),
+                ("inclusion_probability", FieldType::F64),
+            ],
+        ]),
         "AllocEvent" => Some(&[
             &[
                 ("tid", U32),
