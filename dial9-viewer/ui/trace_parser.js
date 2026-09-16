@@ -715,7 +715,7 @@
             taskSpawnLocs: new Map(),
             taskSpawnTimes: new Map(),
             taskTerminateTimes: new Map(),
-            taskInstrumented: new Map(), // taskId -> bool (true if spawned via TelemetryHandle::spawn)
+            taskInstrumented: new Map(), // taskId -> bool (true if spawned via dial9::spawn)
             callframeSymbols: new Map(),
             // Optional columnar cpu-sample sink (src/lib/trace/columnar-cpu-samples.ts).
             // Its `.pushSample(...)` stores callchains in a flat pool; without it,

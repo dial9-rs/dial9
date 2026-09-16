@@ -408,7 +408,7 @@ function infoMenu(
                 </div>
                 <div class="d9-info-note">
                   Spawned via raw <code>tokio::spawn</code> (no wake tracking).
-                  Use <code>TelemetryHandle::spawn</code> for full data.
+                  Use <code>dial9::spawn</code> for full data.
                 </div>`
             : ""}
         </div>
