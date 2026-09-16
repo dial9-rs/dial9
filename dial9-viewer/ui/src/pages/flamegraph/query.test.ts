@@ -202,6 +202,48 @@ describe("buildBrowserQuery", () => {
   });
 });
 
+describe("poll-duration filters and thread scope", () => {
+  it.each([
+    { minPollNs: "100000", maxPollNs: null },
+    { minPollNs: null, maxPollNs: "100000000" },
+    { minPollNs: "100000", maxPollNs: "100000000" },
+  ])("omits an incompatible off-worker band from requests and links: %j", (band) => {
+    const query = state({
+      ...band,
+      facets: { source: "cpu", thread_class: "off-worker" },
+      hosts: ["host-a"],
+      startNs: "100",
+      endNs: "200",
+    });
+    for (const params of [
+      new URL(buildApiUrl(query, ORIGIN)).searchParams,
+      new URLSearchParams(buildBrowserQuery(query)),
+    ]) {
+      expect(params.get("thread_class")).toBe("off-worker");
+      expect(params.get("min_poll_ns")).toBeNull();
+      expect(params.get("max_poll_ns")).toBeNull();
+      expect(params.getAll("host")).toEqual(["host-a"]);
+      expect(params.get("start_ns")).toBe("100");
+      expect(params.get("end_ns")).toBe("200");
+    }
+  });
+
+  it.each(["worker", ""])("retains the poll band for thread scope %j", (threadClass) => {
+    const query = state({
+      minPollNs: "100000",
+      maxPollNs: "100000000",
+      facets: { source: "cpu", thread_class: threadClass },
+    });
+    for (const params of [
+      new URL(buildApiUrl(query, ORIGIN)).searchParams,
+      new URLSearchParams(buildBrowserQuery(query)),
+    ]) {
+      expect(params.get("min_poll_ns")).toBe("100000");
+      expect(params.get("max_poll_ns")).toBe("100000000");
+    }
+  });
+});
+
 // The unified SourceScope transport rule, and the region+role gap this refactor
 // closes: flamegraph used to carry NEITHER region nor the role in its query
 // state, so a fresh-session aggregate deep link into a cross-region / assume-

@@ -50,6 +50,7 @@ export interface PollMinimap {
   render(bars: PollDurationBar[] | undefined): void;
   /** The current band as ns strings (for the query state). */
   band(): { minPollNs: string | null; maxPollNs: string | null };
+  clearBand(): void;
 }
 
 interface DragState {
@@ -321,6 +322,11 @@ export function createPollMinimap(opts: PollMinimapOptions): PollMinimap {
     if (layout) render(layout.bars);
     opts.onApply();
   }
+  function clearBand(): void {
+    fPollMin.value = "";
+    fPollMax.value = "";
+    renderedKey = null;
+  }
   mmApply.addEventListener("click", applyBand);
   for (const el of [fPollMin, fPollMax]) {
     el.addEventListener("keydown", (e) => {
@@ -328,8 +334,7 @@ export function createPollMinimap(opts: PollMinimapOptions): PollMinimap {
     });
   }
   mmClear.addEventListener("click", () => {
-    fPollMin.value = "";
-    fPollMax.value = "";
+    clearBand();
     applyBand();
   });
   mmFastSlow.addEventListener("click", () => {
@@ -371,6 +376,7 @@ export function createPollMinimap(opts: PollMinimapOptions): PollMinimap {
 
   return {
     render,
+    clearBand,
     band() {
       return { minPollNs: msToNs(fPollMin.value), maxPollNs: msToNs(fPollMax.value) };
     },
