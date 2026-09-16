@@ -345,7 +345,7 @@ mod tests {
     }
 
     /// Records the `source` field of every WARN event seen while active.
-    struct SourceWarnRecorder {
+    struct SourceWarnSubscriber {
         warned_sources: Arc<Mutex<Vec<String>>>,
     }
 
@@ -359,7 +359,7 @@ mod tests {
         fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
     }
 
-    impl tracing::Subscriber for SourceWarnRecorder {
+    impl tracing::Subscriber for SourceWarnSubscriber {
         fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
             *metadata.level() == tracing::Level::WARN
         }
@@ -467,14 +467,7 @@ mod tests {
     #[test]
     fn distinct_panicking_flush_sources_are_each_warned_about() {
         let warned_sources = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = SourceWarnRecorder {
-            warned_sources: warned_sources.clone(),
-        };
-        // The flush thread logs from its own OS thread, not this test's, so
-        // `with_default`'s thread-local scoping wouldn't see it. Global is
-        // safe here because nextest runs each test in its own process.
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("no global tracing subscriber set yet in this test process");
+        let subscriber_source = warned_sources.clone();
 
         let writer = MemoryBuffer::builder()
             .max_total_size(1024 * 1024)
@@ -485,6 +478,14 @@ mod tests {
         let mut recorder = recorder(writer)
             .source(PanickingFlushSource("panicking_flush_a"))
             .source(PanickingFlushSource("panicking_flush_b"))
+            .on_recording_thread_start(move || {
+                // Scoped to just the flush thread: a global subscriber would
+                // collide with other tests' tracing state.
+                let guard = tracing::subscriber::set_default(SourceWarnSubscriber {
+                    warned_sources: subscriber_source.clone(),
+                });
+                move || drop(guard)
+            })
             .build();
         recorder.handle().enable();
 
@@ -505,7 +506,7 @@ mod tests {
         );
         // Both sources panic on every one of the ~40 cycles in the sleep
         // window above; more than one warning per source would mean the
-        // 60s per-key rate limit isn't actually suppressing repeats.
+        // 60s per-key rate limit isn't suppressing repeats.
         assert_eq!(
             warned_sources.len(),
             2,
@@ -519,11 +520,7 @@ mod tests {
     #[test]
     fn distinct_panicking_metadata_sources_are_each_warned_about() {
         let warned_sources = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = SourceWarnRecorder {
-            warned_sources: warned_sources.clone(),
-        };
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("no global tracing subscriber set yet in this test process");
+        let subscriber_source = warned_sources.clone();
 
         let writer = MemoryBuffer::builder()
             .max_total_size(1024 * 1024)
@@ -534,6 +531,14 @@ mod tests {
         let mut recorder = recorder(writer)
             .source(PanickingMetadataSource("panicking_metadata_a"))
             .source(PanickingMetadataSource("panicking_metadata_b"))
+            .on_recording_thread_start(move || {
+                // Scoped to just the flush thread: a global subscriber would
+                // collide with other tests' tracing state.
+                let guard = tracing::subscriber::set_default(SourceWarnSubscriber {
+                    warned_sources: subscriber_source.clone(),
+                });
+                move || drop(guard)
+            })
             .build();
         recorder.handle().enable();
 
@@ -552,7 +557,7 @@ mod tests {
         );
         // Both sources panic on every one of the ~40 cycles in the sleep
         // window above; more than one warning per source would mean the
-        // 60s per-key rate limit isn't actually suppressing repeats.
+        // 60s per-key rate limit isn't suppressing repeats.
         assert_eq!(
             warned_sources.len(),
             2,
