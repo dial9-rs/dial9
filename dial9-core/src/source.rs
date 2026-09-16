@@ -124,9 +124,22 @@ pub(crate) enum SourceCall {
 /// Runs a per-cycle `Source` call, catching a panic so a broken source can't
 /// poison the flush thread or skip sibling sources' turns. Warns (rate-
 /// limited per source name) on panic; returns whether it panicked.
-pub(crate) fn catch_source_panic(name: &'static str, call: SourceCall, f: impl FnOnce()) -> bool {
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err();
+///
+/// Takes `source` itself (rather than a pre-fetched name) so `name()` is
+/// only called when it's actually needed, on the panic branch.
+pub(crate) fn catch_source_panic(
+    source: &mut dyn Source,
+    call: SourceCall,
+    f: impl FnOnce(&mut dyn Source),
+) -> bool {
+    let panicked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *source))).is_err();
     if panicked {
+        let name = source.name();
+        // Each arm is its own rate-limit bucket (a separate `rate_limited!`
+        // call site). A source panicking in both flush and
+        // segment_metadata should warn about both, not have one suppress
+        // the other.
         match call {
             SourceCall::Flush => {
                 crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), key = name, {
