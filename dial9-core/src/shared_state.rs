@@ -273,10 +273,11 @@ impl SharedState {
             let ctx = self.flush_context();
             let mut sources = self.sources.lock().unwrap();
             for source in sources.iter_mut() {
-                let name = source.name();
-                crate::source::catch_source_panic(name, crate::source::SourceCall::Flush, || {
-                    source.flush(&ctx);
-                });
+                crate::source::catch_source_panic(
+                    source.as_mut(),
+                    crate::source::SourceCall::Flush,
+                    |source| source.flush(&ctx),
+                );
             }
         }
     }

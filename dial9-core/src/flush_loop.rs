@@ -146,11 +146,10 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 // push from the panicking source doesn't leave stray entries
                 // in this cycle's metadata.
                 let before = source_entries.len();
-                let name = source.name();
                 let panicked = crate::source::catch_source_panic(
-                    name,
+                    source.as_mut(),
                     crate::source::SourceCall::SegmentMetadata,
-                    || source.segment_metadata(&mut source_entries),
+                    |source| source.segment_metadata(&mut source_entries),
                 );
                 if panicked {
                     source_entries.truncate(before);
