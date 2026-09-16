@@ -105,8 +105,10 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
   }
   if (state.startNs) p.set("start_ns", state.startNs);
   if (state.endNs) p.set("end_ns", state.endNs);
-  if (state.minPollNs) p.set("min_poll_ns", state.minPollNs);
-  if (state.maxPollNs) p.set("max_poll_ns", state.maxPollNs);
+  if (state.facets.thread_class !== "off-worker") {
+    if (state.minPollNs) p.set("min_poll_ns", state.minPollNs);
+    if (state.maxPollNs) p.set("max_poll_ns", state.maxPollNs);
+  }
   if (state.spanTypeUid) p.set("span_type_uid", state.spanTypeUid);
   if (state.minSpanNs) p.set("min_span_ns", state.minSpanNs);
   if (state.maxSpanNs) p.set("max_span_ns", state.maxSpanNs);
