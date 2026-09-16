@@ -18,7 +18,7 @@ import {
 } from "../../lib/canvas/diff-presets.js";
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
-import { fmtTick } from "./format.js";
+import { fmtTick, tzName } from "./format.js";
 import type { HeatmapRow } from "./state.js";
 
 // A row of theme-matched inline styles kept local to the tray because the
@@ -49,7 +49,9 @@ function summarize(scope: URLSearchParams, localTz: boolean): string {
   if (s && e) {
     const t0 = Number(s) / 1e9;
     const t1 = Number(e) / 1e9;
-    bits.push(`${fmtTick(t0, localTz, true)} · ${formatDuration(t1 - t0)}`);
+    bits.push(
+      `${fmtTick(t0, localTz, true)} ${tzName(localTz)} · ${formatDuration(t1 - t0)}`,
+    );
   }
   const bucket = scope.get("bucket");
   if (bucket) bits.push(bucket);

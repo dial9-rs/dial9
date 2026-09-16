@@ -95,8 +95,11 @@ function refreshMoreBtn(): void {
 
 // ── Period management ──
 
+// Timezone mode for the period pickers
+let utc = true;
+
 function renderPeriodsNow(): void {
-  renderPeriods(els.periods, periods, els.utcToggle.checked, {
+  renderPeriods(els.periods, periods, utc, {
     onUpdate: updatePeriod,
     onRemove: removePeriod,
   });
@@ -133,7 +136,7 @@ function removePeriod(id: number): void {
 function updatePeriod(id: number, field: "start" | "end", val: string): void {
   const p = periods.find((x) => x.id === id);
   if (p) {
-    const ns = datetimeToNs(val, els.utcToggle.checked);
+    const ns = datetimeToNs(val, utc);
     if (field === "start") p.startNs = ns;
     else p.endNs = ns;
   }
@@ -339,7 +342,11 @@ async function loadAll(): Promise<void> {
 
 // ── Wiring ──
 
-els.utcToggle.addEventListener("change", renderPeriodsNow);
+els.tzBtn.addEventListener("click", () => {
+  utc = !utc;
+  els.tzBtn.textContent = utc ? "TZ: UTC" : "TZ: Local";
+  renderPeriodsNow();
+});
 els.btnLoad.addEventListener("click", () => {
   maxFiles = null; // a fresh load starts from the server's default cap
   void loadAll();

@@ -1,7 +1,9 @@
-// Header chrome: the timezone toggle button. The creds button lives in
+// Header chrome: the timezone toggle button, and the labels that name the
+// active zone for values it cannot annotate itself. The creds button lives in
 // creds-panel.ts.
 
 import { assertInScheduledRender } from "../../store/store.js";
+import { tzName } from "./format.js";
 import type { PageCtx } from "./ctx.js";
 
 export function mountHeader({ store, els, actions }: PageCtx): void {
@@ -11,6 +13,13 @@ export function mountHeader({ store, els, actions }: PageCtx): void {
 
   store.subscribe(["ui"], (state) => {
     assertInScheduledRender("header render");
-    els.tzBtn.textContent = state.ui.useLocalTz ? "TZ: Local" : "TZ: UTC";
+    const zone = tzName(state.ui.useLocalTz);
+    els.tzBtn.textContent = `TZ: ${zone}`;
+    // The range pickers are native datetime-local inputs and the table's date
+    // columns repeat per row, so both name the zone on their label instead.
+    els.rangeFromLabel.textContent = `From (${zone}):`;
+    els.rangeToLabel.textContent = `To (${zone}):`;
+    els.thTraceStart.textContent = `Trace Start (${zone})`;
+    els.thUploaded.textContent = `Uploaded (${zone})`;
   });
 }

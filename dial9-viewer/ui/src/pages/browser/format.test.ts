@@ -14,6 +14,7 @@ import {
   formatSize,
   pickerToDate,
   timeToX,
+  tzName,
   xToTime,
 } from "./format.js";
 
@@ -58,9 +59,16 @@ describe("formatSize", () => {
   });
 });
 
+describe("tzName", () => {
+  it("names the mode the TZ button and value labels show", () => {
+    expect(tzName(false)).toBe("UTC");
+    expect(tzName(true)).toBe("Local");
+  });
+});
+
 describe("formatDate / formatEpochStr", () => {
-  it("UTC mode renders ISO-like without the T", () => {
-    expect(formatDate("2026-04-09T19:00:05Z", false)).toBe("2026-04-09 19:00:05");
+  it("UTC mode renders YYYY/MM/DD HH:MM:SS", () => {
+    expect(formatDate("2026-04-09T19:00:05Z", false)).toBe("2026/04/09 19:00:05");
   });
   it("returns empty and invalid inputs unchanged", () => {
     expect(formatDate("", false)).toBe("");
@@ -71,7 +79,7 @@ describe("formatDate / formatEpochStr", () => {
   });
   it("epoch 0 renders empty (missing filename epoch, not an error)", () => {
     expect(formatEpochStr(0, false)).toBe("");
-    expect(formatEpochStr(1744221600, false)).toBe("2025-04-09 18:00:00");
+    expect(formatEpochStr(1744221600, false)).toBe("2025/04/09 18:00:00");
   });
   it("local mode agrees with the Date accessors", () => {
     const iso = "2026-04-09T19:00:05Z";
@@ -79,9 +87,9 @@ describe("formatDate / formatEpochStr", () => {
     const pad = (n: number) => String(n).padStart(2, "0");
     const expected =
       d.getFullYear() +
-      "-" +
+      "/" +
       pad(d.getMonth() + 1) +
-      "-" +
+      "/" +
       pad(d.getDate()) +
       " " +
       pad(d.getHours()) +
@@ -98,7 +106,7 @@ describe("fmtTick", () => {
     expect(fmtTick(1744221600, false)).toBe("18:00:00");
   });
   it("withDate prefixes the calendar date", () => {
-    expect(fmtTick(1744221600, false, true)).toBe("2025-04-09 18:00:00");
+    expect(fmtTick(1744221600, false, true)).toBe("2025/04/09 18:00:00");
   });
   it("withDate in local mode matches formatEpochStr", () => {
     expect(fmtTick(1744221600, true, true)).toBe(formatEpochStr(1744221600, true));

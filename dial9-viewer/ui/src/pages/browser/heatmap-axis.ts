@@ -13,6 +13,7 @@ import {
   crossesDayBoundary,
   fmtTick,
   formatEpochStr,
+  tzName,
   timeToX,
   xToTime,
 } from "./format.js";
@@ -52,7 +53,10 @@ export function axisTicks(domain: TimeDomain, W: number, localTz: boolean): Axis
     const x = degenerate ? 0 : timeToX(t, tMin, tMax, W);
     if (x < 0 || x > W) return;
     const withDate = everyTickDated || i === 0;
-    out.push({ t, x, label: fmtTick(t, localTz, withDate) });
+    // Only the leftmost tick names the zone
+    const label =
+      fmtTick(t, localTz, withDate) + (i === 0 ? ` ${tzName(localTz)}` : "");
+    out.push({ t, x, label });
   });
   return out;
 }
@@ -71,7 +75,8 @@ export function timestampAt(
   W: number,
   localTz: boolean,
 ): string {
-  return formatEpochStr(xToTime(x, domain.tMin, domain.tMax, W), localTz);
+  const t = formatEpochStr(xToTime(x, domain.tMin, domain.tMax, W), localTz);
+  return t === "" ? t : `${t} ${tzName(localTz)}`;
 }
 
 /**

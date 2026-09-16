@@ -9,7 +9,7 @@
 import { MAX_OPEN_BYTES } from "../../lib/canvas/heatmap.js";
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
-import { fmtTick, formatSize } from "./format.js";
+import { fmtTick, formatSize, tzName } from "./format.js";
 import { effectiveProfileSelection } from "./open-links.js";
 
 interface ButtonLabel {
@@ -107,7 +107,7 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       const tz = state.ui.useLocalTz;
       const win =
         profileSel.t0 && profileSel.t1
-          ? ` · ${fmtTick(profileSel.t0, tz)}–${fmtTick(profileSel.t1, tz)}`
+          ? ` · ${fmtTick(profileSel.t0, tz)}–${fmtTick(profileSel.t1, tz)} ${tzName(tz)}`
           : "";
       const scopeLabel = sel ? "" : "Current service · ";
       els.selectionCount.textContent = `${scopeLabel}${profileSel.keys.length} segment${profileSel.keys.length !== 1 ? "s" : ""} · ${formatSize(profileSel.bytes)}${win}`;

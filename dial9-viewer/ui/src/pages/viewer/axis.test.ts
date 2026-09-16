@@ -1,30 +1,31 @@
 // Tests for the time-axis track. Three load-bearing properties are asserted
 // mechanically here: (1) axis ticks align PIXEL-EXACT with every other track's
 // ns<->x mapping at three column widths, (2) the date-qualification rule - a
-// day-crossing absolute span gains a `MM-DD ` prefix on the anchor, a same-day
+// day-crossing absolute span gains a `YYYY/MM/DD ` prefix on the anchor, a same-day
 // span does not, and (3) the ruler is window-relative: tick labels are offsets
 // from the left edge whose unit follows the zoom, framed by an absolute anchor
 // and a width/step chip that yield to tick labels on a narrow panel.
 
 import { describe, it, expect } from "vitest";
 import {
-  pickTickInterval,
-  tickOffsets,
+  axisZoneSuffix,
+  clockOffsetForTimestamp,
+  crossesDayBoundaryNs,
   cursorPrecisionNs,
   decimalsForStep,
-  fmtTickOffset,
-  rulerLayout,
-  nsToDrawX,
-  clockOffsetForTimestamp,
-  wallClockNs,
-  crossesDayBoundaryNs,
-  isDateQualified,
-  fmtDuration,
-  fmtWallClockLabel,
-  wallClockFracDigits,
   fmtAxisTick,
+  fmtDuration,
+  fmtTickOffset,
+  fmtWallClockLabel,
+  isDateQualified,
+  nsToDrawX,
+  pickTickInterval,
   renderTimeAxis,
+  rulerLayout,
+  tickOffsets,
   type AxisInputs,
+  wallClockFracDigits,
+  wallClockNs,
 } from "./axis.js";
 import { TRACKS, LABEL_W, trackGeometry } from "../../lib/canvas/track-layout.js";
 import type { TrackSpec } from "../../lib/canvas/track-layout.js";
@@ -256,10 +257,10 @@ describe("label formatting (fmtTs parity + amendment)", () => {
     expect(fmtDuration(4.574e9, 5e6, 4.574e9)).toBe("+4.574s");
   });
 
-  it("fmtWallClockLabel: HH:MM:SS, MM-DD prefix when withDate", () => {
+  it("fmtWallClockLabel: HH:MM:SS, YYYY/MM/DD prefix when withDate", () => {
     const wall = DAY0_NS + 23 * HOUR_NS + 61 * 1e9; // 23:01:01 UTC
     expect(fmtWallClockLabel(wall, false, false)).toBe("23:01:01");
-    expect(fmtWallClockLabel(wall, false, true)).toBe("01-01 23:01:01");
+    expect(fmtWallClockLabel(wall, false, true)).toBe("2021/01/01 23:01:01");
   });
 
   it("fmtWallClockLabel: fractional seconds in 3-digit groups", () => {
@@ -311,7 +312,18 @@ describe("label formatting (fmtTs parity + amendment)", () => {
     const inputs = absInputs(0);
     const tick = DAY0_NS + 23 * HOUR_NS; // 23:00:00 on 2021-01-01
     expect(fmtAxisTick(inputs, tick, false)).toBe("23:00:00");
-    expect(fmtAxisTick(inputs, tick, true)).toBe("01-01 23:00:00");
+    expect(fmtAxisTick(inputs, tick, true)).toBe("2021/01/01 23:00:00");
+  });
+
+  it("axisZoneSuffix: names the zone only for a real wall clock", () => {
+    const tick = DAY0_NS + 23 * HOUR_NS;
+    expect(axisZoneSuffix(absInputs(0), tick)).toBe(" UTC");
+    expect(axisZoneSuffix(absInputs(0, "local"), tick)).toBe(" Local");
+    // Relative mode labels are self-describing offsets.
+    expect(axisZoneSuffix(relInputs(DAY0_NS), tick)).toBe("");
+    // Absolute mode with no clock-sync anchor renders a relative offset.
+    const noAnchor: AxisInputs = { ...absInputs(0), clockOffsetNs: null, minTs: DAY0_NS };
+    expect(axisZoneSuffix(noAnchor, tick)).toBe("");
   });
 
   it("fmtAxisTick: absolute with no anchor falls back to relative", () => {
@@ -376,7 +388,7 @@ describe("rulerLayout (window-relative ruler)", () => {
   it("date-qualifies the anchor when the absolute span crosses a day", () => {
     const vs = DAY0_NS + 23 * HOUR_NS;
     const layout = rulerLayout(vs, vs + 2 * HOUR_NS, 900, absInputs(0));
-    expect(layout.anchor).toMatch(/^\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(layout.anchor).toMatch(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} UTC$/);
     // Ticks stay relative, so they never carry a date.
     for (const tick of layout.ticks) {
       if (tick.text !== null) expect(tick.text).not.toMatch(/:/);

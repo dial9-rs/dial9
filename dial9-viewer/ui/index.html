@@ -88,9 +88,9 @@
             <button data-hours="3">Last 3hr</button>
             <button data-hours="24">Last 24hr</button>
         </div>
-        <label>From:</label>
+        <label id="range-from-label">From (UTC):</label>
         <input type="datetime-local" id="range-from" step="60" />
-        <label>To:</label>
+        <label id="range-to-label">To (UTC):</label>
         <input type="datetime-local" id="range-to" step="60" />
         <button class="primary" id="search-btn" disabled>Search</button>
     </div>
@@ -151,10 +151,10 @@
                             <th data-sort="service">Service</th>
                             <th data-sort="host">Host</th>
                             <th data-sort="bootId">Boot</th>
-                            <th data-sort="traceStart">Trace Start</th>
+                            <th data-sort="traceStart"><span id="th-trace-start">Trace Start (UTC)</span></th>
                             <th data-sort="segIndex">Seg #</th>
                             <th data-sort="size">Size</th>
-                            <th data-sort="last_modified">Uploaded</th>
+                            <th data-sort="last_modified"><span id="th-uploaded">Uploaded (UTC)</span></th>
                         </tr>
                     </thead>
                     <tbody id="raw-body"></tbody>

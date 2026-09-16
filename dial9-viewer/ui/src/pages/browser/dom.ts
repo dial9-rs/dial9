@@ -17,6 +17,11 @@ const bySelector = <T extends HTMLElement>(sel: string): T =>
 export interface BrowserEls {
   // Header
   tzBtn: HTMLButtonElement;
+  /** Labels that name the active timezone (#654). */
+  rangeFromLabel: HTMLElement;
+  rangeToLabel: HTMLElement;
+  thTraceStart: HTMLElement;
+  thUploaded: HTMLElement;
   credsBtn: HTMLButtonElement;
   credsBtnLabel: HTMLSpanElement;
   // Credentials panel
@@ -92,6 +97,10 @@ export interface BrowserEls {
 export function queryEls(): BrowserEls {
   return {
     tzBtn: byId("tz-btn"),
+    rangeFromLabel: byId("range-from-label"),
+    rangeToLabel: byId("range-to-label"),
+    thTraceStart: byId("th-trace-start"),
+    thUploaded: byId("th-uploaded"),
     credsBtn: byId("creds-btn"),
     credsBtnLabel: byId("creds-btn-label"),
     credsPanel: byId("creds-panel"),

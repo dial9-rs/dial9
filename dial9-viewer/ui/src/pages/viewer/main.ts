@@ -27,7 +27,12 @@ import {
   spawnHistogramTooltipRows,
   tooltipRowsTemplate,
 } from "../../components/overlay/index.js";
-import { cursorPrecisionNs, deriveAxisInputs, fmtAxisTick } from "./axis.js";
+import {
+  axisZoneSuffix,
+  cursorPrecisionNs,
+  deriveAxisInputs,
+  fmtAxisTick,
+} from "./axis.js";
 import {
   cpuIntervalAt,
   cpuIntervalTooltip,
@@ -220,13 +225,17 @@ function boot(): void {
     // The ruler is window-relative, so this readout is where absolute time
     // lives: give it a precision finer than one tick so it resolves the
     // cursor's own position, not the tick it sits near.
-    (state, ns) =>
-      fmtAxisTick(
-        deriveAxisInputs(state),
-        ns,
-        false,
-        cursorPrecisionNs(state.viewport.viewStart, state.viewport.viewEnd),
-      ),
+    (state, ns) => {
+      const axis = deriveAxisInputs(state);
+      return (
+        fmtAxisTick(
+          axis,
+          ns,
+          false,
+          cursorPrecisionNs(state.viewport.viewStart, state.viewport.viewEnd),
+        ) + axisZoneSuffix(axis, ns)
+      );
+    },
     (trackId, state, ns) => {
       if (trackId === "queue") {
         const bin = shell.queueTrack.spawnBinAt(ns);

@@ -9,21 +9,26 @@ export function formatSize(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
+/** The active TZ mode's name */
+export function tzName(localTz: boolean): string {
+  return localTz ? "Local" : "UTC";
+}
+
 /**
- * "YYYY-MM-DD HH:MM:SS" in the active TZ mode. Invalid input falls back to
+ * "YYYY/MM/DD HH:MM:SS" in the active TZ mode. Invalid input falls back to
  * the raw string; empty/missing input renders "".
  */
 export function formatDate(dateStr: string | null | undefined, localTz: boolean): string {
   if (!dateStr) return "";
   try {
     const d = new Date(dateStr);
+    const pad = (n: number) => String(n).padStart(2, "0");
     if (localTz) {
-      const pad = (n: number) => String(n).padStart(2, "0");
       return (
         d.getFullYear() +
-        "-" +
+        "/" +
         pad(d.getMonth() + 1) +
-        "-" +
+        "/" +
         pad(d.getDate()) +
         " " +
         pad(d.getHours()) +
@@ -33,7 +38,8 @@ export function formatDate(dateStr: string | null | undefined, localTz: boolean)
         pad(d.getSeconds())
       );
     }
-    return d.toISOString().replace("T", " ").slice(0, 19);
+    const iso = d.toISOString();
+    return iso.slice(0, 10).replace(/-/g, "/") + " " + iso.slice(11, 19);
   } catch {
     return dateStr;
   }
@@ -60,7 +66,7 @@ export function epochSeconds(lastModified: string | number | null | undefined): 
 }
 
 /** Axis/selection tick in the active TZ mode: HH:MM:SS by default; with
- * `withDate` the calendar date is prefixed ("YYYY-MM-DD HH:MM:SS") so ticks
+ * `withDate` the calendar date is prefixed ("YYYY/MM/DD HH:MM:SS") so ticks
  * on a day-crossing span stay unambiguous. The selection-count readout
  * keeps the time-only form.
  */

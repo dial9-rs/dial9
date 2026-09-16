@@ -60,7 +60,7 @@ describe("axisTicks", () => {
   it("dates the leftmost tick and leaves the rest time-only", () => {
     const ticks = axisTicks(TEN_MINUTES, 800, false);
 
-    expect(ticks[0]!.label).toBe("2026-01-15 10:00:00");
+    expect(ticks[0]!.label).toBe("2026/01/15 10:00:00 UTC");
     expect(ticks[1]!.label).toBe("10:02:00");
     expect(ticks.slice(1).every((tick) => !tick.label.includes("2026"))).toBe(true);
   });
@@ -75,9 +75,11 @@ describe("axisTicks", () => {
     );
 
     expect(ticks.length).toBeGreaterThan(1);
-    expect(ticks.every((tick) => /^\d{4}-\d{2}-\d{2} /.test(tick.label))).toBe(true);
-    expect(ticks.some((tick) => tick.label.startsWith("2026-01-15"))).toBe(true);
-    expect(ticks.some((tick) => tick.label.startsWith("2026-01-16"))).toBe(true);
+    expect(ticks.every((tick) => /^\d{4}\/\d{2}\/\d{2} /.test(tick.label))).toBe(true);
+    expect(ticks.some((tick) => tick.label.startsWith("2026/01/15"))).toBe(true);
+    expect(ticks.some((tick) => tick.label.startsWith("2026/01/16"))).toBe(true);
+    // Only the anchor names the zone, not every dated tick.
+    expect(ticks.filter((tick) => tick.label.endsWith(" UTC"))).toHaveLength(1);
   });
 
   it("labels in local time when the TZ toggle is on local", () => {
@@ -86,8 +88,8 @@ describe("axisTicks", () => {
     const pad = (n: number) => String(n).padStart(2, "0");
 
     expect(tick!.label).toBe(
-      `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())} ` +
-        `${pad(local.getHours())}:${pad(local.getMinutes())}:${pad(local.getSeconds())}`,
+      `${local.getFullYear()}/${pad(local.getMonth() + 1)}/${pad(local.getDate())} ` +
+        `${pad(local.getHours())}:${pad(local.getMinutes())}:${pad(local.getSeconds())} Local`,
     );
   });
 
@@ -104,16 +106,16 @@ describe("axisTicks", () => {
       const ticks = axisTicks(domain, 800, false);
       expect(ticks).toHaveLength(1);
       expect(ticks[0]!.x).toBe(0);
-      expect(ticks[0]!.label).toBe("2026-01-15 10:00:00");
+      expect(ticks[0]!.label).toBe("2026/01/15 10:00:00 UTC");
     }
   });
 });
 
 describe("timestampAt", () => {
   it("reads the time under the pointer across the plot", () => {
-    expect(timestampAt(0, TEN_MINUTES, 800, false)).toBe("2026-01-15 10:00:00");
-    expect(timestampAt(400, TEN_MINUTES, 800, false)).toBe("2026-01-15 10:05:00");
-    expect(timestampAt(800, TEN_MINUTES, 800, false)).toBe("2026-01-15 10:10:00");
+    expect(timestampAt(0, TEN_MINUTES, 800, false)).toBe("2026/01/15 10:00:00 UTC");
+    expect(timestampAt(400, TEN_MINUTES, 800, false)).toBe("2026/01/15 10:05:00 UTC");
+    expect(timestampAt(800, TEN_MINUTES, 800, false)).toBe("2026/01/15 10:10:00 UTC");
   });
 });
 

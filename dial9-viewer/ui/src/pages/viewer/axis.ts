@@ -16,9 +16,11 @@
 // (components/overlay) is the other place absolute time is available. Its
 // precision follows the tick step, so it always resolves finer than one tick.
 //
-// Absolute-mode anchors gain a `MM-DD ` date prefix when the visible span
+// Absolute-mode anchors gain a `YYYY/MM/DD ` date prefix when the visible span
 // crosses a calendar-day boundary, so a window straddling midnight reads
 // unambiguously. Relative mode has no calendar day, so it is never qualified.
+// The anchor and the at-cursor readout also name their zone (axisZoneSuffix),
+// since neither sits next to the toolbar's TZ button.
 
 import { nsToDrawX } from "../../lib/canvas/index.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
@@ -303,8 +305,8 @@ export function wallClockFracDigits(precisionNs: number | undefined): number {
 
 /**
  * Wall-clock label for a wall-clock timestamp (ns): "HH:MM:SS", or
- * "MM-DD HH:MM:SS" when `withDate` (date-qualified), in UTC or the local zone.
- * `fracDigits` (see `wallClockFracDigits`) appends that many sub-second
+ * "YYYY/MM/DD HH:MM:SS" when `withDate` (date-qualified), in UTC or the local
+ * zone. `fracDigits` (see `wallClockFracDigits`) appends that many sub-second
  * digits, e.g. "HH:MM:SS.001500" at 6.
  */
 export function fmtWallClockLabel(
@@ -314,6 +316,7 @@ export function fmtWallClockLabel(
   fracDigits = 0,
 ): string {
   const d = new Date(wallNs / 1e6);
+  const yr = localTz ? d.getFullYear() : d.getUTCFullYear();
   const mo = localTz ? d.getMonth() + 1 : d.getUTCMonth() + 1;
   const day = localTz ? d.getDate() : d.getUTCDate();
   const hh = localTz ? d.getHours() : d.getUTCHours();
@@ -326,7 +329,18 @@ export function fmtWallClockLabel(
     const subSecNs = ((Math.floor(wallNs) % 1e9) + 1e9) % 1e9;
     time += "." + String(subSecNs).padStart(9, "0").slice(0, fracDigits);
   }
-  return withDate ? pad2(mo) + "-" + pad2(day) + " " + time : time;
+  return withDate ? `${yr}/${pad2(mo)}/${pad2(day)} ${time}` : time;
+}
+
+/**
+ * The zone name to append to an absolute label, or "" when the label is not a
+ * wall clock - relative mode, or absolute mode with no clock-sync anchor to
+ * resolve (where `fmtAxisTick` falls back to a relative offset).
+ */
+export function axisZoneSuffix(inputs: AxisInputs, ns: number): string {
+  if (inputs.timeMode !== "abs") return "";
+  if (wallClockNs(inputs, ns) == null) return "";
+  return inputs.tz === "local" ? " Local" : " UTC";
 }
 
 /**
@@ -447,7 +461,8 @@ export function rulerLayout(
   // the trace start it would otherwise read "+0ns" beside second-scale ticks.
   const anchor =
     drawW >= ANCHOR_MIN_W
-      ? fmtAxisTick(inputs, viewStart, withDate, interval, viewEnd - inputs.minTs)
+      ? fmtAxisTick(inputs, viewStart, withDate, interval, viewEnd - inputs.minTs) +
+        axisZoneSuffix(inputs, viewStart)
       : null;
   const chip =
     drawW >= CHIP_WITH_STEP_MIN_W

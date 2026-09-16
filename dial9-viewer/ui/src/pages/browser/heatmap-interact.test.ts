@@ -191,7 +191,7 @@ describe("heatmap hover time readout", () => {
     // 5 minutes in.
     plot.dispatch("mousemove", { clientX: 50, clientY: 5 });
 
-    expect(cursorLabel.textContent).toBe("2026-01-15 10:05:00");
+    expect(cursorLabel.textContent).toBe("2026/01/15 10:05:00 UTC");
     expect(cursor.style["display"]).toBe("block");
     expect(cursorLabel.style["display"]).toBe("block");
     expect(cursor.style["left"]).toBe("50px");

@@ -46,6 +46,20 @@ interface AvailFacet {
   values: Set<string>;
 }
 
+/**
+ * The scope's time range for the header and stats readouts: "YYYY/MM/DD
+ * HH:MM:SS -> HH:MM:SS UTC", with the date on the start only.
+ *
+ * Aggregated mode is UTC throughout - the time pickers read as UTC and S3 trace
+ * keys are bucketed in UTC
+ */
+export function utcRange(startNs: number, endNs: number): string {
+  const from = new Date(startNs / 1e6).toISOString();
+  const to = new Date(endNs / 1e6).toISOString();
+  const date = from.slice(0, 10).replace(/-/g, "/");
+  return `${date} ${from.slice(11, 19)} \u2192 ${to.slice(11, 19)} UTC`;
+}
+
 export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const { loadingEl, errorEl, containerEl, titleEl, statsEl } = els;
   const source = readPlainSourceScope(
@@ -71,8 +85,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     "display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0;flex-wrap:wrap;";
   toolbar.innerHTML = `
         <span id="f-facets" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"></span>
-        <label style="color:#e0e0e0">From: <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
-        <label style="color:#e0e0e0">To: <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
+        <label style="color:#e0e0e0" title="UTC wall-clock - the native picker renders it in your locale, but the value is read as UTC">From (UTC): <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
+        <label style="color:#e0e0e0" title="UTC wall-clock - the native picker renders it in your locale, but the value is read as UTC">To (UTC): <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
         <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
         <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
@@ -266,11 +280,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     if (hostNames.length === 1 && firstHost !== undefined) bits.push(firstHost);
     else if (hostNames.length > 1) bits.push(`${hostNames.length} hosts`);
     if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
-      const from =
-        new Date(meta.min_timestamp_ns / 1e6).toISOString().slice(0, 19) + "Z";
-      const to =
-        new Date(meta.max_timestamp_ns / 1e6).toISOString().slice(11, 19) + "Z";
-      bits.push(`${from} \u2192 ${to}`);
+      bits.push(utcRange(meta.min_timestamp_ns, meta.max_timestamp_ns));
     }
     const svc = meta.service || "aggregated";
     document.title = `Flamegraph \u2014 ${svc}`;
@@ -308,13 +318,9 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     const bits = [`${resp.total_samples.toLocaleString()} samples`];
     if (meta.hosts > 1) bits.push(`${meta.hosts} hosts`);
     if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
-      const from = new Date(meta.min_timestamp_ns / 1e6);
-      const to = new Date(meta.max_timestamp_ns / 1e6);
       const dur = formatHumanDuration(meta.max_timestamp_ns - meta.min_timestamp_ns);
       bits.push(
-        `${from.toISOString().slice(11, 19)} \u2192 ${to
-          .toISOString()
-          .slice(11, 19)} (${dur})`
+        `${utcRange(meta.min_timestamp_ns, meta.max_timestamp_ns)} (${dur})`
       );
     }
     return bits.join(" \u00b7 ");

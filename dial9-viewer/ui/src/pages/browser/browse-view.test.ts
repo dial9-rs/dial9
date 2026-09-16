@@ -193,7 +193,7 @@ describe("browse timeline painter", () => {
     // Ticks land on round wall-clock instants (every 2 minutes here), which
     // an even division of the pane would not produce.
     expect(axis.children.map((tick) => tick.textContent)).toStrictEqual([
-      "2026-01-15 10:00:00",
+      "2026/01/15 10:00:00 UTC",
       "10:02:00",
       "10:04:00",
       "10:06:00",

@@ -8,7 +8,7 @@ export interface PageEls {
   btnMore: HTMLButtonElement;
   slider: HTMLInputElement;
   threshLabel: HTMLElement;
-  utcToggle: HTMLInputElement;
+  tzBtn: HTMLButtonElement;
   status: HTMLElement;
   viewTabs: HTMLElement;
   summary: HTMLElement;
@@ -29,7 +29,7 @@ export function pageEls(): PageEls {
     btnMore: byId("btn-more"),
     slider: byId("threshold-slider"),
     threshLabel: byId("threshold-label"),
-    utcToggle: byId("utc-toggle"),
+    tzBtn: byId("tz-btn"),
     status: byId("status"),
     viewTabs: byId("view-tabs"),
     summary: byId("summary"),

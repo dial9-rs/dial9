@@ -84,13 +84,14 @@ function periodsTemplate(
   utc: boolean,
   handlers: PeriodHandlers,
 ): TemplateResult {
+  const zone = utc ? "UTC" : "Local";
   return html`${periods.map((p, i) => {
     const color = COLORS[i % COLORS.length];
     return html`
       <div class="period-row">
         <span class="tag" style="background:${color}33;color:${color}">P${i + 1}</span>
         <label
-          >From:
+          >From (${zone}):
           <input
             type="datetime-local"
             step="1"
@@ -98,7 +99,7 @@ function periodsTemplate(
             @change=${(e: Event) => handlers.onUpdate(p.id, "start", inputValue(e))}
         /></label>
         <label
-          >To:
+          >To (${zone}):
           <input
             type="datetime-local"
             step="1"
