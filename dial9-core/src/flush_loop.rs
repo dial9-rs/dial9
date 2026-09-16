@@ -142,24 +142,18 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         {
             let mut sources = shared.sources.lock().unwrap();
             for source in sources.iter_mut() {
-                // A panicking `Source::segment_metadata` must not poison the
-                // flush thread or skip sibling sources' metadata this cycle.
-                // Truncate back to the pre-call length so a partial push
-                // from the panicking source doesn't leave stray entries in
-                // this cycle's metadata.
+                // Truncate back to the pre-call length on panic so a partial
+                // push from the panicking source doesn't leave stray entries
+                // in this cycle's metadata.
                 let before = source_entries.len();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    source.segment_metadata(&mut source_entries);
-                }));
-                if result.is_err() {
+                let name = source.name();
+                let panicked = crate::source::catch_source_panic(
+                    name,
+                    crate::source::SourceCall::SegmentMetadata,
+                    || source.segment_metadata(&mut source_entries),
+                );
+                if panicked {
                     source_entries.truncate(before);
-                    let name = source.name();
-                    rate_limited!(Duration::from_secs(60), {
-                        tracing::warn!(
-                            source = name,
-                            "source panicked during segment_metadata; metadata skipped"
-                        );
-                    });
                 }
             }
         }

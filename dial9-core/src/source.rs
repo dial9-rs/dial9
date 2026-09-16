@@ -61,10 +61,12 @@ impl<'a> FlushContext<'a> {
 /// # Panic safety
 ///
 /// The flush thread catches panics from [`flush`](Self::flush) and
-/// [`segment_metadata`](Self::segment_metadata), dropping that cycle's
-/// events or metadata for this source. The same instance is reused on the
-/// next cycle, so implementations **must** remain in a valid state after a
-/// panic.
+/// [`segment_metadata`](Self::segment_metadata) so one source's panic can't
+/// poison the flush thread or skip sibling sources' turns. The same instance
+/// is reused next cycle, so implementations **must** remain valid after a
+/// panic. [`segment_metadata`] fully discards this cycle's metadata on
+/// panic; [`flush`] does not. Events already recorded before the panic
+/// point still reach the trace.
 ///
 /// [`flush`]: Source::flush
 /// [`segment_metadata`]: Source::segment_metadata
@@ -110,6 +112,41 @@ pub trait Source: Any + Send {
     fn segment_processor(&mut self) -> Option<Box<dyn crate::pipeline::SegmentProcessor>> {
         None
     }
+}
+
+/// Which per-cycle `Source` call [`catch_source_panic`] is guarding, for the
+/// warning message on panic.
+pub(crate) enum SourceCall {
+    Flush,
+    SegmentMetadata,
+}
+
+/// Runs a per-cycle `Source` call, catching a panic so a broken source can't
+/// poison the flush thread or skip sibling sources' turns. Warns (rate-
+/// limited per source name) on panic; returns whether it panicked.
+pub(crate) fn catch_source_panic(name: &'static str, call: SourceCall, f: impl FnOnce()) -> bool {
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err();
+    if panicked {
+        match call {
+            SourceCall::Flush => {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), key = name, {
+                    tracing::warn!(
+                        source = name,
+                        "source panicked during flush; remaining events for this cycle skipped"
+                    );
+                })
+            }
+            SourceCall::SegmentMetadata => {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), key = name, {
+                    tracing::warn!(
+                        source = name,
+                        "source panicked during segment_metadata; metadata skipped"
+                    );
+                })
+            }
+        }
+    }
+    panicked
 }
 
 /// Collect current segment metadata from every source by calling the
