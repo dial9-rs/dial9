@@ -76,7 +76,10 @@ pub(crate) fn sealed_segment(dir: &Path) -> PathBuf {
 }
 
 /// Decode a segment's `SegmentMetadataEvent` entries into a merged map.
-/// Returns an empty map if `data` doesn't decode (e.g. an empty segment).
+/// Returns an empty map for a fully-empty/unparseable buffer (e.g. a segment
+/// with no header). A mid-stream frame decode error panics: the input is
+/// assumed to be real flush output, so a corrupt frame means the encoder is
+/// broken, not that the segment is legitimately empty.
 pub(crate) fn decode_segment_metadata(data: &[u8]) -> HashMap<String, String> {
     let Some(mut dec) = Decoder::new(data) else {
         return HashMap::new();
