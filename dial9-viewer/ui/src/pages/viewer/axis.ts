@@ -334,7 +334,7 @@ export function fmtWallClockLabel(
 
 /**
  * The zone name to append to an absolute label, or "" when the label is not a
- * wall clock - relative mode, or absolute mode with no clock-sync anchor to
+ * wall clock: relative mode, or absolute mode with no clock-sync anchor to
  * resolve (where `fmtAxisTick` falls back to a relative offset).
  */
 export function axisZoneSuffix(inputs: AxisInputs, ns: number): string {

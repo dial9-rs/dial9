@@ -923,25 +923,31 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("browse", { selection: sel });
   }
 
-  // Raw-mode Select All / Deselect All. The checkboxes are DOM-owned;
-  // mirror the result into the raw slice for the count render.
+  // Raw-mode Select All / Deselect All. Covers every result, not just the
+  // rows the table rendered (capped in raw-rows.ts).
   function rawSelectAll(checked: boolean): void {
+    const selected = checked
+      ? new Set(store.getState().raw.objects.map((o) => o.key))
+      : new Set<string>();
     els.rawBody
       .querySelectorAll<HTMLInputElement>(".raw-cb")
       .forEach((cb) => {
         cb.checked = checked;
       });
     els.rawSelectAll.checked = checked;
-    syncRawSelectionFromDom();
+    store.update("raw", { selected });
   }
 
-  /** Rebuild the raw-selection mirror from the live checkbox state. */
+  /** Fold the checkbox state in; keys outside the rendered window survive. */
   function syncRawSelectionFromDom(): void {
-    const selected = new Set<string>();
+    const selected = new Set(store.getState().raw.selected);
     els.rawBody
-      .querySelectorAll<HTMLInputElement>(".raw-cb:checked")
+      .querySelectorAll<HTMLInputElement>(".raw-cb")
       .forEach((cb) => {
-        if (cb.dataset["key"] != null) selected.add(cb.dataset["key"]);
+        const key = cb.dataset["key"];
+        if (key == null) return;
+        if (cb.checked) selected.add(key);
+        else selected.delete(key);
       });
     store.update("raw", { selected });
   }

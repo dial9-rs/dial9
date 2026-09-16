@@ -17,6 +17,11 @@ export function nsToDatetime(ns: string | null, utc: boolean): string {
     .slice(0, 19);
 }
 
+/** The active mode's zone name, for labels beside a zone-less date input. */
+export function zoneName(utc: boolean): string {
+  return utc ? "UTC" : "Local";
+}
+
 /**
  * Parse a `datetime-local` value back to an epoch-ns string (ms-precision
  * floor). Empty -> null. `utc` appends `Z` (parse as UTC); otherwise the

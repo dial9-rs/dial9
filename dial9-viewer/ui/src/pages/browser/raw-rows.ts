@@ -20,6 +20,27 @@
 import { parseKey } from "../../lib/trace/keys.js";
 import type { BrowseObject } from "./state.js";
 
+/**
+ * Rows rendered at once.
+ */
+export const MAX_RENDERED_ROWS = 1000;
+
+/**
+ * The rows to render plus the notice for the rest.
+ */
+export function capRows(rows: readonly RawRow[]): {
+  rows: readonly RawRow[];
+  notice: string;
+} {
+  if (rows.length <= MAX_RENDERED_ROWS) return { rows, notice: "" };
+  return {
+    rows: rows.slice(0, MAX_RENDERED_ROWS),
+    notice:
+      `Showing the first ${MAX_RENDERED_ROWS.toLocaleString()} of ` +
+      `${rows.length.toLocaleString()} rows.`,
+  };
+}
+
 export interface RawRow {
   obj: BrowseObject;
   /**

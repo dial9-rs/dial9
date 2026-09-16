@@ -1,6 +1,6 @@
 // Header chrome: the timezone toggle button, and the labels that name the
-// active zone for values it cannot annotate itself. The creds button lives in
-// creds-panel.ts.
+// active zone for values the button cannot annotate. The creds button lives
+// in creds-panel.ts.
 
 import { assertInScheduledRender } from "../../store/store.js";
 import { tzName } from "./format.js";

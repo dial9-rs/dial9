@@ -526,7 +526,7 @@ export const registry = {
     await dragSelectRowZero(page);
     const count = await textOf(page, "#selection-count");
     expect(
-      /^1 segment · \d+(\.\d+)? [KMG]B · \d{2}:\d{2}:\d{2}–\d{2}:\d{2}:\d{2}$/.test(count),
+      /^1 segment · \d+(\.\d+)? [KMG]B · \d{2}:\d{2}:\d{2}–\d{2}:\d{2}:\d{2} (UTC|Local)$/.test(count),
       `selection count format was "${count}"`,
     );
     expect(await page.locator("#view-btn").isEnabled(), "View button not enabled");
@@ -554,7 +554,7 @@ export const registry = {
     const hosts = await page.locator("#raw-body tr td.host").allTextContents();
     expect(hosts[0] === "local/host-0" && hosts[1] === "abcd", `host/boot were ${hosts}`);
     const traceStart = await textOf(page, "#raw-body tr td:nth-child(5)");
-    expect(/^\d{4}-\d{2}-\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
+    expect(/^\d{4}\/\d{2}\/\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
     return "Hive key decoded into service=demo-service, host=local/host-0, boot=abcd";
   },
 

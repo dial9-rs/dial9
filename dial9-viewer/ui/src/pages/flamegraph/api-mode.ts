@@ -50,8 +50,8 @@ interface AvailFacet {
  * The scope's time range for the header and stats readouts: "YYYY/MM/DD
  * HH:MM:SS -> HH:MM:SS UTC", with the date on the start only.
  *
- * Aggregated mode is UTC throughout - the time pickers read as UTC and S3 trace
- * keys are bucketed in UTC
+ * Aggregated mode is UTC throughout: the pickers read as UTC and S3 trace keys
+ * are bucketed in UTC.
  */
 export function utcRange(startNs: number, endNs: number): string {
   const from = new Date(startNs / 1e6).toISOString();
@@ -85,8 +85,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     "display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0;flex-wrap:wrap;";
   toolbar.innerHTML = `
         <span id="f-facets" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"></span>
-        <label style="color:#e0e0e0" title="UTC wall-clock - the native picker renders it in your locale, but the value is read as UTC">From (UTC): <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
-        <label style="color:#e0e0e0" title="UTC wall-clock - the native picker renders it in your locale, but the value is read as UTC">To (UTC): <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
+        <label style="color:#e0e0e0" title="Read as UTC, whatever format your locale shows">From (UTC): <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
+        <label style="color:#e0e0e0" title="Read as UTC, whatever format your locale shows">To (UTC): <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
         <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
         <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>

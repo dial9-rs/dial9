@@ -18,10 +18,10 @@ export interface BrowserEls {
   // Header
   tzBtn: HTMLButtonElement;
   /** Labels that name the active timezone (#654). */
-  rangeFromLabel: HTMLElement;
-  rangeToLabel: HTMLElement;
-  thTraceStart: HTMLElement;
-  thUploaded: HTMLElement;
+  rangeFromLabel: HTMLLabelElement;
+  rangeToLabel: HTMLLabelElement;
+  thTraceStart: HTMLSpanElement;
+  thUploaded: HTMLSpanElement;
   credsBtn: HTMLButtonElement;
   credsBtnLabel: HTMLSpanElement;
   // Credentials panel

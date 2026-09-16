@@ -13,7 +13,12 @@ import type {
   SourceScope,
   TokioStatsResponse,
 } from "../../lib/trace/index.js";
-import { formatDuration, nsToDatetime, schedulingDelayEvidenceLabel } from "./format.js";
+import {
+  formatDuration,
+  nsToDatetime,
+  schedulingDelayEvidenceLabel,
+  zoneName,
+} from "./format.js";
 import { busynessHeat, latencyHeat } from "../../lib/trace/tokio_stats_api.js";
 import { exemplarLink } from "./exemplar.js";
 import {
@@ -84,7 +89,7 @@ function periodsTemplate(
   utc: boolean,
   handlers: PeriodHandlers,
 ): TemplateResult {
-  const zone = utc ? "UTC" : "Local";
+  const zone = zoneName(utc);
   return html`${periods.map((p, i) => {
     const color = COLORS[i % COLORS.length];
     return html`

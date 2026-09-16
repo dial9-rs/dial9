@@ -13,6 +13,7 @@ import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { formatDate, formatEpochStr, formatSize } from "./format.js";
 import {
+  capRows,
   nextSort,
   parseRawSortKey,
   sortRawRows,
@@ -21,11 +22,6 @@ import {
 } from "./raw-rows.js";
 import type { BrowseObject } from "./state.js";
 import { renderStatus } from "./status-render.js";
-
-/**
- * Max rows rendered at once, this caps rendering only.
- */
-const MAX_RENDERED_ROWS = 1000;
 
 export function mountRawView({ store, els, actions }: PageCtx): void {
   // Enter in the prefix field triggers the search.
@@ -97,8 +93,11 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
   ): void {
     els.rawBody.textContent = "";
 
-    const sorted = sortRawRows(toRawRows(objects), sort);
-    for (const row of sorted.slice(0, MAX_RENDERED_ROWS)) {
+    const capped = capRows(sortRawRows(toRawRows(objects), sort));
+    els.rawTruncated.textContent = capped.notice ? `\u26a0 ${capped.notice}` : "";
+    els.rawTruncated.style.display =
+      capped.notice && store.getState().raw.tableVisible ? "" : "none";
+    for (const row of capped.rows) {
       const { obj } = row;
       const tr = document.createElement("tr");
 
@@ -141,14 +140,6 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
 
       els.rawBody.appendChild(tr);
     }
-
-    const held = sorted.length - MAX_RENDERED_ROWS;
-    els.rawTruncated.style.display = held > 0 ? "" : "none";
-    els.rawTruncated.textContent =
-      held > 0
-        ? `Showing the first ${MAX_RENDERED_ROWS.toLocaleString()} of ` +
-          `${sorted.length.toLocaleString()} objects. `
-        : "";
   }
 
   let lastEpoch = -1;
@@ -157,6 +148,7 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     assertInScheduledRender("raw-view render");
     renderStatus(els.rawStatus, state.raw.status);
     els.rawTable.style.display = state.raw.tableVisible ? "" : "none";
+    if (!state.raw.tableVisible) els.rawTruncated.style.display = "none";
     renderSortIndicators(state.raw.sort);
     // Rebuild only when a search / TZ toggle bumped the render epoch
     // (selection reset) or a header click changed the sort (selection

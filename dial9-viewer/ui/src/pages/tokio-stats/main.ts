@@ -14,7 +14,7 @@ import {
 } from "../../lib/trace/index.js";
 import type { TokioStatsQuery, TokioStatsResponse } from "../../lib/trace/index.js";
 import { pageEls } from "./dom.js";
-import { formatDuration, datetimeToNs, thresholdNs } from "./format.js";
+import { formatDuration, datetimeToNs, thresholdNs, zoneName } from "./format.js";
 import { computeStats, buildDiffModel } from "./stats.js";
 import {
   renderPeriods,
@@ -344,7 +344,7 @@ async function loadAll(): Promise<void> {
 
 els.tzBtn.addEventListener("click", () => {
   utc = !utc;
-  els.tzBtn.textContent = utc ? "TZ: UTC" : "TZ: Local";
+  els.tzBtn.textContent = `TZ: ${zoneName(utc)}`;
   renderPeriodsNow();
 });
 els.btnLoad.addEventListener("click", () => {

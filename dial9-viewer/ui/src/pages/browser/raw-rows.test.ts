@@ -7,7 +7,15 @@
 //   otherwise; repeated header clicks flip the direction.
 
 import { describe, expect, it } from "vitest";
-import { nextSort, sortRawRows, toRawRow, toRawRows } from "./raw-rows.js";
+import {
+  MAX_RENDERED_ROWS,
+  capRows,
+  type RawRow,
+  nextSort,
+  sortRawRows,
+  toRawRow,
+  toRawRows,
+} from "./raw-rows.js";
 
 const KNOWN_KEY =
   "traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz";
@@ -145,5 +153,33 @@ describe("sorting (amendment)", () => {
     expect(nextSort({ key: "size", dir: 1 }, "size")).toEqual({ key: "size", dir: -1 });
     expect(nextSort({ key: "size", dir: -1 }, "size")).toEqual({ key: "size", dir: 1 });
     expect(nextSort({ key: "size", dir: -1 }, "host")).toEqual({ key: "host", dir: 1 });
+  });
+});
+
+describe("capRows", () => {
+  const rows = (n: number): RawRow[] =>
+    Array.from({ length: n }, (_, i) =>
+      toRawRow({ key: `k${i}`, size: 1, last_modified: "" }),
+    );
+
+  it("passes a result that fits through untouched", () => {
+    const all = rows(MAX_RENDERED_ROWS);
+    const capped = capRows(all);
+    expect(capped.rows).toBe(all);
+    expect(capped.notice).toBe("");
+  });
+
+  it("caps one row over and counts the whole result in the notice", () => {
+    const capped = capRows(rows(MAX_RENDERED_ROWS + 1));
+    expect(capped.rows).toHaveLength(MAX_RENDERED_ROWS);
+    expect(capped.notice).toContain("1,000");
+    expect(capped.notice).toContain("1,001");
+  });
+
+  it("keeps the head of the order it was given", () => {
+    const all = rows(MAX_RENDERED_ROWS + 5);
+    const capped = capRows(all);
+    expect(capped.rows[0]).toBe(all[0]);
+    expect(capped.rows[MAX_RENDERED_ROWS - 1]).toBe(all[MAX_RENDERED_ROWS - 1]);
   });
 });
