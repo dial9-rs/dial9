@@ -10,47 +10,55 @@ use std::path::{Path, PathBuf};
 use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
 use dial9_trace_format::types::FieldValueRef;
 
-use crate::buffer::MemoryBuffer;
-use crate::clock::clock_monotonic_ns;
-use crate::fs::Fs;
-use crate::primitives::sync::Arc;
-use crate::recording::Recorder;
-use crate::shared_state::SharedState;
-use crate::source::Source;
-
-/// Start a `Recorder` over an in-memory writer with `sources` registered.
-///
-/// Drives `Recorder::start`/`SharedState` construction directly, bypassing
-/// `RecorderBuilder`'s `SoleRecorderGuard` (a process-wide singleton that
-/// doesn't tolerate a shuttle scenario's many same-process iterations).
 #[cfg(all(test, shuttle, feature = "pipeline"))]
-pub(crate) fn start_shuttle_memory_recorder(sources: Vec<Box<dyn Source>>) -> (Recorder, Arc<Fs>) {
-    let writer = MemoryBuffer::builder()
-        .max_total_size(100 * 1024 * 1024)
-        .max_segment_size(256)
-        .build()
-        .unwrap();
-    let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
-    let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-    for source in sources {
-        shared.push_source(source);
-    }
-    let recorder = Recorder::start(shared, writer, None, || || {});
-    recorder.handle().enable();
-    (recorder, fs)
-}
+pub(crate) use pipeline_helpers::*;
 
-/// Call `f` with each sealed segment's raw bytes, draining `fs` until empty.
+/// Shuttle-only pipeline test helpers, gated as one module so the imports
+/// they need carry the same `#[cfg]` as the functions using them.
 #[cfg(all(test, shuttle, feature = "pipeline"))]
-pub(crate) fn for_each_sealed_segment(fs: &Arc<Fs>, mut f: impl FnMut(Vec<u8>)) {
-    loop {
-        let taken = fs.take_files();
-        if taken.segments.is_empty() {
-            break;
+mod pipeline_helpers {
+    use crate::buffer::MemoryBuffer;
+    use crate::clock::clock_monotonic_ns;
+    use crate::fs::Fs;
+    use crate::primitives::sync::Arc;
+    use crate::recording::Recorder;
+    use crate::shared_state::SharedState;
+    use crate::source::Source;
+
+    /// Start a `Recorder` over an in-memory writer with `sources` registered.
+    ///
+    /// Drives `Recorder::start`/`SharedState` construction directly, bypassing
+    /// `RecorderBuilder`'s `SoleRecorderGuard` (a process-wide singleton that
+    /// doesn't tolerate a shuttle scenario's many same-process iterations).
+    pub(crate) fn start_shuttle_memory_recorder(
+        sources: Vec<Box<dyn Source>>,
+    ) -> (Recorder, Arc<Fs>) {
+        let writer = MemoryBuffer::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        for source in sources {
+            shared.push_source(source);
         }
-        for seg in taken.segments {
-            let (_seg_ref, payload, _accounting) = seg.load().expect("load sealed segment");
-            f(payload.into_vec());
+        let recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        (recorder, fs)
+    }
+
+    /// Call `f` with each sealed segment's raw bytes, draining `fs` until empty.
+    pub(crate) fn for_each_sealed_segment(fs: &Arc<Fs>, mut f: impl FnMut(Vec<u8>)) {
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().expect("load sealed segment");
+                f(payload.into_vec());
+            }
         }
     }
 }
