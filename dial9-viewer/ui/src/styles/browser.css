@@ -236,6 +236,7 @@ td.host { color: #aaa; font-size: 0.8em; }
 /* Unknown-layout keys render raw across the parsed
    columns instead of positionally shifted Service/Host/Boot fields. */
 td.rawkey { color: #aaa; font-size: 0.8em; font-family: monospace; }
+#raw-truncated { color: #ffd93d; font-size: 0.8em; padding: 6px 20px; }
 td input[type="checkbox"] { accent-color: #6c63ff; }
 
 .actions {

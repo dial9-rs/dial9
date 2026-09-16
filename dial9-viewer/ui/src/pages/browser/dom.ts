@@ -74,6 +74,7 @@ export interface BrowserEls {
   rawSearchInput: HTMLInputElement;
   rawSearchBtn: HTMLButtonElement;
   rawStatus: HTMLDivElement;
+  rawTruncated: HTMLDivElement;
   rawTable: HTMLTableElement;
   rawBody: HTMLTableSectionElement;
   rawSelectAll: HTMLInputElement;
@@ -148,6 +149,7 @@ export function queryEls(): BrowserEls {
     rawSearchInput: byId("raw-search-input"),
     rawSearchBtn: bySelector('button[data-action="raw-search"]'),
     rawStatus: byId("raw-status"),
+    rawTruncated: byId("raw-truncated"),
     rawTable: byId("raw-table"),
     rawBody: byId("raw-body"),
     rawSelectAll: byId("raw-select-all"),

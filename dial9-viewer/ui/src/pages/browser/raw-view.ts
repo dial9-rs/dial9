@@ -22,6 +22,11 @@ import {
 import type { BrowseObject } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
+/**
+ * Max rows rendered at once, this caps rendering only.
+ */
+const MAX_RENDERED_ROWS = 1000;
+
 export function mountRawView({ store, els, actions }: PageCtx): void {
   // Enter in the prefix field triggers the search.
   els.rawSearchInput.addEventListener("keydown", (e) => {
@@ -92,7 +97,8 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
   ): void {
     els.rawBody.textContent = "";
 
-    for (const row of sortRawRows(toRawRows(objects), sort)) {
+    const sorted = sortRawRows(toRawRows(objects), sort);
+    for (const row of sorted.slice(0, MAX_RENDERED_ROWS)) {
       const { obj } = row;
       const tr = document.createElement("tr");
 
@@ -135,6 +141,14 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
 
       els.rawBody.appendChild(tr);
     }
+
+    const held = sorted.length - MAX_RENDERED_ROWS;
+    els.rawTruncated.style.display = held > 0 ? "" : "none";
+    els.rawTruncated.textContent =
+      held > 0
+        ? `Showing the first ${MAX_RENDERED_ROWS.toLocaleString()} of ` +
+          `${sorted.length.toLocaleString()} objects. `
+        : "";
   }
 
   let lastEpoch = -1;
