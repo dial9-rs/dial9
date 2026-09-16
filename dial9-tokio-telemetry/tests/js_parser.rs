@@ -280,3 +280,75 @@ main().catch((e) => {{ console.error(e); process.exit(1); }});
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Both wire schemas reach the production JS parser; old captures retain an
+/// absent probability rather than being assigned a plausible sampling weight.
+#[test]
+fn task_dump_sampling_schema_compatibility() {
+    use dial9_trace_format::{TraceEvent, encoder::Encoder, types::InternedStackFrames};
+
+    #[derive(TraceEvent)]
+    #[traceevent(name = "TaskDumpEvent")]
+    struct LegacyDump {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        task_id: u64,
+        callchain: InternedStackFrames,
+    }
+    #[derive(TraceEvent)]
+    #[traceevent(name = "TaskDumpEvent")]
+    struct SampledDump {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        task_id: u64,
+        callchain: InternedStackFrames,
+        inclusion_probability: f64,
+    }
+    let mut old = Encoder::new();
+    let callchain = old.intern_stack_frames(&[0x1234, 0x5678]).unwrap();
+    old.write(&LegacyDump {
+        timestamp_ns: 100,
+        task_id: 7,
+        callchain,
+    })
+    .unwrap();
+    let mut new = Encoder::new();
+    let callchain = new.intern_stack_frames(&[0x1234, 0x5678]).unwrap();
+    new.write(&SampledDump {
+        timestamp_ns: 200,
+        task_id: 7,
+        callchain,
+        inclusion_probability: 0.125,
+    })
+    .unwrap();
+    let dir = TempDir::new().unwrap();
+    let trace = dir.path().join("dumps.bin");
+    std::fs::write(&trace, [old.finish(), new.finish()].concat()).unwrap();
+    let parser =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dial9-viewer/ui/trace_parser.js");
+    let output = Command::new("node")
+        .args([
+            "-e",
+            r#"
+const assert = require('node:assert/strict');
+const { parseTrace } = require(process.argv[1]);
+parseTrace(require('node:fs').readFileSync(process.argv[2])).then(trace => {
+    const dumps = trace.taskDumps.get(7);
+    assert.equal(dumps.length, 2);
+    assert.equal(dumps[0].inclusionProbability, undefined);
+    assert.equal(dumps[1].inclusionProbability, 0.125);
+    assert.deepEqual(dumps[0].callchain, ['0x1234', '0x5678']);
+    assert.deepEqual(dumps[1].callchain, dumps[0].callchain);
+}).catch(error => { console.error(error); process.exitCode = 1; });
+"#,
+        ])
+        .arg(parser)
+        .arg(trace)
+        .output()
+        .expect("run JS parser");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

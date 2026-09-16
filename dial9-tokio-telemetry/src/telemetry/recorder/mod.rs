@@ -8,8 +8,6 @@ pub(crate) use dial9_core::source;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
-#[cfg(any(feature = "taskdump", test))]
-pub(crate) use runtime_context::poll_start_ts_monotonic;
 
 pub use dial9_core::handle::Dial9Handle;
 pub(crate) use handle::traced_runtime_handle;
@@ -90,9 +88,6 @@ fn register_hooks(
     handle: &Dial9Handle,
     #[cfg_attr(not(tokio_unstable), allow(unused_variables))] task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
-    #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
-        crate::telemetry::task_dump_config::TaskDumpConfig,
-    >,
 ) {
     let c1 = ctx.clone();
     let c2 = ctx.clone();
@@ -167,12 +162,6 @@ fn register_hooks(
         set_tl_handle(handle_for_tl.clone());
         runtime_context::mark_thread_traced();
 
-        // Install this thread's task-dump config for `TaskDumped` to read.
-        #[cfg(feature = "taskdump")]
-        if let Some(config) = taskdump_config {
-            crate::task_dumped::set_taskdump_config(config);
-        }
-
         #[cfg(feature = "cpu-profiling")]
         {
             // Sched event sampling is deferred to start_sched_sampling_if_needed(),
@@ -190,7 +179,7 @@ fn register_hooks(
         runtime_context::clear_thread_traced();
 
         #[cfg(feature = "taskdump")]
-        crate::task_dumped::clear_taskdump_config();
+        crate::task_dumped::clear_worker_sampler();
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -212,21 +201,18 @@ fn register_runtime_hooks(
     worker_ids: runtime_context::WorkerIdCounter,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
-    taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
+    #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
+        crate::telemetry::task_dump_config::TaskDumpConfig,
+    >,
 ) -> Arc<RuntimeContext> {
-    let ctx = Arc::new(RuntimeContext::new(
-        runtime_name,
-        handle.clone(),
-        worker_ids,
-    ));
-    register_hooks(
-        builder,
-        &ctx,
-        handle,
-        task_tracking_enabled,
-        tokio_hooks,
-        taskdump_config,
-    );
+    #[allow(unused_mut)]
+    let mut ctx = RuntimeContext::new(runtime_name, handle.clone(), worker_ids);
+    #[cfg(feature = "taskdump")]
+    {
+        ctx.task_dump_config = taskdump_config;
+    }
+    let ctx = Arc::new(ctx);
+    register_hooks(builder, &ctx, handle, task_tracking_enabled, tokio_hooks);
     ctx
 }
 

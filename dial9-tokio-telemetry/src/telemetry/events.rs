@@ -146,19 +146,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn poll_start_ts_monotonic_is_strictly_increasing() {
-        use crate::telemetry::recorder::poll_start_ts_monotonic;
-        // Rapid-fire calls should never return the same value twice.
-        let mut prev = poll_start_ts_monotonic();
-        for _ in 0..10_000 {
-            let next = poll_start_ts_monotonic();
-            assert!(
-                next > prev,
-                "poll_start_ts_monotonic must be strictly increasing: got {next} after {prev}"
-            );
-            prev = next;
-        }
-    }
 }

@@ -1,6 +1,8 @@
 use super::source::{FlushContext, Source};
 #[cfg(not(tokio_unstable))]
 use crate::primitives::sync::Weak;
+#[cfg(feature = "taskdump")]
+use crate::primitives::sync::atomic::AtomicU64 as SamplingActivationCount;
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
@@ -13,6 +15,8 @@ use crate::telemetry::task_metadata::TaskId;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use metrique_timesource::{Instant, time_source};
 use std::cell::{Cell, RefCell};
+#[cfg(feature = "taskdump")]
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
@@ -44,6 +48,14 @@ pub(crate) struct RuntimeContext {
     /// Global worker IDs within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
     pub worker_ids: Mutex<BTreeSet<u64>>,
+    #[cfg(feature = "taskdump")]
+    pub(super) task_dump_config: Option<crate::telemetry::TaskDumpConfig>,
+    /// Shared by every thread that drives a logical worker. The source reads
+    /// activation metadata without locking a worker's sampling decision.
+    #[cfg(feature = "taskdump")]
+    task_dump_workers: Mutex<BTreeMap<u64, Arc<crate::task_dump_sampler::WorkerTaskDumpSampler>>>,
+    #[cfg(feature = "taskdump")]
+    task_dump_activations: Arc<SamplingActivationCount>,
 }
 
 thread_local! {
@@ -81,14 +93,9 @@ thread_local! {
     /// so a thread the sources refuse is not retried on every poll.
     #[cfg(feature = "cpu-profiling")]
     static TRACKING_ATTEMPTED: Cell<bool> = const { Cell::new(false) };
-    /// Monotonic timestamp captured in `on_before_task_poll`, cleared in
-    /// `on_after_task_poll`. Allows code running inside a poll (e.g.
-    /// `TaskDumped`, memory profiler) to reuse the timestamp without an extra
-    /// clock read.
+    /// A timestamp marks an open recorded poll, so nested wrappers do not
+    /// duplicate the runtime hooks' poll events. Cleared at poll end.
     static POLL_START_TS: Cell<Option<NonZeroU64>> = const { Cell::new(None) };
-    /// Last timestamp returned by `poll_start_ts_monotonic`. Ensures strictly
-    /// increasing values within a thread by bumping +1ns on ties.
-    static LAST_TS: Cell<u64> = const { Cell::new(0) };
 }
 
 thread_local! {
@@ -189,32 +196,6 @@ fn sched_wait_sample_rate() -> u64 {
 fn advance_park_counter(counter: u64, rate: u64) -> (u64, bool) {
     let next = counter.wrapping_add(1);
     (next, next.is_multiple_of(rate.max(1)))
-}
-
-/// Returns a strictly monotonic timestamp for this thread.
-///
-/// Returns the cached `PollStart` timestamp from this thread's most
-/// recent `on_before_task_poll`, if any; otherwise reads the wall
-/// clock via [`crate::telemetry::events::clock_monotonic_ns`]. The
-/// returned value is always **strictly greater** than the previous
-/// call on this thread (bumps by 1 ns on ties), which keeps event
-/// ordering correct when several samples share a clock tick — e.g.
-/// an in-place realloc producing free + alloc at the same address
-/// within one poll, or repeated allocations inside a tight loop.
-///
-/// Used by:
-/// - the task-dump idle/wake bookkeeping in [`crate::task_dumped`].
-#[cfg(any(feature = "taskdump", test))]
-pub(crate) fn poll_start_ts_monotonic() -> u64 {
-    let raw = POLL_START_TS.with(|c| c.get()).map_or_else(
-        crate::telemetry::events::clock_monotonic_ns,
-        NonZeroU64::get,
-    );
-    LAST_TS.with(|last| {
-        let next = last.get().wrapping_add(1).max(raw);
-        last.set(next);
-        next
-    })
 }
 
 /// Shared list of all attached runtimes.
@@ -365,13 +346,21 @@ impl Source for TokioRuntimesSource {
         // Self-detected change: there is no external signal to keep in sync, so
         // a new caller that mutates runtime/worker metadata cannot forget to
         // announce it. The fingerprint is the runtime count plus the total
-        // number of registered workers across all runtimes. Both only ever grow
+        // number of registered workers and calibrated samplers. These only grow
         // (runtimes and workers are added, never removed) and each worker's
         // global id is fixed once assigned, so an unchanged fingerprint means
         // unchanged metadata. Cheap — a few uncontended read locks and no
         // allocation — so it runs every flush cycle.
         let contexts = self.contexts.lock().unwrap();
-        let fingerprint = contexts.len()
+        #[cfg(feature = "taskdump")]
+        let activated_workers = contexts
+            .iter()
+            .map(|ctx| ctx.task_dump_activations.load(Ordering::Acquire) as usize)
+            .sum::<usize>();
+        #[cfg(not(feature = "taskdump"))]
+        let activated_workers = 0;
+        let fingerprint = activated_workers
+            + contexts.len()
             + contexts
                 .iter()
                 .map(|c| c.worker_ids.lock().unwrap().len())
@@ -381,8 +370,29 @@ impl Source for TokioRuntimesSource {
         }
         self.last_fingerprint = fingerprint;
         // The writer's merge is additive, so emitting the full current snapshot
-        // on each change is correct. A fingerprint bump from an unnamed runtime
+        // on each change is correct.
         out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
+        #[cfg(feature = "taskdump")]
+        for ctx in contexts.iter() {
+            let Some(config) = ctx.task_dump_config else {
+                continue;
+            };
+            out.push(("task_dump.sampler".into(), "per_worker_bernoulli_v1".into()));
+            // Always use worker rates: metadata merges are additive, so a
+            // scalar could become stale if a different-rate runtime attaches.
+            for (worker, sampler) in ctx.task_dump_workers.lock().unwrap().iter() {
+                out.push((
+                    format!("task_dump.worker.{worker}.captures_per_second"),
+                    config.captures_per_second_per_worker().to_string(),
+                ));
+                if let Some(timestamp) = sampler.sampling_active_ns() {
+                    out.push((
+                        format!("task_dump.worker.{worker}.sampling_active_ns"),
+                        timestamp.to_string(),
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -402,6 +412,12 @@ impl RuntimeContext {
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
+            #[cfg(feature = "taskdump")]
+            task_dump_config: None,
+            #[cfg(feature = "taskdump")]
+            task_dump_workers: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "taskdump")]
+            task_dump_activations: Arc::new(SamplingActivationCount::new(0)),
         }
     }
 
@@ -541,6 +557,27 @@ fn register_worker_if_needed(ctx: &RuntimeContext, global_id: u64) {
     let key = (ctx.id, global_id);
     WORKER_REGISTERED.with(|cell| {
         if cell.get() != Some(key) {
+            #[cfg(feature = "taskdump")]
+            {
+                let sampler = ctx.task_dump_config.map(|config| {
+                    ctx.task_dump_workers
+                        .lock()
+                        .unwrap()
+                        .entry(global_id)
+                        .or_insert_with(|| {
+                            Arc::new(crate::task_dump_sampler::WorkerTaskDumpSampler::new(
+                                config,
+                                global_id,
+                                clock_monotonic_ns(),
+                                ctx.task_dump_activations.clone(),
+                            ))
+                        })
+                        .clone()
+                });
+                crate::task_dumped::set_worker_sampler(sampler);
+            }
+            // Publish the worker after its sampler so a source snapshot that
+            // sees the worker-count change also sees its capture configuration.
             ctx.worker_ids.lock().unwrap().insert(global_id);
             // Install the recorder handle on this thread. `on_thread_start` also
             // does this for pool threads, but a `current_thread` runtime's driver
@@ -1188,6 +1225,47 @@ mod shuttle_tests {
                      found these runtime.* entries: {runtime_entries:?}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(all(test, shuttle, feature = "taskdump"))]
+mod task_dump_shuttle_tests {
+    use super::*;
+    use crate::primitives::thread;
+
+    dial9_core::shuttle_test! {
+        num_iters = 1_000, depth = 3;
+        fn worker_registration_publishes_capture_rate_before_activation() {
+            let mut ctx = RuntimeContext::new(
+                Some("main".into()),
+                Dial9Handle::disabled(),
+                Arc::new(AtomicU64::new(0)),
+            );
+            ctx.task_dump_config = Some(crate::telemetry::TaskDumpConfig::default());
+            let ctx = Arc::new(ctx);
+            let contexts = Arc::new(Mutex::new(vec![ctx.clone()]));
+            let mut source = TokioRuntimesSource::new(contexts);
+            let register = {
+                let ctx = ctx.clone();
+                thread::spawn(move || register_worker_if_needed(&ctx, 0))
+            };
+
+            // The writer merges metadata across flushes, including any that
+            // interleave with registration. Never activate or poll this worker:
+            // its configuration must not depend on a later capture repairing it.
+            let mut entries = Vec::new();
+            for _ in 0..3 {
+                source.segment_metadata(&mut entries);
+                shuttle::thread::yield_now();
+            }
+            register.join().unwrap();
+            source.segment_metadata(&mut entries);
+            assert!(entries.contains(&("runtime.main".into(), "0".into())));
+            assert!(entries.contains(&(
+                "task_dump.worker.0.captures_per_second".into(), "10".into(),
+            )));
+            assert_eq!(ctx.task_dump_activations.load(Ordering::Acquire), 0);
         }
     }
 }

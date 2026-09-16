@@ -401,11 +401,6 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // first poll.
         set_tl_handle(self.clone());
         super::runtime_context::mark_thread_traced();
-        // Same for the task-dump config.
-        #[cfg(feature = "taskdump")]
-        if let Some(config) = task_dump_config {
-            crate::task_dumped::set_taskdump_config(config);
-        }
         register_runtime_metrics(self, runtime_name, runtime.handle().metrics());
         Ok(runtime)
     }

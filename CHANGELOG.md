@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Task dumps now sample before capture (`DIAL9_TASK_DUMP_PER_WORKER_HZ`, default: 10).
+  Deprecated `idle_threshold` and `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` now mean
+  a per-worker capture interval, rather than cumulative idle time per task.
+
 ### Fixed
 
 - The viewer attaches each captured task stack to the idle gap it describes.

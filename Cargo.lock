@@ -2029,6 +2029,7 @@ dependencies = [
  "bon",
  "bytes",
  "criterion 0.5.1",
+ "crossbeam-utils",
  "dial9-core",
  "dial9-destinations-s3",
  "dial9-perf-self-profile",
