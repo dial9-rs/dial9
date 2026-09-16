@@ -48,7 +48,8 @@ interface AvailFacet {
 
 /**
  * The scope's time range for the header and stats readouts: "YYYY/MM/DD
- * HH:MM:SS -> HH:MM:SS UTC", with the date on the start only.
+ * HH:MM:SS -> HH:MM:SS UTC". The end repeats the date only when the range
+ * crosses midnight, where a bare time would read as running backwards.
  *
  * Aggregated mode is UTC throughout: the pickers read as UTC and S3 trace keys
  * are bucketed in UTC.
@@ -56,8 +57,9 @@ interface AvailFacet {
 export function utcRange(startNs: number, endNs: number): string {
   const from = new Date(startNs / 1e6).toISOString();
   const to = new Date(endNs / 1e6).toISOString();
-  const date = from.slice(0, 10).replace(/-/g, "/");
-  return `${date} ${from.slice(11, 19)} \u2192 ${to.slice(11, 19)} UTC`;
+  const day = (iso: string): string => iso.slice(0, 10).replace(/-/g, "/");
+  const endDate = from.slice(0, 10) === to.slice(0, 10) ? "" : `${day(to)} `;
+  return `${day(from)} ${from.slice(11, 19)} \u2192 ${endDate}${to.slice(11, 19)} UTC`;
 }
 
 export function runApiMode(params: URLSearchParams, els: PageEls): void {

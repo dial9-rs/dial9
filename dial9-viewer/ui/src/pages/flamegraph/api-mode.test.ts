@@ -17,6 +17,12 @@ describe("utcRange", () => {
     expect(label).toBe("2026/01/01 00:30:00 → 01:00:00 UTC");
   });
 
+  it("dates the end too when the range crosses midnight", () => {
+    expect(
+      utcRange(ns("2026-09-16T23:50:00Z"), ns("2026-09-17T00:10:00Z")),
+    ).toBe("2026/09/16 23:50:00 \u2192 2026/09/17 00:10:00 UTC");
+  });
+
   it("keeps 24h times past noon", () => {
     expect(
       utcRange(ns("2026-09-16T13:05:00Z"), ns("2026-09-16T23:59:59Z")),
