@@ -300,15 +300,86 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    struct PanickingSource;
-    impl Source for PanickingSource {
+    // ── Test fixtures ────────────────────────────────────────────────
+
+    struct PanickingFlushSource(&'static str);
+    impl Source for PanickingFlushSource {
         fn flush(&mut self, _ctx: &FlushContext<'_>) {
-            panic!("PanickingSource intentionally panics for teardown test");
+            panic!("PanickingFlushSource({}) intentionally panics", self.0);
         }
         fn name(&self) -> &'static str {
-            "panicking"
+            self.0
         }
     }
+
+    struct PanickingMetadataSource(&'static str);
+    impl Source for PanickingMetadataSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            out.push((
+                format!("{}.partial", self.0),
+                "should not survive".to_string(),
+            ));
+            panic!("PanickingMetadataSource({}) intentionally panics", self.0);
+        }
+        fn name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    struct HealthyMetadataSource;
+    impl Source for HealthyMetadataSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            out.push(("healthy.key".to_string(), "healthy-value".to_string()));
+        }
+        fn name(&self) -> &'static str {
+            "healthy_metadata"
+        }
+    }
+
+    #[derive(Debug, dial9_trace_format::TraceEvent)]
+    struct MarkerEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+    }
+
+    /// Records the `source` field of every WARN event seen while active.
+    struct SourceWarnRecorder {
+        warned_sources: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct SourceFieldVisitor(Option<String>);
+    impl tracing::field::Visit for SourceFieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "source" {
+                self.0 = Some(value.to_string());
+            }
+        }
+        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
+    }
+
+    impl tracing::Subscriber for SourceWarnRecorder {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = SourceFieldVisitor(None);
+            event.record(&mut visitor);
+            if let Some(name) = visitor.0 {
+                self.warned_sources.lock().unwrap().push(name);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    // ── Tests ────────────────────────────────────────────────────────
 
     /// `teardown()` should run even after an uncaught `Source::flush` panic:
     /// it's the flush thread's own cleanup, unrelated to whichever source
@@ -327,7 +398,7 @@ mod tests {
             .unwrap();
 
         let mut recorder = recorder(writer)
-            .source(PanickingSource)
+            .source(PanickingFlushSource("panicking"))
             .on_recording_thread_start(move || {
                 let teardown_ran_for_thread = teardown_ran_for_thread.clone();
                 move || {
@@ -353,38 +424,6 @@ mod tests {
         );
     }
 
-    struct PanickingMetadataSource;
-    impl Source for PanickingMetadataSource {
-        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
-        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
-            out.push((
-                "panicking.partial".to_string(),
-                "should not survive".to_string(),
-            ));
-            panic!("PanickingMetadataSource intentionally panics for segment_metadata test");
-        }
-        fn name(&self) -> &'static str {
-            "panicking_metadata"
-        }
-    }
-
-    struct HealthyMetadataSource;
-    impl Source for HealthyMetadataSource {
-        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
-        fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
-            out.push(("healthy.key".to_string(), "healthy-value".to_string()));
-        }
-        fn name(&self) -> &'static str {
-            "healthy_metadata"
-        }
-    }
-
-    #[derive(Debug, dial9_trace_format::TraceEvent)]
-    struct MarkerEvent {
-        #[traceevent(timestamp)]
-        timestamp_ns: u64,
-    }
-
     /// A panicking `Source::segment_metadata` must not corrupt sibling
     /// sources' entries for the same cycle, and its own partial push must
     /// not survive. `flush_loop` now catches the panic and truncates
@@ -395,7 +434,7 @@ mod tests {
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
         let recorder = recorder(writer)
-            .source(PanickingMetadataSource)
+            .source(PanickingMetadataSource("panicking_metadata"))
             .source(HealthyMetadataSource)
             .build();
         recorder.handle().enable();
@@ -416,8 +455,109 @@ mod tests {
             "sibling source's metadata must survive a panicking source in the same cycle"
         );
         assert!(
-            !entries.contains_key("panicking.partial"),
+            !entries.contains_key("panicking_metadata.partial"),
             "a panicking source's partial push must not survive in the cycle's metadata"
+        );
+    }
+
+    /// Two distinct sources panicking during `flush` in the same cycle must
+    /// each be warned about: `catch_source_panic`'s rate limiting is keyed
+    /// per source name, so one source's warning can't suppress the other's
+    /// through their shared `flush_sources` call site.
+    #[test]
+    fn distinct_panicking_flush_sources_are_each_warned_about() {
+        let warned_sources = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = SourceWarnRecorder {
+            warned_sources: warned_sources.clone(),
+        };
+        // The flush thread logs from its own OS thread, not this test's, so
+        // `with_default`'s thread-local scoping wouldn't see it. Global is
+        // safe here because nextest runs each test in its own process.
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no global tracing subscriber set yet in this test process");
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+
+        let mut recorder = recorder(writer)
+            .source(PanickingFlushSource("panicking_flush_a"))
+            .source(PanickingFlushSource("panicking_flush_b"))
+            .build();
+        recorder.handle().enable();
+
+        // Give the flush thread time to run at least one cycle: both
+        // sources panic on their very first flush.
+        std::thread::sleep(Duration::from_millis(200));
+        recorder.stop_flush_thread();
+
+        let warned_sources = warned_sources.lock().unwrap();
+        assert!(
+            warned_sources.iter().any(|s| s == "panicking_flush_a"),
+            "expected a warning naming panicking_flush_a, got {warned_sources:?}"
+        );
+        assert!(
+            warned_sources.iter().any(|s| s == "panicking_flush_b"),
+            "expected a warning naming panicking_flush_b \u{2014} it must not be suppressed by \
+             panicking_flush_a's rate limit, got {warned_sources:?}"
+        );
+        // Both sources panic on every one of the ~40 cycles in the sleep
+        // window above; more than one warning per source would mean the
+        // 60s per-key rate limit isn't actually suppressing repeats.
+        assert_eq!(
+            warned_sources.len(),
+            2,
+            "expected exactly one warning per source (rate limit should suppress repeats \
+             within the 60s window), got {warned_sources:?}"
+        );
+    }
+
+    /// Same property as `distinct_panicking_flush_sources_are_each_warned_about`,
+    /// for the `segment_metadata` call site.
+    #[test]
+    fn distinct_panicking_metadata_sources_are_each_warned_about() {
+        let warned_sources = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = SourceWarnRecorder {
+            warned_sources: warned_sources.clone(),
+        };
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no global tracing subscriber set yet in this test process");
+
+        let writer = MemoryBuffer::builder()
+            .max_total_size(1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+
+        let mut recorder = recorder(writer)
+            .source(PanickingMetadataSource("panicking_metadata_a"))
+            .source(PanickingMetadataSource("panicking_metadata_b"))
+            .build();
+        recorder.handle().enable();
+
+        std::thread::sleep(Duration::from_millis(200));
+        recorder.stop_flush_thread();
+
+        let warned_sources = warned_sources.lock().unwrap();
+        assert!(
+            warned_sources.iter().any(|s| s == "panicking_metadata_a"),
+            "expected a warning naming panicking_metadata_a, got {warned_sources:?}"
+        );
+        assert!(
+            warned_sources.iter().any(|s| s == "panicking_metadata_b"),
+            "expected a warning naming panicking_metadata_b \u{2014} it must not be suppressed by \
+             panicking_metadata_a's rate limit, got {warned_sources:?}"
+        );
+        // Both sources panic on every one of the ~40 cycles in the sleep
+        // window above; more than one warning per source would mean the
+        // 60s per-key rate limit isn't actually suppressing repeats.
+        assert_eq!(
+            warned_sources.len(),
+            2,
+            "expected exactly one warning per source (rate limit should suppress repeats \
+             within the 60s window), got {warned_sources:?}"
         );
     }
 }
