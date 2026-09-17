@@ -227,8 +227,14 @@ pub mod time {
     /// poll of `future` has a small chance of simulating the deadline
     /// instead of waiting, so short futures rarely get cut off while
     /// long ones accumulate rising odds across a `pct`/`determinism` batch.
+    /// Verified to fire at least once per batch by
+    /// `worker::shuttle_tests::shuttle_background_task_drain_timeout_fires`,
+    /// via `take_elapsed_fired`.
     pub fn timeout<F: Future + Unpin>(_duration: std::time::Duration, future: F) -> Timeout<F> {
-        Timeout { future }
+        Timeout {
+            future,
+            pending_polls: 0,
+        }
     }
 
     #[derive(Debug)]
@@ -236,11 +242,42 @@ pub mod time {
 
     pub struct Timeout<F> {
         future: F,
+        pending_polls: u32,
     }
 
-    // Per-pending-poll odds of simulating the deadline. Low enough that a
-    // handful of polls (a typical drain) is very unlikely to get cut off.
+    // Per-pending-poll odds of simulating the deadline: mean 1/p = 50 pending
+    // polls before firing. Placeholder value: picked so a short drain (a
+    // handful of polls) is unlikely to trip it, never measured against
+    // real polling counts. No scenario checks that property; only the
+    // opposite one (eventual firing on a permanently-pending future) is
+    // tested, and that guarantee comes from
+    // `MAX_PENDING_POLLS_BEFORE_FORCED_ELAPSED` below, not from this value.
     const FIRE_PROBABILITY_PER_PENDING_POLL: f64 = 0.02;
+
+    // Forces `Elapsed` after this many pending polls even without the dice
+    // landing, so unbounded bad luck can't exceed shuttle's own
+    // (process-wide, uncontrollable) step budget. ~8x the mean above, so it
+    // almost never triggers in practice.
+    const MAX_PENDING_POLLS_BEFORE_FORCED_ELAPSED: u32 = 400;
+
+    // Accumulates across a whole `check_pct`/determinism batch (shuttle
+    // resets its own state every iteration). Thread-local so a
+    // concurrently-running `#[test]`, on its own OS thread, can't inflate
+    // this one's count.
+    std::thread_local! {
+        static ELAPSED_FIRED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Count of `Timeout::poll` calls that resolved `Err(Elapsed)` since the
+    /// last call. Lets a scenario built around `primitives::time::timeout`
+    /// assert the deadline branch actually fired at least once across a
+    /// batch.
+    ///
+    /// Test-integrity check: a failure here means the scenario stopped
+    /// exercising the code path it exists to cover.
+    pub fn take_elapsed_fired() -> usize {
+        ELAPSED_FIRED.with(|c| c.replace(0))
+    }
 
     impl<F: Future + Unpin> Future for Timeout<F> {
         type Output = Result<F::Output, Elapsed>;
@@ -249,9 +286,18 @@ pub mod time {
             match Pin::new(&mut self.future).poll(cx) {
                 Poll::Ready(v) => Poll::Ready(Ok(v)),
                 Poll::Pending => {
-                    if shuttle::rand::thread_rng().gen_bool(FIRE_PROBABILITY_PER_PENDING_POLL) {
+                    self.pending_polls += 1;
+                    if self.pending_polls >= MAX_PENDING_POLLS_BEFORE_FORCED_ELAPSED
+                        || shuttle::rand::thread_rng().gen_bool(FIRE_PROBABILITY_PER_PENDING_POLL)
+                    {
+                        ELAPSED_FIRED.with(|c| c.set(c.get() + 1));
                         Poll::Ready(Err(Elapsed(())))
                     } else {
+                        // Must self-wake: `future` may never wake anything
+                        // on its own (e.g. `std::future::pending()`), and
+                        // without this the dice above would only ever be
+                        // rolled once.
+                        cx.waker().wake_by_ref();
                         Poll::Pending
                     }
                 }
@@ -328,6 +374,9 @@ pub const SHUTTLE_TOKIO_STACK_SIZE: usize = 0x000F_0000;
 /// - `verify_faults_triggered` -- also asserts
 ///   `primitives::fs::take_faults_triggered() > 0`, so fault injection can't
 ///   silently stop exercising its error path.
+/// - `verify_elapsed_triggered`: also asserts
+///   `primitives::time::take_elapsed_fired() > 0`, so `primitives::time::timeout`'s
+///   `Elapsed` branch can't silently stop firing across a batch.
 /// - `stack_size = $bytes`: build `shuttle::Runner` directly with a
 ///   bumped coroutine stack, for a scenario whose call depth SIGBUSes on
 ///   the hardcoded 60KB default. Pass [`SHUTTLE_TOKIO_STACK_SIZE`].
@@ -530,6 +579,43 @@ macro_rules! shuttle_test {
                 $crate::primitives::fs::take_faults_triggered(); // drain any count left over from an earlier test
                 shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
                 assert_faults_were_triggered();
+            }
+        }
+    };
+    // Same as the plain form, but also asserts
+    // `primitives::time::take_elapsed_fired() > 0` across the whole batch, so
+    // `primitives::time::timeout`'s `Elapsed` branch can't silently stop
+    // firing without failing loudly. Checked inside the same
+    // `pct`/`determinism` runs, not separate tests, to avoid exploring twice.
+    (num_iters = $num_iters:expr, depth = $depth:expr, verify_elapsed_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            $(#[$attr])*
+            fn $name() $body
+
+            fn assert_elapsed_was_triggered() {
+                assert!(
+                    $crate::primitives::time::take_elapsed_fired() > 0,
+                    "no run across {} iterations took primitives::time::timeout's Elapsed \
+                     branch; this scenario is not exercising the drain-timeout race it exists \
+                     to cover.",
+                    $num_iters,
+                );
+            }
+
+            #[test]
+            fn pct() {
+                $crate::primitives::time::take_elapsed_fired(); // drain any count left over from an earlier test
+                shuttle::check_pct($name, $num_iters, $depth);
+                assert_elapsed_was_triggered();
+            }
+
+            #[test]
+            fn determinism() {
+                $crate::primitives::time::take_elapsed_fired(); // drain any count left over from an earlier test
+                shuttle::check_uncontrolled_nondeterminism($name, $num_iters);
+                assert_elapsed_was_triggered();
             }
         }
     };
