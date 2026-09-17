@@ -146,7 +146,6 @@ pub mod time {
     use std::cell::Cell;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     pub use tokio::time::Instant;
@@ -190,10 +189,13 @@ pub mod time {
         yielded: bool,
     }
 
-    // Shuttle resets its own state every execution, but this must accumulate
-    // across a whole `check_pct` batch to answer "did any schedule in this batch
-    // actually suspend here."
-    static YIELD_PENDING_POLLS: AtomicUsize = AtomicUsize::new(0);
+    // Accumulates across a whole `check_pct`/determinism batch (shuttle
+    // resets its own state every iteration). Thread-local so a
+    // concurrently-running `#[test]`, on its own OS thread, can't inflate
+    // this one's count.
+    std::thread_local! {
+        static YIELD_PENDING_POLLS: Cell<usize> = const { Cell::new(0) };
+    }
 
     /// Count of `Yield::poll` calls that returned `Pending` since the last call.
     /// Lets a scenario built around `sleep`/`sleep_until`
@@ -202,7 +204,7 @@ pub mod time {
     /// Test-integrity check: a failure here means the scenario stopped exercising
     /// the code path it exists to cover.
     pub fn take_yield_pending_polls() -> usize {
-        YIELD_PENDING_POLLS.swap(0, Ordering::Relaxed)
+        YIELD_PENDING_POLLS.with(|c| c.replace(0))
     }
 
     impl Future for Yield {
@@ -212,7 +214,7 @@ pub mod time {
                 Poll::Ready(())
             } else {
                 self.yielded = true;
-                YIELD_PENDING_POLLS.fetch_add(1, Ordering::Relaxed);
+                YIELD_PENDING_POLLS.with(|c| c.set(c.get() + 1));
                 LOGICAL_CLOCK
                     .with(|(_, nanos)| nanos.set(nanos.get() + LOGICAL_TICK.as_nanos() as u64));
                 cx.waker().wake_by_ref();
