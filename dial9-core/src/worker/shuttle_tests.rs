@@ -23,6 +23,12 @@
 //! shuttle-safe too, so the whole function, including
 //! `run_background_task`'s real-runtime wrapper, is drivable under
 //! shuttle; see `shuttle_concurrent_attach` in `dial9-tokio-telemetry`.
+//!
+//! `shuttle_background_task_drain_timeout_fires` sends a real shutdown
+//! signal (the scenario above drops its unused) against a processor whose
+//! `initialize()` never resolves, so the worker future can never complete
+//! on its own and `primitives::time::timeout`'s `Elapsed` branch is the
+//! only way the scenario ever returns.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -329,5 +335,53 @@ crate::shuttle_test! {
              run_background_task_inner's top-level catch_unwind, not \
              propagate to its caller"
         );
+    }
+}
+
+/// A processor whose `initialize()` never resolves, so `WorkerLoop::new`
+/// (and therefore the worker future `run_background_task_inner` races
+/// against the drain timeout) can never complete on its own.
+struct HangingInitializer;
+
+impl SegmentProcessor for HangingInitializer {
+    fn name(&self) -> &'static str {
+        "HangingInitializer"
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move { Ok(data) })
+    }
+}
+
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, verify_elapsed_triggered;
+    // Mirrors `initializer_hang_respects_shutdown_timeout` (real Tokio, in
+    // `worker/tests.rs`). The worker future never resolves, so `Elapsed` is
+    // guaranteed to fire; this guards the shuttle-mock timeout's self-wake
+    // against regressing into a bare deadlock, not a realistic drain race.
+    fn shuttle_background_task_drain_timeout_fires() {
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let config = BackgroundTaskConfig::builder()
+            .processors(vec![Box::new(HangingInitializer) as Box<dyn SegmentProcessor>])
+            .build();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let sender = crate::primitives::thread::spawn(move || {
+            let _ = shutdown_tx.send(Duration::from_millis(1));
+        });
+
+        let worker = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+        });
+
+        sender.join().unwrap();
+        worker.join().unwrap();
     }
 }
