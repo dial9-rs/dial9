@@ -331,6 +331,10 @@ pub const SHUTTLE_TOKIO_STACK_SIZE: usize = 0x000F_0000;
 /// - `stack_size = $bytes`: build `shuttle::Runner` directly with a
 ///   bumped coroutine stack, for a scenario whose call depth SIGBUSes on
 ///   the hardcoded 60KB default. Pass [`SHUTTLE_TOKIO_STACK_SIZE`].
+/// - `verify_yield_triggered` (added after `stack_size = $bytes`): also
+///   asserts `primitives::time::take_yield_pending_polls() > 0`, so a
+///   `sleep`/`sleep_until` await can't silently stop suspending across a
+///   batch.
 ///
 /// Use `num_iters = $num_iters, determinism_only;` instead of `num_iters =
 /// .., depth = ..` for a scenario with no real concurrency to explore
@@ -558,6 +562,53 @@ macro_rules! shuttle_test {
                 let scheduler =
                     UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new($num_iters));
                 shuttle::Runner::new(scheduler, config()).run($name);
+            }
+        }
+    };
+    // Same as the `stack_size` form, but also asserts
+    // `primitives::time::take_yield_pending_polls() > 0` across the whole
+    // batch, for a scenario whose `sleep`/`sleep_until` await only suspends
+    // on some schedules.
+    (num_iters = $num_iters:expr, depth = $depth:expr, stack_size = $stack_size:expr, verify_yield_triggered; $(#[$attr:meta])* fn $name:ident() $body:block) => {
+        mod $name {
+            use super::*;
+
+            $(#[$attr])*
+            fn $name() $body
+
+            fn config() -> shuttle::Config {
+                let mut config = shuttle::Config::new();
+                config.stack_size = $stack_size;
+                config
+            }
+
+            fn assert_yield_was_triggered() {
+                assert!(
+                    $crate::primitives::time::take_yield_pending_polls() > 0,
+                    "no run across {} iterations suspended on sleep/sleep_until; \
+                     this scenario is not exercising the deadline path it exists \
+                     to cover.",
+                    $num_iters,
+                );
+            }
+
+            #[test]
+            fn pct() {
+                $crate::primitives::time::take_yield_pending_polls(); // drain any count left over from an earlier test
+                use shuttle::scheduler::PctScheduler;
+                let scheduler = PctScheduler::new($depth, $num_iters);
+                shuttle::Runner::new(scheduler, config()).run($name);
+                assert_yield_was_triggered();
+            }
+
+            #[test]
+            fn determinism() {
+                $crate::primitives::time::take_yield_pending_polls(); // drain any count left over from an earlier test
+                use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
+                let scheduler =
+                    UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new($num_iters));
+                shuttle::Runner::new(scheduler, config()).run($name);
+                assert_yield_was_triggered();
             }
         }
     };

@@ -213,9 +213,10 @@ crate::shuttle_test! {
 /// value itself doesn't matter, shuttle's `sleep_until` ignores it.
 const LOOKFORWARD: Duration = Duration::from_millis(1);
 
-mod shuttle_dump_time_range_resolves_via_deadline {
-    use super::*;
-
+crate::shuttle_test! {
+    // SIGBUSes on shuttle's bare 60KB default stack under this scenario's
+    // concurrent load.
+    num_iters = 500, depth = 3, stack_size = crate::primitives::SHUTTLE_TOKIO_STACK_SIZE, verify_yield_triggered;
     // Only scenario using a real deadline: every other one uses
     // `dump_current_data` (deadline always `None`), never exercising
     // `sleep_until`.
@@ -279,47 +280,6 @@ mod shuttle_dump_time_range_resolves_via_deadline {
             processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
             "dump must not double-dispatch a segment to the processor"
         );
-    }
-
-    // SIGBUSes on shuttle's bare 60KB default stack under concurrent load;
-    // matches shuttle-tokio's own bumped default. Scoped to this test only.
-    fn bumped_stack_config() -> shuttle::Config {
-        let mut config = shuttle::Config::new();
-        config.stack_size = 0x000F_0000;
-        config
-    }
-
-    #[test]
-    fn pct() {
-        // Drain any count left over from an earlier test in this binary.
-        crate::primitives::time::take_yield_pending_polls();
-
-        {
-            use shuttle::scheduler::PctScheduler;
-            let scheduler = PctScheduler::new(3, 500);
-            let runner = shuttle::Runner::new(scheduler, bumped_stack_config());
-            runner.run(shuttle_dump_time_range_resolves_via_deadline);
-        }
-
-        // Batch-level: whether a given schedule reaches the wait depends on the interleaving,
-        // but across 500 iterations at least one must have. Without this, the scenario passes
-        // just as happily when `deadline` is never set at all and `sleep_until` is never awaited.
-        //
-        // Failing here means this test lost coverage of its own scenario, not
-        // that WorkerLoop/ActiveDump regressed.
-        assert!(
-            crate::primitives::time::take_yield_pending_polls() > 0,
-            "no sleep/sleep_until await ever suspended: this scenario never \
-             exercised the deadline path it exists to cover"
-        );
-    }
-
-    #[test]
-    fn determinism() {
-        use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
-        let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(500));
-        let runner = shuttle::Runner::new(scheduler, bumped_stack_config());
-        runner.run(shuttle_dump_time_range_resolves_via_deadline);
     }
 }
 
