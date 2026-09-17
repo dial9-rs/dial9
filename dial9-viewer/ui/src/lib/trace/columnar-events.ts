@@ -86,17 +86,25 @@ export class ColumnarEvents {
   cpuTime: Float64Array;
   /** NaN encodes null (unsampled sched_wait). */
   schedWaitRaw: Float64Array;
-  taskId: Float64Array;
+  /**
+   * Indices into `taskIdList`, -1 encodes absent. Task ids are u64 from
+   * tokio's process-lifetime counter, so their MAGNITUDE can exceed Int32 even
+   * when a trace holds only a handful. Interning makes the column width
+   * independent of that, at 4 bytes instead of 8.
+   */
+  taskIdx: Int32Array;
   /** -1 encodes null; else an index into spawnList. */
   spawnLocIdx: Int32Array;
   /** NaN encodes undefined (no tid). */
   tidRaw: Float64Array;
-  /** NaN encodes "not a wake event". */
-  wakerTaskIdRaw: Float64Array;
-  wokenTaskIdRaw: Float64Array;
+  /** -1 encodes "not a wake event"; else an index into taskIdList. */
+  wakerTaskIdx: Int32Array;
+  wokenTaskIdx: Int32Array;
 
   spawnList: string[] = [];
   private spawnIntern = new Map<string, number>();
+  taskIdList: number[] = [];
+  private taskIdIntern = new Map<number, number>();
 
   private _len = 0;
   private _cap: number;
@@ -120,11 +128,11 @@ export class ColumnarEvents {
     this.globalQueue = new Int32Array(cap);
     this.cpuTime = new Float64Array(cap);
     this.schedWaitRaw = new Float64Array(cap);
-    this.taskId = new Float64Array(cap);
+    this.taskIdx = new Int32Array(cap);
     this.spawnLocIdx = new Int32Array(cap);
     this.tidRaw = new Float64Array(cap);
-    this.wakerTaskIdRaw = new Float64Array(cap);
-    this.wokenTaskIdRaw = new Float64Array(cap);
+    this.wakerTaskIdx = new Int32Array(cap);
+    this.wokenTaskIdx = new Int32Array(cap);
     this.view = new ReusedEventCursor(this);
   }
 
@@ -139,6 +147,17 @@ export class ColumnarEvents {
       i = this.spawnList.length;
       this.spawnList.push(s);
       this.spawnIntern.set(s, i);
+    }
+    return i;
+  }
+
+  private internTask(id: number | null | undefined): number {
+    if (id == null) return -1;
+    let i = this.taskIdIntern.get(id);
+    if (i === undefined) {
+      i = this.taskIdList.length;
+      this.taskIdList.push(id);
+      this.taskIdIntern.set(id, i);
     }
     return i;
   }
@@ -160,11 +179,11 @@ export class ColumnarEvents {
     this.globalQueue = g(this.globalQueue, Int32Array);
     this.cpuTime = g(this.cpuTime, Float64Array);
     this.schedWaitRaw = g(this.schedWaitRaw, Float64Array);
-    this.taskId = g(this.taskId, Float64Array);
+    this.taskIdx = g(this.taskIdx, Int32Array);
     this.spawnLocIdx = g(this.spawnLocIdx, Int32Array);
     this.tidRaw = g(this.tidRaw, Float64Array);
-    this.wakerTaskIdRaw = g(this.wakerTaskIdRaw, Float64Array);
-    this.wokenTaskIdRaw = g(this.wokenTaskIdRaw, Float64Array);
+    this.wakerTaskIdx = g(this.wakerTaskIdx, Int32Array);
+    this.wokenTaskIdx = g(this.wokenTaskIdx, Int32Array);
     this._cap = n;
   }
 
@@ -187,11 +206,11 @@ export class ColumnarEvents {
     this.globalQueue[i] = e.globalQueue ?? 0;
     this.cpuTime[i] = e.cpuTime ?? 0;
     this.schedWaitRaw[i] = e.schedWait == null ? NaN : e.schedWait;
-    this.taskId[i] = e.taskId ?? 0;
+    this.taskIdx[i] = this.internTask(e.taskId);
     this.spawnLocIdx[i] = this.intern(e.spawnLoc ?? null);
     this.tidRaw[i] = e.tid == null ? NaN : e.tid;
-    this.wakerTaskIdRaw[i] = e.wakerTaskId == null ? NaN : e.wakerTaskId;
-    this.wokenTaskIdRaw[i] = e.wokenTaskId == null ? NaN : e.wokenTaskId;
+    this.wakerTaskIdx[i] = this.internTask(e.wakerTaskId);
+    this.wokenTaskIdx[i] = this.internTask(e.wokenTaskId);
   }
 
   /**
@@ -227,11 +246,11 @@ export class ColumnarEvents {
     this.globalQueue[i] = globalQueue;
     this.cpuTime[i] = cpuTime;
     this.schedWaitRaw[i] = schedWait == null ? NaN : schedWait;
-    this.taskId[i] = taskId;
+    this.taskIdx[i] = this.internTask(taskId);
     this.spawnLocIdx[i] = this.intern(spawnLoc);
     this.tidRaw[i] = tid == null ? NaN : tid;
-    this.wakerTaskIdRaw[i] = wakerTaskId == null ? NaN : wakerTaskId;
-    this.wokenTaskIdRaw[i] = wokenTaskId == null ? NaN : wokenTaskId;
+    this.wakerTaskIdx[i] = this.internTask(wakerTaskId);
+    this.wokenTaskIdx[i] = this.internTask(wokenTaskId);
   }
 
   // ── Column decoders (sentinel -> semantic value) for index-based consumers ──
@@ -246,6 +265,20 @@ export class ColumnarEvents {
   tidAt(i: number): number | undefined {
     const v = this.tidRaw[i];
     return Number.isNaN(v) ? undefined : v;
+  }
+  /** Absent reads as 0, matching the pre-interning `taskId ?? 0` column. */
+  taskIdAt(i: number): number {
+    const idx = this.taskIdx[i]!;
+    return idx < 0 ? 0 : this.taskIdList[idx]!;
+  }
+  /** Absent reads as NaN, the "not a wake event" sentinel consumers test for. */
+  wakerTaskIdAt(i: number): number {
+    const idx = this.wakerTaskIdx[i]!;
+    return idx < 0 ? NaN : this.taskIdList[idx]!;
+  }
+  wokenTaskIdAt(i: number): number {
+    const idx = this.wokenTaskIdx[i]!;
+    return idx < 0 ? NaN : this.taskIdList[idx]!;
   }
 
   /** Materialize a fresh, independent plain event at index `i` (safe to
@@ -375,12 +408,12 @@ function materialize(c: ColumnarEvents, i: number): EventLike {
     globalQueue: c.globalQueue[i]!,
     cpuTime: c.cpuTime[i]!,
     schedWait: c.schedWaitAt(i),
-    taskId: c.taskId[i]!,
+    taskId: c.taskIdAt(i),
     spawnLocId: c.spawnLocAt(i),
     spawnLoc: c.spawnLocAt(i),
     tid: c.tidAt(i),
-    wakerTaskId: c.wakerTaskIdRaw[i]!,
-    wokenTaskId: c.wokenTaskIdRaw[i]!,
+    wakerTaskId: c.wakerTaskIdAt(i),
+    wokenTaskId: c.wokenTaskIdAt(i),
     targetWorker: workerId,
   };
 }
@@ -402,11 +435,11 @@ class ReusedEventCursor implements EventLike {
   get globalQueue(): number { return this.c.globalQueue[this._i]!; }
   get cpuTime(): number { return this.c.cpuTime[this._i]!; }
   get schedWait(): number | null { return this.c.schedWaitAt(this._i); }
-  get taskId(): number { return this.c.taskId[this._i]!; }
+  get taskId(): number { return this.c.taskIdAt(this._i); }
   get spawnLocId(): string | null { return this.c.spawnLocAt(this._i); }
   get spawnLoc(): string | null { return this.c.spawnLocAt(this._i); }
   get tid(): number | undefined { return this.c.tidAt(this._i); }
-  get wakerTaskId(): number { return this.c.wakerTaskIdRaw[this._i]!; }
-  get wokenTaskId(): number { return this.c.wokenTaskIdRaw[this._i]!; }
+  get wakerTaskId(): number { return this.c.wakerTaskIdAt(this._i); }
+  get wokenTaskId(): number { return this.c.wokenTaskIdAt(this._i); }
   get targetWorker(): number { return this.c.workerId[this._i]!; }
 }

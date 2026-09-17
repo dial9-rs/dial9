@@ -28,6 +28,7 @@ beforeAll(() => {
 const FIELDS: (keyof EventLike)[] = [
   "eventType", "timestamp", "workerId", "localQueue", "globalQueue",
   "cpuTime", "schedWait", "taskId", "spawnLocId", "spawnLoc", "tid",
+  "wakerTaskId", "wokenTaskId",
 ];
 
 describe("ColumnarEvents parser sink parity", () => {
@@ -62,8 +63,11 @@ describe("ColumnarEvents parser sink parity", () => {
 
 // The fat parser omits `tid` (undefined) on events that never set it, and sets
 // schedWait null on unsampled unparks; the store round-trips both identically.
+// The wake ids are absent on non-wake events, which the fat parser spells
+// `undefined` and the store spells NaN.
 function normalize(f: keyof EventLike, v: unknown): unknown {
   if (f === "tid" && v === undefined) return undefined;
+  if ((f === "wakerTaskId" || f === "wokenTaskId") && v === undefined) return NaN;
   return v;
 }
 

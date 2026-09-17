@@ -115,10 +115,13 @@ function reconstruct(
   const workerId = store.workerId;
   const localQueue = store.localQueue;
   const cpuTime = store.cpuTime;
-  const taskId = store.taskId;
   const globalQueue = store.globalQueue;
-  const wakerRaw = store.wakerTaskIdRaw;
-  const wokenRaw = store.wokenTaskIdRaw;
+  // Task-id columns are interned indices, decode inline (only wake rows and
+  // poll starts need it, not every event).
+  const taskIdx = store.taskIdx;
+  const wakerIdx = store.wakerTaskIdx;
+  const wokenIdx = store.wokenTaskIdx;
+  const taskIds = store.taskIdList;
   const n = store.length;
 
   // First pass: bucket event INDICES by worker; index wake events.
@@ -126,9 +129,11 @@ function reconstruct(
   for (let i = 0; i < n; i++) {
     const et = eventType[i];
     if (et === EVT.WakeEvent) {
-      const woken = wokenRaw[i]!;
+      const wi = wokenIdx[i]!;
+      const woken = wi < 0 ? NaN : taskIds[wi]!;
       const target = workerId[i]!; // targetWorker === workerId for wake events
-      const waker = wakerRaw[i]!;
+      const ki = wakerIdx[i]!;
+      const waker = ki < 0 ? NaN : taskIds[ki]!;
       (wakesByTask[woken] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, targetWorker: target });
       (wakesByWorker[target] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, wokenTaskId: woken });
     } else if (et !== EVT.QueueSample) {
@@ -160,7 +165,12 @@ function reconstruct(
         }
         openPoll[workerKey] = t;
         const sl = store.spawnLocAt(i);
-        openPollMeta[workerKey] = { taskId: taskId[i]!, spawnLocId: sl, spawnLoc: sl };
+        const ti = taskIdx[i]!;
+        openPollMeta[workerKey] = {
+          taskId: ti < 0 ? 0 : taskIds[ti]!,
+          spawnLocId: sl,
+          spawnLoc: sl,
+        };
       } else if (et === EVT.PollEnd) {
         if (openPoll[workerKey] != null) {
           const meta = openPollMeta[workerKey] || defaultMeta;
