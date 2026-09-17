@@ -2176,6 +2176,37 @@
     }
 
     /**
+     * Locate analyze.js, the parse worker. It sits next to this file in every
+     * toolkit copy; in a source checkout this file lives in ui/ and the worker
+     * under whichever skills/ entry ships the toolkit, found by content since
+     * that directory's name is not fixed.
+     * @private
+     */
+    function findParseWorker(fs, path) {
+        const candidates = [path.resolve(__dirname, "analyze.js")];
+        const skillsRoot = path.resolve(__dirname, "..", "skills");
+        let entries = [];
+        try {
+            entries = fs.readdirSync(skillsRoot).sort();
+        } catch {
+            // not a source checkout
+        }
+        for (const entry of entries) {
+            candidates.push(
+                path.join(skillsRoot, entry, "scripts", "analyze.js"),
+            );
+        }
+        const found = candidates.find((c) => fs.existsSync(c));
+        if (!found) {
+            throw new Error(
+                "cannot find analyze.js (parse worker). Searched:\n  " +
+                    candidates.join("\n  "),
+            );
+        }
+        return found;
+    }
+
+    /**
      * Parse all trace files in a directory with caching and parallelism.
      * Workers do parse + analysis. Cache holds pre-computed analysis results.
      * Returns {files, [Symbol.asyncIterator]} where each item is {file, analysis}.
@@ -2222,18 +2253,7 @@
 
         const concurrency =
             opts.parallel === false ? 1 : Math.min(os.cpus().length, 32);
-        const workerCandidate = path.resolve(__dirname, "analyze.js");
-        const workerFallback = path.resolve(
-            __dirname,
-            "..",
-            "skills",
-            "dial9-toolkit",
-            "scripts",
-            "analyze.js",
-        );
-        const workerScript = fs.existsSync(workerCandidate)
-            ? workerCandidate
-            : workerFallback;
+        const workerScript = findParseWorker(fs, path);
 
         function cachePathFor(file) {
             return path.join(cacheDir, file.replace(TRACE_EXT, "") + ".json");
