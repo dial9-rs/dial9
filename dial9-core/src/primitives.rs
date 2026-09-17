@@ -350,6 +350,33 @@ pub mod runtime {
 #[cfg(shuttle)]
 pub const SHUTTLE_TOKIO_STACK_SIZE: usize = 0x000F_0000;
 
+/// Shared by `shuttle_test!`'s `stack_size` arms so a custom `Config` doesn't
+/// need `shuttle::check_pct`'s scheduler-construction internals reimplemented
+/// at each arm.
+#[cfg(shuttle)]
+pub fn run_stack_bumped_pct<F: Fn() + Send + Sync + 'static>(
+    f: F,
+    depth: usize,
+    num_iters: usize,
+    config: shuttle::Config,
+) {
+    use shuttle::scheduler::PctScheduler;
+    let scheduler = PctScheduler::new(depth, num_iters);
+    shuttle::Runner::new(scheduler, config).run(f);
+}
+
+/// Same as [`run_stack_bumped_pct`], for `shuttle::check_uncontrolled_nondeterminism`.
+#[cfg(shuttle)]
+pub fn run_stack_bumped_determinism<F: Fn() + Send + Sync + 'static>(
+    f: F,
+    num_iters: usize,
+    config: shuttle::Config,
+) {
+    use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
+    let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(num_iters));
+    shuttle::Runner::new(scheduler, config).run(f);
+}
+
 /// Pairs a shuttle scenario with `check_pct` and `check_uncontrolled_nondeterminism`
 /// Nests the scenario in its own module so `pct`/`determinism` can be fixed leaf names.
 ///
@@ -637,17 +664,12 @@ macro_rules! shuttle_test {
 
             #[test]
             fn pct() {
-                use shuttle::scheduler::PctScheduler;
-                let scheduler = PctScheduler::new($depth, $num_iters);
-                shuttle::Runner::new(scheduler, config()).run($name);
+                $crate::primitives::run_stack_bumped_pct($name, $depth, $num_iters, config());
             }
 
             #[test]
             fn determinism() {
-                use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
-                let scheduler =
-                    UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new($num_iters));
-                shuttle::Runner::new(scheduler, config()).run($name);
+                $crate::primitives::run_stack_bumped_determinism($name, $num_iters, config());
             }
         }
     };
@@ -681,19 +703,14 @@ macro_rules! shuttle_test {
             #[test]
             fn pct() {
                 $crate::primitives::time::take_yield_pending_polls(); // drain any count left over from an earlier test
-                use shuttle::scheduler::PctScheduler;
-                let scheduler = PctScheduler::new($depth, $num_iters);
-                shuttle::Runner::new(scheduler, config()).run($name);
+                $crate::primitives::run_stack_bumped_pct($name, $depth, $num_iters, config());
                 assert_yield_was_triggered();
             }
 
             #[test]
             fn determinism() {
                 $crate::primitives::time::take_yield_pending_polls(); // drain any count left over from an earlier test
-                use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
-                let scheduler =
-                    UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new($num_iters));
-                shuttle::Runner::new(scheduler, config()).run($name);
+                $crate::primitives::run_stack_bumped_determinism($name, $num_iters, config());
                 assert_yield_was_triggered();
             }
         }
