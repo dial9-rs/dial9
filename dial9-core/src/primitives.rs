@@ -709,6 +709,24 @@ pub mod fs {
         }
     }
 
+    // Accumulates across a whole `check_pct`/determinism batch (shuttle
+    // resets its own state every iteration). Thread-local so a
+    // concurrently-running `#[test]`, on its own OS thread, can't inflate
+    // this one's count.
+    std::thread_local! {
+        static FAULTS_TRIGGERED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Count of `check()` calls that returned an error since the last call.
+    /// Lets a scenario built around `set_fault` assert a fault actually
+    /// fired at least once across a batch.
+    ///
+    /// Test-integrity check: a failure here means the scenario stopped
+    /// exercising the code path it exists to cover.
+    pub fn take_faults_triggered() -> usize {
+        FAULTS_TRIGGERED.with(|c| c.replace(0))
+    }
+
     fn check() -> io::Result<()> {
         let fail = match FAULT.with(|f| f.get()) {
             FaultPolicy::None => false,
@@ -716,6 +734,7 @@ pub mod fs {
             FaultPolicy::FailProb(p) => shuttle::rand::thread_rng().gen_bool(p),
         };
         if fail {
+            FAULTS_TRIGGERED.with(|c| c.set(c.get() + 1));
             Err(io::Error::from(ErrorKind::PermissionDenied))
         } else {
             Ok(())

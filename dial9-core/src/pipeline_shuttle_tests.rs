@@ -487,7 +487,7 @@ crate::shuttle_test! {
 }
 
 crate::shuttle_test! {
-    num_iters = 10_000, depth = 3;
+    num_iters = 10_000, depth = 3, verify_faults_triggered;
     fn test_core_probabilistic_fs_faults() {
         let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
         assert!(
