@@ -58,6 +58,9 @@ const INITIAL_CAP = 1 << 16;
  */
 const BYTES_PER_EVENT_ESTIMATE = 32;
 
+/** Absent-tid sentinel. u32 max. */
+const NO_TID = 0xffffffff;
+
 /** Ceiling on the estimate, so a malformed or unusually large byte count cannot
  *  commit hundreds of MB of columns up front. Past this, doubling takes over. */
 const MAX_ESTIMATED_CAP = 1 << 25; // ~33.5M events
@@ -81,22 +84,19 @@ export class ColumnarEvents {
   eventType: Uint8Array;
   ts: Float64Array;
   workerId: Int32Array;
-  localQueue: Int32Array;
+  /** Wire type is u8 (telemetry/format.rs), so a byte holds it. */
+  localQueue: Uint8Array;
   globalQueue: Int32Array;
   cpuTime: Float64Array;
   /** NaN encodes null (unsampled sched_wait). */
   schedWaitRaw: Float64Array;
-  /**
-   * Indices into `taskIdList`, -1 encodes absent. Task ids are u64 from
-   * tokio's process-lifetime counter, so their MAGNITUDE can exceed Int32 even
-   * when a trace holds only a handful. Interning makes the column width
-   * independent of that, at 4 bytes instead of 8.
-   */
+  /** Indices into `taskIdList`, -1 encodes absent. Interning keeps the column
+   *  4 bytes whatever magnitude tokio's u64 counter has reached. */
   taskIdx: Int32Array;
   /** -1 encodes null; else an index into spawnList. */
   spawnLocIdx: Int32Array;
-  /** NaN encodes undefined (no tid). */
-  tidRaw: Float64Array;
+  /** Wire type is u32; NO_TID encodes undefined (no tid). */
+  tidRaw: Uint32Array;
   /** -1 encodes "not a wake event"; else an index into taskIdList. */
   wakerTaskIdx: Int32Array;
   wokenTaskIdx: Int32Array;
@@ -124,13 +124,13 @@ export class ColumnarEvents {
     this.eventType = new Uint8Array(cap);
     this.ts = new Float64Array(cap);
     this.workerId = new Int32Array(cap);
-    this.localQueue = new Int32Array(cap);
+    this.localQueue = new Uint8Array(cap);
     this.globalQueue = new Int32Array(cap);
     this.cpuTime = new Float64Array(cap);
     this.schedWaitRaw = new Float64Array(cap);
     this.taskIdx = new Int32Array(cap);
     this.spawnLocIdx = new Int32Array(cap);
-    this.tidRaw = new Float64Array(cap);
+    this.tidRaw = new Uint32Array(cap);
     this.wakerTaskIdx = new Int32Array(cap);
     this.wokenTaskIdx = new Int32Array(cap);
     this.view = new ReusedEventCursor(this);
@@ -175,13 +175,13 @@ export class ColumnarEvents {
     this.eventType = g(this.eventType, Uint8Array);
     this.ts = g(this.ts, Float64Array);
     this.workerId = g(this.workerId, Int32Array);
-    this.localQueue = g(this.localQueue, Int32Array);
+    this.localQueue = g(this.localQueue, Uint8Array);
     this.globalQueue = g(this.globalQueue, Int32Array);
     this.cpuTime = g(this.cpuTime, Float64Array);
     this.schedWaitRaw = g(this.schedWaitRaw, Float64Array);
     this.taskIdx = g(this.taskIdx, Int32Array);
     this.spawnLocIdx = g(this.spawnLocIdx, Int32Array);
-    this.tidRaw = g(this.tidRaw, Float64Array);
+    this.tidRaw = g(this.tidRaw, Uint32Array);
     this.wakerTaskIdx = g(this.wakerTaskIdx, Int32Array);
     this.wokenTaskIdx = g(this.wokenTaskIdx, Int32Array);
     this._cap = n;
@@ -208,7 +208,7 @@ export class ColumnarEvents {
     this.schedWaitRaw[i] = e.schedWait == null ? NaN : e.schedWait;
     this.taskIdx[i] = this.internTask(e.taskId);
     this.spawnLocIdx[i] = this.intern(e.spawnLoc ?? null);
-    this.tidRaw[i] = e.tid == null ? NaN : e.tid;
+    this.tidRaw[i] = e.tid == null ? NO_TID : e.tid;
     this.wakerTaskIdx[i] = this.internTask(e.wakerTaskId);
     this.wokenTaskIdx[i] = this.internTask(e.wokenTaskId);
   }
@@ -248,7 +248,7 @@ export class ColumnarEvents {
     this.schedWaitRaw[i] = schedWait == null ? NaN : schedWait;
     this.taskIdx[i] = this.internTask(taskId);
     this.spawnLocIdx[i] = this.intern(spawnLoc);
-    this.tidRaw[i] = tid == null ? NaN : tid;
+    this.tidRaw[i] = tid == null ? NO_TID : tid;
     this.wakerTaskIdx[i] = this.internTask(wakerTaskId);
     this.wokenTaskIdx[i] = this.internTask(wokenTaskId);
   }
@@ -263,8 +263,8 @@ export class ColumnarEvents {
     return Number.isNaN(v) ? null : v;
   }
   tidAt(i: number): number | undefined {
-    const v = this.tidRaw[i];
-    return Number.isNaN(v) ? undefined : v;
+    const v = this.tidRaw[i]!;
+    return v === NO_TID ? undefined : v;
   }
   /** Absent reads as 0, matching the pre-interning `taskId ?? 0` column. */
   taskIdAt(i: number): number {

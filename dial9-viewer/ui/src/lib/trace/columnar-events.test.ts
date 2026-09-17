@@ -267,3 +267,49 @@ describe("capacityForBytes", () => {
     expect(b.at(199)!.taskId).toBe(199);
   });
 });
+
+describe("column widths", () => {
+  it("costs 54 bytes per event", () => {
+    const store = new ColumnarEvents(1) as unknown as Record<
+      string,
+      { BYTES_PER_ELEMENT: number }
+    >;
+    const widths: Record<string, number> = {
+      eventType: 1,
+      ts: 8,
+      workerId: 4,
+      localQueue: 1,
+      globalQueue: 4,
+      cpuTime: 8,
+      schedWaitRaw: 8,
+      taskIdx: 4,
+      spawnLocIdx: 4,
+      tidRaw: 4,
+      wakerTaskIdx: 4,
+      wokenTaskIdx: 4,
+    };
+    let total = 0;
+    for (const [col, want] of Object.entries(widths)) {
+      expect(store[col]!.BYTES_PER_ELEMENT, `${col} width`).toBe(want);
+      total += want;
+    }
+    expect(total).toBe(54);
+  });
+
+  it("round-trips a tid past Float32's exact range, and an absent one", () => {
+    const store = new ColumnarEvents(4);
+    // Above 2^24, where a Float32 column would start rounding.
+    store.pushEvent(0, 1, 0, 0, 0, 0, null, 1, null, 16_777_217, undefined, undefined);
+    store.pushEvent(0, 2, 0, 0, 0, 0, null, 1, null, 4_294_967_294, undefined, undefined);
+    store.pushEvent(0, 3, 0, 0, 0, 0, null, 1, null, undefined, undefined, undefined);
+    expect(store.tidAt(0)).toBe(16_777_217);
+    expect(store.tidAt(1)).toBe(4_294_967_294);
+    expect(store.tidAt(2)).toBeUndefined();
+  });
+
+  it("holds the full u8 range of local-queue depth", () => {
+    const store = new ColumnarEvents(2);
+    store.pushEvent(0, 1, 0, 255, 0, 0, null, 1, null, undefined, undefined, undefined);
+    expect(store.at(0)!.localQueue).toBe(255);
+  });
+});
