@@ -73,6 +73,101 @@ fn attach_runtime_records_poll_events() {
     );
 }
 
+/// An attached `LocalRuntime` records poll events for `!Send` work: the root
+/// future through `block_on_local` and a task through `spawn_local`.
+#[test]
+fn attach_local_runtime_records_poll_events() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
+
+    let recorder = recorder(writer).build();
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_local_runtime(
+            builder,
+            TokioAttachOptions::builder().runtime_name("local").build(),
+        )
+        .expect("build local tokio runtime");
+
+    let cell = Rc::new(Cell::new(0u32));
+    let cell_task = cell.clone();
+    dial9::block_on_local(&runtime, async move {
+        let join = dial9::spawn_local(async move {
+            cell_task.set(1);
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            cell_task.set(2);
+        });
+        join.await.unwrap();
+    });
+    assert_eq!(cell.get(), 2);
+
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
+    let mut decoder = Decoder::new(&bytes).expect("valid trace");
+    let mut poll_starts = 0u32;
+    let mut poll_ends = 0u32;
+    decoder
+        .for_each_event(|ev| match ev.name {
+            "PollStartEvent" => poll_starts += 1,
+            "PollEndEvent" => poll_ends += 1,
+            _ => {}
+        })
+        .expect("decode events");
+
+    assert!(
+        poll_starts > 0,
+        "expected poll events from the attached local runtime, got 0"
+    );
+    assert_eq!(
+        poll_starts, poll_ends,
+        "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
+    );
+}
+
+/// A disabled recorder still yields a working untraced [`tokio::runtime::LocalRuntime`].
+#[test]
+fn disabled_recorder_runs_plain_local_runtime() {
+    let recorder = dial9::recorder_disabled();
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let runtime = recorder
+        .handle()
+        .attach_tokio_local_runtime(builder, TokioAttachOptions::default())
+        .expect("build local tokio runtime");
+
+    let out = runtime.block_on(async {
+        let cell = std::rc::Rc::new(3u32);
+        tokio::task::spawn_local(async move { *cell })
+            .await
+            .unwrap()
+    });
+    assert_eq!(out, 3);
+    drop(runtime);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+}
+
+#[test]
+fn attach_local_runtime_rejects_multi_thread_builder() {
+    let recorder = recorder(dial9::MemoryBuffer::new(1 << 20).unwrap()).build();
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().worker_threads(2);
+    let err = recorder
+        .handle()
+        .attach_tokio_local_runtime(builder, TokioAttachOptions::default())
+        .expect_err("multi_thread builder must not build a LocalRuntime");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+}
+
 /// A disabled recorder still yields a working plain runtime.
 #[test]
 fn disabled_recorder_runs_plainly() {

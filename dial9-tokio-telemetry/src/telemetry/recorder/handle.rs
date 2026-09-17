@@ -108,6 +108,27 @@ impl Dial9TokioHandle {
         }
     }
 
+    /// [`spawn`](Self::spawn) without the `Send` bounds. Always spawns on the
+    /// calling thread, whatever runtime the handle was built for.
+    ///
+    /// # Panics
+    ///
+    /// Same as [`tokio::task::spawn_local`].
+    #[track_caller]
+    pub fn spawn_local<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + 'static,
+        F::Output: 'static,
+    {
+        match &self.traced {
+            Some(traced) => {
+                let _guard = InstrumentedSpawnGuard::enter();
+                tokio::task::spawn_local(TracedFuture::new(future, Some(traced.clone())))
+            }
+            None => tokio::task::spawn_local(future),
+        }
+    }
+
     /// Spawn an instrumented future through a user-supplied spawn function.
     ///
     /// `spawn_fn` must synchronously perform a real Tokio spawn (or an
@@ -245,6 +266,45 @@ where
             Ok(output) => output,
             Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(_) => unreachable!("task cannot be cancelled inside block_on"),
+        }
+    })
+}
+
+/// [`spawn`] without the `Send` bounds.
+///
+/// # Panics
+///
+/// Same as [`tokio::task::spawn_local`].
+#[track_caller]
+pub fn spawn_local<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + 'static,
+    F::Output: 'static,
+{
+    Dial9TokioHandle::current().spawn_local(future)
+}
+
+/// [`block_on`] for a [`tokio::runtime::LocalRuntime`]: runs `future` as a
+/// traced task so its polls are recorded.
+///
+/// # Panics
+///
+/// Resumes the future's panic on the calling thread.
+#[track_caller]
+pub fn block_on_local<F>(runtime: &tokio::runtime::LocalRuntime, future: F) -> F::Output
+where
+    F: std::future::Future + 'static,
+    F::Output: 'static,
+{
+    let join = {
+        let _guard = InstrumentedSpawnGuard::enter();
+        runtime.spawn_local(TracedFuture::new_lazy(future))
+    };
+    runtime.block_on(async move {
+        match join.await {
+            Ok(output) => output,
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(_) => unreachable!("task cannot be cancelled inside block_on_local"),
         }
     })
 }
