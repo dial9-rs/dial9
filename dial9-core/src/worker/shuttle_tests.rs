@@ -99,6 +99,71 @@ fn spawn_writers(fs: Arc<Fs>) -> Vec<crate::primitives::thread::JoinHandle<()>> 
         .collect()
 }
 
+/// Shared by `shuttle_dump_resolves_exactly_once`/
+/// `shuttle_dump_time_range_resolves_via_deadline`: races `dump_call`
+/// against writers sealing segments and a worker draining them through
+/// `run_triggered()`, then asserts no segment was double-dispatched.
+///
+/// `dump_call` takes the sole `DumpTrigger` handle by value (not cloned),
+/// so the channel closes deterministically once the returned future drops,
+/// right after its own await resolves; the worker's `recv()` loop relies on
+/// that to know no more requests are ever coming.
+fn run_dump_scenario<F, Fut>(dump_call: F)
+where
+    F: FnOnce(crate::dump::DumpTrigger) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+    let processed = Arc::new(AtomicUsize::new(0));
+
+    let writers = spawn_writers(fs.clone());
+
+    let (trigger, rx) = crate::dump::channel();
+
+    let trigger_handle =
+        crate::primitives::thread::spawn(move || shuttle::future::block_on(dump_call(trigger)));
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let worker_fs = fs.clone();
+    let worker_processed = processed.clone();
+    let worker_stop = stop.clone();
+    let worker = crate::primitives::thread::spawn(move || {
+        shuttle::future::block_on(async move {
+            let mut worker = WorkerLoop::new(
+                worker_fs.clone(),
+                Duration::from_millis(1),
+                vec![Box::new(CountingProcessor(worker_processed))],
+                worker_stop,
+                metrique::writer::sink::DevNullSink::boxed(),
+                Some(rx),
+            )
+            .await
+            .expect("initialize worker");
+
+            let rx = worker.trigger.take().expect("triggered mode");
+            worker.run_triggered(rx).await;
+        });
+    });
+
+    for w in writers {
+        w.join().unwrap();
+    }
+    // Must join before marking the writer done: `run_triggered` checks
+    // `writer_done()` at the top of its loop and rejects any
+    // not-yet-registered request with `WorkerStopped`.
+    trigger_handle.join().unwrap();
+    fs.mark_writer_done();
+    // `run_triggered` only notices `writer_done()` while idle if `stop`
+    // is also cancelled. Mirror real callers by doing both.
+    stop.cancel();
+    worker.join().unwrap();
+
+    assert!(
+        processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
+        "dump must not double-dispatch a segment to the processor"
+    );
+}
+
 crate::shuttle_test! {
     num_iters = 2_000, depth = 3;
     // Multiple writer threads seal segments into an in-memory `Fs`
@@ -152,66 +217,13 @@ crate::shuttle_test! {
     // has unbounded lookback, so this verifies the race itself, not
     // window-matching).
     fn shuttle_dump_resolves_exactly_once() {
-        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let processed = Arc::new(AtomicUsize::new(0));
-
-        let writers = spawn_writers(fs.clone());
-
-        let (trigger, rx) = crate::dump::channel();
-
-        // Sole `DumpTrigger` handle, moved (not cloned) into this thread, so
-        // the channel closes deterministically once it drops, right after
-        // this await resolves. The worker's `recv()` loop below relies on
-        // that to know no more requests are ever coming.
-        let trigger_handle = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let receipt = trigger.dump_current_data().await;
-                assert!(
-                    receipt.is_ok(),
-                    "an on-demand dump request must resolve successfully: {receipt:?}"
-                );
-            });
+        run_dump_scenario(|trigger| async move {
+            let receipt = trigger.dump_current_data().await;
+            assert!(
+                receipt.is_ok(),
+                "an on-demand dump request must resolve successfully: {receipt:?}"
+            );
         });
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker_fs = fs.clone();
-        let worker_processed = processed.clone();
-        let worker_stop = stop.clone();
-        let worker = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let mut worker = WorkerLoop::new(
-                    worker_fs.clone(),
-                    Duration::from_millis(1),
-                    vec![Box::new(CountingProcessor(worker_processed))],
-                    worker_stop,
-                    metrique::writer::sink::DevNullSink::boxed(),
-                    Some(rx),
-                )
-                .await
-                .expect("initialize worker");
-
-                let rx = worker.trigger.take().expect("triggered mode");
-                worker.run_triggered(rx).await;
-            });
-        });
-
-        for w in writers {
-            w.join().unwrap();
-        }
-        // Must join before marking the writer done: `run_triggered` checks
-        // `writer_done()` at the top of its loop and rejects any
-        // not-yet-registered request with `WorkerStopped`.
-        trigger_handle.join().unwrap();
-        fs.mark_writer_done();
-        // `run_triggered` only notices `writer_done()` while idle if `stop`
-        // is also cancelled. Mirror real callers by doing both.
-        stop.cancel();
-        worker.join().unwrap();
-
-        assert!(
-            processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
-            "dump must not double-dispatch a segment to the processor"
-        );
     }
 }
 
@@ -234,58 +246,13 @@ crate::shuttle_test! {
     // Joining `trigger_handle` before signaling shutdown guarantees `due()`
     // resolved the dump via the deadline.
     fn shuttle_dump_time_range_resolves_via_deadline() {
-        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let processed = Arc::new(AtomicUsize::new(0));
-
-        let writers = spawn_writers(fs.clone());
-
-        let (trigger, rx) = crate::dump::channel();
-
-        let trigger_handle = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let receipt = trigger.dump_time_range(Duration::MAX, LOOKFORWARD).await;
-                assert!(
-                    receipt.is_ok(),
-                    "a windowed dump request must resolve successfully: {receipt:?}"
-                );
-            });
+        run_dump_scenario(|trigger| async move {
+            let receipt = trigger.dump_time_range(Duration::MAX, LOOKFORWARD).await;
+            assert!(
+                receipt.is_ok(),
+                "a windowed dump request must resolve successfully: {receipt:?}"
+            );
         });
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker_fs = fs.clone();
-        let worker_processed = processed.clone();
-        let worker_stop = stop.clone();
-        let worker = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let mut worker = WorkerLoop::new(
-                    worker_fs.clone(),
-                    Duration::from_millis(1),
-                    vec![Box::new(CountingProcessor(worker_processed))],
-                    worker_stop,
-                    metrique::writer::sink::DevNullSink::boxed(),
-                    Some(rx),
-                )
-                .await
-                .expect("initialize worker");
-
-                let rx = worker.trigger.take().expect("triggered mode");
-                worker.run_triggered(rx).await;
-            });
-        });
-
-        for w in writers {
-            w.join().unwrap();
-        }
-        // Join order matters here too. See the module comment above.
-        trigger_handle.join().unwrap();
-        fs.mark_writer_done();
-        stop.cancel();
-        worker.join().unwrap();
-
-        assert!(
-            processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
-            "dump must not double-dispatch a segment to the processor"
-        );
     }
 }
 
