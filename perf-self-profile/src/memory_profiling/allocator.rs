@@ -97,24 +97,32 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, old_layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: forwarded to the inner allocator. The hook below only
-        // fires after we've confirmed the inner realloc returned non-null
-        // — otherwise the old pointer is still live and must not be
-        // recorded as freed (design §3, "realloc handling").
+        let active = crate::memory_profiling::profiler::ACTIVE.get();
+        // The old block's liveset entry must come out BEFORE forwarding to
+        // the inner allocator: `self.0.realloc` may release `ptr` internally,
+        // after which another thread can be handed that address and overwrite
+        // the entry. Resolving it afterwards would pop the new allocation's
+        // metadata instead. See `hook::ReallocState`.
+        //
+        // SAFETY: `on_realloc_before` is allocation-free (see hook module
+        // docs) — it performs no allocations and only accesses lock-free data
+        // structures. `ptr` is valid per the `realloc` contract.
+        let state =
+            active.map(|inner| crate::memory_profiling::hook::on_realloc_before(inner, ptr));
+        // SAFETY: `ptr`/`old_layout`/`new_size` validity contract forwarded
+        // to the inner allocator.
         let new_ptr = unsafe { self.0.realloc(ptr, old_layout, new_size) };
-        // SAFETY: `on_realloc` is allocation-free (see hook module docs) — it
-        // performs no allocations, takes no locks, and only accesses lock-free
-        // data structures. `new_ptr` is non-null (checked below) and valid.
-        if !new_ptr.is_null()
-            && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
-        {
-            crate::memory_profiling::hook::on_realloc(
-                inner,
-                ptr,
-                old_layout.size(),
-                new_ptr,
-                new_size,
-            );
+        if let (Some(inner), Some(state)) = (active, state) {
+            // SAFETY: both hooks are allocation-free (see hook module docs).
+            if new_ptr.is_null() {
+                // Realloc failed: the old pointer is still live and must not
+                // be recorded as freed (design §3, "realloc handling").
+                crate::memory_profiling::hook::on_realloc_failed(inner, ptr, state);
+            } else {
+                crate::memory_profiling::hook::on_realloc_success(
+                    inner, ptr, state, new_ptr, new_size,
+                );
+            }
         }
         new_ptr
     }

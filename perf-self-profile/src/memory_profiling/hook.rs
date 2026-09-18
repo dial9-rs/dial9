@@ -29,7 +29,7 @@
 //!
 //! See design §6 (Reentrancy) for the full argument.
 
-use crate::memory_profiling::profiler::MemoryProfilerInner;
+use crate::memory_profiling::profiler::{Liveset, MemoryProfilerInner};
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree};
 use dial9_core::clock::clock_monotonic_ns;
 use dial9_core::sampling::SplitMix64;
@@ -300,14 +300,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
         let Ok(_state) = cell.try_borrow_mut() else {
             return;
         };
-        // Use the entry() API for atomic peek + remove. The bucket lock
-        // is held for the duration of the Entry, so a concurrent on_alloc
-        // overwriting the same address cannot interleave between our read
-        // and remove — preventing stale metadata on the emitted RawFree.
-        use scc::hash_index::Entry;
-        if let Entry::Occupied(o) = liveset.entry(addr) {
-            let (size, alloc_ts_ns) = *o.get();
-            o.remove_entry();
+        if let Some((size, alloc_ts_ns)) = take_liveset_entry(liveset, addr) {
             let sample = RawFree {
                 tid: current_tid(),
                 addr,
@@ -321,25 +314,211 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
     });
 }
 
-/// Allocator hook for realloc. Decomposes into free-of-old +
-/// alloc-of-new per design §3 ("realloc handling", matches jemalloc
-/// convention).
+/// Atomically read and remove the liveset entry for `addr`, returning its
+/// `(size, alloc_ts_ns)`.
 ///
-/// Only call AFTER the inner realloc returns a non-null `new_ptr` —
-/// otherwise the old pointer is still live and must not be recorded
-/// as freed.
+/// Uses the `entry()` API rather than a separate peek and remove: the bucket
+/// lock is held for the duration of the `Entry`, so a concurrent `on_alloc`
+/// overwriting the same address cannot interleave between the read and the
+/// remove, and the returned metadata always describes the entry that was
+/// actually removed.
+///
+/// **Caller invariant: exclusive ownership of `addr`.** Atomicity alone does
+/// not make the popped entry belong to the allocation being freed — if the
+/// address has already been released to the inner allocator, another thread
+/// can have been handed it and overwritten the entry, and we would pop the
+/// *new* allocation's metadata. Every caller must still exclusively own the
+/// address:
+/// - `on_dealloc` runs before `Dial9Allocator::dealloc` forwards to the
+///   inner allocator, so `ptr` has not been released yet.
+/// - `on_realloc_before` runs before `Dial9Allocator::realloc` forwards, for
+///   the same reason. See [`ReallocState`].
+///
+/// Must be called with the `SAMPLE_STATE` re-entrancy guard held and after
+/// `check_shutdown()` — see the callers.
 ///
 /// SAFETY: must be allocation-free — see module docs.
 #[inline]
-pub(crate) fn on_realloc(
+fn take_liveset_entry(liveset: &Liveset, addr: u64) -> Option<(u64, u64)> {
+    use scc::hash_index::Entry;
+    if let Entry::Occupied(o) = liveset.entry(addr) {
+        let val = *o.get();
+        o.remove_entry();
+        Some(val)
+    } else {
+        None
+    }
+}
+
+/// State carried across the inner allocator's `realloc` call.
+///
+/// **Why `realloc` cannot just call `on_dealloc` afterwards.** `on_dealloc`
+/// is sound because `Dial9Allocator::dealloc` runs it *before* forwarding to
+/// `self.0.dealloc(ptr)`: the calling thread still exclusively owns `ptr`, so
+/// no concurrent `on_alloc` can be inserting that address. `realloc` has no
+/// such ordering available — the inner `realloc` may release the old block
+/// internally, so by the time it returns, another thread can already have
+/// been handed that address, sampled it, and overwritten the liveset entry.
+/// Resolving the old address afterwards would then pop the *new* allocation's
+/// metadata: the emitted `RawFree` carries the wrong `(size, alloc_ts_ns)`,
+/// and a live allocation loses its liveset entry so its real free is never
+/// reported.
+///
+/// So the liveset removal moves *before* the inner realloc, while we still
+/// own `ptr`, and only the emit happens after — once we know whether the
+/// realloc actually succeeded. That restores the same exclusive-ownership
+/// invariant the `dealloc` path relies on. See [`take_liveset_entry`].
+///
+/// Stack-resident and `Copy`-free by construction; carrying it across the
+/// inner call allocates nothing.
+pub(crate) struct ReallocState {
+    /// Sampled *before* the inner realloc, i.e. before the old block can be
+    /// released. Used as the emitted `RawFree`'s timestamp, which keeps the
+    /// consolidator's `alloc_ts_ns >= ts_ns` address-reuse guard sound for
+    /// shutdown-flagged frees (see `MemoryProfileSource::handle_free`): any
+    /// later allocation of this address is necessarily stamped after it.
+    /// `None` when liveset tracking is disabled and no free can be emitted.
+    ts_ns: Option<u64>,
+    /// `(size, alloc_ts_ns)` popped from the liveset, if the old block was
+    /// sampled. `None` means it was not.
+    taken: Option<(u64, u64)>,
+    /// This thread is in TLS teardown and cannot touch `scc`, so nothing was
+    /// popped; the consolidator resolves the address instead. Mirrors
+    /// `on_dealloc`'s shutdown drain.
+    shutdown: bool,
+}
+
+/// Allocator hook run **before** the inner `realloc`. Pops the old block's
+/// liveset entry while the caller still exclusively owns `old_ptr`.
+///
+/// Pairs with exactly one of [`on_realloc_success`] or [`on_realloc_failed`].
+///
+/// **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be called
+/// before any `liveset` op. See `on_alloc`'s liveset branch and `opt_out.rs`
+/// for the full mechanism.
+///
+/// **Re-entrancy guard.** Takes the `SAMPLE_STATE` borrow around the liveset
+/// op, symmetric with `on_dealloc`; see its doc for why. The shutdown branch
+/// sits outside the guard for the same reason it does there.
+///
+/// SAFETY: must be allocation-free — see module docs.
+#[inline]
+pub(crate) fn on_realloc_before(inner: &MemoryProfilerInner, old_ptr: *mut u8) -> ReallocState {
+    let Some(liveset) = &inner.liveset else {
+        return ReallocState {
+            ts_ns: None,
+            taken: None,
+            shutdown: false,
+        };
+    };
+    let ts_ns = clock_monotonic_ns();
+    if crate::memory_profiling::opt_out::check_shutdown() {
+        return ReallocState {
+            ts_ns: Some(ts_ns),
+            taken: None,
+            shutdown: true,
+        };
+    }
+    let addr = old_ptr as u64;
+    let mut taken = None;
+    let _ = SAMPLE_STATE.try_with(|cell| {
+        let Ok(_state) = cell.try_borrow_mut() else {
+            return;
+        };
+        taken = take_liveset_entry(liveset, addr);
+    });
+    ReallocState {
+        ts_ns: Some(ts_ns),
+        taken,
+        shutdown: false,
+    }
+}
+
+/// Allocator hook run after a **successful** inner `realloc`. Emits the
+/// free-of-old captured by [`on_realloc_before`], then the alloc-of-new, per
+/// design §3 ("realloc handling", matches jemalloc convention).
+///
+/// The free's timestamp was sampled before the inner realloc and the alloc's
+/// is sampled here, so the free strictly precedes the alloc. The
+/// consolidator's merge-by-timestamp drain therefore orders them correctly
+/// even for an in-place realloc that returns the same address.
+///
+/// SAFETY: must be allocation-free — see module docs.
+#[inline]
+pub(crate) fn on_realloc_success(
     inner: &MemoryProfilerInner,
     old_ptr: *mut u8,
-    old_size: usize,
+    state: ReallocState,
     new_ptr: *mut u8,
     new_size: usize,
 ) {
-    on_dealloc(inner, old_ptr, old_size);
+    if let Some(ts_ns) = state.ts_ns {
+        if state.shutdown {
+            // Shutdown drain: the producer could not touch scc, so push a
+            // flagged RawFree and let the consolidator do the lookup. `size`
+            // and `alloc_ts_ns` are placeholders (0). Mirrors `on_dealloc`.
+            inner.rings.push_free(RawFree {
+                tid: current_tid(),
+                addr: old_ptr as u64,
+                ts_ns,
+                size: 0,
+                alloc_ts_ns: 0,
+                shutdown: true,
+            });
+        } else if let Some((size, alloc_ts_ns)) = state.taken {
+            inner.rings.push_free(RawFree {
+                tid: current_tid(),
+                addr: old_ptr as u64,
+                ts_ns,
+                size,
+                alloc_ts_ns,
+                shutdown: false,
+            });
+        }
+    }
     on_alloc(inner, new_ptr, new_size);
+}
+
+/// Allocator hook run after a **failed** inner `realloc`. The old block is
+/// still live, so the entry [`on_realloc_before`] popped has to go back and
+/// no free may be emitted.
+///
+/// No concurrent `on_alloc` can be racing us for this address: a failed
+/// realloc never releases `old_ptr`, so the calling thread still owns it and
+/// the plain `insert` cannot collide.
+///
+/// SAFETY: must be allocation-free — see module docs.
+#[inline]
+pub(crate) fn on_realloc_failed(
+    inner: &MemoryProfilerInner,
+    old_ptr: *mut u8,
+    state: ReallocState,
+) {
+    let Some(val) = state.taken else {
+        return;
+    };
+    // `taken` is only ever `Some` when the liveset is on and we were not
+    // shutting down, but re-check the shutdown flag: `on_realloc_before` and
+    // this call straddle the inner realloc, and the thread could have entered
+    // TLS teardown in between, after which touching `scc` would panic in
+    // `sdd::Collector::current()`. Dropping the entry is the safe outcome —
+    // `on_alloc` overwrites stale entries when the address is reused.
+    let Some(liveset) = &inner.liveset else {
+        return;
+    };
+    if crate::memory_profiling::opt_out::check_shutdown() {
+        return;
+    }
+    let addr = old_ptr as u64;
+    let _ = SAMPLE_STATE.try_with(|cell| {
+        let Ok(_state) = cell.try_borrow_mut() else {
+            return;
+        };
+        // Cannot collide: we still own `addr` (see the doc above), so the
+        // only way this errs is a stale entry that `on_alloc` would have
+        // overwritten anyway.
+        let _ = liveset.insert(addr, val);
+    });
 }
 
 #[cfg(test)]
@@ -838,6 +1017,173 @@ mod tests {
             inner.rings.free_queue.is_empty(),
             "re-entrant on_dealloc must skip the RawFree push; the queue is \
              non-empty (the guard is not in place)"
+        );
+    }
+
+    /// The core of the realloc ordering fix.
+    ///
+    /// `Dial9Allocator::realloc` forwards to the inner allocator *before* it
+    /// can run any hook, and the inner realloc may release the old block on
+    /// the way. Another thread can therefore be handed that address, sample
+    /// it, and overwrite the liveset entry before our hook looks at it.
+    ///
+    /// This test models exactly that interleaving deterministically: the
+    /// recycling `on_alloc` runs between `on_realloc_before` and
+    /// `on_realloc_success`. Because the entry now comes out *before* the
+    /// inner realloc, the emitted free must still describe the ORIGINAL
+    /// allocation, and the recycled allocation must keep its liveset entry.
+    ///
+    /// Against the old `on_realloc` (dealloc-of-old resolved after the inner
+    /// realloc) both assertions fail: the free reports the recycled
+    /// allocation's size, and the recycled allocation's entry is gone, so its
+    /// real free is never reported.
+    #[test]
+    fn realloc_pops_old_entry_before_the_inner_realloc_runs() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        let old_addr_u = 0xCAFE_0000_usize;
+        let new_addr_u = 0xCAFE_1000_usize;
+
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xA11C_0DE5, 1);
+            let (old_addr, new_addr) = (old_addr_u as *mut u8, new_addr_u as *mut u8);
+
+            // The allocation being realloc'd: size 100.
+            on_alloc(&inner_for_thread, old_addr, 100);
+
+            // Hook runs while we still exclusively own `old_addr`.
+            let state = on_realloc_before(&inner_for_thread, old_addr);
+
+            // Inner realloc releases the old block, and a concurrent thread
+            // is handed the same address and samples it. With the entry
+            // already popped this is a clean insert, not an overwrite.
+            on_alloc(&inner_for_thread, old_addr, 999);
+
+            on_realloc_success(&inner_for_thread, old_addr, state, new_addr, 200);
+        })
+        .join()
+        .expect("scenario thread");
+
+        let mut allocs = Vec::new();
+        while let Some(a) = inner.rings.alloc_queue.pop() {
+            allocs.push(a);
+        }
+        let mut frees = Vec::new();
+        while let Some(f) = inner.rings.free_queue.pop() {
+            frees.push(f);
+        }
+
+        assert_eq!(allocs.len(), 3, "original, recycled, and realloc'd-to");
+        assert_eq!(allocs[0].size, 100, "original allocation");
+        assert_eq!(allocs[1].size, 999, "recycled allocation");
+        assert_eq!(allocs[2].size, 200, "realloc'd-to allocation");
+
+        assert_eq!(frees.len(), 1, "exactly one free-of-old");
+        assert_eq!(
+            frees[0].size, 100,
+            "the free must describe the allocation actually being realloc'd \
+             away, not the one that recycled its address; resolving the \
+             address after the inner realloc would report 999"
+        );
+        assert_eq!(
+            frees[0].alloc_ts_ns, allocs[0].ts_ns,
+            "free's alloc_ts_ns must match the original allocation"
+        );
+        assert!(
+            frees[0].ts_ns < allocs[2].ts_ns,
+            "free-of-old must be stamped before alloc-of-new so the \
+             consolidator's merge-by-timestamp drain orders them correctly \
+             (design §3)"
+        );
+
+        // The recycled allocation must still be tracked, so its own eventual
+        // free is reported.
+        let liveset = inner.liveset.as_ref().expect("liveset configured");
+        assert_eq!(
+            liveset.peek_with(&(old_addr_u as u64), |_, v| v.0),
+            Some(999),
+            "the recycled allocation must keep its liveset entry; resolving \
+             the address after the inner realloc would have removed it"
+        );
+    }
+
+    /// A failed realloc never releases the old pointer, so the block is still
+    /// live: the entry `on_realloc_before` popped has to go back and no free
+    /// may be emitted. Without the restore, a still-live sampled allocation
+    /// would silently stop being tracked and its real free would be dropped.
+    #[test]
+    fn failed_realloc_restores_the_liveset_entry() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        let addr_u = 0xF00D_0000_usize;
+
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xFA11_BACC, 1);
+            let addr = addr_u as *mut u8;
+            on_alloc(&inner_for_thread, addr, 512);
+
+            let state = on_realloc_before(&inner_for_thread, addr);
+            // Inner realloc returned null — the old block is untouched.
+            on_realloc_failed(&inner_for_thread, addr, state);
+
+            // The block is still live and tracked, so its real free must
+            // still report the original metadata.
+            on_dealloc(&inner_for_thread, addr, 512);
+        })
+        .join()
+        .expect("scenario thread");
+
+        let allocs: Vec<_> = std::iter::from_fn(|| inner.rings.alloc_queue.pop()).collect();
+        let frees: Vec<_> = std::iter::from_fn(|| inner.rings.free_queue.pop()).collect();
+
+        assert_eq!(allocs.len(), 1, "a failed realloc allocates nothing");
+        assert_eq!(
+            frees.len(),
+            1,
+            "only the real dealloc emits a free; the failed realloc must not"
+        );
+        assert_eq!(
+            frees[0].size, 512,
+            "the restored entry must carry the original metadata"
+        );
+        assert_eq!(frees[0].alloc_ts_ns, allocs[0].ts_ns);
+
+        let liveset = inner.liveset.as_ref().expect("liveset configured");
+        assert!(
+            liveset.peek_with(&(addr_u as u64), |_, _| ()).is_none(),
+            "the real dealloc must have drained the restored entry"
+        );
+    }
+
+    /// An unsampled block realloc'd away must not emit a free, and must not
+    /// disturb the liveset. Pins the `taken: None` path through all three
+    /// hooks.
+    #[test]
+    fn realloc_of_never_sampled_block_emits_no_free() {
+        // Sample rate high enough that the 8-byte allocations below never
+        // sample, so nothing reaches the liveset.
+        let inner = Arc::new(make_inner_with_liveset(1 << 30, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        let old_addr_u = 0x0BAD_0000_usize;
+        let new_addr_u = 0x0BAD_1000_usize;
+
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xDEAD_C0DE, 1 << 30);
+            let (old_addr, new_addr) = (old_addr_u as *mut u8, new_addr_u as *mut u8);
+            let state = on_realloc_before(&inner_for_thread, old_addr);
+            on_realloc_success(&inner_for_thread, old_addr, state, new_addr, 8);
+        })
+        .join()
+        .expect("scenario thread");
+
+        assert!(
+            inner.rings.free_queue.is_empty(),
+            "a realloc of a never-sampled block must not push a RawFree"
+        );
+        let liveset = inner.liveset.as_ref().expect("liveset configured");
+        assert!(
+            liveset.peek_with(&(old_addr_u as u64), |_, _| ()).is_none(),
+            "a realloc miss must not leave an entry in the liveset"
         );
     }
 }
