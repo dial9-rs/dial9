@@ -1295,46 +1295,26 @@ impl TraceField for Vec<(String, String)> {
 /// Encoding writes `0x00` for `None` or `0x01` followed by the inner value
 /// for `Some`. Decoding maps `FieldValueRef::None` to `None` and delegates
 /// to the inner type for present values.
-macro_rules! impl_optional_trace_field {
-    ($inner:ty) => {
-        impl TraceField for Option<$inner> {
-            fn field_type() -> FieldType {
-                FieldType::from_tag(
-                    <$inner as TraceField>::field_type() as u8 | FieldType::OPTIONAL_BIT,
-                )
-                .expect("no optional variant for inner type")
-            }
+impl<T: TraceField> TraceField for Option<T> {
+    fn field_type() -> FieldType {
+        FieldType::from_tag(<T as TraceField>::field_type() as u8 | FieldType::OPTIONAL_BIT)
+            .expect("no optional variant for inner type")
+    }
 
-            fn is_optional() -> bool {
-                true
-            }
+    fn is_optional() -> bool {
+        true
+    }
 
-            fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
-                match self {
-                    None => enc.state.writer.write_all(&[0x00]),
-                    Some(v) => {
-                        enc.state.writer.write_all(&[0x01])?;
-                        <$inner as TraceField>::encode(v, enc)
-                    }
-                }
+    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+        match self {
+            None => enc.state.writer.write_all(&[0x00]),
+            Some(v) => {
+                enc.state.writer.write_all(&[0x01])?;
+                v.encode(enc)
             }
         }
-    };
+    }
 }
-
-impl_optional_trace_field!(InternedString);
-impl_optional_trace_field!(InternedStackFrames);
-impl_optional_trace_field!(u8);
-impl_optional_trace_field!(u16);
-impl_optional_trace_field!(u32);
-impl_optional_trace_field!(u64);
-impl_optional_trace_field!(i64);
-impl_optional_trace_field!(f64);
-impl_optional_trace_field!(bool);
-impl_optional_trace_field!(String);
-impl_optional_trace_field!(Vec<u8>);
-impl_optional_trace_field!(StackFrames);
-impl_optional_trace_field!(Vec<(String, String)>);
 
 #[cfg(test)]
 mod tests {

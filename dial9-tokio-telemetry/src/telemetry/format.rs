@@ -194,6 +194,10 @@ pub struct TaskSpawnEvent {
     pub spawn_loc: InternedString,
     /// Whether this spawn was instrumented (via `Dial9TokioHandle::spawn`).
     pub instrumented: bool,
+    /// Worker that ran the spawn, when the spawn happened on a worker of the
+    /// task's runtime. `None` for spawns off a worker (e.g. from a
+    /// non-runtime thread) and for traces that predate this field.
+    pub worker_id: Option<WorkerId>,
 }
 
 #[derive(TraceEvent)]
