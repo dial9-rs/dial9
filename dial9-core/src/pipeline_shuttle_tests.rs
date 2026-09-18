@@ -420,26 +420,35 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
     warn_count.load(StdOrdering::Relaxed)
 }
 
-// Pins `primitives::fs::FAULT`'s real `std::thread_local!`: a fault armed
-// on this thread must stay visible to a spawned thread too. No `pct`: the
-// spawning thread parks on `.join()` immediately, no interleaving to explore.
+const FAULT_PROBE_THREADS: usize = 3;
+
+// Pins `primitives::fs::FAULT`'s `std::thread_local!`: a fault armed on
+// this thread must stay visible to every concurrently-running spawned
+// thread.
 crate::shuttle_test! {
-    default, determinism_only;
+    default;
     fn fs_fault_visible_across_threads() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fault_probe");
-        std::fs::write(&path, b"x").unwrap();
+        let paths: Vec<_> = (0..FAULT_PROBE_THREADS)
+            .map(|i| {
+                let path = dir.path().join(format!("fault_probe_{i}"));
+                std::fs::write(&path, b"x").unwrap();
+                path
+            })
+            .collect();
 
         let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
-        let observed_fault =
-            crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
-                .join()
-                .unwrap();
+        let threads: Vec<_> = paths
+            .into_iter()
+            .map(|path| crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err()))
+            .collect();
 
-        assert!(
-            observed_fault,
-            "fault armed on the test thread was not observed on a spawned thread"
-        );
+        for (i, t) in threads.into_iter().enumerate() {
+            assert!(
+                t.join().unwrap(),
+                "fault armed on the test thread was not observed on spawned thread {i}"
+            );
+        }
     }
 }
 
