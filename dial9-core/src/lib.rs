@@ -87,3 +87,7 @@ pub mod worker;
 
 #[cfg(all(test, shuttle))]
 mod pipeline_shuttle_tests;
+
+/// Shared helpers for this crate's own `#[cfg(test)]` shuttle scenarios.
+#[cfg(all(test, shuttle))]
+mod test_support;

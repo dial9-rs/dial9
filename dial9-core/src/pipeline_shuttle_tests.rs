@@ -139,9 +139,7 @@ impl Source for PanickingSource {
 crate::shuttle_test! {
     num_iters = 10_000, depth = 3;
     fn test_core_pipeline() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
@@ -204,18 +202,10 @@ crate::shuttle_test! {
         // Final flush + seal the last segment, then join the flush thread.
         recorder.stop_flush_thread();
 
-        // Drain the in-memory ring (memory pops one sealed segment per call).
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
         let expected = expected.lock().unwrap();
 
         // Run all invariants.
@@ -233,9 +223,7 @@ crate::shuttle_test! {
     expect_panic = "PanickingSource intentionally panics for shuttle coverage",
     replay = "91011be187b1dcc7fc8f9dbc0100000058555515";
     fn test_source_panic_does_not_wedge_pipeline() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let writer = MemoryBuffer::builder()
             .max_total_size(100 * 1024 * 1024)
@@ -265,16 +253,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
 
         assert!(
             all_decoded.iter().any(|e| e.id == healthy_source_event.id),
@@ -292,9 +273,7 @@ crate::shuttle_test! {
     expect_panic = "PanickingSource intentionally panics for shuttle coverage",
     replay = "910124ca81ffb4a781e6ae0a000000006055555555";
     fn test_source_panic_does_not_lose_tl_buffer_write() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let writer = MemoryBuffer::builder()
             .max_total_size(100 * 1024 * 1024)
@@ -320,16 +299,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
 
         assert!(
             all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
@@ -392,9 +364,7 @@ impl tracing::Subscriber for CountingSubscriber {
 /// Drive the pipeline with the fs armed to `fault`, returning the
 /// number of WARN/ERROR events the flush loop emitted.
 fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
-    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-    ));
+    let _ts_guard = crate::test_support::pin_fixed_clock();
 
     let warn_count = StdArc::new(StdAtomicU64::new(0));
     let subscriber = CountingSubscriber {
