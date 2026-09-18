@@ -116,8 +116,8 @@ impl Source for MockSource {
         "mock"
     }
 
-    // TODO: exercise on_worker_thread_start/on_thread_stop once shuttle
-    // tests include a Tokio runtime.
+    // on_thread_start/on_thread_stop's Tokio-worker-thread path needs a
+    // real multi_thread runtime worker thread, which shuttle can't provide.
 }
 
 /// A Source whose `flush` always panics. Used to check whether the flush
@@ -423,10 +423,11 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
 const FAULT_PROBE_THREADS: usize = 3;
 
 // Pins `primitives::fs::FAULT`'s `std::thread_local!`: a fault armed on
-// this thread must stay visible to every concurrently-running spawned
-// thread.
+// this thread must stay visible to every spawned thread. Structural, not
+// schedule-dependent. Shuttle's coroutines always share one real OS
+// thread, so this doesn't need `pct`'s interleaving search.
 crate::shuttle_test! {
-    default;
+    default, determinism_only;
     fn fs_fault_visible_across_threads() {
         let dir = tempfile::tempdir().unwrap();
         let paths: Vec<_> = (0..FAULT_PROBE_THREADS)
