@@ -934,6 +934,18 @@ If you use [Symposium](https://symposium.dev), skills auto-install when your pro
 cargo agents sync
 ```
 
+The skills ship inside the `dial9` crate (its `skills/` directory), so Symposium
+installs the set that matches the `dial9` version your project resolved. Delivery
+is wired by the `dial9` entry of the
+[`symposium-recommendations`](https://github.com/symposium-dev/recommendations)
+registry: a project at or above the first `dial9` release carrying skills gets
+them from `dial9`; anything else (an older pin, a prerelease pin, or a project
+that declares only `dial9-tokio-telemetry`) gets the newest `dial9-viewer`
+skills as a fallback, which may describe a newer API than the project uses. A
+workspace whose members pin different `dial9` versions is seen by Symposium as
+a single version per crate, the lowest one declared, so the whole workspace
+gets that version's skills.
+
 ### `trace-shape`
 
 Extracts sanitized structural fingerprints ("shapes") from traces, or generates
