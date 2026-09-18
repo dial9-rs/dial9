@@ -116,8 +116,8 @@ impl Source for MockSource {
         "mock"
     }
 
-    // TODO: exercise on_worker_thread_start/on_thread_stop once shuttle
-    // tests include a Tokio runtime.
+    // on_thread_start/on_thread_stop's Tokio-worker-thread path needs a
+    // real multi_thread runtime worker thread, which shuttle can't provide.
 }
 
 /// A Source whose `flush` always panics. Used to check whether the flush
@@ -139,9 +139,7 @@ impl Source for PanickingSource {
 crate::shuttle_test! {
     num_iters = 10_000, depth = 3;
     fn test_core_pipeline() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
@@ -204,18 +202,10 @@ crate::shuttle_test! {
         // Final flush + seal the last segment, then join the flush thread.
         recorder.stop_flush_thread();
 
-        // Drain the in-memory ring (memory pops one sealed segment per call).
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
         let expected = expected.lock().unwrap();
 
         // Run all invariants.
@@ -233,9 +223,7 @@ crate::shuttle_test! {
     expect_panic = "PanickingSource intentionally panics for shuttle coverage",
     replay = "91011be187b1dcc7fc8f9dbc0100000058555515";
     fn test_source_panic_does_not_wedge_pipeline() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let writer = MemoryBuffer::builder()
             .max_total_size(100 * 1024 * 1024)
@@ -265,16 +253,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
 
         assert!(
             all_decoded.iter().any(|e| e.id == healthy_source_event.id),
@@ -292,9 +273,7 @@ crate::shuttle_test! {
     expect_panic = "PanickingSource intentionally panics for shuttle coverage",
     replay = "910124ca81ffb4a781e6ae0a000000006055555555";
     fn test_source_panic_does_not_lose_tl_buffer_write() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let writer = MemoryBuffer::builder()
             .max_total_size(100 * 1024 * 1024)
@@ -320,16 +299,9 @@ crate::shuttle_test! {
         recorder.stop_flush_thread();
 
         let mut all_decoded: Vec<ValidationEvent> = Vec::new();
-        loop {
-            let taken = fs.take_files();
-            if taken.segments.is_empty() {
-                break;
-            }
-            for seg in taken.segments {
-                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
-                all_decoded.extend(decode_validation_events(&payload.into_vec()));
-            }
-        }
+        crate::test_support::for_each_sealed_segment(&fs, |bytes| {
+            all_decoded.extend(decode_validation_events(&bytes));
+        });
 
         assert!(
             all_decoded.iter().any(|e| e.id == tl_buffer_event.id),
@@ -392,9 +364,7 @@ impl tracing::Subscriber for CountingSubscriber {
 /// Drive the pipeline with the fs armed to `fault`, returning the
 /// number of WARN/ERROR events the flush loop emitted.
 fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
-    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-    ));
+    let _ts_guard = crate::test_support::pin_fixed_clock();
 
     let warn_count = StdArc::new(StdAtomicU64::new(0));
     let subscriber = CountingSubscriber {
@@ -450,26 +420,36 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
     warn_count.load(StdOrdering::Relaxed)
 }
 
-// Pins `primitives::fs::FAULT`'s real `std::thread_local!`: a fault armed
-// on this thread must stay visible to a spawned thread too. No `pct`: the
-// spawning thread parks on `.join()` immediately, no interleaving to explore.
+const FAULT_PROBE_THREADS: usize = 3;
+
+// Pins `primitives::fs::FAULT`'s `std::thread_local!`: a fault armed on
+// this thread must stay visible to every spawned thread. Structural, not
+// schedule-dependent. Shuttle's coroutines always share one real OS
+// thread, so this doesn't need `pct`'s interleaving search.
 crate::shuttle_test! {
     default, determinism_only;
     fn fs_fault_visible_across_threads() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fault_probe");
-        std::fs::write(&path, b"x").unwrap();
+        let paths: Vec<_> = (0..FAULT_PROBE_THREADS)
+            .map(|i| {
+                let path = dir.path().join(format!("fault_probe_{i}"));
+                std::fs::write(&path, b"x").unwrap();
+                path
+            })
+            .collect();
 
         let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
-        let observed_fault =
-            crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
-                .join()
-                .unwrap();
+        let threads: Vec<_> = paths
+            .into_iter()
+            .map(|path| crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err()))
+            .collect();
 
-        assert!(
-            observed_fault,
-            "fault armed on the test thread was not observed on a spawned thread"
-        );
+        for (i, t) in threads.into_iter().enumerate() {
+            assert!(
+                t.join().unwrap(),
+                "fault armed on the test thread was not observed on spawned thread {i}"
+            );
+        }
     }
 }
 
@@ -487,7 +467,7 @@ crate::shuttle_test! {
 }
 
 crate::shuttle_test! {
-    num_iters = 10_000, depth = 3;
+    num_iters = 10_000, depth = 3, verify_faults_triggered;
     fn test_core_probabilistic_fs_faults() {
         let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
         assert!(
