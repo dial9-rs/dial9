@@ -260,7 +260,7 @@ export function mountOverlay(
               allSpans: data.allSpans,
               columnarSpans: data.columnarSpans,
               queueSamples: data.queueSamples,
-              localQueueSamples: data.workerQueueSamples[req.workerId] ?? [],
+              localQueueSamples: data.queueSampleIndex.forWorker(req.workerId).toRecords(),
               activeTaskSamples: data.activeTaskSamples,
               blockInPlaceGaps: data.blockInPlaceGaps,
               hasCpuTime: data.hasCpuTime,

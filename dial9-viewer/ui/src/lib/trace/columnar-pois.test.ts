@@ -3,6 +3,7 @@
 // detector type - so poi.ts / minimap-poi.ts can scan columns instead of
 // materializing every poll from the flyweight lane views.
 
+import { WakeIndex } from "./wake-index.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -42,7 +43,7 @@ beforeAll(async () => {
   store = ColumnarWorkerSpans.fromWorkerSpans(ws);
   store.attachCpuSamples(trace.cpuSamples as never);
   fatSched = computeSchedulingDelays(ws, workerIds, r.wakesByTask);
-  colSched = store.schedulingDelays(workerIds, r.wakesByTask as never);
+  colSched = store.schedulingDelays(workerIds, WakeIndex.fromRecords(r.wakesByTask));
   // Synthesize an instrumentation map so "uninstrumented" has matches.
   taskInstrumented = new Map();
   let flip = false;

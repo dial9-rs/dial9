@@ -167,7 +167,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const selectedSpanIds = sel.spanFocus ? sel.spanFocus.chain : EMPTY_SET;
     const sharedMaxQ = sharedVisibleMaxQueue(
       data.workerIds,
-      data.workerQueueSamples,
+      data.queueSampleIndex,
       state.viewport.viewStart,
       state.viewport.viewEnd,
     );
@@ -179,8 +179,8 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       runtimeTaskSpawns: data.runtimeTaskSpawns.byRuntime,
       laneIdentity: data.laneIdentity,
       runtimeAccents: data.runtimeAccents,
-      workerQueueSamples: data.workerQueueSamples,
-      wakesByWorker: data.wakesByWorker,
+      queueSampleIndex: data.queueSampleIndex,
+      wakeIndex: data.wakeIndex,
       spansById: data.spansById,
       blockInPlaceGaps: state.trace.trace ? state.trace.trace.blockInPlaceGaps : [],
       hasCpuTime: data.hasCpuTime,

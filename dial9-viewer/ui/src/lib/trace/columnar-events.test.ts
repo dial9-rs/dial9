@@ -93,8 +93,12 @@ describe("buildWorkerSpans columnar parity", () => {
     expect(b.queueSamples).toStrictEqual(a.queueSamples);
     expect(b.workerQueueSamples).toStrictEqual(a.workerQueueSamples);
     expect(b.maxLocalQueue).toBe(a.maxLocalQueue);
-    expect(b.wakesByTask).toStrictEqual(a.wakesByTask);
-    expect(b.wakesByWorker).toStrictEqual(a.wakesByWorker);
+    expect(wakeFields(b.wakesByTask, TASK_WAKE_FIELDS)).toStrictEqual(
+      a.wakesByTask,
+    );
+    expect(wakeFields(b.wakesByWorker, WORKER_WAKE_FIELDS)).toStrictEqual(
+      a.wakesByWorker,
+    );
   });
 });
 
@@ -313,3 +317,21 @@ describe("column widths", () => {
     expect(store.at(0)!.localQueue).toBe(255);
   });
 });
+
+/** Keep only `keys` on each wake record. One record now serves both lookups,
+ *  so it has all four fields; the frozen builder wrote three per index. */
+function wakeFields(
+  byKey: Record<string, unknown[]>,
+  keys: readonly string[],
+): Record<string, unknown[]> {
+  return Object.fromEntries(
+    Object.entries(byKey).map(([k, arr]) => [
+      k,
+      (arr as Record<string, unknown>[]).map((rec) =>
+        Object.fromEntries(keys.map((f) => [f, rec[f]])),
+      ),
+    ]),
+  );
+}
+const TASK_WAKE_FIELDS = ["timestamp", "wakerTaskId", "targetWorker"] as const;
+const WORKER_WAKE_FIELDS = ["timestamp", "wakerTaskId", "wokenTaskId"] as const;

@@ -16,6 +16,8 @@
 
 import { EVT } from "./columnar-events.js";
 import type { ColumnarEvents } from "./columnar-events.js";
+import { WakeIndex } from "./wake-index.js";
+import { QueueSampleIndex } from "./queue-samples.js";
 import { ColumnarWorkerSpansBuilder, type ColumnarWorkerSpans } from "./columnar-worker-spans.js";
 import type {
   BlockInPlaceGap,
@@ -79,10 +81,9 @@ class StoreSpanEmitter implements SpanEmitter {
 interface SpanAggregates {
   perWorker: ByWorker<number[]>;
   queueSamples: { t: number; global: number }[];
-  workerQueueSamples: ByWorker<{ t: number; local: number }[]>;
+  queueSampleIndex: QueueSampleIndex;
   maxLocalQueue: number;
-  wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
-  wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
+  wakeIndex: WakeIndex;
 }
 
 /** The shared span state machine; emits polls/parks/actives through `emit`. */
@@ -103,12 +104,12 @@ function reconstruct(
     for (const g of blockInPlaceGaps) (gapsByW[g.workerId] ??= []).push(g);
   }
 
-  const workerQueueSamples: ByWorker<{ t: number; local: number }[]> = {};
+  const queueSampleIndex = new QueueSampleIndex();
   let maxLocalQueue = 1;
-  const wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]> = {};
-  const wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]> = {};
+  // Flat quads (ts, waker, woken, worker) folded into a CSR index below
+  const wakeRows: number[] = [];
 
-  for (const w of workerIds) workerQueueSamples[w] = [];
+  for (const w of workerIds) queueSampleIndex.ensure(w);
 
   const eventType = store.eventType;
   const ts = store.ts;
@@ -134,8 +135,7 @@ function reconstruct(
       const target = workerId[i]!; // targetWorker === workerId for wake events
       const ki = wakerIdx[i]!;
       const waker = ki < 0 ? NaN : taskIds[ki]!;
-      (wakesByTask[woken] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, targetWorker: target });
-      (wakesByWorker[target] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, wokenTaskId: woken });
+      wakeRows.push(ts[i]!, waker, woken, target);
     } else if (et !== EVT.QueueSample) {
       (perWorker[workerId[i]!] ??= []).push(i);
     }
@@ -144,8 +144,11 @@ function reconstruct(
   // Stable sort of indices by ts (JS sort is stable, so equal-ts events keep
   // their original event order, matching the frozen object sort).
   for (const key in perWorker) perWorker[key]!.sort((a, b) => ts[a]! - ts[b]!);
-  for (const key in wakesByTask) wakesByTask[key]!.sort((a, b) => a.timestamp - b.timestamp);
-  for (const key in wakesByWorker) wakesByWorker[key]!.sort((a, b) => a.timestamp - b.timestamp);
+  const wakeIndex = WakeIndex.build(wakeRows.length / 4, (emit) => {
+    for (let k = 0; k < wakeRows.length; k += 4) {
+      emit(wakeRows[k]!, wakeRows[k + 1]!, wakeRows[k + 2]!, wakeRows[k + 3]!);
+    }
+  });
 
   for (const workerKey in perWorker) {
     const w = Number(workerKey);
@@ -154,7 +157,7 @@ function reconstruct(
       const t = ts[i]!;
 
       if (et === EVT.PollStart || et === EVT.WorkerPark || et === EVT.WorkerUnpark) {
-        workerQueueSamples[workerKey]!.push({ t, local: localQueue[i]! });
+        queueSampleIndex.push(w, t, localQueue[i]!);
         if (localQueue[i]! > maxLocalQueue) maxLocalQueue = localQueue[i]!;
       }
 
@@ -225,7 +228,7 @@ function reconstruct(
     if (eventType[i] === EVT.QueueSample) queueSamples.push({ t: ts[i]!, global: globalQueue[i]! });
   }
 
-  return { perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker };
+  return { perWorker, queueSamples, queueSampleIndex, maxLocalQueue, wakeIndex };
 }
 
 /** Fat-output path: field-for-field identical to the frozen buildWorkerSpans. */
@@ -238,6 +241,8 @@ export function buildWorkerSpansColumnar(
   const emit = new FatSpanEmitter();
   for (const w of workerIds) emit.ensure(w);
   const agg = reconstruct(store, workerIds, maxTs, blockInPlaceGaps, emit);
+  let maps: ReturnType<WakeIndex["toRecordMaps"]> | undefined;
+  let queueMap: ReturnType<QueueSampleIndex["toRecordMap"]> | undefined;
   return {
     workerSpans: emit.workerSpans,
     // The ONE field that is not frozen-identical: index buckets, not event
@@ -245,10 +250,17 @@ export function buildWorkerSpansColumnar(
     // confined to this field instead of blanking the whole result's type.
     perWorker: agg.perWorker as unknown as WorkerSpansResult["perWorker"],
     queueSamples: agg.queueSamples,
-    workerQueueSamples: agg.workerQueueSamples,
+    get workerQueueSamples() {
+      return (queueMap ??= agg.queueSampleIndex.toRecordMap());
+    },
     maxLocalQueue: agg.maxLocalQueue,
-    wakesByTask: agg.wakesByTask,
-    wakesByWorker: agg.wakesByWorker,
+    // Lazy: the callers here (exact-mode flamegraph) read only the spans.
+    get wakesByTask() {
+      return (maps ??= agg.wakeIndex.toRecordMaps()).byTask;
+    },
+    get wakesByWorker() {
+      return (maps ??= agg.wakeIndex.toRecordMaps()).byWorker;
+    },
   };
 }
 
@@ -257,10 +269,9 @@ export function buildWorkerSpansColumnar(
 export interface WorkerSpansStoreResult {
   store: ColumnarWorkerSpans;
   queueSamples: { t: number; global: number }[];
-  workerQueueSamples: ByWorker<{ t: number; local: number }[]>;
+  queueSampleIndex: QueueSampleIndex;
   maxLocalQueue: number;
-  wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
-  wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
+  wakeIndex: WakeIndex;
 }
 
 /**
@@ -281,9 +292,8 @@ export function buildWorkerSpansColumnarStore(
   return {
     store: builder.finish(),
     queueSamples: agg.queueSamples,
-    workerQueueSamples: agg.workerQueueSamples,
+    queueSampleIndex: agg.queueSampleIndex,
     maxLocalQueue: agg.maxLocalQueue,
-    wakesByTask: agg.wakesByTask,
-    wakesByWorker: agg.wakesByWorker,
+    wakeIndex: agg.wakeIndex,
   };
 }

@@ -21,6 +21,7 @@ import {
 } from "../../lib/trace/derived.js";
 import { metricsRuntimeNames } from "../../lib/trace/runtime-metrics-model.js";
 import { deriveRuntimeTaskSpawns } from "../../lib/trace/runtime-task-spawns.js";
+import type { QueueSampleIndex } from "../../lib/trace/queue-samples.js";
 import type {
   BlockInPlaceGap,
   ParsedTrace,
@@ -47,7 +48,7 @@ export interface OverlayData {
   /** Columnar span store (main-thread path); hover span lookups dispatch on it. */
   columnarSpans?: ColumnarSpans | undefined;
   /** Per-worker local-queue series, sorted by t (local Q). */
-  workerQueueSamples: Record<number, { t: number; local: number }[]>;
+  queueSampleIndex: QueueSampleIndex;
   /** Global injection-queue series, sorted by t (tooltip Global Q). */
   queueSamples: { t: number; global: number }[];
   /** Active-task-count timeline, sorted by t (tooltip Active Tasks). */
@@ -97,7 +98,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     workerSpans,
     allSpans: spanData.allSpans,
     columnarSpans: spanData.columnarSpans,
-    workerQueueSamples: spanResult.workerQueueSamples,
+    queueSampleIndex: spanResult.queueSampleIndex,
     queueSamples: spanResult.queueSamples,
     activeTaskSamples,
     runtimeTaskSpawns: runtimeTaskSpawns.byRuntime,

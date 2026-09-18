@@ -20,6 +20,8 @@ import {
 } from "./index.js";
 import type { SpanData } from "./index.js";
 import { ColumnarEvents } from "./columnar-events.js";
+import { WakeIndex } from "./wake-index.js";
+import { QueueSampleIndex } from "./queue-samples.js";
 import { buildWorkerSpansColumnarStore } from "./worker-spans-columnar.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
 import { measureSpan } from "./load-perf.js";
@@ -148,8 +150,12 @@ export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
   const lanes = laneSource(columnarWorkerStoreFor(trace), spanResult.workerSpans);
   const schedDelays = measureSpan("schedDelays", () =>
     lanes.columnar
-      ? lanes.store.schedulingDelays(workerIds, spanResult.wakesByTask)
-      : computeSchedulingDelays(lanes.workerSpans, workerIds, spanResult.wakesByTask),
+      ? lanes.store.schedulingDelays(workerIds, spanResult.wakeIndex)
+      : computeSchedulingDelays(
+          lanes.workerSpans,
+          workerIds,
+          spanResult.wakesByTask ?? {},
+        ),
   );
 
   const inputs: DetectorInputs = {
@@ -209,10 +215,9 @@ export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
         workerSpans: built.store.workerLanes(),
         perWorker: {},
         queueSamples: built.queueSamples,
-        workerQueueSamples: built.workerQueueSamples,
+        queueSampleIndex: built.queueSampleIndex,
         maxLocalQueue: built.maxLocalQueue,
-        wakesByTask: built.wakesByTask,
-        wakesByWorker: built.wakesByWorker,
+        wakeIndex: built.wakeIndex,
       };
     } else {
       const fat = buildWorkerSpans(
@@ -227,7 +232,12 @@ export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
       if (trace.cpuSamples && trace.cpuSamples.length > 0) {
         attachCpuSamples(trace.cpuSamples, fat.workerSpans);
       }
-      r = fat;
+      // Wrap the frozen builder's maps so consumers see one interface.
+      r = {
+        ...fat,
+        wakeIndex: WakeIndex.fromRecords(fat.wakesByTask),
+        queueSampleIndex: QueueSampleIndex.fromRecordMap(fat.workerQueueSamples),
+      };
     }
     workerSpansCache.set(trace, r);
   }

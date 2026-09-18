@@ -1,6 +1,8 @@
 // Lane render/click/hover tests over a recording 2D-context stub and
 // synthetic lane data: no DOM, no trace parse.
 
+import { QueueSampleIndex } from "../../../lib/trace/queue-samples.js";
+import { EMPTY_WAKE_INDEX } from "../../../lib/trace/wake-index.js";
 import { describe, it, expect } from "vitest";
 import {
   LANE_ROW_H,
@@ -111,8 +113,8 @@ function baseInput(over: Partial<LanesRenderInput>): LanesRenderInput {
     runtimeTaskSpawns: new Map(),
     laneIdentity: new Map(),
     runtimeAccents: new Map(),
-    workerQueueSamples: {},
-    wakesByWorker: {},
+    queueSampleIndex: QueueSampleIndex.fromRecordMap({}),
+    wakeIndex: EMPTY_WAKE_INDEX,
     spansById: new Map(),
     blockInPlaceGaps: [],
     hasCpuTime: false,
@@ -170,7 +172,7 @@ describe("renderLanes: pixel-bounded fills (downsample+coalesce)", () => {
     renderLanes(
       rec.ctx,
       baseInput({
-        workerQueueSamples: { 0: samples },
+        queueSampleIndex: QueueSampleIndex.fromRecordMap({ 0: samples }),
         viewStart: 0,
         viewEnd: n,
         sharedMaxQ: 11,
@@ -216,10 +218,10 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
   // a cheap per-drawn-row marker to count.
   function workersInput(ids: number[]): LanesRenderInput {
     const workerSpans: Record<number, WorkerLane> = {};
-    const workerQueueSamples: Record<number, { t: number; local: number }[]> = {};
+    const samples: Record<number, { t: number; local: number }[]> = {};
     for (const id of ids) {
       workerSpans[id] = emptyLane();
-      workerQueueSamples[id] = [
+      samples[id] = [
         { t: 0, local: 1 },
         { t: 1000, local: 2 },
       ];
@@ -227,7 +229,7 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
     return baseInput({
       workerIds: ids,
       workerSpans,
-      workerQueueSamples,
+      queueSampleIndex: QueueSampleIndex.fromRecordMap(samples),
       viewStart: 0,
       viewEnd: 1000,
       sharedMaxQ: 2,
@@ -293,7 +295,7 @@ describe("renderLanes: fixed-height rows + inner-scroll windowing", () => {
       const rec = recordingCtx();
       renderLanes(
         rec.ctx,
-        { ...workersInput(ids), workerQueueSamples: sentinels, hasLocalQueueDepth },
+        { ...workersInput(ids), queueSampleIndex: QueueSampleIndex.fromRecordMap(sentinels), hasLocalQueueDepth },
         {
           time: layout(0, 1000, 300),
           height: ids.length * LANE_ROW_H,
@@ -430,9 +432,9 @@ describe("sharedVisibleMaxQueue", () => {
       1: [{ t: 150, local: 5 }],
     };
     // Window [90, 160] sees worker0's 9 (via <=/>= backup) and worker1's 5.
-    expect(sharedVisibleMaxQueue([0, 1], s, 90, 160)).toBe(9);
+    expect(sharedVisibleMaxQueue([0, 1], QueueSampleIndex.fromRecordMap(s), 90, 160)).toBe(9);
     // Empty window still floors at 1.
-    expect(sharedVisibleMaxQueue([0, 1], s, 1000, 2000)).toBeGreaterThanOrEqual(1);
+    expect(sharedVisibleMaxQueue([0, 1], QueueSampleIndex.fromRecordMap(s), 1000, 2000)).toBeGreaterThanOrEqual(1);
   });
 });
 

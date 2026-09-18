@@ -159,9 +159,10 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
   const merged: MergedLocalSample[] = [];
   if (trace.hasLocalQueueDepth) {
     for (const w of workerIds) {
-      const samples = spanResult.workerQueueSamples[w];
-      if (!samples) continue;
-      for (const s of samples) merged.push({ t: s.t, w, local: s.local });
+      const samples = spanResult.queueSampleIndex.forWorker(w);
+      for (let i = 0; i < samples.length; i++) {
+        merged.push({ t: samples.tAt(i), w, local: samples.localAt(i) });
+      }
     }
     merged.sort((a, b) => a.t - b.t);
   }

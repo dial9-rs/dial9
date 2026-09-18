@@ -14,10 +14,13 @@
 import { SegmentForest, spanBucketMerge, type SpanAgg } from "./segment-forest.js";
 import type { CpuSample } from "./columnar-cpu-samples.js";
 import type { SpanList } from "./query.js";
+import type { WakeIndex } from "./wake-index.js";
+import type { QueueSampleIndex } from "./queue-samples.js";
 import type {
   PointOfInterest,
   PointOfInterestType,
   SchedDelay,
+  TaskWake,
   WorkerLane,
   WorkerSpansResult,
 } from "../../types/trace.js";
@@ -210,8 +213,17 @@ export type LaneSpans = WorkerLane | WorkerLaneView;
  * shape except that lanes may be columnar: the frozen function only ever
  * returns fat lanes, so widening WorkerSpansResult itself would misdescribe
  * it. */
-export type LaneWorkerSpans = Omit<WorkerSpansResult, "workerSpans"> & {
+export type LaneWorkerSpans = Omit<
+  WorkerSpansResult,
+  "workerSpans" | "wakesByTask" | "wakesByWorker" | "workerQueueSamples"
+> & {
   workerSpans: Record<number, LaneSpans>;
+  /** Wake storage. */
+  wakeIndex: WakeIndex;
+  /** Per-worker local-queue samples. */
+  queueSampleIndex: QueueSampleIndex;
+  /** Frozen builder only: `computeSchedulingDelays` takes the object map. */
+  wakesByTask?: Record<number, TaskWake[]>;
 };
 
 /** True when `lane` is columnar-backed (dispatch guard for render + hit-test). */
@@ -1025,7 +1037,7 @@ export class ColumnarWorkerSpans {
    */
   schedulingDelays(
     workerIds: number[],
-    wakesByTask: Record<number, WakeRec[]>
+    wakes: WakeIndex
   ): SchedDelayView[] {
     // Shared per-task poll CSR (cached; also used by buildSpanDataColumnar).
     const { slotOf: slot, off, start: pStart, end: pEnd } = this.pollsByTaskCSR();
@@ -1036,27 +1048,28 @@ export class ColumnarWorkerSpans {
       for (let i = 0; i < c.n; i++) {
         const taskId = c.taskId[i];
         if (!taskId) continue;
-        const wakes = wakesByTask[taskId];
-        if (!wakes || !wakes.length) continue;
+        const taskWakes = wakes.forTask(taskId);
+        if (taskWakes.length === 0) continue;
         const sStart = c.start[i]!;
         // latest wake with timestamp <= sStart
-        let lo = 0, hi = wakes.length - 1, best = -1;
+        let lo = 0, hi = taskWakes.length - 1, best = -1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
-          if (wakes[mid]!.timestamp <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
+          if (taskWakes.timestampAt(mid) <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
         if (best < 0) continue;
-        const wake = wakes[best]!;
-        let effectiveWake = wake.timestamp;
+        const wakeTs = taskWakes.timestampAt(best);
+        const wakeWaker = taskWakes.wakerTaskIdAt(best);
+        let effectiveWake = wakeTs;
         const s = slot.get(taskId);
         if (s !== undefined) {
           // rightmost poll of the task with start <= wake.timestamp
           let plo = off[s]!, phi = off[s + 1]! - 1, pbest = -1;
           while (plo <= phi) {
             const pmid = (plo + phi) >> 1;
-            if (pStart[pmid]! <= wake.timestamp) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
+            if (pStart[pmid]! <= wakeTs) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
           }
-          if (pbest >= 0 && pStart[pbest]! < sStart && wake.timestamp <= pEnd[pbest]!) {
+          if (pbest >= 0 && pStart[pbest]! < sStart && wakeTs <= pEnd[pbest]!) {
             effectiveWake = pEnd[pbest]!;
           }
         }
@@ -1064,7 +1077,7 @@ export class ColumnarWorkerSpans {
         if (delay > 0 && delay < 1e9) {
           out.push({
             wakeTime: effectiveWake, pollTime: sStart, delay, taskId,
-            wakerTaskId: wake.wakerTaskId, worker: w, poll: this.pollAt(w, i)!,
+            wakerTaskId: wakeWaker, worker: w, poll: this.pollAt(w, i)!,
           });
         }
       }
