@@ -239,6 +239,8 @@ pub struct TaskDumpEvent {
     pub task_id: TaskId,
     /// Raw instruction pointer addresses (leaf first).
     pub callchain: Vec<u64>,
+    /// Probability used to select this pending transition for capture.
+    pub inclusion_probability: f64,
 }
 
 /// One task woke another task.
@@ -558,6 +560,7 @@ mod tests {
             timestamp_ns: 8_000_000,
             task_id: TaskId::from_u32(100),
             callchain: dump_chain,
+            inclusion_probability: 0.25,
         })
         .unwrap();
 

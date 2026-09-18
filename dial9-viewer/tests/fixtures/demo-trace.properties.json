@@ -1,21 +1,21 @@
 {
   "universe": "callchain_nonempty",
-  "total_samples": 14405,
+  "total_samples": 7865,
   "by_source": {
-    "0": 190,
-    "1": 14215
+    "0": 109,
+    "1": 7756
   },
   "on_off_all": {
-    "on_runtime": 14379,
-    "off_runtime": 26
+    "on_runtime": 7860,
+    "off_runtime": 5
   },
   "on_off_by_source": {
     "0": {
-      "on": 164,
-      "off": 26
+      "on": 104,
+      "off": 5
     },
     "1": {
-      "on": 14215,
+      "on": 7756,
       "off": 0
     }
   },
@@ -26,52 +26,52 @@
     3
   ],
   "cpu_profile": {
-    "count": 190,
-    "distinct_stacks": 151,
-    "stack_sig_digest": "0293365dce8ccf83",
-    "ts_count": 190,
-    "ts_span_ns": 4487783336,
-    "ts_delta_digest": "8d4657f0e04eeb4d",
+    "count": 109,
+    "distinct_stacks": 104,
+    "stack_sig_digest": "6d0e0c9c3bfb4b8b",
+    "ts_count": 109,
+    "ts_span_ns": 3533061794,
+    "ts_delta_digest": "84da87b2d58ffde6",
     "top_stacks": [
       {
-        "count": 10,
-        "depth": 1,
-        "leaf": "__lll_unlock_wake"
-      },
-      {
-        "count": 9,
-        "depth": 1,
-        "leaf": "__libc_write"
-      },
-      {
-        "count": 5,
-        "depth": 1,
-        "leaf": "dl_iterate_phdr"
-      },
-      {
-        "count": 4,
-        "depth": 1,
-        "leaf": "_int_malloc"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__strlen_sse2"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__malloc"
-      },
-      {
-        "count": 3,
-        "depth": 1,
-        "leaf": "__pthread_mutex_unlock_usercnt"
+        "count": 2,
+        "depth": 113,
+        "leaf": "[unknown] 0xffff9447de54"
       },
       {
         "count": 2,
-        "depth": 1,
-        "leaf": "[unknown] 0x7f59f31543aa"
+        "depth": 106,
+        "leaf": "[unknown] 0xffff9447de60"
+      },
+      {
+        "count": 2,
+        "depth": 107,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 97,
+        "leaf": "http::header::name::StandardHeader::from_bytes"
+      },
+      {
+        "count": 2,
+        "depth": 94,
+        "leaf": "hyper::proto::h1::role::Server::encode_headers"
+      },
+      {
+        "count": 1,
+        "depth": 105,
+        "leaf": "tokio::runtime::context::with_scheduler"
+      },
+      {
+        "count": 1,
+        "depth": 61,
+        "leaf": "$d"
+      },
+      {
+        "count": 1,
+        "depth": 130,
+        "leaf": "http::uri::Uri::from_shared"
       }
     ]
   }

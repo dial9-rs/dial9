@@ -1,10 +1,9 @@
 #![deny(clippy::arithmetic_side_effects)]
 //! Shared geometric/Poisson sampling primitives.
 //!
-//! Used by the task-dump idle sampler (sampling on nanoseconds) and by the
-//! memory profiler (sampling on bytes). The unit is opaque to the math —
-//! callers pass the mean and treat the returned u64 as a counter in their
-//! native unit.
+//! The PRNG is shared by task-dump capture sampling and memory profiling.
+//! Exponential gaps use an opaque unit: callers pass a mean and treat the
+//! returned u64 as a counter in their native unit (e.g. allocated bytes).
 
 /// Minimal splitmix64 PRNG. Fast, no dependencies, good enough for sampling.
 #[derive(Debug)]

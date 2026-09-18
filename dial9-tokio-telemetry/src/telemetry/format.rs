@@ -208,7 +208,7 @@ pub(crate) struct TaskTerminateEvent {
 }
 
 /// Wire-format event for a task dump: async backtrace captured at a yield point
-/// after the task stayed idle past the configured threshold.
+/// selected by the worker's capture sampler.
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
 #[cfg(any(feature = "taskdump", test))]
@@ -217,6 +217,8 @@ pub(crate) struct TaskDumpEvent {
     pub timestamp_ns: u64,
     pub task_id: TaskId,
     pub callchain: InternedStackFrames,
+    /// Probability used before capture; shared by all callchains in this group.
+    pub inclusion_probability: f64,
 }
 
 /// Wire-format event for a wake notification.

@@ -194,18 +194,14 @@ describe("demo-trace anchors (#593 measurements)", () => {
   // and confirm the old anchors still reproduce. Then sanity-check the
   // new values before copying: poll/tokio should dominate, spawn should
   // stay tiny, and shifts should be explainable by the capture.
-  // Re-measured after the Tokio 1.53 task-dump demo regen. The old anchors
-  // reproduce exactly against origin/main's trace, ruling out a search
-  // regression. The refreshed capture has 164 worker CPU samples (up from
-  // 145); the matching frame counts and inclusive-area shares below reflect
-  // its changed workload.
+  // Capture-sampling demo: 104 worker CPU samples.
   const ANCHORS: Array<[string, number, string]> = [
-    ["poll", 124, "49.4"],
-    ["tokio", 136, "49.4"],
-    ["axum", 14, "40.2"],
-    ["dispatcher", 25, "39.0"],
-    ["framebuf", 5, "7.9"],
-    ["spawn", 2, "49.4"],
+    ["poll", 143, "100.0"],
+    ["tokio", 180, "100.0"],
+    ["axum", 29, "85.6"],
+    ["dispatcher", 33, "78.8"],
+    ["framebuf", 7, "14.4"],
+    ["spawn", 2, "100.0"],
   ];
 
   for (const [query, frames, expected] of ANCHORS) {

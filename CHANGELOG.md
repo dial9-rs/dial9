@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Task dumps now sample before capture (`DIAL9_TASK_DUMP_PER_WORKER_HZ`, default: 10).
+  Deprecated `idle_threshold` and `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` now mean
+  a per-worker capture interval, rather than cumulative idle time per task.
+
 ## [0.5.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0...dial9-v0.5.1) - 2026-09-17
 
 ### Added

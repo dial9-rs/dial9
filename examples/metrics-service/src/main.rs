@@ -250,7 +250,7 @@ fn main() -> std::io::Result<()> {
 
     let task_dumps = (!args.no_task_dumps).then(|| {
         TaskDumpConfig::builder()
-            .idle_threshold(Duration::from_millis(5))
+            .captures_per_second_per_worker(200)
             .build()
     });
 
