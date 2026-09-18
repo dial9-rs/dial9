@@ -137,9 +137,7 @@ impl Source for PanickingSource {
 crate::shuttle_test! {
     num_iters = 10_000, depth = 3;
     fn test_core_pipeline() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
@@ -212,9 +210,7 @@ crate::shuttle_test! {
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     fn test_source_panic_does_not_wedge_pipeline() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(|b| {
@@ -293,9 +289,7 @@ impl Source for HealthyMetadataSource {
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     fn test_source_panic_during_segment_metadata_skips_only_that_source() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(|b| {
             b.source(PanickingMetadataSource { name: "panicking_a" })
@@ -349,9 +343,7 @@ crate::shuttle_test! {
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     fn test_source_panic_does_not_lose_tl_buffer_write() {
-        let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+        let _ts_guard = crate::test_support::pin_fixed_clock();
 
         let (mut recorder, fs) =
             crate::test_support::start_shuttle_memory_recorder(|b| b.source(PanickingSource));
@@ -433,9 +425,7 @@ impl tracing::Subscriber for CountingSubscriber {
 /// Drive the pipeline with the fs armed to `fault`, returning the
 /// number of WARN/ERROR events the flush loop emitted.
 fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
-    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-    ));
+    let _ts_guard = crate::test_support::pin_fixed_clock();
 
     let warn_count = StdArc::new(StdAtomicU64::new(0));
     let subscriber = CountingSubscriber {
