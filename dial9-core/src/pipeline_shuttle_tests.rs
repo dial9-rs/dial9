@@ -115,9 +115,31 @@ impl Source for MockSource {
     fn name(&self) -> &'static str {
         "mock"
     }
+}
 
-    // TODO: exercise on_worker_thread_start/on_thread_stop once shuttle
-    // tests include a Tokio runtime.
+/// Records every `on_thread_start`/`on_thread_stop` call, so a scenario can
+/// assert both fired for a thread tracked via `Dial9Handle::track_current_thread`
+/// (the non-Tokio path to these hooks; the other path needs a real Tokio
+/// worker's first poll, which shuttle has no way to provide).
+struct ThreadLifecycleSource {
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Source for ThreadLifecycleSource {
+    fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+
+    fn name(&self) -> &'static str {
+        "thread_lifecycle"
+    }
+
+    fn on_thread_start(&mut self) -> std::io::Result<()> {
+        self.log.lock().unwrap().push("start");
+        Ok(())
+    }
+
+    fn on_thread_stop(&mut self) {
+        self.log.lock().unwrap().push("stop");
+    }
 }
 
 /// A Source whose `flush` always panics. Used to check whether the flush
@@ -211,6 +233,38 @@ crate::shuttle_test! {
         // Run all invariants.
         check_all_events_present(&expected, &all_decoded);
         check_timestamps_roundtrip(&expected, &all_decoded);
+    }
+}
+
+crate::shuttle_test! {
+    default, determinism_only;
+    // No pct: a single tracked thread, nothing to interleave against.
+    fn test_track_current_thread_fires_lifecycle_hooks() {
+        let writer = MemoryBuffer::builder()
+            .max_total_size(1 << 20)
+            .max_segment_size(4096)
+            .build()
+            .unwrap();
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        shared.push_source(Box::new(ThreadLifecycleSource { log: log.clone() }));
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
+
+        let tracked = crate::primitives::thread::spawn(move || {
+            let _guard = handle.track_current_thread().expect("tracking must succeed");
+        });
+        tracked.join().unwrap();
+
+        recorder.stop_flush_thread();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["start", "stop"],
+            "track_current_thread must fire on_thread_start immediately and \
+             on_thread_stop when the guard drops"
+        );
     }
 }
 
