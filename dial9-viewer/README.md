@@ -66,11 +66,33 @@ dependency graph:
 dial9-viewer = { version = "0.5", default-features = false }
 ```
 
-Without `s3`, construct `ViewerConfig` with `local_dir` or `agg_source_dir`.
-S3-backed configuration (`bucket`, `agg`, and `agg_output_bucket`) is rejected,
-and S3-specific APIs such as `storage::S3Backend`,
-`server::AppState::from_bucket`, and the credential types under
-`server::credentials` require the `s3` feature.
+Without `s3`, construct `ViewerConfig` with `local_dir` or `agg_source_dir`, or
+supply your own backend (below). S3-backed configuration (`bucket`, `agg`, and
+`agg_output_bucket`) is rejected, and S3-specific APIs such as
+`storage::S3Backend`, `server::AppState::from_bucket`, and the credential types
+under `server::credentials` require the `s3` feature.
+
+## Custom storage backends
+
+To serve traces from a store neither backend covers (Google Cloud Storage,
+Azure Blob, in-house solution, ...) implement `storage::StorageBackend` and hand
+it to `build_app_with_backend`:
+
+```rust,ignore
+let app = dial9_viewer::build_app_with_backend(
+    dial9_viewer::ViewerConfig {
+        bucket: Some("my-trace-bucket".to_string()),
+        ..Default::default()
+    },
+    std::sync::Arc::new(MyBackend::new()),
+)
+.await?;
+```
+
+The backend is the source for browsing, and for on-demand aggregation when
+`agg` is set. Aggregate output is unaffected, so writes never reach the source.
+Bring-your-own credentials and assume-role stay off, since both are S3
+concepts. This path needs no `s3` feature.
 
 ## `trace-shape` — Trace Structural Fingerprints
 

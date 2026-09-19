@@ -144,7 +144,51 @@ pub fn init_tracing(local: bool) {
 ///   - **per-request metrics** — attach a sink with [`attach_request_metrics`]
 ///     (the standard EMF/local sink) or supply your own metrique sink, and hold
 ///     the returned handle for the life of the server.
-pub async fn build_app(
+pub async fn build_app(config: ViewerConfig) -> anyhow::Result<axum::Router> {
+    build_app_from(config, None).await
+}
+
+/// [`build_app`] over a storage backend you supply, for an object store the
+/// built-in backends do not cover (Google Cloud Storage, Azure Blob,
+/// in-house solution, ...). Everything else about the assembled app
+/// is identical.
+///
+/// The backend is the source for browsing, and for demand-driven aggregation
+/// when [`ViewerConfig::agg`] is set; `bucket` names the container it lists and
+/// `prefix` scopes it. Aggregate *output* is unchanged — the configured
+/// `agg_output_bucket`, or a process-local temporary directory — so writes
+/// never go back to the source.
+///
+/// The request paths that are S3 by construction stay off: bring-your-own
+/// credentials and the assume-role flow mean nothing for another store.
+///
+/// `local_dir` and `agg_source_dir` select the built-in local backend, so
+/// combining either with a supplied backend is an error rather than a silent
+/// precedence rule.
+///
+/// ```no_run
+/// # async fn example(backend: std::sync::Arc<dyn dial9_viewer::storage::StorageBackend>)
+/// # -> anyhow::Result<()> {
+/// let app = dial9_viewer::build_app_with_backend(
+///     dial9_viewer::ViewerConfig {
+///         bucket: Some("my-trace-bucket".to_string()),
+///         ..Default::default()
+///     },
+///     backend,
+/// )
+/// .await?;
+/// # let _ = app;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn build_app_with_backend(
+    config: ViewerConfig,
+    backend: std::sync::Arc<dyn storage::StorageBackend>,
+) -> anyhow::Result<axum::Router> {
+    build_app_from(config, Some(backend)).await
+}
+
+async fn build_app_from(
     ViewerConfig {
         bucket,
         prefix,
@@ -158,14 +202,27 @@ pub async fn build_app(
         agg_segment_secs,
         enable_upload,
     }: ViewerConfig,
+    supplied_backend: Option<std::sync::Arc<dyn storage::StorageBackend>>,
 ) -> anyhow::Result<axum::Router> {
-    s3::validate_config(
-        bucket.as_deref(),
-        agg,
-        agg_output_bucket.as_deref(),
-        local_dir.as_deref(),
-        agg_source_dir.as_deref(),
-    )?;
+    match &supplied_backend {
+        // A supplied backend answers for the source, so the built-in source
+        // selection — and the S3-feature checks that police it — do not apply.
+        Some(_) => {
+            if local_dir.is_some() || agg_source_dir.is_some() {
+                anyhow::bail!(
+                    "a supplied storage backend and `local_dir`/`agg_source_dir` both name \
+                     the source; pass one or the other"
+                );
+            }
+        }
+        None => s3::validate_config(
+            bucket.as_deref(),
+            agg,
+            agg_output_bucket.as_deref(),
+            local_dir.as_deref(),
+            agg_source_dir.as_deref(),
+        )?,
+    }
 
     // Build one aggregate-output destination shared by the configured
     // aggregation context and all BYOC requests. An explicit output bucket
@@ -178,11 +235,38 @@ pub async fn build_app(
         "aggregate output destination (writes go here, never the source)"
     );
 
-    // Build the demand-driven aggregation context if requested. Two sources:
+    // Build the demand-driven aggregation context if requested. Three sources:
+    //   - a supplied backend: source is that backend over `bucket`/`prefix`.
     //   - `agg_source_dir` (local): source + output are LocalBackends.
     //   - `agg` + `bucket` (S3): source is the served bucket/prefix; output is
     //     the configured S3 bucket or a process-local temporary directory.
-    let agg = if let Some(src_dir) = &agg_source_dir {
+    let agg = if let Some(backend) = &supplied_backend {
+        if agg {
+            let Some(source_bucket) = bucket.as_deref() else {
+                anyhow::bail!("`agg` over a supplied storage backend requires `bucket`");
+            };
+            tracing::info!(
+                %source_bucket,
+                output = %agg_output.location(),
+                "demand-driven aggregation enabled (supplied backend)"
+            );
+            Some(AggContext {
+                source: std::sync::Arc::clone(backend),
+                output: agg_output.backend(),
+                output_bucket: agg_output.output_bucket_for(source_bucket),
+                source_bucket: source_bucket.to_string(),
+                // Not the local filesystem, so segment keys stay fully
+                // qualified, as they are for S3 and the simulator.
+                source_is_local: false,
+                output_prefix: agg_output.prefix().to_string(),
+                // The served `prefix` (if any) scopes the raw-segment listing.
+                source_prefixes: vec![prefix.clone().unwrap_or_default()],
+                segment_duration_secs: agg_segment_secs,
+            })
+        } else {
+            None
+        }
+    } else if let Some(src_dir) = &agg_source_dir {
         let src_dir = std::fs::canonicalize(src_dir)?;
         let out_dir = agg_output_dir.unwrap_or_else(|| src_dir.join("flamegraph-data"));
         std::fs::create_dir_all(&out_dir)?;
@@ -225,8 +309,9 @@ pub async fn build_app(
         // same source backend, and `/api/flamegraph` runs the refinement loop.
         // The browse default bucket is the agg source bucket ("local" for a
         // local source, the real bucket for S3). An S3 source supports BYO
-        // credentials; a local-directory source does not.
-        let source_is_s3 = !agg.source_is_local;
+        // credentials; a local-directory source does not, and neither does a
+        // supplied backend — its store is not S3 whatever it addresses.
+        let source_is_s3 = !agg.source_is_local && supplied_backend.is_none();
         let state = server::AppState::new(
             std::sync::Arc::clone(&agg.source),
             Some(agg.source_bucket.clone()),
@@ -234,6 +319,14 @@ pub async fn build_app(
         )
         .with_agg(agg.clone());
         (state, source_is_s3)
+    } else if let Some(backend) = &supplied_backend {
+        tracing::info!(?bucket, "serving traces from a supplied storage backend");
+        let state = server::AppState::new(
+            std::sync::Arc::clone(backend),
+            bucket.clone(),
+            prefix.clone(),
+        );
+        (state, false)
     } else if let Some(dir) = &local_dir {
         let dir = std::fs::canonicalize(dir)?;
         tracing::info!(path = %dir.display(), "serving traces from local directory");
@@ -284,6 +377,76 @@ pub async fn shutdown_signal() {
         .await
         .expect("failed to install CTRL+C handler");
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod supplied_backend_tests {
+    use super::{ViewerConfig, build_app_with_backend, storage};
+    use std::sync::Arc;
+
+    fn backend(dir: &std::path::Path) -> Arc<dyn storage::StorageBackend> {
+        Arc::new(storage::LocalBackend::new(dir))
+    }
+
+    /// The supplied backend is the source, so neither a bucket nor a local
+    /// directory is needed — and on a build without the `s3` feature, the
+    /// source checks that would otherwise reject this must not run.
+    #[tokio::test]
+    async fn builds_without_bucket_or_local_dir() {
+        let traces = tempfile::tempdir().unwrap();
+        let app = build_app_with_backend(ViewerConfig::default(), backend(traces.path())).await;
+        assert!(app.is_ok(), "{:?}", app.err());
+    }
+
+    #[tokio::test]
+    async fn builds_with_aggregation_over_the_supplied_backend() {
+        let traces = tempfile::tempdir().unwrap();
+        let app = build_app_with_backend(
+            ViewerConfig {
+                bucket: Some("traces".to_string()),
+                agg: true,
+                ..ViewerConfig::default()
+            },
+            backend(traces.path()),
+        )
+        .await;
+        assert!(app.is_ok(), "{:?}", app.err());
+    }
+
+    #[tokio::test]
+    async fn aggregation_needs_a_bucket_to_list() {
+        let traces = tempfile::tempdir().unwrap();
+        let error = build_app_with_backend(
+            ViewerConfig {
+                agg: true,
+                ..ViewerConfig::default()
+            },
+            backend(traces.path()),
+        )
+        .await
+        .expect_err("aggregation without a bucket should not build");
+        assert!(error.to_string().contains("requires `bucket`"), "{error}");
+    }
+
+    /// Two sources with no ordering between them is a caller mistake worth
+    /// reporting rather than resolving.
+    #[tokio::test]
+    async fn rejects_a_second_source() {
+        let traces = tempfile::tempdir().unwrap();
+        let error = build_app_with_backend(
+            ViewerConfig {
+                local_dir: Some(traces.path().to_path_buf()),
+                ..ViewerConfig::default()
+            },
+            backend(traces.path()),
+        )
+        .await
+        .expect_err("a supplied backend plus local_dir should not build");
+        assert!(
+            error.to_string().contains("pass one or the other"),
+            "{error}"
+        );
+    }
 }
 
 #[cfg(all(test, not(feature = "s3")))]
