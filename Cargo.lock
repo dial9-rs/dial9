@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "arrow",

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.1...dial9-v0.5.2) - 2026-09-19
+
+### Added
+
+- *(viewer)* build_app_with_backend for custom stores ([#933](https://github.com/dial9-rs/dial9/pull/933))
+
 ## [0.5.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0...dial9-v0.5.1) - 2026-09-17
 
 ### Added
