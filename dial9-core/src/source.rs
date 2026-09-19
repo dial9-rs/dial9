@@ -58,7 +58,18 @@ impl<'a> FlushContext<'a> {
 /// the source with [`RecorderBuilder::source`] before starting the flush
 /// thread; the flush thread calls [`flush`] once per cycle.
 ///
+/// # Panic safety
+///
+/// The flush thread catches panics from [`flush`](Self::flush) and
+/// [`segment_metadata`](Self::segment_metadata) so one source's panic can't
+/// poison the flush thread or skip sibling sources' turns. The same instance
+/// is reused next cycle, so implementations **must** remain valid after a
+/// panic. [`segment_metadata`] fully discards this cycle's metadata on
+/// panic; [`flush`] does not. Events already recorded before the panic
+/// point still reach the trace.
+///
 /// [`flush`]: Source::flush
+/// [`segment_metadata`]: Source::segment_metadata
 /// [`RecorderBuilder::source`]: crate::recorder::RecorderBuilder::source
 pub trait Source: Any + Send {
     /// Drain pending data into the trace. Called once per flush cycle.
@@ -101,6 +112,54 @@ pub trait Source: Any + Send {
     fn segment_processor(&mut self) -> Option<Box<dyn crate::pipeline::SegmentProcessor>> {
         None
     }
+}
+
+/// Which per-cycle `Source` call [`catch_source_panic`] is guarding, for the
+/// warning message on panic.
+pub(crate) enum SourceCall {
+    Flush,
+    SegmentMetadata,
+}
+
+/// Runs a per-cycle `Source` call, catching a panic so a broken source can't
+/// poison the flush thread or skip sibling sources' turns. Warns (rate-
+/// limited per source name) on panic; returns whether it panicked.
+///
+/// Takes `source` itself (rather than a pre-fetched name) so `name()` is
+/// only called when it's actually needed, on the panic branch.
+pub(crate) fn catch_source_panic(
+    source: &mut dyn Source,
+    call: SourceCall,
+    f: impl FnOnce(&mut dyn Source),
+) -> bool {
+    let panicked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *source))).is_err();
+    if panicked {
+        let name = source.name();
+        // Each arm is its own rate-limit bucket (a separate `rate_limited!`
+        // call site). A source panicking in both flush and
+        // segment_metadata should warn about both, not have one suppress
+        // the other.
+        match call {
+            SourceCall::Flush => {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), key = name, {
+                    tracing::warn!(
+                        source = name,
+                        "source panicked during flush; remaining events for this cycle skipped"
+                    );
+                })
+            }
+            SourceCall::SegmentMetadata => {
+                crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), key = name, {
+                    tracing::warn!(
+                        source = name,
+                        "source panicked during segment_metadata; metadata skipped"
+                    );
+                })
+            }
+        }
+    }
+    panicked
 }
 
 /// Collect current segment metadata from every source by calling the

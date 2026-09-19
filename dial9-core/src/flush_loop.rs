@@ -142,7 +142,18 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         {
             let mut sources = shared.sources.lock().unwrap();
             for source in sources.iter_mut() {
-                source.segment_metadata(&mut source_entries);
+                // Truncate back to the pre-call length on panic so a partial
+                // push from the panicking source doesn't leave stray entries
+                // in this cycle's metadata.
+                let before = source_entries.len();
+                let panicked = crate::source::catch_source_panic(
+                    source.as_mut(),
+                    crate::source::SourceCall::SegmentMetadata,
+                    |source| source.segment_metadata(&mut source_entries),
+                );
+                if panicked {
+                    source_entries.truncate(before);
+                }
             }
         }
         if !source_entries.is_empty() {
