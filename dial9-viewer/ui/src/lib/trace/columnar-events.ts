@@ -17,6 +17,8 @@
 // customEvents stay fat: they are used as WeakMap keys and spread via
 // Object.entries(fields), so they can't share this representation.
 
+import { allocColumn, resizeColumns } from "./resizable-column.js";
+
 /** Event-type discriminants, mirroring the frozen core's EVENT_TYPES. */
 export const EVT = {
   PollStart: 0,
@@ -121,18 +123,18 @@ export class ColumnarEvents {
 
   constructor(cap = INITIAL_CAP) {
     this._cap = cap;
-    this.eventType = new Uint8Array(cap);
-    this.ts = new Float64Array(cap);
-    this.workerId = new Int32Array(cap);
-    this.localQueue = new Uint8Array(cap);
-    this.globalQueue = new Int32Array(cap);
-    this.cpuTime = new Float64Array(cap);
-    this.schedWaitRaw = new Float64Array(cap);
-    this.taskIdx = new Int32Array(cap);
-    this.spawnLocIdx = new Int32Array(cap);
-    this.tidRaw = new Uint32Array(cap);
-    this.wakerTaskIdx = new Int32Array(cap);
-    this.wokenTaskIdx = new Int32Array(cap);
+    this.eventType = allocColumn(Uint8Array, cap);
+    this.ts = allocColumn(Float64Array, cap);
+    this.workerId = allocColumn(Int32Array, cap);
+    this.localQueue = allocColumn(Uint8Array, cap);
+    this.globalQueue = allocColumn(Int32Array, cap);
+    this.cpuTime = allocColumn(Float64Array, cap);
+    this.schedWaitRaw = allocColumn(Float64Array, cap);
+    this.taskIdx = allocColumn(Int32Array, cap);
+    this.spawnLocIdx = allocColumn(Int32Array, cap);
+    this.tidRaw = allocColumn(Uint32Array, cap);
+    this.wakerTaskIdx = allocColumn(Int32Array, cap);
+    this.wokenTaskIdx = allocColumn(Int32Array, cap);
     this.view = new ReusedEventCursor(this);
   }
 
@@ -164,6 +166,28 @@ export class ColumnarEvents {
 
   private grow(): void {
     const n = this._cap * 2;
+    if (
+      resizeColumns(
+        [
+          this.eventType,
+          this.ts,
+          this.workerId,
+          this.localQueue,
+          this.globalQueue,
+          this.cpuTime,
+          this.schedWaitRaw,
+          this.taskIdx,
+          this.spawnLocIdx,
+          this.tidRaw,
+          this.wakerTaskIdx,
+          this.wokenTaskIdx,
+        ],
+        n,
+      )
+    ) {
+      this._cap = n;
+      return;
+    }
     const g = <T extends { set(a: ArrayLike<number>): void }>(
       old: ArrayLike<number>,
       Ctor: new (len: number) => T

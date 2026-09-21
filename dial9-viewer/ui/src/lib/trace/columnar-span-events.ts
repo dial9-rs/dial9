@@ -14,6 +14,12 @@
 import type { DecodedFieldValue } from "../../../decode.js";
 
 /** Span-event kind, replacing the frozen buildSpanData name classification. */
+import {
+  MAX_RESIZABLE_ELEMENTS,
+  allocColumn,
+  resizeColumns,
+} from "./resizable-column.js";
+
 export const SPAN_KIND = { Enter: 0, Exit: 1, Close: 2, Complete: 3 } as const;
 
 const TOKIO_TASK_ID_FIELD = "dial9.tokio.task_id";
@@ -152,26 +158,26 @@ export class ColumnarSpanEvents {
 
   constructor(cap = INITIAL_CAP) {
     this._cap = cap;
-    this.kind = new Uint8Array(cap);
-    this.ts = new Float64Array(cap);
-    this.workerId = new Float64Array(cap);
-    this.taskId = new Float64Array(cap);
-    this.spanIdIdx = new Int32Array(cap);
-    this.parentIdx = new Int32Array(cap);
-    this.spanNameIdx = new Int32Array(cap);
-    this.completeIdx = new Int32Array(cap);
+    this.kind = allocColumn(Uint8Array, cap);
+    this.ts = allocColumn(Float64Array, cap);
+    this.workerId = allocColumn(Float64Array, cap);
+    this.taskId = allocColumn(Float64Array, cap);
+    this.spanIdIdx = allocColumn(Int32Array, cap);
+    this.parentIdx = allocColumn(Int32Array, cap);
+    this.spanNameIdx = allocColumn(Int32Array, cap);
+    this.completeIdx = allocColumn(Int32Array, cap);
     this.completeIdx.fill(-1);
-    this.completeStart = new Float64Array(this.completeCap);
-    this.completeEnd = new Float64Array(this.completeCap);
-    this.completeThreadId = new Float64Array(this.completeCap);
-    this.completeTaskId = new Float64Array(this.completeCap);
-    this.completeWorkerId = new Float64Array(this.completeCap);
-    this.completeTypeIdx = new Int32Array(this.completeCap);
-    this.extraOff = new Int32Array(cap + 1);
+    this.completeStart = allocColumn(Float64Array, this.completeCap);
+    this.completeEnd = allocColumn(Float64Array, this.completeCap);
+    this.completeThreadId = allocColumn(Float64Array, this.completeCap);
+    this.completeTaskId = allocColumn(Float64Array, this.completeCap);
+    this.completeWorkerId = allocColumn(Float64Array, this.completeCap);
+    this.completeTypeIdx = allocColumn(Int32Array, this.completeCap);
+    this.extraOff = allocColumn(Int32Array, cap + 1);
     this._extraCap = cap;
-    this.extraKeyId = new Int32Array(cap);
-    this.extraValId = new Int32Array(cap);
-    this.extraUnitId = new Int32Array(cap);
+    this.extraKeyId = allocColumn(Int32Array, cap);
+    this.extraValId = allocColumn(Int32Array, cap);
+    this.extraUnitId = allocColumn(Int32Array, cap);
     this.extraUnitId.fill(-1);
   }
 
@@ -201,6 +207,11 @@ export class ColumnarSpanEvents {
   }
   private growExtra(): void {
     const n = this._extraCap * 2;
+    if (resizeColumns([this.extraKeyId, this.extraValId, this.extraUnitId], n)) {
+      this.extraUnitId.fill(-1, this._extraCap);
+      this._extraCap = n;
+      return;
+    }
     const gk = new Int32Array(n); gk.set(this.extraKeyId); this.extraKeyId = gk;
     const gv = new Int32Array(n); gv.set(this.extraValId); this.extraValId = gv;
     const gu = new Int32Array(n); gu.fill(-1); gu.set(this.extraUnitId); this.extraUnitId = gu;
@@ -209,6 +220,22 @@ export class ColumnarSpanEvents {
 
   private growComplete(): void {
     const n = this.completeCap * 2;
+    if (
+      resizeColumns(
+        [
+          this.completeStart,
+          this.completeEnd,
+          this.completeThreadId,
+          this.completeTaskId,
+          this.completeWorkerId,
+          this.completeTypeIdx,
+        ],
+        n,
+      )
+    ) {
+      this.completeCap = n;
+      return;
+    }
     const start = new Float64Array(n);
     start.set(this.completeStart);
     this.completeStart = start;
@@ -311,6 +338,29 @@ export class ColumnarSpanEvents {
 
   private grow(): void {
     const n = this._cap * 2;
+    // extraOff carries one extra slot, so stop one doubling short of the
+    // ceiling and both resizes stay inside it.
+    if (
+      n < MAX_RESIZABLE_ELEMENTS &&
+      resizeColumns(
+        [
+          this.kind,
+          this.ts,
+          this.workerId,
+          this.taskId,
+          this.spanIdIdx,
+          this.parentIdx,
+          this.spanNameIdx,
+          this.completeIdx,
+        ],
+        n,
+      ) &&
+      resizeColumns([this.extraOff], n + 1)
+    ) {
+      this.completeIdx.fill(-1, this._cap);
+      this._cap = n;
+      return;
+    }
     const g = <T extends { set(a: ArrayLike<number>): void }>(
       old: ArrayLike<number>,
       Ctor: new (len: number) => T
