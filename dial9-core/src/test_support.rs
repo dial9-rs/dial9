@@ -3,6 +3,7 @@
 //! Distinct from `test_util`, which is `pub` under the `test-util` feature
 //! for sibling-crate tests; this module is crate-internal and feature-free,
 //! so it's always available wherever `#[cfg(test)]` is.
+#![cfg(test)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
