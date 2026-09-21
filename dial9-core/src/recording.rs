@@ -296,7 +296,7 @@ mod tests {
     use crate::buffer::{DiskBuffer, MemoryBuffer};
     use crate::recorder::recorder;
     use crate::source::{FlushContext, Source};
-    use crate::test_support::{decode_segment_metadata, sealed_segment};
+    use crate::test_support::{SOLE_RECORDER_LOCK, decode_segment_metadata, sealed_segment};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
@@ -442,6 +442,7 @@ mod tests {
     /// runs as it would for any clean stop.
     #[test]
     fn source_panic_does_not_skip_thread_teardown() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let teardown_ran = Arc::new(AtomicBool::new(false));
         let teardown_ran_for_thread = teardown_ran.clone();
 
@@ -484,6 +485,7 @@ mod tests {
     /// `source_entries` back to its pre-call length.
     #[test]
     fn source_panic_during_segment_metadata_skips_only_that_source() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
@@ -528,6 +530,7 @@ mod tests {
     /// through their shared `flush_sources` call site.
     #[test]
     fn distinct_panicking_flush_sources_are_each_warned_about() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let warned_sources = Arc::new(Mutex::new(Vec::new()));
         let subscriber_source = warned_sources.clone();
 
@@ -591,6 +594,7 @@ mod tests {
     /// for the `segment_metadata` call site.
     #[test]
     fn distinct_panicking_metadata_sources_are_each_warned_about() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let warned_sources = Arc::new(Mutex::new(Vec::new()));
         let subscriber_source = warned_sources.clone();
 

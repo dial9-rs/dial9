@@ -493,7 +493,7 @@ mod tests {
     use super::*;
     use crate::buffer::{DiskBuffer, MemoryBuffer};
     use crate::source::FlushContext;
-    use crate::test_support::sealed_segment;
+    use crate::test_support::{SOLE_RECORDER_LOCK, sealed_segment};
     use dial9_trace_format::TraceEvent;
     use dial9_trace_format::decoder::Decoder;
     use std::time::Duration;
@@ -544,6 +544,7 @@ mod tests {
     /// runtime. The final flush on `graceful_shutdown` runs the source.
     #[test]
     fn records_source_events_to_disk() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
@@ -566,6 +567,7 @@ mod tests {
     /// `build()` starts recording.
     #[test]
     fn build_starts_recording() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let recorder = recorder(writer).build();
         assert!(
@@ -577,6 +579,7 @@ mod tests {
     /// `paused()` builds a live recorder that is not yet recording.
     #[test]
     fn paused_build_waits_for_enable() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let recorder = recorder(writer).paused().build();
         assert!(
@@ -607,6 +610,7 @@ mod tests {
     /// starts — at `build()`, or at `enable()` when the build was paused.
     #[test]
     fn on_recording_start_runs_once_when_recording_starts() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -644,6 +648,7 @@ mod tests {
     #[cfg(feature = "pipeline")]
     #[test]
     fn pipe_runs_the_background_worker() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
         use std::future::Future;
         use std::pin::Pin;
@@ -712,6 +717,7 @@ mod tests {
     #[cfg(feature = "pipeline")]
     #[test]
     fn source_stage_joins_the_default_pipeline() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
         use std::future::Future;
         use std::pin::Pin;
@@ -773,6 +779,7 @@ mod tests {
     #[cfg(feature = "pipeline")]
     #[test]
     fn default_pipeline_is_empty_without_stages() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
@@ -802,6 +809,7 @@ mod tests {
     #[cfg(feature = "pipeline")]
     #[test]
     fn terminal_processor_replaces_write_back() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
         use std::future::Future;
         use std::pin::Pin;
@@ -849,6 +857,7 @@ mod tests {
 
     #[test]
     fn recording_thread_hook_runs_on_dial9_threads() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -892,9 +901,11 @@ mod tests {
 mod single_recorder_tests {
     use super::*;
     use crate::buffer::MemoryBuffer;
+    use crate::test_support::SOLE_RECORDER_LOCK;
 
     #[test]
     fn a_second_recorder_in_the_process_is_refused() {
+        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let first = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
         assert!(first.handle().is_connected(), "the first one records");
 
