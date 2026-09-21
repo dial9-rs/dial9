@@ -144,7 +144,9 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
             for source in sources.iter_mut() {
                 // Truncate back to the pre-call length on panic so a partial
                 // push from the panicking source doesn't leave stray entries
-                // in this cycle's metadata.
+                // in this cycle's metadata, then record that it panicked so
+                // the absence of its usual entries is explained in the trace
+                // itself, not only in the (rate-limited) warning log.
                 let before = source_entries.len();
                 let panicked = crate::source::catch_source_panic(
                     source.as_mut(),
@@ -153,6 +155,10 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 );
                 if panicked {
                     source_entries.truncate(before);
+                    source_entries.push((
+                        format!("dial9.source.{}.panicked", source.name()),
+                        "true".to_string(),
+                    ));
                 }
             }
         }

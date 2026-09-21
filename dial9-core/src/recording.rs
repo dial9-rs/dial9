@@ -458,6 +458,13 @@ mod tests {
             !entries.contains_key("panicking_metadata.partial"),
             "a panicking source's partial push must not survive in the cycle's metadata"
         );
+        assert_eq!(
+            entries
+                .get("dial9.source.panicking_metadata.panicked")
+                .map(String::as_str),
+            Some("true"),
+            "the trace itself should record which source panicked, not just a log line"
+        );
     }
 
     /// Two distinct sources panicking during `flush` in the same cycle must
