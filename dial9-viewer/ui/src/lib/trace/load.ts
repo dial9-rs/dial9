@@ -15,6 +15,7 @@
 // else establishes `globalThis.TraceDecoder`; without this the first parse
 // throws "TraceDecoder not found".
 import "./core-globals.js";
+import { warmDerived } from "./derived.js";
 import { ColumnarEvents, capacityForBytes } from "./columnar-events.js";
 import { ColumnarCpuSamples } from "./columnar-cpu-samples.js";
 import { ColumnarTaskDumps } from "./columnar-task-dumps.js";
@@ -487,7 +488,7 @@ export function loadTraceOnMainThread(
   perf.mark("start");
 
   const emit = (
-    phase: "fetching" | "parsing",
+    phase: "fetching" | "parsing" | "analyzing",
     bytesRead: number,
     totalBytes: number | null
   ): void => {
@@ -563,37 +564,66 @@ export function loadTraceOnMainThread(
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
       trace.spanEvents = spanEventSink;
-      settle(() => {
+      const hasRaf = typeof requestAnimationFrame === "function";
+      // How warmDerived hands the frame back. rAF means the page paints the
+      // new label before the next slice runs; without it (tests, headless) a
+      // resolved promise still breaks the call stack.
+      const nextFrame = (): Promise<void> =>
+        hasRaf
+          ? new Promise<void>((resolve) => {
+              requestAnimationFrame(() => {
+                resolve();
+              });
+            })
+          : Promise.resolve();
+      const commit = (): void => {
         store.update("trace", { trace });
         perf.mark("store-updated");
         // The store arms its flush rAF inside update() above, so this callback
-        // is registered AFTER it and runs once the first render pass over the
-        // new trace has completed. That pass is where every consumer's
-        // post-parse derivation lands, which is what "derive" measures.
-        const report = (): void =>
+        // is registered AFTER it and runs once the first render over the new
+        // trace has completed - a render against warm caches.
+        const finish = (): void => {
           perf.finish({
             mode,
             urlCount: list.length,
             events: trace.events.length,
             bytes,
           });
-        if (typeof requestAnimationFrame === "function") {
+          const timing: TraceWorkerTiming = {
+            startMs,
+            fetchDoneMs,
+            parseDoneMs: performance.now(),
+            mode,
+            events: trace.events.length,
+            bytes,
+          };
+          // The page closes its loading view when this resolves, so it waits
+          // for the first render over the new trace.
+          resolveDone({ trace, bytes, mode, timing });
+        };
+        if (hasRaf) {
           requestAnimationFrame(() => {
             perf.mark("first-paint");
-            report();
+            finish();
           });
         } else {
-          report(); // No rAF (tests / headless): report without the derive span.
+          finish(); // No rAF (tests / headless): no derive span to wait for.
         }
-        const timing: TraceWorkerTiming = {
-          startMs,
-          fetchDoneMs,
-          parseDoneMs: performance.now(),
-          mode,
-          events: trace.events.length,
-          bytes,
-        };
-        resolveDone({ trace, bytes, mode, timing });
+      };
+
+      settle(() => {
+        // Derivation runs here, in slices, so the page can report where it is
+        // and the trace lands on the store with its caches already warm. Left
+        // to the first render it is one block, seconds long on a large trace,
+        // with no paint and no timer tick.
+        emit("analyzing", 0, 1);
+        void warmDerived(
+          trace,
+          (fraction) => {
+            emit("analyzing", fraction, 1);
+          },
+          nextFrame,
+        ).then(commit, commit); // A failed warm still commits: the lazy path redoes it.
       });
     })
     .catch((err: unknown) => {

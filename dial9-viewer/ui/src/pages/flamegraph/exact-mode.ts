@@ -75,7 +75,10 @@ export async function runExactMode(
   // Loading label: the worker picks stream vs buffered itself with the same
   // canStreamDecode rule, so the main-thread answer sets the initial label;
   // progress messages keep it accurate afterwards.
-  const setLoadLabel = (mode: "stream" | "buffered", phase: "fetching" | "parsing"): void => {
+  const setLoadLabel = (
+    mode: "stream" | "buffered",
+    phase: "fetching" | "parsing" | "analyzing",
+  ): void => {
     els.loadingEl.textContent = loadingLabel(mode, phase, rawTraceUrls.length);
   };
   setLoadLabel(canStreamDecode() ? "stream" : "buffered", "fetching");

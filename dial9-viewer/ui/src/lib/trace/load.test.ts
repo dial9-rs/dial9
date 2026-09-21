@@ -197,6 +197,38 @@ describe("loadTraceOnMainThread", () => {
     expect(result.bytes).toBe(rawTrace.length);
   });
 
+  // The page can only report analysis progress while nothing else is rendering
+  // the new trace, so the store write has to wait for the last slice.
+  it("finishes analyzing before it writes the store", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const log: string[] = [];
+    const store = {
+      updates: [] as { trace: ParsedTrace }[],
+      update(_slice: "trace", patch: { trace: ParsedTrace }): void {
+        log.push("store");
+        store.updates.push(patch);
+      },
+    };
+    const fractions: number[] = [];
+    const result = await loadTraceOnMainThread(store, ["/t.bin"], {
+      onProgress: (p): void => {
+        if (p.phase !== "analyzing") return;
+        fractions.push(p.bytesRead);
+        log.push("analyze");
+      },
+    }).done;
+
+    expect(log.at(-1)).toBe("store");
+    expect(log.filter((e) => e === "store")).toHaveLength(1);
+    expect(fractions.at(0)).toBe(0);
+    expect(fractions.at(-1)).toBe(1);
+    // Non-decreasing, so the label never walks backwards.
+    for (let i = 1; i < fractions.length; i++) {
+      expect(fractions[i]!).toBeGreaterThanOrEqual(fractions[i - 1]!);
+    }
+    expect(result.trace).toBe(store.updates[0]!.trace);
+  });
+
   it("forwards parse progress with a growing event count", async () => {
     installFetchMock({ "/t.bin": gzTrace });
     const store = fakeStore();

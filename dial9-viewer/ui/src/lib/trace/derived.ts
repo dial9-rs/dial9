@@ -22,7 +22,10 @@ import type { SpanData } from "./index.js";
 import { ColumnarEvents } from "./columnar-events.js";
 import { WakeIndex } from "./wake-index.js";
 import { QueueSampleIndex } from "./queue-samples.js";
-import { buildWorkerSpansColumnarStore } from "./worker-spans-columnar.js";
+import {
+  buildWorkerSpansColumnarStore,
+  buildWorkerSpansColumnarStoreChunked,
+} from "./worker-spans-columnar.js";
 import { buildSpanDataColumnar } from "./span-data-columnar.js";
 import { measureSpan } from "./load-perf.js";
 import {
@@ -166,6 +169,89 @@ export function sharedDetectorInputs(trace: ParsedTrace): DetectorInputs {
   };
   detectorInputsCache.set(trace, inputs);
   return inputs;
+}
+
+/** Work between yields: long enough to keep the pacing overhead small, short
+ *  enough to leave a frame budget room to paint. */
+const SLICE_BUDGET_MS = 12;
+
+/**
+ * Build the derivation up front, in slices, so it does not land whole inside
+ * the first render over a new trace. On a large trace that is seconds of
+ * blocked main thread, which cannot paint a label or tick a timer.
+ *
+ * Both halves are the same work the lazy path does, written into the same
+ * caches, so every consumer stays synchronous and finds the result already
+ * there.
+ *
+ * `onProgress` gets 0..1 across both halves, weighted by their measured share.
+ * Columnar traces only - the fat path is small by construction.
+ */
+export async function warmDerived(
+  trace: ParsedTrace,
+  onProgress: (fraction: number) => void,
+  yieldToEventLoop: () => Promise<void>,
+): Promise<void> {
+  const ev = trace.events;
+  if (!(ev instanceof ColumnarEvents)) return;
+  if (workerSpansCache.has(trace) && detectorInputsCache.has(trace)) return;
+
+  /** Reconstruct's measured share of the two halves; the rest is sched delays. */
+  const RECONSTRUCT_SHARE = 0.7;
+
+  // The generators yield far more often than the page needs to repaint, and
+  // charging a frame for each one costs more than the work it paces. Run slices
+  // back to back until the budget is spent, then give the frame away once.
+  let sliceStart = performance.now();
+  const breathe = async (): Promise<void> => {
+    if (performance.now() - sliceStart < SLICE_BUDGET_MS) return;
+    await yieldToEventLoop();
+    sliceStart = performance.now();
+  };
+
+  const build = buildWorkerSpansColumnarStoreChunked(
+    ev, deriveWorkerIds(trace), trace.maxTs ?? 0, trace.blockInPlaceGaps,
+  );
+  let step = build.next();
+  while (!step.done) {
+    onProgress(step.value * RECONSTRUCT_SHARE);
+    await breathe();
+    step = build.next();
+  }
+  const result = step.value;
+
+  if (trace.cpuSamples && trace.cpuSamples.length > 0) {
+    result.store.attachCpuSamples(trace.cpuSamples as never);
+    await yieldToEventLoop();
+    sliceStart = performance.now();
+  }
+  columnarStoreCache.set(trace, result.store);
+  const spanResult: LaneWorkerSpans = {
+    workerSpans: result.store.workerLanes(),
+    perWorker: {},
+    queueSamples: result.queueSamples,
+    queueSampleIndex: result.queueSampleIndex,
+    maxLocalQueue: result.maxLocalQueue,
+    wakeIndex: result.wakeIndex,
+  };
+  workerSpansCache.set(trace, spanResult);
+
+  const workerIds = lifecycleWorkerIds(trace);
+  const delays = result.store.schedulingDelaysChunked(workerIds, result.wakeIndex);
+  let d = delays.next();
+  while (!d.done) {
+    onProgress(RECONSTRUCT_SHARE + d.value * (1 - RECONSTRUCT_SHARE));
+    await breathe();
+    d = delays.next();
+  }
+  const lanes = laneSource(result.store, spanResult.workerSpans);
+  detectorInputsCache.set(trace, {
+    workerIds,
+    lanes,
+    schedDelays: d.value,
+    hasWorkerCpuTime: anyWorkerCpuTime(lanes),
+  });
+  onProgress(1);
 }
 
 /** Keyed on trace identity, so a reparse invalidates but a pan never does. */

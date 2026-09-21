@@ -87,13 +87,23 @@ interface SpanAggregates {
 }
 
 /** The shared span state machine; emits polls/parks/actives through `emit`. */
-function reconstruct(
+/** Events between yields. A power of two, so the loops test it with a mask. */
+const CHUNK_MASK = (1 << 18) - 1;
+
+/** Run a chunked build straight through, for the synchronous callers. */
+function drain<T>(g: Generator<number, T, void>): T {
+  let r = g.next();
+  while (!r.done) r = g.next();
+  return r.value;
+}
+
+function* reconstructChunked(
   store: ColumnarEvents,
   workerIds: readonly number[],
   maxTs: number,
   blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined,
   emit: SpanEmitter,
-): SpanAggregates {
+): Generator<number, SpanAggregates, void> {
   const openPoll: ByWorker<number | null> = {};
   const openPark: ByWorker<number | null> = {};
   const openUnpark: ByWorker<{ timestamp: number; cpuTime: number } | null> = {};
@@ -125,9 +135,15 @@ function reconstruct(
   const taskIds = store.taskIdList;
   const n = store.length;
 
+  // Four passes over roughly n events each; `done` drives the progress the
+  // loader reports while this runs in chunks (see reconstructChunked's callers).
+  const totalWork = n * 4 || 1;
+  let done = 0;
+
   // First pass: bucket event INDICES by worker; index wake events.
   const perWorker: ByWorker<number[]> = {};
   for (let i = 0; i < n; i++) {
+    if ((i & CHUNK_MASK) === 0 && i > 0) yield (done + i) / totalWork;
     const et = eventType[i];
     if (et === EVT.WakeEvent) {
       const wi = wokenIdx[i]!;
@@ -141,18 +157,27 @@ function reconstruct(
     }
   }
 
+  done += n;
+
   // Stable sort of indices by ts (JS sort is stable, so equal-ts events keep
-  // their original event order, matching the frozen object sort).
-  for (const key in perWorker) perWorker[key]!.sort((a, b) => ts[a]! - ts[b]!);
+  // their original event order, matching the frozen object sort). One sort is
+  // atomic, so the yield can only land between workers.
+  for (const key in perWorker) {
+    perWorker[key]!.sort((a, b) => ts[a]! - ts[b]!);
+    done += perWorker[key]!.length;
+    yield done / totalWork;
+  }
   const wakeIndex = WakeIndex.build(wakeRows.length / 4, (emit) => {
     for (let k = 0; k < wakeRows.length; k += 4) {
       emit(wakeRows[k]!, wakeRows[k + 1]!, wakeRows[k + 2]!, wakeRows[k + 3]!);
     }
   });
 
+  let step = 0;
   for (const workerKey in perWorker) {
     const w = Number(workerKey);
     for (const i of perWorker[workerKey]!) {
+      if ((++step & CHUNK_MASK) === 0) yield (done + step) / totalWork;
       const et = eventType[i];
       const t = ts[i]!;
 
@@ -222,13 +247,26 @@ function reconstruct(
     if (openPark[w] != null) emit.park(w, openPark[w]!, maxTs);
   }
 
+  done += step;
+
   // Global queue samples, in original event order (not per-worker sorted).
   const queueSamples: { t: number; global: number }[] = [];
   for (let i = 0; i < n; i++) {
+    if ((i & CHUNK_MASK) === 0 && i > 0) yield (done + i) / totalWork;
     if (eventType[i] === EVT.QueueSample) queueSamples.push({ t: ts[i]!, global: globalQueue[i]! });
   }
 
   return { perWorker, queueSamples, queueSampleIndex, maxLocalQueue, wakeIndex };
+}
+
+function reconstruct(
+  store: ColumnarEvents,
+  workerIds: readonly number[],
+  maxTs: number,
+  blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined,
+  emit: SpanEmitter,
+): SpanAggregates {
+  return drain(reconstructChunked(store, workerIds, maxTs, blockInPlaceGaps, emit));
 }
 
 /** Fat-output path: field-for-field identical to the frozen buildWorkerSpans. */
@@ -281,14 +319,16 @@ export interface WorkerSpansStoreResult {
  * machine), just materialized as columns. cpuSampleTimes / cpu-sched samples are
  * filled afterward by store.attachCpuSamples.
  */
-export function buildWorkerSpansColumnarStore(
+export function* buildWorkerSpansColumnarStoreChunked(
   store: ColumnarEvents,
   workerIds: readonly number[],
   maxTs: number,
   blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined
-): WorkerSpansStoreResult {
+): Generator<number, WorkerSpansStoreResult, void> {
   const builder = new ColumnarWorkerSpansBuilder(workerIds);
-  const agg = reconstruct(store, workerIds, maxTs, blockInPlaceGaps, new StoreSpanEmitter(builder));
+  const agg = yield* reconstructChunked(
+    store, workerIds, maxTs, blockInPlaceGaps, new StoreSpanEmitter(builder),
+  );
   return {
     store: builder.finish(),
     queueSamples: agg.queueSamples,
@@ -296,4 +336,15 @@ export function buildWorkerSpansColumnarStore(
     maxLocalQueue: agg.maxLocalQueue,
     wakeIndex: agg.wakeIndex,
   };
+}
+
+export function buildWorkerSpansColumnarStore(
+  store: ColumnarEvents,
+  workerIds: readonly number[],
+  maxTs: number,
+  blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined
+): WorkerSpansStoreResult {
+  return drain(
+    buildWorkerSpansColumnarStoreChunked(store, workerIds, maxTs, blockInPlaceGaps),
+  );
 }

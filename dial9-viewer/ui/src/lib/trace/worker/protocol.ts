@@ -91,11 +91,13 @@ export type TraceWorkerRequest =
  */
 export interface TraceWorkerProgress {
   /**
-   * "fetching" while the buffered-mode download runs; "parsing" once
-   * decoded bytes flow. Stream mode is always "parsing" - fetch and parse
-   * are fused.
+   * "fetching" while the buffered-mode download runs; "parsing" once decoded
+   * bytes flow (stream mode is always "parsing" - fetch and parse are fused);
+   * "analyzing" once the bytes are decoded and the first render over the new
+   * trace is about to run its derivation. Only the main-thread loader reaches
+   * "analyzing": the worker's job ends at the done message.
    */
-  phase: "fetching" | "parsing";
+  phase: "fetching" | "parsing" | "analyzing";
   mode: TraceWorkerLoadMode;
   /** Number of trace= components in this load. */
   urlCount: number;

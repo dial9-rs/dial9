@@ -141,6 +141,10 @@ export function progressLabel(p: TraceWorkerProgress): string {
     return p.urlCount > 1 ? `Fetching ${p.urlCount} traces...` : "Fetching...";
   }
   const events = `${Math.floor(p.eventCount / 1000)}k events`;
+  if (p.phase === "analyzing") {
+    const pct = p.totalBytes ? Math.floor((p.bytesRead / p.totalBytes) * 100) : 0;
+    return `Analyzing: ${pct}% - ${events}`;
+  }
   if (p.totalBytes) {
     const pct = Math.floor((p.bytesRead / p.totalBytes) * 100);
     return `Parsing: ${pct}% - ${events}`;

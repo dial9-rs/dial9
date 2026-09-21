@@ -1035,17 +1035,31 @@ export class ColumnarWorkerSpans {
    * per-task CSR over Float64 start/end columns (~85 MB, not 1.9 GB of objects),
    * transient to this call.
    */
-  schedulingDelays(
+  schedulingDelays(workerIds: number[], wakes: WakeIndex): SchedDelayView[] {
+    const g = this.schedulingDelaysChunked(workerIds, wakes);
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+  }
+
+  /** schedulingDelays in slices, so a load can drive it without blocking the
+   *  frame. Yields the fraction of polls scanned. */
+  *schedulingDelaysChunked(
     workerIds: number[],
     wakes: WakeIndex
-  ): SchedDelayView[] {
+  ): Generator<number, SchedDelayView[], void> {
     // Shared per-task poll CSR (cached; also used by buildSpanDataColumnar).
     const { slotOf: slot, off, start: pStart, end: pEnd } = this.pollsByTaskCSR();
+    let total = 0;
+    for (const w of workerIds) total += this.byWorker.get(w)?.n ?? 0;
+    total ||= 1;
+    let scanned = 0;
     const out: SchedDelayView[] = [];
     for (const w of workerIds) {
       const c = this.byWorker.get(w);
       if (!c) continue;
       for (let i = 0; i < c.n; i++) {
+        if ((++scanned & SCHED_CHUNK_MASK) === 0) yield scanned / total;
         const taskId = c.taskId[i];
         if (!taskId) continue;
         const taskWakes = wakes.forTask(taskId);
@@ -1086,6 +1100,9 @@ export class ColumnarWorkerSpans {
     return out;
   }
 }
+
+/** Polls between yields in schedulingDelaysChunked. */
+const SCHED_CHUNK_MASK = (1 << 16) - 1;
 
 /** Per-worker growable number[] columns during a direct build; frozen to typed
  * arrays in finish(). */
