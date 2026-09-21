@@ -297,33 +297,87 @@ mod tests {
     use crate::recorder::recorder;
     use crate::source::{FlushContext, Source};
     use crate::test_support::{decode_segment_metadata, sealed_segment};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     // ── Test fixtures ────────────────────────────────────────────────
 
-    struct PanickingFlushSource(&'static str);
-    impl Source for PanickingFlushSource {
-        fn flush(&mut self, _ctx: &FlushContext<'_>) {
-            panic!("PanickingFlushSource({}) intentionally panics", self.0);
-        }
-        fn name(&self) -> &'static str {
-            self.0
+    /// Poll `condition` until it's true, instead of sleeping a fixed
+    /// duration and hoping enough flush cycles ran in that window: adapts to
+    /// actual scheduling speed rather than assuming it, on any machine.
+    fn wait_until(mut condition: impl FnMut() -> bool, timeout: Duration) {
+        let start = Instant::now();
+        while !condition() {
+            assert!(
+                start.elapsed() < timeout,
+                "condition not met within {timeout:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
-    struct PanickingMetadataSource(&'static str);
+    struct PanickingFlushSource {
+        name: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+    impl PanickingFlushSource {
+        /// Returns the source and a counter of how many times `flush` has
+        /// run, so a test can wait for N panics instead of a fixed sleep.
+        fn new(name: &'static str) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    name,
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+    impl Source for PanickingFlushSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            panic!("PanickingFlushSource({}) intentionally panics", self.name);
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    struct PanickingMetadataSource {
+        name: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+    impl PanickingMetadataSource {
+        /// Returns the source and a counter of how many times
+        /// `segment_metadata` has run, so a test can wait for N panics
+        /// instead of a fixed sleep.
+        fn new(name: &'static str) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    name,
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
     impl Source for PanickingMetadataSource {
         fn flush(&mut self, _ctx: &FlushContext<'_>) {}
         fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             out.push((
-                format!("{}.partial", self.0),
+                format!("{}.partial", self.name),
                 "should not survive".to_string(),
             ));
-            panic!("PanickingMetadataSource({}) intentionally panics", self.0);
+            panic!(
+                "PanickingMetadataSource({}) intentionally panics",
+                self.name
+            );
         }
         fn name(&self) -> &'static str {
-            self.0
+            self.name
         }
     }
 
@@ -397,8 +451,9 @@ mod tests {
             .build()
             .unwrap();
 
+        let (source, calls) = PanickingFlushSource::new("panicking");
         let mut recorder = recorder(writer)
-            .source(PanickingFlushSource("panicking"))
+            .source(source)
             .on_recording_thread_start(move || {
                 let teardown_ran_for_thread = teardown_ran_for_thread.clone();
                 move || {
@@ -408,13 +463,12 @@ mod tests {
             .build();
         recorder.handle().enable();
 
-        // Give the flush thread time to run at least one cycle: the
-        // panicking source guarantees the very first cycle panics.
-        std::thread::sleep(Duration::from_millis(200));
-
-        // Explicitly ask the flush thread to stop, rather than relying on
-        // the sleep alone: this is what makes the loop return normally and
-        // run teardown().
+        // Wait for the panicking source to actually run at least once
+        // before asking the flush thread to stop.
+        wait_until(
+            || calls.load(Ordering::Relaxed) >= 1,
+            Duration::from_secs(5),
+        );
         recorder.stop_flush_thread();
 
         assert!(
@@ -433,8 +487,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
+        let (source, _calls) = PanickingMetadataSource::new("panicking_metadata");
         let recorder = recorder(writer)
-            .source(PanickingMetadataSource("panicking_metadata"))
+            .source(source)
             .source(HealthyMetadataSource)
             .build();
         recorder.handle().enable();
@@ -463,7 +518,7 @@ mod tests {
                 .get("dial9.source.panicking_metadata.panicked")
                 .map(String::as_str),
             Some("true"),
-            "the trace itself should record which source panicked, not just a log line"
+            "the trace itself should record which source panicked"
         );
     }
 
@@ -482,9 +537,11 @@ mod tests {
             .build()
             .unwrap();
 
+        let (source_a, calls_a) = PanickingFlushSource::new("panicking_flush_a");
+        let (source_b, calls_b) = PanickingFlushSource::new("panicking_flush_b");
         let mut recorder = recorder(writer)
-            .source(PanickingFlushSource("panicking_flush_a"))
-            .source(PanickingFlushSource("panicking_flush_b"))
+            .source(source_a)
+            .source(source_b)
             .on_recording_thread_start(move || {
                 // Scoped to just the flush thread: a global subscriber would
                 // collide with other tests' tracing state.
@@ -496,9 +553,17 @@ mod tests {
             .build();
         recorder.handle().enable();
 
-        // Give the flush thread time to run at least one cycle: both
-        // sources panic on their very first flush.
-        std::thread::sleep(Duration::from_millis(200));
+        // Wait for several repeat panics from both sources, not just one:
+        // the assertion below needs proof the rate limit suppressed a
+        // repeat, which a single panic can't demonstrate.
+        const MIN_CYCLES: usize = 5;
+        wait_until(
+            || {
+                calls_a.load(Ordering::Relaxed) >= MIN_CYCLES
+                    && calls_b.load(Ordering::Relaxed) >= MIN_CYCLES
+            },
+            Duration::from_secs(5),
+        );
         recorder.stop_flush_thread();
 
         let warned_sources = warned_sources.lock().unwrap();
@@ -511,9 +576,9 @@ mod tests {
             "expected a warning naming panicking_flush_b \u{2014} it must not be suppressed by \
              panicking_flush_a's rate limit, got {warned_sources:?}"
         );
-        // Both sources panic on every one of the ~40 cycles in the sleep
-        // window above; more than one warning per source would mean the
-        // 60s per-key rate limit isn't suppressing repeats.
+        // Both sources panicked at least MIN_CYCLES times above; more than
+        // one warning per source would mean the 60s per-key rate limit
+        // isn't suppressing repeats.
         assert_eq!(
             warned_sources.len(),
             2,
@@ -535,9 +600,11 @@ mod tests {
             .build()
             .unwrap();
 
+        let (source_a, calls_a) = PanickingMetadataSource::new("panicking_metadata_a");
+        let (source_b, calls_b) = PanickingMetadataSource::new("panicking_metadata_b");
         let mut recorder = recorder(writer)
-            .source(PanickingMetadataSource("panicking_metadata_a"))
-            .source(PanickingMetadataSource("panicking_metadata_b"))
+            .source(source_a)
+            .source(source_b)
             .on_recording_thread_start(move || {
                 // Scoped to just the flush thread: a global subscriber would
                 // collide with other tests' tracing state.
@@ -549,7 +616,17 @@ mod tests {
             .build();
         recorder.handle().enable();
 
-        std::thread::sleep(Duration::from_millis(200));
+        // Wait for several repeat panics from both sources, not just one:
+        // the assertion below needs proof the rate limit suppressed a
+        // repeat, which a single panic can't demonstrate.
+        const MIN_CYCLES: usize = 5;
+        wait_until(
+            || {
+                calls_a.load(Ordering::Relaxed) >= MIN_CYCLES
+                    && calls_b.load(Ordering::Relaxed) >= MIN_CYCLES
+            },
+            Duration::from_secs(5),
+        );
         recorder.stop_flush_thread();
 
         let warned_sources = warned_sources.lock().unwrap();
@@ -562,9 +639,9 @@ mod tests {
             "expected a warning naming panicking_metadata_b \u{2014} it must not be suppressed by \
              panicking_metadata_a's rate limit, got {warned_sources:?}"
         );
-        // Both sources panic on every one of the ~40 cycles in the sleep
-        // window above; more than one warning per source would mean the
-        // 60s per-key rate limit isn't suppressing repeats.
+        // Both sources panicked at least MIN_CYCLES times above; more than
+        // one warning per source would mean the 60s per-key rate limit
+        // isn't suppressing repeats.
         assert_eq!(
             warned_sources.len(),
             2,
