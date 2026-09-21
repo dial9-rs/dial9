@@ -52,7 +52,7 @@ export interface ShellDeps extends ToolbarDeps {
 /** The persistent interaction hint chips: always visible, never auto-hidden. */
 const HINT_CHIPS: readonly string[] = [
   "Shift+drag = select region",
-  "Option+drag = zoom",
+  "Alt/Option+drag = zoom",
   "/ search",
   "n / p points of interest",
   "f fit",
