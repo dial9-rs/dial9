@@ -751,7 +751,11 @@
             // before RuntimeMetricsEvent replaced it. Keep that optional field
             // in a side channel so traces from that generation remain useful.
             legacyActiveTaskSamples: [],
-            taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
+            // taskId → [{timestamp, callchain}] sorted by timestamp. An optional
+            // columnar sink (src/lib/trace/columnar-task-dumps.ts) replaces the
+            // Map: it exposes the same get/has/keys reads, but holds dumps in
+            // flat columns instead of two objects each.
+            taskDumps: (options && options.taskDumpSink) || new Map(),
             customEvents: [], // unrecognized event types: {name, timestamp, fields}
             // Schema active when each custom event was decoded. Kept parallel to
             // customEvents only until finalizeParse so annotation frames that
@@ -1459,6 +1463,12 @@
             }
             case "TaskDumpEvent": {
                 const taskId = num(v.task_id);
+                if (taskDumps.pushDump) {
+                    // Columnar sink: it interns frames into its own pool, so
+                    // pass the raw callchain and build no per-dump objects.
+                    taskDumps.pushDump(taskId, ts, v.callchain || []);
+                    break;
+                }
                 const chain = (v.callchain || []).map(
                     (addr) => internHex(state.hexIntern, addr),
                 );
@@ -1695,9 +1705,12 @@
             return 0;
         });
 
-        // Sort task dumps by timestamp for efficient lookup during rendering
-        for (const arr of taskDumps.values()) {
-            arr.sort((a, b) => a.timestamp - b.timestamp);
+        // Sort task dumps by timestamp for efficient lookup during rendering.
+        // The columnar sink orders each task's dumps as it groups them.
+        if (!taskDumps.pushDump) {
+            for (const arr of taskDumps.values()) {
+                arr.sort((a, b) => a.timestamp - b.timestamp);
+            }
         }
         for (const [tid, bindings] of tidBindings) {
             bindings.sort((a, b) => a.timestamp - b.timestamp);

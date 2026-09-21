@@ -166,6 +166,24 @@ declare module "*/trace_parser.js" {
     droppedFrees: number;
   }
 
+  /** The reads consumers make of `taskDumps`; a Map satisfies it. */
+  export interface TaskDumpStore {
+    get(taskId: number): TaskDump[] | undefined;
+    has(taskId: number): boolean;
+    keys(): IterableIterator<number>;
+    entries(): IterableIterator<[number, TaskDump[]]>;
+    readonly size: number;
+  }
+
+  /** A {@link TaskDumpStore} the parser can also write into. */
+  export interface TaskDumpSink extends TaskDumpStore {
+    pushDump(
+      taskId: number,
+      timestamp: number,
+      callchain: readonly (string | number | bigint)[],
+    ): void;
+  }
+
   export interface TaskDump {
     timestamp: number;
     callchain: string[];
@@ -292,7 +310,7 @@ declare module "*/trace_parser.js" {
      */
     spanEvents?: import("../lib/trace/columnar-span-events.js").ColumnarSpanEvents;
     /** task id -> async stack captures, sorted by timestamp. */
-    taskDumps: Map<number, TaskDump[]>;
+    taskDumps: TaskDumpStore;
     clockSyncAnchors: ClockSyncAnchor[];
     /** Monotonic-to-wall-clock offset; null when no anchor exists. */
     clockOffsetNs: number | null;
@@ -391,6 +409,12 @@ declare module "*/trace_parser.js" {
      * buildSpanDataColumnar reads the columns.
      */
     spanEventSink?: SpanEventSink;
+    /**
+     * Columnar sink for task dumps (src/lib/trace/columnar-task-dumps.ts):
+     * `pushDump` stores each dump in flat columns instead of a record plus a
+     * frame array. Defaults to a Map of fat dumps.
+     */
+    taskDumpSink?: TaskDumpSink;
     /** Directory parsing only (Node). */
     cache?: boolean;
     parallel?: boolean;
