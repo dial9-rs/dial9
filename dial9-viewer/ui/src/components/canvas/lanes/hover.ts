@@ -14,6 +14,7 @@ import type {
   TracingSpan,
 } from "../../../types/trace.js";
 import type { LaneSpans, ParkLike } from "../../../lib/trace/columnar-worker-spans.js";
+import type { QueueSampleSlice } from "../../../lib/trace/queue-samples.js";
 
 /** A worker's state at the hovered instant. */
 export type WorkerHoverState = "active" | "parked" | "block_in_place" | "polling";
@@ -68,8 +69,8 @@ export interface LaneHoverInput {
   columnarSpans?: ColumnarSpans | undefined;
   /** Global injection-queue series {t, global}, sorted by t. */
   queueSamples: readonly { t: number; global: number }[];
-  /** This worker's local-queue series {t, local}, sorted by t. */
-  localQueueSamples: readonly { t: number; local: number }[];
+  /** This worker's local-queue depth samples, read by binary search. */
+  localQueueSamples: QueueSampleSlice;
   /** Active-task-count timeline {t, count}, sorted by t. */
   activeTaskSamples: readonly { t: number; count: number }[];
   blockInPlaceGaps: readonly BlockInPlaceGap[];
@@ -174,7 +175,7 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
   }
 
   const nearestGlobal = nearestByT(input.queueSamples, ns);
-  const nearestLocal = nearestByT(input.localQueueSamples, ns);
+  const localIdx = input.localQueueSamples.nearest(ns);
 
   // Span detail: outermost span with a segment on this worker at `ns`.
   let span: HoverSpanInfo | null = null;
@@ -210,7 +211,9 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
     globalQueue: nearestGlobal ? nearestGlobal.global : null,
     // The recorded 0 is a sentinel; report unknown so the tooltip shows "-".
     localQueue:
-      input.hasLocalQueueDepth && nearestLocal ? nearestLocal.local : null,
+      input.hasLocalQueueDepth && localIdx >= 0
+        ? input.localQueueSamples.localAt(localIdx)
+        : null,
     activeTaskCount: activeTaskCountAt(input.activeTaskSamples, ns),
     span,
     hasClickableStack,

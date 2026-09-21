@@ -22,6 +22,11 @@ import { assembleLaneHover } from "./hover.js";
 import type { PollSpan, TracingSpan, WorkerLane } from "../../../types/trace.js";
 import type { TimePanelLayout } from "../../../types/state.js";
 
+/** One worker's local-queue slice from plain records. */
+const localSlice = (recs: { t: number; local: number }[]) =>
+  QueueSampleIndex.fromRecordMap({ 0: recs }).forWorker(0);
+
+
 // ── Recording context ────────────────────────────────────────────────────
 
 interface FillRectCall {
@@ -545,7 +550,7 @@ describe("assembleLaneHover", () => {
       spans: lane,
       allSpans: [],
       queueSamples: [{ t: 40, global: 3 }],
-      localQueueSamples: [{ t: 40, local: 1 }],
+      localQueueSamples: localSlice([{ t: 40, local: 1 }]),
       activeTaskSamples: [{ t: 0, count: 5 }],
       blockInPlaceGaps: [],
       hasCpuTime: true,
@@ -574,7 +579,7 @@ describe("assembleLaneHover", () => {
       spans: lane,
       allSpans: [],
       queueSamples: [{ t: 40, global: 3 }],
-      localQueueSamples: [{ t: 40, local: 0 }],
+      localQueueSamples: localSlice([{ t: 40, local: 0 }]),
       activeTaskSamples: [],
       blockInPlaceGaps: [],
       hasCpuTime: true,
@@ -600,7 +605,7 @@ describe("assembleLaneHover", () => {
       spans: lane,
       allSpans: [],
       queueSamples: [],
-      localQueueSamples: [],
+      localQueueSamples: localSlice([]),
       activeTaskSamples: [],
       blockInPlaceGaps: [],
       hasCpuTime: false,

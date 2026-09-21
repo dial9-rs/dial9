@@ -15,7 +15,7 @@ export interface QueueSampleSlice {
   firstAtOrAfter(val: number): number;
   /** Index of the sample closest to `ns`, or -1 when empty. */
   nearest(ns: number): number;
-  /** `{t, local}` objects for one worker; the cursor readout needs the shape. */
+  /** `{t, local}` objects for one worker, for the compat path's record map. */
   toRecords(): { t: number; local: number }[];
   /** Objects for `[start, end]`; the step-line batcher needs the shape, and
    *  only ever asks for the visible window. */
