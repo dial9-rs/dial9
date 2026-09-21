@@ -1,7 +1,6 @@
 // Load orchestration: a typed wrapper over the frozen trace_parser.js load
 // surface, plus repeatable `trace=` components, parallel fetch + gunzip +
-// concat, and streaming parse with chunk capture so the full buffer stays
-// available for in-memory re-parse (see ./reparse.ts). Loading-view labels,
+// concat, and streaming parse so decode overlaps download. Loading-view labels,
 // elapsed timers, loadPerf records, alerts/credential hints and drop-zone
 // resets are page concerns. The file-drop path is `parseTraceBuffer`; the
 // demo path is `loadTrace("demo-trace.bin")`.
@@ -18,6 +17,7 @@
 import "./core-globals.js";
 import { ColumnarEvents, capacityForBytes } from "./columnar-events.js";
 import { ColumnarCpuSamples } from "./columnar-cpu-samples.js";
+import { ColumnarTaskDumps } from "./columnar-task-dumps.js";
 import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import { startLoadPerf } from "./load-perf.js";
 import type { LoadPerfRecorder } from "./load-perf.js";
@@ -38,7 +38,7 @@ import type {
   ParseOptions,
   ParsedTrace,
 } from "../../../trace_parser.js";
-import { streamTraceWithCapture } from "./stream.js";
+import { streamTrace } from "./stream.js";
 import type {
   TraceWorkerFactory,
   TraceWorkerLoadRequest,
@@ -89,11 +89,8 @@ export interface LoadTraceOptions extends FetchOptions, ParseOptions {}
 /** The result of loading one logical trace from URLs. */
 export interface LoadedTrace {
   trace: ParsedTrace;
-  /**
-   * The raw (gunzipped, concatenated) trace bytes, retained so Set/Clear
-   * Range can re-parse in memory without re-fetching.
-   */
-  buffer: ArrayBuffer;
+  /** Decompressed byte count (the bytes themselves are not retained). */
+  bytes: number;
   /**
    * "stream" when download and decode overlapped (canStreamDecode
    * runtimes); "buffered" for the fetch-then-parse fallback. Pages use this
@@ -139,11 +136,9 @@ export function parseTraceBuffer(
  * time overlaps the download (~max(download, parse) instead of their sum).
  * For multiple URLs the fetches run concurrently and the components stream
  * in back-to-back, in order, as one logical trace - so parsing the first
- * segment overlaps the in-flight downloads of the rest. The gunzipped
- * chunks are captured while parsing so the full buffer is still available
- * afterwards for in-memory Set/Clear-Range re-parsing (which never
- * re-fetches). Mechanism lives in ./stream.ts (shared with the worker body,
- * which must not import this module - see stream.ts header).
+ * segment overlaps the in-flight downloads of the rest. Mechanism lives in
+ * ./stream.ts (shared with the worker body, which must not import this
+ * module - see stream.ts header).
  */
 export async function loadTraceStreamed(
   urls: string | readonly string[],
@@ -151,8 +146,8 @@ export async function loadTraceStreamed(
 ): Promise<LoadedTrace> {
   const list = Array.isArray(urls) ? (urls as readonly string[]) : [urls as string];
   const { fetchOpts, parseOpts } = splitOptions(opts);
-  const { trace, buffer } = await streamTraceWithCapture(list, fetchOpts, parseOpts);
-  return { trace, buffer, mode: "stream" };
+  const { trace, bytes } = await streamTrace(list, fetchOpts, parseOpts);
+  return { trace, bytes, mode: "stream" };
 }
 
 /**
@@ -169,7 +164,7 @@ export async function loadTraceBuffered(
   const { fetchOpts, parseOpts } = splitOptions(opts);
   const buffer = await fetchTraces([...list], fetchOpts);
   const trace = await parseTrace(buffer, parseOpts);
-  return { trace, buffer, mode: "buffered" };
+  return { trace, bytes: buffer.byteLength, mode: "buffered" };
 }
 
 /**
@@ -196,7 +191,7 @@ export function loadTrace(
 // the worker (cooperative fetch cancellation) followed by port.terminate()
 // (authoritative - also kills a compute-bound parse phase that no signal
 // reaches). Message and error payloads cross the boundary via structured
-// clone; the raw buffer is transferred zero-copy.
+// clone.
 
 /**
  * The store surface the worker pipeline writes into. Structurally satisfied
@@ -371,7 +366,7 @@ export function loadTraceInWorker(
           store.update("trace", { trace: message.trace });
           resolveDone({
             trace: message.trace,
-            buffer: message.buffer,
+            bytes: message.timing.bytes,
             mode: message.mode,
             timing: message.timing,
           });
@@ -537,15 +532,16 @@ export function loadTraceOnMainThread(
     eventSink: new ColumnarEvents(),
     cpuSampleSink: new ColumnarCpuSamples(),
     spanEventSink,
+    taskDumpSink: new ColumnarTaskDumps(),
   };
   if (opts.maxEvents !== undefined) parseOpts.maxEvents = opts.maxEvents;
   if (opts.startTime !== undefined) parseOpts.startTime = opts.startTime;
   if (opts.endTime !== undefined) parseOpts.endTime = opts.endTime;
 
-  const run = async (): Promise<{ trace: ParsedTrace; buffer: ArrayBuffer }> => {
+  const run = async (): Promise<{ trace: ParsedTrace; bytes: number }> => {
     if (mode === "stream") {
       emit("parsing", 0, null);
-      return streamTraceWithCapture(list, fetchOpts, parseOpts);
+      return streamTrace(list, fetchOpts, parseOpts);
     }
     emit("fetching", 0, null);
     const buffer = await fetchTraces([...list], fetchOpts);
@@ -558,11 +554,11 @@ export function loadTraceOnMainThread(
     // the final length.
     parseOpts.eventSink = new ColumnarEvents(capacityForBytes(buffer.byteLength));
     const trace = await parseTrace(buffer, parseOpts);
-    return { trace, buffer };
+    return { trace, bytes: buffer.byteLength };
   };
 
   run()
-    .then(({ trace, buffer }) => {
+    .then(({ trace, bytes }) => {
       perf.mark("parse-done");
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
@@ -579,7 +575,7 @@ export function loadTraceOnMainThread(
             mode,
             urlCount: list.length,
             events: trace.events.length,
-            bytes: buffer.byteLength,
+            bytes,
           });
         if (typeof requestAnimationFrame === "function") {
           requestAnimationFrame(() => {
@@ -595,9 +591,9 @@ export function loadTraceOnMainThread(
           parseDoneMs: performance.now(),
           mode,
           events: trace.events.length,
-          bytes: buffer.byteLength,
+          bytes,
         };
-        resolveDone({ trace, buffer, mode, timing });
+        resolveDone({ trace, bytes, mode, timing });
       });
     })
     .catch((err: unknown) => {

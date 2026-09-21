@@ -171,8 +171,7 @@ describe("worker path (real thread + structured clone)", () => {
     expect(result.trace.maxTs).toBe(direct.maxTs);
     expect(result.trace.hasTaskTracking).toBe(direct.hasTaskTracking);
 
-    // The transferred buffer round-trips byte-exact (re-parse source).
-    expectBytesEqual(new Uint8Array(result.buffer), rawTrace);
+    expect(result.bytes).toBe(rawTrace.length);
 
     // The store's trace slice received the parsed trace.
     expect(store.getState().trace.trace).toBe(result.trace);

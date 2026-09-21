@@ -19,7 +19,7 @@ import {
   fetchTraces,
   parseTrace,
 } from "../../../../trace_parser.js";
-import { parseChunksWithCapture, streamTraceWithCapture } from "../stream.ts";
+import { parseChunks, streamTrace } from "../stream.ts";
 import type { FetchOptions, ParsedTrace } from "../../../../trace_parser.js";
 import type {
   TraceWorkerLoadMode,
@@ -81,7 +81,7 @@ function makeReporter(
 
   const finish = (
     trace: ParsedTrace,
-    buffer: ArrayBuffer,
+    bytes: number,
     fetchDoneMs: number | null
   ): void => {
     const timing: TraceWorkerTiming = {
@@ -90,11 +90,9 @@ function makeReporter(
       parseDoneMs: performance.now(),
       mode,
       events: trace.events.length,
-      bytes: buffer.byteLength,
+      bytes,
     };
-    // The buffer is TRANSFERRED (zero-copy); it is detached on this
-    // side after post, so timing.bytes is computed above, before.
-    post({ kind: "done", trace, buffer, mode, timing }, [buffer]);
+    post({ kind: "done", trace, mode, timing });
   };
 
   return { progress, onParseProgress, finish };
@@ -156,11 +154,11 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
       // stays null), and the first progress signals the parse phase
       // directly.
       progress("parsing", 0, null);
-      const { trace, buffer } = await streamTraceWithCapture(urls, fetchOpts, {
+      const { trace, bytes } = await streamTrace(urls, fetchOpts, {
         ...parseOpts,
         onParseProgress,
       });
-      finish(trace, buffer, null);
+      finish(trace, bytes, null);
     } else {
       // Buffered fallback (no DecompressionStream): fetch every component
       // in parallel, gunzip + concatenate, then parse - separate phases.
@@ -169,7 +167,7 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
       const fetchDoneMs = performance.now();
       progress("parsing", 0, buffer.byteLength);
       const trace = await parseTrace(buffer, { ...parseOpts, onParseProgress });
-      finish(trace, buffer, fetchDoneMs);
+      finish(trace, buffer.byteLength, fetchDoneMs);
     }
   }
 
@@ -208,11 +206,11 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
         1
       );
       progress("parsing", 0, null);
-      const { trace, buffer } = await parseChunksWithCapture(
-        gunzipChunks(bytes),
-        { ...parseOpts, onParseProgress }
-      );
-      finish(trace, buffer, null);
+      const { trace, bytes: rawBytes } = await parseChunks(gunzipChunks(bytes), {
+        ...parseOpts,
+        onParseProgress,
+      });
+      finish(trace, rawBytes, null);
     } else {
       const { progress, onParseProgress, finish } = makeReporter(
         post,
@@ -225,7 +223,7 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
         ...parseOpts,
         onParseProgress,
       });
-      finish(trace, request.buffer, null);
+      finish(trace, request.buffer.byteLength, null);
     }
   }
 

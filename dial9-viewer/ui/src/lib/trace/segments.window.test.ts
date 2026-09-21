@@ -1107,9 +1107,8 @@ describe("parseSegmentInWorker", () => {
     fake.emit({
       kind: "done",
       trace: fakeTrace,
-      buffer: new ArrayBuffer(42),
       mode: "stream",
-      timing,
+      timing: { ...timing, bytes: 42 },
     });
     const result = await job.done;
     expect(result.trace).toBe(fakeTrace);
@@ -1144,7 +1143,6 @@ describe("parseSegmentInWorker", () => {
     fake.emit({
       kind: "done",
       trace: fakeTrace,
-      buffer: new ArrayBuffer(1),
       mode: "stream",
       timing,
     });

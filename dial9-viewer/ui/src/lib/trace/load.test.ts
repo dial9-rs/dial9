@@ -92,25 +92,22 @@ function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
 describe("loadTraceBuffered", () => {
   it("single raw component round-trips and parses", async () => {
     installFetchMock({ "/a": rawTrace });
-    const { trace, buffer, mode } = await loadTraceBuffered("/a");
+    const { trace, bytes, mode } = await loadTraceBuffered("/a");
     expect(mode).toBe("buffered");
-    expectBytesEqual(bytesOf(buffer), rawTrace);
+    expect(bytes).toBe(rawTrace.length);
     expect(trace.events.length).toBe(singleEvents);
   });
 
   it("gzipped component is gunzipped client-side", async () => {
     installFetchMock({ "/a.gz": gzTrace });
-    const { buffer } = await loadTraceBuffered(["/a.gz"]);
-    expectBytesEqual(bytesOf(buffer), rawTrace);
+    const { bytes } = await loadTraceBuffered(["/a.gz"]);
+    expect(bytes).toBe(rawTrace.length);
   });
 
   it("mixed gzip/raw components concatenate in order and parse as one trace", async () => {
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
-    const { trace, buffer } = await loadTraceBuffered(["/gz", "/raw"]);
-    const out = bytesOf(buffer);
-    expect(out.length).toBe(rawTrace.length * 2);
-    expectBytesEqual(out.slice(0, rawTrace.length), rawTrace);
-    expectBytesEqual(out.slice(rawTrace.length), rawTrace);
+    const { trace, bytes } = await loadTraceBuffered(["/gz", "/raw"]);
+    expect(bytes).toBe(rawTrace.length * 2);
     // Decoder resets on the mid-stream TRC\0 header: double the events.
     expect(trace.events.length).toBe(singleEvents * 2);
   });
@@ -137,14 +134,14 @@ describe("loadTraceBuffered", () => {
   });
 });
 
-// ── Streamed path: capture + reassembly parity with buffered ─────────────
+// ── Streamed path: parity with buffered ──────────────────────────────────
 
 describe("loadTraceStreamed", () => {
   it("runtime supports streaming (fixture precondition)", () => {
     expect(canStreamDecode()).toBe(true);
   });
 
-  it("multi-URL stream parses to the same events and retains the full buffer", async () => {
+  it("multi-URL stream sees the same events and bytes as the buffered concat", async () => {
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
     const streamed = await loadTraceStreamed(["/gz", "/raw"]);
     expect(streamed.mode).toBe("stream");
@@ -152,15 +149,13 @@ describe("loadTraceStreamed", () => {
 
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
     const buffered = await loadTraceBuffered(["/gz", "/raw"]);
-    // The captured-chunk reassembly must be byte-identical to the
-    // buffered concat, so Set/Clear-Range re-parses see the same trace.
-    expectBytesEqual(bytesOf(streamed.buffer), bytesOf(buffered.buffer));
+    expect(streamed.bytes).toBe(buffered.bytes);
   });
 
-  it("single-URL stream matches the raw bytes", async () => {
+  it("single-URL stream counts the raw bytes", async () => {
     installFetchMock({ "/a": rawTrace });
-    const { trace, buffer } = await loadTraceStreamed("/a");
-    expectBytesEqual(bytesOf(buffer), rawTrace);
+    const { trace, bytes } = await loadTraceStreamed("/a");
+    expect(bytes).toBe(rawTrace.length);
     expect(trace.events.length).toBe(singleEvents);
   });
 });
@@ -199,7 +194,7 @@ describe("loadTraceOnMainThread", () => {
     expect(result.trace).toBe(store.updates[0]!.trace);
     expect(result.mode).toBe(canStreamDecode() ? "stream" : "buffered");
     expect(result.timing.events).toBe(singleEvents);
-    expect(result.buffer.byteLength).toBe(rawTrace.length);
+    expect(result.bytes).toBe(rawTrace.length);
   });
 
   it("forwards parse progress with a growing event count", async () => {
