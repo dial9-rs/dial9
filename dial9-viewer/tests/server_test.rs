@@ -2165,6 +2165,13 @@ mod skills_unpack_tests {
             .expect("no unpacked skill ships scripts/trace_parser.js")
     }
 
+    fn trace_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("ui")
+            .join("test-traces")
+            .join("block_in_place.bin")
+    }
+
     /// These tests run the JS tools rather than inspect the file layout, so
     /// `node` is required.
     fn run_node(script: &Path, args: &[&str]) -> std::process::Output {
@@ -2184,10 +2191,7 @@ mod skills_unpack_tests {
         let toolkit = dir.path().join("renamed-by-the-installer");
         std::fs::rename(unpacked_toolkit_dir(dir.path()), &toolkit).unwrap();
 
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("ui")
-            .join("test-traces")
-            .join("block_in_place.bin");
+        let fixture = trace_fixture();
         let fixture = fixture.to_str().unwrap();
         let scripts = dir.path();
         let tools: [(PathBuf, Vec<&str>); 5] = [
@@ -2257,6 +2261,92 @@ mod skills_unpack_tests {
             stderr.contains(skills_root.to_str().unwrap()),
             "stderr: {stderr}"
         );
+    }
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+
+    /// Locating the toolkit by content means several copies can qualify, and
+    /// they may be different versions. The tool picks one and says so: choosing
+    /// silently would surface later as a decode failure inside the parser.
+    #[test]
+    fn analysis_tools_warn_when_several_toolkit_copies_exist() {
+        let dir = unpack_skills();
+        let toolkit = unpacked_toolkit_dir(dir.path());
+        // Sorts before the real toolkit, so it is the copy that gets picked.
+        copy_dir(
+            &toolkit.join("scripts"),
+            &dir.path().join("aaa-second-copy").join("scripts"),
+        );
+
+        let script = dir
+            .path()
+            .join("dial9-zoom-window")
+            .join("scripts")
+            .join("zoom.js");
+        let output = run_node(&script, &[trace_fixture().to_str().unwrap(), "100"]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stderr: {stderr}");
+        assert!(!output.stdout.is_empty(), "zoom.js printed nothing");
+        assert!(
+            stderr.contains("2 dial9 toolkit copies found"),
+            "stderr: {stderr}"
+        );
+        assert!(stderr.contains("aaa-second-copy"), "stderr: {stderr}");
+    }
+
+    /// Running from a checkout still works, and stays quiet: there the toolkit's
+    /// scripts/ is symlinked at ui/, so both qualify while being one copy.
+    #[test]
+    fn analysis_tools_run_from_the_source_checkout_without_warning() {
+        let skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let fixture = trace_fixture();
+        let tools: [(PathBuf, Vec<&str>); 5] = [
+            (
+                skills.join("dial9-red-flags/scripts/red_flag_scan.js"),
+                vec![fixture.to_str().unwrap()],
+            ),
+            (
+                skills.join("dial9-diagnose-long-poll/scripts/diagnose_long_poll.js"),
+                vec![fixture.to_str().unwrap()],
+            ),
+            (
+                skills.join("dial9-zoom-window/scripts/zoom.js"),
+                vec![fixture.to_str().unwrap(), "100"],
+            ),
+            (
+                skills.join("dial9-toolkit/scripts/analyze.js"),
+                vec![fixture.to_str().unwrap()],
+            ),
+            (
+                skills.join("dial9-toolkit/scripts/diagnose_setup.js"),
+                vec![fixture.to_str().unwrap()],
+            ),
+        ];
+        for (script, args) in &tools {
+            let output = run_node(script, args);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "{} failed from the checkout:\n{stderr}",
+                script.display()
+            );
+            assert!(
+                !output.stdout.is_empty(),
+                "{} printed nothing",
+                script.display()
+            );
+            assert!(
+                !stderr.contains("toolkit copies found"),
+                "{} warned about duplicate toolkits in a checkout:\n{stderr}",
+                script.display()
+            );
+        }
     }
 }
 

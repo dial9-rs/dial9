@@ -22,11 +22,33 @@ function* toolkitCandidates() {
 
 function findToolkitDir() {
   const searched = [];
+  const found = [];
+  const libraries = new Set();
   for (const dir of toolkitCandidates()) {
-    if (searched.includes(dir)) continue;
-    if (TOOLKIT_FILES.every(f => fs.existsSync(path.join(dir, f)))) return dir;
-    searched.push(dir);
+    if (searched.includes(dir) || found.includes(dir)) continue;
+    if (!TOOLKIT_FILES.every(f => fs.existsSync(path.join(dir, f)))) {
+      searched.push(dir);
+      continue;
+    }
+    // One library reached by two routes is not a conflict: a checkout symlinks
+    // the toolkit's scripts/ at ui/, so both qualify and resolve to one file.
+    const first = path.join(dir, TOOLKIT_FILES[0]);
+    let library;
+    try { library = fs.realpathSync(first); } catch { library = first; }
+    if (libraries.has(library)) continue;
+    libraries.add(library);
+    found.push(dir);
   }
+  if (found.length > 1) {
+    // Copies can be different versions. Choosing one silently would surface as
+    // a decode failure deep in the parser rather than as a resolution problem.
+    console.warn(
+      `warning: ${found.length} dial9 toolkit copies found, using ${found[0]}\n  also: ` +
+      found.slice(1).join('\n  also: ') +
+      '\n  They may be different versions. Remove the ones you do not want.'
+    );
+  }
+  if (found.length > 0) return found[0];
   throw new Error(
     `cannot find the dial9 toolkit scripts (${TOOLKIT_FILES.join(', ')}). Searched:\n  ` +
     searched.join('\n  ') +
