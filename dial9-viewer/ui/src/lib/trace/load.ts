@@ -93,8 +93,9 @@ export interface LoadedTrace {
   trace: ParsedTrace;
   /** Decompressed byte count (the decompressed bytes are not retained). */
   bytes: number;
-  /** The compressed bytes, when the loader kept them for Set/Clear Range. */
-  compressed?: Uint8Array;
+  /** The compressed bytes per component, when the loader kept them for
+   *  Set/Clear Range. */
+  compressed?: Uint8Array[];
   /**
    * "stream" when download and decode overlapped (canStreamDecode
    * runtimes); "buffered" for the fetch-then-parse fallback. Pages use this
@@ -546,7 +547,7 @@ export function loadTraceOnMainThread(
   const run = async (): Promise<{
     trace: ParsedTrace;
     bytes: number;
-    compressed?: Uint8Array;
+    compressed?: Uint8Array[] | undefined;
   }> => {
     if (mode === "stream") {
       emit("parsing", 0, null);

@@ -495,7 +495,11 @@ declare module "*/trace_parser.js" {
      * Receives each chunk as it arrived, before any gunzip, with whether this
      * component was gzipped (see stream.ts streamTrace).
      */
-    onRawChunk?: (chunk: Uint8Array, isGzip: boolean) => void;
+    onRawChunk?: (
+      chunk: Uint8Array,
+      isGzip: boolean,
+      component?: number,
+    ) => void;
   }
 
   /**

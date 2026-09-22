@@ -211,7 +211,8 @@
      * @param {{signal?: AbortSignal, headers?: Object,
      *   onRawChunk?: (chunk: Uint8Array, isGzip: boolean) => void}} [opts]
      *   `onRawChunk` receives the bytes as they arrived, before any gunzip,
-     *   with whether this component was gzipped.
+     *   with whether this component was gzipped. fetchTracesStream adds the
+     *   component index as a third argument.
      * @returns {Promise<AsyncIterable<Uint8Array>>}
      */
     async function fetchTraceStream(url, opts = {}) {
@@ -248,10 +249,8 @@
 
         // A ReadableStream that re-emits the peeked first chunk then drains the
         // rest of the body reader. `onRawChunk` sees the bytes as they arrived,
-        // before any gunzip, so a caller can keep the compressed form. It is
-        // told whether THIS component was gzipped: a capture spanning several
-        // components can only be re-decoded if every one of them was, since the
-        // reader sniffs a single magic for the whole concatenation.
+        // before any gunzip, so a caller can keep the compressed form, with
+        // whether this component was gzipped.
         const onRaw = opts.onRawChunk;
         const rawStream = new ReadableStream({
             start(controller) {
@@ -342,8 +341,19 @@
         // a no-op catch to each promise immediately to mark it handled; the loop
         // below still awaits the ORIGINAL promise, so the real error surfaces
         // (and rejects the iterator) when emission reaches that component.
-        const streamPromises = list.map((url) => {
-            const p = fetchTraceStream(url, opts);
+        const streamPromises = list.map((url, i) => {
+            // Tag each raw chunk with its component, so a caller keeping the
+            // compressed bytes can keep them per component. Gzip members are
+            // only reliably decodable one at a time.
+            const perComponent =
+                opts.onRawChunk === undefined
+                    ? opts
+                    : {
+                          ...opts,
+                          onRawChunk: (chunk, isGzip) =>
+                              opts.onRawChunk(chunk, isGzip, i),
+                      };
+            const p = fetchTraceStream(url, perComponent);
             p.catch(() => {});
             return p;
         });

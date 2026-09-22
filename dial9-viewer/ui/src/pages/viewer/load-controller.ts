@@ -182,7 +182,7 @@ export function loadErrorMessage(
  * S3 round trip for the whole trace.
  */
 type ReparseSource =
-  | { kind: "bytes"; bytes: Uint8Array }
+  | { kind: "bytes"; parts: readonly Uint8Array[] }
   | { kind: "urls"; urls: readonly string[] }
   | { kind: "file"; file: Blob };
 
@@ -318,7 +318,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     opts: {
       label: string;
       withHeaders: boolean;
-      objectUrl: string | null;
+      objectUrls: readonly string[] | null;
       /** Set-Range reparse window forwarded to the worker. */
       range?: ReparseRange | null;
       /** Source replacement vs same-source Set/Clear Range reparse. */
@@ -358,7 +358,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     currentHandle = handle;
 
     const cleanup = (): void => {
-      if (opts.objectUrl !== null) revokeObjectUrl(opts.objectUrl);
+      if (opts.objectUrls !== null) opts.objectUrls.forEach(revokeObjectUrl);
       if (token === loadToken) {
         stopTimer();
         currentHandle = null;
@@ -381,8 +381,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
           // Compressed bytes beat whatever source the caller named: same
           // trace, and re-parsing them is a gunzip rather than a round trip.
           reparseSource =
-            raw instanceof Uint8Array && raw.byteLength > 0
-              ? { kind: "bytes", bytes: raw }
+            Array.isArray(raw) && raw.length > 0
+              ? { kind: "bytes", parts: raw as Uint8Array[] }
               : opts.source;
         }
         // Success: the store's trace slice is now populated; commit the
@@ -467,7 +467,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       begin([objectUrl], {
         label: `Loading ${name}...`,
         withHeaders: false,
-        objectUrl,
+        objectUrls: [objectUrl],
         kind: "source",
         shareableAfterSuccess: false,
         source: { kind: "file", file },
@@ -477,7 +477,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       begin(urls, {
         label,
         withHeaders: true,
-        objectUrl: null,
+        objectUrls: null,
         kind: "source",
         shareableAfterSuccess: true,
         source: { kind: "urls", urls },
@@ -507,15 +507,17 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
         ? "Applying range..."
         : "Restoring full trace...";
       if (reparseSource.kind === "bytes" || reparseSource.kind === "file") {
-        const blob =
+        // One source per component: each is its own gzip stream, and the
+        // loader gunzips them independently exactly as the first load did.
+        const blobs =
           reparseSource.kind === "bytes"
-            ? new Blob([reparseSource.bytes as BlobPart])
-            : reparseSource.file;
-        const objectUrl = createObjectUrl(blob);
-        begin([objectUrl], {
+            ? reparseSource.parts.map((b) => new Blob([b as BlobPart]))
+            : [reparseSource.file];
+        const objectUrls = blobs.map(createObjectUrl);
+        begin(objectUrls, {
           label,
           withHeaders: false,
-          objectUrl,
+          objectUrls,
           kind: "reparse",
           shareableAfterSuccess: null,
           source: null,
@@ -526,7 +528,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       begin(reparseSource.urls, {
         label,
         withHeaders: true,
-        objectUrl: null,
+        objectUrls: null,
         kind: "reparse",
         shareableAfterSuccess: null,
         source: null,
@@ -537,7 +539,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       begin(["/demo-trace.bin"], {
         label: "Loading demo trace...",
         withHeaders: true,
-        objectUrl: null,
+        objectUrls: null,
         kind: "source",
         shareableAfterSuccess: false,
         source: { kind: "urls", urls: ["/demo-trace.bin"] },

@@ -153,9 +153,10 @@ describe("loadTraceStreamed", () => {
     expect(streamed.bytes).toBe(buffered.bytes);
   });
 
-  // Set/Clear Range re-parses these rather than re-fetching, so they have to be
-  // the compressed form and they have to decode back to the same trace.
-  it("captures the compressed bytes, not the decompressed ones", async () => {
+  // Set/Clear Range re-parses these, so they have to be the compressed form and
+  // they have to decode back to the same trace. One entry per component: a gzip
+  // stream of several members decodes on some runtimes and throws on others.
+  it("captures the compressed bytes per component", async () => {
     installFetchMock({ "/a.gz": gzTrace, "/b.gz": gzTrace });
     const { trace, bytes, compressed } = await streamTrace(
       ["/a.gz", "/b.gz"],
@@ -163,19 +164,17 @@ describe("loadTraceStreamed", () => {
       {},
       true,
     );
-    expect(compressed).toBeDefined();
-    expect(compressed!.length).toBe(gzTrace.length * 2);
-    expect(compressed!.length).toBeLessThan(bytes);
+    expect(compressed).toHaveLength(2);
+    for (const part of compressed!) expectBytesEqual(part, gzTrace);
+    expect(compressed![0]!.length + compressed![1]!.length).toBeLessThan(bytes);
 
-    // Re-parsed the way the page does it: hand the capture back as one source.
-    installFetchMock({ "/again": compressed! });
-    const again = await streamTrace(["/again"], {}, {});
+    // Re-parsed the way the page does it: one source per component.
+    installFetchMock({ "/r0": compressed![0]!, "/r1": compressed![1]! });
+    const again = await streamTrace(["/r0", "/r1"], {}, {});
     expect(again.trace.events.length).toBe(trace.events.length);
     expect(again.bytes).toBe(bytes);
   });
 
-  // The reader sniffs one gzip magic for the whole capture, so a plain
-  // component would leave a tail that cannot be decoded.
   it("drops the capture when any component arrives uncompressed", async () => {
     installFetchMock({ "/a.gz": gzTrace, "/raw": rawTrace });
     const { compressed } = await streamTrace(["/a.gz", "/raw"], {}, {}, true);

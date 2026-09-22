@@ -28,12 +28,15 @@ export interface StreamedParse {
   /** Decompressed byte count (the decompressed bytes are not retained). */
   bytes: number;
   /**
-   * The bytes as they arrived, still compressed, concatenated across
-   * components. Absent when nothing asked for them or when they outgrew the
-   * budget. Concatenated gzip members decode as one stream, so these re-parse
-   * through the ordinary load path.
+   * The bytes as they arrived, still compressed, one entry per component.
+   * Absent when nothing asked for them, or when a component arrived
+   * uncompressed.
+   *
+   * Kept apart rather than concatenated: a gzip stream of several members
+   * decodes on some runtimes and throws "trailing junk" on others, so each
+   * component re-parses as its own source.
    */
-  compressed?: Uint8Array;
+  compressed?: Uint8Array[];
 }
 
 /**
@@ -77,21 +80,21 @@ export async function streamTrace(
   parseOpts: ParseOptions,
   captureCompressed = false
 ): Promise<StreamedParse> {
-  let captured: Uint8Array[] | null = captureCompressed ? [] : null;
-  let capturedBytes = 0;
+  // Chunks per component, in arrival order; index 0 for the single-URL path,
+  // which never reports one.
+  let captured: Uint8Array[][] | null = captureCompressed ? [] : null;
   const opts: FetchOptions = captureCompressed
     ? {
         ...fetchOpts,
-        onRawChunk: (chunk: Uint8Array, isGzip: boolean): void => {
+        onRawChunk: (chunk: Uint8Array, isGzip: boolean, component = 0): void => {
           if (captured === null) return;
-          // A capture is re-read as one stream whose first bytes decide whether
-          // the whole thing is gunzipped, so one plain component invalidates it.
+          // Re-parsing a component means gunzipping it, so a plain one has
+          // nothing to re-parse from and the whole capture goes.
           if (!isGzip) {
             captured = null;
             return;
           }
-          capturedBytes += chunk.length;
-          captured.push(chunk);
+          (captured[component] ??= []).push(chunk);
         },
       }
     : fetchOpts;
@@ -101,11 +104,16 @@ export async function streamTrace(
       : fetchTracesStream([...urls], opts);
   const parsed = await parseChunks(stream, parseOpts);
   if (captured === null) return parsed;
-  const out = new Uint8Array(capturedBytes);
-  let off = 0;
-  for (const c of captured) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return { ...parsed, compressed: out };
+  const compressed = captured.map((chunks) => {
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return out;
+  });
+  return { ...parsed, compressed };
 }
