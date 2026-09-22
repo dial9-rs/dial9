@@ -391,7 +391,9 @@ async fn serve_embedded(uri: axum::http::Uri) -> Response {
         }
         None => {
             if path == "index.html" {
-                tracing::warn!("embedded UI missing index.html! were UI assets built properly?");
+                tracing::warn!(
+                    "embedded UI missing index.html! were UI assets built properly? please try `npm run build`"
+                );
             }
             (StatusCode::NOT_FOUND, "not found").into_response()
         }
