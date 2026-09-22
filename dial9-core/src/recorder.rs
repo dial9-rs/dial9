@@ -262,36 +262,16 @@ impl<M: BufferMode> RecorderBuilder<M> {
     /// [`recorder_or_disabled`]); the sources and pipeline configured on the way
     /// here are never started.
     pub fn build(self) -> Recorder {
-        if self.writer.is_none() {
+        #[allow(unused_mut)]
+        let Some(mut writer) = self.writer else {
             return recorder_disabled();
-        }
+        };
+
         let Some(sole_recorder) = SoleRecorderGuard::claim() else {
             tracing::error!(
                 target: "dial9",
                 "dial9: this process already has a recorder, this one will run without telemetry."
             );
-            return recorder_disabled();
-        };
-        let mut recorder = self.build_inner();
-        recorder.hold_process(sole_recorder);
-        recorder
-    }
-
-    /// Like [`build`](Self::build), but never claims [`SoleRecorderGuard`]:
-    /// lets tests build many recorders in parallel without racing for the
-    /// process-wide singleton. Exercises the same construction as `build`;
-    /// only the guard claim is skipped.
-    #[cfg(test)]
-    pub(crate) fn build_for_test(self) -> Recorder {
-        self.build_inner()
-    }
-
-    /// Construction shared by [`build`](Self::build) and
-    /// [`build_for_test`](Self::build_for_test), independent of
-    /// [`SoleRecorderGuard`].
-    fn build_inner(self) -> Recorder {
-        #[allow(unused_mut)]
-        let Some(mut writer) = self.writer else {
             return recorder_disabled();
         };
 
@@ -370,6 +350,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         let hook = self.thread_init.clone();
         #[allow(unused_mut)]
         let mut recorder = Recorder::start(shared, writer, self.metrics_sink, move || hook());
+        recorder.hold_process(sole_recorder);
 
         #[cfg(feature = "pipeline")]
         if let Some(worker) = worker {
@@ -572,7 +553,7 @@ mod tests {
                 emitted: false,
                 value: 7,
             })
-            .build_for_test();
+            .build();
         recorder.graceful_shutdown(Duration::ZERO);
 
         let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
@@ -586,7 +567,7 @@ mod tests {
     #[test]
     fn build_starts_recording() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
-        let recorder = recorder(writer).build_for_test();
+        let recorder = recorder(writer).build();
         assert!(
             recorder.shared().expect("live recorder").is_enabled(),
             "build() must start recording"
@@ -597,7 +578,7 @@ mod tests {
     #[test]
     fn paused_build_waits_for_enable() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
-        let recorder = recorder(writer).paused().build_for_test();
+        let recorder = recorder(writer).paused().build();
         assert!(
             !recorder.shared().expect("live recorder").is_enabled(),
             "paused() must leave recording off"
@@ -635,7 +616,7 @@ mod tests {
             .on_recording_start(move |_handle| {
                 runs_hook.fetch_add(1, Ordering::SeqCst);
             })
-            .build_for_test();
+            .build();
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at build");
         live.enable();
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at most once");
@@ -648,7 +629,7 @@ mod tests {
                 paused_hook.fetch_add(1, Ordering::SeqCst);
             })
             .paused()
-            .build_for_test();
+            .build();
         assert_eq!(
             paused_runs.load(Ordering::SeqCst),
             0,
@@ -695,7 +676,7 @@ mod tests {
                 value: 11,
             })
             .pipe(CountingProcessor(StdArc::clone(&processed)))
-            .build_for_test();
+            .build();
         recorder.graceful_shutdown(Duration::from_secs(5));
 
         assert!(
@@ -774,7 +755,7 @@ mod tests {
                 emitted: false,
                 value: 3,
             })
-            .build_for_test();
+            .build();
         recorder.graceful_shutdown(Duration::from_secs(5));
 
         assert!(
@@ -800,7 +781,7 @@ mod tests {
                 emitted: false,
                 value: 5,
             })
-            .build_for_test();
+            .build();
         recorder.graceful_shutdown(Duration::from_secs(5));
 
         let compressed = std::fs::read_dir(dir.path())
@@ -852,7 +833,7 @@ mod tests {
                 value: 9,
             })
             .terminal_processor(Uploader(StdArc::clone(&uploaded)))
-            .build_for_test();
+            .build();
         recorder.graceful_shutdown(Duration::from_secs(5));
 
         assert!(
@@ -886,7 +867,7 @@ mod tests {
                         t.fetch_add(1, Ordering::SeqCst);
                     }
                 })
-                .build_for_test();
+                .build();
             recorder.graceful_shutdown(Duration::from_secs(5));
 
             (

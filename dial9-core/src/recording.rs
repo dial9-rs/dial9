@@ -460,7 +460,7 @@ mod tests {
                     teardown_ran_for_thread.store(true, Ordering::Relaxed);
                 }
             })
-            .build_for_test();
+            .build();
         recorder.handle().enable();
 
         // Wait for the panicking source to actually run at least once
@@ -491,7 +491,7 @@ mod tests {
         let recorder = recorder(writer)
             .source(source)
             .source(HealthyMetadataSource)
-            .build_for_test();
+            .build();
         recorder.handle().enable();
         // A trivial marker event: `finalize()` discards a segment that never
         // held a real event, so without this the metadata-only segment
@@ -550,7 +550,7 @@ mod tests {
                 });
                 move || drop(guard)
             })
-            .build_for_test();
+            .build();
         recorder.handle().enable();
 
         // Wait for several repeat panics from both sources, not just one:
@@ -613,7 +613,7 @@ mod tests {
                 });
                 move || drop(guard)
             })
-            .build_for_test();
+            .build();
         recorder.handle().enable();
 
         // Wait for several repeat panics from both sources, not just one:
