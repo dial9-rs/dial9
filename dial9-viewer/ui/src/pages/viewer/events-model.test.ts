@@ -46,6 +46,22 @@ function ev(
 
 // ── Generic-event extraction ─────────────────────────────────────────────
 
+/** EventTrackData over a plain event list, already in timestamp order. */
+const trackData = (
+  events: readonly CustomTraceEvent[],
+  eventNames: readonly string[],
+): EventTrackData => ({
+  store: events,
+  // Built from the length alone, so a proxied store records no element reads
+  // here and the bounded-scan test measures only the window scan.
+  order: Int32Array.from({ length: events.length }, (_, i) => i),
+  eventNames,
+});
+
+/** The rows `data` selected, materialized in order. */
+const ordered = (data: EventTrackData): CustomTraceEvent[] =>
+  [...data.order].map((row) => data.store.at(row)!);
+
 describe("computeEventTrackData", () => {
   it("drops span lifecycle events, sorts by ts, and lists unique names", () => {
     const data = computeEventTrackData([
@@ -72,18 +88,18 @@ describe("computeEventTrackData", () => {
         },
       },
     ]);
-    expect(data.events.map((e) => e.timestamp)).toEqual([10, 20, 30]);
-    expect(data.events.map((e) => e.name)).toEqual(["alpha", "alpha", "beta"]);
+    expect(ordered(data).map((e) => e.timestamp)).toEqual([10, 20, 30]);
+    expect(ordered(data).map((e) => e.name)).toEqual(["alpha", "alpha", "beta"]);
     expect(data.eventNames).toEqual(["alpha", "beta"]);
   });
 
   it("returns the shared empty data for null / span-only input", () => {
-    expect(computeEventTrackData(null).events).toHaveLength(0);
-    expect(computeEventTrackData([ev("SpanEnter:x", 1)]).events).toHaveLength(0);
+    expect(computeEventTrackData(null).order).toHaveLength(0);
+    expect(computeEventTrackData([ev("SpanEnter:x", 1)]).order).toHaveLength(0);
   });
 
   it("keeps unannotated metrique-named events", () => {
-    expect(computeEventTrackData([ev("metrique:RequestMetrics", 10)]).events)
+    expect(computeEventTrackData([ev("metrique:RequestMetrics", 10)]).order)
       .toHaveLength(1);
   });
 });
@@ -92,13 +108,17 @@ describe("computeEventTrackData", () => {
 
 describe("visibility window binary search", () => {
   const events = Array.from({ length: 20 }, (_, i) => ev("e", i * 10));
-  const data: EventTrackData = { events, eventNames: ["e"] };
+  const data: EventTrackData = {
+    store: events,
+    order: Int32Array.from(events.map((_, i) => i)),
+    eventNames: ["e"],
+  };
 
   it("lowerBound / upperBound bracket the inclusive window", () => {
     // window [50, 120]: first ts>=50 is index 5 (ts 50); first ts>120 is
     // index 13 (ts 130).
-    expect(lowerBoundByTimestamp(events, 50)).toBe(5);
-    expect(upperBoundByTimestamp(events, 120)).toBe(13);
+    expect(lowerBoundByTimestamp(data, 50)).toBe(5);
+    expect(upperBoundByTimestamp(data, 120)).toBe(13);
     // exact-edge inclusivity: ts 120 is index 12, included by upperBound(120).
     const vis = filterVisibleEvents(data, 50, 120, new Set());
     expect(vis.map((e) => e.timestamp)).toEqual([50, 60, 70, 80, 90, 100, 110, 120]);
@@ -114,7 +134,7 @@ describe("visibility window binary search", () => {
         return Reflect.get(target, prop, recv);
       },
     });
-    const windowed: EventTrackData = { events: proxy, eventNames: ["e"] };
+    const windowed: EventTrackData = trackData(proxy, ["e"]);
     // A narrow window near the middle: indices [25000, 25009].
     const vis = filterVisibleEvents(windowed, 25_000, 25_009, new Set());
     expect(vis.map((e) => e.timestamp)).toEqual([
@@ -140,10 +160,10 @@ describe("eventMatchesFilter", () => {
     expect(eventMatchesFilter(ev("drop", 1), sel)).toBe(false);
   });
   it("filterVisibleEvents applies the name filter within the window", () => {
-    const data: EventTrackData = {
-      events: [ev("a", 10), ev("b", 20), ev("a", 30)],
-      eventNames: ["a", "b"],
-    };
+    const data: EventTrackData = trackData(
+      [ev("a", 10), ev("b", 20), ev("a", 30)],
+      ["a", "b"],
+    );
     const vis = filterVisibleEvents(data, 0, 100, new Set(["a"]));
     expect(vis.map((e) => e.timestamp)).toEqual([10, 30]);
   });
@@ -157,10 +177,10 @@ describe("buildEventRenderModel", () => {
 
   it("clusters same-pixel events, sizes ticks, and stripes mixed names", () => {
     // viewStart=0 viewEnd=100 drawW=100 -> ns maps 1:1 to px.
-    const data: EventTrackData = {
-      events: [ev("a", 10), ev("b", 10), ev("a", 50)],
-      eventNames: ["a", "b"],
-    };
+    const data: EventTrackData = trackData(
+      [ev("a", 10), ev("b", 10), ev("a", 50)],
+      ["a", "b"],
+    );
     const model = buildEventRenderModel({
       data,
       viewStart: 0,
@@ -195,7 +215,7 @@ describe("buildEventRenderModel", () => {
 
   it("reports the no-events vs no-visible resting reasons", () => {
     const empty = buildEventRenderModel({
-      data: { events: [], eventNames: [] },
+      data: trackData([], []),
       viewStart: 0,
       viewEnd: 100,
       drawW: 100,
@@ -207,7 +227,7 @@ describe("buildEventRenderModel", () => {
     expect(empty.emptyReason).toBe("no-events");
 
     const panned = buildEventRenderModel({
-      data: { events: [ev("a", 500)], eventNames: ["a"] },
+      data: trackData([ev("a", 500)], ["a"]),
       viewStart: 0,
       viewEnd: 100,
       drawW: 100,

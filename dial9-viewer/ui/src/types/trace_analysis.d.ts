@@ -289,7 +289,7 @@ declare module "*/trace_analysis.js" {
   export function getTraceTimeRange(
     events: readonly TraceEvent[],
     cpuSamples: readonly CpuSample[],
-    customEvents?: readonly CustomTraceEvent[] | null
+    customEvents?: import("*/trace_parser.js").CustomEventStore | null
   ): { minTs: number; maxTs: number; durationNs: number } | null;
 
   export function hasCpuProfileSamples(
@@ -322,7 +322,10 @@ declare module "*/trace_analysis.js" {
   }
 
   export function buildProcessCpuUsageSeries(
-    customEvents: readonly CustomTraceEvent[] | null | undefined,
+    customEvents:
+      | import("*/trace_parser.js").CustomEventStore
+      | null
+      | undefined,
     availableParallelism?: number | string | null
   ): {
     samples: ProcessCpuUsageSample[];
@@ -505,7 +508,7 @@ declare module "*/trace_analysis.js" {
   }
 
   export function buildSpanData(
-    customEvents: readonly CustomTraceEvent[],
+    customEvents: import("*/trace_parser.js").CustomEventStore,
     workerSpans?: Record<number, WorkerLane>,
     tidBindings?: ReadonlyMap<
       number,

@@ -756,7 +756,11 @@
             // Map: it exposes the same get/has/keys reads, but holds dumps in
             // flat columns instead of two objects each.
             taskDumps: (options && options.taskDumpSink) || new Map(),
-            customEvents: [], // unrecognized event types: {name, timestamp, fields}
+            // Unrecognized event types: {name, timestamp, fields}. An optional
+            // columnar sink (src/lib/trace/columnar-custom-events.ts) replaces
+            // the array: it types each schema's fields into columns and
+            // resolves units/fieldKinds from the schema on read.
+            customEvents: (options && options.customEventSink) || [],
             // Schema active when each custom event was decoded. Kept parallel to
             // customEvents only until finalizeParse so annotation frames that
             // legally arrive after an event still reach that event's metadata.
@@ -1242,30 +1246,38 @@
                     singleEventSpan,
                 );
             if (!storedInSink) {
-                // units/fieldKinds resolved in finalizeParse (see below).
+                if (customEvents.pushCustom) {
+                    customEvents.pushCustom(frame.name, ts, v, schema, singleEventSpan);
+                } else {
+                    // units/fieldKinds resolved in finalizeParse (see below).
+                    customEvents.push({
+                        name: frame.name,
+                        timestamp: ts,
+                        fields: v,
+                        units: null,
+                        fieldKinds: null,
+                        singleEventSpan,
+                    });
+                    state.customEventSchemas.push(schema);
+                }
+            }
+        } else if (isSingleEventSchema && ts != null) {
+            // Invalid schemas and per-event projection failures remain visible
+            // as ordinary custom events, but must not mutate runtime state based
+            // only on a colliding schema name.
+            if (customEvents.pushCustom) {
+                customEvents.pushCustom(frame.name, ts, v, schema, null);
+            } else {
                 customEvents.push({
                     name: frame.name,
                     timestamp: ts,
                     fields: v,
                     units: null,
                     fieldKinds: null,
-                    singleEventSpan,
+                    singleEventSpan: null,
                 });
                 state.customEventSchemas.push(schema);
             }
-        } else if (isSingleEventSchema && ts != null) {
-            // Invalid schemas and per-event projection failures remain visible
-            // as ordinary custom events, but must not mutate runtime state based
-            // only on a colliding schema name.
-            customEvents.push({
-                name: frame.name,
-                timestamp: ts,
-                fields: v,
-                units: null,
-                fieldKinds: null,
-                singleEventSpan: null,
-            });
-            state.customEventSchemas.push(schema);
         }
         if (isSingleEventSchema) {
             return;
@@ -1586,18 +1598,25 @@
                             spanEventSink.pushIfSpan(frame.name, ts, v, null)
                         )
                     ) {
-                        // units/fieldKinds are resolved in finalizeParse from
-                        // the parallel customEventSchemas array (trailing
-                        // annotation frames may still update the schema).
-                        customEvents.push({
-                            name: frame.name,
-                            timestamp: ts,
-                            fields: v,
-                            units: null,
-                            fieldKinds: null,
-                            singleEventSpan: null,
-                        });
-                        state.customEventSchemas.push(schema);
+                        if (customEvents.pushCustom) {
+                            // The sink holds the schema itself, so units and
+                            // fieldKinds resolve on read - including from
+                            // annotation frames that arrive later.
+                            customEvents.pushCustom(frame.name, ts, v, schema, null);
+                        } else {
+                            // units/fieldKinds are resolved in finalizeParse from
+                            // the parallel customEventSchemas array (trailing
+                            // annotation frames may still update the schema).
+                            customEvents.push({
+                                name: frame.name,
+                                timestamp: ts,
+                                fields: v,
+                                units: null,
+                                fieldKinds: null,
+                                singleEventSpan: null,
+                            });
+                            state.customEventSchemas.push(schema);
+                        }
                     }
                 }
                 break;
@@ -1679,11 +1698,13 @@
         // their type (see docs/design/single-event-spans.md), so the decode-time
         // projection in processFrame is already final. Both decoders classify in
         // a single pass; neither re-resolves spans after the fact.
-        for (let i = 0; i < customEvents.length; i++) {
-            const event = customEvents[i];
-            const schema = customEventSchemas[i];
-            event.units = schema?.units || null;
-            event.fieldKinds = schema?.fieldKinds || null;
+        if (!customEvents.pushCustom) {
+            for (let i = 0; i < customEvents.length; i++) {
+                const event = customEvents[i];
+                const schema = customEventSchemas[i];
+                event.units = schema?.units || null;
+                event.fieldKinds = schema?.fieldKinds || null;
+            }
         }
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall

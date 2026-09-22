@@ -18,6 +18,7 @@ import "./core-globals.js";
 import { warmDerived } from "./derived.js";
 import { ColumnarEvents, capacityForBytes } from "./columnar-events.js";
 import { ColumnarCpuSamples } from "./columnar-cpu-samples.js";
+import { ColumnarCustomEvents } from "./columnar-custom-events.js";
 import { ColumnarTaskDumps } from "./columnar-task-dumps.js";
 import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import { startLoadPerf } from "./load-perf.js";
@@ -534,6 +535,7 @@ export function loadTraceOnMainThread(
     cpuSampleSink: new ColumnarCpuSamples(),
     spanEventSink,
     taskDumpSink: new ColumnarTaskDumps(),
+    customEventSink: new ColumnarCustomEvents(),
   };
   if (opts.maxEvents !== undefined) parseOpts.maxEvents = opts.maxEvents;
   if (opts.startTime !== undefined) parseOpts.startTime = opts.startTime;

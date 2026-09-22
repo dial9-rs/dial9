@@ -161,7 +161,9 @@ describe("worker path (real thread + structured clone)", () => {
     expect(result.trace.events[mid]).toEqual(direct.events[mid]);
     expect(result.trace.events.at(-1)).toEqual(direct.events.at(-1));
     const midCustom = Math.floor(direct.customEvents.length / 2);
-    expect(result.trace.customEvents[midCustom]).toEqual(direct.customEvents[midCustom]);
+    expect(result.trace.customEvents.at(midCustom)).toEqual(
+      direct.customEvents.at(midCustom),
+    );
     const firstSymbolKey = direct.callframeSymbols.keys().next().value;
     expect(firstSymbolKey).toBeDefined();
     expect(result.trace.callframeSymbols.get(firstSymbolKey!)).toEqual(

@@ -26,6 +26,7 @@ import type {
   PollSpan,
 } from "../../lib/trace/index.js";
 import type { PinnedCustomEvent, SelectionSlice } from "../../types/state.js";
+import type { CustomEventStore } from "../../trace_parser.js";
 
 // ── Generic-event extraction ─────────────────────────────────────────────
 
@@ -59,8 +60,14 @@ function isSpanEvent(name: string): boolean {
  * binary search relies on it).
  */
 export interface EventTrackData {
-  /** Generic (non-span) custom events, sorted ascending by timestamp. */
-  events: readonly CustomTraceEvent[];
+  /** The trace's custom events; rows are read through `order`. */
+  store: CustomEventStore;
+  /**
+   * Rows of `store` that are generic (non-span) events, ascending by
+   * timestamp. Indices rather than events: a trace can hold millions of custom
+   * events, and only the visible window is ever materialized.
+   */
+  order: Int32Array;
   /** Unique event names, sorted - the legend chip set. */
   eventNames: readonly string[];
 }
@@ -68,7 +75,8 @@ export interface EventTrackData {
 /** Empty resting data (no trace / no generic events) so callers never
  *  special-case null. */
 export const EMPTY_EVENT_TRACK_DATA: EventTrackData = {
-  events: [],
+  store: [],
+  order: new Int32Array(0),
   eventNames: [],
 };
 
@@ -79,21 +87,30 @@ export const EMPTY_EVENT_TRACK_DATA: EventTrackData = {
  * track renders its resting state without branching.
  */
 export function computeEventTrackData(
-  customEvents: readonly CustomTraceEvent[] | null | undefined,
+  customEvents: CustomEventStore | null | undefined,
 ): EventTrackData {
   if (customEvents == null || customEvents.length === 0) {
     return EMPTY_EVENT_TRACK_DATA;
   }
-  const events: CustomTraceEvent[] = [];
+  const rows: number[] = [];
+  const ts: number[] = [];
   const names = new Set<string>();
-  for (const ev of customEvents) {
+  for (let i = 0; i < customEvents.length; i++) {
+    // Materialized only to classify it; the row itself is what we keep.
+    const ev = customEvents.at(i)!;
     if (ev.singleEventSpan != null || isSpanEvent(ev.name)) continue;
-    events.push(ev);
+    rows.push(i);
+    ts.push(ev.timestamp);
     names.add(ev.name);
   }
-  if (events.length === 0) return EMPTY_EVENT_TRACK_DATA;
-  events.sort((a, b) => a.timestamp - b.timestamp);
-  return { events, eventNames: [...names].sort() };
+  if (rows.length === 0) return EMPTY_EVENT_TRACK_DATA;
+  // Sort positions, not rows, so each comparison reads `ts` directly. Equal
+  // timestamps fall back to arrival order, so the result is stable.
+  const pos = rows.map((_, k) => k);
+  pos.sort((a, b) => ts[a]! - ts[b]! || rows[a]! - rows[b]!);
+  const order = new Int32Array(pos.length);
+  for (let k = 0; k < pos.length; k++) order[k] = rows[pos[k]!]!;
+  return { store: customEvents, order, eventNames: [...names].sort() };
 }
 
 // ── Filtering (name chips) ───────────────────────────────────────────────
@@ -109,37 +126,39 @@ export function eventMatchesFilter(
 // ── Visibility window (binary-searched at both edges) ────────────────────
 
 /**
- * First index in `events` (sorted by timestamp) whose `timestamp` is >=
- * `viewStart` - the inclusive left bound of the visible window. Binary search:
- * events before this index end (are) before the view and cannot be visible.
+ * First position in `data.order` whose event timestamp is >= `viewStart` - the
+ * inclusive left bound of the visible window. Binary search: events before it
+ * are before the view and cannot be visible.
  */
 export function lowerBoundByTimestamp(
-  events: readonly CustomTraceEvent[],
+  data: EventTrackData,
   viewStart: number,
 ): number {
+  const { store, order } = data;
   let lo = 0;
-  let hi = events.length;
+  let hi = order.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (events[mid]!.timestamp < viewStart) lo = mid + 1;
+    if (store.at(order[mid]!)!.timestamp < viewStart) lo = mid + 1;
     else hi = mid;
   }
   return lo;
 }
 
 /**
- * First index in `events` (sorted by timestamp) whose `timestamp` is strictly
- * greater than `viewEnd` - the exclusive right bound of the visible window.
+ * First position in `data.order` whose event timestamp is strictly greater than
+ * `viewEnd` - the exclusive right bound of the visible window.
  */
 export function upperBoundByTimestamp(
-  events: readonly CustomTraceEvent[],
+  data: EventTrackData,
   viewEnd: number,
 ): number {
+  const { store, order } = data;
   let lo = 0;
-  let hi = events.length;
+  let hi = order.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (events[mid]!.timestamp <= viewEnd) lo = mid + 1;
+    if (store.at(order[mid]!)!.timestamp <= viewEnd) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -156,12 +175,12 @@ export function filterVisibleEvents(
   viewEnd: number,
   selectedNames: ReadonlySet<string>,
 ): CustomTraceEvent[] {
-  const events = data.events;
-  const lo = lowerBoundByTimestamp(events, viewStart);
-  const hi = upperBoundByTimestamp(events, viewEnd);
+  const { store, order } = data;
+  const lo = lowerBoundByTimestamp(data, viewStart);
+  const hi = upperBoundByTimestamp(data, viewEnd);
   const out: CustomTraceEvent[] = [];
   for (let i = lo; i < hi; i++) {
-    const ev = events[i]!;
+    const ev = store.at(order[i]!)!;
     if (!eventMatchesFilter(ev, selectedNames)) continue;
     out.push(ev);
   }
@@ -357,7 +376,7 @@ export interface EventRenderModelOpts {
  */
 export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderModel {
   const { data, viewStart, viewEnd, drawW, canvasH, selectedNames, taskOf, colorOf } = opts;
-  if (data.events.length === 0) {
+  if (data.order.length === 0) {
     return { buckets: [], info: "", emptyReason: "no-events" };
   }
   if (drawW <= 0 || canvasH <= 0 || viewEnd <= viewStart) {

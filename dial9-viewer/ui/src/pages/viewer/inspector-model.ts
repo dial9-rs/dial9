@@ -18,6 +18,7 @@ import {
 } from "./field-chart-model.js";
 import type { ColumnarSpans } from "../../lib/trace/columnar-spans.js";
 import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
+import type { CustomEventStore } from "../../trace_parser.js";
 import type {
   CallframeSymbols,
   CustomTraceEvent,
@@ -220,7 +221,7 @@ export interface EventDetailView {
 
 /** How many events carry `key === String(val)`. */
 function countWithField(
-  events: readonly CustomTraceEvent[],
+  events: CustomEventStore,
   key: string,
   val: string,
 ): number {
@@ -233,7 +234,7 @@ function countWithField(
 
 /** Most-frequent-first "name ×N" list, for cluster types. */
 export function topEventNames(
-  events: readonly CustomTraceEvent[],
+  events: CustomEventStore,
   limit = 5,
 ): string {
   const counts = new Map<string, number>();
@@ -254,7 +255,7 @@ export function topEventNames(
  */
 export function buildEventDetail(
   pinned: PinnedCustomEvent,
-  allEvents: readonly CustomTraceEvent[],
+  allEvents: CustomEventStore,
   fmtTs: (ns: number) => string,
 ): EventDetailView {
   const events = pinned.events;
@@ -433,7 +434,7 @@ export interface RelatedView {
 
 /** Context the Related derivation reads (trace-invariant, cached). */
 export interface RelatedContext {
-  allEvents: readonly CustomTraceEvent[];
+  allEvents: CustomEventStore;
   allSpans: readonly TracingSpan[];
   /** Columnar span store (main-thread path); enclosingSpans dispatches on it. */
   columnarSpans?: ColumnarSpans | undefined;
@@ -445,7 +446,7 @@ export interface RelatedContext {
 }
 
 function eventsWhere(
-  events: readonly CustomTraceEvent[],
+  events: CustomEventStore,
   pred: (e: CustomTraceEvent) => boolean,
 ): CustomTraceEvent[] {
   return events.filter(pred).sort((a, b) => a.timestamp - b.timestamp);

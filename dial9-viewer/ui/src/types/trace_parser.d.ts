@@ -141,6 +141,30 @@ declare module "*/trace_parser.js" {
     singleEventSpan?: SingleEventSpan | null;
   }
 
+  /** The reads consumers make of `customEvents`; an array satisfies it. */
+  export interface CustomEventStore {
+    readonly length: number;
+    at(i: number): CustomTraceEvent | undefined;
+    [Symbol.iterator](): IterableIterator<CustomTraceEvent>;
+    filter(
+      pred: (e: CustomTraceEvent, i: number) => boolean,
+    ): CustomTraceEvent[];
+    find(
+      pred: (e: CustomTraceEvent, i: number) => boolean,
+    ): CustomTraceEvent | undefined;
+  }
+
+  /** A {@link CustomEventStore} the parser can also write into. */
+  export interface CustomEventSink extends CustomEventStore {
+    pushCustom(
+      name: string,
+      timestamp: number,
+      fields: Record<string, import("*/decode.js").DecodedFieldValue>,
+      schema: unknown,
+      singleEventSpan: SingleEventSpan | null,
+    ): void;
+  }
+
   export interface AllocEvent {
     timestamp: number;
     tid: number;
@@ -300,7 +324,7 @@ declare module "*/trace_parser.js" {
      * carry per-runtime counts in `runtimeMetrics`.
      */
     legacyActiveTaskSamples: LegacyActiveTaskSample[];
-    customEvents: CustomTraceEvent[];
+    customEvents: CustomEventStore;
     /**
      * Columnar span-producing custom events (SpanEnter/Exit/Close and annotated
      * single-event spans), present only on the main-thread columnar load path
@@ -409,6 +433,13 @@ declare module "*/trace_parser.js" {
      * buildSpanDataColumnar reads the columns.
      */
     spanEventSink?: SpanEventSink;
+    /**
+     * Columnar sink for NON-span custom events
+     * (src/lib/trace/columnar-custom-events.ts): `pushCustom` types each
+     * schema's fields into columns and keeps the schema, so units and
+     * fieldKinds resolve on read. Defaults to an array of fat events.
+     */
+    customEventSink?: CustomEventSink;
     /**
      * Columnar sink for task dumps (src/lib/trace/columnar-task-dumps.ts):
      * `pushDump` stores each dump in flat columns instead of a record plus a
