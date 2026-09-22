@@ -118,6 +118,7 @@ export class ColumnarEvents {
    * rare full-span outliers (segment-concat boundary), so a time window is NOT
    * a contiguous index range - it must be found through this sort index. */
   private _tsIndex: Int32Array | null = null;
+  private _released = false;
 
   private readonly view: ReusedEventCursor;
 
@@ -140,6 +141,45 @@ export class ColumnarEvents {
 
   get length(): number {
     return this._len;
+  }
+
+  /**
+   * Drop the columns. `length`, `minTs` and `maxTs` survive, which is what the
+   * toolbar and the axis read. Reads of anything else throw: empty columns
+   * would render an empty trace with no error.
+   *
+   * derived.ts owns when this is safe (finishEventColumns).
+   */
+  release(): void {
+    this._released = true;
+    const i32 = new Int32Array(0);
+    this.eventType = new Uint8Array(0);
+    this.ts = new Float64Array(0);
+    this.workerId = i32;
+    this.localQueue = new Uint8Array(0);
+    this.globalQueue = i32;
+    this.cpuTime = new Float64Array(0);
+    this.schedWaitRaw = new Float64Array(0);
+    this.taskIdx = i32;
+    this.spawnLocIdx = i32;
+    this.tidRaw = new Uint32Array(0);
+    this.wakerTaskIdx = i32;
+    this.wokenTaskIdx = i32;
+    this._tsIndex = null;
+  }
+
+  /** True once {@link release} has run. */
+  get released(): boolean {
+    return this._released;
+  }
+
+  private assertLive(): void {
+    if (this._released) {
+      throw new Error(
+        "ColumnarEvents was released after derivation; read the worker-span " +
+          "store, wake index or queue samples instead",
+      );
+    }
   }
 
   private intern(s: string | null | undefined): number {
@@ -279,28 +319,34 @@ export class ColumnarEvents {
 
   // ── Column decoders (sentinel -> semantic value) for index-based consumers ──
   spawnLocAt(i: number): string | null {
+    this.assertLive();
     const idx = this.spawnLocIdx[i]!;
     return idx < 0 ? null : this.spawnList[idx]!;
   }
   schedWaitAt(i: number): number | null {
+    this.assertLive();
     const v = this.schedWaitRaw[i]!;
     return Number.isNaN(v) ? null : v;
   }
   tidAt(i: number): number | undefined {
+    this.assertLive();
     const v = this.tidRaw[i]!;
     return v === NO_TID ? undefined : v;
   }
   /** Absent reads as 0, matching the pre-interning `taskId ?? 0` column. */
   taskIdAt(i: number): number {
+    this.assertLive();
     const idx = this.taskIdx[i]!;
     return idx < 0 ? 0 : this.taskIdList[idx]!;
   }
   /** Absent reads as NaN, the "not a wake event" sentinel consumers test for. */
   wakerTaskIdAt(i: number): number {
+    this.assertLive();
     const idx = this.wakerTaskIdx[i]!;
     return idx < 0 ? NaN : this.taskIdList[idx]!;
   }
   wokenTaskIdAt(i: number): number {
+    this.assertLive();
     const idx = this.wokenTaskIdx[i]!;
     return idx < 0 ? NaN : this.taskIdList[idx]!;
   }
@@ -308,6 +354,7 @@ export class ColumnarEvents {
   /** Materialize a fresh, independent plain event at index `i` (safe to
    * retain). */
   at(i: number): EventLike | undefined {
+    this.assertLive();
     if (i < 0) i += this._len;
     if (i < 0 || i >= this._len) return undefined;
     return materialize(this, i);
@@ -317,6 +364,7 @@ export class ColumnarEvents {
    * live from columns). Safe ONLY for consumers that read fields within the
    * loop body and never retain the view. */
   [Symbol.iterator](): Iterator<EventLike> {
+    this.assertLive();
     const view = this.view;
     const n = this._len;
     let i = 0;
@@ -343,6 +391,7 @@ export class ColumnarEvents {
 
   /** Array-like `.filter`: returns MATERIALIZED (safe-to-retain) events. */
   filter(fn: (e: EventLike, i: number) => boolean): EventLike[] {
+    this.assertLive();
     const out: EventLike[] = [];
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
@@ -353,6 +402,7 @@ export class ColumnarEvents {
   }
 
   some(fn: (e: EventLike, i: number) => boolean): boolean {
+    this.assertLive();
     const view = this.view;
     for (let i = 0; i < this._len; i++) {
       view._i = i;
@@ -368,6 +418,7 @@ export class ColumnarEvents {
    * binTimestamps(this.map(e => e.timestamp), {startNs,endNs}, resolution).
    */
   densityBins(startNs: number, endNs: number, resolution: number): number[] {
+    this.assertLive();
     const span = endNs - startNs;
     if (span <= 0 || resolution <= 0) return [];
     const bins = new Array<number>(resolution).fill(0);
@@ -390,6 +441,7 @@ export class ColumnarEvents {
    * cached. V8 TypedArray.sort is stable (ES2019+), so equal-ts events keep
    * their original (wire) order - matching the per-worker sorts downstream. */
   tsIndex(): Int32Array {
+    this.assertLive();
     if (this._tsIndex === null) {
       const n = this._len;
       const idx = new Int32Array(n);

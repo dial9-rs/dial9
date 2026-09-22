@@ -227,6 +227,7 @@ export async function warmDerived(
     sliceStart = performance.now();
   }
   columnarStoreCache.set(trace, result.store);
+  finishEventColumns(trace, ev);
   const spanResult: LaneWorkerSpans = {
     workerSpans: result.store.workerLanes(),
     perWorker: {},
@@ -253,6 +254,53 @@ export async function warmDerived(
     hasWorkerCpuTime: anyWorkerCpuTime(lanes),
   });
   onProgress(1);
+}
+
+/**
+ * Bins in the minimap's whole-trace density strip. It lives here because the
+ * bins are computed and cached while the event columns are still alive, so no
+ * caller can ask for a different resolution afterwards.
+ */
+export const TRACE_DENSITY_RESOLUTION = 256;
+
+const densityCache = new WeakMap<ParsedTrace, number[] | null>();
+
+/**
+ * Whole-trace event density for the minimap strip, binned at
+ * {@link TRACE_DENSITY_RESOLUTION}. Columnar traces only; the fat path has no
+ * release to work around. Building the worker spans is what fills it.
+ */
+export function traceDensityBins(trace: ParsedTrace): number[] | null {
+  const cached = densityCache.get(trace);
+  if (cached !== undefined) return cached;
+  sharedWorkerSpans(trace);
+  return densityCache.get(trace) ?? null;
+}
+
+/**
+ * Run the last reads of the event columns, then drop them. Everything after
+ * this renders from the worker-span store, the wake index and the queue
+ * samples, which the reconstruction has already built.
+ *
+ * The minimap's density strip and the lifecycle worker-id scan also walk the
+ * columns, so both are memoized here before the drop. Both builders of the
+ * worker spans call this: sharedWorkerSpans, and warmDerived, which builds the
+ * store directly.
+ */
+function finishEventColumns(trace: ParsedTrace, ev: ColumnarEvents): void {
+  computeDensity(trace, ev);
+  lifecycleWorkerIds(trace);
+  ev.release();
+}
+
+function computeDensity(trace: ParsedTrace, ev: ColumnarEvents): void {
+  const { minTs, maxTs } = trace;
+  densityCache.set(
+    trace,
+    minTs == null || maxTs == null || maxTs <= minTs
+      ? null
+      : ev.densityBins(minTs, maxTs, TRACE_DENSITY_RESOLUTION),
+  );
 }
 
 /** Keyed on trace identity, so a reparse invalidates but a pan never does. */
@@ -298,6 +346,7 @@ export function sharedWorkerSpans(trace: ParsedTrace): LaneWorkerSpans {
         );
       }
       columnarStoreCache.set(trace, built.store);
+      finishEventColumns(trace, ev);
       r = {
         workerSpans: built.store.workerLanes(),
         perWorker: {},

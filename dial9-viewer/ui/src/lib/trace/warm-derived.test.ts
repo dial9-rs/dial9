@@ -1,6 +1,6 @@
-// warmDerived writes the same caches the lazy path fills on first render, and
-// they are separate code rather than one calling the other, so the two have to
-// be held to the same output field for field.
+// warmDerived writes the same caches the lazy path fills on first render.
+// They are separate code, so the two have to be held to the same output field
+// for field.
 
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -9,7 +9,9 @@ import type { ParsedTrace } from "../../../trace_parser.js";
 import { ColumnarEvents } from "./columnar-events.js";
 import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import {
+  TRACE_DENSITY_RESOLUTION,
   lifecycleWorkerIds,
+  traceDensityBins,
   sharedDetectorInputs,
   sharedSpanData,
   sharedWorkerSpans,
@@ -122,5 +124,58 @@ describe("span-event release", () => {
     expect(sharedSpanData(trace).columnarSpans?.length).toBe(
       data.columnarSpans?.length,
     );
+  });
+});
+
+// The event columns go once the reconstruction has read them, but the minimap's
+// density strip and the lifecycle worker-id scan walk them too. Both have to be
+// memoized first, on either path that builds the worker spans, or they answer
+// from empty columns without saying so.
+describe("event-column release", () => {
+  const eventsOf = (t: ParsedTrace): ColumnarEvents =>
+    t.events as unknown as ColumnarEvents;
+
+  it("releases via the lazy path with every dependent read already memoized", async () => {
+    const trace = await load();
+    const ev = eventsOf(trace);
+    const len = ev.length;
+    expect(ev.released).toBe(false);
+
+    sharedWorkerSpans(trace);
+    expect(ev.released).toBe(true);
+
+    // Survives: the toolbar's count and the axis bounds read these, not columns.
+    expect(ev.length).toBe(len);
+    expect(trace.minTs).not.toBeNull();
+
+    // Memoized before the release, so they still answer.
+    expect(lifecycleWorkerIds(trace).length).toBeGreaterThan(0);
+    expect(traceDensityBins(trace)).not.toBeNull();
+    expect(traceDensityBins(trace)!.length).toBe(TRACE_DENSITY_RESOLUTION);
+
+    // A reader that outlives the release fails loudly.
+    expect(() => [...ev]).toThrow(/released/);
+    expect(() => ev.at(0)).toThrow(/released/);
+  });
+
+  it("releases via warmDerived with the same reads memoized", async () => {
+    const trace = await load();
+    const ev = eventsOf(trace);
+    await warmDerived(trace, () => {}, () => Promise.resolve());
+    expect(ev.released).toBe(true);
+    expect(lifecycleWorkerIds(trace).length).toBeGreaterThan(0);
+    expect(traceDensityBins(trace)).not.toBeNull();
+  });
+
+  it("agrees with the pre-release values", async () => {
+    const before = await load();
+    const ids = lifecycleWorkerIds(before);
+    const bins = eventsOf(before).densityBins(
+      before.minTs!, before.maxTs!, TRACE_DENSITY_RESOLUTION,
+    );
+    const after = await load();
+    sharedWorkerSpans(after);
+    expect(lifecycleWorkerIds(after)).toEqual(ids);
+    expect(traceDensityBins(after)).toEqual(bins);
   });
 });

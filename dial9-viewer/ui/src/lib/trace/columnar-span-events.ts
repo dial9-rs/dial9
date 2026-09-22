@@ -265,7 +265,7 @@ export class ColumnarSpanEvents {
   /**
    * Drop the columns once buildSpanDataColumnar has turned them into a span
    * store.
-   * 
+   *
    * Reads after this throw. Returning empty columns instead would render a
    * trace with no spans and no error, which is the worse failure.
    */
