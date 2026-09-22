@@ -317,11 +317,22 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
 /// Atomically read and remove the liveset entry for `addr`, returning its
 /// `(size, alloc_ts_ns)`.
 ///
-/// Uses the `entry()` API rather than a separate peek and remove: the bucket
-/// lock is held for the duration of the `Entry`, so a concurrent `on_alloc`
-/// overwriting the same address cannot interleave between the read and the
-/// remove, and the returned metadata always describes the entry that was
-/// actually removed.
+/// Misses take a lock-free `peek_with` and return early. The liveset holds
+/// only sampled allocations, so the overwhelming majority of calls miss, and
+/// `entry()` would take the bucket write lock and reserve a vacant entry
+/// before the caller could observe the miss. This mirrors `on_alloc`, whose
+/// hot path stays on the lock-free `insert`.
+///
+/// Hits then re-resolve through `entry()`, so the read and the remove stay
+/// atomic with respect to anything else mutating that bucket, and the
+/// returned metadata always describes the entry that was actually removed.
+/// An entry can go vacant between the peek and the `entry()` — a concurrent
+/// remove, or the shutdown drain — which reads as a miss, exactly as it
+/// would have before the peek was added.
+///
+/// Note what this atomicity does *not* buy: it does not rule out popping a
+/// different allocation's entry for the same address. Only the caller
+/// invariant below does that.
 ///
 /// **Caller invariant: exclusive ownership of `addr`.** Atomicity alone does
 /// not make the popped entry belong to the allocation being freed — if the
@@ -340,6 +351,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
 /// SAFETY: must be allocation-free — see module docs.
 #[inline]
 fn take_liveset_entry(liveset: &Liveset, addr: u64) -> Option<(u64, u64)> {
+    liveset.peek_with(&addr, |_, _| ())?;
     use scc::hash_index::Entry;
     if let Entry::Occupied(o) = liveset.entry(addr) {
         let val = *o.get();
@@ -1184,6 +1196,38 @@ mod tests {
         assert!(
             liveset.peek_with(&(old_addr_u as u64), |_, _| ()).is_none(),
             "a realloc miss must not leave an entry in the liveset"
+        );
+    }
+
+    /// Pins `take_liveset_entry`'s miss branch on the `on_dealloc` path. The
+    /// overwhelming majority of deallocs are for addresses that were never
+    /// sampled, so the helper returns on the lock-free `peek_with` without
+    /// reaching `entry()`. A miss must push no `RawFree` and leave no entry
+    /// behind — if the peek ever reported a false hit, the `entry()` below it
+    /// would emit a free carrying another allocation's metadata.
+    #[test]
+    fn on_dealloc_ignores_address_that_was_never_sampled() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        let addr_u64 = 0x0BAD_0BAD_u64;
+
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xDEAD_C0DE, 1);
+            // Deliberately no matching `on_alloc`: this address has never
+            // been in the liveset.
+            on_dealloc(&inner_for_thread, addr_u64 as usize as *mut u8, 64);
+        })
+        .join()
+        .expect("scenario thread");
+
+        let liveset = inner.liveset.as_ref().expect("liveset configured");
+        assert!(
+            liveset.peek_with(&addr_u64, |_, _| ()).is_none(),
+            "a dealloc miss must not leave an entry in the liveset"
+        );
+        assert!(
+            inner.rings.free_queue.is_empty(),
+            "a dealloc for a never-sampled address must not push a RawFree"
         );
     }
 }
