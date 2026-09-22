@@ -21,16 +21,28 @@ pub(crate) struct RingBuffer {
     position: u64,
 }
 
-// Safety: The mmap'd memory is valid for the lifetime of the RingBuffer
-// regardless of which thread owns it. The kernel's data_head/data_tail
-// synchronization protocol with memory fences is thread-safe.
+// SAFETY:
+// `RingBuffer` owns the mapping and is not `Sync`, so only the owning thread can
+// consume it. Moving that ownership to another thread does not change the
+// mapping's validity. Cursor access follows perf's Acquire/Release protocol.
 unsafe impl Send for RingBuffer {}
 
 impl RingBuffer {
     /// Create a new RingBuffer from an already-mmap'd pointer.
     ///
     /// # Safety
-    /// `base` must be a valid mmap'd perf event region with `mmap_size` bytes.
+    ///
+    /// The caller must ensure that:
+    ///
+    /// - `base` is non-null, page-aligned, and points to a live writable
+    ///   perf-event mapping of at least `mmap_size` bytes.
+    /// - The mapping starts with a `perf_event_mmap_page`, followed by
+    ///   `data_size` bytes of ring data.
+    /// - `data_size` is non-zero, fits in `usize`, and
+    ///   `page_size() + data_size <= mmap_size`.
+    /// - No other owner unmaps the first `mmap_size` bytes. Ownership of that
+    ///   range transfers to the returned `RingBuffer`, which unmaps it in
+    ///   `Drop`.
     pub unsafe fn new(base: *mut u8, data_size: u64, mmap_size: usize) -> Self {
         RingBuffer {
             base,
@@ -101,19 +113,29 @@ impl RingBuffer {
     }
 
     fn read_head(&self) -> u64 {
+        let page = self.base.cast::<perf_event_mmap_page>();
+        // SAFETY:
+        // `RingBuffer::new` requires `base` to point to a live, aligned
+        // perf-event metadata page. `addr_of!` creates no Rust reference to the
+        // kernel-mutated mapping. The volatile load reads the kernel-published
+        // cursor, and the Acquire fence orders subsequent data reads after it.
         unsafe {
-            let page = &*(self.base as *const perf_event_mmap_page);
-            let head = ptr::read_volatile(&page.data_head);
+            let head = ptr::read_volatile(ptr::addr_of!((*page).data_head));
             fence(Ordering::Acquire);
             head
         }
     }
 
     fn write_tail(&self, value: u64) {
+        let page = self.base.cast::<perf_event_mmap_page>();
+        // SAFETY:
+        // The mapping invariant from `RingBuffer::new` keeps the metadata page
+        // live and writable. `addr_of_mut!` creates no exclusive Rust reference
+        // to memory also accessed by the kernel. The Release fence publishes all
+        // preceding record reads before the volatile tail update.
         unsafe {
-            let page = &mut *(self.base as *mut perf_event_mmap_page);
             fence(Ordering::Release);
-            ptr::write_volatile(&mut page.data_tail, value);
+            ptr::write_volatile(ptr::addr_of_mut!((*page).data_tail), value);
         }
     }
 
@@ -126,15 +148,22 @@ impl RingBuffer {
 }
 
 pub(crate) fn page_size() -> usize {
-    // Safety: sysconf(_SC_PAGESIZE) is always safe and always succeeds on Linux.
-    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+    // SAFETY:
+    // `sysconf` does not access caller-provided memory, and `_SC_PAGESIZE`
+    // requests a process-wide constant.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    assert!(size > 0, "sysconf(_SC_PAGESIZE) failed");
+    size as usize
 }
 
 impl Drop for RingBuffer {
     fn drop(&mut self) {
+        // SAFETY:
+        // `RingBuffer::new` transfers ownership of the first `mmap_size` bytes
+        // of a live mapping. This is the only unmap path for that range.
         unsafe {
-            libc::munmap(self.base as *mut libc::c_void, self.mmap_size);
-        }
+            libc::munmap(self.base.cast::<libc::c_void>(), self.mmap_size);
+        };
     }
 }
 
