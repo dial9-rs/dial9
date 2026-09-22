@@ -173,6 +173,173 @@ fn task_spawn_events_from_main_thread_are_captured() {
     );
 }
 
+/// Worker attribution: spawns that run on a worker carry that worker's id;
+/// spawns from the `block_on` thread (which is not a worker) carry `None`.
+#[cfg(tokio_unstable)]
+#[test]
+fn task_spawn_records_worker_id_only_when_spawned_on_a_worker() {
+    use dial9_tokio_telemetry::telemetry::current_worker_id;
+    use std::sync::{Arc, Mutex};
+
+    let (capture, batches) = capture_processor();
+
+    const OFF_WORKER: usize = 5;
+
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let rt = common::attach(
+        &recorder,
+        2,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
+
+    let worker_that_spawned: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let on_worker = worker_that_spawned.clone();
+
+    rt.block_on(async move {
+        let mut handles = Vec::new();
+        // Spawned from the block_on thread, which is not a worker.
+        for _ in 0..OFF_WORKER {
+            handles.push(tokio::spawn(async {}));
+        }
+        handles.push(tokio::spawn(async move {
+            // The task body runs on a worker, so this spawn does too.
+            *on_worker.lock().unwrap() = Some(current_worker_id().as_u64());
+            tokio::spawn(async {});
+        }));
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    let worker = worker_that_spawned
+        .lock()
+        .unwrap()
+        .expect("task body must run on a worker");
+    assert_ne!(worker, WorkerId::UNKNOWN.as_u64());
+
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
+
+    let mut on_workers = Vec::new();
+    let mut off_workers = 0;
+    for event in &events {
+        if let Dial9Event::TaskSpawnEvent(ev) = event {
+            match ev.worker_id {
+                Some(w) => on_workers.push(w.as_u64()),
+                None => off_workers += 1,
+            }
+        }
+    }
+
+    // The inner spawn (and only it) ran on a worker.
+    assert_eq!(on_workers, vec![worker]);
+    // OFF_WORKER empty tasks + the outer task, all spawned from block_on.
+    assert_eq!(
+        off_workers,
+        OFF_WORKER + 1,
+        "expected only the spawns made on a worker to carry a worker id"
+    );
+}
+
+/// A spawn entering this runtime from a *worker of another runtime* records
+/// `None`: the hook runs on the foreign worker, whose thread has a worker
+/// index of its own, and mapping that index through this runtime's registry
+/// would name a worker that never ran the spawn. The same test keeps one
+/// spawn from a worker of this runtime as the control, so the discrimination
+/// is pinned in both directions.
+#[cfg(tokio_unstable)]
+#[test]
+fn task_spawn_from_a_foreign_runtime_worker_records_no_worker() {
+    use dial9_tokio_telemetry::telemetry::current_worker_id;
+    use std::sync::{Arc, Mutex};
+
+    let (capture, batches) = capture_processor();
+
+    let recorder = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build();
+    let rt = common::attach(
+        &recorder,
+        1,
+        TokioAttachOptions::builder()
+            .task_tracking_enabled(true)
+            .build(),
+    );
+    let handle = rt.handle().clone();
+
+    // A second, unrelated runtime: its workers are not this runtime's.
+    let foreign = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("build the foreign runtime");
+
+    let worker_that_spawned: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let on_worker = worker_that_spawned.clone();
+
+    rt.block_on(async move {
+        // Spawned from the block_on thread: no worker.
+        tokio::spawn(async move {
+            // This body runs on one of this runtime's workers.
+            *on_worker.lock().unwrap() = Some(current_worker_id().as_u64());
+            tokio::spawn(async {});
+        })
+        .await
+        .unwrap();
+    });
+
+    foreign.block_on(async {
+        let handle = handle.clone();
+        // This task runs on a worker of the foreign runtime; the spawn it
+        // makes enters the recorded runtime from there.
+        tokio::spawn(async move {
+            handle.spawn(async {});
+        })
+        .await
+        .unwrap();
+    });
+
+    drop(foreign);
+    drop(rt);
+    recorder.graceful_shutdown(Duration::from_secs(1));
+
+    let worker = worker_that_spawned
+        .lock()
+        .unwrap()
+        .expect("the control task body must run on a worker");
+    assert_ne!(worker, WorkerId::UNKNOWN.as_u64());
+
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
+
+    let mut on_workers = Vec::new();
+    let mut off_workers = 0;
+    for event in &events {
+        if let Dial9Event::TaskSpawnEvent(ev) = event {
+            match ev.worker_id {
+                Some(w) => on_workers.push(w.as_u64()),
+                None => off_workers += 1,
+            }
+        }
+    }
+
+    // The control spawn on this runtime's worker is attributed to it; the
+    // foreign worker's spawn is not. Without the runtime check the foreign
+    // spawn would carry an id derived from the foreign worker's index.
+    assert_eq!(on_workers, vec![worker]);
+    assert_eq!(
+        off_workers, 2,
+        "expected the block_on spawn and the foreign-runtime spawn to be unattributed"
+    );
+}
+
 #[cfg(tokio_unstable)]
 #[test]
 fn task_terminate_events_are_captured() {

@@ -258,6 +258,12 @@ fn builtin_signatures(schema_name: &str) -> Option<&'static [BuiltinFieldSignatu
             ],
         ]),
         "TaskSpawnEvent" => Some(&[
+            &[
+                ("task_id", V),
+                ("spawn_loc", PS),
+                ("instrumented", B),
+                ("worker_id", OV),
+            ],
             &[("task_id", V), ("spawn_loc", PS), ("instrumented", B)],
             &[("task_id", V), ("spawn_loc", PS)],
             &[("task_id", U32), ("spawn_loc", PS)],
@@ -6983,6 +6989,15 @@ mod tests {
                     FieldDef::new("local_queue", FieldType::U8),
                     FieldDef::new("cpu_time_ns", FieldType::Varint),
                     FieldDef::new("sched_wait_ns", FieldType::Varint),
+                ],
+            ),
+            (
+                "TaskSpawnEvent",
+                vec![
+                    FieldDef::new("task_id", FieldType::Varint),
+                    FieldDef::new("spawn_loc", FieldType::PooledString),
+                    FieldDef::new("instrumented", FieldType::Bool),
+                    FieldDef::new("worker_id", FieldType::OptionalVarint),
                 ],
             ),
             (

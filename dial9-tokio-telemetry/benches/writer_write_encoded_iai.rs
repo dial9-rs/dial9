@@ -64,6 +64,7 @@ fn make_encoded_batch(worker: usize) -> Batch {
                 task_id: task,
                 spawn_loc: loc,
                 instrumented: true,
+                worker_id: Some(wid),
             });
         }
         for _ in 0..5 {
