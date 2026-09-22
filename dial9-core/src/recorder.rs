@@ -117,8 +117,8 @@ pub(crate) struct SoleRecorderGuard;
 impl SoleRecorderGuard {
     /// Claim the process, or `None` if another recorder holds it.
     ///
-    /// Always granted under `test-util`, where the suite runs many recorders at
-    /// once.
+    /// Always granted under `test-util`. Otherwise a real singleton: use
+    /// `cargo nextest run` in tests that build a `Recorder`, to avoid flaky races.
     pub(crate) fn claim() -> Option<Self> {
         match cfg!(feature = "test-util") || !RECORDER_TAKEN.swap(true, Ordering::SeqCst) {
             true => Some(Self),

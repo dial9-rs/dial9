@@ -344,6 +344,42 @@ mod tests {
         }
     }
 
+    /// Like [`PanickingFlushSource`], but only panics on its first `flush`
+    /// call, so a test can observe a later, non-panicking cycle.
+    struct FlushPanicsOnceSource {
+        name: &'static str,
+        calls: Arc<AtomicUsize>,
+    }
+    impl FlushPanicsOnceSource {
+        /// Returns the source and a counter of how many times `flush` has
+        /// run, so a test can wait for a specific call count instead of
+        /// sleeping.
+        fn new(name: &'static str) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    name,
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+    impl Source for FlushPanicsOnceSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                panic!(
+                    "FlushPanicsOnceSource({}) intentionally panics on its first flush",
+                    self.name
+                );
+            }
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
     struct PanickingMetadataSource {
         name: &'static str,
         calls: Arc<AtomicUsize>,
@@ -519,6 +555,80 @@ mod tests {
                 .map(String::as_str),
             Some("true"),
             "the trace itself should record which source panicked"
+        );
+    }
+
+    /// A `flush` panic must also warn of possibly-missing events, not just a
+    /// `segment_metadata` panic: `run_flush_loop` reports it into the
+    /// *next* cycle's segment metadata, since metadata is collected before
+    /// `flush_once` runs each cycle.
+    #[test]
+    fn flush_panic_is_recorded_in_next_cycles_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+
+        let (source, calls) = FlushPanicsOnceSource::new("panicking_flush_once");
+        let recorder = recorder(writer).source(source).build();
+        recorder.handle().enable();
+        recorder
+            .handle()
+            .record_event(MarkerEvent { timestamp_ns: 0 });
+
+        // Wait for a second flush call: the first one's panic marker is
+        // only drained into metadata at the top of the *next* cycle, so
+        // this proves that cycle actually ran before checking the trace.
+        wait_until(
+            || calls.load(Ordering::Relaxed) >= 2,
+            Duration::from_secs(5),
+        );
+        recorder.graceful_shutdown(Duration::ZERO);
+
+        let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
+        let entries = decode_segment_metadata(&bytes);
+
+        assert_eq!(
+            entries
+                .get("dial9.source.panicking_flush_once.flush_panicked")
+                .map(String::as_str),
+            Some("true"),
+            "a flush panic must be reported in a later cycle's segment metadata"
+        );
+    }
+
+    /// A flush panic on the exit cycle itself has no next cycle to be
+    /// reported into normally; `run_flush_loop`'s exit path must fold it
+    /// into the final segment metadata instead of losing it.
+    #[test]
+    fn flush_panic_on_exit_cycle_is_recorded_via_teardown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+
+        let (source, calls) = PanickingFlushSource::new("panicking_on_exit");
+        let recorder = recorder(writer).source(source).build();
+        recorder.handle().enable();
+        recorder
+            .handle()
+            .record_event(MarkerEvent { timestamp_ns: 0 });
+
+        // Wait for at least one panic before shutting down: this source
+        // panics on every call, including the exit cycle's own flush,
+        // which is exactly what this test exercises.
+        wait_until(
+            || calls.load(Ordering::Relaxed) >= 1,
+            Duration::from_secs(5),
+        );
+        recorder.graceful_shutdown(Duration::ZERO);
+
+        let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
+        let entries = decode_segment_metadata(&bytes);
+
+        assert_eq!(
+            entries
+                .get("dial9.source.panicking_on_exit.flush_panicked")
+                .map(String::as_str),
+            Some("true"),
+            "a flush panic on the exit cycle itself must still reach the trace, \
+             even though there is no next cycle to report it in normally"
         );
     }
 

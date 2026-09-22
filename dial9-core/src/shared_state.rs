@@ -269,16 +269,24 @@ impl SharedState {
 
     crate::test_util_pub! {
         /// Drain data sources and write their events into the collector.
-        fn flush_sources(&self) {
+        /// Returns the names of any sources whose `flush` panicked this
+        /// cycle, so the caller can record that the cycle may be missing
+        /// their events.
+        fn flush_sources(&self) -> Vec<&'static str> {
             let ctx = self.flush_context();
             let mut sources = self.sources.lock().unwrap();
+            let mut panicked = Vec::new();
             for source in sources.iter_mut() {
-                crate::source::catch_source_panic(
+                let did_panic = crate::source::catch_source_panic(
                     source.as_mut(),
                     crate::source::SourceCall::Flush,
                     |source| source.flush(&ctx),
                 );
+                if did_panic {
+                    panicked.push(source.name());
+                }
             }
+            panicked
         }
     }
 
