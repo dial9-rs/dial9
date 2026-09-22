@@ -12,6 +12,8 @@
 // buildWorkerSpans next.
 
 import { SegmentForest, spanBucketMerge, type SpanAgg } from "./segment-forest.js";
+import { ColumnarSchedDelays } from "./sched-delays.js";
+import type { SchedDelayList } from "./sched-delays.js";
 import type { CpuSample } from "./columnar-cpu-samples.js";
 import type { SpanList } from "./query.js";
 import type { WakeIndex } from "./wake-index.js";
@@ -578,7 +580,7 @@ export class ColumnarWorkerSpans {
   pointsOfInterest(
     filterType: PointOfInterestType,
     workerIds: readonly number[],
-    schedDelays: readonly (SchedDelayView | SchedDelay)[],
+    schedDelays: SchedDelayList | readonly SchedDelay[],
     opts: PoiOpts = {}
   ): PointOfInterest[] {
     const hasSchedWait = !!opts.hasSchedWait;
@@ -1035,7 +1037,7 @@ export class ColumnarWorkerSpans {
    * per-task CSR over Float64 start/end columns (~85 MB, not 1.9 GB of objects),
    * transient to this call.
    */
-  schedulingDelays(workerIds: number[], wakes: WakeIndex): SchedDelayView[] {
+  schedulingDelays(workerIds: number[], wakes: WakeIndex): ColumnarSchedDelays {
     const g = this.schedulingDelaysChunked(workerIds, wakes);
     let r = g.next();
     while (!r.done) r = g.next();
@@ -1047,14 +1049,14 @@ export class ColumnarWorkerSpans {
   *schedulingDelaysChunked(
     workerIds: number[],
     wakes: WakeIndex
-  ): Generator<number, SchedDelayView[], void> {
+  ): Generator<number, ColumnarSchedDelays, void> {
     // Shared per-task poll CSR (cached; also used by buildSpanDataColumnar).
     const { slotOf: slot, off, start: pStart, end: pEnd } = this.pollsByTaskCSR();
     let total = 0;
     for (const w of workerIds) total += this.byWorker.get(w)?.n ?? 0;
     total ||= 1;
     let scanned = 0;
-    const out: SchedDelayView[] = [];
+    const out = new ColumnarSchedDelays(this);
     for (const w of workerIds) {
       const c = this.byWorker.get(w);
       if (!c) continue;
@@ -1089,14 +1091,11 @@ export class ColumnarWorkerSpans {
         }
         const delay = sStart - effectiveWake;
         if (delay > 0 && delay < 1e9) {
-          out.push({
-            wakeTime: effectiveWake, pollTime: sStart, delay, taskId,
-            wakerTaskId: wakeWaker, worker: w, poll: this.pollAt(w, i)!,
-          });
+          out.push(effectiveWake, sStart, delay, taskId, wakeWaker, w, i);
         }
       }
     }
-    out.sort((a, b) => a.wakeTime - b.wakeTime);
+    out.finish();
     return out;
   }
 }

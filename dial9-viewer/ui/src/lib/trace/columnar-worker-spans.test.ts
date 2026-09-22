@@ -367,7 +367,7 @@ describe("ColumnarWorkerSpans.schedulingDelays matches frozen computeSchedulingD
       taskId: d.taskId, wakerTaskId: d.wakerTaskId, worker: d.worker,
       pollStart: d.poll.start, pollEnd: d.poll.end,
     });
-    expect(col.map(norm)).toEqual(fat.map(norm));
+    expect([...col].map(norm)).toEqual([...fat].map(norm));
   });
 });
 

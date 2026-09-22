@@ -79,9 +79,11 @@ describe("warmDerived", () => {
     expect(a.workerIds).toEqual(b.workerIds);
     expect(a.hasWorkerCpuTime).toBe(b.hasWorkerCpuTime);
     expect(a.schedDelays.length).toBe(b.schedDelays.length);
-    const key = (d: (typeof a.schedDelays)[number]): string =>
-      `${d.wakeTime}:${d.pollTime}:${d.delay}:${d.taskId}:${d.worker}`;
-    expect(a.schedDelays.map(key)).toEqual(b.schedDelays.map(key));
+    const keys = (list: typeof a.schedDelays): string[] =>
+      [...list].map(
+        (d) => `${d.wakeTime}:${d.pollTime}:${d.delay}:${d.taskId}:${d.worker}`,
+      );
+    expect(keys(a.schedDelays)).toEqual(keys(b.schedDelays));
   });
 
   it("is a no-op once both caches are populated", async () => {

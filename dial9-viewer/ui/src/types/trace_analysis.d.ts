@@ -264,7 +264,9 @@ declare module "*/trace_analysis.js" {
     filterType: PointOfInterestType,
     workerSpans: Record<number, WorkerLane>,
     workerIds: readonly number[],
-    schedDelays: readonly SchedDelay[],
+    schedDelays:
+      | import("../lib/trace/sched-delays.js").SchedDelayList
+      | readonly SchedDelay[],
     opts?: {
       hasSchedWait?: boolean;
       sortByWorst?: boolean;

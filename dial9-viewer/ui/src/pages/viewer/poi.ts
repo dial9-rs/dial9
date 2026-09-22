@@ -28,6 +28,7 @@ import {
 } from "../../lib/trace/index.js";
 import { sharedDetectorInputs } from "../../lib/trace/derived.js";
 import type { LaneSource } from "../../lib/trace/columnar-worker-spans.js";
+import type { SchedDelayList } from "../../lib/trace/sched-delays.js";
 import type {
   ParsedTrace,
   ParkSpan,
@@ -135,7 +136,7 @@ export interface PoiSource {
   /** Which representation the detectors run against: the columnar store scans
    * raw columns, the fat path takes the frozen filterPointsOfInterest. */
   lanes: LaneSource;
-  schedDelays: SchedDelay[];
+  schedDelays: SchedDelayList | SchedDelay[];
   hasSchedWait: boolean;
   taskInstrumented: Map<number, boolean>;
   taskSpawnTimes: Map<number, number>;

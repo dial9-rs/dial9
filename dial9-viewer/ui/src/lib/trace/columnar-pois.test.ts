@@ -19,6 +19,7 @@ import {
 } from "./index.js";
 import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
+import type { ColumnarSchedDelays } from "./sched-delays.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ws: any;
@@ -27,7 +28,7 @@ let workerIds: number[];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let fatSched: any[];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let colSched: any[];
+let colSched: ColumnarSchedDelays;
 let taskInstrumented: Map<number, boolean>;
 let taskSpawnTimes: Map<number, number>;
 

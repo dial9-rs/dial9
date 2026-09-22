@@ -36,6 +36,7 @@ import {
   type LaneWorkerSpans,
 } from "./columnar-worker-spans.js";
 import type { ParsedTrace, RuntimeGroup, SchedDelay } from "../../types/trace.js";
+import type { SchedDelayList } from "./sched-delays.js";
 import {
   computeRuntimeMetrics,
   type RuntimeMetrics,
@@ -110,7 +111,7 @@ export interface DetectorInputs {
   workerIds: number[];
   /** Which representation the detectors scan (columnar columns or fat spans). */
   lanes: LaneSource;
-  schedDelays: SchedDelay[];
+  schedDelays: SchedDelayList | SchedDelay[];
   /**
    * Gates "off-cpu-active". `thread_cpu_time_nanos()` returns a hardcoded 0 off
    * Linux, so every active period on a workstation trace reports ratio 0 and an
