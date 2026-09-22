@@ -36,11 +36,12 @@ fn flush_once<M: BufferMode>(
     events_written: &mut u64,
     shared: &SharedState,
     drain_self: bool,
+    panicked_sources: &mut Vec<&'static str>,
 ) -> FlushStats {
     let events_before = *events_written;
     let cpu_events_time = std::time::Instant::now();
     if shared.is_enabled() {
-        shared.flush_sources();
+        panicked_sources.extend(shared.flush_sources());
     }
     let cpu_flush_duration = cpu_events_time.elapsed();
 
@@ -109,6 +110,11 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
     // rotation, so it never needs re-merging here.
     let mut source_entries: Vec<(String, String)> = Vec::new();
 
+    // Names of sources whose `flush` panicked last cycle: metadata is
+    // collected before `flush_once` runs, so a panic lands in the
+    // *following* cycle's push.
+    let mut pending_flush_panics: Vec<&'static str> = Vec::new();
+
     let mut drain_state = DrainState::Idle;
 
     loop {
@@ -139,6 +145,12 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
         // last cycle, so the next rotated segment stays self-describing without
         // doing any work when nothing changed.
         source_entries.clear();
+        for name in pending_flush_panics.drain(..) {
+            source_entries.push((
+                format!("dial9.source.{name}.flush_panicked"),
+                "true".to_string(),
+            ));
+        }
         {
             let mut sources = shared.sources.lock().unwrap();
             for source in sources.iter_mut() {
@@ -215,7 +227,13 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
             .append_on_drop(flush_metrics_sink.clone());
         }
         let mut flush_timer = Timer::start_now();
-        let stats = flush_once(&mut writer, &mut events_written, shared, drain_self);
+        let stats = flush_once(
+            &mut writer,
+            &mut events_written,
+            shared,
+            drain_self,
+            &mut pending_flush_panics,
+        );
         flush_timer.stop();
 
         // Notify the writer that TL buffers have been drained and flushed.
@@ -246,6 +264,17 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 .append_on_drop(flush_metrics_sink.clone())
             });
         if exit {
+            // This cycle's own flush panics have no next iteration to be
+            // drained into (see `pending_flush_panics` above), so fold them
+            // in here instead of losing them.
+            if !pending_flush_panics.is_empty() {
+                writer.update_segment_metadata(pending_flush_panics.drain(..).map(|name| {
+                    (
+                        format!("dial9.source.{name}.flush_panicked"),
+                        "true".to_string(),
+                    )
+                }));
+            }
             // Write final metadata before sealing so single-segment
             // traces contain runtime→worker mappings.
             if let Err(e) = writer.write_current_segment_metadata() {
