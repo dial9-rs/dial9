@@ -88,10 +88,11 @@ export class ColumnarSchedDelays implements SchedDelayList {
   /** Order rows by wakeTime. Rows arrive grouped by worker, so this is what
    *  makes the list read chronologically. */
   finish(): void {
-    const pos = Array.from({ length: this.n }, (_, i) => i);
+    const order = new Int32Array(this.n);
+    for (let i = 0; i < this.n; i++) order[i] = i;
     const w = this.wakeTime;
-    pos.sort((a, b) => w[a]! - w[b]! || a - b);
-    this.order = Int32Array.from(pos);
+    order.sort((a, b) => w[a]! - w[b]! || a - b);
+    this.order = order;
   }
 
   /** `delay` alone, for a scan that filters before it reads a whole row. */
