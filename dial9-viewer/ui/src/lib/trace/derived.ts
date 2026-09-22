@@ -363,11 +363,12 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
     const workerSpans = sharedWorkerSpans(trace).workerSpans;
     const store = columnarStoreCache.get(trace);
     const spanEvents = trace.spanEvents;
+    const columnar = store !== undefined && spanEvents !== undefined;
     r = measureSpan("spanData", () =>
-      store && spanEvents
+      columnar
         ? buildSpanDataColumnar(
-            spanEvents,
-            store,
+            spanEvents!,
+            store!,
             trace.tidBindings,
             trace.blockInPlaceGaps,
           )
@@ -379,6 +380,7 @@ export function sharedSpanData(trace: ParsedTrace): SpanData {
           ),
     );
     spanDataCache.set(trace, r);
+    if (columnar) spanEvents!.release();
   }
   return r;
 }

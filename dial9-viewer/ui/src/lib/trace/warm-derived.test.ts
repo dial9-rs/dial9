@@ -7,9 +7,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { parseTrace } from "../../../trace_parser.js";
 import type { ParsedTrace } from "../../../trace_parser.js";
 import { ColumnarEvents } from "./columnar-events.js";
+import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import {
   lifecycleWorkerIds,
   sharedDetectorInputs,
+  sharedSpanData,
   sharedWorkerSpans,
   warmDerived,
 } from "./derived.js";
@@ -17,9 +19,15 @@ import {
 const tracePath = new URL("../../../public/demo-trace.bin", import.meta.url);
 
 async function load(): Promise<ParsedTrace> {
-  return parseTrace(readFileSync(tracePath), {
+  // Both sinks, the way load.ts wires them: the columnar lanes and the columnar
+  // span store go together.
+  const spanEventSink = new ColumnarSpanEvents();
+  const trace = await parseTrace(readFileSync(tracePath), {
     eventSink: new ColumnarEvents(),
+    spanEventSink,
   } as never);
+  (trace as { spanEvents?: unknown }).spanEvents = spanEventSink;
+  return trace;
 }
 
 describe("warmDerived", () => {
@@ -90,5 +98,29 @@ describe("warmDerived", () => {
     const calls: number[] = [];
     await warmDerived(warmed, (f) => calls.push(f), () => Promise.resolve());
     expect(calls).toEqual([]);
+  });
+});
+
+describe("span-event release", () => {
+  it("drops the columns once the span store is built, and stays usable", async () => {
+    const trace = await load();
+    const store = trace.spanEvents as unknown as {
+      length: number;
+      released: boolean;
+      spanIdAt(i: number): string;
+    };
+    expect(store.length).toBeGreaterThan(0);
+    expect(store.released).toBe(false);
+
+    const data = sharedSpanData(trace);
+    expect(data.columnarSpans?.length).toBeGreaterThan(0);
+    expect(store.released).toBe(true);
+    expect(() => store.spanIdAt(0)).toThrow(/released/);
+
+    // The cached span data is what consumers read, and it still answers.
+    expect(sharedSpanData(trace)).toBe(data);
+    expect(sharedSpanData(trace).columnarSpans?.length).toBe(
+      data.columnarSpans?.length,
+    );
   });
 });
