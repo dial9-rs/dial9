@@ -16,6 +16,7 @@ import {
   objectTraceUrls,
   parseTraceBuffer,
 } from "./load.js";
+import { parseChunks, streamTrace } from "./stream.js";
 import type { ParsedTrace } from "./load.js";
 
 // ── Fixtures: the demo trace, raw and gzipped, fully in memory ──────────
@@ -150,6 +151,41 @@ describe("loadTraceStreamed", () => {
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
     const buffered = await loadTraceBuffered(["/gz", "/raw"]);
     expect(streamed.bytes).toBe(buffered.bytes);
+  });
+
+  // Set/Clear Range re-parses these rather than re-fetching, so they have to be
+  // the compressed form and they have to decode back to the same trace.
+  it("captures the compressed bytes, not the decompressed ones", async () => {
+    installFetchMock({ "/a.gz": gzTrace, "/b.gz": gzTrace });
+    const { trace, bytes, compressed } = await streamTrace(
+      ["/a.gz", "/b.gz"],
+      {},
+      {},
+      true,
+    );
+    expect(compressed).toBeDefined();
+    expect(compressed!.length).toBe(gzTrace.length * 2);
+    expect(compressed!.length).toBeLessThan(bytes);
+
+    // Re-parsed the way the page does it: hand the capture back as one source.
+    installFetchMock({ "/again": compressed! });
+    const again = await streamTrace(["/again"], {}, {});
+    expect(again.trace.events.length).toBe(trace.events.length);
+    expect(again.bytes).toBe(bytes);
+  });
+
+  // The reader sniffs one gzip magic for the whole capture, so a plain
+  // component would leave a tail that cannot be decoded.
+  it("drops the capture when any component arrives uncompressed", async () => {
+    installFetchMock({ "/a.gz": gzTrace, "/raw": rawTrace });
+    const { compressed } = await streamTrace(["/a.gz", "/raw"], {}, {}, true);
+    expect(compressed).toBeUndefined();
+  });
+
+  it("skips the capture unless asked", async () => {
+    installFetchMock({ "/a": rawTrace });
+    const { compressed } = await streamTrace(["/a"], {}, {}, false);
+    expect(compressed).toBeUndefined();
   });
 
   it("single-URL stream counts the raw bytes", async () => {

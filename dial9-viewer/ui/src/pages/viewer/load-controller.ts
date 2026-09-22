@@ -176,8 +176,13 @@ export function loadErrorMessage(
   return `Could not load trace: ${rawMessage}`;
 }
 
-/** What Set/Clear Range re-opens: the URLs it was loaded from, or the file. */
+/**
+ * What Set/Clear Range re-opens. The compressed bytes are preferred when the
+ * loader kept them: re-parsing them is a gunzip, where re-opening a URL is an
+ * S3 round trip for the whole trace.
+ */
 type ReparseSource =
+  | { kind: "bytes"; bytes: Uint8Array }
   | { kind: "urls"; urls: readonly string[] }
   | { kind: "file"; file: Blob };
 
@@ -362,14 +367,24 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
 
     handle.done.then(
       (result: unknown) => {
-        const settled = result as { timing?: TraceWorkerTiming } | undefined;
+        const settled = result as
+          | { timing?: TraceWorkerTiming; compressed?: unknown }
+          | undefined;
+        const raw = settled?.compressed;
         if (settled?.timing !== undefined) deps.onTiming?.(settled.timing);
         cleanup();
         if (token !== loadToken) return;
         if (opts.shareableAfterSuccess !== null) {
           sourceShareable = opts.shareableAfterSuccess;
         }
-        if (opts.source !== null) reparseSource = opts.source;
+        if (opts.source !== null) {
+          // Compressed bytes beat whatever source the caller named: same
+          // trace, and re-parsing them is a gunzip rather than a round trip.
+          reparseSource =
+            raw instanceof Uint8Array && raw.byteLength > 0
+              ? { kind: "bytes", bytes: raw }
+              : opts.source;
+        }
         // Success: the store's trace slice is now populated; commit the
         // toolbar label, then drop the load section so the tracks show through.
         deps.onLoaded?.();
@@ -491,8 +506,12 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       const label = isRangeActive(range ?? {})
         ? "Applying range..."
         : "Restoring full trace...";
-      if (reparseSource.kind === "file") {
-        const objectUrl = createObjectUrl(reparseSource.file);
+      if (reparseSource.kind === "bytes" || reparseSource.kind === "file") {
+        const blob =
+          reparseSource.kind === "bytes"
+            ? new Blob([reparseSource.bytes as BlobPart])
+            : reparseSource.file;
+        const objectUrl = createObjectUrl(blob);
         begin([objectUrl], {
           label,
           withHeaders: false,

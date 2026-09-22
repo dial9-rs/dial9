@@ -491,6 +491,11 @@ declare module "*/trace_parser.js" {
      * headers); withheld from cross-origin URLs.
      */
     headers?: Record<string, string>;
+    /**
+     * Receives each chunk as it arrived, before any gunzip, with whether this
+     * component was gzipped (see stream.ts streamTrace).
+     */
+    onRawChunk?: (chunk: Uint8Array, isGzip: boolean) => void;
   }
 
   /**

@@ -91,8 +91,10 @@ export interface LoadTraceOptions extends FetchOptions, ParseOptions {}
 /** The result of loading one logical trace from URLs. */
 export interface LoadedTrace {
   trace: ParsedTrace;
-  /** Decompressed byte count (the bytes themselves are not retained). */
+  /** Decompressed byte count (the decompressed bytes are not retained). */
   bytes: number;
+  /** The compressed bytes, when the loader kept them for Set/Clear Range. */
+  compressed?: Uint8Array;
   /**
    * "stream" when download and decode overlapped (canStreamDecode
    * runtimes); "buffered" for the fetch-then-parse fallback. Pages use this
@@ -541,10 +543,14 @@ export function loadTraceOnMainThread(
   if (opts.startTime !== undefined) parseOpts.startTime = opts.startTime;
   if (opts.endTime !== undefined) parseOpts.endTime = opts.endTime;
 
-  const run = async (): Promise<{ trace: ParsedTrace; bytes: number }> => {
+  const run = async (): Promise<{
+    trace: ParsedTrace;
+    bytes: number;
+    compressed?: Uint8Array;
+  }> => {
     if (mode === "stream") {
       emit("parsing", 0, null);
-      return streamTrace(list, fetchOpts, parseOpts);
+      return streamTrace(list, fetchOpts, parseOpts, true);
     }
     emit("fetching", 0, null);
     const buffer = await fetchTraces([...list], fetchOpts);
@@ -561,7 +567,7 @@ export function loadTraceOnMainThread(
   };
 
   run()
-    .then(({ trace, bytes }) => {
+    .then(({ trace, bytes, compressed }) => {
       perf.mark("parse-done");
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
@@ -601,7 +607,11 @@ export function loadTraceOnMainThread(
           };
           // The page closes its loading view when this resolves, so it waits
           // for the first render over the new trace.
-          resolveDone({ trace, bytes, mode, timing });
+          resolveDone(
+            compressed === undefined
+              ? { trace, bytes, mode, timing }
+              : { trace, bytes, mode, timing, compressed },
+          );
         };
         if (hasRaf) {
           requestAnimationFrame(() => {

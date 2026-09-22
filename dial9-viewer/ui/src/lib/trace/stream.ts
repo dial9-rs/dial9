@@ -25,8 +25,15 @@ import type {
 /** A streamed parse and how many raw bytes it consumed. */
 export interface StreamedParse {
   trace: ParsedTrace;
-  /** Decompressed byte count (the bytes themselves are not retained). */
+  /** Decompressed byte count (the decompressed bytes are not retained). */
   bytes: number;
+  /**
+   * The bytes as they arrived, still compressed, concatenated across
+   * components. Absent when nothing asked for them or when they outgrew the
+   * budget. Concatenated gzip members decode as one stream, so these re-parse
+   * through the ordinary load path.
+   */
+  compressed?: Uint8Array;
 }
 
 /**
@@ -35,9 +42,10 @@ export interface StreamedParse {
  * the worker's parse-buffer path feeds it a DecompressionStream over cached
  * gzip bytes.
  *
- * Chunks are handed to the parser and dropped. Retaining them would cost the
- * whole decompressed trace for the length of the parse, 1.28 GB at 30M events;
- * Set/Clear Range re-opens the source instead (viewer/load-controller.ts).
+ * Chunks are handed to the parser and dropped: retaining the decompressed form
+ * costs the whole trace, 1.28 GB at 30M events. Set/Clear Range re-parses the
+ * compressed bytes instead, which `streamTrace` captures for a third of that
+ * (raw-byte-cache.ts makes the same trade for segments).
  */
 export async function parseChunks(
   chunks: AsyncIterable<Uint8Array>,
@@ -66,11 +74,38 @@ export async function parseChunks(
 export async function streamTrace(
   urls: readonly string[],
   fetchOpts: FetchOptions,
-  parseOpts: ParseOptions
+  parseOpts: ParseOptions,
+  captureCompressed = false
 ): Promise<StreamedParse> {
+  let captured: Uint8Array[] | null = captureCompressed ? [] : null;
+  let capturedBytes = 0;
+  const opts: FetchOptions = captureCompressed
+    ? {
+        ...fetchOpts,
+        onRawChunk: (chunk: Uint8Array, isGzip: boolean): void => {
+          if (captured === null) return;
+          // A capture is re-read as one stream whose first bytes decide whether
+          // the whole thing is gunzipped, so one plain component invalidates it.
+          if (!isGzip) {
+            captured = null;
+            return;
+          }
+          capturedBytes += chunk.length;
+          captured.push(chunk);
+        },
+      }
+    : fetchOpts;
   const stream =
     urls.length === 1
-      ? await fetchTraceStream(urls[0]!, fetchOpts)
-      : fetchTracesStream([...urls], fetchOpts);
-  return parseChunks(stream, parseOpts);
+      ? await fetchTraceStream(urls[0]!, opts)
+      : fetchTracesStream([...urls], opts);
+  const parsed = await parseChunks(stream, parseOpts);
+  if (captured === null) return parsed;
+  const out = new Uint8Array(capturedBytes);
+  let off = 0;
+  for (const c of captured) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return { ...parsed, compressed: out };
 }

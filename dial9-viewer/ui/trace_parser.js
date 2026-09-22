@@ -208,7 +208,10 @@
      * {@link fetchTraces}.
      *
      * @param {string} url single trace URL
-     * @param {{signal?: AbortSignal, headers?: Object}} [opts]
+     * @param {{signal?: AbortSignal, headers?: Object,
+     *   onRawChunk?: (chunk: Uint8Array, isGzip: boolean) => void}} [opts]
+     *   `onRawChunk` receives the bytes as they arrived, before any gunzip,
+     *   with whether this component was gzipped.
      * @returns {Promise<AsyncIterable<Uint8Array>>}
      */
     async function fetchTraceStream(url, opts = {}) {
@@ -244,10 +247,18 @@
             first[1] === 0x8b;
 
         // A ReadableStream that re-emits the peeked first chunk then drains the
-        // rest of the body reader.
+        // rest of the body reader. `onRawChunk` sees the bytes as they arrived,
+        // before any gunzip, so a caller can keep the compressed form. It is
+        // told whether THIS component was gzipped: a capture spanning several
+        // components can only be re-decoded if every one of them was, since the
+        // reader sniffs a single magic for the whole concatenation.
+        const onRaw = opts.onRawChunk;
         const rawStream = new ReadableStream({
             start(controller) {
-                if (first != null) controller.enqueue(first);
+                if (first != null) {
+                    if (onRaw) onRaw(first, isGzip);
+                    controller.enqueue(first);
+                }
             },
             async pull(controller) {
                 const { value, done } = await reader.read();
@@ -255,7 +266,12 @@
                     controller.close();
                     return;
                 }
-                if (value && value.byteLength > 0) controller.enqueue(value);
+                if (value && value.byteLength > 0) {
+                    const u8 =
+                        value instanceof Uint8Array ? value : new Uint8Array(value);
+                    if (onRaw) onRaw(u8, isGzip);
+                    controller.enqueue(u8);
+                }
             },
             cancel(reason) {
                 return reader.cancel(reason);
