@@ -171,7 +171,7 @@ mod tests {
         for source in sources {
             builder = builder.source(source);
         }
-        builder.build_for_test()
+        builder.build()
     }
 
     #[test]
