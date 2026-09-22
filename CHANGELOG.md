@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.1...dial9-v0.5.2) - 2026-09-22
+
+### Added
+
+- *(dial9)* ship the agent skills from the dial9 crate ([#934](https://github.com/dial9-rs/dial9/pull/934))
+- *(telemetry)* record optional worker_id on TaskSpawnEvent ([#929](https://github.com/dial9-rs/dial9/pull/929)) ([#931](https://github.com/dial9-rs/dial9/pull/931))
+- *(viewer)* build_app_with_backend for custom stores ([#933](https://github.com/dial9-rs/dial9/pull/933))
+
+### Fixed
+
+- *(profiler)* avoid references to perf mmap metadata ([#920](https://github.com/dial9-rs/dial9/pull/920))
+
+### Other
+
+- *(memory-profiling)* skip bucket reservation on liveset miss ([#905](https://github.com/dial9-rs/dial9/pull/905))
+- *(viewer)* add log to warn on missing UI assets ([#941](https://github.com/dial9-rs/dial9/pull/941))
+
 ## [0.5.1](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.0...dial9-v0.5.1) - 2026-09-17
 
 ### Added
