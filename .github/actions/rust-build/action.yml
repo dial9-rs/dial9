@@ -39,6 +39,9 @@ runs:
           with:
               save-if: ${{ inputs.save-if }}
               cache-bin: "false"
+        - uses: taiki-e/install-action@184183c2401be73c3bf42c2e61268aa5855379c1 # v2
+          with:
+              tool: nextest
         - name: Enable perf_event_open and kallsyms for tests
           if: runner.os == 'Linux'
           shell: bash
@@ -63,6 +66,8 @@ runs:
                   cargo test --all-targets --features __nonlinux_all_features
               fi
               # dial9-core alone: `test-util` is off here, so the single-recorder
-              # guard is enforced. single_recorder_tests is the only module
-              # that needs it, so it's the only one run here.
-              cargo test -p dial9-core --lib single_recorder_tests
+              # guard is enforced. Plain `cargo test` shares one process across
+              # threads, so unrelated tests would race for the guard; nextest's
+              # one-process-per-test model avoids that without changing any
+              # test to work around it.
+              cargo nextest run -p dial9-core --lib
