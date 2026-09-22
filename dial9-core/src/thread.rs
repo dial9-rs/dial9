@@ -122,7 +122,6 @@ mod tests {
     use crate::buffer::MemoryBuffer;
     use crate::recorder::recorder;
     use crate::source::{FlushContext, Source};
-    use crate::test_support::SOLE_RECORDER_LOCK;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -172,12 +171,11 @@ mod tests {
         for source in sources {
             builder = builder.source(source);
         }
-        builder.build()
+        builder.build_for_test()
     }
 
     #[test]
     fn guard_tracks_the_thread_until_it_drops() {
-        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let counts = Arc::new(Counts::default());
         let rec = counting_recorder([CountingSource {
             counts: Arc::clone(&counts),
@@ -194,7 +192,6 @@ mod tests {
 
     #[test]
     fn a_failing_source_rolls_back_the_started_ones() {
-        let _lock = SOLE_RECORDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let counts = Arc::new(Counts::default());
         let rec = counting_recorder([
             CountingSource {

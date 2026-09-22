@@ -8,15 +8,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::primitives::sync::Mutex;
 use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
 use dial9_trace_format::types::FieldValueRef;
-
-/// Serializes tests that build a real `Recorder` via the public builder:
-/// `SoleRecorderGuard` (recorder.rs) allows only one per process, so
-/// concurrent test threads would otherwise race for it and silently get a
-/// disabled one.
-pub(crate) static SOLE_RECORDER_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(all(test, shuttle, feature = "pipeline"))]
 pub(crate) use pipeline_helpers::*;
