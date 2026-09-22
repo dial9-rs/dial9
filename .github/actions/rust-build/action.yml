@@ -63,5 +63,6 @@ runs:
                   cargo test --all-targets --features __nonlinux_all_features
               fi
               # dial9-core alone: `test-util` is off here, so the single-recorder
-              # guard is compiled in.
-              cargo test -p dial9-core --lib
+              # guard is enforced. single_recorder_tests is the only module
+              # that needs it, so it's the only one run here.
+              cargo test -p dial9-core --lib single_recorder_tests
