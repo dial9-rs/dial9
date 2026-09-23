@@ -486,7 +486,9 @@ function eventSection(
     };
   }
   const n = sorted.length;
-  const anchorRaw = sorted.indexOf(anchor);
+  const anchorRaw = sorted.findIndex(
+    (e) => e.timestamp === anchor.timestamp && e.name === anchor.name,
+  );
   const anchorIdx = anchorRaw < 0 ? 0 : anchorRaw;
   // Nothing beyond the current event itself -> collapse by default.
   const collapseByDefault = anchorRaw >= 0 && n === 1;
@@ -497,8 +499,9 @@ function eventSection(
   const end = anchorIdx + afterShown + 1;
 
   const rows: RelatedRow[] = [];
-  for (const e of sorted.slice(start, end)) {
-    const self = e === anchor;
+  for (let i = start; i < end; i++) {
+    const e = sorted[i]!;
+    const self = i === anchorRaw;
     const name = label ? label(e) : e.name;
     rows.push({
       name: self ? `${name} (this event)` : name,
