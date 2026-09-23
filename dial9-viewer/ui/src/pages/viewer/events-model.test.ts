@@ -17,6 +17,7 @@ import {
   eventHighlightTask,
   eventMatchesFilter,
   filterVisibleEvents,
+  isSameCluster,
   lowerBoundByTimestamp,
   resolveClusterTask,
   resolvePollForEvent,
@@ -170,6 +171,25 @@ describe("eventMatchesFilter", () => {
 });
 
 // ── Clustering + tick geometry + info ────────────────────────────────────
+
+describe("isSameCluster", () => {
+  it("matches the pinned cluster after a re-render materializes fresh events", () => {
+    const events = [ev("a", 10), ev("a", 50)];
+    // A columnar store hands back a new object on every read.
+    const store = { length: events.length, at: (i: number) => ({ ...events[i]! }) };
+    const data = { ...trackData(events, ["a"]), store } as unknown as EventTrackData;
+    const render = () =>
+      buildEventRenderModel({
+        data, viewStart: 0, viewEnd: 100, drawW: 100, canvasH: 40,
+        selectedNames: new Set(), taskOf: () => null, colorOf: () => "#aaa",
+      }).buckets;
+    const pinned = render()[1]!;
+    const [other, same] = render();
+    const pin = { events: pinned.events } as Parameters<typeof isSameCluster>[0];
+    expect(isSameCluster(pin, same!)).toBe(true);
+    expect(isSameCluster(pin, other!)).toBe(false);
+  });
+});
 
 describe("buildEventRenderModel", () => {
   const colorOf = (n: string): string => (n === "a" ? "#aaa" : "#bbb");

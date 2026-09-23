@@ -451,20 +451,18 @@ export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderMo
 
 /**
  * True when `bucket` is the cluster currently pinned (a repeat click toggles
- * the pin off). Identity of the representative event object uniquely names the
- * cluster - the same underlying CustomTraceEvent survives re-renders, and no
- * two clusters share an event - so this needs no pixel column (which the
+ * the pin off). The representative's timestamp and name identify the cluster, since
+ * no two clusters share an event, so this needs no pixel column (which the
  * PinnedCustomEvent contract does not carry).
  */
 export function isSameCluster(
   pinned: PinnedCustomEvent | null,
   bucket: EventDrawBucket,
 ): boolean {
-  return (
-    pinned !== null &&
-    pinned.events.length === bucket.events.length &&
-    pinned.events[0] === bucket.representative
-  );
+  if (pinned === null || pinned.events.length !== bucket.events.length) return false;
+  const first = pinned.events[0]!;
+  const rep = bucket.representative;
+  return first.timestamp === rep.timestamp && first.name === rep.name;
 }
 
 /**
