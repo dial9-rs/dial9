@@ -77,6 +77,14 @@ describe("ColumnarCustomEvents column typing", () => {
     expect(s.at(1)!.fields["v"]).toBe(big);
   });
 
+  it("reads i64 back as the BigInt the decoder produced", () => {
+    const s = new ColumnarCustomEvents();
+    const sch = schema([{ name: "v", fieldType: F.I64 }]);
+    const values = [-5n, 0n, 7n, -(1n << 63n), (1n << 63n) - 1n];
+    values.forEach((v, i) => s.pushCustom("E", i, { v }, sch, null));
+    expect(values.map((_, i) => s.at(i)!.fields["v"])).toEqual(values);
+  });
+
   it("round-trips each fixed-width numeric type", () => {
     const s = new ColumnarCustomEvents();
     const sch = schema([

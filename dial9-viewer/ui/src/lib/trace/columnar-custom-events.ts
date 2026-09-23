@@ -36,18 +36,19 @@ export interface WireSchema {
 /**
  * How one field is stored. `num` covers every fixed-width numeric type and
  * `bool` is the same column read back as a boolean; `text` interns into the
- * store's string pool; `exact` is a numeric column with a side table for values
- * a double cannot hold; `boxed` keeps the decoded value as-is.
+ * store's string pool; `exact` (Varint, read back as a decimal string) and
+ * `i64` (read back as a BigInt) are numeric columns with a side table for
+ * values a double cannot hold; `boxed` keeps the decoded value as-is.
  */
-type ColumnKind = "num" | "bool" | "text" | "exact" | "boxed";
+type ColumnKind = "num" | "bool" | "text" | "exact" | "i64" | "boxed";
 
 interface FieldColumn {
   name: string;
   kind: ColumnKind;
   /** Numeric/interned storage; unused for `boxed`. */
   nums: Float64Array | Uint8Array | Uint16Array | Uint32Array | Int32Array;
-  /** Values a double cannot represent, by slot. Only for `exact`. */
-  exact?: Map<number, string>;
+  /** Values a double cannot represent, by slot. Only for `exact` and `i64`. */
+  exact?: Map<number, string | bigint>;
   /** Decoded values, by slot. Only for `boxed`. */
   boxed?: DecodedFieldValue[];
   /** 1 when the field was present. Only allocated for optional fields. */
@@ -77,8 +78,9 @@ function columnKindFor(fieldType: number): ColumnKind {
     case F.PooledStackFrames:
       return "text";
     case F.Varint:
-    case F.I64:
       return "exact";
+    case F.I64:
+      return "i64";
     default:
       return "boxed";
   }
@@ -158,7 +160,7 @@ export class ColumnarCustomEvents {
         kind,
         nums: kind === "text" ? new Int32Array(INITIAL) : numArrayFor(f.fieldType, INITIAL),
       };
-      if (kind === "exact") col.exact = new Map();
+      if (kind === "exact" || kind === "i64") col.exact = new Map();
       if (kind === "boxed") col.boxed = [];
       if (f.fieldType & OPTIONAL_BIT) col.present = new Uint8Array(INITIAL);
       return col;
@@ -250,13 +252,20 @@ export class ColumnarCustomEvents {
           col.nums[slot] = this.internString(String(v));
           break;
         case "exact": {
-          // Varints decode to decimal strings and I64 to BigInt; both are
-          // u64-ranged, so a double only holds them below 2^53. Keep the
-          // original text for the rest rather than rounding it silently.
+          // Varints decode to u64 decimal strings, which a double only holds
+          // below 2^53. Keep the original text for the rest rather than
+          // rounding it silently.
           const text = String(v);
           const num = Number(text);
           col.nums[slot] = num;
           if (String(num) !== text) col.exact!.set(slot, text);
+          break;
+        }
+        case "i64": {
+          const big = v as bigint;
+          const num = Number(big);
+          col.nums[slot] = num;
+          if (BigInt(num) !== big) col.exact!.set(slot, big);
           break;
         }
         case "boxed":
@@ -279,6 +288,10 @@ export class ColumnarCustomEvents {
       case "exact": {
         const exact = col.exact!.get(slot);
         return exact !== undefined ? exact : String(col.nums[slot]!);
+      }
+      case "i64": {
+        const exact = col.exact!.get(slot);
+        return exact !== undefined ? exact : BigInt(col.nums[slot]!);
       }
       case "boxed":
         return col.boxed![slot] ?? null;
