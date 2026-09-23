@@ -287,6 +287,18 @@ describe("loadTraceOnMainThread", () => {
     await expect(load.done).rejects.toMatchObject({ name: "AbortError" });
     expect(store.updates).toHaveLength(0);
   });
+
+  it("abort() while analyzing rejects and never touches the store", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const store = fakeStore();
+    const load = loadTraceOnMainThread(store, ["/t.bin"], {
+      onProgress: (p): void => {
+        if (p.phase === "analyzing") load.abort();
+      },
+    });
+    await expect(load.done).rejects.toMatchObject({ name: "AbortError" });
+    expect(store.updates).toHaveLength(0);
+  });
 });
 
 // ── objectTraceUrls ─────────────────────────────────────

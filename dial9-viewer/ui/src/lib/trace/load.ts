@@ -576,15 +576,20 @@ export function loadTraceOnMainThread(
       const hasRaf = typeof requestAnimationFrame === "function";
       // How warmDerived hands the frame back. rAF means the page paints the
       // new label before the next slice runs; without it (tests, headless) a
-      // resolved promise still breaks the call stack.
-      const nextFrame = (): Promise<void> =>
-        hasRaf
+      // resolved promise still breaks the call stack. Rejecting on abort stops
+      // the warm at its next slice.
+      const nextFrame = (): Promise<void> => {
+        if (controller.signal.aborted) {
+          return Promise.reject(new DOMException("trace load aborted", "AbortError"));
+        }
+        return hasRaf
           ? new Promise<void>((resolve) => {
               requestAnimationFrame(() => {
                 resolve();
               });
             })
           : Promise.resolve();
+      };
       const commit = (): void => {
         store.update("trace", { trace });
         perf.mark("store-updated");
@@ -624,20 +629,23 @@ export function loadTraceOnMainThread(
         }
       };
 
-      settle(() => {
-        // Derivation runs here, in slices, so the page can report where it is
-        // and the trace lands on the store with its caches already warm. Left
-        // to the first render it is one block, seconds long on a large trace,
-        // with no paint and no timer tick.
-        emit("analyzing", 0, 1);
-        void warmDerived(
-          trace,
-          (fraction) => {
-            emit("analyzing", fraction, 1);
-          },
-          nextFrame,
-        ).then(commit, commit); // A failed warm still commits: the lazy path redoes it.
-      });
+      // Derivation runs here, in slices, so the page can report where it is
+      // and the trace lands on the store with its caches already warm. Left
+      // to the first render it is one block, seconds long on a large trace,
+      // with no paint and no timer tick. The load settles only once the warm
+      // is done, so an abort during it still rejects and skips the commit.
+      if (controller.signal.aborted) return;
+      emit("analyzing", 0, 1);
+      const settleCommit = (): void => {
+        settle(commit);
+      };
+      void warmDerived(
+        trace,
+        (fraction) => {
+          emit("analyzing", fraction, 1);
+        },
+        nextFrame,
+      ).then(settleCommit, settleCommit); // A failed warm still commits: the lazy path redoes it.
     })
     .catch((err: unknown) => {
       // Release this run's marks; an aborted/failed load has no useful spans
