@@ -119,6 +119,16 @@ describe("ColumnarCustomEvents column typing", () => {
     expect(s.at(0)!.fields["l"]).toEqual(frames);
   });
 
+  it("keeps pooled stack frames as the decoder's address array", () => {
+    const s = new ColumnarCustomEvents();
+    const sch = schema([{ name: "st", fieldType: F.PooledStackFrames }]);
+    const frames = ["4096", "8192"];
+    s.pushCustom("E", 1, { st: frames }, sch, null);
+    s.pushCustom("E", 2, { st: "<unresolved stack#3>" }, sch, null);
+    expect(s.at(0)!.fields["st"]).toEqual(frames);
+    expect(s.at(1)!.fields["st"]).toBe("<unresolved stack#3>");
+  });
+
   it("reports an absent optional as null, not as a zero", () => {
     const s = new ColumnarCustomEvents();
     const sch = schema([{ name: "opt", fieldType: F.U32 | OPTIONAL }]);

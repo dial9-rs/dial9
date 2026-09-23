@@ -75,7 +75,6 @@ function columnKindFor(fieldType: number): ColumnKind {
       return "num";
     case F.String:
     case F.PooledString:
-    case F.PooledStackFrames:
       return "text";
     case F.Varint:
       return "exact";
