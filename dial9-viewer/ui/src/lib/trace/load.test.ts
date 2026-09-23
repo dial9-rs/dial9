@@ -175,6 +175,17 @@ describe("loadTraceStreamed", () => {
     expect(again.bytes).toBe(bytes);
   });
 
+  it("keeps an entry for an empty component, so the re-parse sees every one", async () => {
+    installFetchMock({ "/empty": new Uint8Array(0), "/b.gz": gzTrace });
+    const { trace, compressed } = await streamTrace(["/empty", "/b.gz"], {}, {}, true);
+    expect(compressed).toHaveLength(2);
+    expect(compressed![0]).toHaveLength(0);
+
+    installFetchMock({ "/r0": compressed![0]!, "/r1": compressed![1]! });
+    const again = await streamTrace(["/r0", "/r1"], {}, {});
+    expect(again.trace.events.length).toBe(trace.events.length);
+  });
+
   it("drops the capture when any component arrives uncompressed", async () => {
     installFetchMock({ "/a.gz": gzTrace, "/raw": rawTrace });
     const { compressed } = await streamTrace(["/a.gz", "/raw"], {}, {}, true);

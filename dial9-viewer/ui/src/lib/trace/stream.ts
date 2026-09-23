@@ -81,8 +81,11 @@ export async function streamTrace(
   captureCompressed = false
 ): Promise<StreamedParse> {
   // Chunks per component, in arrival order; index 0 for the single-URL path,
-  // which never reports one.
-  let captured: Uint8Array[][] | null = captureCompressed ? [] : null;
+  // which never reports one. Sized up front: an empty component reports no
+  // chunk, and the re-parse needs its entry all the same.
+  let captured: Uint8Array[][] | null = captureCompressed
+    ? Array.from(urls, () => [])
+    : null;
   const opts: FetchOptions = captureCompressed
     ? {
         ...fetchOpts,
