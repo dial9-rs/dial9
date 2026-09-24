@@ -23,7 +23,7 @@ use crate::ingest::decode::SchedulingDelayKind;
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
-use crate::server::metrics::OperationMetrics;
+use crate::server::metrics::{OperationMetrics, UxRequestLifecycle, track_sse_ux};
 
 use arrow::array::Array;
 
@@ -227,6 +227,7 @@ pub struct WorkerStats {
 pub async fn get_tokio_stats(
     State(state): State<AppState>,
     creds: MaybeCreds,
+    ux: Option<Extension<UxRequestLifecycle>>,
     QueryExtra(params): QueryExtra<TokioStatsParams>,
 ) -> Result<
     (
@@ -291,7 +292,10 @@ pub async fn get_tokio_stats(
         None,
     );
 
-    let stream = tokio_stats_stream(agg, resolved, scope, state.fold_limits.clone());
+    let stream = track_sse_ux(
+        tokio_stats_stream(agg, resolved, scope, state.fold_limits.clone()),
+        ux.map(|Extension(ux)| ux),
+    );
     Ok((
         Extension(op),
         Sse::new(stream).keep_alive(KeepAlive::default()),

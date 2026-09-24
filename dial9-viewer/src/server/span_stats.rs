@@ -37,7 +37,10 @@ use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::fold_stream;
-use crate::server::metrics::{OperationMetrics, SpanStatsPhaseDurations, SpanStatsStreamMetrics};
+use crate::server::metrics::{
+    OperationMetrics, SpanStatsPhaseDurations, SpanStatsStreamMetrics, UxRequestLifecycle,
+    track_sse_ux,
+};
 use crate::storage::StorageBackend;
 
 /// The matched-path operation label for this endpoint, shared by the request
@@ -469,6 +472,7 @@ fn raw_trace_bytes(
 pub async fn get_span_stats(
     State(state): State<AppState>,
     creds: MaybeCreds,
+    ux: Option<Extension<UxRequestLifecycle>>,
     QueryExtra(params): QueryExtra<SpanStatsParams>,
 ) -> Result<
     (
@@ -564,13 +568,16 @@ pub async fn get_span_stats(
     // guard rides the SSE body and emits the FINAL coverage + full
     // `stream_duration` when the stream ends (normal close or client disconnect).
     let stream_metrics = SpanStatsStreamMetrics::arm(SPAN_STATS_OPERATION);
-    let stream = span_stats_stream(
-        agg,
-        resolved,
-        state.fold_limits.clone(),
-        accum,
-        params.exemplars_only,
-        stream_metrics,
+    let stream = track_sse_ux(
+        span_stats_stream(
+            agg,
+            resolved,
+            state.fold_limits.clone(),
+            accum,
+            params.exemplars_only,
+            stream_metrics,
+        ),
+        ux.map(|Extension(ux)| ux),
     );
     Ok((
         Extension(op),

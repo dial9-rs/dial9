@@ -3,9 +3,13 @@
 //! One [`RequestMetrics`] entry is emitted for every HTTP request that reaches
 //! the API router (see [`record_request_metrics`]). The same middleware records
 //! a first-class dial9 span around the handler future, named after the matched
-//! route and carrying the method, session id, and response status. Streaming
-//! response lifetimes and background folds remain bridged from their metrique
-//! entries through [`Dial9Stream`].
+//! route and carrying the method, session id, and response status.
+//!
+//! The user-facing SSE APIs additionally emit two Metrique entries that are
+//! bridged into dial9 spans: request-to-first-result and first-result-to-stream
+//! end. Both carry `ux=true` and an explicit `ux_phase`, so UX latency can be
+//! queried consistently in metrics and traces. Background folds and other
+//! stream lifetimes remain bridged through [`Dial9Stream`] as well.
 //!
 //! ## Dimensions
 //!
@@ -15,16 +19,19 @@
 //!   `/api/browse`, `/api/object`), so you can alarm a single noisy endpoint.
 //! - `[]` (the empty set) — a service-wide aggregate across all operations.
 
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use axum::extract::{MatchedPath, Request};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use dial9_core::handle::Dial9Handle;
 use dial9_metrique::{Dial9Context, Dial9Stream, Interned, SpanName};
 use dial9_utils::dial9_span;
 use dial9_utils::span::Instrument as _;
+use futures::Stream;
 use metrique::ServiceMetrics;
 use metrique::emf::Emf;
 use metrique::local::{LocalFormat, OutputStyle};
@@ -37,6 +44,8 @@ use metrique::writer::{AttachGlobalEntrySinkExt, EntryIoStream, FormatExt};
 const CLOUDWATCH_NAMESPACE: &str = "dial9_viewer";
 const SESSION_ID_HEADER: &str = "x-dial9-session-id";
 const UUID_TEXT_LEN: usize = 36;
+const UX_FIRST_RESULT: &str = "first_result";
+const UX_STREAMING: &str = "streaming";
 
 /// Operation label used when a request did not match any registered route
 /// (e.g. a stray request that fell through to the API router). Keeps the
@@ -87,6 +96,242 @@ struct RequestMetrics {
     /// `op_detail` tag appear inline on the same entry.
     #[metrics(flatten)]
     op_detail: Option<OperationMetrics>,
+}
+
+/// A user-experience phase for one of the viewer's public SSE APIs.
+///
+/// This is deliberately one shared representation for both observability
+/// systems: Metrique receives the entry directly, while [`Dial9Stream`] turns
+/// the same entry into a duration span. The span name includes the route and
+/// phase; `ux=true` and `ux_phase` make UX-only queries explicit.
+#[metrics(emf::dimension_sets = [["operation", "ux_phase"], ["ux_phase"], []])]
+struct UxSpanMetrics {
+    #[metrics(flatten)]
+    dial9: Dial9Context,
+
+    #[metrics(timestamp)]
+    timestamp: SystemTime,
+
+    #[metrics(flags(Interned, SpanName))]
+    span_name: String,
+
+    #[metrics(flags(Interned))]
+    operation: String,
+
+    #[metrics(flags(Interned))]
+    ux_phase: &'static str,
+
+    /// Stable marker distinguishing spans that track what a human waits for
+    /// from internal implementation spans. These are server-observed UX
+    /// boundaries: first event production, not browser receipt or render.
+    #[metrics(flags(Interned))]
+    ux: &'static str,
+
+    #[metrics(flags(Interned))]
+    method: String,
+
+    status_code: String,
+    session_id: Option<String>,
+
+    #[metrics(unit = Count)]
+    count: u32,
+
+    /// `1` for a normal phase boundary, `0` when the response was disconnected
+    /// or dropped before that boundary.
+    #[metrics(unit = Count)]
+    completed: u32,
+
+    /// `1` when at least one meaningful SSE result was produced.
+    #[metrics(unit = Count)]
+    result_returned: u32,
+
+    /// Source SSE events produced during this phase. Axum keep-alives are not
+    /// included because this wraps the application stream before `Sse`.
+    #[metrics(unit = Count)]
+    events_streamed: u64,
+
+    /// Wall time for the phase. The dial9 bridge derives the span duration from
+    /// [`Dial9Context`]; this parallel timer exposes the same UX latency to
+    /// Metrique/EMF.
+    #[metrics(unit = Millisecond)]
+    duration: Timer,
+}
+
+impl UxSpanMetrics {
+    fn arm(
+        operation: &str,
+        phase: &'static str,
+        method: &str,
+        status_code: &str,
+        session_id: Option<&str>,
+    ) -> UxSpanMetricsGuard {
+        UxSpanMetrics {
+            dial9: Dial9Context::capture(),
+            timestamp: SystemTime::now(),
+            span_name: format!("{operation} ux.{phase}"),
+            operation: operation.to_string(),
+            ux_phase: phase,
+            ux: "true",
+            method: method.to_string(),
+            status_code: status_code.to_string(),
+            session_id: session_id.map(str::to_string),
+            count: 1,
+            completed: 0,
+            result_returned: 0,
+            events_streamed: 0,
+            duration: Timer::start_now(),
+        }
+        .append_on_drop(ServiceMetrics::sink_or_discard())
+    }
+}
+
+/// Request-start state shared between the metrics middleware and the SSE body.
+///
+/// The middleware owns the start of the first-result phase. A successful
+/// handler transfers responsibility to [`track_sse_ux`]; an early HTTP error
+/// closes the phase itself. The final owner dropping the guard records
+/// cancellation automatically (`completed=0`).
+#[derive(Clone)]
+pub(crate) struct UxRequestLifecycle {
+    inner: Arc<Mutex<UxRequestState>>,
+}
+
+struct UxRequestState {
+    first_result: Option<UxSpanMetricsGuard>,
+    operation: String,
+    method: String,
+    status_code: String,
+    session_id: Option<String>,
+    stream_attached: bool,
+}
+
+impl UxRequestLifecycle {
+    fn new(operation: String, method: String, session_id: Option<String>) -> Self {
+        let first_result = UxSpanMetrics::arm(
+            &operation,
+            UX_FIRST_RESULT,
+            &method,
+            "pending",
+            session_id.as_deref(),
+        );
+        Self {
+            inner: Arc::new(Mutex::new(UxRequestState {
+                first_result: Some(first_result),
+                operation,
+                method,
+                status_code: "pending".to_string(),
+                session_id,
+                stream_attached: false,
+            })),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, UxRequestState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_status(&self, status_code: u16) {
+        let mut state = self.lock();
+        let status_code = status_code.to_string();
+        state.status_code = status_code.clone();
+        if let Some(first_result) = state.first_result.as_mut() {
+            first_result.status_code = status_code;
+        }
+    }
+
+    fn mark_stream_attached(&self) {
+        self.lock().stream_attached = true;
+    }
+
+    fn stream_attached(&self) -> bool {
+        self.lock().stream_attached
+    }
+
+    /// Finish a request that returned an HTTP response before constructing its
+    /// SSE body (validation/backend errors). It was user-visible, but did not
+    /// return a result event.
+    fn finish_without_stream(&self) {
+        let first_result = {
+            let mut state = self.lock();
+            state.first_result.take().map(|mut first_result| {
+                first_result.completed = 1;
+                first_result
+            })
+        };
+        drop(first_result);
+    }
+
+    /// Close request-to-first-result and start first-result-to-stream-end at the
+    /// first meaningful application event.
+    fn start_streaming(&self) -> Option<UxSpanMetricsGuard> {
+        let (first_result, streaming) = {
+            let mut state = self.lock();
+            let mut first_result = state.first_result.take()?;
+            first_result.completed = 1;
+            first_result.result_returned = 1;
+            first_result.events_streamed = 1;
+
+            let mut streaming = UxSpanMetrics::arm(
+                &state.operation,
+                UX_STREAMING,
+                &state.method,
+                &state.status_code,
+                state.session_id.as_deref(),
+            );
+            streaming.result_returned = 1;
+            streaming.events_streamed = 1;
+            (first_result, streaming)
+        };
+        drop(first_result);
+        Some(streaming)
+    }
+
+    /// A normally completed stream can be empty. In that case there is no
+    /// streaming phase, and request-to-first-result records the empty outcome.
+    fn finish_empty_stream(&self) {
+        self.finish_without_stream();
+    }
+}
+
+/// Wrap an application SSE source stream with the two user-facing phase
+/// metrics. The first yielded item is the first real result (not an Axum
+/// keep-alive); normal exhaustion marks streaming complete, while dropping the
+/// response body leaves `completed=0` to represent client cancellation.
+pub(crate) fn track_sse_ux<S>(
+    stream: S,
+    lifecycle: Option<UxRequestLifecycle>,
+) -> impl Stream<Item = S::Item>
+where
+    S: Stream + Send + 'static,
+{
+    let mut stream = Box::pin(stream);
+    let mut streaming: Option<UxSpanMetricsGuard> = None;
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        lifecycle.mark_stream_attached();
+    }
+
+    futures::stream::poll_fn(move |cx| match stream.as_mut().poll_next(cx) {
+        Poll::Ready(Some(item)) => {
+            if let Some(streaming) = streaming.as_mut() {
+                streaming.events_streamed += 1;
+            } else if let Some(lifecycle) = lifecycle.as_ref() {
+                streaming = lifecycle.start_streaming();
+            }
+            Poll::Ready(Some(item))
+        }
+        Poll::Ready(None) => {
+            if let Some(mut streaming) = streaming.take() {
+                streaming.completed = 1;
+                drop(streaming);
+            } else if let Some(lifecycle) = lifecycle.as_ref() {
+                lifecycle.finish_empty_stream();
+            }
+            Poll::Ready(None)
+        }
+        Poll::Pending => Poll::Pending,
+    })
 }
 
 /// Per-operation metric detail, attached by a handler to the response so the
@@ -702,7 +947,7 @@ impl OperationMetrics {
 /// [`MatchedPath`] is read from the request extensions (axum inserts it during
 /// routing, so it is available to a router `layer`); requests that matched no
 /// route fall back to [`UNMATCHED_OPERATION`].
-pub async fn record_request_metrics(req: Request, next: Next) -> Response {
+pub async fn record_request_metrics(mut req: Request, next: Next) -> Response {
     // Read the matched-path template *before* `next.run` consumes the request.
     let operation = req
         .extensions()
@@ -711,6 +956,11 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
         .unwrap_or_else(|| UNMATCHED_OPERATION.to_string());
     let session_id = validated_session_id(req.headers());
     let method = req.method().as_str().to_string();
+    let ux = is_user_facing_sse(&operation, req.method())
+        .then(|| UxRequestLifecycle::new(operation.clone(), method.clone(), session_id.clone()));
+    if let Some(ux) = ux.as_ref() {
+        req.extensions_mut().insert(ux.clone());
+    }
 
     let mut metrics = RequestMetrics {
         timestamp: SystemTime::now(),
@@ -781,6 +1031,13 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
     .instrument(request_span)
     .await;
 
+    if let Some(ux) = ux.as_ref() {
+        ux.set_status(response.status().as_u16());
+        if !ux.stream_attached() {
+            ux.finish_without_stream();
+        }
+    }
+
     // Stop the timer at response-headers time (not body completion): for a
     // streamed body the bytes flow after this middleware returns.
     metrics.latency.stop();
@@ -798,6 +1055,14 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
     metrics.op_detail = response.extensions_mut().remove::<OperationMetrics>();
 
     response
+}
+
+fn is_user_facing_sse(operation: &str, method: &Method) -> bool {
+    method == Method::GET
+        && matches!(
+            operation,
+            "/api/flamegraph" | "/api/tokio-stats" | "/api/span-stats"
+        )
 }
 
 /// Read only canonical, lower-case UUID text from the session header. Invalid
@@ -825,9 +1090,9 @@ fn validated_session_id(headers: &HeaderMap) -> Option<String> {
 ///   stdout, for local runs.
 ///
 /// The API middleware records request spans directly, including active/idle
-/// timing. This tee covers the opted-in stream-lifetime and fold entries that
-/// cannot be represented by the response-head request span. Without an active
-/// recorder, the dial9 side of the stream is inert.
+/// timing. This tee covers the UX phase entries, stream-lifetime entries, and
+/// fold entries that cannot be represented by the response-head request span.
+/// Without an active recorder, the dial9 side of the stream is inert.
 pub fn attach_request_metrics(local: bool) -> AttachHandle {
     let dial9 = Dial9Handle::current();
     if local {
@@ -859,16 +1124,19 @@ fn attach_request_metrics_to_stream(
 mod tests {
     use super::*;
     use axum::Router;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    use axum::response::sse::{Event, Sse};
     use axum::routing::get;
     use dial9_core::buffer::DiskBuffer;
     use dial9_core::handle::{clear_tl_handle, set_tl_handle};
     use dial9_core::recorder::recorder;
     use dial9_core::schema_extensions::{ROLE_KEY, SPAN_TYPE_KEY, roles, span_types};
     use dial9_trace_format::types::FieldValueRef;
+    use futures::StreamExt as _;
     use metrique::test_util::{TestEntrySink, test_entry_sink, test_metric};
     use std::collections::HashMap;
+    use std::convert::Infallible;
     use tower::ServiceExt; // for `oneshot`
 
     static DIAL9_RECORDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -923,6 +1191,11 @@ mod tests {
         );
 
         drop(request_metrics().append_on_drop(ServiceMetrics::sink_or_discard()));
+        let mut ux = UxSpanMetrics::arm("/api/flamegraph", UX_FIRST_RESULT, "GET", "200", None);
+        ux.completed = 1;
+        ux.result_returned = 1;
+        ux.events_streamed = 1;
+        drop(ux);
         drop(ObjectStreamMetrics::arm("/api/object"));
         drop(SpanStatsStreamMetrics::arm("/api/span-stats"));
         FoldFileMetricsBuilder::new().emit();
@@ -963,6 +1236,7 @@ mod tests {
             .unwrap();
 
         let expected = [
+            "metrique:UxSpanMetrics",
             "metrique:ObjectStreamMetrics",
             "metrique:SpanStatsStreamMetrics",
             "metrique:FoldFileMetrics",
@@ -993,6 +1267,11 @@ mod tests {
                 "{name} does not use operation as its span name"
             );
         }
+        assert_eq!(
+            schemas["metrique:UxSpanMetrics"].annotations["span_name"][ROLE_KEY],
+            roles::SPAN_NAME,
+            "UX metrics must use their route-and-phase label as the span name"
+        );
         assert!(
             !schemas.contains_key("metrique:RequestMetrics"),
             "request metrics must not duplicate the first-class API span"
@@ -1129,8 +1408,16 @@ mod tests {
         assert_eq!(resp.status(), status);
 
         let entries = inspector.entries();
-        assert_eq!(entries.len(), 1, "exactly one metric entry per request");
-        entries.into_iter().next().unwrap()
+        let request_entries = entries
+            .into_iter()
+            .filter(|entry| !entry.values.contains_key("ux_phase"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_entries.len(),
+            1,
+            "exactly one request metric entry per request"
+        );
+        request_entries.into_iter().next().unwrap()
     }
 
     async fn run(route: &str, uri: &str, status: StatusCode) -> metrique::test_util::TestEntry {
@@ -1169,6 +1456,150 @@ mod tests {
         assert_eq!(e.metrics["fault"].as_u64(), 0);
         assert_eq!(e.metrics["error"].as_u64(), 0);
         assert_eq!(e.metrics["count"].as_u64(), 1);
+    }
+
+    #[tokio::test]
+    async fn sse_ux_phases_are_identical_metrique_records_and_dial9_span_inputs() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+        let session_id = "123e4567-e89b-42d3-a456-426614174000";
+
+        let app: Router = Router::new()
+            .route(
+                "/api/flamegraph",
+                get(
+                    |ux: Option<axum::Extension<UxRequestLifecycle>>| async move {
+                        let source = futures::stream::iter([
+                            Ok::<_, Infallible>(Event::default().data("first")),
+                            Ok::<_, Infallible>(Event::default().data("second")),
+                        ]);
+                        Sse::new(track_sse_ux(source, ux.map(|axum::Extension(ux)| ux)))
+                    },
+                ),
+            )
+            .layer(axum::middleware::from_fn(record_request_metrics));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/flamegraph")
+                    .header(SESSION_ID_HEADER, session_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"data: first"));
+
+        let entries = inspector.entries();
+        assert_eq!(
+            entries.len(),
+            3,
+            "request, first-result UX, and streaming UX records"
+        );
+        let first_result = entries
+            .iter()
+            .find(|entry| entry.values.get("ux_phase").map(String::as_str) == Some(UX_FIRST_RESULT))
+            .expect("first-result UX metric");
+        assert_eq!(first_result.values["ux"], "true");
+        assert_eq!(
+            first_result.values["span_name"],
+            "/api/flamegraph ux.first_result"
+        );
+        assert_eq!(first_result.values["operation"], "/api/flamegraph");
+        assert_eq!(first_result.values["method"], "GET");
+        assert_eq!(first_result.values["status_code"], "200");
+        assert_eq!(first_result.values["session_id"], session_id);
+        assert_eq!(first_result.metrics["completed"].as_u64(), 1);
+        assert_eq!(first_result.metrics["result_returned"].as_u64(), 1);
+        assert_eq!(first_result.metrics["events_streamed"].as_u64(), 1);
+        assert_eq!(first_result.metrics["duration"].num_observations(), 1);
+
+        let streaming = entries
+            .iter()
+            .find(|entry| entry.values.get("ux_phase").map(String::as_str) == Some(UX_STREAMING))
+            .expect("streaming UX metric");
+        assert_eq!(streaming.values["ux"], "true");
+        assert_eq!(
+            streaming.values["span_name"],
+            "/api/flamegraph ux.streaming"
+        );
+        assert_eq!(streaming.metrics["completed"].as_u64(), 1);
+        assert_eq!(streaming.metrics["result_returned"].as_u64(), 1);
+        assert_eq!(streaming.metrics["events_streamed"].as_u64(), 2);
+        assert_eq!(streaming.metrics["duration"].num_observations(), 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_sse_body_marks_the_streaming_ux_phase_incomplete() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+        let lifecycle =
+            UxRequestLifecycle::new("/api/span-stats".to_string(), "GET".to_string(), None);
+        lifecycle.set_status(StatusCode::OK.as_u16());
+
+        let source =
+            futures::stream::once(async { "first" }).chain(futures::stream::pending::<&str>());
+        let mut stream = Box::pin(track_sse_ux(source, Some(lifecycle)));
+        assert_eq!(stream.next().await, Some("first"));
+        drop(stream);
+
+        let entries = inspector.entries();
+        assert_eq!(entries.len(), 2);
+        let first_result = entries
+            .iter()
+            .find(|entry| entry.values.get("ux_phase").map(String::as_str) == Some(UX_FIRST_RESULT))
+            .expect("first-result UX metric");
+        assert_eq!(first_result.metrics["completed"].as_u64(), 1);
+
+        let streaming = entries
+            .iter()
+            .find(|entry| entry.values.get("ux_phase").map(String::as_str) == Some(UX_STREAMING))
+            .expect("streaming UX metric");
+        assert_eq!(streaming.metrics["completed"].as_u64(), 0);
+        assert_eq!(streaming.metrics["events_streamed"].as_u64(), 1);
+    }
+
+    #[tokio::test]
+    async fn sse_http_error_finishes_wait_phase_without_claiming_a_result() {
+        let TestEntrySink { inspector, sink } = test_entry_sink();
+        let _guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+        let app: Router = Router::new()
+            .route(
+                "/api/tokio-stats",
+                get(|| async { StatusCode::BAD_REQUEST }),
+            )
+            .layer(axum::middleware::from_fn(record_request_metrics));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tokio-stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let entries = inspector.entries();
+        let ux = entries
+            .iter()
+            .find(|entry| entry.values.contains_key("ux_phase"))
+            .expect("first-result UX metric");
+        assert_eq!(ux.values["ux_phase"], UX_FIRST_RESULT);
+        assert_eq!(ux.values["status_code"], "400");
+        assert_eq!(ux.metrics["completed"].as_u64(), 1);
+        assert_eq!(ux.metrics["result_returned"].as_u64(), 0);
+        assert_eq!(ux.metrics["events_streamed"].as_u64(), 0);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.values.get("ux_phase").map(String::as_str)
+                    != Some(UX_STREAMING))
+        );
     }
 
     #[tokio::test]
@@ -1227,8 +1658,16 @@ mod tests {
             .unwrap();
 
         let entries = inspector.entries();
-        assert_eq!(entries.len(), 1, "exactly one metric entry per request");
-        entries.into_iter().next().unwrap()
+        let request_entries = entries
+            .into_iter()
+            .filter(|entry| !entry.values.contains_key("ux_phase"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_entries.len(),
+            1,
+            "exactly one request metric entry per request"
+        );
+        request_entries.into_iter().next().unwrap()
     }
 
     #[tokio::test]
