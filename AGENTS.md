@@ -208,7 +208,9 @@ Failing to update it will cause the viewer to fail when loading the demo.
 
 ## Repository management
 
-- Only when explicitly asked to open or manage PRs: do not stack PRs (PR B targeting PR A's branch). The merge queue rewrites commits, so stacked PRs always end up with merge conflicts. Instead, wait for the first PR to merge, then rebase the second onto `main`.
+- Only open or manage PRs when explicitly asked. Stacked PRs are supported:
+  target each dependent PR at the preceding branch, keep every layer independently
+  buildable, and rebase or retarget the remaining stack as lower layers merge.
 
 ## Agent skills
 
