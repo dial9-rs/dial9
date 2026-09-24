@@ -7,6 +7,7 @@
 //! sequence of processors.
 
 use crate::fs::SegmentAccounting;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
@@ -140,6 +141,15 @@ pub trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
 
+    /// Whether this processor can accept segment work right now.
+    ///
+    /// The worker checks every processor before loading or transforming a
+    /// segment. Implementations must keep this cheap, synchronous, and free of
+    /// side effects.
+    fn liveness(&self) -> ProcessorLiveness {
+        ProcessorLiveness::Live
+    }
+
     /// Initialize this processor on the worker's Tokio runtime before the
     /// pipeline begins processing segments.
     ///
@@ -174,6 +184,28 @@ pub trait SegmentProcessor: Send {
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         let _ = completion;
         Box::pin(std::future::ready(None))
+    }
+}
+
+/// A processor's ability to accept new segment work.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessorLiveness {
+    /// The processor can accept work.
+    Live,
+    /// The processor is temporarily unavailable.
+    Unavailable {
+        /// Diagnostic suitable for rate-limited worker logs.
+        message: Cow<'static, str>,
+    },
+}
+
+impl ProcessorLiveness {
+    /// Construct a temporarily unavailable result.
+    pub fn unavailable(message: impl Into<Cow<'static, str>>) -> Self {
+        Self::Unavailable {
+            message: message.into(),
+        }
     }
 }
 

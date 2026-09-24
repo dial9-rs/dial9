@@ -10,7 +10,9 @@ use std::path::PathBuf;
 #[cfg(feature = "cpu-profiling")]
 pub(crate) use dial9_perf_self_profile::SymbolizeProcessor;
 
-pub use dial9_core::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
+pub use dial9_core::pipeline::{
+    ProcessError, ProcessErrorKind, ProcessorLiveness, SegmentData, SegmentProcessor,
+};
 pub use dial9_core::worker::BackgroundTaskConfig;
 pub(crate) use dial9_core::worker::processors::{GzipCompressor, WriteBackProcessor};
 #[cfg(feature = "worker-s3")]
