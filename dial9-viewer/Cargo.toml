@@ -89,6 +89,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrique = { version = "0.1.28", features = ["emf", "local-format"] }
 metrique-writer = "0.1"
 dial9-metrique = { workspace = true, features = ["tokio"] }
+dial9-utils = { workspace = true, features = ["span"] }
 time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"], optional = true }

@@ -1,7 +1,11 @@
 //! Per-request operational metrics, published via metrique.
 //!
 //! One [`RequestMetrics`] entry is emitted for every HTTP request that reaches
-//! the API router (see [`record_request_metrics`]).
+//! the API router (see [`record_request_metrics`]). The same middleware records
+//! a first-class dial9 span around the handler future, named after the matched
+//! route and carrying the method, session id, and response status. Streaming
+//! response lifetimes and background folds remain bridged from their metrique
+//! entries through [`Dial9Stream`].
 //!
 //! ## Dimensions
 //!
@@ -19,6 +23,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use dial9_core::handle::Dial9Handle;
 use dial9_metrique::{Dial9Context, Dial9Stream, Interned, SpanName};
+use dial9_utils::dial9_span;
+use dial9_utils::span::Instrument as _;
 use metrique::ServiceMetrics;
 use metrique::emf::Emf;
 use metrique::local::{LocalFormat, OutputStyle};
@@ -39,16 +45,12 @@ const UNMATCHED_OPERATION: &str = "unmatched";
 
 #[metrics(emf::dimension_sets = [["operation"], []])]
 struct RequestMetrics {
-    #[metrics(flatten)]
-    dial9: Dial9Context,
-
     /// Stamp the metric at request *start*. Without this the timestamp would be
     /// taken when the entry is flushed (after the handler runs), skewing it by
     /// the request's own latency.
     #[metrics(timestamp)]
     timestamp: SystemTime,
 
-    #[metrics(flags(Interned, SpanName))]
     operation: String,
 
     /// HTTP status code as a string (e.g. `"200"`). Emitted as a plain value,
@@ -693,7 +695,8 @@ impl OperationMetrics {
 }
 
 /// Axum middleware that emits one [`RequestMetrics`] entry per request to the
-/// global [`ServiceMetrics`] sink.
+/// global [`ServiceMetrics`] sink and records the handler future as a dial9
+/// span when the API is running on a dial9-instrumented runtime.
 ///
 /// Wired via [`axum::middleware::from_fn`], so it carries no state. The
 /// [`MatchedPath`] is read from the request extensions (axum inserts it during
@@ -707,13 +710,13 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| UNMATCHED_OPERATION.to_string());
     let session_id = validated_session_id(req.headers());
+    let method = req.method().as_str().to_string();
 
     let mut metrics = RequestMetrics {
-        dial9: Dial9Context::capture(),
         timestamp: SystemTime::now(),
-        operation,
+        operation: operation.clone(),
         status_code: String::new(),
-        session_id,
+        session_id: session_id.clone(),
         count: 1,
         fault: 0,
         error: 0,
@@ -726,7 +729,57 @@ pub async fn record_request_metrics(req: Request, next: Next) -> Response {
     // attached (or test) sink if present, else silently dropped.
     .append_on_drop(ServiceMetrics::sink_or_discard());
 
-    let mut response = next.run(req).await;
+    let (request_span, span_fields) = dial9_span!(
+        operation,
+        method: String = method,
+        session_id: Option<String> = session_id,
+        status_code: u16,
+        objects_returned: u64,
+        prefixes_fanned_out: u64,
+        truncated: bool,
+        refined: bool,
+        files_matched: u32,
+        files_folded: u32,
+        coverage_pct: f64,
+        samples: u64,
+        notable_polls: u64,
+    );
+    let mut response = async {
+        let response = next.run(req).await;
+        span_fields.status_code.set(response.status().as_u16());
+        if let Some(detail) = response.extensions().get::<OperationMetrics>() {
+            match detail {
+                OperationMetrics::Browse(detail) => {
+                    span_fields
+                        .objects_returned
+                        .set(detail.objects_returned as u64);
+                    span_fields
+                        .prefixes_fanned_out
+                        .set(detail.prefixes_fanned_out as u64);
+                    span_fields.truncated.set(detail.truncated != 0);
+                    span_fields.refined.set(detail.refined != 0);
+                }
+                OperationMetrics::Flamegraph(detail) => {
+                    span_fields.files_matched.set(detail.files_matched);
+                    span_fields.files_folded.set(detail.files_folded);
+                    span_fields.coverage_pct.set(detail.coverage_pct);
+                    if let Some(samples) = detail.samples {
+                        span_fields.samples.set(samples);
+                    }
+                }
+                OperationMetrics::TokioStats(detail) => {
+                    span_fields.files_matched.set(detail.files_matched);
+                    span_fields.files_folded.set(detail.files_folded);
+                    if let Some(notable_polls) = detail.notable_polls {
+                        span_fields.notable_polls.set(notable_polls);
+                    }
+                }
+            }
+        }
+        response
+    }
+    .instrument(request_span)
+    .await;
 
     // Stop the timer at response-headers time (not body completion): for a
     // streamed body the bytes flow after this middleware returns.
@@ -771,9 +824,10 @@ fn validated_session_id(headers: &HeaderMap) -> Option<String> {
 /// - `local == true` (`--local`): metrique's human-readable [`LocalFormat`] to
 ///   stdout, for local runs.
 ///
-/// When called from a dial9-instrumented runtime, the stream is also connected
-/// to that runtime's current recorder and opted-in entries become dial9 spans.
-/// Without an active recorder, the dial9 side of the stream is inert.
+/// The API middleware records request spans directly, including active/idle
+/// timing. This tee covers the opted-in stream-lifetime and fold entries that
+/// cannot be represented by the response-head request span. Without an active
+/// recorder, the dial9 side of the stream is inert.
 pub fn attach_request_metrics(local: bool) -> AttachHandle {
     let dial9 = Dial9Handle::current();
     if local {
@@ -809,24 +863,34 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use dial9_core::buffer::DiskBuffer;
+    use dial9_core::handle::{clear_tl_handle, set_tl_handle};
     use dial9_core::recorder::recorder;
     use dial9_core::schema_extensions::{ROLE_KEY, SPAN_TYPE_KEY, roles, span_types};
+    use dial9_trace_format::types::FieldValueRef;
     use metrique::test_util::{TestEntrySink, test_entry_sink, test_metric};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use tower::ServiceExt; // for `oneshot`
 
+    static DIAL9_RECORDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn on_fresh_dial9_thread(f: impl FnOnce() + Send + 'static) {
+        let _recorder_guard = DIAL9_RECORDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::thread::spawn(f)
+            .join()
+            .expect("dial9 test thread must not panic");
+    }
+
     #[test]
-    fn viewer_metrics_are_recorded_as_dial9_spans() {
+    fn viewer_stream_metrics_are_recorded_as_dial9_spans() {
+        on_fresh_dial9_thread(assert_viewer_stream_metrics_are_recorded_as_dial9_spans);
+    }
+
+    fn assert_viewer_stream_metrics_are_recorded_as_dial9_spans() {
         #[derive(Debug)]
         struct RecordedSchema {
-            fields: HashSet<String>,
             annotations: HashMap<String, HashMap<String, String>>,
-        }
-
-        #[derive(Debug, serde::Deserialize)]
-        struct DecodedRequestMetrics {
-            operation: String,
-            session_id: Option<String>,
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -835,7 +899,6 @@ mod tests {
         recorder.enable();
 
         let request_metrics = || RequestMetrics {
-            dial9: Dial9Context::capture(),
             timestamp: SystemTime::now(),
             operation: "/api/browse".to_string(),
             status_code: "200".to_string(),
@@ -879,33 +942,14 @@ mod tests {
             "dial9 context fields leaked into the normal metric stream: {normal_output}"
         );
 
-        let sealed_trace = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .find(|path| path.to_string_lossy().contains(".bin"))
-            .expect("recorder must seal a trace segment");
-        let data = std::fs::read(sealed_trace).unwrap();
+        let data = std::fs::read(dir.path().join("viewer-metrics.0.bin")).unwrap();
         let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
         let mut schemas = HashMap::new();
-        let mut request_metrics = None;
         decoder
             .for_each_event(|event| {
                 if !event.name.starts_with("metrique:") {
                     return;
                 }
-                if event.name == "metrique:RequestMetrics" {
-                    request_metrics = Some(
-                        event
-                            .deserialize::<DecodedRequestMetrics>()
-                            .expect("request metrics event must deserialize"),
-                    );
-                }
-                let fields: HashSet<_> = event
-                    .schema
-                    .fields()
-                    .iter()
-                    .map(|field| field.name().to_string())
-                    .collect();
                 let mut annotations: HashMap<String, HashMap<String, String>> = HashMap::new();
                 for annotation in event.schema.annotations() {
                     let field = event.schema.fields()[usize::from(annotation.field_index())].name();
@@ -914,18 +958,11 @@ mod tests {
                         .or_default()
                         .insert(annotation.key().to_string(), annotation.value().to_string());
                 }
-                schemas.insert(
-                    event.name.to_string(),
-                    RecordedSchema {
-                        fields,
-                        annotations,
-                    },
-                );
+                schemas.insert(event.name.to_string(), RecordedSchema { annotations });
             })
             .unwrap();
 
         let expected = [
-            "metrique:RequestMetrics",
             "metrique:ObjectStreamMetrics",
             "metrique:SpanStatsStreamMetrics",
             "metrique:FoldFileMetrics",
@@ -947,7 +984,6 @@ mod tests {
         }
 
         for name in [
-            "metrique:RequestMetrics",
             "metrique:ObjectStreamMetrics",
             "metrique:SpanStatsStreamMetrics",
         ] {
@@ -958,20 +994,112 @@ mod tests {
             );
         }
         assert!(
-            schemas["metrique:RequestMetrics"]
-                .fields
-                .contains("session_id"),
-            "session UUID must remain available for per-session trace correlation"
+            !schemas.contains_key("metrique:RequestMetrics"),
+            "request metrics must not duplicate the first-class API span"
         );
-        let request_metrics = request_metrics.expect("request metrics event must be recorded");
-        assert_eq!(
-            request_metrics.session_id.as_deref(),
-            Some("123e4567-e89b-42d3-a456-426614174000")
-        );
-        assert_eq!(
-            request_metrics.operation, "/api/browse",
-            "the operation selected as span.name must retain its value"
-        );
+    }
+
+    fn field_string(
+        pool: &dial9_trace_format::decoder::StringPool,
+        value: &FieldValueRef<'_>,
+    ) -> Option<String> {
+        match value {
+            FieldValueRef::PooledString(id) => pool.get(*id).map(str::to_owned),
+            FieldValueRef::String(value) => Some(value.to_string()),
+            FieldValueRef::Varint(value) => Some(value.to_string()),
+            FieldValueRef::I64(value) => Some(value.to_string()),
+            FieldValueRef::F64(value) => Some(value.to_string()),
+            FieldValueRef::Bool(value) => Some(value.to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn api_request_records_first_class_dial9_span() {
+        on_fresh_dial9_thread(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(assert_api_request_records_first_class_dial9_span());
+        });
+    }
+
+    async fn assert_api_request_records_first_class_dial9_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder =
+            recorder(DiskBuffer::single_file(dir.path().join("api-request.bin")).unwrap()).build();
+        set_tl_handle(recorder.handle().clone());
+        let TestEntrySink { sink, .. } = test_entry_sink();
+        let _metrics_guard = ServiceMetrics::set_test_sink_on_current_tokio_runtime(sink);
+
+        let detail = OperationMetrics::browse(7, 4, true, false);
+        let app: Router = Router::new()
+            .route(
+                "/items/{id}",
+                get(move || {
+                    let detail = detail.clone();
+                    async move { (StatusCode::SERVICE_UNAVAILABLE, axum::Extension(detail)) }
+                }),
+            )
+            .layer(axum::middleware::from_fn(record_request_metrics));
+        let session_id = "123e4567-e89b-42d3-a456-426614174000";
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/items/42")
+                    .header(SESSION_ID_HEADER, session_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        clear_tl_handle();
+        recorder.graceful_shutdown(Duration::from_secs(1));
+
+        let data = std::fs::read(dir.path().join("api-request.0.bin")).unwrap();
+        let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
+        let mut enter_fields = None;
+        let mut exit_fields = None;
+        decoder
+            .for_each_event(|event| {
+                if !event.name.starts_with("SpanEnter:") && !event.name.starts_with("SpanExit:") {
+                    return;
+                }
+                let fields = event
+                    .schema
+                    .fields()
+                    .iter()
+                    .zip(event.fields.iter())
+                    .filter_map(|(field, value)| {
+                        field_string(event.string_pool, value)
+                            .map(|value| (field.name().to_string(), value))
+                    })
+                    .collect::<HashMap<_, _>>();
+                if fields.get("span_name").map(String::as_str) != Some("/items/{id}") {
+                    return;
+                }
+                if event.name.starts_with("SpanEnter:") {
+                    enter_fields = Some(fields);
+                } else {
+                    exit_fields = Some(fields);
+                }
+            })
+            .unwrap();
+
+        let enter_fields = enter_fields.expect("API span enter event");
+        assert_eq!(enter_fields["method"], "GET");
+        assert_eq!(enter_fields["session_id"], session_id);
+
+        let exit_fields = exit_fields.expect("API span exit event");
+        assert_eq!(exit_fields["status_code"], "503");
+        assert_eq!(exit_fields["objects_returned"], "7");
+        assert_eq!(exit_fields["prefixes_fanned_out"], "4");
+        assert_eq!(exit_fields["truncated"], "true");
+        assert_eq!(exit_fields["refined"], "false");
+        assert_eq!(exit_fields["completed"], "true");
     }
 
     /// Drive one request through the middleware against a test sink installed
