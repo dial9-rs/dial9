@@ -454,9 +454,10 @@ fn api_router(state: AppState) -> Router {
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())
-        // Per-request metrics. Layered on the API router (not the outer one) so
-        // it sees the populated `MatchedPath` and only counts API requests, not
-        // static-asset fetches. Publishes to the global `ServiceMetrics` sink.
+        // Per-request metrics, dial9 API spans, and shared Metrique/dial9 UX
+        // phases for SSE APIs. Layered on the API router (not the outer one) so
+        // it sees the populated `MatchedPath` and covers API requests, not
+        // static-asset fetches.
         .layer(axum::middleware::from_fn(metrics::record_request_metrics))
         .with_state(state)
 }

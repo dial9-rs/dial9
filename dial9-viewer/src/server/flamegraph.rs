@@ -29,7 +29,7 @@ use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::fold_stream;
-use crate::server::metrics::OperationMetrics;
+use crate::server::metrics::{OperationMetrics, UxRequestLifecycle, track_sse_ux};
 
 #[derive(Deserialize)]
 pub struct FlamegraphParams {
@@ -411,6 +411,7 @@ impl WireFrames {
 pub async fn get_flamegraph(
     State(state): State<AppState>,
     creds: MaybeCreds,
+    ux: Option<Extension<UxRequestLifecycle>>,
     // `axum_extra`'s Query supports repeated keys (`host=a&host=b`), which the
     // stock `serde_urlencoded`-based extractor does not.
     QueryExtra(params): QueryExtra<FlamegraphParams>,
@@ -554,7 +555,10 @@ pub async fn get_flamegraph(
         None,
     );
 
-    let stream = flamegraph_stream(agg, resolved, &params, state.fold_limits.clone());
+    let stream = track_sse_ux(
+        flamegraph_stream(agg, resolved, &params, state.fold_limits.clone()),
+        ux.map(|Extension(ux)| ux),
+    );
     Ok((
         Extension(op),
         Sse::new(stream).keep_alive(KeepAlive::default()),
