@@ -7,6 +7,7 @@
 
 use rustc_hash::FxHashMap;
 
+use super::attribution::AttributionInterval;
 use super::clock::{ClockOffset, MonoNs};
 use super::events::{PollEnd, PollStart, TaskSpawn, TaskTerminate, WakeEvent, WorkerPark};
 use super::types::SchedulingDelayKind;
@@ -36,13 +37,101 @@ pub(crate) struct PollRecord {
 }
 
 pub(crate) struct PollTimeline {
-    tid_to_worker: FxHashMap<u32, u64>,
     tid_bindings: FxHashMap<u32, Vec<(MonoNs, u64)>>,
     tid_handoff_gaps: FxHashMap<u32, Vec<(MonoNs, MonoNs)>>,
     records: Vec<PollRecord>,
     by_worker: FxHashMap<u64, Vec<usize>>,
     sample_counts: Vec<(u32, u32)>,
     end_unproven: u64,
+}
+
+fn merge_intervals(intervals: &mut Vec<(MonoNs, MonoNs)>) {
+    intervals.sort_unstable_by_key(|(start, _)| *start);
+    let mut write = 0;
+    for read in 0..intervals.len() {
+        let (start, end) = intervals[read];
+        if write > 0 && start <= intervals[write - 1].1 {
+            intervals[write - 1].1 = intervals[write - 1].1.max(end);
+        } else {
+            intervals[write] = (start, end);
+            write += 1;
+        }
+    }
+    intervals.truncate(write);
+}
+
+/// Binary-search indices over reconstructed polls.
+pub(crate) struct PollIndex<'a> {
+    by_task: FxHashMap<u64, Vec<&'a PollRecord>>,
+    by_worker: FxHashMap<u64, Vec<&'a PollRecord>>,
+}
+
+impl<'a> PollIndex<'a> {
+    pub(crate) fn new(records: &'a [PollRecord]) -> Self {
+        let mut by_task: FxHashMap<u64, Vec<&PollRecord>> = FxHashMap::default();
+        let mut by_worker: FxHashMap<u64, Vec<&PollRecord>> = FxHashMap::default();
+        for poll in records {
+            if poll.task_id == 0 {
+                continue;
+            }
+            by_task.entry(poll.task_id).or_default().push(poll);
+            by_worker.entry(poll.worker_id).or_default().push(poll);
+        }
+        Self { by_task, by_worker }
+    }
+
+    /// Resolve the task running on `worker_id` at a half-open poll instant.
+    pub(crate) fn task_at(&self, worker_id: u64, timestamp: MonoNs) -> Option<u64> {
+        let polls = self.by_worker.get(&worker_id)?;
+        let position = polls.partition_point(|poll| poll.start <= timestamp);
+        let poll = polls.get(position.checked_sub(1)?)?;
+        (timestamp < poll.end).then_some(poll.task_id)
+    }
+
+    /// Resolve an exit at a poll boundary to the poll that just ended.
+    pub(crate) fn task_at_exit(&self, worker_id: u64, timestamp: MonoNs) -> Option<u64> {
+        let polls = self.by_worker.get(&worker_id)?;
+        let before = polls.partition_point(|poll| poll.start < timestamp);
+        if let Some(poll) = before.checked_sub(1).and_then(|index| polls.get(index))
+            && timestamp <= poll.end
+        {
+            return Some(poll.task_id);
+        }
+        self.task_at(worker_id, timestamp)
+    }
+
+    pub(crate) fn task_polls(&self, task_id: u64) -> Option<&[&'a PollRecord]> {
+        self.by_task.get(&task_id).map(Vec::as_slice)
+    }
+
+    /// Intersect one lifecycle range with the task's polls, retaining workers.
+    pub(crate) fn intersections(
+        &self,
+        task_id: u64,
+        start: MonoNs,
+        end: MonoNs,
+    ) -> Vec<AttributionInterval> {
+        let Some(polls) = self.task_polls(task_id) else {
+            return Vec::new();
+        };
+        let first = polls.partition_point(|poll| poll.end <= start);
+        polls[first..]
+            .iter()
+            .take_while(|poll| poll.start < end)
+            .filter_map(|poll| {
+                let overlap_start = poll.start.max(start);
+                let overlap_end = poll.end.min(end);
+                if overlap_end <= overlap_start {
+                    return None;
+                }
+                Some(AttributionInterval {
+                    start: overlap_start,
+                    end: overlap_end,
+                    worker_id: u32::try_from(poll.worker_id).ok()?,
+                })
+            })
+            .collect()
+    }
 }
 
 /// Per-task readiness bookkeeping used while reconstructing polls.
@@ -258,9 +347,8 @@ impl Reconstructor {
 
 impl PollTimeline {
     pub(crate) fn reconstruct(events: &[TraceEvent]) -> Self {
-        // Build both the existing last-seen tid → worker map and a historical
-        // binding timeline from all park/unpark events.
-        let mut tid_to_worker = FxHashMap::default();
+        // Build a historical tid → worker binding timeline from all park/unpark
+        // events.
         let mut tid_bindings: FxHashMap<u32, Vec<(MonoNs, u64)>> = FxHashMap::default();
         let mut tid_handoff_gaps: FxHashMap<u32, Vec<(MonoNs, MonoNs)>> = FxHashMap::default();
         struct WorkerTidState {
@@ -286,7 +374,6 @@ impl PollTimeline {
                 continue;
             };
 
-            tid_to_worker.insert(tid, worker_id);
             let bindings = tid_bindings.entry(tid).or_default();
             if bindings
                 .last()
@@ -317,7 +404,7 @@ impl PollTimeline {
             }
         }
         for gaps in tid_handoff_gaps.values_mut() {
-            gaps.sort_unstable_by_key(|(start, _)| *start);
+            merge_intervals(gaps);
         }
 
         // Reconstruct poll spans and consume per-task readiness evidence
@@ -346,7 +433,6 @@ impl PollTimeline {
         }
         let sample_counts = vec![(0, 0); records.len()];
         Self {
-            tid_to_worker,
             tid_bindings,
             tid_handoff_gaps,
             records,
@@ -371,7 +457,7 @@ impl PollTimeline {
         source: u8,
     ) -> (Option<u32>, Option<u64>, Option<String>) {
         // UNKNOWN=255 and BLOCKING=254 are off-runtime, represented as None.
-        let worker = match self.tid_to_worker.get(&tid).copied() {
+        let worker = match self.worker_for_tid_at(tid, timestamp) {
             Some(worker) if worker < 254 => Some(worker as u32),
             _ => None,
         };
@@ -408,8 +494,6 @@ impl PollTimeline {
 
     /// Resolve the worker bound to `tid` at a historical monotonic timestamp.
     ///
-    /// The last-seen map remains separate for existing sample attribution
-    /// behavior.
     pub(crate) fn worker_for_tid_at(&self, tid: u32, timestamp: MonoNs) -> Option<u64> {
         if self.tid_is_in_handoff_gap(tid, timestamp) {
             return None;
@@ -421,9 +505,8 @@ impl PollTimeline {
 
     pub(crate) fn tid_is_in_handoff_gap(&self, tid: u32, timestamp: MonoNs) -> bool {
         self.tid_handoff_gaps.get(&tid).is_some_and(|gaps| {
-            gaps.iter()
-                .take_while(|(start, _)| *start <= timestamp)
-                .any(|(_, end)| timestamp < *end)
+            let index = gaps.partition_point(|(start, _)| *start <= timestamp);
+            index > 0 && timestamp < gaps[index - 1].1
         })
     }
 
@@ -504,7 +587,6 @@ mod tests {
         assert_eq!(timeline.worker_for_tid_at(200, MonoNs(35)), Some(2));
         assert_eq!(timeline.worker_for_tid_at(200, MonoNs(45)), Some(3));
         assert_eq!(timeline.worker_for_tid_at(200, MonoNs(25)), None);
-        assert_eq!(timeline.tid_to_worker.get(&200), Some(&3));
     }
 
     #[test]
@@ -526,6 +608,81 @@ mod tests {
         assert_eq!(timeline.worker_for_tid_at(100, MonoNs(15)), None);
         assert_eq!(timeline.worker_for_tid_at(200, MonoNs(15)), None);
         assert_eq!(timeline.worker_for_tid_at(100, MonoNs(20)), Some(1));
+    }
+
+    #[test]
+    fn sample_attribution_uses_worker_bound_at_sample_time() {
+        let events = vec![
+            TraceEvent::WorkerUnpark(WorkerUnpark {
+                timestamp_ns: 10,
+                worker_id: 1,
+                tid: 77,
+            }),
+            TraceEvent::PollStart(start_on(1, 20, 1)),
+            TraceEvent::PollEnd(end_on(1, 30)),
+            TraceEvent::WorkerUnpark(WorkerUnpark {
+                timestamp_ns: 40,
+                worker_id: 2,
+                tid: 77,
+            }),
+            TraceEvent::PollStart(start_on(2, 50, 2)),
+            TraceEvent::PollEnd(end_on(2, 60)),
+        ];
+
+        let mut timeline = PollTimeline::reconstruct(&events);
+        assert_eq!(
+            timeline.attribute_sample(77, MonoNs(25), 0),
+            (Some(1), Some(10), Some("src/test.rs:1".to_string()))
+        );
+        assert_eq!(
+            timeline.attribute_sample(77, MonoNs(55), 0),
+            (Some(2), Some(10), Some("src/test.rs:1".to_string()))
+        );
+    }
+
+    #[test]
+    fn handoff_gaps_are_merged_for_binary_search() {
+        let mut gaps = vec![
+            (MonoNs(30), MonoNs(40)),
+            (MonoNs(10), MonoNs(20)),
+            (MonoNs(18), MonoNs(35)),
+            (MonoNs(50), MonoNs(60)),
+        ];
+
+        merge_intervals(&mut gaps);
+
+        assert_eq!(
+            gaps,
+            vec![(MonoNs(10), MonoNs(40)), (MonoNs(50), MonoNs(60))]
+        );
+    }
+
+    #[test]
+    fn poll_index_assigns_exit_at_stop_to_finishing_task() {
+        let polls = [
+            PollRecord {
+                start: MonoNs(10),
+                end: MonoNs(20),
+                worker_id: 1,
+                task_id: 7,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
+            PollRecord {
+                start: MonoNs(20),
+                end: MonoNs(30),
+                worker_id: 1,
+                task_id: 8,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
+        ];
+        let index = PollIndex::new(&polls);
+
+        assert_eq!(index.task_at_exit(1, MonoNs(20)), Some(7));
+        assert_eq!(index.task_at(1, MonoNs(20)), Some(8));
     }
 
     fn start(timestamp_ns: u64, task_id: u64) -> PollStart {

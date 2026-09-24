@@ -14,9 +14,13 @@
 //!   Each close-delimited segment becomes one row. Without this, every reuse of
 //!   a span_id collapses into one span whose lifecycle runs from the first enter
 //!   to the last close (e.g. a 1ms request span decoded as a 14.5s span).
-//! - Pair enters/exits by `(span_id, segment)` — NOT worker_id: a task can
-//!   migrate workers between its enter and exit, so the worker is not a stable
-//!   lane.
+//! - Pair enters/exits by `(span_id, segment, task lane)`. A span can
+//!   be entered concurrently by multiple tasks; pairing all lanes through one
+//!   global LIFO stack cross-pairs their exits and fabricates long overlapping
+//!   active intervals. Task identity survives worker migration. For older
+//!   events, infer the task from the poll covering the event. If only one side
+//!   has evidence, reconcile it to the sole task known for that span segment;
+//!   otherwise keep missing evidence in a conservative unknown lane.
 //! - Synthesize a deterministic instance_id from span_id + segment ordinal +
 //!   first-enter timestamp.
 //! - Parse target/name/file/line from the SpanEnter schema name.
@@ -29,9 +33,10 @@
 
 use rustc_hash::FxHashMap;
 
+use super::super::attribution::AttributionInterval;
 use super::clock::{ClockOffset, MonoNs};
 use super::interval_pairing::{self, MonoInterval, PairingEvent};
-use super::polls::PollRecord;
+use super::polls::{PollIndex, PollRecord};
 use super::span_builder::{SpanCandidate, compute_span_uid};
 use super::{
     LegacySpanCloseEvent, LegacySpanEnterEvent, LegacySpanExitEvent, LegacySpanSchemaInfo,
@@ -41,8 +46,38 @@ use super::{
 /// Result of legacy span resolution.
 pub(crate) struct LegacyResolution {
     pub(crate) spans: Vec<ResolvedSpan>,
-    /// Per synthetic_instance_id: list of monotonic-clock (enter_ts, exit_ts) intervals.
-    pub(crate) instance_intervals: FxHashMap<u64, Vec<MonoInterval>>,
+    /// Per synthetic instance: poll-bounded execution intervals, including the
+    /// worker lane required for safe CPU-sample attribution.
+    pub(crate) instance_intervals: FxHashMap<u64, Vec<AttributionInterval>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PairingLane {
+    Task(u64),
+    Unknown,
+}
+
+fn pairing_lane(
+    poll_index: &PollIndex<'_>,
+    task_id: Option<u64>,
+    worker_id: Option<u64>,
+    timestamp: MonoNs,
+    is_enter: bool,
+) -> PairingLane {
+    if let Some(task_id) = task_id.filter(|&id| id != 0) {
+        return PairingLane::Task(task_id);
+    }
+    let Some(worker_id) = worker_id else {
+        return PairingLane::Unknown;
+    };
+    let task_id = if is_enter {
+        poll_index.task_at(worker_id, timestamp)
+    } else {
+        poll_index.task_at_exit(worker_id, timestamp)
+    };
+    task_id
+        .map(PairingLane::Task)
+        .unwrap_or(PairingLane::Unknown)
 }
 
 /// Resolve legacy (old-producer) span events into `ResolvedSpan` rows via
@@ -220,19 +255,20 @@ pub(crate) fn resolve_legacy_spans(
         }
     }
 
-    // Build a per-(span_id, segment) enter/exit timeline for LIFO pairing using
-    // the unified interval pairer.
+    let poll_index = PollIndex::new(polls);
+    // Build a per-(span_id, segment, execution lane) enter/exit timeline for
+    // LIFO pairing using the unified interval pairer.
     //
-    // The pairing key omits `worker_id` — deliberately NOT `(span_id,
-    // worker_id)`. An async span can enter on one worker and exit on another
-    // when its task migrates between workers across an `.await`. Keying on the
-    // worker would push the enter onto one worker's stack and look for the exit
-    // on another worker's stack, silently dropping the interval. On a measured
-    // beta trace, roughly 44% of fully captured spans migrated workers.
+    // A tracing span instance may be entered concurrently by many tasks. A
+    // single stack per span instance pairs exits against whichever task entered
+    // most recently, fabricating intervals that remain "active" across other
+    // tasks' work. Prefer task id so a task may migrate workers safely. For
+    // older producers without task ids, infer the task from the poll containing
+    // each event, assigning an exit at PollStop to the poll that just ended.
     //
     // Decode sequences come directly from the shared wire decoder, so ties
     // preserve the actual interleaving between legacy enters and exits.
-    let mut pairing_events: Vec<PairingEvent<(u64, u32)>> =
+    let mut pairing_events: Vec<PairingEvent<(u64, u32, PairingLane)>> =
         Vec::with_capacity(legacy_enters.len() + legacy_exits.len());
 
     for (_schema_name, enter) in legacy_enters {
@@ -240,7 +276,17 @@ pub(crate) fn resolve_legacy_spans(
             timestamp: MonoNs(enter.timestamp_ns),
             decode_sequence: enter.decode_sequence,
             is_enter: true,
-            group_key: (enter.span_id, segment_of(enter.decode_sequence)),
+            group_key: (
+                enter.span_id,
+                segment_of(enter.decode_sequence),
+                pairing_lane(
+                    &poll_index,
+                    enter.task_id,
+                    enter.worker_id,
+                    MonoNs(enter.timestamp_ns),
+                    true,
+                ),
+            ),
         });
     }
     for (_schema_name, exit) in legacy_exits {
@@ -248,8 +294,47 @@ pub(crate) fn resolve_legacy_spans(
             timestamp: MonoNs(exit.timestamp_ns),
             decode_sequence: exit.decode_sequence,
             is_enter: false,
-            group_key: (exit.span_id, segment_of(exit.decode_sequence)),
+            group_key: (
+                exit.span_id,
+                segment_of(exit.decode_sequence),
+                pairing_lane(
+                    &poll_index,
+                    exit.task_id,
+                    exit.worker_id,
+                    MonoNs(exit.timestamp_ns),
+                    false,
+                ),
+            ),
         });
+    }
+
+    // A rotation can drop poll evidence for only one side of a migrated
+    // enter/exit pair. If this span segment has exactly one evidenced task,
+    // conservatively attach its unknown events to that task. With multiple
+    // evidenced tasks the assignment is ambiguous, so leave unknown events in
+    // their own lane instead of risking a cross-task pair.
+    let mut sole_task_by_span: FxHashMap<(u64, u32), Option<u64>> = FxHashMap::default();
+    for event in &pairing_events {
+        let (span_id, segment, lane) = event.group_key;
+        let PairingLane::Task(task_id) = lane else {
+            continue;
+        };
+        sole_task_by_span
+            .entry((span_id, segment))
+            .and_modify(|sole_task| {
+                if sole_task.is_some_and(|existing| existing != task_id) {
+                    *sole_task = None;
+                }
+            })
+            .or_insert(Some(task_id));
+    }
+    for event in &mut pairing_events {
+        let (span_id, segment, lane) = &mut event.group_key;
+        if *lane == PairingLane::Unknown
+            && let Some(Some(task_id)) = sole_task_by_span.get(&(*span_id, *segment))
+        {
+            *lane = PairingLane::Task(*task_id);
+        }
     }
 
     let pairing_results = interval_pairing::pair_intervals(&mut pairing_events);
@@ -257,48 +342,33 @@ pub(crate) fn resolve_legacy_spans(
     // Rebuild the per-(span_id, segment) interval map and unmatched accounting.
     let mut local_intervals: FxHashMap<(u64, u32), Vec<MonoInterval>> = FxHashMap::default();
     let mut interval_enter_sequences: FxHashMap<(u64, u32), Vec<u64>> = FxHashMap::default();
+    let mut task_by_enter_sequence: FxHashMap<u64, u64> = FxHashMap::default();
     let mut unmatched_exits_map: FxHashMap<(u64, u32), u32> = FxHashMap::default();
     let mut unmatched_enters_map: FxHashMap<(u64, u32), u32> = FxHashMap::default();
-    for (key, result) in &pairing_results {
+    for (&(span_id, segment, lane), result) in &pairing_results {
+        let key = (span_id, segment);
         if !result.intervals.is_empty() {
             local_intervals
-                .entry(*key)
+                .entry(key)
                 .or_default()
                 .extend_from_slice(&result.intervals);
             interval_enter_sequences
-                .entry(*key)
+                .entry(key)
                 .or_default()
                 .extend_from_slice(&result.enter_decode_sequences);
+            if let PairingLane::Task(task_id) = lane {
+                for &enter_sequence in &result.enter_decode_sequences {
+                    task_by_enter_sequence.insert(enter_sequence, task_id);
+                }
+            }
         }
         if result.unmatched_exits > 0 {
-            *unmatched_exits_map.entry(*key).or_insert(0) += result.unmatched_exits;
+            *unmatched_exits_map.entry(key).or_insert(0) += result.unmatched_exits;
         }
         if result.unmatched_enters > 0 {
-            *unmatched_enters_map.entry(*key).or_insert(0) += result.unmatched_enters;
+            *unmatched_enters_map.entry(key).or_insert(0) += result.unmatched_enters;
         }
     }
-
-    // ── Poll indices for task-based CPU/wait attribution ─────────────────────
-    let mut polls_by_worker: FxHashMap<u64, Vec<(MonoNs, MonoNs, u64)>> = FxHashMap::default();
-    let mut polls_by_task: FxHashMap<u64, Vec<MonoInterval>> = FxHashMap::default();
-    for poll in polls {
-        // task_id 0 is the block-in-place / no-task stub — not a real task.
-        if poll.task_id != 0 {
-            polls_by_worker.entry(poll.worker_id).or_default().push((
-                poll.start,
-                poll.end,
-                poll.task_id,
-            ));
-            polls_by_task
-                .entry(poll.task_id)
-                .or_default()
-                .push((poll.start, poll.end));
-        }
-    }
-    let enters_by_sequence: FxHashMap<u64, &LegacySpanEnterEvent> = legacy_enters
-        .iter()
-        .map(|(_, enter)| (enter.decode_sequence, enter))
-        .collect();
 
     // Generate a synthetic instance_id deterministically from span identity
     // evidence. The segment distinguishes recycled ids even when timestamps tie.
@@ -350,7 +420,7 @@ pub(crate) fn resolve_legacy_spans(
     // close event or local intervals (we produce a row even without a close
     // when we have balanced enter/exit pairs).
     let mut resolved_spans: Vec<ResolvedSpan> = Vec::new();
-    let mut resolved_intervals: FxHashMap<u64, Vec<MonoInterval>> = FxHashMap::default();
+    let mut resolved_intervals: FxHashMap<u64, Vec<AttributionInterval>> = FxHashMap::default();
 
     // Collect all (span_id, segment) keys that have either a close or intervals.
     // Dedup via a set, not `Vec::contains` in a loop — the latter is
@@ -407,16 +477,7 @@ pub(crate) fn resolve_legacy_spans(
             let mut resolved_task = None;
             let mut task_is_unambiguous = ivs.len() == enter_sequences.len();
             for enter_sequence in enter_sequences {
-                let task_id = enters_by_sequence.get(enter_sequence).and_then(|enter| {
-                    enter.task_id.filter(|&task_id| task_id != 0).or_else(|| {
-                        enter
-                            .worker_id
-                            .and_then(|worker_id| polls_by_worker.get(&worker_id))
-                            .and_then(|worker_polls| {
-                                resolve_span_task(worker_polls, MonoNs(enter.timestamp_ns))
-                            })
-                    })
-                });
+                let task_id = task_by_enter_sequence.get(enter_sequence).copied();
                 match (resolved_task, task_id) {
                     (None, Some(task_id)) => resolved_task = Some(task_id),
                     (Some(existing), Some(task_id)) if existing == task_id => {}
@@ -428,9 +489,14 @@ pub(crate) fn resolve_legacy_spans(
             }
             if task_is_unambiguous
                 && let Some(task_id) = resolved_task
-                && let Some(task_polls) = polls_by_task.get(&task_id)
+                && let Some(task_polls) = poll_index.task_polls(task_id)
             {
-                let (on_cpu, async_wait) = attribute_legacy_span_from_polls(ivs, task_polls);
+                let task_poll_intervals: Vec<_> = task_polls
+                    .iter()
+                    .map(|poll| (poll.start, poll.end))
+                    .collect();
+                let (on_cpu, async_wait) =
+                    attribute_legacy_span_from_polls(ivs, &task_poll_intervals);
                 on_cpu_ns_est = Some(on_cpu);
                 async_wait_ns_est = Some(async_wait);
                 // Clear bit 2 (worker/tid ambiguous): every paired interval
@@ -488,9 +554,22 @@ pub(crate) fn resolve_legacy_spans(
 
         resolved_spans.push(candidate.finalize(clock_offset));
 
-        // Store intervals keyed by synthetic_instance_id for sample attribution.
-        if let Some(ivs) = intervals {
-            resolved_intervals.insert(instance_id, ivs.clone());
+        // Store only intervals during which the owning task was actually being
+        // polled, retaining the worker lane for CPU-sample attribution. A raw
+        // tracing guard may remain entered across `.await`; its enter→exit
+        // envelope is not continuous execution.
+        if let (Some(ivs), Some(enter_sequences)) = (intervals, interval_enter_sequences.get(&key))
+        {
+            let mut attribution_intervals = Vec::new();
+            for (&(enter, exit), enter_sequence) in ivs.iter().zip(enter_sequences) {
+                let task_id = task_by_enter_sequence.get(enter_sequence).copied();
+                if let Some(task_id) = task_id {
+                    attribution_intervals.extend(poll_index.intersections(task_id, enter, exit));
+                }
+            }
+            if !attribution_intervals.is_empty() {
+                resolved_intervals.insert(instance_id, attribution_intervals);
+            }
         }
     }
 
@@ -498,21 +577,6 @@ pub(crate) fn resolve_legacy_spans(
         spans: resolved_spans,
         instance_intervals: resolved_intervals,
     }
-}
-
-/// Resolve the Tokio task that owns a span, from the poll on `worker` whose
-/// window covers `enter_ts`. `worker_polls` is that worker's polls as
-/// `(start, end, task_id)`, sorted by `start` and non-overlapping (a worker
-/// runs one poll at a time). Binary search — a worker can hold hundreds of
-/// thousands of polls on a large trace. Returns `None` when no poll covers the
-/// enter (span entered outside any poll, e.g. on a non-runtime thread).
-pub(crate) fn resolve_span_task(
-    worker_polls: &[(MonoNs, MonoNs, u64)],
-    enter_ts: MonoNs,
-) -> Option<u64> {
-    let position = worker_polls.partition_point(|&(start, _, _)| start <= enter_ts);
-    let &(_, end, task_id) = worker_polls.get(position.checked_sub(1)?)?;
-    (enter_ts < end).then_some(task_id)
 }
 
 /// Split a span's entered wall time into estimated on-CPU vs async-wait using
@@ -598,12 +662,23 @@ mod tests {
         span_id: u64,
         value: &str,
     ) -> (String, LegacySpanExitEvent) {
+        exit_on(timestamp_ns, decode_sequence, 1, None, span_id, value)
+    }
+
+    fn exit_on(
+        timestamp_ns: u64,
+        decode_sequence: u64,
+        worker_id: u64,
+        task_id: Option<u64>,
+        span_id: u64,
+        value: &str,
+    ) -> (String, LegacySpanExitEvent) {
         (
             SCHEMA.replacen("SpanEnter", "SpanExit", 1),
             LegacySpanExitEvent {
                 timestamp_ns,
-                worker_id: Some(0),
-                task_id: None,
+                worker_id: Some(worker_id),
+                task_id,
                 span_id,
                 span_name: Some("operation".to_string()),
                 decode_sequence,
@@ -667,11 +742,20 @@ mod tests {
         ];
         let exits = vec![exit(100, 1, 1, "first"), exit(100, 4, 1, "second")];
         let closes = vec![close(100, 2, 1), close(100, 5, 1)];
-        let resolution = resolve(&enters, &exits, &closes, &[]);
+        let polls = vec![PollRecord {
+            start: MonoNs(0),
+            end: MonoNs(200),
+            worker_id: 1,
+            task_id: 11,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        }];
+        let resolution = resolve(&enters, &exits, &closes, &polls);
 
         assert_eq!(resolution.spans.len(), 2);
         assert_ne!(resolution.spans[0].span_uid, resolution.spans[1].span_uid);
-        assert_eq!(resolution.instance_intervals.len(), 2);
+        assert!(resolution.instance_intervals.is_empty());
     }
 
     #[test]
@@ -710,7 +794,7 @@ mod tests {
         ];
         let resolution = resolve(
             &[direct],
-            &[exit(250, 1, 1, "direct")],
+            &[exit_on(250, 1, 2, Some(22), 1, "direct")],
             &[close(300, 2, 1)],
             &polls,
         );
@@ -719,6 +803,14 @@ mod tests {
         assert_eq!(span.on_cpu_ns_est, Some(150));
         assert_eq!(span.async_wait_ns, Some(0));
         assert_eq!(span.attribution_flags & 0b0100, 0);
+        assert_eq!(
+            resolution.instance_intervals.values().next().unwrap(),
+            &vec![AttributionInterval {
+                start: MonoNs(100),
+                end: MonoNs(250),
+                worker_id: 2,
+            }]
+        );
     }
 
     #[test]
@@ -742,6 +834,103 @@ mod tests {
         let span = &resolution.spans[0];
         assert_eq!(span.on_cpu_ns_est, Some(150));
         assert_eq!(span.async_wait_ns, Some(0));
+    }
+
+    #[test]
+    fn missing_poll_evidence_preserves_worker_migration_pairing() {
+        let poll_index = PollIndex::new(&[]);
+
+        assert_eq!(
+            pairing_lane(&poll_index, None, Some(1), MonoNs(100), true),
+            PairingLane::Unknown
+        );
+        assert_eq!(
+            pairing_lane(&poll_index, None, Some(2), MonoNs(100), false),
+            PairingLane::Unknown
+        );
+    }
+
+    #[test]
+    fn partial_poll_evidence_preserves_worker_migration_pairing() {
+        let polls = vec![PollRecord {
+            start: MonoNs(50),
+            end: MonoNs(150),
+            worker_id: 1,
+            task_id: 11,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        }];
+        let resolution = resolve(
+            &[enter(100, 0, 1, 1, None, "migrated")],
+            &[exit_on(250, 1, 2, None, 1, "migrated")],
+            &[close(300, 2, 1)],
+            &polls,
+        );
+
+        let span = &resolution.spans[0];
+        assert_eq!(span.unbalanced_enters, 0);
+        assert_eq!(span.unbalanced_exits, 0);
+        assert_eq!(span.on_cpu_ns_est, Some(50));
+        assert_eq!(span.async_wait_ns, Some(100));
+    }
+
+    #[test]
+    fn exit_only_poll_evidence_preserves_attribution_after_migration() {
+        let polls = vec![PollRecord {
+            start: MonoNs(200),
+            end: MonoNs(250),
+            worker_id: 1,
+            task_id: 11,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        }];
+        let resolution = resolve(
+            &[enter(100, 0, 2, 1, None, "migrated")],
+            &[exit_on(250, 1, 1, None, 1, "migrated")],
+            &[close(300, 2, 1)],
+            &polls,
+        );
+
+        let span = &resolution.spans[0];
+        assert_eq!(span.unbalanced_enters, 0);
+        assert_eq!(span.unbalanced_exits, 0);
+        assert_eq!(span.on_cpu_ns_est, Some(50));
+        assert_eq!(span.async_wait_ns, Some(100));
+        assert_eq!(
+            resolution.instance_intervals.values().next().unwrap(),
+            &vec![AttributionInterval {
+                start: MonoNs(200),
+                end: MonoNs(250),
+                worker_id: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn legacy_exit_at_poll_stop_pairs_with_the_finishing_task() {
+        let polls = vec![PollRecord {
+            start: MonoNs(0),
+            end: MonoNs(250),
+            worker_id: 1,
+            task_id: 11,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        }];
+        let resolution = resolve(
+            &[enter(100, 0, 1, 1, None, "legacy")],
+            &[exit(250, 1, 1, "legacy")],
+            &[close(300, 2, 1)],
+            &polls,
+        );
+
+        assert_eq!(resolution.spans.len(), 1);
+        let span = &resolution.spans[0];
+        assert_eq!(span.unbalanced_enters, 0);
+        assert_eq!(span.unbalanced_exits, 0);
+        assert_eq!(span.on_cpu_ns_est, Some(150));
     }
 
     #[test]
@@ -776,7 +965,10 @@ mod tests {
             enter(100, 0, 1, 1, None, "outer"),
             enter(150, 1, 2, 1, None, "inner"),
         ];
-        let exits = vec![exit(200, 2, 1, "inner"), exit(250, 3, 1, "outer")];
+        let exits = vec![
+            exit_on(200, 2, 2, None, 1, "inner"),
+            exit_on(250, 3, 1, None, 1, "outer"),
+        ];
         let polls = vec![
             PollRecord {
                 start: MonoNs(0),
