@@ -7,6 +7,7 @@
 
 /** ES2024 resizable ArrayBuffer, not in the ES2022 lib this project targets. */
 interface ResizableArrayBuffer extends ArrayBuffer {
+  readonly resizable: boolean;
   resize(byteLength: number): void;
 }
 type ResizableArrayBufferCtor = new (
@@ -61,7 +62,7 @@ export function allocColumn<T>(Ctor: ColumnCtor<T>, cap: number): T {
 export function resizeColumns(cols: readonly Column[], cap: number): boolean {
   if (!supported || cap > MAX_RESIZABLE_ELEMENTS) return false;
   for (const c of cols) {
-    if (!("resize" in c.buffer)) return false;
+    if (!(c.buffer as ResizableArrayBuffer).resizable) return false;
   }
   for (const c of cols) {
     (c.buffer as ResizableArrayBuffer).resize(cap * c.BYTES_PER_ELEMENT);

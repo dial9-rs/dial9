@@ -35,6 +35,14 @@ describe("resizable columns", () => {
 
   // A store constructed at a capacity past the ceiling allocates fixed
   // buffers, so every later growth must take the copy path.
+  it("declines when any column is a fixed buffer, leaving every column untouched", () => {
+    const resizable = allocColumn(Float64Array, 4);
+    const fixed = new Float64Array(4);
+    expect(resizeColumns([resizable, fixed], 8)).toBe(false);
+    expect(resizable.length).toBe(4);
+    expect(fixed.length).toBe(4);
+  });
+
   it("allocates fixed past the ceiling and declines to resize it", () => {
     const col = allocColumn(Uint8Array, MAX_RESIZABLE_ELEMENTS + 1);
     expect(col.length).toBe(MAX_RESIZABLE_ELEMENTS + 1);
