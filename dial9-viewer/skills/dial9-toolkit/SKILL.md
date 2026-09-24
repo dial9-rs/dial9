@@ -5,7 +5,7 @@ description: JavaScript analysis toolkit for parsing and analyzing dial9 Tokio r
 
 # dial9 Analysis Toolkit
 
-This skill provides the JavaScript modules for working with dial9 traces programmatically.
+This skill provides the JavaScript modules for working with dial9 traces programmatically. The other dial9 skills locate these modules by content rather than by this directory's name, so the directory can be installed under any name as long as `scripts/` stays intact.
 
 ## What traces capture
 

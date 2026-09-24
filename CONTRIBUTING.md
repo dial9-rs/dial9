@@ -71,6 +71,12 @@ Some tests will only run with the `shuttle` cfg enabled. There is a script to ru
 
 For other tests, `cargo nextest run` will run all of the normal tests.
 
+`node` must be on `PATH`. Some Rust integration tests drive the JavaScript trace
+tooling as a subprocess (`dial9-tokio-telemetry/tests/js_parser.rs` and the
+skill-unpack tests in `dial9-viewer/tests/server_test.rs`), and they fail rather
+than skip when `node` is missing: skipping would let them pass while the
+behaviour they cover is broken.
+
 ## Doing releases
 
 Releases are human-initiated, not automatic. There are two kinds of release:
