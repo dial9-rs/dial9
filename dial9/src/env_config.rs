@@ -575,7 +575,8 @@ fn build_s3_config(config: ResolvedS3Config) -> dial9_destinations_s3::S3Config 
 ///
 /// # Errors
 ///
-/// Only if the Tokio runtime cannot be built.
+/// If the Tokio runtime cannot be built, or both task dumps and task sampling
+/// are enabled on the instrumented runtime.
 pub fn recorder_from_env() -> io::Result<AttachedRuntime> {
     recorder_from_env_source(&ProcessEnv, |_| {})
 }

@@ -297,9 +297,10 @@ WakeTraced<TaskDumped<F>>
 ```
 
 `WakeTraced` continues to record normal wake tracing for every instrumented
-task. `TaskDumped` owns only the task-dump capture decision and reusable frame
-buffer. The sampler itself is worker-local, so all `TaskDumped` futures polled
-on one worker contribute to and draw from the same budget.
+task. `TaskDumped` selects the legacy or experimental capture policy, each with
+its own reusable frame buffer. Only the experimental policy uses a worker-local
+sampler: its futures polled on one worker contribute to and draw from the same
+budget. Legacy task dumps retain per-task idle-time sampling.
 
 The intended poll flow is:
 
