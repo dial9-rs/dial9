@@ -23,6 +23,12 @@
 //! shuttle-safe too, so the whole function, including
 //! `run_background_task`'s real-runtime wrapper, is drivable under
 //! shuttle; see `shuttle_concurrent_attach` in `dial9-tokio-telemetry`.
+//!
+//! `shuttle_background_task_drain_timeout_fires` sends a real shutdown
+//! signal (the scenario above drops its unused) against a processor whose
+//! `initialize()` never resolves, so the worker future can never complete
+//! on its own and `primitives::time::timeout`'s `Elapsed` branch is the
+//! only way the scenario ever returns.
 
 use super::*;
 use crate::pipeline::ProcessError;
@@ -93,6 +99,71 @@ fn spawn_writers(fs: Arc<Fs>) -> Vec<crate::primitives::thread::JoinHandle<()>> 
         .collect()
 }
 
+/// Shared by `shuttle_dump_resolves_exactly_once`/
+/// `shuttle_dump_time_range_resolves_via_deadline`: races `dump_call`
+/// against writers sealing segments and a worker draining them through
+/// `run_triggered()`, then asserts no segment was double-dispatched.
+///
+/// `dump_call` takes the sole `DumpTrigger` handle by value (not cloned),
+/// so the channel closes deterministically once the returned future drops,
+/// right after its own await resolves; the worker's `recv()` loop relies on
+/// that to know no more requests are ever coming.
+fn run_dump_scenario<F, Fut>(dump_call: F)
+where
+    F: FnOnce(crate::dump::DumpTrigger) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+    let processed = Arc::new(AtomicUsize::new(0));
+
+    let writers = spawn_writers(fs.clone());
+
+    let (trigger, rx) = crate::dump::channel();
+
+    let trigger_handle =
+        crate::primitives::thread::spawn(move || shuttle::future::block_on(dump_call(trigger)));
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let worker_fs = fs.clone();
+    let worker_processed = processed.clone();
+    let worker_stop = stop.clone();
+    let worker = crate::primitives::thread::spawn(move || {
+        shuttle::future::block_on(async move {
+            let mut worker = WorkerLoop::new(
+                worker_fs.clone(),
+                Duration::from_millis(1),
+                vec![Box::new(CountingProcessor(worker_processed))],
+                worker_stop,
+                metrique::writer::sink::DevNullSink::boxed(),
+                Some(rx),
+            )
+            .await
+            .expect("initialize worker");
+
+            let rx = worker.trigger.take().expect("triggered mode");
+            worker.run_triggered(rx).await;
+        });
+    });
+
+    for w in writers {
+        w.join().unwrap();
+    }
+    // Must join before marking the writer done: `run_triggered` checks
+    // `writer_done()` at the top of its loop and rejects any
+    // not-yet-registered request with `WorkerStopped`.
+    trigger_handle.join().unwrap();
+    fs.mark_writer_done();
+    // `run_triggered` only notices `writer_done()` while idle if `stop`
+    // is also cancelled. Mirror real callers by doing both.
+    stop.cancel();
+    worker.join().unwrap();
+
+    assert!(
+        processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
+        "dump must not double-dispatch a segment to the processor"
+    );
+}
+
 crate::shuttle_test! {
     num_iters = 2_000, depth = 3;
     // Multiple writer threads seal segments into an in-memory `Fs`
@@ -146,66 +217,13 @@ crate::shuttle_test! {
     // has unbounded lookback, so this verifies the race itself, not
     // window-matching).
     fn shuttle_dump_resolves_exactly_once() {
-        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let processed = Arc::new(AtomicUsize::new(0));
-
-        let writers = spawn_writers(fs.clone());
-
-        let (trigger, rx) = crate::dump::channel();
-
-        // Sole `DumpTrigger` handle, moved (not cloned) into this thread, so
-        // the channel closes deterministically once it drops, right after
-        // this await resolves. The worker's `recv()` loop below relies on
-        // that to know no more requests are ever coming.
-        let trigger_handle = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let receipt = trigger.dump_current_data().await;
-                assert!(
-                    receipt.is_ok(),
-                    "an on-demand dump request must resolve successfully: {receipt:?}"
-                );
-            });
+        run_dump_scenario(|trigger| async move {
+            let receipt = trigger.dump_current_data().await;
+            assert!(
+                receipt.is_ok(),
+                "an on-demand dump request must resolve successfully: {receipt:?}"
+            );
         });
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker_fs = fs.clone();
-        let worker_processed = processed.clone();
-        let worker_stop = stop.clone();
-        let worker = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let mut worker = WorkerLoop::new(
-                    worker_fs.clone(),
-                    Duration::from_millis(1),
-                    vec![Box::new(CountingProcessor(worker_processed))],
-                    worker_stop,
-                    metrique::writer::sink::DevNullSink::boxed(),
-                    Some(rx),
-                )
-                .await
-                .expect("initialize worker");
-
-                let rx = worker.trigger.take().expect("triggered mode");
-                worker.run_triggered(rx).await;
-            });
-        });
-
-        for w in writers {
-            w.join().unwrap();
-        }
-        // Must join before marking the writer done: `run_triggered` checks
-        // `writer_done()` at the top of its loop and rejects any
-        // not-yet-registered request with `WorkerStopped`.
-        trigger_handle.join().unwrap();
-        fs.mark_writer_done();
-        // `run_triggered` only notices `writer_done()` while idle if `stop`
-        // is also cancelled. Mirror real callers by doing both.
-        stop.cancel();
-        worker.join().unwrap();
-
-        assert!(
-            processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
-            "dump must not double-dispatch a segment to the processor"
-        );
     }
 }
 
@@ -213,9 +231,10 @@ crate::shuttle_test! {
 /// value itself doesn't matter, shuttle's `sleep_until` ignores it.
 const LOOKFORWARD: Duration = Duration::from_millis(1);
 
-mod shuttle_dump_time_range_resolves_via_deadline {
-    use super::*;
-
+crate::shuttle_test! {
+    // SIGBUSes on shuttle's bare 60KB default stack under this scenario's
+    // concurrent load.
+    num_iters = 500, depth = 3, stack_size = crate::primitives::SHUTTLE_TOKIO_STACK_SIZE, verify_yield_triggered;
     // Only scenario using a real deadline: every other one uses
     // `dump_current_data` (deadline always `None`), never exercising
     // `sleep_until`.
@@ -227,99 +246,13 @@ mod shuttle_dump_time_range_resolves_via_deadline {
     // Joining `trigger_handle` before signaling shutdown guarantees `due()`
     // resolved the dump via the deadline.
     fn shuttle_dump_time_range_resolves_via_deadline() {
-        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
-        let processed = Arc::new(AtomicUsize::new(0));
-
-        let writers = spawn_writers(fs.clone());
-
-        let (trigger, rx) = crate::dump::channel();
-
-        let trigger_handle = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let receipt = trigger.dump_time_range(Duration::MAX, LOOKFORWARD).await;
-                assert!(
-                    receipt.is_ok(),
-                    "a windowed dump request must resolve successfully: {receipt:?}"
-                );
-            });
+        run_dump_scenario(|trigger| async move {
+            let receipt = trigger.dump_time_range(Duration::MAX, LOOKFORWARD).await;
+            assert!(
+                receipt.is_ok(),
+                "a windowed dump request must resolve successfully: {receipt:?}"
+            );
         });
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker_fs = fs.clone();
-        let worker_processed = processed.clone();
-        let worker_stop = stop.clone();
-        let worker = crate::primitives::thread::spawn(move || {
-            shuttle::future::block_on(async move {
-                let mut worker = WorkerLoop::new(
-                    worker_fs.clone(),
-                    Duration::from_millis(1),
-                    vec![Box::new(CountingProcessor(worker_processed))],
-                    worker_stop,
-                    metrique::writer::sink::DevNullSink::boxed(),
-                    Some(rx),
-                )
-                .await
-                .expect("initialize worker");
-
-                let rx = worker.trigger.take().expect("triggered mode");
-                worker.run_triggered(rx).await;
-            });
-        });
-
-        for w in writers {
-            w.join().unwrap();
-        }
-        // Join order matters here too. See the module comment above.
-        trigger_handle.join().unwrap();
-        fs.mark_writer_done();
-        stop.cancel();
-        worker.join().unwrap();
-
-        assert!(
-            processed.load(Ordering::Relaxed) <= WRITERS * SEGMENTS_PER_WRITER as usize,
-            "dump must not double-dispatch a segment to the processor"
-        );
-    }
-
-    // SIGBUSes on shuttle's bare 60KB default stack under concurrent load;
-    // matches shuttle-tokio's own bumped default. Scoped to this test only.
-    fn bumped_stack_config() -> shuttle::Config {
-        let mut config = shuttle::Config::new();
-        config.stack_size = 0x000F_0000;
-        config
-    }
-
-    #[test]
-    fn pct() {
-        // Drain any count left over from an earlier test in this binary.
-        crate::primitives::time::take_yield_pending_polls();
-
-        {
-            use shuttle::scheduler::PctScheduler;
-            let scheduler = PctScheduler::new(3, 500);
-            let runner = shuttle::Runner::new(scheduler, bumped_stack_config());
-            runner.run(shuttle_dump_time_range_resolves_via_deadline);
-        }
-
-        // Batch-level: whether a given schedule reaches the wait depends on the interleaving,
-        // but across 500 iterations at least one must have. Without this, the scenario passes
-        // just as happily when `deadline` is never set at all and `sleep_until` is never awaited.
-        //
-        // Failing here means this test lost coverage of its own scenario, not
-        // that WorkerLoop/ActiveDump regressed.
-        assert!(
-            crate::primitives::time::take_yield_pending_polls() > 0,
-            "no sleep/sleep_until await ever suspended: this scenario never \
-             exercised the deadline path it exists to cover"
-        );
-    }
-
-    #[test]
-    fn determinism() {
-        use shuttle::scheduler::{RandomScheduler, UncontrolledNondeterminismCheckScheduler};
-        let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(500));
-        let runner = shuttle::Runner::new(scheduler, bumped_stack_config());
-        runner.run(shuttle_dump_time_range_resolves_via_deadline);
     }
 }
 
@@ -369,5 +302,53 @@ crate::shuttle_test! {
              run_background_task_inner's top-level catch_unwind, not \
              propagate to its caller"
         );
+    }
+}
+
+/// A processor whose `initialize()` never resolves, so `WorkerLoop::new`
+/// (and therefore the worker future `run_background_task_inner` races
+/// against the drain timeout) can never complete on its own.
+struct HangingInitializer;
+
+impl SegmentProcessor for HangingInitializer {
+    fn name(&self) -> &'static str {
+        "HangingInitializer"
+    }
+
+    fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn process(
+        &mut self,
+        data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move { Ok(data) })
+    }
+}
+
+crate::shuttle_test! {
+    num_iters = 500, depth = 3, verify_elapsed_triggered;
+    // Mirrors `initializer_hang_respects_shutdown_timeout` (real Tokio, in
+    // `worker/tests.rs`). The worker future never resolves, so `Elapsed` is
+    // guaranteed to fire; this guards the shuttle-mock timeout's self-wake
+    // against regressing into a bare deadlock, not a realistic drain race.
+    fn shuttle_background_task_drain_timeout_fires() {
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let config = BackgroundTaskConfig::builder()
+            .processors(vec![Box::new(HangingInitializer) as Box<dyn SegmentProcessor>])
+            .build();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let sender = crate::primitives::thread::spawn(move || {
+            let _ = shutdown_tx.send(Duration::from_millis(1));
+        });
+
+        let worker = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+        });
+
+        sender.join().unwrap();
+        worker.join().unwrap();
     }
 }

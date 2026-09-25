@@ -683,9 +683,10 @@ impl WorkerLoop {
 
             let uncompressed_size = payload.len() as u64;
             let path_for_header = seg_ref.disk_path().unwrap_or_else(|| Path::new(""));
-            // A freshly loaded segment is always a single chunk holding the
-            // whole payload, so the first chunk is the full byte range the
-            // timestamp parser needs.
+            // A freshly loaded segment is a single chunk holding the whole
+            // payload (empty only for a zero-byte segment, since
+            // `Payload::push` drops empty `Bytes`), so the first chunk, if
+            // any, is the full byte range the timestamp parser needs.
             let header_bytes = payload.chunks().first().map_or(&[][..], |b| b.as_ref());
             let (epoch_secs, header_valid) =
                 sealed::creation_epoch_secs(header_bytes, path_for_header);
