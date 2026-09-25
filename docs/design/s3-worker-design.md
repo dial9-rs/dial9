@@ -4,7 +4,9 @@
 
 Get trace data from running processes into S3 with minimal in-process overhead. The application writes traces to local disk; a background worker uploads them asynchronously.
 
-**Core principle:** Keep the hot path simple. Push all heavy work (S3 uploads, compression, retries) to a worker that can't affect application performance.
+**Core principle:** Host stability is more important than trace completeness.
+Keep the hot path simple, bound retained data, and drop trace data rather than
+risk overwhelming the application host.
 
 ## Architecture
 
@@ -95,7 +97,8 @@ The order supports the browser's two listing steps:
 
 ### 4. Circuit breaker
 
-**Problem:** S3 outages shouldn't crash the worker or lose data.
+**Problem:** S3 outages must not crash the worker or repeatedly consume host
+CPU by symbolizing and compressing segments that cannot be uploaded.
 
 **Disk space safety:** Running out of disk space is worse than losing trace data. `RotatingWriter` enforces a `max_total_size` budget — when total disk usage exceeds the limit, it deletes the oldest sealed segments. This means if S3 is unreachable and files accumulate, the writer evicts old segments to stay within bounds. Data loss is acceptable; disk exhaustion is not. The worker processes oldest-first to maximize the upload window before eviction.
 
@@ -118,9 +121,35 @@ Closed
 
 Backoff: 1s → 2s → 4s → ... → 5min cap. Success resets to Closed immediately.
 
+The S3 uploader's processor liveness future sleeps until the circuit permits
+another attempt. Before claiming or dequeuing a segment, the worker awaits
+every stage. An open S3 circuit therefore prevents symbolization and
+compression without a special admission stage or polling in the worker.
+
+Only one segment may occupy the pipeline. A retryable failure retains its
+current `SegmentData` and failing processor index in memory, so the retry resumes
+at S3 without repeating symbolization or compression. No transformed retry
+artifact is written to disk.
+
+Every successful seal increments a generation and wakes the worker. If a newer
+segment arrives while the current segment is retrying or still inside an async
+processor, the worker cancels and drops the old segment. When the pipeline is
+unavailable before intake, the worker has not claimed or dequeued a segment;
+the existing bounded disk or memory policy handles new arrivals. This bounds
+retained work and deliberately prefers losing trace data to accumulating
+pressure on the host.
+
+`SymbolizeProcessor` reports itself unavailable for the full lifetime of its
+blocking symbolization job. Dropping its async future does not clear that state;
+the blocking job owns the busy guard. This prevents a replacement segment from
+starting another CPU-heavy symbolization in parallel after cancellation.
+
 **Evicted files don't trip the circuit breaker.** If a segment disappears (evicted by `RotatingWriter`) during processing, the worker logs at debug level and skips it — this is normal operation, not an S3 failure.
 
-**Why not crash?** Compressed files on disk are still valuable. Can be manually uploaded or recovered when S3 comes back.
+Disk-backed raw segments remain covered by the existing `max_total_size`
+eviction budget. Per-process namespace GC reclaims old namespaces after a
+crashed process releases its namespace lock; the retry design adds no new
+on-disk artifact type.
 
 ### 5. Segment metadata
 
@@ -167,6 +196,11 @@ dial9-tokio-telemetry = { version = "0.1", features = ["worker-s3"] }
 ```rust
 pub trait SegmentProcessor: Send {
     fn name(&self) -> &'static str;
+    fn wait_until_live(&mut self)
+        -> Pin<Box<dyn Future<Output = ()> + Send + '_>>
+    {
+        Box::pin(std::future::ready(()))
+    }
     fn initialize(&mut self)
         -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>
     {
@@ -179,7 +213,9 @@ pub trait SegmentProcessor: Send {
 
 `SegmentData` flows through the pipeline, carrying the segment bytes, accumulated metadata, and a metrics guard. Each processor transforms the data and passes it to the next. On error, `ProcessError` carries the `SegmentData` back so metrics are still recorded.
 
-Current pipeline: `SymbolizeProcessor` (if cpu-profiling) → `GzipCompressor` → `S3PipelineUploader` (if worker-s3). Without S3: `SymbolizeProcessor` → `GzipWriteBackProcessor`.
+Current S3 pipeline: `SymbolizeProcessor` (if cpu-profiling) →
+`GzipCompressor` → `S3PipelineUploader`. Without S3:
+`SymbolizeProcessor` → `GzipWriteBackProcessor`.
 
 **Why a trait instead of hardcoded steps?** Extensibility for symbolization, format conversion, and testing (swap in mock processors). The trait uses manual boxed futures rather than `async_trait` to avoid the dependency.
 
@@ -268,10 +304,11 @@ loop {
 | Error | Action | State Change |
 |-------|--------|--------------|
 | Segment disappeared (evicted by RotatingWriter) | Skip, log debug | None (circuit breaker unaffected) |
-| S3 upload fails (500, timeout, 403) | Log warning, keep file | Circuit breaker → Open |
+| Retryable S3 upload failure | Log warning, retain transformed payload | Circuit breaker → Open |
+| Permanent S3 upload failure | Log warning, remove segment | Circuit breaker → Open |
 | S3 retry succeeds | Log info | Circuit breaker → Closed |
 | Compression fails | Log error, skip segment | None |
-| Circuit breaker open | Skip upload entirely | None (wait for backoff timer) |
+| Circuit breaker open | Reject before expensive processors | None (wait for backoff timer) |
 
 **Never crash.** All errors are logged via `tracing`. Worker continues processing.
 
