@@ -27,8 +27,6 @@ mod disk;
 mod mem;
 
 use disk::DiskFs;
-#[cfg(feature = "pipeline")]
-pub(crate) use mem::MEMORY_RETRY_BUDGET;
 use mem::{MemActiveWriter, MemFs};
 
 /// Segments reserved outside the ring so `max_total_size` cap includes them.
@@ -130,7 +128,6 @@ impl Write for ActiveHandle {
 pub(crate) struct MemoryPayload {
     pub(crate) bytes: Bytes,
     pub(crate) accounting: SegmentAccounting,
-    pub(crate) retry_count: u32,
     /// `(creation, seal)` epochs carried from the ring slot so the worker
     /// and retry re-enqueue never re-parse them.
     pub(crate) epochs: (u64, u64),
@@ -157,7 +154,6 @@ impl TakenSegment {
         seg: MemorySegment,
         bytes: Bytes,
         accounting: SegmentAccounting,
-        retry_count: u32,
         epochs: (u64, u64),
     ) -> Self {
         Self {
@@ -165,7 +161,6 @@ impl TakenSegment {
             pre_loaded: Some(MemoryPayload {
                 bytes,
                 accounting,
-                retry_count,
                 epochs,
             }),
         }
@@ -175,11 +170,6 @@ impl TakenSegment {
     /// retry re-enqueue. `None` for disk (retry re-reads the file).
     pub(crate) fn original_bytes(&self) -> Option<Bytes> {
         self.pre_loaded.as_ref().map(|m| m.bytes.clone())
-    }
-
-    /// Re-enqueue count this dispense carries. `None` for disk.
-    pub(crate) fn retry_count(&self) -> Option<u32> {
-        self.pre_loaded.as_ref().map(|m| m.retry_count)
     }
 
     /// `(creation, seal)` epochs the ring slot carried. `None` for disk
@@ -385,6 +375,25 @@ impl Fs {
         }
     }
 
+    /// Monotonic count of segments sealed by this writer.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn seal_generation(&self) -> u64 {
+        match self {
+            Fs::Disk(d) => d.seal_generation(),
+            Fs::Mem(m) => m.seal_generation(),
+        }
+    }
+
+    /// Wait until a segment newer than `generation` is sealed or the writer
+    /// finishes.
+    #[cfg(feature = "pipeline")]
+    pub(crate) async fn wait_for_seal_after(&self, generation: u64) {
+        match self {
+            Fs::Disk(d) => d.wait_for_seal_after(generation).await,
+            Fs::Mem(m) => m.wait_for_seal_after(generation).await,
+        }
+    }
+
     /// Returns `true` once `DiskBuffer::finalize` has run.
     #[cfg(feature = "pipeline")]
     pub(crate) fn writer_done(&self) -> bool {
@@ -403,12 +412,8 @@ impl Fs {
         }
     }
 
-    /// Mark a previously dispensed segment as available for re-dispensing on
-    /// the next `take_files`.
-    ///
-    /// Disk: drops the claim entry.
-    /// Memory: no-op. Memory retry goes through [`Self::release_for_retry`]
-    /// which carries the bytes back into the ring.
+    /// Mark a previously dispensed disk segment as available for
+    /// re-dispensing on the next `take_files`.
     #[cfg(feature = "pipeline")]
     pub(crate) fn release_claim(&self, seg: &SegmentRef) {
         match self {
@@ -417,33 +422,19 @@ impl Fs {
         }
     }
 
-    /// Re-enqueue a memory segment after a retryable failure.
-    ///
-    /// Caller owns the [`MEMORY_RETRY_BUDGET`] check, this method always
-    /// pushes. `epochs` is the `(creation, seal)` pair the slot originally
-    /// carried. Disk segments do not use this path, they retry via
-    /// [`Self::release_claim`] + directory rescan.
+    /// Restore a memory segment defensively if window matching changes between
+    /// dequeue and header inspection.
     #[cfg(feature = "pipeline")]
-    pub(crate) fn release_for_retry(
+    pub(crate) fn restore_memory_segment(
         &self,
         seg: &SegmentRef,
         bytes: bytes::Bytes,
-        attempt: u32,
         epochs: (u64, u64),
     ) {
         match self {
-            Fs::Mem(m) => m.release_for_retry(seg.index(), bytes, attempt, epochs),
-            Fs::Disk(_) => unreachable!("release_for_retry called on disk segment"),
+            Fs::Mem(m) => m.restore_segment(seg.index(), bytes, epochs),
+            Fs::Disk(_) => unreachable!("restore_memory_segment called on disk segment"),
         }
-    }
-
-    /// Whether one `take_files_matching` call dispenses every matching
-    /// segment at once (disk claims the whole backlog; memory pops one slot
-    /// per call). The triggered worker uses this to decide if a pass that
-    /// ended on a retry still covered all other matching work.
-    #[cfg(feature = "pipeline")]
-    pub(crate) fn take_is_exhaustive(&self) -> bool {
-        matches!(self, Fs::Disk(_))
     }
 
     /// Test-only: override the seal epoch of a queued memory slot so tests

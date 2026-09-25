@@ -49,10 +49,6 @@ impl Write for MemActiveWriter {
 struct MemSealedSegment {
     index: u32,
     bytes: Bytes,
-    /// 0 for a fresh seal, incremented each time the worker re-enqueues
-    /// after a retryable failure.
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
-    retry_count: u32,
     /// Creation epoch parsed from the segment header at seal time, used by
     /// the triggered worker's windowed pop.
     #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
@@ -62,10 +58,6 @@ struct MemSealedSegment {
     #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     seal_secs: u64,
 }
-
-/// Cap on retryable-failure re-enqueues for a memory segment.
-#[cfg(feature = "pipeline")]
-pub(crate) const MEMORY_RETRY_BUDGET: u32 = 3;
 
 /// Holds the deque + bookkeeping that must move together under the lock.
 struct Queue {
@@ -86,6 +78,7 @@ struct MemChannel {
     #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     in_flight_bytes_peak: Arc<AtomicU64>,
     writer_done: AtomicBool,
+    seal_generation: AtomicU64,
     notify: Notify,
 }
 
@@ -122,6 +115,7 @@ impl MemFs {
                 in_flight_segments: Arc::new(AtomicU64::new(0)),
                 in_flight_bytes_peak: Arc::new(AtomicU64::new(0)),
                 writer_done: AtomicBool::new(false),
+                seal_generation: AtomicU64::new(0),
                 notify: Notify::new(),
             }),
         })
@@ -167,7 +161,6 @@ impl MemFs {
             q.segments.push_back(MemSealedSegment {
                 index,
                 bytes,
-                retry_count: 0,
                 epoch_secs,
                 seal_secs,
             });
@@ -184,25 +177,16 @@ impl MemFs {
             });
         }
 
+        ch.seal_generation.fetch_add(1, Ordering::Release);
         ch.notify.notify_one();
         Ok(SegmentRef::Memory(MemorySegment { index, size }))
     }
 
     pub(super) fn remove_sealed(&self, _seg: &SegmentRef, _reason: RemoveReason) {}
 
-    /// Re-enqueue `bytes` for re-dispense on the next `take_files` cycle.
-    ///
-    /// `attempt` is the new retry count this segment carries; `epochs` is
-    /// the `(creation, seal)` pair the slot originally carried.
-    /// Pushed to the front so a single failing segment cycles back ahead of fresh work.
+    /// Restore a defensively dequeued segment to the front of the ring.
     #[cfg(feature = "pipeline")]
-    pub(super) fn release_for_retry(
-        &self,
-        index: u32,
-        bytes: Bytes,
-        attempt: u32,
-        epochs: (u64, u64),
-    ) {
+    pub(super) fn restore_segment(&self, index: u32, bytes: Bytes, epochs: (u64, u64)) {
         let size = bytes.len() as u64;
         let ch = &self.channel;
         {
@@ -210,7 +194,6 @@ impl MemFs {
             q.segments.push_front(MemSealedSegment {
                 index,
                 bytes,
-                retry_count: attempt,
                 epoch_secs: epochs.0,
                 seal_secs: epochs.1,
             });
@@ -299,7 +282,6 @@ impl MemFs {
             },
             slot.bytes,
             accounting,
-            slot.retry_count,
             (slot.epoch_secs, slot.seal_secs),
         );
 
@@ -339,6 +321,23 @@ impl MemFs {
     #[cfg(feature = "pipeline")]
     pub(super) fn writer_done(&self) -> bool {
         self.channel.writer_done.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) fn seal_generation(&self) -> u64 {
+        self.channel.seal_generation.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) async fn wait_for_seal_after(&self, generation: u64) {
+        let ch = &self.channel;
+        let notified = ch.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.seal_generation() != generation {
+            return;
+        }
+        notified.await;
     }
 
     /// Test-only: override the seal epoch of a queued slot so tests can

@@ -511,42 +511,52 @@ mod worker_pipeline_tests {
         Duration::from_secs(1)
     }
 
-    /// Stage that always fails with a retryable transfer error, standing in
-    /// for any upload processor that hit a transient failure.
-    struct RetryableFail;
-    impl SegmentProcessor for RetryableFail {
-        fn name(&self) -> &'static str {
-            "RetryableFail"
-        }
-        fn process(
-            &mut self,
-            data: SegmentData,
-        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
-            Box::pin(async move {
-                Err(ProcessError::new(
-                    data,
-                    ProcessErrorKind::transfer(Box::from("injected"), true),
-                ))
-            })
-        }
-    }
-
-    /// A retryable error keeps the segment on disk for a later attempt. (The
-    /// real S3 transient-failure and circuit-breaker-open paths both surface
-    /// as a retryable transfer error; they're covered against real S3 in
-    /// `dial9-destinations-s3`.)
+    /// A retryable disk segment stays in the one pipeline slot until a newly
+    /// sealed segment supersedes and deletes it.
     #[tokio::test]
-    async fn failed_segment_kept_on_transient_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let seg_path = dir.path().join("trace.0.bin");
-        std::fs::write(&seg_path, b"bad data").unwrap();
+    async fn new_disk_segment_supersedes_retained_retry() {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(RetryableFail)];
+        struct FailFirst {
+            attempts: Arc<AtomicU32>,
+        }
+        impl SegmentProcessor for FailFirst {
+            fn name(&self) -> &'static str {
+                "FailFirst"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Err(ProcessError::new(
+                        data,
+                        ProcessErrorKind::transfer(Box::from("injected"), true),
+                    ))
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_for(dir.path());
+        let seg_path = dir.path().join("trace.0.bin");
+        let active_path = dir.path().join("trace.0.bin.active");
+        let mut active = fs.create_segment(&active_path).unwrap();
+        active.write_all(b"first").unwrap();
+        fs.seal(active, &active_path, 0).unwrap();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(FailFirst {
+            attempts: Arc::clone(&attempts),
+        })];
 
         let stop = tokio_util::sync::CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            fs_for(dir.path()),
-            default_poll(),
+        let worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(10),
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
@@ -554,12 +564,27 @@ mod worker_pipeline_tests {
         )
         .await
         .expect("initialize worker");
-        worker.process_open_segments().await;
+        let task = tokio::spawn(async move {
+            let mut worker = worker;
+            worker.process_open_segments().await;
+        });
 
+        while attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
         check!(
             seg_path.exists(),
-            "segment should be kept on disk after a retryable error"
+            "segment should remain while its retry owns the pipeline slot"
         );
+
+        let next_active_path = dir.path().join("trace.1.bin.active");
+        let mut next_active = fs.create_segment(&next_active_path).unwrap();
+        next_active.write_all(b"second").unwrap();
+        fs.seal(next_active, &next_active_path, 1).unwrap();
+
+        task.await.unwrap();
+        check!(!seg_path.exists(), "superseded segment should be deleted");
+        check!(dir.path().join("trace.1.bin").exists());
     }
 
     /// A NotFound error (evicted segment) is silently skipped — no deletion attempt.
@@ -1251,10 +1276,10 @@ mod worker_pipeline_tests {
         }
     }
 
-    /// N<budget retryable failures followed by success: segment delivers,
-    /// in-flight accounting drains.
+    /// Retryable failures followed by success retain one segment in place and
+    /// release its in-flight accounting after delivery.
     #[tokio::test(start_paused = true)]
-    async fn mem_worker_retries_retryable_within_budget() {
+    async fn mem_worker_retries_retained_segment_until_success() {
         use std::io::Write;
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1314,10 +1339,287 @@ mod worker_pipeline_tests {
         check!(snap.in_flight_segments == 0);
     }
 
-    /// Always-fail retryable: exactly `MEMORY_RETRY_BUDGET + 1` attempts,
-    /// then segment is dropped and accounting drains.
+    /// Retryable terminal failures retain the transformed payload, so
+    /// expensive upstream work runs once rather than once per attempt.
     #[tokio::test(start_paused = true)]
-    async fn mem_worker_drops_after_retry_budget_exhausted() {
+    async fn mem_worker_retains_transformed_payload_across_retries() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct TransformOnce(Arc<AtomicU32>);
+        impl SegmentProcessor for TransformOnce {
+            fn name(&self) -> &'static str {
+                "TransformOnce"
+            }
+
+            fn process(
+                &mut self,
+                mut data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                if !data.payload().starts_with(&[0x1f, 0x8b]) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    data.set_payload(vec![0x1f, 0x8b, 0x08, 0]);
+                }
+                Box::pin(std::future::ready(Ok(data)))
+            }
+        }
+
+        struct FailOnce(Arc<AtomicU32>);
+        impl SegmentProcessor for FailOnce {
+            fn name(&self) -> &'static str {
+                "FailOnce"
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err(ProcessError::new(
+                            data,
+                            ProcessErrorKind::transfer(Box::from("transient"), true),
+                        ))
+                    } else {
+                        Ok(data)
+                    }
+                })
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut handle = fs.create_segment(Path::new("x")).unwrap();
+        handle.write_all(b"raw segment").unwrap();
+        fs.seal(handle, Path::new("x"), 0).unwrap();
+        fs.mark_writer_done();
+
+        let transforms = Arc::new(AtomicU32::new(0));
+        let attempts = Arc::new(AtomicU32::new(0));
+        let mut worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+            vec![
+                Box::new(TransformOnce(Arc::clone(&transforms))),
+                Box::new(FailOnce(Arc::clone(&attempts))),
+            ],
+            tokio_util::sync::CancellationToken::new(),
+            metrique_writer::sink::DevNullSink::boxed(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        worker.run().await;
+        check!(attempts.load(Ordering::SeqCst) == 2);
+        check!(transforms.load(Ordering::SeqCst) == 1);
+    }
+
+    /// A retry resumes at the failing processor rather than rerunning upstream
+    /// work. This models symbolization/compression followed by an S3 outage.
+    #[tokio::test(start_paused = true)]
+    async fn retry_does_not_repeat_upstream_work() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct ExpensiveStage(Arc<AtomicU32>);
+        impl SegmentProcessor for ExpensiveStage {
+            fn name(&self) -> &'static str {
+                "ExpensiveStage"
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Ok(data)))
+            }
+        }
+
+        struct OutageOnce(Arc<AtomicU32>);
+        impl SegmentProcessor for OutageOnce {
+            fn name(&self) -> &'static str {
+                "OutageOnce"
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let attempt = self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        Err(ProcessError::new(
+                            data,
+                            ProcessErrorKind::transfer(Box::from("S3 unavailable"), true),
+                        ))
+                    } else {
+                        Ok(data)
+                    }
+                })
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut handle = fs.create_segment(Path::new("x")).unwrap();
+        handle.write_all(b"segment").unwrap();
+        fs.seal(handle, Path::new("x"), 0).unwrap();
+
+        let expensive_calls = Arc::new(AtomicU32::new(0));
+        let upload_attempts = Arc::new(AtomicU32::new(0));
+        let worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+            vec![
+                Box::new(ExpensiveStage(Arc::clone(&expensive_calls))),
+                Box::new(OutageOnce(Arc::clone(&upload_attempts))),
+            ],
+            tokio_util::sync::CancellationToken::new(),
+            metrique_writer::sink::DevNullSink::boxed(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let worker_task = tokio::spawn(async move {
+            let mut worker = worker;
+            worker.run().await;
+        });
+        while upload_attempts.load(Ordering::SeqCst) < 2 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+        }
+        fs.mark_writer_done();
+        worker_task.await.unwrap();
+        check!(upload_attempts.load(Ordering::SeqCst) == 2);
+        check!(
+            expensive_calls.load(Ordering::SeqCst) == 1,
+            "upstream work must not repeat after an upload retry"
+        );
+    }
+
+    /// A fresh segment cancels a pending processor future, but the replacement
+    /// waits while that processor still reports background work in progress.
+    #[tokio::test(start_paused = true)]
+    async fn superseded_processor_does_not_start_parallel_background_work() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use tokio::sync::Notify;
+
+        struct BusyAfterCancellation {
+            busy: Arc<AtomicBool>,
+            calls: Arc<AtomicU32>,
+            release_background: Arc<Notify>,
+            background_done: Arc<Notify>,
+        }
+        impl SegmentProcessor for BusyAfterCancellation {
+            fn name(&self) -> &'static str {
+                "BusyAfterCancellation"
+            }
+
+            fn wait_until_live(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {
+                    loop {
+                        let notified = self.background_done.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        if !self.busy.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        notified.await;
+                    }
+                })
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+                if attempt != 0 {
+                    return Box::pin(std::future::ready(Ok(data)));
+                }
+
+                self.busy.store(true, Ordering::SeqCst);
+                let busy = Arc::clone(&self.busy);
+                let release = Arc::clone(&self.release_background);
+                let background_done = Arc::clone(&self.background_done);
+                tokio::spawn(async move {
+                    release.notified().await;
+                    busy.store(false, Ordering::SeqCst);
+                    background_done.notify_one();
+                });
+                Box::pin(async move {
+                    std::future::pending::<()>().await;
+                    Ok(data)
+                })
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut first = fs.create_segment(Path::new("x")).unwrap();
+        first.write_all(b"first").unwrap();
+        fs.seal(first, Path::new("x"), 0).unwrap();
+
+        let busy = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicU32::new(0));
+        let release_background = Arc::new(Notify::new());
+        let background_done = Arc::new(Notify::new());
+        let worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+            vec![Box::new(BusyAfterCancellation {
+                busy: Arc::clone(&busy),
+                calls: Arc::clone(&calls),
+                release_background: Arc::clone(&release_background),
+                background_done: Arc::clone(&background_done),
+            })],
+            tokio_util::sync::CancellationToken::new(),
+            metrique_writer::sink::DevNullSink::boxed(),
+            None,
+        )
+        .await
+        .unwrap();
+        let worker_task = tokio::spawn(async move {
+            let mut worker = worker;
+            worker.run().await;
+        });
+
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let mut second = fs.create_segment(Path::new("x")).unwrap();
+        second.write_all(b"second").unwrap();
+        fs.seal(second, Path::new("x"), 1).unwrap();
+
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+        }
+        check!(
+            calls.load(Ordering::SeqCst) == 1,
+            "replacement must wait while the cancelled stage remains busy"
+        );
+
+        release_background.notify_one();
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::task::yield_now().await;
+        }
+        fs.mark_writer_done();
+        worker_task.await.unwrap();
+        check!(calls.load(Ordering::SeqCst) == 2);
+    }
+
+    /// Cancelling the worker drops a retained retry and releases accounting.
+    #[tokio::test(start_paused = true)]
+    async fn mem_worker_stop_drops_retained_retry() {
         use std::io::Write;
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1347,27 +1649,29 @@ mod worker_pipeline_tests {
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
         fs.seal(h, Path::new("x"), 0).unwrap();
-        fs.mark_writer_done();
-
         let attempts = Arc::new(AtomicU32::new(0));
         let stop = tokio_util::sync::CancellationToken::new();
-        let mut worker = WorkerLoop::new(
+        let worker = WorkerLoop::new(
             Arc::clone(&fs),
             Duration::from_millis(1),
             vec![Box::new(AlwaysFails {
                 attempts: Arc::clone(&attempts),
             })],
-            stop,
+            stop.clone(),
             metrique_writer::sink::DevNullSink::boxed(),
             None,
         )
         .await
         .expect("initialize worker");
-        worker.run().await;
-        check!(
-            attempts.load(Ordering::SeqCst) == crate::fs::MEMORY_RETRY_BUDGET + 1,
-            "initial + budget retries",
-        );
+        let worker_task = tokio::spawn(async move {
+            let mut worker = worker;
+            worker.run().await;
+        });
+        while attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        stop.cancel();
+        worker_task.await.unwrap();
         let snap = fs.take_files();
         check!(snap.in_flight_bytes == 0);
         check!(snap.in_flight_segments == 0);
@@ -1509,7 +1813,7 @@ mod triggered_worker_tests {
     use assert2::check;
     use std::collections::HashMap;
     use std::future::Future;
-    use std::io;
+    use std::io::{self, Write as _};
     use std::path::Path;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1684,10 +1988,10 @@ mod triggered_worker_tests {
         worker.await.unwrap();
     }
 
-    /// A retrying segment only holds open the dumps it matched (disk: one
-    /// pass covers the whole backlog); an unrelated due dump resolves.
+    /// A retrying disk segment owns the single pipeline slot until a newly
+    /// sealed segment supersedes it.
     #[tokio::test(start_paused = true)]
-    async fn disk_retry_holds_only_matched_dumps() {
+    async fn disk_retry_blocks_other_dumps_until_new_segment_supersedes_it() {
         /// Fails retryably, forever, any segment whose creation epoch
         /// matches `old_epoch`; passes everything else through.
         struct FailOldForever {
@@ -1753,19 +2057,35 @@ mod triggered_worker_tests {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Narrow dump's window cannot match the retrying segment: it must
-        // resolve despite the wide dump's pending retry.
-        let receipt_narrow = trigger
-            .dump_time_range(Duration::from_secs(60), Duration::ZERO)
-            .await
-            .unwrap();
+        // Even an unrelated dump waits behind the one in-flight segment.
+        let narrow = tokio::spawn({
+            let trigger = trigger.clone();
+            async move {
+                trigger
+                    .dump_time_range(Duration::from_secs(60), Duration::ZERO)
+                    .await
+                    .unwrap()
+            }
+        });
+        tokio::task::yield_now().await;
+        check!(!narrow.is_finished());
+
+        // A fresh seal supersedes the retry. Its epoch is outside the narrow
+        // dump but inside the wide dump.
+        let active_path = dir.path().join("trace.2.bin.active");
+        let mut active = fs.create_segment(&active_path).unwrap();
+        active.write_all(&segment_with_epoch(now - 1800)).unwrap();
+        fs.seal(active, &active_path, 2).unwrap();
+
+        let receipt_narrow = narrow.await.unwrap();
         check!(receipt_narrow.segments_processed == 0);
 
-        // The wide dump stays open until shutdown truncates it; the fresh
-        // segment it captured before the retry stall is on the receipt.
-        stop.cancel();
+        // The old segment was dropped; the other two matched the wide dump.
         let receipt_wide = fut_wide.await.unwrap();
-        check!(receipt_wide.segments_processed == 1);
+        check!(receipt_wide.segments_processed == 2);
+        check!(!old_path.exists());
+
+        stop.cancel();
         worker.await.unwrap();
     }
 

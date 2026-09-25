@@ -32,6 +32,10 @@ pub(crate) struct DiskFs {
     claimed: Mutex<HashMap<u32, u64>>,
     dropped: AtomicU64,
     writer_done: AtomicBool,
+    #[cfg(feature = "pipeline")]
+    seal_generation: AtomicU64,
+    #[cfg(feature = "pipeline")]
+    seal_notify: tokio::sync::Notify,
 }
 
 impl DiskFs {
@@ -42,6 +46,10 @@ impl DiskFs {
             claimed: Mutex::new(HashMap::new()),
             dropped: AtomicU64::new(0),
             writer_done: AtomicBool::new(false),
+            #[cfg(feature = "pipeline")]
+            seal_generation: AtomicU64::new(0),
+            #[cfg(feature = "pipeline")]
+            seal_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -72,10 +80,17 @@ impl DiskFs {
         drop(active_handle);
         let sealed_path = strip_active_suffix(active_path);
         match fs::rename(active_path, &sealed_path) {
-            Ok(()) => Ok(SegmentRef::Disk(SealedSegment {
-                path: sealed_path,
-                index,
-            })),
+            Ok(()) => {
+                #[cfg(feature = "pipeline")]
+                {
+                    self.seal_generation.fetch_add(1, Ordering::Release);
+                    self.seal_notify.notify_one();
+                }
+                Ok(SegmentRef::Disk(SealedSegment {
+                    path: sealed_path,
+                    index,
+                }))
+            }
             Err(e) => Err(e),
         }
     }
@@ -122,12 +137,30 @@ impl DiskFs {
         self.writer_done.load(Ordering::Acquire)
     }
 
+    #[cfg(feature = "pipeline")]
+    pub(super) fn seal_generation(&self) -> u64 {
+        self.seal_generation.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(super) async fn wait_for_seal_after(&self, generation: u64) {
+        let notified = self.seal_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.seal_generation() != generation {
+            return;
+        }
+        notified.await;
+    }
+
     /// Signal that the writer has sealed its final segment. The disk seal
     /// (`std::fs::rename`) happens-before this `Release` store, so any worker
     /// thread observing `writer_done == true` will see the renamed file on its
     /// next `take_files` scan.
     pub(super) fn mark_writer_done(&self) {
         self.writer_done.store(true, Ordering::Release);
+        #[cfg(feature = "pipeline")]
+        self.seal_notify.notify_one();
     }
 
     #[cfg(feature = "pipeline")]
@@ -196,7 +229,6 @@ impl DiskFs {
             }
             (claimed.len() as u64, claimed.values().sum::<u64>())
         };
-
         TakenFiles {
             segments: new_segments,
             queued_segments: None,

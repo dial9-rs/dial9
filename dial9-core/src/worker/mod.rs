@@ -351,13 +351,17 @@ fn epoch_to_system(epoch_secs: u64) -> SystemTime {
 #[derive(Debug, Default)]
 struct PassStats {
     /// Window-matched segments that reached a terminal outcome (pipeline
-    /// success, terminal failure, eviction, panic, retry budget spent).
+    /// success, terminal failure, eviction, panic, or supersession).
     matched_done: usize,
-    /// Ids of the dumps matched by segments actually re-enqueued after a
-    /// retryable failure; those dumps stay open until the retry settles.
-    retry_dump_ids: Vec<crate::dump::DumpId>,
     /// Segments that passed window matching and entered the pipeline.
     entered_pipeline: usize,
+}
+
+enum ProcessorRun {
+    Completed(
+        Result<Result<SegmentData, crate::pipeline::ProcessError>, Box<dyn std::any::Any + Send>>,
+    ),
+    Superseded,
 }
 
 /// Record a terminal pipeline error against every matched dump that has none
@@ -431,6 +435,20 @@ impl WorkerLoop {
         true
     }
 
+    /// Pace a retry while waking immediately if newer data supersedes the
+    /// current segment.
+    async fn wait_before_retry(&mut self, segment_generation: u64) -> bool {
+        if self.stop.is_cancelled() {
+            return false;
+        }
+        crate::shuttle_select! {
+            _ = self.stop.cancelled() => return false,
+            _ = self.fs.wait_for_seal_after(segment_generation) => {}
+            _ = crate::primitives::time::sleep(self.poll_interval) => {}
+        }
+        self.fs.seal_generation() == segment_generation
+    }
+
     async fn run_continuous(&mut self) {
         loop {
             if !self.wait_until_pipeline_live().await {
@@ -474,21 +492,14 @@ impl WorkerLoop {
 
         loop {
             if !dumps.is_empty() {
-                let retry_hold = self.drain_matching(&mut dumps).await;
+                self.drain_matching(&mut dumps).await;
                 // Resolve every dump whose forward deadline elapsed (or that
-                // never had one) and that is not held open by a pending
-                // retry. A disk pass covers the whole backlog, so a retry
-                // there only holds the dumps the retrying segment matched;
-                // the memory pop dispenses one slot per pass, so a retry
-                // there keeps everything open until the head of the ring
-                // settles (budget-bounded, brief).
-                let exhaustive = self.fs.take_is_exhaustive();
+                // never had one). Retryable failures remain inside the one
+                // in-flight pipeline slot until they succeed or are dropped.
                 let now = crate::primitives::time::now();
                 let mut i = 0;
                 while i < dumps.len() {
-                    let held = !retry_hold.is_empty()
-                        && (!exhaustive || retry_hold.contains(&dumps[i].id));
-                    if dumps[i].due(now) && !held {
+                    if dumps[i].due(now) {
                         self.resolve_dump(dumps.swap_remove(i)).await;
                     } else {
                         i += 1;
@@ -536,17 +547,14 @@ impl WorkerLoop {
         }
     }
 
-    /// Run matching passes until the active windows quiesce. Returns the ids
-    /// of dumps matched by segments that failed retryably (the caller bails
-    /// to its select instead of hot-looping the retry and keeps those dumps
-    /// open); empty means the windows quiesced.
-    async fn drain_matching(&mut self, dumps: &mut [ActiveDump]) -> Vec<crate::dump::DumpId> {
+    /// Run matching passes until the active windows quiesce.
+    async fn drain_matching(&mut self, dumps: &mut [ActiveDump]) {
         loop {
             if dumps.is_empty() {
-                return Vec::new();
+                return;
             }
             if !self.wait_until_pipeline_live().await {
-                return Vec::new();
+                return;
             }
             let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
             let mut taken = self.fs.take_files_matching(&windows);
@@ -560,19 +568,16 @@ impl WorkerLoop {
             }
             if taken.segments.is_empty() {
                 self.emit_cycle_metrics(&taken, 0);
-                return Vec::new();
+                return;
             }
             let segments = std::mem::take(&mut taken.segments);
             let stats = self.process_segments(segments, dumps).await;
             // Out-of-window claims are released, not dispatched; only count
             // segments that actually entered the pipeline.
             self.emit_cycle_metrics(&taken, stats.entered_pipeline as u64);
-            if !stats.retry_dump_ids.is_empty() {
-                return stats.retry_dump_ids;
-            }
             if stats.matched_done == 0 {
                 // Only out-of-window segments (disk): nothing matching left.
-                return Vec::new();
+                return;
             }
         }
     }
@@ -683,7 +688,6 @@ impl WorkerLoop {
             }
             // Snapshot memory-only retry state before `load()` consumes
             // `taken`, so re-dispense on a retryable failure gets the same bytes as the first attempt.
-            let retry_count = taken.retry_count();
             let original_bytes = taken.original_bytes();
             let mem_epochs = taken.mem_epochs();
             let (seg_ref, payload, accounting) = match taken.load() {
@@ -739,11 +743,10 @@ impl WorkerLoop {
                         // Defensive: the windowed pop only dispenses matching
                         // slots. Put the bytes back without burning a retry
                         // attempt.
-                        if let (Some(count), Some(bytes)) = (retry_count, original_bytes.as_ref()) {
-                            self.fs.release_for_retry(
+                        if let Some(bytes) = original_bytes.as_ref() {
+                            self.fs.restore_memory_segment(
                                 &seg_ref,
                                 bytes.clone(),
-                                count,
                                 (epoch_secs, seal_secs),
                             );
                         }
@@ -795,43 +798,106 @@ impl WorkerLoop {
                 }
             }
 
-            for processor in &mut self.processors {
+            let mut processor_index = 0;
+            let mut pending_retry_error = None;
+            let mut segment_generation;
+            while processor_index < self.processors.len() {
+                if !self.wait_until_pipeline_live().await {
+                    let err_kind = pending_retry_error.take().unwrap_or_else(|| {
+                        ProcessErrorKind::Io(io::Error::other(
+                            "pipeline stopped while waiting for a processor",
+                        ))
+                    });
+                    metrics.status = Some(MetriqueResult::Failure);
+                    metrics.compressed_size = data.compressed_size();
+                    metrics.total_time.stop();
+                    self.fs
+                        .remove_sealed(data.segment(), RemoveReason::Terminal);
+                    self.epoch_cache.remove(&seg_ref_retained.index());
+                    if !matched.is_empty() {
+                        stats.matched_done += 1;
+                        record_dump_error(dumps, &matched, err_kind);
+                    }
+                    continue 'next_segment;
+                }
+                segment_generation = self.fs.seal_generation();
+
+                let fs = Arc::clone(&self.fs);
+                let processor = &mut self.processors[processor_index];
+                let processor_name = processor.name();
                 let mut stage = StageMetrics::start();
                 let proc_start = std::time::Instant::now();
-                tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, "running processor");
+                tracing::debug!(target: "dial9_worker", processor = processor_name, segment = seg_idx + 1, "running processor");
                 // Catch panics in both the synchronous `process()` call
                 // (which builds the future) and during `.await` (polling).
                 // AssertUnwindSafe: current processors are stateless or have
                 // trivially-recoverable state, so reuse after panic is safe.
-                let process_result = {
+                let process_run =
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         processor.process(data)
                     })) {
-                        Ok(fut) => std::panic::AssertUnwindSafe(fut).catch_unwind().await,
-                        Err(panic_payload) => Err(panic_payload),
+                        Ok(fut) => {
+                            let guarded = std::panic::AssertUnwindSafe(fut).catch_unwind();
+                            tokio::pin!(guarded);
+                            loop {
+                                crate::shuttle_select! {
+                                biased;
+                                result = &mut guarded => {
+                                    break ProcessorRun::Completed(result);
+                                }
+                                    _ = fs.wait_for_seal_after(segment_generation) => {
+                                        if fs.seal_generation() != segment_generation {
+                                            break ProcessorRun::Superseded;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(panic_payload) => ProcessorRun::Completed(Err(panic_payload)),
+                    };
+                match process_run {
+                    ProcessorRun::Superseded => {
+                        stage.fail();
+                        metrics.pipeline.push(processor_name, stage);
+                        metrics.status = Some(MetriqueResult::Failure);
+                        metrics.total_time.stop();
+                        self.fs
+                            .remove_sealed(&seg_ref_retained, RemoveReason::Terminal);
+                        self.epoch_cache.remove(&seg_ref_retained.index());
+                        if !matched.is_empty() {
+                            stats.matched_done += 1;
+                            record_dump_error(
+                                dumps,
+                                &matched,
+                                ProcessErrorKind::Io(io::Error::other(
+                                    "segment superseded during processing",
+                                )),
+                            );
+                        }
+                        continue 'next_segment;
                     }
-                };
-                match process_result {
-                    Ok(Ok(next)) => {
-                        tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, "processor succeeded");
+                    ProcessorRun::Completed(Ok(Ok(next))) => {
+                        tracing::debug!(target: "dial9_worker", processor = processor_name, segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, "processor succeeded");
                         data = next;
                         data.adjust_accounting();
                         stage.succeed();
-                        metrics.pipeline.push(processor.name(), stage);
+                        metrics.pipeline.push(processor_name, stage);
+                        pending_retry_error = None;
+                        processor_index += 1;
                     }
-                    Ok(Err(e)) => {
-                        tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, error = %e.kind(), "processor failed");
+                    ProcessorRun::Completed(Ok(Err(e))) => {
+                        tracing::debug!(target: "dial9_worker", processor = processor_name, segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, error = %e.kind(), "processor failed");
                         let (next_data, err_kind) = e.into_parts();
                         data = next_data;
                         let already_deleted = err_kind.already_deleted();
                         let retryable = err_kind.retryable();
                         let kind_msg = err_kind.to_string();
-                        stage.fail();
-                        metrics.pipeline.push(processor.name(), stage);
-                        metrics.status = Some(MetriqueResult::Failure);
-                        metrics.compressed_size = data.compressed_size();
-                        metrics.total_time.stop();
                         if already_deleted {
+                            stage.fail();
+                            metrics.pipeline.push(processor_name, stage);
+                            metrics.status = Some(MetriqueResult::Failure);
+                            metrics.compressed_size = data.compressed_size();
+                            metrics.total_time.stop();
                             tracing::debug!(target: "dial9_worker", id = %data.segment(), "segment evicted during processing, skipping");
                             // Best-effort: an evicted segment leaves the dump
                             // silently uncounted.
@@ -840,60 +906,33 @@ impl WorkerLoop {
                                 stats.matched_done += 1;
                             }
                         } else if retryable {
-                            match data.segment() {
-                                // Memory segments always carry retry_count + a
-                                // byte snapshot (set in `TakenSegment::memory`).
-                                // If either is missing the invariant broke. In-flight
-                                // is released via `data`'s accounting on `continue`.
-                                SegmentRef::Memory(_) => {
-                                    match (retry_count, original_bytes.as_ref()) {
-                                        (Some(prev), Some(bytes)) => {
-                                            let attempt = prev + 1;
-                                            if attempt > crate::fs::MEMORY_RETRY_BUDGET {
-                                                rate_limited!(Duration::from_secs(60), {
-                                                    tracing::warn!(target: "dial9_worker", id = %data.segment(), err = %kind_msg, budget = crate::fs::MEMORY_RETRY_BUDGET, "memory retry budget exhausted, dropping segment");
-                                                });
-                                                // Budget spent: terminal for any
-                                                // matched dump, same as a
-                                                // non-retryable failure.
-                                                if !matched.is_empty() {
-                                                    stats.matched_done += 1;
-                                                    record_dump_error(dumps, &matched, err_kind);
-                                                }
-                                            } else {
-                                                crate::primitives::time::sleep(self.poll_interval)
-                                                    .await;
-                                                self.fs.release_for_retry(
-                                                    data.segment(),
-                                                    bytes.clone(),
-                                                    attempt,
-                                                    (epoch_secs, seal_secs),
-                                                );
-                                                stats
-                                                    .retry_dump_ids
-                                                    .extend(matched.iter().map(|&i| dumps[i].id));
-                                            }
-                                        }
-                                        _ => {
-                                            rate_limited!(Duration::from_secs(60), {
-                                                tracing::warn!(target: "dial9_worker", id = %data.segment(), "memory segment missing retry state, dropping");
-                                            });
-                                            if !matched.is_empty() {
-                                                stats.matched_done += 1;
-                                                record_dump_error(dumps, &matched, err_kind);
-                                            }
-                                        }
-                                    }
-                                }
-                                SegmentRef::Disk(_) => {
-                                    tracing::debug!(target: "dial9_worker", id = %data.segment(), err = %kind_msg, "retryable error");
-                                    self.fs.release_claim(data.segment());
-                                    stats
-                                        .retry_dump_ids
-                                        .extend(matched.iter().map(|&i| dumps[i].id));
-                                }
+                            tracing::debug!(target: "dial9_worker", id = %data.segment(), err = %kind_msg, "retryable error; retaining pipeline state");
+                            pending_retry_error = Some(err_kind);
+                            if self.wait_before_retry(segment_generation).await {
+                                continue;
+                            }
+                            stage.fail();
+                            metrics.pipeline.push(processor_name, stage);
+                            metrics.status = Some(MetriqueResult::Failure);
+                            metrics.compressed_size = data.compressed_size();
+                            metrics.total_time.stop();
+                            self.fs
+                                .remove_sealed(data.segment(), RemoveReason::Terminal);
+                            self.epoch_cache.remove(&seg_ref_retained.index());
+                            if !matched.is_empty() {
+                                stats.matched_done += 1;
+                                record_dump_error(
+                                    dumps,
+                                    &matched,
+                                    pending_retry_error.take().expect("retry error retained"),
+                                );
                             }
                         } else {
+                            stage.fail();
+                            metrics.pipeline.push(processor_name, stage);
+                            metrics.status = Some(MetriqueResult::Failure);
+                            metrics.compressed_size = data.compressed_size();
+                            metrics.total_time.stop();
                             self.fs
                                 .remove_sealed(data.segment(), RemoveReason::Terminal);
                             rate_limited!(Duration::from_secs(60), {
@@ -907,7 +946,7 @@ impl WorkerLoop {
                         }
                         continue 'next_segment;
                     }
-                    Err(panic_payload) => {
+                    ProcessorRun::Completed(Err(panic_payload)) => {
                         let panic_msg = panic_payload
                             .downcast_ref::<&str>()
                             .copied()
@@ -917,7 +956,7 @@ impl WorkerLoop {
                             Duration::from_secs(60),
                             tracing::error!(
                                 target: "dial9_worker",
-                                processor = processor.name(),
+                                processor = processor_name,
                                 segment = seg_idx + 1,
                                 id = %seg_ref_retained,
                                 panic = panic_msg,
