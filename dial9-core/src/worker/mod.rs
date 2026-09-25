@@ -419,8 +419,23 @@ impl WorkerLoop {
         }
     }
 
+    /// Wait for every stage before taking a segment from storage.
+    async fn wait_until_pipeline_live(&mut self) -> bool {
+        for processor in &mut self.processors {
+            crate::shuttle_select! {
+                biased;
+                _ = processor.wait_until_live() => {}
+                _ = self.stop.cancelled() => return false,
+            }
+        }
+        true
+    }
+
     async fn run_continuous(&mut self) {
         loop {
+            if !self.wait_until_pipeline_live().await {
+                return;
+            }
             let taken = self.fs.take_files();
             let dispatched = taken.segments.len() as u64;
             self.emit_cycle_metrics(&taken, dispatched);
@@ -431,6 +446,9 @@ impl WorkerLoop {
                 // Ordering invariant: writer calls mark_writer_done (Release) after
                 // the seal-time queue push, so any late-racing push is visible here.
                 loop {
+                    if !self.wait_until_pipeline_live().await {
+                        return;
+                    }
                     let taken = self.fs.take_files();
                     let dispatched = taken.segments.len() as u64;
                     self.emit_cycle_metrics(&taken, dispatched);
@@ -525,6 +543,9 @@ impl WorkerLoop {
     async fn drain_matching(&mut self, dumps: &mut [ActiveDump]) -> Vec<crate::dump::DumpId> {
         loop {
             if dumps.is_empty() {
+                return Vec::new();
+            }
+            if !self.wait_until_pipeline_live().await {
                 return Vec::new();
             }
             let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
@@ -628,6 +649,9 @@ impl WorkerLoop {
     // drain-to-empty). This forces one synchronous drain cycle for unit tests.
     #[cfg(test)]
     async fn process_open_segments(&mut self) -> bool {
+        if !self.wait_until_pipeline_live().await {
+            return false;
+        }
         let taken = self.fs.take_files();
         let found = !taken.segments.is_empty();
         let dispatched = taken.segments.len() as u64;

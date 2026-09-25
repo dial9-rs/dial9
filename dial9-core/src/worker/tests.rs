@@ -144,6 +144,101 @@ mod worker_s3_tests {
         check!(following_initialized.load(Ordering::SeqCst) == 0);
     }
 
+    #[tokio::test]
+    async fn pipeline_waits_for_every_processor_before_taking_work() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::Notify;
+
+        struct CountingProcessor(Arc<AtomicUsize>);
+
+        impl SegmentProcessor for CountingProcessor {
+            fn name(&self) -> &'static str {
+                "CountingProcessor"
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Ok(data)))
+            }
+        }
+
+        struct GatedProcessor {
+            live: Arc<AtomicBool>,
+            changed: Arc<Notify>,
+            processed: Arc<AtomicUsize>,
+        }
+
+        impl SegmentProcessor for GatedProcessor {
+            fn name(&self) -> &'static str {
+                "GatedProcessor"
+            }
+
+            fn wait_until_live(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {
+                    while !self.live.load(Ordering::SeqCst) {
+                        self.changed.notified().await;
+                    }
+                })
+            }
+
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.processed.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Ok(data)))
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut segment = fs.create_segment(Path::new("trace")).unwrap();
+        std::io::Write::write_all(&mut segment, b"segment").unwrap();
+        fs.seal(segment, Path::new("trace"), 0).unwrap();
+        fs.mark_writer_done();
+
+        let first_processed = Arc::new(AtomicUsize::new(0));
+        let gated_processed = Arc::new(AtomicUsize::new(0));
+        let live = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(Notify::new());
+        let worker = WorkerLoop::new(
+            fs,
+            DEFAULT_POLL_INTERVAL,
+            vec![
+                Box::new(CountingProcessor(Arc::clone(&first_processed))),
+                Box::new(GatedProcessor {
+                    live: Arc::clone(&live),
+                    changed: Arc::clone(&changed),
+                    processed: Arc::clone(&gated_processed),
+                }),
+            ],
+            tokio_util::sync::CancellationToken::new(),
+            metrique_writer::sink::DevNullSink::boxed(),
+            None,
+        )
+        .await
+        .expect("initialize worker");
+        let worker_task = tokio::spawn(async move {
+            let mut worker = worker;
+            worker.run().await;
+        });
+
+        tokio::task::yield_now().await;
+        check!(first_processed.load(Ordering::SeqCst) == 0);
+        check!(gated_processed.load(Ordering::SeqCst) == 0);
+
+        live.store(true, Ordering::SeqCst);
+        changed.notify_one();
+        worker_task.await.unwrap();
+
+        check!(first_processed.load(Ordering::SeqCst) == 1);
+        check!(gated_processed.load(Ordering::SeqCst) == 1);
+    }
+
     // --- Review finding #1: compressed_size metric is non-zero after pipeline ---
 
     /// After a successful pipeline run (gzip + a terminal stage), the
