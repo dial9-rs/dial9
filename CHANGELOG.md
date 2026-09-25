@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.2...dial9-v0.5.3) - 2026-09-25
+
+### Added
+
+- gate S3 segment processing on liveness ([#965](https://github.com/dial9-rs/dial9/pull/965))
+
+### Fixed
+
+- *(viewer)* bound span sample attribution to task polls ([#961](https://github.com/dial9-rs/dial9/pull/961))
+- *(viewer)* locate the toolkit by content, not by name ([#952](https://github.com/dial9-rs/dial9/pull/952))
+
 ## [0.5.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.1...dial9-v0.5.2) - 2026-09-22
 
 ### Added
