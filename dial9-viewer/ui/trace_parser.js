@@ -669,6 +669,7 @@
         "TaskTerminateEvent",
         "CpuSampleEvent",
         "TaskDumpEvent",
+        "TaskSampleEvent",
         "SymbolTableEntry",
         "SegmentMetadataEvent",
         "ClockSyncEvent",
@@ -1457,13 +1458,20 @@
                 }
                 break;
             }
-            case "TaskDumpEvent": {
+            case "TaskDumpEvent":
+            case "TaskSampleEvent": {
                 const taskId = num(v.task_id);
                 const chain = (v.callchain || []).map(
                     (addr) => internHex(state.hexIntern, addr),
                 );
                 if (!taskDumps.has(taskId)) taskDumps.set(taskId, []);
-                taskDumps.get(taskId).push({ timestamp: ts, callchain: chain });
+                taskDumps.get(taskId).push({
+                    timestamp: ts,
+                    callchain: chain,
+                    inclusionProbability: v.inclusion_probability != null
+                        ? num(v.inclusion_probability)
+                        : undefined,
+                });
                 break;
             }
             case "AllocEvent": {

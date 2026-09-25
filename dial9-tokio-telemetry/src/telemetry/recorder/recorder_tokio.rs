@@ -54,7 +54,7 @@ use super::runtime_context::RuntimeContext;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource, WorkerIdCounter};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
-use crate::telemetry::task_dump_config::TaskDumpConfig;
+use crate::telemetry::{TaskDumpConfig, TaskSamplingConfig};
 use dial9_core::buffer::BufferMode;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::RecorderBuilder;
@@ -185,7 +185,7 @@ pub struct TokioAttachOptions {
     /// Human-readable runtime name, recorded into segment metadata as
     /// `runtime.{name}`.
     #[builder(into)]
-    runtime_name: Option<String>,
+    pub(super) runtime_name: Option<String>,
     /// Install dial9's Tokio runtime hooks. When `false`, attaching is a no-op
     /// and the runtime you build records nothing. Default `true`.
     #[builder(default = true)]
@@ -196,7 +196,7 @@ pub struct TokioAttachOptions {
     /// Without it no task spawn/terminate events are recorded regardless of what this is
     /// set to.
     #[builder(default)]
-    task_tracking_enabled: bool,
+    pub(super) task_tracking_enabled: bool,
     /// Async-backtrace capture config (requires the `taskdump` feature).
     ///
     /// <div class="warning">
@@ -207,10 +207,13 @@ pub struct TokioAttachOptions {
     /// not produce task dumps.
     ///
     /// </div>
-    task_dump_config: Option<TaskDumpConfig>,
+    pub(super) task_dump_config: Option<TaskDumpConfig>,
+    /// Experimental sampling before stack capture (requires `taskdump`).
+    /// Mutually exclusive with `task_dump_config`; attaching both returns an error.
+    pub(super) task_sampling_config: Option<TaskSamplingConfig>,
     /// User-composed Tokio hooks, run after dial9's own.
     #[builder(default)]
-    tokio_hooks: super::TokioHooks,
+    pub(super) tokio_hooks: super::TokioHooks,
 }
 
 impl Default for TokioAttachOptions {
@@ -364,26 +367,25 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if !options.tokio_instrumentation_enabled {
             return builder.build();
         }
+        if options.task_dump_config.is_some() && options.task_sampling_config.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "task_dump_config and task_sampling_config cannot both be enabled on one runtime",
+            ));
+        }
         let Some(state) = tokio_attach_state(self) else {
             return Err(io::Error::other(
                 "dial9 source registry unavailable; Tokio runtime not attached",
             ));
         };
 
+        #[cfg(feature = "taskdump")]
         let task_dump_config = options.task_dump_config;
         // Capture the runtime name before `options.runtime_name` is moved into
         // `register_runtime_hooks`, so the metrics registration can tag this
         // runtime's samples with its identity.
         let runtime_name = options.runtime_name.clone();
-        let ctx = register_runtime_hooks(
-            &mut builder,
-            options.runtime_name,
-            self,
-            state.worker_ids,
-            options.task_tracking_enabled,
-            options.tokio_hooks,
-            task_dump_config,
-        );
+        let ctx = register_runtime_hooks(&mut builder, self, state.worker_ids, options);
 
         let runtime = builder.build()?;
 
@@ -404,7 +406,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // Same for the task-dump config.
         #[cfg(feature = "taskdump")]
         if let Some(config) = task_dump_config {
-            crate::task_dumped::set_taskdump_config(config);
+            crate::task_dump::set_taskdump_config(config);
         }
         register_runtime_metrics(self, runtime_name, runtime.handle().metrics());
         Ok(runtime)

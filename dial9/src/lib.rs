@@ -93,7 +93,7 @@ pub use dial9_tokio_telemetry::telemetry::RecorderS3ClientExt;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::{
     AttachedRuntime, Dial9HandleTokioExt, Dial9TokioHandle, JoinSetExt, RecorderPipelineExt,
-    TaskDumpConfig, TokioAttachOptions, TokioHooks,
+    TaskDumpConfig, TaskSamplingConfig, TokioAttachOptions, TokioHooks,
 };
 
 /// Offline trace reading and analysis.

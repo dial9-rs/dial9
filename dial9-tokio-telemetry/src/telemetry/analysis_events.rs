@@ -245,6 +245,20 @@ pub struct TaskDumpEvent {
     pub callchain: Vec<u64>,
 }
 
+/// Async backtrace selected by the experimental per-worker sampler.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[non_exhaustive]
+pub struct TaskSampleEvent {
+    /// Timestamp in nanoseconds (monotonic).
+    pub timestamp_ns: u64,
+    /// Task that was idle.
+    pub task_id: TaskId,
+    /// Raw instruction pointer addresses (leaf first).
+    pub callchain: Vec<u64>,
+    /// Probability used to select this pending transition for capture.
+    pub inclusion_probability: f64,
+}
+
 /// One task woke another task.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[non_exhaustive]
@@ -440,6 +454,8 @@ pub enum Dial9Event {
     CpuSampleEvent(CpuSampleEvent),
     /// An async backtrace at a yield point.
     TaskDumpEvent(TaskDumpEvent),
+    /// An async backtrace selected by the per-worker sampler.
+    TaskSampleEvent(TaskSampleEvent),
     /// One task woke another.
     ///
     /// Wire schema name is `"WakeEventEvent"` for historical reasons.
@@ -476,6 +492,27 @@ mod tests {
     use crate::telemetry::task_metadata::TaskId;
     use dial9_trace_format::decoder::Decoder;
     use dial9_trace_format::encoder::Encoder;
+
+    #[test]
+    fn task_sample_round_trips() {
+        let mut enc = Encoder::new();
+        let callchain = enc.intern_stack_frames(&[0x1111, 0x2222]).unwrap();
+        enc.write(&format::TaskSampleEvent {
+            timestamp_ns: 42_000,
+            task_id: TaskId::from_u32(17),
+            callchain,
+            inclusion_probability: 0.125,
+        })
+        .unwrap();
+        let events = format::decode_events(&enc.finish()).unwrap();
+        let Dial9Event::TaskSampleEvent(sample) = &events[0] else {
+            panic!("expected TaskSampleEvent");
+        };
+        assert_eq!(sample.timestamp_ns, 42_000);
+        assert_eq!(sample.task_id, 17);
+        assert_eq!(sample.callchain, vec![0x1111, 0x2222]);
+        assert_eq!(sample.inclusion_probability, 0.125);
+    }
 
     #[test]
     fn synthetic_trace_round_trip_all_events() {

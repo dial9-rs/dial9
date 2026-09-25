@@ -223,6 +223,20 @@ pub(crate) struct TaskDumpEvent {
     pub callchain: InternedStackFrames,
 }
 
+/// Wire-format event for a task sample: async backtrace captured at a yield point
+/// selected by the worker's capture sampler.
+#[derive(TraceEvent)]
+#[traceevent(wire_slot)]
+#[cfg(any(feature = "taskdump", test))]
+pub(crate) struct TaskSampleEvent {
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    pub task_id: TaskId,
+    pub callchain: InternedStackFrames,
+    /// Probability used before capture; shared by all callchains in this group.
+    pub inclusion_probability: f64,
+}
+
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]

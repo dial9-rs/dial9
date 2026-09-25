@@ -38,4 +38,8 @@ Everything is controlled via CLI flags—run `cargo run -- --help` for the full 
 
 On Linux, CPU profiling and scheduler event tracing are enabled automatically.
 
+Task dumps use the legacy idle-time policy by default. Pass
+`--task-sampling-per-worker-hz 200` to try experimental task sampling
+on the same workload.
+
 Set `PREWARM_FD_TABLE_SIZE=N` to pre-warm the kernel FD table before the runtime starts, mitigating RCU-synchronization latency spikes from FD table growth under load (see [tokio#7970](https://github.com/tokio-rs/tokio/issues/7970)).

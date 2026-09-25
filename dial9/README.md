@@ -186,6 +186,8 @@ such as `dial9::spawn`):
 | --- | --- | --- |
 | `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
 | `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
+| `DIAL9_TASK_SAMPLING_ENABLED` | `false` | Enable experimental sampling before async stack capture. |
+| `DIAL9_TASK_SAMPLING_PER_WORKER_HZ` | `10` | Target captures/s/worker; not a cap. |
 
 See [Task dumps](#task-dumps-linux-only) for setup and usage details.
 
@@ -526,6 +528,11 @@ Field units (from `#[metrics(unit = ..)]` or the value type) are carried into th
 `dial9` can capture async backtraces at yield points. This is the Tokio equivalent of scheduling events: You can see the stack trace your future was at when it went idle.
 
 Task dumps are captured only for futures spawned through a dial9 spawner, such as `dial9::spawn`, with the `taskdump` feature on and `TaskDumpConfig` set. `tokio::spawn` tasks are recorded as usual, minus the dump.
+
+For experimental task sampling, use `TaskSamplingConfig` through
+`TokioAttachOptions::builder().task_sampling_config(...)`. It requires the
+same `taskdump` feature and is not yet intended for production use.
+Existing task-dump settings retain their behavior.
 
 > Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64) and only under `--cfg tokio_unstable`. Enabling it on another target, or without the flag, is a hard compile error from Tokio.
 
