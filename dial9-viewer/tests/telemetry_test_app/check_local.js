@@ -87,16 +87,6 @@ function fixtureFrames(frames) {
   return fixture;
 }
 
-function fixtureSpanForStack(frames, spanNames) {
-  for (let index = frames.length - 1; index >= 0; index--) {
-    const prefix = "dial9_fixture_mixed_";
-    if (!frames[index].startsWith(prefix)) continue;
-    const spanName = `dial9_fixture_span_${frames[index].slice(prefix.length)}`;
-    if (spanNames.has(spanName)) return { spanName };
-  }
-  return null;
-}
-
 function addStack(stacks, feature, frames) {
   const key = `${feature}\0${frames.join("\0")}`;
   const current = stacks.get(key);
@@ -143,12 +133,6 @@ async function observeTrace(paths) {
     trace.tidBindings,
     trace.blockInPlaceGaps,
   ).allSpans;
-  const measuredSpanNames = new Set(
-    allSpans
-      .filter((span) => span.start >= start && span.end <= end)
-      .map((span) => span.spanName),
-  );
-
   const stacks = new Map();
   const associations = new Set();
   for (const sample of trace.cpuSamples) {
@@ -166,21 +150,29 @@ async function observeTrace(paths) {
     addAssociations(associations, "cpu", frames, active);
   }
 
-  for (const dumps of trace.taskDumps.values()) {
+  for (const [taskId, dumps] of trace.taskDumps) {
     for (const dump of dumps) {
       if (dump.timestamp < start || dump.timestamp > end) continue;
       const frames = fixtureFrames(
         callerFirstSymbols(dump.callchain, trace.callframeSymbols),
       );
       if (frames.length === 0) continue;
+      if (!(dump.inclusionProbability > 0 && dump.inclusionProbability <= 1)) {
+        throw new Error("task dump is missing its capture inclusion probability");
+      }
       addStack(stacks, "task_dump", frames);
       addAssociations(
         associations,
         "task_dump",
         frames,
-        // Capture timestamps are poll-start timestamps and can precede the
-        // nested SpanEnter; the innermost mixed fixture frame is unambiguous.
-        fixtureSpanForStack(frames, measuredSpanNames),
+        allSpans
+          .filter((span) =>
+            span.taskId === taskId &&
+            span.start <= dump.timestamp &&
+            span.end >= dump.timestamp,
+          )
+          .sort((a, b) => a.depth - b.depth)
+          .at(-1),
       );
     }
   }
