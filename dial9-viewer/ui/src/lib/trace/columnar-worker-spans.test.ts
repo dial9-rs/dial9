@@ -1,3 +1,4 @@
+import { WakeIndex } from "./wake-index.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -228,9 +229,14 @@ describe("buildWorkerSpansColumnarStore builds the store DIRECTLY, identical to 
     // Non-span aggregates match the fat build.
     expect(direct.maxLocalQueue).toBe(fatWs.maxLocalQueue);
     expect(direct.queueSamples).toEqual(fatWs.queueSamples);
-    expect(direct.workerQueueSamples).toEqual(fatWs.workerQueueSamples);
-    expect(direct.wakesByTask).toEqual(fatWs.wakesByTask);
-    expect(direct.wakesByWorker).toEqual(fatWs.wakesByWorker);
+    expect(direct.queueSampleIndex.toRecordMap()).toEqual(fatWs.workerQueueSamples);
+    const directMaps = direct.wakeIndex.toRecordMaps();
+    expect(wakeFields(directMaps.byTask, TASK_WAKE_FIELDS)).toEqual(
+      fatWs.wakesByTask,
+    );
+    expect(wakeFields(directMaps.byWorker, WORKER_WAKE_FIELDS)).toEqual(
+      fatWs.wakesByWorker,
+    );
   });
 });
 
@@ -351,7 +357,7 @@ describe("ColumnarWorkerSpans.schedulingDelays matches frozen computeSchedulingD
     const fat = computeSchedulingDelays(wsLocal, wids, r.wakesByTask) as any[];
 
     const store = ColumnarWorkerSpans.fromWorkerSpans(wsLocal);
-    const col = store.schedulingDelays(wids, r.wakesByTask as never);
+    const col = store.schedulingDelays(wids, WakeIndex.fromRecords(r.wakesByTask));
 
     expect(col.length).toBe(fat.length);
     expect(fat.length).toBeGreaterThan(0);
@@ -361,6 +367,24 @@ describe("ColumnarWorkerSpans.schedulingDelays matches frozen computeSchedulingD
       taskId: d.taskId, wakerTaskId: d.wakerTaskId, worker: d.worker,
       pollStart: d.poll.start, pollEnd: d.poll.end,
     });
-    expect(col.map(norm)).toEqual(fat.map(norm));
+    expect([...col].map(norm)).toEqual([...fat].map(norm));
   });
 });
+
+/** Keep only `keys` on each wake record. One record now serves both lookups,
+ *  so it has all four fields; the frozen builder wrote three per index. */
+function wakeFields(
+  byKey: Record<string, unknown[]>,
+  keys: readonly string[],
+): Record<string, unknown[]> {
+  return Object.fromEntries(
+    Object.entries(byKey).map(([k, arr]) => [
+      k,
+      (arr as Record<string, unknown>[]).map((rec) =>
+        Object.fromEntries(keys.map((f) => [f, rec[f]])),
+      ),
+    ]),
+  );
+}
+const TASK_WAKE_FIELDS = ["timestamp", "wakerTaskId", "targetWorker"] as const;
+const WORKER_WAKE_FIELDS = ["timestamp", "wakerTaskId", "wokenTaskId"] as const;

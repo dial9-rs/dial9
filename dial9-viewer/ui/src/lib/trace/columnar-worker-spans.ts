@@ -12,12 +12,17 @@
 // buildWorkerSpans next.
 
 import { SegmentForest, spanBucketMerge, type SpanAgg } from "./segment-forest.js";
+import { ColumnarSchedDelays } from "./sched-delays.js";
+import type { SchedDelayList } from "./sched-delays.js";
 import type { CpuSample } from "./columnar-cpu-samples.js";
 import type { SpanList } from "./query.js";
+import type { WakeIndex } from "./wake-index.js";
+import type { QueueSampleIndex } from "./queue-samples.js";
 import type {
   PointOfInterest,
   PointOfInterestType,
   SchedDelay,
+  TaskWake,
   WorkerLane,
   WorkerSpansResult,
 } from "../../types/trace.js";
@@ -210,8 +215,17 @@ export type LaneSpans = WorkerLane | WorkerLaneView;
  * shape except that lanes may be columnar: the frozen function only ever
  * returns fat lanes, so widening WorkerSpansResult itself would misdescribe
  * it. */
-export type LaneWorkerSpans = Omit<WorkerSpansResult, "workerSpans"> & {
+export type LaneWorkerSpans = Omit<
+  WorkerSpansResult,
+  "workerSpans" | "wakesByTask" | "wakesByWorker" | "workerQueueSamples"
+> & {
   workerSpans: Record<number, LaneSpans>;
+  /** Wake storage. */
+  wakeIndex: WakeIndex;
+  /** Per-worker local-queue samples. */
+  queueSampleIndex: QueueSampleIndex;
+  /** Frozen builder only: `computeSchedulingDelays` takes the object map. */
+  wakesByTask?: Record<number, TaskWake[]>;
 };
 
 /** True when `lane` is columnar-backed (dispatch guard for render + hit-test). */
@@ -566,7 +580,7 @@ export class ColumnarWorkerSpans {
   pointsOfInterest(
     filterType: PointOfInterestType,
     workerIds: readonly number[],
-    schedDelays: readonly (SchedDelayView | SchedDelay)[],
+    schedDelays: SchedDelayList | readonly SchedDelay[],
     opts: PoiOpts = {}
   ): PointOfInterest[] {
     const hasSchedWait = !!opts.hasSchedWait;
@@ -1023,56 +1037,71 @@ export class ColumnarWorkerSpans {
    * per-task CSR over Float64 start/end columns (~85 MB, not 1.9 GB of objects),
    * transient to this call.
    */
-  schedulingDelays(
+  schedulingDelays(workerIds: number[], wakes: WakeIndex): ColumnarSchedDelays {
+    const g = this.schedulingDelaysChunked(workerIds, wakes);
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+  }
+
+  /** schedulingDelays in slices, so a load can drive it without blocking the
+   *  frame. Yields the fraction of polls scanned. */
+  *schedulingDelaysChunked(
     workerIds: number[],
-    wakesByTask: Record<number, WakeRec[]>
-  ): SchedDelayView[] {
+    wakes: WakeIndex
+  ): Generator<number, ColumnarSchedDelays, void> {
     // Shared per-task poll CSR (cached; also used by buildSpanDataColumnar).
     const { slotOf: slot, off, start: pStart, end: pEnd } = this.pollsByTaskCSR();
-    const out: SchedDelayView[] = [];
+    let total = 0;
+    for (const w of workerIds) total += this.byWorker.get(w)?.n ?? 0;
+    total ||= 1;
+    let scanned = 0;
+    const out = new ColumnarSchedDelays(this);
     for (const w of workerIds) {
       const c = this.byWorker.get(w);
       if (!c) continue;
       for (let i = 0; i < c.n; i++) {
+        if ((++scanned & SCHED_CHUNK_MASK) === 0) yield scanned / total;
         const taskId = c.taskId[i];
         if (!taskId) continue;
-        const wakes = wakesByTask[taskId];
-        if (!wakes || !wakes.length) continue;
+        const taskWakes = wakes.forTask(taskId);
+        if (taskWakes.length === 0) continue;
         const sStart = c.start[i]!;
         // latest wake with timestamp <= sStart
-        let lo = 0, hi = wakes.length - 1, best = -1;
+        let lo = 0, hi = taskWakes.length - 1, best = -1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
-          if (wakes[mid]!.timestamp <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
+          if (taskWakes.timestampAt(mid) <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
         if (best < 0) continue;
-        const wake = wakes[best]!;
-        let effectiveWake = wake.timestamp;
+        const wakeTs = taskWakes.timestampAt(best);
+        const wakeWaker = taskWakes.wakerTaskIdAt(best);
+        let effectiveWake = wakeTs;
         const s = slot.get(taskId);
         if (s !== undefined) {
           // rightmost poll of the task with start <= wake.timestamp
           let plo = off[s]!, phi = off[s + 1]! - 1, pbest = -1;
           while (plo <= phi) {
             const pmid = (plo + phi) >> 1;
-            if (pStart[pmid]! <= wake.timestamp) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
+            if (pStart[pmid]! <= wakeTs) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
           }
-          if (pbest >= 0 && pStart[pbest]! < sStart && wake.timestamp <= pEnd[pbest]!) {
+          if (pbest >= 0 && pStart[pbest]! < sStart && wakeTs <= pEnd[pbest]!) {
             effectiveWake = pEnd[pbest]!;
           }
         }
         const delay = sStart - effectiveWake;
         if (delay > 0 && delay < 1e9) {
-          out.push({
-            wakeTime: effectiveWake, pollTime: sStart, delay, taskId,
-            wakerTaskId: wake.wakerTaskId, worker: w, poll: this.pollAt(w, i)!,
-          });
+          out.push(effectiveWake, sStart, delay, taskId, wakeWaker, w, i);
         }
       }
     }
-    out.sort((a, b) => a.wakeTime - b.wakeTime);
+    out.finish();
     return out;
   }
 }
+
+/** Polls between yields in schedulingDelaysChunked. */
+const SCHED_CHUNK_MASK = (1 << 16) - 1;
 
 /** Per-worker growable number[] columns during a direct build; frozen to typed
  * arrays in finish(). */

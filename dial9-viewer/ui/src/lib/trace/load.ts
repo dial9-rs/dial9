@@ -1,7 +1,6 @@
 // Load orchestration: a typed wrapper over the frozen trace_parser.js load
 // surface, plus repeatable `trace=` components, parallel fetch + gunzip +
-// concat, and streaming parse with chunk capture so the full buffer stays
-// available for in-memory re-parse (see ./reparse.ts). Loading-view labels,
+// concat, and streaming parse so decode overlaps download. Loading-view labels,
 // elapsed timers, loadPerf records, alerts/credential hints and drop-zone
 // resets are page concerns. The file-drop path is `parseTraceBuffer`; the
 // demo path is `loadTrace("demo-trace.bin")`.
@@ -16,8 +15,11 @@
 // else establishes `globalThis.TraceDecoder`; without this the first parse
 // throws "TraceDecoder not found".
 import "./core-globals.js";
+import { warmDerived } from "./derived.js";
 import { ColumnarEvents, capacityForBytes } from "./columnar-events.js";
 import { ColumnarCpuSamples } from "./columnar-cpu-samples.js";
+import { ColumnarCustomEvents } from "./columnar-custom-events.js";
+import { ColumnarTaskDumps } from "./columnar-task-dumps.js";
 import { ColumnarSpanEvents } from "./columnar-span-events.js";
 import { startLoadPerf } from "./load-perf.js";
 import type { LoadPerfRecorder } from "./load-perf.js";
@@ -38,7 +40,7 @@ import type {
   ParseOptions,
   ParsedTrace,
 } from "../../../trace_parser.js";
-import { streamTraceWithCapture } from "./stream.js";
+import { streamTrace } from "./stream.js";
 import type {
   TraceWorkerFactory,
   TraceWorkerLoadRequest,
@@ -89,11 +91,11 @@ export interface LoadTraceOptions extends FetchOptions, ParseOptions {}
 /** The result of loading one logical trace from URLs. */
 export interface LoadedTrace {
   trace: ParsedTrace;
-  /**
-   * The raw (gunzipped, concatenated) trace bytes, retained so Set/Clear
-   * Range can re-parse in memory without re-fetching.
-   */
-  buffer: ArrayBuffer;
+  /** Decompressed byte count (the decompressed bytes are not retained). */
+  bytes: number;
+  /** The compressed bytes per component, when the loader kept them for
+   *  Set/Clear Range. */
+  compressed?: Uint8Array[];
   /**
    * "stream" when download and decode overlapped (canStreamDecode
    * runtimes); "buffered" for the fetch-then-parse fallback. Pages use this
@@ -139,11 +141,9 @@ export function parseTraceBuffer(
  * time overlaps the download (~max(download, parse) instead of their sum).
  * For multiple URLs the fetches run concurrently and the components stream
  * in back-to-back, in order, as one logical trace - so parsing the first
- * segment overlaps the in-flight downloads of the rest. The gunzipped
- * chunks are captured while parsing so the full buffer is still available
- * afterwards for in-memory Set/Clear-Range re-parsing (which never
- * re-fetches). Mechanism lives in ./stream.ts (shared with the worker body,
- * which must not import this module - see stream.ts header).
+ * segment overlaps the in-flight downloads of the rest. Mechanism lives in
+ * ./stream.ts (shared with the worker body, which must not import this
+ * module - see stream.ts header).
  */
 export async function loadTraceStreamed(
   urls: string | readonly string[],
@@ -151,8 +151,8 @@ export async function loadTraceStreamed(
 ): Promise<LoadedTrace> {
   const list = Array.isArray(urls) ? (urls as readonly string[]) : [urls as string];
   const { fetchOpts, parseOpts } = splitOptions(opts);
-  const { trace, buffer } = await streamTraceWithCapture(list, fetchOpts, parseOpts);
-  return { trace, buffer, mode: "stream" };
+  const { trace, bytes } = await streamTrace(list, fetchOpts, parseOpts);
+  return { trace, bytes, mode: "stream" };
 }
 
 /**
@@ -169,7 +169,7 @@ export async function loadTraceBuffered(
   const { fetchOpts, parseOpts } = splitOptions(opts);
   const buffer = await fetchTraces([...list], fetchOpts);
   const trace = await parseTrace(buffer, parseOpts);
-  return { trace, buffer, mode: "buffered" };
+  return { trace, bytes: buffer.byteLength, mode: "buffered" };
 }
 
 /**
@@ -196,7 +196,7 @@ export function loadTrace(
 // the worker (cooperative fetch cancellation) followed by port.terminate()
 // (authoritative - also kills a compute-bound parse phase that no signal
 // reaches). Message and error payloads cross the boundary via structured
-// clone; the raw buffer is transferred zero-copy.
+// clone.
 
 /**
  * The store surface the worker pipeline writes into. Structurally satisfied
@@ -371,7 +371,7 @@ export function loadTraceInWorker(
           store.update("trace", { trace: message.trace });
           resolveDone({
             trace: message.trace,
-            buffer: message.buffer,
+            bytes: message.timing.bytes,
             mode: message.mode,
             timing: message.timing,
           });
@@ -492,7 +492,7 @@ export function loadTraceOnMainThread(
   perf.mark("start");
 
   const emit = (
-    phase: "fetching" | "parsing",
+    phase: "fetching" | "parsing" | "analyzing",
     bytesRead: number,
     totalBytes: number | null
   ): void => {
@@ -537,15 +537,21 @@ export function loadTraceOnMainThread(
     eventSink: new ColumnarEvents(),
     cpuSampleSink: new ColumnarCpuSamples(),
     spanEventSink,
+    taskDumpSink: new ColumnarTaskDumps(),
+    customEventSink: new ColumnarCustomEvents(),
   };
   if (opts.maxEvents !== undefined) parseOpts.maxEvents = opts.maxEvents;
   if (opts.startTime !== undefined) parseOpts.startTime = opts.startTime;
   if (opts.endTime !== undefined) parseOpts.endTime = opts.endTime;
 
-  const run = async (): Promise<{ trace: ParsedTrace; buffer: ArrayBuffer }> => {
+  const run = async (): Promise<{
+    trace: ParsedTrace;
+    bytes: number;
+    compressed?: Uint8Array[] | undefined;
+  }> => {
     if (mode === "stream") {
       emit("parsing", 0, null);
-      return streamTraceWithCapture(list, fetchOpts, parseOpts);
+      return streamTrace(list, fetchOpts, parseOpts, true);
     }
     emit("fetching", 0, null);
     const buffer = await fetchTraces([...list], fetchOpts);
@@ -558,47 +564,88 @@ export function loadTraceOnMainThread(
     // the final length.
     parseOpts.eventSink = new ColumnarEvents(capacityForBytes(buffer.byteLength));
     const trace = await parseTrace(buffer, parseOpts);
-    return { trace, buffer };
+    return { trace, bytes: buffer.byteLength };
   };
 
   run()
-    .then(({ trace, buffer }) => {
+    .then(({ trace, bytes, compressed }) => {
       perf.mark("parse-done");
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
       trace.spanEvents = spanEventSink;
-      settle(() => {
+      const hasRaf = typeof requestAnimationFrame === "function";
+      // How warmDerived hands the frame back. rAF means the page paints the
+      // new label before the next slice runs; without it (tests, headless) a
+      // resolved promise still breaks the call stack. Rejecting on abort stops
+      // the warm at its next slice.
+      const nextFrame = (): Promise<void> => {
+        if (controller.signal.aborted) {
+          return Promise.reject(new DOMException("trace load aborted", "AbortError"));
+        }
+        return hasRaf
+          ? new Promise<void>((resolve) => {
+              requestAnimationFrame(() => {
+                resolve();
+              });
+            })
+          : Promise.resolve();
+      };
+      const commit = (): void => {
         store.update("trace", { trace });
         perf.mark("store-updated");
         // The store arms its flush rAF inside update() above, so this callback
-        // is registered AFTER it and runs once the first render pass over the
-        // new trace has completed. That pass is where every consumer's
-        // post-parse derivation lands, which is what "derive" measures.
-        const report = (): void =>
+        // is registered AFTER it and runs once the first render over the new
+        // trace has completed - a render against warm caches.
+        const finish = (): void => {
           perf.finish({
             mode,
             urlCount: list.length,
             events: trace.events.length,
-            bytes: buffer.byteLength,
+            bytes,
           });
-        if (typeof requestAnimationFrame === "function") {
+          const timing: TraceWorkerTiming = {
+            startMs,
+            fetchDoneMs,
+            parseDoneMs: performance.now(),
+            mode,
+            events: trace.events.length,
+            bytes,
+          };
+          // The page closes its loading view when this resolves, so it waits
+          // for the first render over the new trace.
+          resolveDone(
+            compressed === undefined
+              ? { trace, bytes, mode, timing }
+              : { trace, bytes, mode, timing, compressed },
+          );
+        };
+        if (hasRaf) {
           requestAnimationFrame(() => {
             perf.mark("first-paint");
-            report();
+            finish();
           });
         } else {
-          report(); // No rAF (tests / headless): report without the derive span.
+          finish(); // No rAF (tests / headless): no derive span to wait for.
         }
-        const timing: TraceWorkerTiming = {
-          startMs,
-          fetchDoneMs,
-          parseDoneMs: performance.now(),
-          mode,
-          events: trace.events.length,
-          bytes: buffer.byteLength,
-        };
-        resolveDone({ trace, buffer, mode, timing });
-      });
+      };
+
+      // Derivation runs here, in slices, so the page can report where it is
+      // and the trace lands on the store with its caches already warm. Left
+      // to the first render it is one block, seconds long on a large trace,
+      // with no paint and no timer tick. The load settles only once the warm
+      // is done, so an abort during it still rejects and skips the commit.
+      if (controller.signal.aborted) return;
+      emit("analyzing", 0, 1);
+      const settleCommit = (): void => {
+        settle(commit);
+      };
+      void warmDerived(
+        trace,
+        (fraction) => {
+          emit("analyzing", fraction, 1);
+        },
+        nextFrame,
+      ).then(settleCommit, settleCommit); // A failed warm still commits: the lazy path redoes it.
     })
     .catch((err: unknown) => {
       // Release this run's marks; an aborted/failed load has no useful spans

@@ -146,9 +146,8 @@ describe("worker body: stream load", () => {
     expect(done.trace.maxTs).toBe(direct.maxTs);
     expect(done.trace.callframeSymbols.size).toBe(direct.callframeSymbols.size);
 
-    // The raw buffer round-trips for Set/Clear-Range re-parse.
     expect(done.mode).toBe("stream");
-    expectBytesEqual(new Uint8Array(done.buffer), rawTrace);
+    expect(done.timing.bytes).toBe(rawTrace.length);
 
     // Progress: first message opens the parse phase; later ones carry
     // live byte/event counters; every load-timing field is populated.
@@ -212,7 +211,7 @@ describe("worker body: buffered fallback", () => {
     expect(done.mode).toBe("buffered");
     // Mid-stream TRC\0 header resets the decoder: double the events.
     expect(done.trace.events.length).toBe(direct.events.length * 2);
-    expect(done.buffer.byteLength).toBe(rawTrace.length * 2);
+    expect(done.timing.bytes).toBe(rawTrace.length * 2);
 
     const progress = progressOf(sink).map((m) => m.progress);
     expect(progress[0]).toMatchObject({
@@ -256,9 +255,8 @@ describe("worker body: parse-buffer", () => {
     expect(done.trace.events.at(-1)).toEqual(direct.events.at(-1));
     expect(done.trace.minTs).toBe(direct.minTs);
     expect(done.trace.maxTs).toBe(direct.maxTs);
-    // The decompressed bytes round-trip; their length is what the budget
-    // accountant records as the segment's resident raw size.
-    expectBytesEqual(new Uint8Array(done.buffer), rawTrace);
+    // The decompressed length is what the budget accountant records as the
+    // segment's resident raw size.
     expect(done.timing.bytes).toBe(rawTrace.length);
     expect(done.timing.fetchDoneMs).toBeNull();
 

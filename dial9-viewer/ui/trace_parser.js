@@ -208,7 +208,11 @@
      * {@link fetchTraces}.
      *
      * @param {string} url single trace URL
-     * @param {{signal?: AbortSignal, headers?: Object}} [opts]
+     * @param {{signal?: AbortSignal, headers?: Object,
+     *   onRawChunk?: (chunk: Uint8Array, isGzip: boolean) => void}} [opts]
+     *   `onRawChunk` receives the bytes as they arrived, before any gunzip,
+     *   with whether this component was gzipped. fetchTracesStream adds the
+     *   component index as a third argument.
      * @returns {Promise<AsyncIterable<Uint8Array>>}
      */
     async function fetchTraceStream(url, opts = {}) {
@@ -244,10 +248,16 @@
             first[1] === 0x8b;
 
         // A ReadableStream that re-emits the peeked first chunk then drains the
-        // rest of the body reader.
+        // rest of the body reader. `onRawChunk` sees the bytes as they arrived,
+        // before any gunzip, so a caller can keep the compressed form, with
+        // whether this component was gzipped.
+        const onRaw = opts.onRawChunk;
         const rawStream = new ReadableStream({
             start(controller) {
-                if (first != null) controller.enqueue(first);
+                if (first != null) {
+                    if (onRaw) onRaw(first, isGzip);
+                    controller.enqueue(first);
+                }
             },
             async pull(controller) {
                 const { value, done } = await reader.read();
@@ -255,7 +265,12 @@
                     controller.close();
                     return;
                 }
-                if (value && value.byteLength > 0) controller.enqueue(value);
+                if (value && value.byteLength > 0) {
+                    const u8 =
+                        value instanceof Uint8Array ? value : new Uint8Array(value);
+                    if (onRaw) onRaw(u8, isGzip);
+                    controller.enqueue(u8);
+                }
             },
             cancel(reason) {
                 return reader.cancel(reason);
@@ -326,8 +341,19 @@
         // a no-op catch to each promise immediately to mark it handled; the loop
         // below still awaits the ORIGINAL promise, so the real error surfaces
         // (and rejects the iterator) when emission reaches that component.
-        const streamPromises = list.map((url) => {
-            const p = fetchTraceStream(url, opts);
+        const streamPromises = list.map((url, i) => {
+            // Tag each raw chunk with its component, so a caller keeping the
+            // compressed bytes can keep them per component. Gzip members are
+            // only reliably decodable one at a time.
+            const perComponent =
+                opts.onRawChunk === undefined
+                    ? opts
+                    : {
+                          ...opts,
+                          onRawChunk: (chunk, isGzip) =>
+                              opts.onRawChunk(chunk, isGzip, i),
+                      };
+            const p = fetchTraceStream(url, perComponent);
             p.catch(() => {});
             return p;
         });
@@ -751,8 +777,16 @@
             // before RuntimeMetricsEvent replaced it. Keep that optional field
             // in a side channel so traces from that generation remain useful.
             legacyActiveTaskSamples: [],
-            taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
-            customEvents: [], // unrecognized event types: {name, timestamp, fields}
+            // taskId → [{timestamp, callchain}] sorted by timestamp. An optional
+            // columnar sink (src/lib/trace/columnar-task-dumps.ts) replaces the
+            // Map: it exposes the same get/has/keys reads, but holds dumps in
+            // flat columns instead of two objects each.
+            taskDumps: (options && options.taskDumpSink) || new Map(),
+            // Unrecognized event types: {name, timestamp, fields}. An optional
+            // columnar sink (src/lib/trace/columnar-custom-events.ts) replaces
+            // the array: it types each schema's fields into columns and
+            // resolves units/fieldKinds from the schema on read.
+            customEvents: (options && options.customEventSink) || [],
             // Schema active when each custom event was decoded. Kept parallel to
             // customEvents only until finalizeParse so annotation frames that
             // legally arrive after an event still reach that event's metadata.
@@ -1238,30 +1272,38 @@
                     singleEventSpan,
                 );
             if (!storedInSink) {
-                // units/fieldKinds resolved in finalizeParse (see below).
+                if (customEvents.pushCustom) {
+                    customEvents.pushCustom(frame.name, ts, v, schema, singleEventSpan);
+                } else {
+                    // units/fieldKinds resolved in finalizeParse (see below).
+                    customEvents.push({
+                        name: frame.name,
+                        timestamp: ts,
+                        fields: v,
+                        units: null,
+                        fieldKinds: null,
+                        singleEventSpan,
+                    });
+                    state.customEventSchemas.push(schema);
+                }
+            }
+        } else if (isSingleEventSchema && ts != null) {
+            // Invalid schemas and per-event projection failures remain visible
+            // as ordinary custom events, but must not mutate runtime state based
+            // only on a colliding schema name.
+            if (customEvents.pushCustom) {
+                customEvents.pushCustom(frame.name, ts, v, schema, null);
+            } else {
                 customEvents.push({
                     name: frame.name,
                     timestamp: ts,
                     fields: v,
                     units: null,
                     fieldKinds: null,
-                    singleEventSpan,
+                    singleEventSpan: null,
                 });
                 state.customEventSchemas.push(schema);
             }
-        } else if (isSingleEventSchema && ts != null) {
-            // Invalid schemas and per-event projection failures remain visible
-            // as ordinary custom events, but must not mutate runtime state based
-            // only on a colliding schema name.
-            customEvents.push({
-                name: frame.name,
-                timestamp: ts,
-                fields: v,
-                units: null,
-                fieldKinds: null,
-                singleEventSpan: null,
-            });
-            state.customEventSchemas.push(schema);
         }
         if (isSingleEventSchema) {
             return;
@@ -1459,6 +1501,12 @@
             }
             case "TaskDumpEvent": {
                 const taskId = num(v.task_id);
+                if (taskDumps.pushDump) {
+                    // Columnar sink: it interns frames into its own pool, so
+                    // pass the raw callchain and build no per-dump objects.
+                    taskDumps.pushDump(taskId, ts, v.callchain || []);
+                    break;
+                }
                 const chain = (v.callchain || []).map(
                     (addr) => internHex(state.hexIntern, addr),
                 );
@@ -1576,18 +1624,25 @@
                             spanEventSink.pushIfSpan(frame.name, ts, v, null)
                         )
                     ) {
-                        // units/fieldKinds are resolved in finalizeParse from
-                        // the parallel customEventSchemas array (trailing
-                        // annotation frames may still update the schema).
-                        customEvents.push({
-                            name: frame.name,
-                            timestamp: ts,
-                            fields: v,
-                            units: null,
-                            fieldKinds: null,
-                            singleEventSpan: null,
-                        });
-                        state.customEventSchemas.push(schema);
+                        if (customEvents.pushCustom) {
+                            // The sink holds the schema itself, so units and
+                            // fieldKinds resolve on read - including from
+                            // annotation frames that arrive later.
+                            customEvents.pushCustom(frame.name, ts, v, schema, null);
+                        } else {
+                            // units/fieldKinds are resolved in finalizeParse from
+                            // the parallel customEventSchemas array (trailing
+                            // annotation frames may still update the schema).
+                            customEvents.push({
+                                name: frame.name,
+                                timestamp: ts,
+                                fields: v,
+                                units: null,
+                                fieldKinds: null,
+                                singleEventSpan: null,
+                            });
+                            state.customEventSchemas.push(schema);
+                        }
                     }
                 }
                 break;
@@ -1669,11 +1724,13 @@
         // their type (see docs/design/single-event-spans.md), so the decode-time
         // projection in processFrame is already final. Both decoders classify in
         // a single pass; neither re-resolves spans after the fact.
-        for (let i = 0; i < customEvents.length; i++) {
-            const event = customEvents[i];
-            const schema = customEventSchemas[i];
-            event.units = schema?.units || null;
-            event.fieldKinds = schema?.fieldKinds || null;
+        if (!customEvents.pushCustom) {
+            for (let i = 0; i < customEvents.length; i++) {
+                const event = customEvents[i];
+                const schema = customEventSchemas[i];
+                event.units = schema?.units || null;
+                event.fieldKinds = schema?.fieldKinds || null;
+            }
         }
 
         // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
@@ -1695,9 +1752,12 @@
             return 0;
         });
 
-        // Sort task dumps by timestamp for efficient lookup during rendering
-        for (const arr of taskDumps.values()) {
-            arr.sort((a, b) => a.timestamp - b.timestamp);
+        // Sort task dumps by timestamp for efficient lookup during rendering.
+        // The columnar sink orders each task's dumps as it groups them.
+        if (!taskDumps.pushDump) {
+            for (const arr of taskDumps.values()) {
+                arr.sort((a, b) => a.timestamp - b.timestamp);
+            }
         }
         for (const [tid, bindings] of tidBindings) {
             bindings.sort((a, b) => a.timestamp - b.timestamp);

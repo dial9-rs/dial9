@@ -28,6 +28,7 @@ beforeAll(() => {
 const FIELDS: (keyof EventLike)[] = [
   "eventType", "timestamp", "workerId", "localQueue", "globalQueue",
   "cpuTime", "schedWait", "taskId", "spawnLocId", "spawnLoc", "tid",
+  "wakerTaskId", "wokenTaskId",
 ];
 
 describe("ColumnarEvents parser sink parity", () => {
@@ -62,8 +63,11 @@ describe("ColumnarEvents parser sink parity", () => {
 
 // The fat parser omits `tid` (undefined) on events that never set it, and sets
 // schedWait null on unsampled unparks; the store round-trips both identically.
+// The wake ids are absent on non-wake events, which the fat parser spells
+// `undefined` and the store spells NaN.
 function normalize(f: keyof EventLike, v: unknown): unknown {
   if (f === "tid" && v === undefined) return undefined;
+  if ((f === "wakerTaskId" || f === "wokenTaskId") && v === undefined) return NaN;
   return v;
 }
 
@@ -89,8 +93,12 @@ describe("buildWorkerSpans columnar parity", () => {
     expect(b.queueSamples).toStrictEqual(a.queueSamples);
     expect(b.workerQueueSamples).toStrictEqual(a.workerQueueSamples);
     expect(b.maxLocalQueue).toBe(a.maxLocalQueue);
-    expect(b.wakesByTask).toStrictEqual(a.wakesByTask);
-    expect(b.wakesByWorker).toStrictEqual(a.wakesByWorker);
+    expect(wakeFields(b.wakesByTask, TASK_WAKE_FIELDS)).toStrictEqual(
+      a.wakesByTask,
+    );
+    expect(wakeFields(b.wakesByWorker, WORKER_WAKE_FIELDS)).toStrictEqual(
+      a.wakesByWorker,
+    );
   });
 });
 
@@ -263,3 +271,67 @@ describe("capacityForBytes", () => {
     expect(b.at(199)!.taskId).toBe(199);
   });
 });
+
+describe("column widths", () => {
+  it("costs 54 bytes per event", () => {
+    const store = new ColumnarEvents(1) as unknown as Record<
+      string,
+      { BYTES_PER_ELEMENT: number }
+    >;
+    const widths: Record<string, number> = {
+      eventType: 1,
+      ts: 8,
+      workerId: 4,
+      localQueue: 1,
+      globalQueue: 4,
+      cpuTime: 8,
+      schedWaitRaw: 8,
+      taskIdx: 4,
+      spawnLocIdx: 4,
+      tidRaw: 4,
+      wakerTaskIdx: 4,
+      wokenTaskIdx: 4,
+    };
+    let total = 0;
+    for (const [col, want] of Object.entries(widths)) {
+      expect(store[col]!.BYTES_PER_ELEMENT, `${col} width`).toBe(want);
+      total += want;
+    }
+    expect(total).toBe(54);
+  });
+
+  it("round-trips a tid past Float32's exact range, and an absent one", () => {
+    const store = new ColumnarEvents(4);
+    // Above 2^24, where a Float32 column would start rounding.
+    store.pushEvent(0, 1, 0, 0, 0, 0, null, 1, null, 16_777_217, undefined, undefined);
+    store.pushEvent(0, 2, 0, 0, 0, 0, null, 1, null, 4_294_967_294, undefined, undefined);
+    store.pushEvent(0, 3, 0, 0, 0, 0, null, 1, null, undefined, undefined, undefined);
+    expect(store.tidAt(0)).toBe(16_777_217);
+    expect(store.tidAt(1)).toBe(4_294_967_294);
+    expect(store.tidAt(2)).toBeUndefined();
+  });
+
+  it("holds the full u8 range of local-queue depth", () => {
+    const store = new ColumnarEvents(2);
+    store.pushEvent(0, 1, 0, 255, 0, 0, null, 1, null, undefined, undefined, undefined);
+    expect(store.at(0)!.localQueue).toBe(255);
+  });
+});
+
+/** Keep only `keys` on each wake record. One record now serves both lookups,
+ *  so it has all four fields; the frozen builder wrote three per index. */
+function wakeFields(
+  byKey: Record<string, unknown[]>,
+  keys: readonly string[],
+): Record<string, unknown[]> {
+  return Object.fromEntries(
+    Object.entries(byKey).map(([k, arr]) => [
+      k,
+      (arr as Record<string, unknown>[]).map((rec) =>
+        Object.fromEntries(keys.map((f) => [f, rec[f]])),
+      ),
+    ]),
+  );
+}
+const TASK_WAKE_FIELDS = ["timestamp", "wakerTaskId", "targetWorker"] as const;
+const WORKER_WAKE_FIELDS = ["timestamp", "wakerTaskId", "wokenTaskId"] as const;

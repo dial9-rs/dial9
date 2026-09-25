@@ -1,8 +1,8 @@
-// The streaming fetch + gunzip + capture mechanism shared by the main-thread
-// load path (load.ts loadTraceStreamed) and the Web Worker load body
-// (worker/body.ts). It is a leaf module so the worker body can import it
-// without pulling load.ts's worker ORCHESTRATOR (and thus the worker entry)
-// into the worker bundle graph.
+// The streaming fetch + gunzip pipeline shared by the main-thread load path
+// (load.ts loadTraceStreamed) and the Web Worker load body (worker/body.ts).
+// It is a leaf module so the worker body can import it without pulling
+// load.ts's worker orchestrator (and thus the worker entry) into the worker
+// bundle graph.
 //
 // LEAF-MODULE RULE (plain-Node constraint): the worker body runs under plain
 // Node via native type stripping (no bundler), which resolves import
@@ -22,67 +22,101 @@ import type {
   ParsedTrace,
 } from "../../../trace_parser.js";
 
-/** A streamed parse plus the reassembled raw bytes it consumed. */
+/** A streamed parse and how many raw bytes it consumed. */
 export interface StreamedParse {
   trace: ParsedTrace;
+  /** Decompressed byte count (the decompressed bytes are not retained). */
+  bytes: number;
   /**
-   * The raw (gunzipped, concatenated) trace bytes, captured while parsing
-   * and reassembled, so Set/Clear Range can re-parse in memory without
-   * re-fetching.
+   * The bytes as they arrived, still compressed, one entry per component.
+   * Absent when nothing asked for them, or when a component arrived
+   * uncompressed.
+   *
+   * Kept apart rather than concatenated: a gzip stream of several members
+   * decodes on some runtimes and throws "trailing junk" on others, so each
+   * component re-parses as its own source.
    */
-  buffer: ArrayBuffer;
+  compressed?: Uint8Array[];
 }
 
 /**
- * Parse an async stream of raw (already-gunzipped) trace chunks while
- * capturing them, then reassemble the captured chunks into the full raw
- * buffer. The chunk source is the caller's concern: the URL path below
- * feeds it fetch streams; the worker's parse-buffer path feeds it a
- * DecompressionStream over cached gzip bytes.
+ * Parse an async stream of raw (already-gunzipped) trace chunks. The chunk
+ * source is the caller's concern: the URL path below feeds it fetch streams;
+ * the worker's parse-buffer path feeds it a DecompressionStream over cached
+ * gzip bytes.
+ *
+ * Chunks are handed to the parser and dropped: retaining the decompressed form
+ * costs the whole trace, 1.28 GB at 30M events. Set/Clear Range re-parses the
+ * compressed bytes instead, which `streamTrace` captures for a third of that
+ * (raw-byte-cache.ts makes the same trade for segments).
  */
-export async function parseChunksWithCapture(
+export async function parseChunks(
   chunks: AsyncIterable<Uint8Array>,
   parseOpts: ParseOptions
 ): Promise<StreamedParse> {
-  const captured: Uint8Array[] = [];
-  const capturing: AsyncIterable<Uint8Array> = {
+  let bytes = 0;
+  const counting: AsyncIterable<Uint8Array> = {
     async *[Symbol.asyncIterator]() {
       for await (const chunk of chunks) {
-        captured.push(chunk);
+        bytes += chunk.length;
         yield chunk;
       }
     },
   };
-  const trace = await parseTraceStream(capturing, parseOpts);
-  let total = 0;
-  for (const c of captured) total += c.length;
-  const buffer = new Uint8Array(total);
-  let off = 0;
-  for (const c of captured) {
-    buffer.set(c, off);
-    off += c.length;
-  }
-  return { trace, buffer: buffer.buffer };
+  const trace = await parseTraceStream(counting, parseOpts);
+  return { trace, bytes };
 }
 
 /**
  * Stream one OR MORE trace URLs: decode chunks as they download so parse
  * time overlaps the download (~max(download, parse) instead of their sum).
- * For multiple URLs the fetches run concurrently and the components stream
- * in back-to-back, in order, as one logical trace - so parsing the first
- * segment overlaps the in-flight downloads of the rest. The gunzipped
- * chunks are captured while parsing so the full buffer is still
- * available afterwards for in-memory Set/Clear-Range re-parsing (which
- * never re-fetches).
+ * For multiple URLs a few fetches run at once and the components stream in
+ * back-to-back, in order, as one logical trace - so parsing the first segment
+ * overlaps the in-flight downloads of the rest.
  */
-export async function streamTraceWithCapture(
+export async function streamTrace(
   urls: readonly string[],
   fetchOpts: FetchOptions,
-  parseOpts: ParseOptions
+  parseOpts: ParseOptions,
+  captureCompressed = false
 ): Promise<StreamedParse> {
+  // Chunks per component, in arrival order; index 0 for the single-URL path,
+  // which never reports one. Sized up front: an empty component reports no
+  // chunk, and the re-parse needs its entry all the same.
+  let captured: Uint8Array[][] | null = captureCompressed
+    ? Array.from(urls, () => [])
+    : null;
+  const opts: FetchOptions = captureCompressed
+    ? {
+        ...fetchOpts,
+        onRawChunk: (chunk: Uint8Array, isGzip: boolean, component = 0): void => {
+          if (captured === null) return;
+          // Re-parsing a component means gunzipping it, so a plain one has
+          // nothing to re-parse from and the whole capture goes.
+          if (!isGzip) {
+            captured = null;
+            return;
+          }
+          (captured[component] ??= []).push(chunk);
+        },
+      }
+    : fetchOpts;
   const stream =
     urls.length === 1
-      ? await fetchTraceStream(urls[0]!, fetchOpts)
-      : fetchTracesStream([...urls], fetchOpts);
-  return parseChunksWithCapture(stream, parseOpts);
+      ? await fetchTraceStream(urls[0]!, opts)
+      : fetchTracesStream([...urls], opts);
+  const parsed = await parseChunks(stream, parseOpts);
+  if (captured === null) return parsed;
+  const compressed = captured.map((chunks) => {
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return out;
+  });
+  return { ...parsed, compressed };
 }

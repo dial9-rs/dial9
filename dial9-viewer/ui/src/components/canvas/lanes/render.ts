@@ -17,6 +17,8 @@
 // by `sf = laneH / LANE_REF_H`, so the poll band, queue step area, ticks and
 // triangles keep their proportions at any row height.
 
+import type { QueueSampleIndex } from "../../../lib/trace/queue-samples.js";
+import type { WakeIndex } from "../../../lib/trace/wake-index.js";
 import type {
   ActiveSpan,
   BlockInPlaceGap,
@@ -101,9 +103,9 @@ export interface LanesRenderInput {
    *  as its lanes' rails. Absent name -> the default accent. */
   runtimeAccents: ReadonlyMap<string, string>;
   /** Per-worker local-queue samples, sorted by t. */
-  workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
+  queueSampleIndex: QueueSampleIndex;
   /** Wake events indexed by target worker. */
-  wakesByWorker: Readonly<Record<number, readonly WorkerWake[]>>;
+  wakeIndex: WakeIndex;
   /** span id -> every span instance sharing it (highlight lookup). */
   spansById: SpanByIdMulti;
   /** Block-in-place handoff gaps (hatched overlay). */
@@ -228,18 +230,18 @@ function strokeStyleOf(styleKey: string): StrokeStyleSpec {
  */
 export function sharedVisibleMaxQueue(
   workerIds: readonly number[],
-  workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>,
+  queueSampleIndex: QueueSampleIndex,
   viewStart: number,
   viewEnd: number,
 ): number {
   let max = 1;
   for (const w of workerIds) {
-    const samples = workerQueueSamples[w];
-    if (!samples || samples.length === 0) continue;
-    const start = Math.max(0, lowerBoundT(samples, viewStart));
-    const end = Math.min(samples.length - 1, upperBoundT(samples, viewEnd));
+    const samples = queueSampleIndex.forWorker(w);
+    if (samples.length === 0) continue;
+    const start = Math.max(0, samples.lastAtOrBefore(viewStart));
+    const end = Math.min(samples.length - 1, samples.firstAtOrAfter(viewEnd));
     for (let i = start; i <= end; i++) {
-      const local = samples[i]!.local;
+      const local = samples.localAt(i);
       if (local > max) max = local;
     }
   }
@@ -899,16 +901,17 @@ function drawWakeMarkers(
 ): void {
   const selected = input.selectedTaskId;
   if (!selected) return;
-  const wakes = input.wakesByWorker[workerId];
-  if (!wakes || wakes.length === 0) return;
+  const wakes = input.wakeIndex.forWorker(workerId);
+  if (wakes.length === 0) return;
   const { viewStart, viewEnd } = input;
   ctx.fillStyle = "#66bb6a";
   const yTop = top + 2 * sf;
   const yBot = top + 8 * sf;
-  for (const w of wakes) {
-    if (w.timestamp < viewStart || w.timestamp > viewEnd) continue;
-    if (w.wokenTaskId !== selected) continue;
-    const x = nsToX(w.timestamp);
+  for (let i = 0; i < wakes.length; i++) {
+    const t = wakes.timestampAt(i);
+    if (t < viewStart || t > viewEnd) continue;
+    if (wakes.wokenTaskIdAt(i) !== selected) continue;
+    const x = nsToX(t);
     ctx.beginPath();
     ctx.moveTo(x, yTop);
     ctx.lineTo(x - 3, yBot);
@@ -933,11 +936,11 @@ function drawQueueStepLine(
   // The recorded 0 is a sentinel; a step line would read as "the local queues
   // are empty" rather than "unmeasured".
   if (!input.hasLocalQueueDepth) return;
-  const samples = input.workerQueueSamples[workerId];
-  if (!samples || samples.length === 0) return;
+  const samples = input.queueSampleIndex.forWorker(workerId);
+  if (samples.length === 0) return;
   const { viewStart, viewEnd } = input;
-  const iStart = Math.max(0, lowerBoundT(samples, viewStart));
-  const iEnd = Math.min(samples.length - 1, upperBoundT(samples, viewEnd));
+  const iStart = Math.max(0, samples.lastAtOrBefore(viewStart));
+  const iEnd = Math.min(samples.length - 1, samples.firstAtOrAfter(viewEnd));
   if (iEnd < iStart) return;
   const maxQ = input.sharedMaxQ || 1;
 
@@ -954,7 +957,7 @@ function drawQueueStepLine(
   const yOf = (s: { local: number }): number => qTop + qH - (s.local / maxQ) * qH;
   // One slice of the visible window (was two: an intermediate copy per worker
   // per frame). `points` is pushed onto below; nothing else reads the slice.
-  const points: { t: number; local: number }[] = samples.slice(iStart, iEnd + 1);
+  const points: { t: number; local: number }[] = samples.recordsIn(iStart, iEnd);
   const last = points[points.length - 1]!;
   // Trailing extension so the final level runs to the panel edge - but ONLY
   // when the last visible sample sits left of the edge. iEnd may include one

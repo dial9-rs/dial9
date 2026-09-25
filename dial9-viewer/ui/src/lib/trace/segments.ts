@@ -260,7 +260,7 @@ export const parseSegmentInWorker: SegmentParser = (bytes, opts = {}) => {
         settle(() => {
           resolveDone({
             trace: message.trace,
-            rawByteLength: message.buffer.byteLength,
+            rawByteLength: message.timing.bytes,
           });
         });
         return;

@@ -16,6 +16,8 @@
 
 import { EVT } from "./columnar-events.js";
 import type { ColumnarEvents } from "./columnar-events.js";
+import { WakeIndex } from "./wake-index.js";
+import { QueueSampleIndex } from "./queue-samples.js";
 import { ColumnarWorkerSpansBuilder, type ColumnarWorkerSpans } from "./columnar-worker-spans.js";
 import type {
   BlockInPlaceGap,
@@ -79,20 +81,29 @@ class StoreSpanEmitter implements SpanEmitter {
 interface SpanAggregates {
   perWorker: ByWorker<number[]>;
   queueSamples: { t: number; global: number }[];
-  workerQueueSamples: ByWorker<{ t: number; local: number }[]>;
+  queueSampleIndex: QueueSampleIndex;
   maxLocalQueue: number;
-  wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
-  wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
+  wakeIndex: WakeIndex;
 }
 
 /** The shared span state machine; emits polls/parks/actives through `emit`. */
-function reconstruct(
+/** Events between yields. A power of two, so the loops test it with a mask. */
+const CHUNK_MASK = (1 << 18) - 1;
+
+/** Run a chunked build straight through, for the synchronous callers. */
+function drain<T>(g: Generator<number, T, void>): T {
+  let r = g.next();
+  while (!r.done) r = g.next();
+  return r.value;
+}
+
+function* reconstructChunked(
   store: ColumnarEvents,
   workerIds: readonly number[],
   maxTs: number,
   blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined,
   emit: SpanEmitter,
-): SpanAggregates {
+): Generator<number, SpanAggregates, void> {
   const openPoll: ByWorker<number | null> = {};
   const openPark: ByWorker<number | null> = {};
   const openUnpark: ByWorker<{ timestamp: number; cpuTime: number } | null> = {};
@@ -103,53 +114,75 @@ function reconstruct(
     for (const g of blockInPlaceGaps) (gapsByW[g.workerId] ??= []).push(g);
   }
 
-  const workerQueueSamples: ByWorker<{ t: number; local: number }[]> = {};
+  const queueSampleIndex = new QueueSampleIndex();
   let maxLocalQueue = 1;
-  const wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]> = {};
-  const wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]> = {};
+  // Flat quads (ts, waker, woken, worker) folded into a CSR index below
+  const wakeRows: number[] = [];
 
-  for (const w of workerIds) workerQueueSamples[w] = [];
+  for (const w of workerIds) queueSampleIndex.ensure(w);
 
   const eventType = store.eventType;
   const ts = store.ts;
   const workerId = store.workerId;
   const localQueue = store.localQueue;
   const cpuTime = store.cpuTime;
-  const taskId = store.taskId;
   const globalQueue = store.globalQueue;
-  const wakerRaw = store.wakerTaskIdRaw;
-  const wokenRaw = store.wokenTaskIdRaw;
+  // Task-id columns are interned indices, decode inline (only wake rows and
+  // poll starts need it, not every event).
+  const taskIdx = store.taskIdx;
+  const wakerIdx = store.wakerTaskIdx;
+  const wokenIdx = store.wokenTaskIdx;
+  const taskIds = store.taskIdList;
   const n = store.length;
+
+  // Four passes over roughly n events each; `done` drives the progress the
+  // loader reports while this runs in chunks (see reconstructChunked's callers).
+  const totalWork = n * 4 || 1;
+  let done = 0;
 
   // First pass: bucket event INDICES by worker; index wake events.
   const perWorker: ByWorker<number[]> = {};
   for (let i = 0; i < n; i++) {
+    if ((i & CHUNK_MASK) === 0 && i > 0) yield (done + i) / totalWork;
     const et = eventType[i];
     if (et === EVT.WakeEvent) {
-      const woken = wokenRaw[i]!;
+      const wi = wokenIdx[i]!;
+      const woken = wi < 0 ? NaN : taskIds[wi]!;
       const target = workerId[i]!; // targetWorker === workerId for wake events
-      const waker = wakerRaw[i]!;
-      (wakesByTask[woken] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, targetWorker: target });
-      (wakesByWorker[target] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, wokenTaskId: woken });
+      const ki = wakerIdx[i]!;
+      const waker = ki < 0 ? NaN : taskIds[ki]!;
+      wakeRows.push(ts[i]!, waker, woken, target);
     } else if (et !== EVT.QueueSample) {
       (perWorker[workerId[i]!] ??= []).push(i);
     }
   }
 
-  // Stable sort of indices by ts (JS sort is stable, so equal-ts events keep
-  // their original event order, matching the frozen object sort).
-  for (const key in perWorker) perWorker[key]!.sort((a, b) => ts[a]! - ts[b]!);
-  for (const key in wakesByTask) wakesByTask[key]!.sort((a, b) => a.timestamp - b.timestamp);
-  for (const key in wakesByWorker) wakesByWorker[key]!.sort((a, b) => a.timestamp - b.timestamp);
+  done += n;
 
+  // Stable sort of indices by ts (JS sort is stable, so equal-ts events keep
+  // their original event order, matching the frozen object sort). One sort is
+  // atomic, so the yield can only land between workers.
+  for (const key in perWorker) {
+    perWorker[key]!.sort((a, b) => ts[a]! - ts[b]!);
+    done += perWorker[key]!.length;
+    yield done / totalWork;
+  }
+  const wakeIndex = WakeIndex.build(wakeRows.length / 4, (emit) => {
+    for (let k = 0; k < wakeRows.length; k += 4) {
+      emit(wakeRows[k]!, wakeRows[k + 1]!, wakeRows[k + 2]!, wakeRows[k + 3]!);
+    }
+  });
+
+  let step = 0;
   for (const workerKey in perWorker) {
     const w = Number(workerKey);
     for (const i of perWorker[workerKey]!) {
+      if ((++step & CHUNK_MASK) === 0) yield (done + step) / totalWork;
       const et = eventType[i];
       const t = ts[i]!;
 
       if (et === EVT.PollStart || et === EVT.WorkerPark || et === EVT.WorkerUnpark) {
-        workerQueueSamples[workerKey]!.push({ t, local: localQueue[i]! });
+        queueSampleIndex.push(w, t, localQueue[i]!);
         if (localQueue[i]! > maxLocalQueue) maxLocalQueue = localQueue[i]!;
       }
 
@@ -160,7 +193,12 @@ function reconstruct(
         }
         openPoll[workerKey] = t;
         const sl = store.spawnLocAt(i);
-        openPollMeta[workerKey] = { taskId: taskId[i]!, spawnLocId: sl, spawnLoc: sl };
+        const ti = taskIdx[i]!;
+        openPollMeta[workerKey] = {
+          taskId: ti < 0 ? 0 : taskIds[ti]!,
+          spawnLocId: sl,
+          spawnLoc: sl,
+        };
       } else if (et === EVT.PollEnd) {
         if (openPoll[workerKey] != null) {
           const meta = openPollMeta[workerKey] || defaultMeta;
@@ -209,13 +247,26 @@ function reconstruct(
     if (openPark[w] != null) emit.park(w, openPark[w]!, maxTs);
   }
 
+  done += step;
+
   // Global queue samples, in original event order (not per-worker sorted).
   const queueSamples: { t: number; global: number }[] = [];
   for (let i = 0; i < n; i++) {
+    if ((i & CHUNK_MASK) === 0 && i > 0) yield (done + i) / totalWork;
     if (eventType[i] === EVT.QueueSample) queueSamples.push({ t: ts[i]!, global: globalQueue[i]! });
   }
 
-  return { perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker };
+  return { perWorker, queueSamples, queueSampleIndex, maxLocalQueue, wakeIndex };
+}
+
+function reconstruct(
+  store: ColumnarEvents,
+  workerIds: readonly number[],
+  maxTs: number,
+  blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined,
+  emit: SpanEmitter,
+): SpanAggregates {
+  return drain(reconstructChunked(store, workerIds, maxTs, blockInPlaceGaps, emit));
 }
 
 /** Fat-output path: field-for-field identical to the frozen buildWorkerSpans. */
@@ -228,6 +279,8 @@ export function buildWorkerSpansColumnar(
   const emit = new FatSpanEmitter();
   for (const w of workerIds) emit.ensure(w);
   const agg = reconstruct(store, workerIds, maxTs, blockInPlaceGaps, emit);
+  let maps: ReturnType<WakeIndex["toRecordMaps"]> | undefined;
+  let queueMap: ReturnType<QueueSampleIndex["toRecordMap"]> | undefined;
   return {
     workerSpans: emit.workerSpans,
     // The ONE field that is not frozen-identical: index buckets, not event
@@ -235,10 +288,17 @@ export function buildWorkerSpansColumnar(
     // confined to this field instead of blanking the whole result's type.
     perWorker: agg.perWorker as unknown as WorkerSpansResult["perWorker"],
     queueSamples: agg.queueSamples,
-    workerQueueSamples: agg.workerQueueSamples,
+    get workerQueueSamples() {
+      return (queueMap ??= agg.queueSampleIndex.toRecordMap());
+    },
     maxLocalQueue: agg.maxLocalQueue,
-    wakesByTask: agg.wakesByTask,
-    wakesByWorker: agg.wakesByWorker,
+    // Lazy: the callers here (exact-mode flamegraph) read only the spans.
+    get wakesByTask() {
+      return (maps ??= agg.wakeIndex.toRecordMaps()).byTask;
+    },
+    get wakesByWorker() {
+      return (maps ??= agg.wakeIndex.toRecordMaps()).byWorker;
+    },
   };
 }
 
@@ -247,10 +307,9 @@ export function buildWorkerSpansColumnar(
 export interface WorkerSpansStoreResult {
   store: ColumnarWorkerSpans;
   queueSamples: { t: number; global: number }[];
-  workerQueueSamples: ByWorker<{ t: number; local: number }[]>;
+  queueSampleIndex: QueueSampleIndex;
   maxLocalQueue: number;
-  wakesByTask: ByWorker<{ timestamp: number; wakerTaskId: number; targetWorker: number }[]>;
-  wakesByWorker: ByWorker<{ timestamp: number; wakerTaskId: number; wokenTaskId: number }[]>;
+  wakeIndex: WakeIndex;
 }
 
 /**
@@ -260,20 +319,32 @@ export interface WorkerSpansStoreResult {
  * machine), just materialized as columns. cpuSampleTimes / cpu-sched samples are
  * filled afterward by store.attachCpuSamples.
  */
+export function* buildWorkerSpansColumnarStoreChunked(
+  store: ColumnarEvents,
+  workerIds: readonly number[],
+  maxTs: number,
+  blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined
+): Generator<number, WorkerSpansStoreResult, void> {
+  const builder = new ColumnarWorkerSpansBuilder(workerIds);
+  const agg = yield* reconstructChunked(
+    store, workerIds, maxTs, blockInPlaceGaps, new StoreSpanEmitter(builder),
+  );
+  return {
+    store: builder.finish(),
+    queueSamples: agg.queueSamples,
+    queueSampleIndex: agg.queueSampleIndex,
+    maxLocalQueue: agg.maxLocalQueue,
+    wakeIndex: agg.wakeIndex,
+  };
+}
+
 export function buildWorkerSpansColumnarStore(
   store: ColumnarEvents,
   workerIds: readonly number[],
   maxTs: number,
   blockInPlaceGaps: readonly BlockInPlaceGap[] | undefined
 ): WorkerSpansStoreResult {
-  const builder = new ColumnarWorkerSpansBuilder(workerIds);
-  const agg = reconstruct(store, workerIds, maxTs, blockInPlaceGaps, new StoreSpanEmitter(builder));
-  return {
-    store: builder.finish(),
-    queueSamples: agg.queueSamples,
-    workerQueueSamples: agg.workerQueueSamples,
-    maxLocalQueue: agg.maxLocalQueue,
-    wakesByTask: agg.wakesByTask,
-    wakesByWorker: agg.wakesByWorker,
-  };
+  return drain(
+    buildWorkerSpansColumnarStoreChunked(store, workerIds, maxTs, blockInPlaceGaps),
+  );
 }

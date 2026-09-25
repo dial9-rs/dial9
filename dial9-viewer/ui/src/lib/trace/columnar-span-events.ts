@@ -14,6 +14,12 @@
 import type { DecodedFieldValue } from "../../../decode.js";
 
 /** Span-event kind, replacing the frozen buildSpanData name classification. */
+import {
+  MAX_RESIZABLE_ELEMENTS,
+  allocColumn,
+  resizeColumns,
+} from "./resizable-column.js";
+
 export const SPAN_KIND = { Enter: 0, Exit: 1, Close: 2, Complete: 3 } as const;
 
 const TOKIO_TASK_ID_FIELD = "dial9.tokio.task_id";
@@ -149,29 +155,30 @@ export class ColumnarSpanEvents {
    * required; stable tiebreak on index preserves the frozen sort's equal-ts
    * order. */
   private _tsIndex: Int32Array | null = null;
+  private _released = false;
 
   constructor(cap = INITIAL_CAP) {
     this._cap = cap;
-    this.kind = new Uint8Array(cap);
-    this.ts = new Float64Array(cap);
-    this.workerId = new Float64Array(cap);
-    this.taskId = new Float64Array(cap);
-    this.spanIdIdx = new Int32Array(cap);
-    this.parentIdx = new Int32Array(cap);
-    this.spanNameIdx = new Int32Array(cap);
-    this.completeIdx = new Int32Array(cap);
+    this.kind = allocColumn(Uint8Array, cap);
+    this.ts = allocColumn(Float64Array, cap);
+    this.workerId = allocColumn(Float64Array, cap);
+    this.taskId = allocColumn(Float64Array, cap);
+    this.spanIdIdx = allocColumn(Int32Array, cap);
+    this.parentIdx = allocColumn(Int32Array, cap);
+    this.spanNameIdx = allocColumn(Int32Array, cap);
+    this.completeIdx = allocColumn(Int32Array, cap);
     this.completeIdx.fill(-1);
-    this.completeStart = new Float64Array(this.completeCap);
-    this.completeEnd = new Float64Array(this.completeCap);
-    this.completeThreadId = new Float64Array(this.completeCap);
-    this.completeTaskId = new Float64Array(this.completeCap);
-    this.completeWorkerId = new Float64Array(this.completeCap);
-    this.completeTypeIdx = new Int32Array(this.completeCap);
-    this.extraOff = new Int32Array(cap + 1);
+    this.completeStart = allocColumn(Float64Array, this.completeCap);
+    this.completeEnd = allocColumn(Float64Array, this.completeCap);
+    this.completeThreadId = allocColumn(Float64Array, this.completeCap);
+    this.completeTaskId = allocColumn(Float64Array, this.completeCap);
+    this.completeWorkerId = allocColumn(Float64Array, this.completeCap);
+    this.completeTypeIdx = allocColumn(Int32Array, this.completeCap);
+    this.extraOff = allocColumn(Int32Array, cap + 1);
     this._extraCap = cap;
-    this.extraKeyId = new Int32Array(cap);
-    this.extraValId = new Int32Array(cap);
-    this.extraUnitId = new Int32Array(cap);
+    this.extraKeyId = allocColumn(Int32Array, cap);
+    this.extraValId = allocColumn(Int32Array, cap);
+    this.extraUnitId = allocColumn(Int32Array, cap);
     this.extraUnitId.fill(-1);
   }
 
@@ -201,6 +208,11 @@ export class ColumnarSpanEvents {
   }
   private growExtra(): void {
     const n = this._extraCap * 2;
+    if (resizeColumns([this.extraKeyId, this.extraValId, this.extraUnitId], n)) {
+      this.extraUnitId.fill(-1, this._extraCap);
+      this._extraCap = n;
+      return;
+    }
     const gk = new Int32Array(n); gk.set(this.extraKeyId); this.extraKeyId = gk;
     const gv = new Int32Array(n); gv.set(this.extraValId); this.extraValId = gv;
     const gu = new Int32Array(n); gu.fill(-1); gu.set(this.extraUnitId); this.extraUnitId = gu;
@@ -209,6 +221,22 @@ export class ColumnarSpanEvents {
 
   private growComplete(): void {
     const n = this.completeCap * 2;
+    if (
+      resizeColumns(
+        [
+          this.completeStart,
+          this.completeEnd,
+          this.completeThreadId,
+          this.completeTaskId,
+          this.completeWorkerId,
+          this.completeTypeIdx,
+        ],
+        n,
+      )
+    ) {
+      this.completeCap = n;
+      return;
+    }
     const start = new Float64Array(n);
     start.set(this.completeStart);
     this.completeStart = start;
@@ -234,9 +262,57 @@ export class ColumnarSpanEvents {
     return this._len;
   }
 
+  /**
+   * Drop the columns once buildSpanDataColumnar has turned them into a span
+   * store.
+   *
+   * Reads after this throw. Returning empty columns instead would render a
+   * trace with no spans and no error, which is the worse failure.
+   */
+  release(): void {
+    this._released = true;
+    const empty = new Int32Array(0);
+    this.kind = new Uint8Array(0);
+    this.ts = new Float64Array(0);
+    this.workerId = new Float64Array(0);
+    this.taskId = new Float64Array(0);
+    this.spanIdIdx = empty;
+    this.parentIdx = empty;
+    this.spanNameIdx = empty;
+    this.completeIdx = empty;
+    this.extraOff = empty;
+    this.extraKeyId = empty;
+    this.extraValId = empty;
+    this.extraUnitId = empty;
+    this.completeStart = new Float64Array(0);
+    this.completeEnd = new Float64Array(0);
+    this.completeThreadId = new Float64Array(0);
+    this.completeTaskId = new Float64Array(0);
+    this.completeWorkerId = new Float64Array(0);
+    this.completeTypeIdx = empty;
+    this.extraVals = [];
+    this.extraValIntern = new Map();
+    this._tsIndex = null;
+  }
+
+  /** True once {@link release} has run; the span store has the data instead. */
+  get released(): boolean {
+    return this._released;
+  }
+
+  private assertLive(): void {
+    if (this._released) {
+      throw new Error(
+        "ColumnarSpanEvents was released after the span store was built; " +
+          "read the span store (sharedSpanData) instead",
+      );
+    }
+  }
+
   /** Indices sorted ascending by ts; stable (equal ts keep wire order), so a
    * columnar buildSpanData sees the same event order as `[...customEvents].sort`. */
   tsIndex(): Int32Array {
+    this.assertLive();
     if (this._tsIndex === null) {
       const perm = new Int32Array(this._len);
       for (let i = 0; i < this._len; i++) perm[i] = i;
@@ -311,6 +387,29 @@ export class ColumnarSpanEvents {
 
   private grow(): void {
     const n = this._cap * 2;
+    // extraOff carries one extra slot, so stop one doubling short of the
+    // ceiling and both resizes stay inside it.
+    if (
+      n < MAX_RESIZABLE_ELEMENTS &&
+      resizeColumns(
+        [
+          this.kind,
+          this.ts,
+          this.workerId,
+          this.taskId,
+          this.spanIdIdx,
+          this.parentIdx,
+          this.spanNameIdx,
+          this.completeIdx,
+        ],
+        n,
+      ) &&
+      resizeColumns([this.extraOff], n + 1)
+    ) {
+      this.completeIdx.fill(-1, this._cap);
+      this._cap = n;
+      return;
+    }
     const g = <T extends { set(a: ArrayLike<number>): void }>(
       old: ArrayLike<number>,
       Ctor: new (len: number) => T
@@ -413,52 +512,62 @@ export class ColumnarSpanEvents {
   /** span_id as the exact string buildSpanData keys by (String(v.span_id));
    * "undefined" when absent, matching String(undefined). */
   spanIdAt(i: number): string {
+    this.assertLive();
     const idx = this.spanIdIdx[i]!;
     return idx < 0 ? "undefined" : this.strings[idx]!;
   }
   /** parent_span_id string, or null (matching v.parent_span_id != null ? … : null). */
   parentAt(i: number): string | null {
+    this.assertLive();
     const idx = this.parentIdx[i]!;
     return idx < 0 ? null : this.strings[idx]!;
   }
   /** span_name, or "unknown" (matching v.span_name || "unknown"). */
   spanNameAt(i: number): string {
+    this.assertLive();
     const idx = this.spanNameIdx[i]!;
     return idx < 0 ? "unknown" : this.spanNames[idx]!;
   }
   /** Single-event start timestamp, or NaN for tracing events. */
   startAt(i: number): number {
+    this.assertLive();
     const idx = this.completeIdx[i]!;
     return idx < 0 ? NaN : this.completeStart[idx]!;
   }
   /** Single-event end timestamp, or NaN for tracing events. */
   endAt(i: number): number {
+    this.assertLive();
     const idx = this.completeIdx[i]!;
     return idx < 0 ? NaN : this.completeEnd[idx]!;
   }
   /** Complete-event OS thread id, or NaN for tracing events / absent data. */
   threadIdAt(i: number): number {
+    this.assertLive();
     const idx = this.completeIdx[i]!;
     return idx < 0 ? NaN : this.completeThreadId[idx]!;
   }
   /** Complete-event Tokio task id, or NaN for tracing events / absent data. */
   taskIdAt(i: number): number {
+    this.assertLive();
     const idx = this.completeIdx[i]!;
     return idx < 0 ? NaN : this.completeTaskId[idx]!;
   }
   /** Complete-event runtime worker id, or NaN when absent. */
   completeWorkerIdAt(i: number): number {
+    this.assertLive();
     const idx = this.completeIdx[i]!;
     return idx < 0 ? NaN : this.completeWorkerId[idx]!;
   }
   /** Producer/instrumentation family for a complete single-event span. */
   spanTypeAt(i: number): string {
+    this.assertLive();
     const idx = this.completeIdx[i]!;
     return idx < 0 ? "tracing" : this.spanTypes[this.completeTypeIdx[idx]!]!;
   }
   /** Non-base fields for this event ({} when none), rebuilt from the interned
    * CSR - matches the fat buildSpanData per-span `fields`. */
   extraFieldsAt(i: number): Record<string, DecodedFieldValue> {
+    this.assertLive();
     const lo = this.extraOff[i]!, hi = this.extraOff[i + 1]!;
     if (lo === hi) return {};
     const out: Record<string, DecodedFieldValue> = {};
@@ -470,6 +579,7 @@ export class ColumnarSpanEvents {
   }
   /** Attribute units for this event, or null when none are declared. */
   extraUnitsAt(i: number): Record<string, string> | null {
+    this.assertLive();
     const lo = this.extraOff[i]!, hi = this.extraOff[i + 1]!;
     const out: Record<string, string> = {};
     for (let j = lo; j < hi; j++) {

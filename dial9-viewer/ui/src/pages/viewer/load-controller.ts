@@ -141,6 +141,10 @@ export function progressLabel(p: TraceWorkerProgress): string {
     return p.urlCount > 1 ? `Fetching ${p.urlCount} traces...` : "Fetching...";
   }
   const events = `${Math.floor(p.eventCount / 1000)}k events`;
+  if (p.phase === "analyzing") {
+    const pct = p.totalBytes ? Math.floor((p.bytesRead / p.totalBytes) * 100) : 0;
+    return `Analyzing: ${pct}% - ${events}`;
+  }
   if (p.totalBytes) {
     const pct = Math.floor((p.bytesRead / p.totalBytes) * 100);
     return `Parsing: ${pct}% - ${events}`;
@@ -171,6 +175,16 @@ export function loadErrorMessage(
   }
   return `Could not load trace: ${rawMessage}`;
 }
+
+/**
+ * What Set/Clear Range re-opens. The compressed bytes are preferred when the
+ * loader kept them: re-parsing them is a gunzip, where re-opening a URL is an
+ * S3 round trip for the whole trace.
+ */
+type ReparseSource =
+  | { kind: "bytes"; parts: readonly Uint8Array[] }
+  | { kind: "urls"; urls: readonly string[] }
+  | { kind: "file"; file: Blob };
 
 export interface LoadController {
   getState(): LoadChromeState;
@@ -248,9 +262,11 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
   // Source identity is committed only by a successful, current load. Pending,
   // aborted, failed, and superseded attempts cannot change Copy Link behavior.
   let sourceShareable = false;
-  // The decompressed trace bytes from the last successful load, retained for
-  // Set/Clear Range reparse. Null until the first load completes.
-  let retainedBuffer: ArrayBuffer | null = null;
+  // What Set/Clear Range re-opens: the URLs the trace came from, or the
+  // dropped File. Holding the decompressed bytes instead would cost 1.28 GB on
+  // a 30M-event trace, and the reparse object URL Blob-copies them again. A
+  // File is disk-backed and URLs re-fetch, usually from cache.
+  let reparseSource: ReparseSource | null = null;
 
   // Parse progress arrives on every ~256 KB drain, and each notification drives
   // a full lit-html render of the loading layer. The main-thread parser runs
@@ -302,11 +318,13 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     opts: {
       label: string;
       withHeaders: boolean;
-      objectUrl: string | null;
+      objectUrls: readonly string[] | null;
       /** Set-Range reparse window forwarded to the worker. */
       range?: ReparseRange | null;
       /** Source replacement vs same-source Set/Clear Range reparse. */
       kind: "source" | "reparse";
+      /** Commit on success; null preserves the current one (reparse). */
+      source: ReparseSource | null;
       /** Commit on success; null preserves the current source (reparse). */
       shareableAfterSuccess: boolean | null;
     },
@@ -340,7 +358,7 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     currentHandle = handle;
 
     const cleanup = (): void => {
-      if (opts.objectUrl !== null) revokeObjectUrl(opts.objectUrl);
+      if (opts.objectUrls !== null) opts.objectUrls.forEach(revokeObjectUrl);
       if (token === loadToken) {
         stopTimer();
         currentHandle = null;
@@ -349,19 +367,23 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
 
     handle.done.then(
       (result: unknown) => {
-        // Retain the decompressed buffer the worker transfers back so Set/Clear
-        // Range can re-parse it with a time window without re-fetching. Blob
-        // copies on reparse, so this reference stays valid across reparses.
         const settled = result as
-          | { buffer?: unknown; timing?: TraceWorkerTiming }
+          | { timing?: TraceWorkerTiming; compressed?: unknown }
           | undefined;
-        const buf = settled?.buffer;
-        if (buf instanceof ArrayBuffer && buf.byteLength > 0) retainedBuffer = buf;
+        const raw = settled?.compressed;
         if (settled?.timing !== undefined) deps.onTiming?.(settled.timing);
         cleanup();
         if (token !== loadToken) return;
         if (opts.shareableAfterSuccess !== null) {
           sourceShareable = opts.shareableAfterSuccess;
+        }
+        if (opts.source !== null) {
+          // Compressed bytes beat whatever source the caller named: same
+          // trace, and re-parsing them is a gunzip rather than a round trip.
+          reparseSource =
+            Array.isArray(raw) && raw.length > 0
+              ? { kind: "bytes", parts: raw as Uint8Array[] }
+              : opts.source;
         }
         // Success: the store's trace slice is now populated; commit the
         // toolbar label, then drop the load section so the tracks show through.
@@ -445,18 +467,20 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       begin([objectUrl], {
         label: `Loading ${name}...`,
         withHeaders: false,
-        objectUrl,
+        objectUrls: [objectUrl],
         kind: "source",
         shareableAfterSuccess: false,
+        source: { kind: "file", file },
       });
     },
     loadUrls(urls, label, range): void {
       begin(urls, {
         label,
         withHeaders: true,
-        objectUrl: null,
+        objectUrls: null,
         kind: "source",
         shareableAfterSuccess: true,
+        source: { kind: "urls", urls },
         ...(range !== undefined ? { range } : {}),
       });
     },
@@ -474,20 +498,40 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     },
     isCurrentLoad: (token) => token === loadToken && section === "loading",
     reparse(range): void {
-      // Set/Clear Range: re-parse the retained buffer with a time window, OFF
-      // the main thread (reuses the worker load path via an object URL). The
-      // worker filters events to the window; viewer-reconstruction's fitTrace
-      // refits to the new trace's extent. No-op before the first load.
-      if (retainedBuffer === null) return;
-      const objectUrl = createObjectUrl(new Blob([retainedBuffer]));
-      begin([objectUrl], {
-        label: isRangeActive(range ?? {})
-          ? "Applying range..."
-          : "Restoring full trace...",
-        withHeaders: false,
-        objectUrl,
+      // Set/Clear Range: re-open the source with a time window. The parse runs
+      // through the normal load path; the worker filters events to the window
+      // and viewer-reconstruction's fitTrace refits to the new extent. No-op
+      // before the first load.
+      if (reparseSource === null) return;
+      const label = isRangeActive(range ?? {})
+        ? "Applying range..."
+        : "Restoring full trace...";
+      if (reparseSource.kind === "bytes" || reparseSource.kind === "file") {
+        // One source per component: each is its own gzip stream, and the
+        // loader gunzips them independently exactly as the first load did.
+        const blobs =
+          reparseSource.kind === "bytes"
+            ? reparseSource.parts.map((b) => new Blob([b as BlobPart]))
+            : [reparseSource.file];
+        const objectUrls = blobs.map(createObjectUrl);
+        begin(objectUrls, {
+          label,
+          withHeaders: false,
+          objectUrls,
+          kind: "reparse",
+          shareableAfterSuccess: null,
+          source: null,
+          range,
+        });
+        return;
+      }
+      begin(reparseSource.urls, {
+        label,
+        withHeaders: true,
+        objectUrls: null,
         kind: "reparse",
         shareableAfterSuccess: null,
+        source: null,
         range,
       });
     },
@@ -495,9 +539,10 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       begin(["/demo-trace.bin"], {
         label: "Loading demo trace...",
         withHeaders: true,
-        objectUrl: null,
+        objectUrls: null,
         kind: "source",
         shareableAfterSuccess: false,
+        source: { kind: "urls", urls: ["/demo-trace.bin"] },
       });
     },
     cancel: cancelLoad,

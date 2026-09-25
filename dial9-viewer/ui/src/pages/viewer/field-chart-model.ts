@@ -8,6 +8,7 @@
 // pixels.
 
 import type { ViewerStore } from "../../store/store.js";
+import type { CustomEventStore } from "../../trace_parser.js";
 import type {
   FieldChartKind,
   FieldChartSpec,
@@ -109,7 +110,7 @@ function subtract(
  * equal timestamps retain their source order.
  */
 export function materializeFieldChartSeries(
-  events: readonly CustomTraceEvent[],
+  events: CustomEventStore,
   spec: FieldChartSpec,
 ): FieldChartSeries {
   const ordered: CustomTraceEvent[] = [];

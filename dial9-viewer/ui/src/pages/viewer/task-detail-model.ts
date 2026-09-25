@@ -21,6 +21,7 @@
 // a truncated/oversized window rather than presenting a clipped poll list as the
 // task's whole history.
 
+import { EMPTY_WAKE_INDEX, type WakeIndex } from "../../lib/trace/wake-index.js";
 import {
   EVENT_TYPES,
   computePollWakes,
@@ -57,15 +58,15 @@ export interface TaskPollSource {
   workerIds: readonly number[];
   /** Reconstructed poll/park/active spans per worker. */
   workerSpans: Record<number, LaneSpans>;
-  /** Wake events indexed by woken task. */
-  wakesByTask: Record<number, TaskWake[]>;
+  /** Wake storage; the Task tab materializes only the selected task's wakes. */
+  wakeIndex: WakeIndex;
 }
 
 /** Empty source (no trace) so callers never special-case null. */
 export const EMPTY_TASK_POLL_SOURCE: TaskPollSource = {
   workerIds: [],
   workerSpans: {},
-  wakesByTask: {},
+  wakeIndex: EMPTY_WAKE_INDEX,
 };
 
 /**
@@ -93,7 +94,7 @@ export function buildTaskPollSource(trace: ParsedTrace | null): TaskPollSource {
   return {
     workerIds,
     workerSpans: result.workerSpans,
-    wakesByTask: result.wakesByTask,
+    wakeIndex: result.wakeIndex,
   };
 }
 
@@ -232,7 +233,7 @@ export function computeTaskDetailData(
   }
   if (polls.length < 1) return EMPTY_TASK_DETAIL_DATA;
 
-  const wakes = source.wakesByTask[taskId] ?? [];
+  const wakes = source.wakeIndex.materializeForTask(taskId);
   const rawPollWakes = computePollWakes(polls, wakes);
   const workerIdCount = source.workerIds.length;
   const pollWakes: (PollWakeInfo | null)[] = rawPollWakes.map((pw) =>

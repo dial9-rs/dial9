@@ -16,6 +16,7 @@ import {
   objectTraceUrls,
   parseTraceBuffer,
 } from "./load.js";
+import { parseChunks, streamTrace } from "./stream.js";
 import type { ParsedTrace } from "./load.js";
 
 // ── Fixtures: the demo trace, raw and gzipped, fully in memory ──────────
@@ -92,25 +93,22 @@ function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
 describe("loadTraceBuffered", () => {
   it("single raw component round-trips and parses", async () => {
     installFetchMock({ "/a": rawTrace });
-    const { trace, buffer, mode } = await loadTraceBuffered("/a");
+    const { trace, bytes, mode } = await loadTraceBuffered("/a");
     expect(mode).toBe("buffered");
-    expectBytesEqual(bytesOf(buffer), rawTrace);
+    expect(bytes).toBe(rawTrace.length);
     expect(trace.events.length).toBe(singleEvents);
   });
 
   it("gzipped component is gunzipped client-side", async () => {
     installFetchMock({ "/a.gz": gzTrace });
-    const { buffer } = await loadTraceBuffered(["/a.gz"]);
-    expectBytesEqual(bytesOf(buffer), rawTrace);
+    const { bytes } = await loadTraceBuffered(["/a.gz"]);
+    expect(bytes).toBe(rawTrace.length);
   });
 
   it("mixed gzip/raw components concatenate in order and parse as one trace", async () => {
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
-    const { trace, buffer } = await loadTraceBuffered(["/gz", "/raw"]);
-    const out = bytesOf(buffer);
-    expect(out.length).toBe(rawTrace.length * 2);
-    expectBytesEqual(out.slice(0, rawTrace.length), rawTrace);
-    expectBytesEqual(out.slice(rawTrace.length), rawTrace);
+    const { trace, bytes } = await loadTraceBuffered(["/gz", "/raw"]);
+    expect(bytes).toBe(rawTrace.length * 2);
     // Decoder resets on the mid-stream TRC\0 header: double the events.
     expect(trace.events.length).toBe(singleEvents * 2);
   });
@@ -137,14 +135,14 @@ describe("loadTraceBuffered", () => {
   });
 });
 
-// ── Streamed path: capture + reassembly parity with buffered ─────────────
+// ── Streamed path: parity with buffered ──────────────────────────────────
 
 describe("loadTraceStreamed", () => {
   it("runtime supports streaming (fixture precondition)", () => {
     expect(canStreamDecode()).toBe(true);
   });
 
-  it("multi-URL stream parses to the same events and retains the full buffer", async () => {
+  it("multi-URL stream sees the same events and bytes as the buffered concat", async () => {
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
     const streamed = await loadTraceStreamed(["/gz", "/raw"]);
     expect(streamed.mode).toBe("stream");
@@ -152,15 +150,58 @@ describe("loadTraceStreamed", () => {
 
     installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
     const buffered = await loadTraceBuffered(["/gz", "/raw"]);
-    // The captured-chunk reassembly must be byte-identical to the
-    // buffered concat, so Set/Clear-Range re-parses see the same trace.
-    expectBytesEqual(bytesOf(streamed.buffer), bytesOf(buffered.buffer));
+    expect(streamed.bytes).toBe(buffered.bytes);
   });
 
-  it("single-URL stream matches the raw bytes", async () => {
+  // Set/Clear Range re-parses these, so they have to be the compressed form and
+  // they have to decode back to the same trace. One entry per component: a gzip
+  // stream of several members decodes on some runtimes and throws on others.
+  it("captures the compressed bytes per component", async () => {
+    installFetchMock({ "/a.gz": gzTrace, "/b.gz": gzTrace });
+    const { trace, bytes, compressed } = await streamTrace(
+      ["/a.gz", "/b.gz"],
+      {},
+      {},
+      true,
+    );
+    expect(compressed).toHaveLength(2);
+    for (const part of compressed!) expectBytesEqual(part, gzTrace);
+    expect(compressed![0]!.length + compressed![1]!.length).toBeLessThan(bytes);
+
+    // Re-parsed the way the page does it: one source per component.
+    installFetchMock({ "/r0": compressed![0]!, "/r1": compressed![1]! });
+    const again = await streamTrace(["/r0", "/r1"], {}, {});
+    expect(again.trace.events.length).toBe(trace.events.length);
+    expect(again.bytes).toBe(bytes);
+  });
+
+  it("keeps an entry for an empty component, so the re-parse sees every one", async () => {
+    installFetchMock({ "/empty": new Uint8Array(0), "/b.gz": gzTrace });
+    const { trace, compressed } = await streamTrace(["/empty", "/b.gz"], {}, {}, true);
+    expect(compressed).toHaveLength(2);
+    expect(compressed![0]).toHaveLength(0);
+
+    installFetchMock({ "/r0": compressed![0]!, "/r1": compressed![1]! });
+    const again = await streamTrace(["/r0", "/r1"], {}, {});
+    expect(again.trace.events.length).toBe(trace.events.length);
+  });
+
+  it("drops the capture when any component arrives uncompressed", async () => {
+    installFetchMock({ "/a.gz": gzTrace, "/raw": rawTrace });
+    const { compressed } = await streamTrace(["/a.gz", "/raw"], {}, {}, true);
+    expect(compressed).toBeUndefined();
+  });
+
+  it("skips the capture unless asked", async () => {
     installFetchMock({ "/a": rawTrace });
-    const { trace, buffer } = await loadTraceStreamed("/a");
-    expectBytesEqual(bytesOf(buffer), rawTrace);
+    const { compressed } = await streamTrace(["/a"], {}, {}, false);
+    expect(compressed).toBeUndefined();
+  });
+
+  it("single-URL stream counts the raw bytes", async () => {
+    installFetchMock({ "/a": rawTrace });
+    const { trace, bytes } = await loadTraceStreamed("/a");
+    expect(bytes).toBe(rawTrace.length);
     expect(trace.events.length).toBe(singleEvents);
   });
 });
@@ -199,7 +240,39 @@ describe("loadTraceOnMainThread", () => {
     expect(result.trace).toBe(store.updates[0]!.trace);
     expect(result.mode).toBe(canStreamDecode() ? "stream" : "buffered");
     expect(result.timing.events).toBe(singleEvents);
-    expect(result.buffer.byteLength).toBe(rawTrace.length);
+    expect(result.bytes).toBe(rawTrace.length);
+  });
+
+  // The page can only report analysis progress while nothing else is rendering
+  // the new trace, so the store write has to wait for the last slice.
+  it("finishes analyzing before it writes the store", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const log: string[] = [];
+    const store = {
+      updates: [] as { trace: ParsedTrace }[],
+      update(_slice: "trace", patch: { trace: ParsedTrace }): void {
+        log.push("store");
+        store.updates.push(patch);
+      },
+    };
+    const fractions: number[] = [];
+    const result = await loadTraceOnMainThread(store, ["/t.bin"], {
+      onProgress: (p): void => {
+        if (p.phase !== "analyzing") return;
+        fractions.push(p.bytesRead);
+        log.push("analyze");
+      },
+    }).done;
+
+    expect(log.at(-1)).toBe("store");
+    expect(log.filter((e) => e === "store")).toHaveLength(1);
+    expect(fractions.at(0)).toBe(0);
+    expect(fractions.at(-1)).toBe(1);
+    // Non-decreasing, so the label never walks backwards.
+    for (let i = 1; i < fractions.length; i++) {
+      expect(fractions[i]!).toBeGreaterThanOrEqual(fractions[i - 1]!);
+    }
+    expect(result.trace).toBe(store.updates[0]!.trace);
   });
 
   it("forwards parse progress with a growing event count", async () => {
@@ -222,6 +295,18 @@ describe("loadTraceOnMainThread", () => {
     const store = fakeStore();
     const load = loadTraceOnMainThread(store, ["/t.bin"], {});
     load.abort();
+    await expect(load.done).rejects.toMatchObject({ name: "AbortError" });
+    expect(store.updates).toHaveLength(0);
+  });
+
+  it("abort() while analyzing rejects and never touches the store", async () => {
+    installFetchMock({ "/t.bin": gzTrace });
+    const store = fakeStore();
+    const load = loadTraceOnMainThread(store, ["/t.bin"], {
+      onProgress: (p): void => {
+        if (p.phase === "analyzing") load.abort();
+      },
+    });
     await expect(load.done).rejects.toMatchObject({ name: "AbortError" });
     expect(store.updates).toHaveLength(0);
   });

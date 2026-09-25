@@ -3,6 +3,7 @@
 // detector type - so poi.ts / minimap-poi.ts can scan columns instead of
 // materializing every poll from the flyweight lane views.
 
+import { WakeIndex } from "./wake-index.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -18,6 +19,7 @@ import {
 } from "./index.js";
 import { deriveWorkerIds } from "./derived.js";
 import { ColumnarWorkerSpans } from "./columnar-worker-spans.js";
+import type { ColumnarSchedDelays } from "./sched-delays.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ws: any;
@@ -26,7 +28,7 @@ let workerIds: number[];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let fatSched: any[];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let colSched: any[];
+let colSched: ColumnarSchedDelays;
 let taskInstrumented: Map<number, boolean>;
 let taskSpawnTimes: Map<number, number>;
 
@@ -42,7 +44,7 @@ beforeAll(async () => {
   store = ColumnarWorkerSpans.fromWorkerSpans(ws);
   store.attachCpuSamples(trace.cpuSamples as never);
   fatSched = computeSchedulingDelays(ws, workerIds, r.wakesByTask);
-  colSched = store.schedulingDelays(workerIds, r.wakesByTask as never);
+  colSched = store.schedulingDelays(workerIds, WakeIndex.fromRecords(r.wakesByTask));
   // Synthesize an instrumentation map so "uninstrumented" has matches.
   taskInstrumented = new Map();
   let flip = false;
