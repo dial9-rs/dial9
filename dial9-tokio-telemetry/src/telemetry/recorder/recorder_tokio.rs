@@ -404,7 +404,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         // Same for the task-dump config.
         #[cfg(feature = "taskdump")]
         if let Some(config) = task_dump_config {
-            crate::task_dumped::set_taskdump_config(config);
+            crate::task_dump::set_taskdump_config(config);
         }
         register_runtime_metrics(self, runtime_name, runtime.handle().metrics());
         Ok(runtime)

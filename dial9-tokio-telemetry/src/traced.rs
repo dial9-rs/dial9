@@ -15,7 +15,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[cfg(feature = "taskdump")]
-type MaybeTaskDumped<F> = crate::task_dumped::TaskDumped<F>;
+type MaybeTaskDumped<F> = crate::task_dump::TaskDumped<F>;
 
 #[cfg(not(feature = "taskdump"))]
 type MaybeTaskDumped<F> = F;
@@ -205,7 +205,7 @@ where
     F: Future,
 {
     #[cfg(feature = "taskdump")]
-    let inner = crate::task_dumped::TaskDumped::new(inner, handle.clone(), task_id);
+    let inner = crate::task_dump::TaskDumped::new(inner, handle.clone(), task_id);
 
     WakeTraced::new(inner, handle, task_id, spawn_loc)
 }

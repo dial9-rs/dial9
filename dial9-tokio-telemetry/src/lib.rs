@@ -21,7 +21,7 @@ pub mod memory_profiling {
 pub(crate) use dial9_core::sampling;
 pub(crate) use dial9_core::{primitives, rate_limit};
 #[cfg(feature = "taskdump")]
-pub(crate) mod task_dumped;
+pub(crate) mod task_dump;
 /// Core telemetry types, recording, and trace I/O.
 pub mod telemetry;
 pub(crate) mod traced;

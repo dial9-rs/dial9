@@ -170,7 +170,7 @@ fn register_hooks(
         // Install this thread's task-dump config for `TaskDumped` to read.
         #[cfg(feature = "taskdump")]
         if let Some(config) = taskdump_config {
-            crate::task_dumped::set_taskdump_config(config);
+            crate::task_dump::set_taskdump_config(config);
         }
 
         #[cfg(feature = "cpu-profiling")]
@@ -190,7 +190,7 @@ fn register_hooks(
         runtime_context::clear_thread_traced();
 
         #[cfg(feature = "taskdump")]
-        crate::task_dumped::clear_taskdump_config();
+        crate::task_dump::clear_taskdump_config();
 
         #[cfg(feature = "cpu-profiling")]
         {

@@ -210,7 +210,7 @@ fn advance_park_counter(counter: u64, rate: u64) -> (u64, bool) {
 /// within one poll, or repeated allocations inside a tight loop.
 ///
 /// Used by:
-/// - the task-dump idle/wake bookkeeping in [`crate::task_dumped`].
+/// - the task-dump idle/wake bookkeeping in [`crate::task_dump`].
 #[cfg(any(feature = "taskdump", test))]
 pub(crate) fn poll_start_ts_monotonic() -> u64 {
     let raw = POLL_START_TS.with(|c| c.get()).map_or_else(
