@@ -9,11 +9,11 @@ returns `Pending`, then use an idle-time Poisson decision to choose which
 captures to emit. Sampling only at emission limits trace volume, but it does
 not limit the expensive stack captures.
 
-Replace that behavior with one worker-local sampling decision before stack
-capture:
+Add an experimental alternative with one worker-local sampling decision before
+stack capture, preserving the existing task-dump behavior:
 
 ```rust
-TaskDumpConfig::builder()
+TaskSamplingConfig::builder()
     .captures_per_second_per_worker(10)
     .build()
 ```
@@ -21,7 +21,7 @@ TaskDumpConfig::builder()
 Each worker independently targets the configured capture rate across eligible
 pending transitions. A selected transition has no second emission-sampling
 decision: if the `trace_with` re-poll remains pending, all captured callchains
-are emitted immediately. Each `TaskDumpEvent` records its inclusion probability
+are emitted immediately. Each `TaskSampleEvent` records its inclusion probability
 so analysis can recover unbiased wait-time estimates.
 
 The same statistical contract enables a task-scoped mixed flamegraph:
@@ -52,14 +52,14 @@ every attached runtime worker participates in that worker's sampler.
 - Support a task-scoped flamegraph that combines on-CPU and async-idle stacks
   in time units.
 - Keep the disabled and non-selected poll paths allocation-free.
-- Preserve source compatibility for the existing `TaskDumpConfig` API.
+- Preserve the existing `TaskDumpConfig` API and behavior.
 
 ## Non-goals
 
 - A process-wide mixed flamegraph in the first version.
 - Correcting for tasks that were not spawned through dial9 instrumentation.
 - A strict maximum number of captures in every wall-clock second. The
-  configured rate is a long-run expected rate.
+  configured rate is a sampling target.
 - Combining scheduler-event samples with on-CPU samples. Mixed flamegraphs use
   `CpuProfile` samples only.
 - Changing Tokio's task-dump capture mechanism.
@@ -69,12 +69,12 @@ every attached runtime worker participates in that worker's sampler.
 The preferred configuration is:
 
 ```rust
-use dial9::{TaskDumpConfig, TokioAttachOptions};
+use dial9::{TaskSamplingConfig, TokioAttachOptions};
 
 let options = TokioAttachOptions::builder()
     .task_tracking_enabled(true)
-    .task_dump_config(
-        TaskDumpConfig::builder()
+    .task_sampling_config(
+        TaskSamplingConfig::builder()
             .captures_per_second_per_worker(10)
             .build(),
     )
@@ -82,25 +82,25 @@ let options = TokioAttachOptions::builder()
 ```
 
 `captures_per_second_per_worker` is a positive integer. `0` is rejected at
-build time; callers disable task dumps by omitting `task_dump_config`.
+build time; callers disable task sampling by omitting `task_sampling_config`.
 
 The default is 10 captures/s/worker. `rng_seed` remains available for
 deterministic tests.
 
 ### Compatibility
 
-`TaskDumpConfig` is a published builder API. Keep the existing
-`idle_threshold(Duration)` builder setter and `idle_threshold()` accessor as
-deprecated aliases during migration.
+`TaskDumpConfig`, `idle_threshold`, and the existing `DIAL9_TASK_DUMP_*`
+variables retain their behavior. `TaskSamplingConfig` is a separate opt-in under
+the same `taskdump` Cargo feature; the two configs cannot be enabled on the
+same runtime. Different runtimes may use different modes.
 
-Internally the configuration should store one capture interval. The new
-captures-per-second setter converts frequency to that interval; the deprecated
-idle-threshold setter writes the same value. There must not be two independent
-production sampling controls.
+`DIAL9_TASK_SAMPLING_ENABLED` enables the experimental mode;
+`DIAL9_TASK_SAMPLING_PER_WORKER_HZ` sets its target rate (default: 10).
+It has no cap yet and can substantially exceed the target after a traffic
+increase. Cost protection and data quality must be evaluated before production use.
 
-This preserves source compatibility while deliberately changing the behavior
-from "mean cumulative idle time between emitted dumps" to "mean wall-clock
-capture budget per worker." Release notes must call out that semantic change.
+Legacy `TaskDumpEvent` stays unchanged. `TaskSampleEvent` carries the sampled
+stacks and their inclusion probability; analysis must distinguish the two.
 
 ## Cost Model
 
@@ -164,6 +164,7 @@ one representative workload, not universal bounds.
 The sampling decision still runs on each eligible pending transition. Its fast
 path should be a worker-local counter update and branch; stack capture,
 trimming, interning, and event encoding only run for selected transitions.
+This per-transition cost is not included in the estimate above.
 
 ## Sampling Design
 
@@ -179,6 +180,21 @@ An eligible item is an instrumented task poll that:
 Sampling is worker-local. Tasks may migrate between workers; the probability
 stored on an event is the probability used by the worker that made that
 capture.
+
+### Worker ownership and thread handoffs
+
+During `block_in_place`, Tokio
+[hands the worker's core to another thread](https://github.com/tokio-rs/tokio/blob/eb9cdf2ff012ec22d4efd74cf46d04222264cd8e/tokio/src/runtime/scheduler/multi_thread/worker.rs#L486-L506).
+The original task can finish its poll concurrently with the replacement
+worker. Keep one sampler per worker in `RuntimeContext`, with TLS caching a
+reference. A per-worker mutex protects selection, never application polling,
+capture, or emission. Contention must not discard sampling opportunities.
+Pad each worker's mutable state to avoid false sharing, as in the CPU sampler.
+
+Calibration survives thread changes, including `current_thread` driver changes.
+Each task retains its poll's worker reference across nested runtimes that may
+replace TLS. Selection reads the clock after acquiring the mutex, so long polls
+use their pending-transition time rather than an earlier poll-start timestamp.
 
 ### Coverage across tasks and workers
 
@@ -249,12 +265,15 @@ sampling-active timestamp
 ```
 
 Use the existing `SplitMix64` PRNG and derive independent worker seeds from
-`rng_seed` plus worker identity. No process-global RNG or atomic increment is
-needed on the poll path.
+`rng_seed` plus worker identity. There is no process-global RNG or capture
+counter on the steady-state poll path.
 
 ### Bursts and overload
 
-Bernoulli sampling bounds expected cost, not the exact count in every second.
+The cost model assumes workers have enough eligible transitions to reach the
+target, with similar counts in successive epochs. Repeated rate changes can
+keep the previous epoch's estimate stale and sustain an average above the target.
+
 An emergency burst cap may protect against a stale rate estimate after a sharp
 poll-rate increase, but hitting it makes that worker/epoch statistically
 incomplete.
@@ -350,6 +369,11 @@ The existing `just_captured` suppression remains necessary. The `trace_with`
 re-poll can cause an immediate wake; that synthetic follow-up poll must not
 consume a new sampling opportunity or start a capture loop.
 
+Tokio 1.53.1 lacks the deferred leaf wakes restored by
+[Tokio #8445](https://github.com/tokio-rs/tokio/pull/8445). Until that fix is
+included, suppression can skip a real pending transition; probabilities describe
+eligible transitions, not all waits.
+
 One `trace_with` call can produce more than one callchain. All callchains from
 the same capture share task ID, timestamp, and inclusion probability. Treat
 them as one capture group keyed by `(task_id, timestamp_ns)`, not as independent
@@ -410,10 +434,10 @@ once.
 
 ## Trace Contract
 
-Add one field to `TaskDumpEvent`:
+Add a separate `TaskSampleEvent`:
 
 ```rust
-struct TaskDumpEvent {
+struct TaskSampleEvent {
     timestamp_ns: u64,
     task_id: TaskId,
     callchain: InternedStackFrames,
@@ -421,33 +445,31 @@ struct TaskDumpEvent {
 }
 ```
 
-Adding the field is wire-compatible because trace schemas are self-describing.
-The JS decoder must treat it as optional so old traces continue to load.
+Keep the legacy `TaskDumpEvent` schema unchanged. The JS decoder accepts both
+events; only sampled events carry an inclusion probability.
 
 `TokioRuntimesSource::segment_metadata` must emit the task-dump sampling
 configuration as source-owned segment metadata:
 
 ```text
-task_dump.captures_per_second_per_worker = "10"
-task_dump.sampler = "per_worker_bernoulli_v1"
-task_dump.worker.<worker_id>.sampling_active_ns = "<monotonic timestamp>"
+task_sampling.worker.<worker_id>.captures_per_second = "10"
+task_sampling.sampler = "per_worker_bernoulli_v1"
+task_sampling.worker.<worker_id>.sampling_started_at_ns = "<monotonic timestamp>"
 ```
 
 These are entries in the `SegmentMetadataEvent` written into each trace
-segment. They are not fields on `TaskDumpEvent`, recorder-level user metadata,
+segment. They are not fields on `TaskSampleEvent`, recorder-level user metadata,
 or metadata supplied by the application. The Tokio source owns them because it
 owns the attached-runtime configuration and worker set. As with existing
 runtime-to-worker metadata, the source adds them to the writer's merged
 metadata cache, which carries them across segment rotation.
 
-If one recorder has attached runtimes with different capture rates, the Tokio
-source must emit
-`task_dump.worker.<worker_id>.captures_per_second = "<rate>"` instead of the
-scalar rate shown above. A worker publishes `sampling_active_ns` once, when its
-calibration epoch ends. That one-time update is stored in the shared runtime
-context for the Tokio source to collect; it does not add shared-state access to
-the steady-state poll path. The `inclusion_probability` on each event remains
-the authoritative value for statistical weighting.
+Always emit rates per worker. The writer's metadata merge is additive: a global
+rate would become stale if a runtime with a different rate attached later.
+A worker publishes `sampling_started_at_ns` once, when its calibration epoch ends.
+That update survives thread handoffs and is collected by the Tokio source
+without taking the sampling mutex. The `inclusion_probability` on each event
+remains the authoritative value for statistical weighting.
 
 The CPU profiling source already emits these separate segment-metadata
 entries:
@@ -625,15 +647,14 @@ sampling noise. Task scope is the correct first interface.
 
 ## Implementation Plan
 
-1. Replace `TaskDumpConfig.idle_threshold` internally with one worker capture
-   interval and add the new builder setter plus deprecated aliases.
-2. Replace the thread-local task-dump config cell with worker-local sampler
-   state initialized by runtime thread hooks.
+1. Add `TaskSamplingConfig` alongside the unchanged `TaskDumpConfig`.
+2. Initialize worker-local sampler state for the experimental mode through
+   runtime hooks, retaining the legacy per-task path.
 3. Move the sampling decision to the `Poll::Pending` path before
    `FrameBuf::capture`.
-4. Emit selected captures immediately and remove delayed idle-time emission
-   state.
-5. Add `TaskDumpEvent.inclusion_probability` and decode it as optional in JS.
+4. Emit selected captures immediately; legacy task dumps retain delayed
+   idle-time emission.
+5. Add `TaskSampleEvent` with `inclusion_probability` and decode both event types.
 6. Have `TokioRuntimesSource` emit task-dump configuration and per-worker
    sampling-active segment metadata.
 7. Group sibling callchains and implement deterministic representative-stack
@@ -664,7 +685,7 @@ application should be introduced.
 
 ### Focused tests
 
-- Builder default, nonzero validation, deprecated alias, and deterministic
+- Builder default, nonzero validation, legacy compatibility, and deterministic
   seed tests.
 - Sampler tests showing the long-run per-worker rate converges to the configured
   target over different pending-poll rates.
@@ -674,7 +695,10 @@ application should be introduced.
 - Regression test proving every selected capture whose re-poll remains pending
   emits and no second emission sampler remains.
 - Existing no-extra-wake/no-extra-poll and completed-on-repoll tests.
-- Trace round-trip tests for the new optional event field.
+- Worker calibration and metadata survive thread handoffs, concurrent pending
+  completions, and nested runtimes.
+- A long application poll uses its pending-transition time for calibration.
+- Trace round-trip tests for both legacy and sampled events.
 - JS parser test for old events where `inclusion_probability` is undefined.
 - Viewer tests that mixed profiles:
   - use `cpu.profile.frequency_hz`;
