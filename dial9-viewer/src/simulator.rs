@@ -784,7 +784,8 @@ fn feature_enabled(features: SimulatorFeatures, schema: &ShapeSchema, event: &Sh
         | "TaskSpawnEvent"
         | "TaskTerminateEvent"
         | "WakeEventEvent"
-        | "TaskDumpEvent" => features.tasks,
+        | "TaskDumpEvent"
+        | "TaskSampleEvent" => features.tasks,
         "SpanCloseEvent" => features.spans,
         "AllocEvent" | "FreeEvent" | "MemoryProfileOverflowEvent" => features.memory,
         "ProcessResourceUsageEvent" | "TcpAcceptQueueEvent" => features.resources,

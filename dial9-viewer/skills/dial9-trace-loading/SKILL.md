@@ -52,7 +52,7 @@ decompress or parse a trace.
   sealedFiles: number,                   // files carrying a seal record (0 on traces predating it)
   incompleteFiles: number,               // of those, how many lost buffered events or inherited them; > 0 means counts are understated
   taskInstrumented: Map<number, boolean>, // task ID → whether task has tracing instrumentation
-  taskDumps: Map<number, [{timestamp, callchain}]>, // task ID → async stack captures (sorted by timestamp); see dial9-tokio-telemetry `taskdump` feature
+  taskDumps: Map<number, [{timestamp, callchain, inclusionProbability}]>, // async captures sorted by timestamp; probability only on TaskSampleEvent
   allocEvents: AllocEvent[],     // Sampled memory allocations (requires dial9-tokio-telemetry memory-profiling feature)
   freeEvents: FreeEvent[],       // Deallocations paired with sampled allocs (requires `track_liveset`)
   memoryOverflows: [{timestamp, droppedAllocs, droppedFrees}], // Ring buffer overflow events (dropped samples per flush period)
