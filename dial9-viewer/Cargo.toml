@@ -21,11 +21,13 @@ include = [
     "!/src/bin/gen_fixtures.rs",
     "/benches/**",
     "/skills/**",
-    # The toolkit links to these two; listing them here makes release-plz
-    # attribute their edits to this crate (they are also materialized under
-    # skills/, so the tarball carries them twice).
+    # Skills link to these (the toolkit to the two JS modules, zoom-window to
+    # the URL contract); listing them here makes release-plz attribute their
+    # edits to this crate (they are also materialized under skills/, so the
+    # tarball carries them twice).
     "/ui/trace_parser.js",
     "/ui/trace_analysis.js",
+    "/ui/URL_CONTRACT.md",
     "/README.md",
     "/skill-source.md",
     "/tracing-layer-skill-source.md",

@@ -918,7 +918,7 @@ Manages skill documentation and the JS analysis toolkit for AI agents.
 dial9 agents
 
 # Print a specific skill segment
-dial9 agents skill recipes
+dial9 agents skill dial9-trace-recipes
 
 # Unpack all skills as an Agent Skills spec directory (for native skill loading)
 dial9 agents skills /tmp/dial9-skills

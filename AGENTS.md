@@ -222,17 +222,21 @@ binary (`agents skills` unpack, embedded by `build.rs`), and the `dial9` crate
 package (Symposium's serving edge) through the `dial9/skills` symlink. Inside
 the toolkit, `trace_parser.js`, `trace_analysis.js` and `decode.js` are
 symlinks to the viewer UI modules and the trace-format JS decoder, so the
-agent runs the same code as the viewer. Edit under `dial9-viewer/skills/` or
-the linked sources; never add a second copy. `cargo package` materializes
-every link as a real file (CI checks the tarball).
+agent runs the same code as the viewer. Likewise
+`dial9-zoom-window/references/viewer-urls.md` links to the viewer's URL
+contract (`ui/URL_CONTRACT.md`), so agents read the list the contract tests
+pin. Edit under `dial9-viewer/skills/` or the linked sources; never add a
+second copy. `cargo package` materializes every link as a real file (CI
+checks the tarball).
 
 release-plz attributes a commit to a crate by the git paths under that crate's
 directory that are also in its package file list. A skill edit is a
 `dial9-viewer` change; `dial9` is released alongside because `release-plz.toml`
 folds the viewer's commits into its changelog and version bump
 (`changelog_include`), and it depends on the viewer besides. The viewer's
-`include` lists `ui/trace_parser.js` and `ui/trace_analysis.js` for the same
-reason: without that, a commit touching only them belongs to no crate.
+`include` lists `ui/trace_parser.js`, `ui/trace_analysis.js` and
+`ui/URL_CONTRACT.md` for the same reason: without that, a commit touching only
+them belongs to no crate.
 
 Known limitations:
 
