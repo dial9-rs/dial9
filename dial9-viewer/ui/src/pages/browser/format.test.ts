@@ -148,6 +148,12 @@ describe("picker conversions", () => {
     const s = dateToPickerStr(d, true);
     expect(pickerToDate(s, true)!.getTime()).toBe(d.getTime());
   });
+  it("preserves seconds for precise URL-restored and zoom ranges", () => {
+    const d = new Date("2026-04-09T18:40:37Z");
+    const s = dateToPickerStr(d, false, true);
+    expect(s).toBe("2026-04-09T18:40:37");
+    expect(pickerToDate(s, false)!.getTime()).toBe(d.getTime());
+  });
   it("empty picker value parses to null", () => {
     expect(pickerToDate("", false)).toBeNull();
     expect(pickerToDate("", true)).toBeNull();

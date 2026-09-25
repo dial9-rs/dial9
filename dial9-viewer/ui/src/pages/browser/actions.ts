@@ -18,6 +18,11 @@ import {
   type SourceScope,
 } from "../../lib/trace/source-scope.js";
 import {
+  encodeScope,
+  scopeFromKeys,
+  type TraceScope,
+} from "../../lib/trace/trace_scope.js";
+import {
   isDateLayer,
   lastSegment,
   preferredPrefix,
@@ -79,6 +84,7 @@ export interface BrowserActions {
   selectSegmentAt(x: number, y: number): void;
   finalizeSelection(x0: number, x1: number, y0: number, y1: number): void;
   setHeatmapSelection(sel: HeatmapSelection | null): void;
+  restoreHeatmapSelection(scope: TraceScope | null): void;
   rawSelectAll(checked: boolean): void;
   syncRawSelectionFromDom(): void;
   getSelectedKeys(): string[];
@@ -99,6 +105,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // intermediate restore steps (tab switch, range set) would otherwise each
   // rewrite the URL and could drop fields not yet restored.
   let restoring = false;
+  let pendingSelectionScope: TraceScope | null = null;
 
   let serviceDiscoveryGeneration = 0;
   let browseGeneration = 0;
@@ -161,6 +168,26 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     if (filterOverride != null) {
       qs += (qs ? "&" : "") + "bucket_filter=" + encodeURIComponent(filterOverride);
     }
+    const selection = s.browse.selection;
+    const selectionScope = selection
+      ? scopeFromKeys(
+          source,
+          selection.keys,
+          selection.window?.[0] ?? selection.t0,
+          selection.window?.[1] ?? selection.t1,
+        )
+      : pendingSelectionScope;
+    if (selectionScope) {
+      qs = encodeScope(new URLSearchParams(qs), {
+        ...selectionScope,
+        bucket: "",
+        region: "",
+        roleArn: "",
+        credentialMode: "",
+        prefix: "",
+        service: "",
+      }).query;
+    }
     // Keep the pathname explicit: a bare "?qs" would resolve against
     // <base href="/"> and rewrite this off-root page's path to "/".
     history[historyMode === "push" ? "pushState" : "replaceState"](
@@ -188,6 +215,18 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
   // A manual edit turns the range into a precise/custom window.
   function clearQuickRange(): void {
+    store.update("search", { quickRange: null });
+    syncUrl();
+  }
+
+  // Replace the search window with an absolute range derived from heatmap
+  // zoom navigation. Round outward to whole seconds so the serialized range
+  // never excludes any of the visible domain.
+  function setZoomTimeRange(t0: number, t1: number): void {
+    const from = new Date(Math.floor(t0) * 1000);
+    const to = new Date(Math.ceil(t1) * 1000);
+    els.rangeFrom.value = dateToPickerStr(from, localTz(), true);
+    els.rangeTo.value = dateToPickerStr(to, localTz(), true);
     store.update("search", { quickRange: null });
     syncUrl();
   }
@@ -241,8 +280,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("ui", { useLocalTz: nowLocal });
 
     // Re-write picker values in the NEW tz mode
-    if (fromDate) els.rangeFrom.value = dateToPickerStr(fromDate, nowLocal);
-    if (toDate) els.rangeTo.value = dateToPickerStr(toDate, nowLocal);
+    if (fromDate) els.rangeFrom.value = dateToPickerStr(fromDate, nowLocal, true);
+    if (toDate) els.rangeTo.value = dateToPickerStr(toDate, nowLocal, true);
 
     // Re-render the current view. A TZ toggle is display-only, so keep the
     // selection and zoom the user set (#644) - only the labels reformat.
@@ -398,6 +437,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         return;
       }
       renderHeatmapState();
+      applyPendingSelection();
     } catch (err) {
       store.update("browse", {
         status: {
@@ -833,6 +873,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     const t1 = xToTime(x1, tMin, tMax, W);
     if (!(t1 > t0)) return;
     store.update("browse", { domain: { tMin: t0, tMax: t1 }, selection: null });
+    setZoomTimeRange(t0, t1);
   }
 
   // Restore the full data extent; no-op if not currently zoomed.
@@ -842,6 +883,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     const { tMin, tMax } = b.fullDomain;
     if (b.domain && b.domain.tMin === tMin && b.domain.tMax === tMax) return;
     store.update("browse", { domain: { tMin, tMax }, selection: null });
+    setZoomTimeRange(tMin, tMax);
   }
 
   // Single-click: select the one segment under the cursor.
@@ -914,13 +956,67 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       bytes: totalBytes(segs),
       t0,
       t1,
+      window: [dragT0, dragT1],
       rows: [r0, r1],
     });
   }
 
   // The rect, label highlights and selection count all render from the slice.
   function setHeatmapSelection(sel: HeatmapSelection | null): void {
+    pendingSelectionScope = null;
+    // A relative browse range would re-anchor on reload while a selection
+    // remains absolute. Freeze the current picker window before serializing
+    // any click or drag selection.
+    if (sel && store.getState().search.quickRange !== null) {
+      store.update("search", { quickRange: null });
+    }
     store.update("browse", { selection: sel });
+    syncUrl();
+  }
+
+  function restoreHeatmapSelection(scope: TraceScope | null): void {
+    pendingSelectionScope = scope;
+    applyPendingSelection();
+  }
+
+  function applyPendingSelection(): void {
+    const scope = pendingSelectionScope;
+    const b = store.getState().browse;
+    if (!scope || !b.rows.length || !b.domain) return;
+
+    const selectedHosts = new Set(scope.hosts);
+    const segs: HeatmapSegment[] = [];
+    let r0 = Infinity;
+    let r1 = -Infinity;
+    for (let r = 0; r < b.rows.length; r++) {
+      const row = b.rows[r]!;
+      if (selectedHosts.size > 0 && !selectedHosts.has(row.host)) continue;
+      const hits = segmentsOverlapping(row.segments, scope.from, scope.to);
+      if (!hits.length) continue;
+      r0 = Math.min(r0, r);
+      r1 = Math.max(r1, r);
+      segs.push(...hits);
+    }
+    if (!segs.length || !Number.isFinite(r0) || !Number.isFinite(r1)) return;
+
+    let t0 = Infinity;
+    let t1 = -Infinity;
+    for (const seg of segs) {
+      const span = segmentSpan(seg);
+      t0 = Math.min(t0, span.start);
+      t1 = Math.max(t1, span.end);
+    }
+    pendingSelectionScope = null;
+    store.update("browse", {
+      selection: {
+        keys: segs.map((seg) => seg.key),
+        bytes: totalBytes(segs),
+        t0,
+        t1,
+        window: [scope.from, scope.to],
+        rows: [r0, r1],
+      },
+    });
   }
 
   // Raw-mode Select All / Deselect All. Covers every result, not just the
@@ -1002,6 +1098,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     selectSegmentAt,
     finalizeSelection,
     setHeatmapSelection,
+    restoreHeatmapSelection,
     rawSelectAll,
     syncRawSelectionFromDom,
     getSelectedKeys,

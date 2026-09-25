@@ -26,6 +26,24 @@ function browseResponse(): Response {
   });
 }
 
+function stubUrlEnv(): ReturnType<typeof vi.fn> {
+  const replaceState = vi.fn();
+  vi.stubGlobal("history", { replaceState, pushState: vi.fn() });
+  vi.stubGlobal("window", {
+    location: { pathname: "/browser.html" },
+    Dial9Creds: undefined,
+    Dial9UrlState: {
+      serialize: (state: Record<string, unknown>) =>
+        new URLSearchParams(
+          Object.entries(state)
+            .filter(([, value]) => value != null && value !== "")
+            .map(([key, value]) => [key, String(value)]),
+        ).toString(),
+    },
+  });
+  return replaceState;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -329,6 +347,7 @@ describe("clearBrowseNoService", () => {
 
 describe("heatmap segment selection", () => {
   it("ends at the next segment start instead of its delayed upload time", () => {
+    stubUrlEnv();
     const store = createBrowserStore();
     const selected: HeatmapSegment = {
       key: "traces/2026-04-09/1910/shale/h1/100-0.bin.gz",
@@ -362,6 +381,123 @@ describe("heatmap segment selection", () => {
       keys: [selected.key],
       t0: 100,
       t1: 110,
+    });
+  });
+
+  it("updates the absolute time range and URL after zooming", () => {
+    const replaceState = stubUrlEnv();
+
+    const store = createBrowserStore();
+    store.update("search", { quickRange: 1 });
+    store.update("browse", {
+      domain: { tMin: 1_775_761_800, tMax: 1_775_761_920 },
+    });
+    const els = browserEls("shale");
+    Object.assign(els, { heatmapCanvas: { clientWidth: 120, style: {} } });
+
+    createActions(store, els).zoomToX(15, 105);
+
+    expect(store.getState().search.quickRange).toBeNull();
+    expect(els.rangeFrom.value).toBe("2026-04-09T19:10:15");
+    expect(els.rangeTo.value).toBe("2026-04-09T19:11:45");
+    expect(replaceState).toHaveBeenLastCalledWith(
+      null,
+      "",
+      expect.stringContaining("from=1775761815"),
+    );
+    expect(replaceState).toHaveBeenLastCalledWith(
+      null,
+      "",
+      expect.stringContaining("to=1775761905"),
+    );
+  });
+
+  it("freezes a relative browse range around a separately linked drag selection", () => {
+    const replaceState = stubUrlEnv();
+
+    const store = createBrowserStore();
+    store.update("search", { quickRange: 1 });
+    const selected: HeatmapSegment = {
+      key: "traces/2026-04-09/1910/shale/h1/1775761800-0.bin.gz",
+      size: 1,
+      start: 1_775_761_800,
+      end: 1_775_761_920,
+      layout: "known",
+      service: "shale",
+      host: "h1",
+      bootId: "",
+    };
+    store.update("browse", {
+      segments: [selected],
+      rows: toRows([selected]),
+      domain: { tMin: 1_775_761_800, tMax: 1_775_761_920 },
+    });
+    const els = browserEls("shale");
+    Object.assign(els, { heatmapCanvas: { clientWidth: 120, style: {} } });
+
+    createActions(store, els).finalizeSelection(15, 105, 0, 26);
+
+    expect(store.getState().browse.selection).toMatchObject({
+      t0: 1_775_761_800,
+      t1: 1_775_761_920,
+      window: [1_775_761_815, 1_775_761_905],
+    });
+    expect(store.getState().search.quickRange).toBeNull();
+    expect(els.rangeFrom.value).toBe("2026-04-09T19:08");
+    expect(els.rangeTo.value).toBe("2026-04-09T20:08");
+
+    const url = new URL(
+      String(replaceState.mock.calls.at(-1)![2]),
+      "http://viewer.example",
+    );
+    expect(url.searchParams.get("last")).toBeNull();
+    expect(url.searchParams.get("from")).toBe("1775761680");
+    expect(url.searchParams.get("to")).toBe("1775765280");
+    expect(url.searchParams.get("s_from")).toBe("1775761815");
+    expect(url.searchParams.get("s_to")).toBe("1775761905");
+    expect(url.searchParams.getAll("s_host")).toEqual(["h1"]);
+    expect(url.searchParams.get("s_bucket")).toBeNull();
+    expect(url.searchParams.get("s_region")).toBeNull();
+    expect(url.searchParams.get("s_svc")).toBeNull();
+  });
+
+  it("restores a linked drag window after the browse rows load", () => {
+    stubUrlEnv();
+    const store = createBrowserStore();
+    const selected: HeatmapSegment = {
+      key: "traces/2026-04-09/1910/shale/h1/1775761800-0.bin.gz",
+      size: 1,
+      start: 1_775_761_800,
+      end: 1_775_761_920,
+      layout: "known",
+      service: "shale",
+      host: "h1",
+      bootId: "",
+    };
+    store.update("browse", {
+      segments: [selected],
+      rows: toRows([selected]),
+      domain: { tMin: 1_775_761_800, tMax: 1_775_761_920 },
+    });
+
+    createActions(store, browserEls("shale")).restoreHeatmapSelection({
+      bucket: "traces-bucket",
+      region: "",
+      roleArn: "",
+      credentialMode: "ambient",
+      prefix: "traces",
+      service: "shale",
+      hosts: ["h1"],
+      from: 1_775_761_815,
+      to: 1_775_761_905,
+    });
+
+    expect(store.getState().browse.selection).toMatchObject({
+      keys: [selected.key],
+      t0: 1_775_761_800,
+      t1: 1_775_761_920,
+      window: [1_775_761_815, 1_775_761_905],
+      rows: [0, 0],
     });
   });
 });

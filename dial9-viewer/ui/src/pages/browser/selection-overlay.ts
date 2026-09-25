@@ -53,14 +53,16 @@ export function mountSelectionOverlay({ store, els }: PageCtx): void {
       return;
     }
     if (sel.rows && state.browse.domain) {
-      // Whole rows [r0,r1] x time span [t0,t1].
+      // Whole rows [r0,r1] x the literal drag window. Click selections have
+      // no separate window and use the selected segment's extent.
       const W =
         els.heatmapCanvas.clientWidth ||
         parseFloat(els.heatmapCanvas.style.width) ||
         1;
       const { tMin, tMax } = state.browse.domain;
-      const x0 = timeToX(sel.t0, tMin, tMax, W);
-      const x1 = timeToX(sel.t1, tMin, tMax, W);
+      const [windowT0, windowT1] = sel.window ?? [sel.t0, sel.t1];
+      const x0 = timeToX(windowT0, tMin, tMax, W);
+      const x1 = timeToX(windowT1, tMin, tMax, W);
       selEl.style.display = "block";
       selEl.style.left = x0 + "px";
       selEl.style.width = Math.max(2, x1 - x0) + "px";

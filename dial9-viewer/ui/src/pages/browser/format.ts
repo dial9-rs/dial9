@@ -134,8 +134,15 @@ export function toUTCDatetime(d: Date): string {
 }
 
 /** Format a Date for the datetime-local picker in the given TZ mode. */
-export function dateToPickerStr(d: Date, localTz: boolean): string {
-  return localTz ? toLocalDatetime(d) : toUTCDatetime(d);
+export function dateToPickerStr(
+  d: Date,
+  localTz: boolean,
+  includeSeconds = false,
+): string {
+  const value = localTz ? toLocalDatetime(d) : toUTCDatetime(d);
+  if (!includeSeconds) return value;
+  const seconds = localTz ? d.getSeconds() : d.getUTCSeconds();
+  return value + ":" + String(seconds).padStart(2, "0");
 }
 
 /** Parse a datetime-local picker value into a Date using the TZ mode. */
