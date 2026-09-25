@@ -144,6 +144,26 @@ mod pipeline_helpers {
         Ok(())
     }
 
+    /// Run a disk-backed continuous pipeline over pre-sealed segment bytes.
+    pub async fn run_pipeline_disk_continuous(
+        dir: &Path,
+        segments: Vec<Vec<u8>>,
+        processors: Vec<Box<dyn SegmentProcessor>>,
+        poll_interval: Duration,
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        for (index, bytes) in segments.iter().enumerate() {
+            std::fs::write(dir.join(format!("trace.{index}.bin")), bytes)?;
+        }
+        let fs = Fs::new_disk(dir, "trace");
+        fs.mark_writer_done();
+        let stop = CancellationToken::new();
+        let mut worker =
+            WorkerLoop::new(fs, poll_interval, processors, stop, dev_null_sink(), None).await?;
+        worker.run().await;
+        Ok(())
+    }
+
     /// An in-memory triggered pipeline: seal segments with [`seal`](Self::seal),
     /// fire a dump via [`trigger`](Self::trigger), then
     /// [`shutdown`](Self::shutdown).

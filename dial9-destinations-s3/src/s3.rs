@@ -1771,14 +1771,83 @@ mod worker_integration_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mem_e2e_real_s3_pipeline_recovers_within_budget() {
+    async fn disk_retry_reuses_transformed_payload() {
+        struct CountRawTransforms(Arc<std::sync::atomic::AtomicU32>);
+        impl SegmentProcessor for CountRawTransforms {
+            fn name(&self) -> &'static str {
+                "CountRawTransforms"
+            }
+
+            fn process(
+                &mut self,
+                data: dial9_core::pipeline::SegmentData,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                dial9_core::pipeline::SegmentData,
+                                dial9_core::pipeline::ProcessError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                if !data.payload().starts_with(&[0x1f, 0x8b]) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                Box::pin(std::future::ready(Ok(data)))
+            }
+        }
+
+        let FlakyHarness {
+            uploader,
+            fail_counter,
+            s3_root,
+        } = flaky_s3_harness(1);
+        let local = tempfile::tempdir().unwrap();
+        let raw = b"segment-payload-that-compresses-segment-payload".to_vec();
+        let raw_transforms = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let uploader_stage = S3PipelineUploader::from_ready(uploader, CircuitBreaker::new());
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            dial9_core::test_util::run_pipeline_disk_continuous(
+                local.path(),
+                vec![raw.clone()],
+                vec![
+                    Box::new(CountRawTransforms(Arc::clone(&raw_transforms))),
+                    Box::new(GzipCompressor),
+                    Box::new(uploader_stage),
+                ],
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("worker hung")
+        .expect("pipeline run failed");
+
+        check!(fail_counter.load(Ordering::SeqCst) == 0);
+        check!(
+            raw_transforms.load(Ordering::SeqCst) == 1,
+            "raw transformation must run only on the first attempt",
+        );
+        let uploaded = read_only_object(s3_root.path());
+        let mut decoder = flate2::read::GzDecoder::new(&uploaded[..]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        check!(decoded == raw);
+        check!(std::fs::read_dir(local.path()).unwrap().next().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mem_e2e_real_s3_pipeline_recovers_in_place() {
         let FlakyHarness {
             uploader,
             fail_counter,
             s3_root,
         } = flaky_s3_harness(2);
-        // > CB initial backoff (1s) so CB reopens between retries. CB
-        // doubles per failure; budget=3 fits 1s+2s within the 15s cap below.
+        // > CB initial backoff (1s) so CB reopens between retries. The
+        // backoff doubles per failure, so 1s+2s fits within the 15s cap below.
         let poll_interval = Duration::from_millis(1100);
 
         let payload = b"segment-payload-bytes".to_vec();
