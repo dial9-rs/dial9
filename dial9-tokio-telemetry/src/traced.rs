@@ -205,7 +205,7 @@ where
     F: Future,
 {
     #[cfg(feature = "taskdump")]
-    let inner = crate::task_dump::TaskDumped::new(inner, handle.clone(), task_id);
+    let inner = crate::task_dump::wrap(inner, handle.clone(), task_id);
 
     WakeTraced::new(inner, handle, task_id, spawn_loc)
 }

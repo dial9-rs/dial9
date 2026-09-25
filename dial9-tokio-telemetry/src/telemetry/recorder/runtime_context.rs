@@ -1,7 +1,11 @@
 use super::source::{FlushContext, Source};
 #[cfg(not(tokio_unstable))]
 use crate::primitives::sync::Weak;
+#[cfg(feature = "taskdump")]
+use crate::primitives::sync::atomic::AtomicU64 as SamplingActivationCount;
 use crate::primitives::sync::{Arc, Mutex};
+#[cfg(feature = "taskdump")]
+use crate::task_dump::worker::WorkerSampler;
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
@@ -44,6 +48,16 @@ pub(crate) struct RuntimeContext {
     /// Global worker IDs within this runtime.
     /// Populated lazily the first time each worker thread resolves its identity.
     pub worker_ids: Mutex<BTreeSet<u64>>,
+    #[cfg(feature = "taskdump")]
+    pub(super) task_dump_config: Option<crate::telemetry::TaskDumpConfig>,
+    #[cfg(feature = "taskdump")]
+    pub(super) task_sampling_config: Option<crate::telemetry::TaskSamplingConfig>,
+    /// Shared by every thread that drives a logical worker. The source reads
+    /// activation metadata without locking a worker's sampling decision.
+    #[cfg(feature = "taskdump")]
+    task_sampling_workers: Mutex<Box<[Option<Arc<WorkerSampler>>]>>,
+    #[cfg(feature = "taskdump")]
+    task_sampling_activations: Arc<SamplingActivationCount>,
 }
 
 thread_local! {
@@ -372,13 +386,21 @@ impl Source for TokioRuntimesSource {
         // Self-detected change: there is no external signal to keep in sync, so
         // a new caller that mutates runtime/worker metadata cannot forget to
         // announce it. The fingerprint is the runtime count plus the total
-        // number of registered workers across all runtimes. Both only ever grow
+        // number of registered workers and calibrated samplers. These only grow
         // (runtimes and workers are added, never removed) and each worker's
         // global id is fixed once assigned, so an unchanged fingerprint means
         // unchanged metadata. Cheap — a few uncontended read locks and no
         // allocation — so it runs every flush cycle.
         let contexts = self.contexts.lock().unwrap();
-        let fingerprint = contexts.len()
+        #[cfg(feature = "taskdump")]
+        let activated_workers = contexts
+            .iter()
+            .map(|ctx| ctx.task_sampling_activations.load(Ordering::Acquire) as usize)
+            .sum::<usize>();
+        #[cfg(not(feature = "taskdump"))]
+        let activated_workers = 0;
+        let fingerprint = activated_workers
+            + contexts.len()
             + contexts
                 .iter()
                 .map(|c| c.worker_ids.lock().unwrap().len())
@@ -388,8 +410,12 @@ impl Source for TokioRuntimesSource {
         }
         self.last_fingerprint = fingerprint;
         // The writer's merge is additive, so emitting the full current snapshot
-        // on each change is correct. A fingerprint bump from an unnamed runtime
+        // on each change is correct.
         out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
+        #[cfg(feature = "taskdump")]
+        for ctx in contexts.iter() {
+            ctx.append_task_sampling_metadata(out);
+        }
     }
 }
 
@@ -409,6 +435,82 @@ impl RuntimeContext {
             #[cfg(tokio_unstable)]
             worker_id_base: OnceLock::new(),
             worker_ids: Mutex::new(BTreeSet::new()),
+            #[cfg(feature = "taskdump")]
+            task_dump_config: None,
+            #[cfg(feature = "taskdump")]
+            task_sampling_config: None,
+            #[cfg(feature = "taskdump")]
+            task_sampling_workers: Mutex::new(Box::new([])),
+            #[cfg(feature = "taskdump")]
+            task_sampling_activations: Arc::new(SamplingActivationCount::new(0)),
+        }
+    }
+
+    #[cfg(feature = "taskdump")]
+    fn task_sampler(&self, global_id: u64) -> Option<Arc<WorkerSampler>> {
+        let config = self.task_sampling_config?;
+        let mut workers = self.task_sampling_workers.lock().unwrap();
+        let slot = self
+            .worker_id_base
+            .get()
+            .and_then(|base| global_id.checked_sub(*base))
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| workers.get_mut(index));
+        let Some(slot) = slot else {
+            dial9_core::rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    global_id,
+                    "task sampling worker slots missing or worker ID out of range"
+                );
+            });
+            return None;
+        };
+        Some(
+            slot.get_or_insert_with(|| {
+                Arc::new(WorkerSampler::new(
+                    config,
+                    global_id,
+                    clock_monotonic_ns(),
+                    self.task_sampling_activations.clone(),
+                ))
+            })
+            .clone(),
+        )
+    }
+
+    #[cfg(feature = "taskdump")]
+    fn append_task_sampling_metadata(&self, out: &mut Vec<(String, String)>) {
+        let Some(config) = self.task_sampling_config else {
+            return;
+        };
+        out.push((
+            "task_sampling.sampler".into(),
+            "per_worker_bernoulli_v1".into(),
+        ));
+        // Always use worker rates: metadata merges are additive, so a
+        // scalar could become stale if a different-rate runtime attaches.
+        let Some(base) = self.worker_id_base.get() else {
+            return;
+        };
+        for (index, sampler) in self
+            .task_sampling_workers
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let Some(sampler) = sampler else { continue };
+            let worker = base + index as u64;
+            out.push((
+                format!("task_sampling.worker.{worker}.captures_per_second"),
+                config.captures_per_second_per_worker().to_string(),
+            ));
+            if let Some(timestamp) = sampler.sampling_started_at_ns() {
+                out.push((
+                    format!("task_sampling.worker.{worker}.sampling_started_at_ns"),
+                    timestamp.to_string(),
+                ));
+            }
         }
     }
 
@@ -544,6 +646,11 @@ impl RuntimeContext {
         // once however many workers resolve at the same moment.
         let base = self.worker_id_base.get_or_init(|| {
             let num_workers = worker_metrics(self, |metrics| metrics.num_workers()) as u64;
+            #[cfg(feature = "taskdump")]
+            if self.task_sampling_config.is_some() {
+                *self.task_sampling_workers.lock().unwrap() =
+                    vec![None; num_workers as usize].into_boxed_slice();
+            }
             self.reserve_worker_ids(num_workers)
         });
         Some(base + local_index as u64)
@@ -565,6 +672,10 @@ fn register_worker_if_needed(ctx: &RuntimeContext, global_id: u64) {
     let key = (ctx.id, global_id);
     WORKER_REGISTERED.with(|cell| {
         if cell.get() != Some(key) {
+            #[cfg(feature = "taskdump")]
+            crate::task_dump::set_worker_sampler(ctx.task_sampler(global_id));
+            // Publish the worker after its sampler so a source snapshot that
+            // sees the worker-count change also sees its capture configuration.
             ctx.worker_ids.lock().unwrap().insert(global_id);
             // Install the recorder handle on this thread. `on_thread_start` also
             // does this for pool threads, but a `current_thread` runtime's driver
@@ -837,6 +948,61 @@ fn make_worker_unpark(ctx: &RuntimeContext) -> WorkerUnparkEvent {
 #[cfg(all(test, not(shuttle)))]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "taskdump")]
+    #[test]
+    fn task_sampler_validates_worker_range_and_reuses_slots() {
+        let mut ctx =
+            RuntimeContext::new(None, Dial9Handle::disabled(), Arc::new(AtomicU64::new(0)));
+        assert!(ctx.task_sampler(37).is_none());
+        ctx.task_sampling_config = Some(crate::telemetry::TaskSamplingConfig::default());
+        assert!(ctx.task_sampler(37).is_none());
+        ctx.worker_id_base.set(37).unwrap();
+        assert!(ctx.task_sampler(37).is_none());
+        *ctx.task_sampling_workers.lock().unwrap() = vec![None, None].into_boxed_slice();
+        assert!(ctx.task_sampler(36).is_none());
+        assert!(ctx.task_sampler(39).is_none());
+        let sampler = ctx.task_sampler(37).unwrap();
+        assert!(Arc::ptr_eq(&sampler, &ctx.task_sampler(37).unwrap()));
+        assert!(ctx.task_sampling_workers.lock().unwrap()[1].is_none());
+    }
+
+    #[cfg(feature = "taskdump")]
+    #[test]
+    fn task_dump_slots_use_current_runtime_worker_count() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::spawn(async {
+                let outer_ctx =
+                    RuntimeContext::new(None, Dial9Handle::disabled(), Arc::new(AtomicU64::new(0)));
+                assert_eq!(
+                    worker_metrics(&outer_ctx, |metrics| metrics.num_workers()),
+                    2
+                );
+                tokio::task::block_in_place(|| {
+                    let nested = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap();
+                    let counter = Arc::new(AtomicU64::new(0));
+                    let mut ctx =
+                        RuntimeContext::new(None, Dial9Handle::disabled(), counter.clone());
+                    ctx.task_sampling_config =
+                        Some(crate::telemetry::TaskSamplingConfig::default());
+                    nested.block_on(async {
+                        let worker = ctx.claim_worker_id().unwrap();
+                        assert_eq!(ctx.task_sampling_workers.lock().unwrap().len(), 1);
+                        assert_eq!(counter.load(Ordering::Relaxed), 1);
+                        assert!(ctx.task_sampler(worker).is_some());
+                    });
+                });
+            })
+            .await
+            .unwrap();
+        });
+    }
 
     #[cfg(tokio_unstable)]
     #[test]
@@ -1284,6 +1450,53 @@ mod shuttle_tests {
                      found these runtime.* entries: {runtime_entries:?}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(all(test, shuttle, feature = "taskdump"))]
+mod task_dump_shuttle_tests {
+    use super::*;
+    use crate::primitives::thread;
+
+    dial9_core::shuttle_test! {
+        num_iters = 1_000, depth = 3;
+        fn worker_registration_publishes_capture_rate_before_activation() {
+            let mut ctx = RuntimeContext::new(
+                Some("main".into()),
+                Dial9Handle::disabled(),
+                Arc::new(AtomicU64::new(0)),
+            );
+            ctx.task_sampling_config = Some(crate::telemetry::TaskSamplingConfig::default());
+            ctx.worker_id_base.set(37).unwrap();
+            *ctx.task_sampling_workers.lock().unwrap() = vec![None, None].into_boxed_slice();
+            let ctx = Arc::new(ctx);
+            let contexts = Arc::new(Mutex::new(vec![ctx.clone()]));
+            let mut source = TokioRuntimesSource::new(contexts);
+            let register = {
+                let ctx = ctx.clone();
+                thread::spawn(move || register_worker_if_needed(&ctx, 37))
+            };
+
+            // The writer merges metadata across flushes, including any that
+            // interleave with registration. Never activate or poll this worker:
+            // its configuration must not depend on a later capture repairing it.
+            let mut entries = Vec::new();
+            for _ in 0..3 {
+                source.segment_metadata(&mut entries);
+                shuttle::thread::yield_now();
+            }
+            register.join().unwrap();
+            source.segment_metadata(&mut entries);
+            assert!(entries.contains(&("runtime.main".into(), "37".into())));
+            assert!(entries.contains(&(
+                "task_sampling.worker.37.captures_per_second".into(), "10".into(),
+            )));
+            let workers = ctx.task_sampling_workers.lock().unwrap();
+            assert!(workers[0].is_some());
+            assert!(workers[1].is_none());
+            assert!(!entries.iter().any(|(key, _)| key.starts_with("task_sampling.worker.38.")));
+            assert_eq!(ctx.task_sampling_activations.load(Ordering::Acquire), 0);
         }
     }
 }

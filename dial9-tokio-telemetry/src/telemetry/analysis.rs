@@ -213,6 +213,7 @@ fn event_timestamp(ev: &Dial9Event) -> Option<u64> {
         Dial9Event::TaskTerminateEvent(e) => Some(e.timestamp_ns),
         Dial9Event::CpuSampleEvent(e) => Some(e.timestamp_ns),
         Dial9Event::TaskDumpEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::TaskSampleEvent(e) => Some(e.timestamp_ns),
         Dial9Event::WakeEvent(e) => Some(e.timestamp_ns),
         Dial9Event::SegmentMetadataEvent(e) => Some(e.timestamp_ns),
         Dial9Event::ClockSyncEvent(e) => Some(e.timestamp_ns),

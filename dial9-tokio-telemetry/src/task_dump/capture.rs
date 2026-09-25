@@ -1,4 +1,4 @@
-use crate::telemetry::format::TaskDumpEvent;
+use crate::telemetry::format::{TaskDumpEvent, TaskSampleEvent};
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::{Encodable, ThreadLocalEncoder};
 use dial9_core::handle::Dial9Handle;
@@ -47,6 +47,16 @@ impl FrameBuf {
         self.chains.clear();
     }
 
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.ips.capacity()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.ips.is_empty() && self.chains.is_empty()
+    }
+
     pub(super) fn has_data(&self) -> bool {
         !self.chains.is_empty()
     }
@@ -55,6 +65,33 @@ impl FrameBuf {
     /// Trimming via `_Unwind_FindEnclosingFunction` happens here (emit path)
     /// rather than during capture, keeping the hot path lock-free.
     pub(super) fn emit(&mut self, handle: &Dial9Handle, task_id: TaskId, capture_ts: u64) {
+        self.emit_with(|chain| {
+            handle.record_event_with(|| TaskDumpData {
+                timestamp_ns: capture_ts,
+                task_id,
+                callchain: chain,
+            });
+        });
+    }
+
+    pub(super) fn emit_sample(
+        &mut self,
+        handle: &Dial9Handle,
+        task_id: TaskId,
+        capture_ts: u64,
+        inclusion_probability: f64,
+    ) {
+        self.emit_with(|chain| {
+            handle.record_event_with(|| TaskSampleData {
+                timestamp_ns: capture_ts,
+                task_id,
+                callchain: chain,
+                inclusion_probability,
+            });
+        });
+    }
+
+    fn emit_with(&mut self, mut record: impl FnMut(&[u64])) {
         for (i, meta) in self.chains.iter().enumerate() {
             let ip_end = self
                 .chains
@@ -67,11 +104,7 @@ impl FrameBuf {
                 None => &[],
             };
             if !chain.is_empty() {
-                handle.record_event_with(|| TaskDumpData {
-                    timestamp_ns: capture_ts,
-                    task_id,
-                    callchain: chain,
-                });
+                record(chain);
             }
         }
         self.clear();
@@ -135,6 +168,27 @@ impl Encodable for TaskDumpData<'_> {
             timestamp_ns: self.timestamp_ns,
             task_id: self.task_id,
             callchain: interned_callchain,
+        });
+    }
+}
+
+/// Borrowed-callchain view of a task-sample event that implements [`Encodable`]
+/// by interning its ips into the batch's stack pool.
+pub(crate) struct TaskSampleData<'a> {
+    pub(crate) timestamp_ns: u64,
+    pub(crate) task_id: TaskId,
+    pub(crate) callchain: &'a [u64],
+    pub(crate) inclusion_probability: f64,
+}
+
+impl Encodable for TaskSampleData<'_> {
+    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+        let interned_callchain = enc.intern_stack_frames(self.callchain);
+        enc.encode(&TaskSampleEvent {
+            timestamp_ns: self.timestamp_ns,
+            task_id: self.task_id,
+            callchain: interned_callchain,
+            inclusion_probability: self.inclusion_probability,
         });
     }
 }

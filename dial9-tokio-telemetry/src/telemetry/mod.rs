@@ -16,6 +16,7 @@ pub(crate) mod format;
 pub(crate) mod recorder;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
+pub mod task_sampling_config;
 pub(crate) use dial9_core::buffer;
 
 pub use crate::traced::TracedFuture;
@@ -56,3 +57,4 @@ pub use recorder::{
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
+pub use task_sampling_config::TaskSamplingConfig;

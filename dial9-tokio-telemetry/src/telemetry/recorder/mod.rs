@@ -90,9 +90,6 @@ fn register_hooks(
     handle: &Dial9Handle,
     #[cfg_attr(not(tokio_unstable), allow(unused_variables))] task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
-    #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
-        crate::telemetry::task_dump_config::TaskDumpConfig,
-    >,
 ) {
     let c1 = ctx.clone();
     let c2 = ctx.clone();
@@ -114,7 +111,11 @@ fn register_hooks(
         meta: builder,
         on_before_task_poll,
         tokio_hooks.on_before_task_poll,
-        |meta| { c3.record_poll_start(meta.spawned_at(), TaskId::from(meta.id())) }
+        |meta| {
+            #[cfg(feature = "taskdump")]
+            crate::task_dump::set_capture_config(c3.task_dump_config, c3.task_sampling_config.is_some());
+            c3.record_poll_start(meta.spawned_at(), TaskId::from(meta.id()))
+        }
     );
 
     #[cfg(tokio_unstable)]
@@ -160,6 +161,8 @@ fn register_hooks(
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
     let handle_for_tl = handle.clone();
+    #[cfg(feature = "taskdump")]
+    let taskdump_config = ctx.task_dump_config;
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
         // Install this thread's Dial9Handle so user code can call
@@ -190,7 +193,10 @@ fn register_hooks(
         runtime_context::clear_thread_traced();
 
         #[cfg(feature = "taskdump")]
-        crate::task_dump::clear_taskdump_config();
+        {
+            crate::task_dump::set_capture_config(None, false);
+            crate::task_dump::clear_worker_sampler();
+        }
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -207,25 +213,24 @@ fn register_hooks(
 /// Worker IDs are reserved lazily on the first poll.
 fn register_runtime_hooks(
     builder: &mut tokio::runtime::Builder,
-    runtime_name: Option<String>,
     handle: &Dial9Handle,
     worker_ids: runtime_context::WorkerIdCounter,
-    task_tracking_enabled: bool,
-    tokio_hooks: TokioHooks,
-    taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
+    options: TokioAttachOptions,
 ) -> Arc<RuntimeContext> {
-    let ctx = Arc::new(RuntimeContext::new(
-        runtime_name,
-        handle.clone(),
-        worker_ids,
-    ));
+    #[allow(unused_mut)]
+    let mut ctx = RuntimeContext::new(options.runtime_name, handle.clone(), worker_ids);
+    #[cfg(feature = "taskdump")]
+    {
+        ctx.task_dump_config = options.task_dump_config;
+        ctx.task_sampling_config = options.task_sampling_config;
+    }
+    let ctx = Arc::new(ctx);
     register_hooks(
         builder,
         &ctx,
         handle,
-        task_tracking_enabled,
-        tokio_hooks,
-        taskdump_config,
+        options.task_tracking_enabled,
+        options.tokio_hooks,
     );
     ctx
 }
@@ -246,6 +251,20 @@ mod tests {
 
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
+
+    #[test]
+    fn task_dump_and_sampling_configs_are_mutually_exclusive() {
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();
+        let options = TokioAttachOptions::builder()
+            .task_dump_config(crate::telemetry::TaskDumpConfig::default())
+            .task_sampling_config(crate::telemetry::TaskSamplingConfig::default())
+            .build();
+        let error = rec
+            .handle()
+            .attach_tokio_runtime(tokio::runtime::Builder::new_current_thread(), options)
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
 
     /// Nested `InstrumentedSpawnGuard`s must compose: inner drop must not
     /// clear the outer scope. Counter, not flag.
@@ -273,12 +292,11 @@ mod tests {
 
         let ctx = register_runtime_hooks(
             &mut builder,
-            Some("aborted".to_string()),
             rec.handle(),
             state.worker_ids,
-            false,
-            TokioHooks::default(),
-            None,
+            TokioAttachOptions::builder()
+                .runtime_name("aborted")
+                .build(),
         );
         let weak = Arc::downgrade(&ctx);
 

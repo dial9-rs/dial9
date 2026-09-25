@@ -49,6 +49,7 @@ crate::primitives::thread_local! {
     /// every runtime-owned thread: worker thread-start, plus the block_on
     /// thread in `attach_tokio_runtime` (which thread-start doesn't fire for on a
     /// current-thread runtime), and cleared on thread stop.
+    /// Refreshed before each task poll to follow runtime changes.
     /// `None` means task dumps aren't configured, so `TaskDumped` runs as a passthrough.
     static TASKDUMP_CONFIG: Cell<Option<TaskDumpConfig>> = const { Cell::new(None) };
 }
