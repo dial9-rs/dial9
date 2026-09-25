@@ -1,6 +1,6 @@
 ---
 name: dial9-zoom-window
-description: Zoom into a narrow time window of a dial9 trace to see every worker and OS thread at one moment. Use after an aggregate pass (`analyze.js`, `red_flag_scan.js`) flags a timestamp — a long poll, a queue spike, a latency outlier. Use when the user says "zoom in", "what was happening at +6953ms", or "show me the window around that poll".
+description: Zoom into a narrow time window of a dial9 trace to see every worker and OS thread at one moment. Use after an aggregate pass (`analyze.js`, `red_flag_scan.js`) flags a timestamp: a long poll, a queue spike, a latency outlier. Use when the user says "zoom in", "what was happening at +6953ms", or "show me the window around that poll". Also covers sharing a window as a dial9 viewer deep link, with the full list of viewer URL parameters.
 ---
 
 # Zooming into a time window
@@ -114,10 +114,12 @@ long poll even without reading CPU stacks.
 ## Share the window as a viewer deep link
 
 Every window has a URL. The full interactive viewer honors `?start=`/`?end=`
-(ABSOLUTE monotonic ns, visible viewport bounds) per the stable URL contract in
-`dial9-viewer/ui/README.md`, section "URL contract (stable deep-link API)".
-`zoom.js` prints this link at the end of every window report; to construct
-it yourself from the relative-ms numbers the aggregate tools print:
+(ABSOLUTE monotonic ns, visible viewport bounds) per its stable URL contract,
+which ships with this skill as
+[`references/viewer-urls.md`](references/viewer-urls.md): every param the
+viewer, flamegraph and trace browser pages honor, plus ready-made link
+recipes. `zoom.js` prints this link at the end of every window report; to
+construct it yourself from the relative-ms numbers the aggregate tools print:
 
 ```javascript
 // centerMs / halfMs: the same numbers you passed to zoom.js.
@@ -139,8 +141,8 @@ percent-encode it (`encodeURIComponent`) before putting it in `trace=`. The
 CPU-profile view of the window.
 Normally leave the viewer's `data-start`/`data-end` unset so the reader can zoom
 back out; add them only when the link must discard data outside the window. Do
-not invent `?worker=` or `?source=`; use the URL contract for supported
-selection fields such as `?task=`.
+not invent `?worker=` or `?source=`; `references/viewer-urls.md` lists the
+supported selection fields such as `?task=`.
 
 ## From window back to cause
 

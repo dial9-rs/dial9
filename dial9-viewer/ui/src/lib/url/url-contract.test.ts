@@ -1,10 +1,10 @@
-// The URL-contract pin. The contract doc is dial9-viewer/ui/README.md, section
-// "URL contract (stable deep-link API)"; this suite keeps that section, the
-// recorded legacy-param fixture, url_state.js, and the view-state codec in
-// lockstep:
+// The URL-contract pin. The contract doc is dial9-viewer/ui/URL_CONTRACT.md
+// (shipped with the agent skills; the README's "URL contract" section holds
+// the process around it); this suite keeps that doc, the recorded
+// legacy-param fixture, url_state.js, and the view-state codec in lockstep:
 //
 // - the schema VERSION is pinned (a bump is a contract event, not a detail);
-// - every param the README tables document is exactly what the recorded
+// - every param the contract tables document is exactly what the recorded
 //   fixtures/serializers know, per table (renaming a table heading or a
 //   param name in the doc fails here BY DESIGN - the doc is the API);
 // - hash keys documented "live" round-trip through the codec; keys
@@ -15,7 +15,7 @@
 //
 // The promise this enforces: old params stay valid forever, evolution is
 // additive-only. Removing or renaming ANY name below is a breaking change and
-// must not happen; adding one means updating the README section, the ledger,
+// must not happen; adding one means updating URL_CONTRACT.md, the ledger,
 // and this suite in the same PR.
 
 import { describe, it, expect } from "vitest";
@@ -40,29 +40,21 @@ const UrlState = require(path.join(uiDir, "url_state.js")) as {
   serialize(state: Record<string, unknown>): string;
 };
 
-// ── README section parsing ───────────────────────────────────────────────
+// ── Contract doc parsing ─────────────────────────────────────────────────
 
-const readme = fs.readFileSync(path.join(uiDir, "README.md"), "utf8");
+const contract = fs.readFileSync(path.join(uiDir, "URL_CONTRACT.md"), "utf8");
 
-/** The whole "## URL contract" section (up to the next h2). */
-function contractSection(): string {
-  const m = readme.match(/^## URL contract[^\n]*\n([\s\S]*?)(?=^## )/m);
-  expect(m, 'README.md must contain a "## URL contract" section').not.toBeNull();
-  return m![1]!;
-}
-
-/** One "### <heading>" subsection of the contract section. */
-function subsection(headingPrefix: string): string {
-  const section = contractSection();
-  const lines = section.split("\n");
-  const start = lines.findIndex((l) => l.startsWith(`### ${headingPrefix}`));
+/** One "## <heading>" section of the contract doc (the last one ends at EOF). */
+function section(headingPrefix: string): string {
+  const lines = contract.split("\n");
+  const start = lines.findIndex((l) => l.startsWith(`## ${headingPrefix}`));
   expect(
     start,
-    `contract section must contain a "### ${headingPrefix}" subsection`,
+    `URL_CONTRACT.md must contain a "## ${headingPrefix}" section`,
   ).toBeGreaterThanOrEqual(0);
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("### ")) {
+    if (lines[i]!.startsWith("## ")) {
       end = i;
       break;
     }
@@ -89,21 +81,21 @@ describe("URL contract: schema version", () => {
     // Bumping this is an incompatible reinterpretation of an existing key
     // (expected: never, per the schema doc's version rules). If you are
     // here because VIEW_STATE_VERSION changed: that is a contract event -
-    // update docs/ui-inventory/05-url-view-state.md, the README contract
-    // section, and the reader-behavior expectations below first.
+    // update docs/ui-inventory/05-url-view-state.md, URL_CONTRACT.md, and
+    // the reader-behavior expectations below first.
     expect(VIEW_STATE_VERSION).toBe(1);
   });
 
-  it("the README documents the pinned version", () => {
-    expect(subsection("Hash")).toContain("currently `1`");
+  it("the contract documents the pinned version", () => {
+    expect(section("Hash")).toContain("currently `1`");
   });
 });
 
 // ── Doc <-> fixture lockstep, per table ──────────────────────────────────
 
-describe("URL contract: README tables match the recorded fixtures", () => {
+describe("URL contract: contract tables match the recorded fixtures", () => {
   it("exact-mode table = flamegraph fixture exact params + viewer-only prof", () => {
-    const documented = tableNames(subsection("Query params - viewer.html"));
+    const documented = tableNames(section("Query params - viewer.html"));
     const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter(
       (p) => p.mode === "exact" || p.mode === "both",
     ).map((p) => p.param);
@@ -111,7 +103,7 @@ describe("URL contract: README tables match the recorded fixtures", () => {
   });
 
   it("api-mode table = flamegraph fixture api params", () => {
-    const documented = tableNames(subsection("Query params - flamegraph.html"));
+    const documented = tableNames(section("Query params - flamegraph.html"));
     const fixture = FLAMEGRAPH_LEGACY_PARAMS.filter(
       (p) => p.mode === "api" || p.mode === "both",
     ).map((p) => p.param);
@@ -119,7 +111,7 @@ describe("URL contract: README tables match the recorded fixtures", () => {
   });
 
   it("browser-page table = url_state.js serialization surface", () => {
-    const documented = tableNames(subsection("Query params - index.html"));
+    const documented = tableNames(section("Query params - index.html"));
     // url_state.js's two mutually-exclusive range forms together cover the
     // full wire vocabulary; the union is the serialization surface.
     const full = {
@@ -141,13 +133,13 @@ describe("URL contract: README tables match the recorded fixtures", () => {
 
   it("viewer durable-state table = viewer URL registry", () => {
     const documented = tableNames(
-      subsection("Query params - viewer.html durable view state"),
+      section("Query params - viewer.html durable view state"),
     );
     expect(sorted(documented)).toEqual(sorted(VIEWER_VIEW_QUERY_PARAMS));
   });
 
   it("hash table = v + live/defined codec keys + reserved keys", () => {
-    const documented = tableNames(subsection("Hash"));
+    const documented = tableNames(section("Hash"));
     // Live + defined keys: what the codec encodes today. Derived from the
     // codec's behavior (not a copied list) so the doc pins the code.
     const encoded = new URLSearchParams(
@@ -179,7 +171,7 @@ describe("URL contract: reserved hash keys", () => {
     expect(decoded).not.toBeNull();
     expect(decoded!.version).toBe(VIEW_STATE_VERSION);
     // No state field materializes from a reserved key today. When one is
-    // implemented, it moves the key to "live" in the README table and
+    // implemented, it moves the key to "live" in the contract table and
     // REMOVES it from this list in the same PR.
     expect(decoded!.state).toEqual({});
   });

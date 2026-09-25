@@ -16,7 +16,7 @@ This skill guides you through analyzing dial9 trace data stored in S3. The workf
 
 - AWS CLI configured with read access to the target bucket
 - `dial9` CLI installed (`cargo install dial9 --features cli` or `cargo binstall dial9`)
-- Node.js 14+ for running the analysis toolkit
+- Node.js 16 or newer for running the analysis toolkit
 
 ## Phase 1: Discovery
 
