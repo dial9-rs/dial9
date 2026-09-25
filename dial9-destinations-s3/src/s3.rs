@@ -11,7 +11,7 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use dial9_core::boot_id::generate_boot_id as default_boot_id;
 use dial9_core::pipeline::{
-    ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor, SegmentRef,
+    ProcessError, ProcessErrorKind, ProcessorLiveness, SegmentData, SegmentProcessor, SegmentRef,
 };
 use dial9_core::rate_limited;
 use std::collections::HashMap;
@@ -475,6 +475,7 @@ impl S3Uploader {
 /// AWS client and bucket region on its Tokio runtime before processing starts.
 pub struct S3PipelineUploader {
     state: S3UploaderState,
+    circuit_breaker: connection::CircuitBreaker,
     /// Triggered mode: object keys written per dump id, accumulated while
     /// the dump is open and flushed into its manifest at `finalize_dump`.
     /// A key appears under several ids when forward windows overlap.
@@ -510,7 +511,6 @@ enum S3UploaderState {
     },
     Ready {
         uploader: S3Uploader,
-        circuit_breaker: connection::CircuitBreaker,
     },
 }
 
@@ -552,6 +552,7 @@ impl S3PipelineUploader {
                 s3_config,
                 client_source,
             },
+            circuit_breaker: connection::CircuitBreaker::new(),
             dump_keys: HashMap::new(),
         }
     }
@@ -631,10 +632,8 @@ impl S3PipelineUploader {
         circuit_breaker: connection::CircuitBreaker,
     ) -> Self {
         Self {
-            state: S3UploaderState::Ready {
-                uploader,
-                circuit_breaker,
-            },
+            state: S3UploaderState::Ready { uploader },
+            circuit_breaker,
             dump_keys: HashMap::new(),
         }
     }
@@ -642,7 +641,7 @@ impl S3PipelineUploader {
     async fn build_uploader(
         s3_config: S3Config,
         bootstrap_client: aws_sdk_s3::Client,
-    ) -> (S3Uploader, connection::CircuitBreaker) {
+    ) -> S3Uploader {
         let region = match s3_config.region() {
             Some(r) => r.to_owned(),
             None => detect_bucket_region(&bootstrap_client, s3_config.bucket()).await,
@@ -657,10 +656,7 @@ impl S3PipelineUploader {
             .build();
         let corrected_client = aws_sdk_s3::Client::from_conf(corrected_conf);
 
-        (
-            S3Uploader::new(corrected_client, s3_config),
-            connection::CircuitBreaker::new(),
-        )
+        S3Uploader::new(corrected_client, s3_config)
     }
 
     async fn ensure_initialized(&mut self) {
@@ -683,17 +679,22 @@ impl S3PipelineUploader {
             S3UploaderState::Ready { .. } => return,
         };
 
-        let (uploader, circuit_breaker) = Self::build_uploader(s3_config, bootstrap_client).await;
-        self.state = S3UploaderState::Ready {
-            uploader,
-            circuit_breaker,
-        };
+        let uploader = Self::build_uploader(s3_config, bootstrap_client).await;
+        self.state = S3UploaderState::Ready { uploader };
     }
 }
 
 impl SegmentProcessor for S3PipelineUploader {
     fn name(&self) -> &'static str {
         "S3Upload"
+    }
+
+    fn liveness(&self) -> ProcessorLiveness {
+        if self.circuit_breaker.should_attempt() {
+            ProcessorLiveness::Live
+        } else {
+            ProcessorLiveness::unavailable("S3 circuit breaker open")
+        }
     }
 
     fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
@@ -705,17 +706,13 @@ impl SegmentProcessor for S3PipelineUploader {
 
     fn process(
         &mut self,
-        mut data: SegmentData,
+        data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             // Keep direct SegmentProcessor drivers compatible even if they do
             // not call the worker lifecycle hook.
             self.ensure_initialized().await;
-            let S3UploaderState::Ready {
-                uploader,
-                circuit_breaker,
-            } = &mut self.state
-            else {
+            let S3UploaderState::Ready { uploader } = &mut self.state else {
                 // Initialization currently always transitions to Ready. Return
                 // an error so a future state change cannot silently lose data.
                 return Err(ProcessError::io(
@@ -723,20 +720,20 @@ impl SegmentProcessor for S3PipelineUploader {
                     std::io::Error::other("S3 uploader in unexpected state"),
                 ));
             };
-            if !circuit_breaker.should_attempt() {
+            if !self.circuit_breaker.should_attempt() {
                 tracing::debug!(target: "dial9_worker", segment = %data.segment(), "circuit breaker open, skipping upload");
                 return Err(ProcessError::new(
                     data,
                     ProcessErrorKind::transfer(Box::from("circuit breaker open"), true),
                 ));
             }
-            let payload = data.take_payload();
+            let payload = data.payload().clone();
             match uploader
                 .upload_and_delete(data.segment(), payload, data.metadata())
                 .await
             {
                 Ok(key) => {
-                    circuit_breaker.on_success();
+                    self.circuit_breaker.on_success();
                     // Triggered dumps: remember the key under every dump id
                     // the segment belongs to, for that dump's manifest.
                     if let Some(dump_ids) = data.metadata().get("dump_id") {
@@ -756,7 +753,7 @@ impl SegmentProcessor for S3PipelineUploader {
                     if kind.already_deleted() {
                         tracing::debug!(target: "dial9_worker", segment = %data.segment(), "segment already evicted, skipping");
                     } else {
-                        circuit_breaker.on_failure();
+                        self.circuit_breaker.on_failure();
                         rate_limited!(Duration::from_secs(60), {
                             tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
                         });
@@ -788,14 +785,10 @@ impl SegmentProcessor for S3PipelineUploader {
             // Keep direct SegmentProcessor drivers compatible if they call
             // finalize without first invoking the lifecycle hook.
             self.ensure_initialized().await;
-            let S3UploaderState::Ready {
-                uploader,
-                circuit_breaker,
-            } = &mut self.state
-            else {
+            let S3UploaderState::Ready { uploader } = &mut self.state else {
                 return None;
             };
-            if !circuit_breaker.should_attempt() {
+            if !self.circuit_breaker.should_attempt() {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!(target: "dial9_worker", dump_id = %manifest.dump_id, "circuit breaker open, skipping dump manifest");
                 });
@@ -814,11 +807,11 @@ impl SegmentProcessor for S3PipelineUploader {
             // Best-effort: a failed manifest PUT never fails the receipt.
             match uploader.upload_manifest(&key, body).await {
                 Ok(()) => {
-                    circuit_breaker.on_success();
+                    self.circuit_breaker.on_success();
                     Some(key)
                 }
                 Err(e) => {
-                    circuit_breaker.on_failure();
+                    self.circuit_breaker.on_failure();
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(target: "dial9_worker", error = %e, dump_id = %manifest.dump_id, "failed to write dump manifest");
                     });
@@ -1390,7 +1383,7 @@ mod worker_integration_tests {
     use crate::connection::CircuitBreaker;
     use crate::s3;
     use assert2::check;
-    use dial9_core::pipeline::SegmentProcessor;
+    use dial9_core::pipeline::{ProcessorLiveness, SegmentProcessor};
     use dial9_core::worker::processors::GzipCompressor;
     use std::path::Path;
     use std::sync::Arc;
@@ -1472,6 +1465,17 @@ mod worker_integration_tests {
     fn pipeline_uploader_remains_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<S3PipelineUploader>();
+    }
+
+    #[test]
+    fn open_circuit_reports_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let mut uploader = s3_uploader_for(root.path());
+        uploader.circuit_breaker.on_failure();
+        check!(matches!(
+            uploader.liveness(),
+            ProcessorLiveness::Unavailable { .. }
+        ));
     }
 
     /// The S3 stage clears per-dump state but writes no manifest for a
