@@ -707,7 +707,7 @@ impl SegmentProcessor for S3PipelineUploader {
 
     fn process(
         &mut self,
-        mut data: SegmentData,
+        data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
             // Keep direct SegmentProcessor drivers compatible even if they do
@@ -728,7 +728,7 @@ impl SegmentProcessor for S3PipelineUploader {
                     ProcessErrorKind::transfer(Box::from("circuit breaker open"), true),
                 ));
             }
-            let payload = data.take_payload();
+            let payload = data.payload().clone();
             match uploader
                 .upload_and_delete(data.segment(), payload, data.metadata())
                 .await
