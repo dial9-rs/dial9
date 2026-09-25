@@ -70,8 +70,11 @@ export interface TimeDomain {
 export interface HeatmapSelection {
   keys: readonly string[];
   bytes: number;
+  /** Whole selected-segment extent used when opening/profile-scoping files. */
   t0: number;
   t1: number;
+  /** Literal rubber-band window, when the selection came from a drag. */
+  window?: readonly [number, number] | undefined;
   rows?: readonly [number, number] | undefined;
 }
 

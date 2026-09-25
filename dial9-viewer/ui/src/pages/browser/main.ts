@@ -34,6 +34,7 @@ import {
   readPlainSourceScope,
   sourceScopeFromStored,
 } from "../../lib/trace/source-scope.js";
+import { readScope } from "../../lib/trace/trace_scope.js";
 
 // `?trace=` passthrough - redirect to the viewer preserving all params
 // (including repeated `trace=` components). Relative target resolves to
@@ -90,9 +91,11 @@ function boot(): void {
   // the page state into the query string via syncUrl(); restore that saved
   // state here. syncUrl() is suppressed while restoring, then run once at
   // the end.
+  const urlParams = new URLSearchParams(window.location.search);
   const urlState = window.Dial9UrlState.parse(window.location.search);
+  const selectionScope = readScope(urlParams);
   const source = readPlainSourceScope(
-    new URLSearchParams(window.location.search),
+    urlParams,
     sourceScopeFromStored("", Dial9Creds.get()),
   );
   store.update("source", source);
@@ -130,11 +133,12 @@ function boot(): void {
     actions.setQuickRange(urlState.last);
   } else if (urlState.from != null && urlState.to != null) {
     const tz = store.getState().ui.useLocalTz;
-    els.rangeFrom.value = dateToPickerStr(new Date(urlState.from * 1000), tz);
-    els.rangeTo.value = dateToPickerStr(new Date(urlState.to * 1000), tz);
+    els.rangeFrom.value = dateToPickerStr(new Date(urlState.from * 1000), tz, true);
+    els.rangeTo.value = dateToPickerStr(new Date(urlState.to * 1000), tz, true);
   } else {
     actions.setQuickRange(1);
   }
+  actions.restoreHeatmapSelection(selectionScope);
   actions.setRestoring(false);
   // Normalize the URL once: collapses any malformed/duplicate params from
   // the incoming link into the canonical serialization.
