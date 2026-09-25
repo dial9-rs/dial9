@@ -696,6 +696,20 @@ impl SegmentProcessor for S3PipelineUploader {
         "S3Upload"
     }
 
+    fn wait_until_live(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let delay = match &self.state {
+            S3UploaderState::Pending { .. } => Duration::ZERO,
+            S3UploaderState::Ready {
+                circuit_breaker, ..
+            } => circuit_breaker.retry_delay(),
+        };
+        Box::pin(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+        })
+    }
+
     fn initialize(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
         Box::pin(async move {
             self.ensure_initialized().await;
@@ -1386,7 +1400,7 @@ mod tests {
 /// helpers (the worker internals are not exposed cross-crate).
 #[cfg(test)]
 mod worker_integration_tests {
-    use super::{S3PipelineUploader, S3Uploader};
+    use super::{S3PipelineUploader, S3Uploader, S3UploaderState};
     use crate::connection::CircuitBreaker;
     use crate::s3;
     use assert2::check;
@@ -1472,6 +1486,28 @@ mod worker_integration_tests {
     fn pipeline_uploader_remains_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<S3PipelineUploader>();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn open_circuit_waits_until_retry_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let mut uploader = s3_uploader_for(root.path());
+        let S3UploaderState::Ready {
+            circuit_breaker, ..
+        } = &mut uploader.state
+        else {
+            panic!("test uploader should be initialized");
+        };
+        circuit_breaker.on_failure();
+        let wait = uploader.wait_until_live();
+        tokio::pin!(wait);
+        check!(
+            tokio::time::timeout(Duration::ZERO, wait.as_mut())
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait.await;
     }
 
     /// The S3 stage clears per-dump state but writes no manifest for a
