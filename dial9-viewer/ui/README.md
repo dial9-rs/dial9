@@ -149,9 +149,9 @@ links to it; it remains only for out-of-tree callers (e.g. the
 The pages' URLs are an API, for humans sharing links and for agents driving
 the UI without a browser (issue #303): a report generator, a skill, or a
 `curl`-style script can construct a URL from the tables below and know the
-page will honor it. This section is the normative contract; the skills that
-emit viewer links (`../skills/dial9-html-report`, `../skills/dial9-zoom-window`)
-and the contract tests (see Enforcement below) follow it.
+page will honor it. This section is the normative contract; the skill that
+emits viewer links (`../skills/dial9-zoom-window`) and the contract tests (see
+Enforcement below) follow it.
 
 **Stability promise (architecture NFR N10): old params stay valid forever.**
 Evolution is additive-only: a param documented here never changes meaning,
