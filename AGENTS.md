@@ -111,7 +111,7 @@ access, and the temporary rollups are removed when the server exits. Open
 background during agent-driven testing.
 
 - Behavior changes should include focused tests that fail without the change; if tests are not practical, state why.
-- For Rust behavior changes, run `cargo nextest run`.
+- For Rust behavior changes, run `cargo nextest run`. This needs `node` on `PATH`: tests that drive the JS trace tooling as a subprocess fail, not skip, without it.
 - For final verification of Rust changes, run `cargo nextest run --stress-duration 20s`. The package is expected to have no flaky tests; report any apparent flake instead of ignoring it.
 - **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the Vitest suites (`npm run test` in `dial9-viewer/ui/`, or a filtered `npx vitest run tests/core/<suite>.test.ts`) and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
 - **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.{js,ts}` for suites over the shared core, `src/**/*.test.ts` for TypeScript modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.

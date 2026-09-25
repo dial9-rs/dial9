@@ -57,11 +57,16 @@ pub(crate) struct ResolvedSample {
     /// fired, or `None` if the sample didn't land inside a poll or the task
     /// has no recorded spawn location.
     pub(crate) spawn_location: Option<String>,
-    /// Spans whose locally observed active intervals enclose this sample's
-    /// timestamp. Typically zero, one, or two entries. Populated during span
-    /// resolution (stage 3). Never lifecycle envelopes when finer interval
-    /// evidence is available.
-    pub(crate) enclosing_spans: Vec<EnclosingSpanSummary>,
+    /// Indices into the segment's `Vec<ResolvedSpan>` for spans whose locally
+    /// observed active intervals enclose this sample's timestamp.
+    ///
+    /// Keeping indices here is load-bearing: copying the full span summary into
+    /// every sample made memory proportional to the sample × active-span
+    /// Cartesian product. Span-heavy production segments reached tens of
+    /// gigabytes before Parquet encoding. The writer resolves these indices back
+    /// to exact span fields, so the persisted schema and filter semantics do not
+    /// change.
+    pub(crate) enclosing_spans: Vec<u32>,
 }
 
 /// A reconstructed poll span: one invocation of `Future::poll` on a task.
@@ -177,20 +182,6 @@ pub(crate) struct ResolvedSpan {
     pub(crate) host: String,
     pub(crate) service: String,
     pub(crate) date: String,
-}
-
-/// A compact span membership attached to each enriched sample row (the
-/// `enclosing_spans` list). One entry per span whose *locally observed entered
-/// interval* encloses the sample's timestamp — never lifecycle envelopes.
-///
-/// OTAP-aligned: carries only the identity, duration, and completeness needed
-/// for the hot flamegraph filter path. Full metadata lives in `spans/` only.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct EnclosingSpanSummary {
-    pub(crate) span_uid: [u8; 16],
-    pub(crate) span_type_uid: [u8; 16],
-    pub(crate) elapsed_ns: u64,
-    pub(crate) details_complete: bool,
 }
 
 /// Return type for [`super::decode_samples`]: resolved samples, stacks

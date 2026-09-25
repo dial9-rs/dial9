@@ -154,9 +154,9 @@ pub(crate) struct SymbolEntry {
 /// Legacy span enter event from old producers.
 ///
 /// Current producers write `dial9.tokio.task_id`; earlier producers wrote
-/// `worker_id`.
-/// Spans are paired enter↔exit by `span_id` alone because a task can migrate
-/// workers between enter and exit (see `resolve_legacy_spans`).
+/// `worker_id`, which the decoder correlates with the task poll covering the
+/// event. Pairing uses task lanes so concurrent tasks cannot cross-pair while
+/// still allowing a task to migrate workers (see `resolve_legacy_spans`).
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct LegacySpanEnterEvent {

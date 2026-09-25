@@ -342,11 +342,11 @@ impl FoldLimits {
     /// parallelism (an earlier core-scaled sizing OOM-killed a 64-core box:
     /// 64 concurrent decodes × ~1.5 GB each ≈ 96 GB):
     ///
-    /// - `cpu` (decode/encode) is the real memory lever: decoding one segment
-    ///   expands ~1.3M events to well over 1 GB of transient structures. Capped
-    ///   at [`MAX_DECODE_CONCURRENCY`] so peak decode memory is bounded to roughly
-    ///   that many segments regardless of core count, then further limited to the
-    ///   available parallelism on small boxes.
+    /// - `cpu` (decode/encode) is the real memory lever. Production segments are
+    ///   not uniformly sized: a high-volume segment can contain roughly 10M
+    ///   events and drive more than 10 GB of resident memory while decoding and
+    ///   encoding. Keep this stage serial until it has a byte-weighted memory
+    ///   budget; a fixed permit count greater than one cannot safely bound RSS.
     /// - `inflight` (whole-fold, memory backstop) bounds how many fetched
     ///   segment buffers are resident; a small multiple of the decode cap gives
     ///   fetch a little runway ahead of decode without unbounded pile-up.
@@ -364,12 +364,13 @@ impl FoldLimits {
     }
 }
 
-/// Hard ceiling on concurrent segment decodes. Each decode transiently holds
-/// over a gigabyte (a ~1.3M-event segment expanded in memory), so this count
-/// times ~1.5 GB is roughly the fold pipeline's peak decode memory. Deliberately
-/// small and core-independent: adding cores speeds each decode but must not
-/// multiply the memory high-water mark.
-const MAX_DECODE_CONCURRENCY: usize = 6;
+/// Hard ceiling on concurrent segment decodes.
+///
+/// A fixed count is only safe at one because segment event counts vary by an
+/// order of magnitude. In production, four simultaneous 8M–10M-event segments
+/// exceeded 16 GiB and OOM-killed the viewer. Serializing this memory-dominant
+/// stage keeps broad queries alive; fetch and part-file writes still overlap.
+const MAX_DECODE_CONCURRENCY: usize = 1;
 
 impl Default for FoldLimits {
     fn default() -> Self {
@@ -422,7 +423,7 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
     let t_encode = Instant::now();
     let metadata = HashMap::new();
     let mut samples_buf = Vec::new();
-    parquet_writer::write_samples(&mut samples_buf, &samples, &metadata)?;
+    parquet_writer::write_samples(&mut samples_buf, &samples, &spans, &metadata)?;
 
     let stacks_map: HashMap<[u8; 16], Vec<String>> = stacks.into_iter().collect();
     let mut dict_buf = Vec::new();
@@ -1632,6 +1633,7 @@ mod tests {
     use std::pin::Pin;
 
     use super::*;
+    use crate::ingest::decode::ResolvedSpan;
     use crate::storage::{BucketInfo, StorageError};
 
     /// A source backend that records the peak number of `get_object` calls
@@ -1759,6 +1761,11 @@ mod tests {
     #[test]
     fn default_fold_limits_do_not_scale_decode_with_cores() {
         let limits = FoldLimits::from_available_parallelism();
+        assert_eq!(
+            limits.cpu.available_permits(),
+            1,
+            "variable-size segment decoding must remain serialized"
+        );
         assert!(
             limits.cpu.available_permits() <= MAX_DECODE_CONCURRENCY,
             "decode concurrency {} must stay within the absolute cap {MAX_DECODE_CONCURRENCY}",
@@ -1832,8 +1839,46 @@ mod tests {
             })
             .collect();
         let mut buf = Vec::new();
-        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+        write_samples(&mut buf, &samples, &[], &HashMap::new()).unwrap();
         buf
+    }
+
+    fn membership_span(span_type_uid: [u8; 16], elapsed_ns: u64) -> ResolvedSpan {
+        ResolvedSpan {
+            span_uid: [1u8; 16],
+            span_type_uid,
+            kind: "tracing".to_string(),
+            name: "test".to_string(),
+            target: "test".to_string(),
+            callsite_file: None,
+            callsite_line: None,
+            start_ns: 0,
+            end_ns: elapsed_ns,
+            elapsed_ns,
+            active_ns: Some(elapsed_ns),
+            observed_active_wall_ns: elapsed_ns,
+            detail_coverage_ns: elapsed_ns,
+            details_complete: true,
+            concurrent: false,
+            parent_span_uid: None,
+            attributes: Vec::new(),
+            on_cpu_ns_est: None,
+            blocked_ns_est: None,
+            async_wait_ns: None,
+            scheduler_delay_ns: None,
+            unknown_ns: elapsed_ns,
+            cpu_sample_count: 0,
+            sched_sample_count: 0,
+            attribution_version: 1,
+            attribution_flags: 0,
+            unbalanced_exits: 0,
+            unbalanced_enters: 0,
+            identity_quality: "metadata",
+            source_key: "test".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+        }
     }
 
     /// Total samples kept after merging `parquet` under a poll-duration band.
@@ -2167,7 +2212,7 @@ mod tests {
             enclosing_spans: Vec::new(), // empty = no membership
         }];
         let mut buf = Vec::new();
-        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+        write_samples(&mut buf, &samples, &[], &HashMap::new()).unwrap();
 
         // A span filter with a specific span_type_uid should NOT match this sample.
         let filter = SampleFilter {
@@ -2187,10 +2232,11 @@ mod tests {
     /// Verify span_filter_matches works with valid membership data.
     #[test]
     fn span_filter_matches_valid_membership() {
-        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::decode::ResolvedSample;
         use crate::ingest::parquet_writer::write_samples;
 
         let target_uid = [42u8; 16];
+        let spans = vec![membership_span(target_uid, 10_000_000)];
         let samples = vec![ResolvedSample {
             timestamp_ns: 1000,
             stack_id: [1u8; 16],
@@ -2202,15 +2248,10 @@ mod tests {
             date: "2026-06-19".to_string(),
             poll_duration_ns: Some(5_000_000),
             spawn_location: Some("src/main.rs:42".to_string()),
-            enclosing_spans: vec![EnclosingSpanSummary {
-                span_uid: [1u8; 16],
-                span_type_uid: target_uid,
-                elapsed_ns: 10_000_000,
-                details_complete: true,
-            }],
+            enclosing_spans: vec![0],
         }];
         let mut buf = Vec::new();
-        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+        write_samples(&mut buf, &samples, &spans, &HashMap::new()).unwrap();
 
         // Filter matches the target uid
         let filter = SampleFilter {
@@ -2230,11 +2271,11 @@ mod tests {
     /// Verify that min_span_ns/max_span_ns bounds work on exact boundaries.
     #[test]
     fn span_filter_exact_window_boundaries() {
-        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::decode::ResolvedSample;
         use crate::ingest::parquet_writer::write_samples;
 
         let target_uid = [42u8; 16];
-        let make_sample = |elapsed_ns: u64| -> ResolvedSample {
+        let make_sample = |span_idx: u32| -> ResolvedSample {
             ResolvedSample {
                 timestamp_ns: 1000,
                 stack_id: [1u8; 16],
@@ -2246,24 +2287,26 @@ mod tests {
                 date: "2026-06-19".to_string(),
                 poll_duration_ns: None,
                 spawn_location: None,
-                enclosing_spans: vec![EnclosingSpanSummary {
-                    span_uid: [1u8; 16],
-                    span_type_uid: target_uid,
-                    elapsed_ns,
-                    details_complete: true,
-                }],
+                enclosing_spans: vec![span_idx],
             }
         };
 
+        let spans = vec![
+            membership_span(target_uid, 1_000_000),
+            membership_span(target_uid, 5_000_000),
+            membership_span(target_uid, 10_000_000),
+            membership_span(target_uid, 10_000_001),
+            membership_span(target_uid, 999_999),
+        ];
         let samples = vec![
-            make_sample(1_000_000),  // exactly at min boundary
-            make_sample(5_000_000),  // in the middle
-            make_sample(10_000_000), // exactly at max boundary
-            make_sample(10_000_001), // just above max
-            make_sample(999_999),    // just below min
+            make_sample(0), // exactly at min boundary
+            make_sample(1), // in the middle
+            make_sample(2), // exactly at max boundary
+            make_sample(3), // just above max
+            make_sample(4), // just below min
         ];
         let mut buf = Vec::new();
-        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+        write_samples(&mut buf, &samples, &spans, &HashMap::new()).unwrap();
 
         // Band [1ms, 10ms] inclusive — should keep exactly 3 samples
         let filter = SampleFilter {
@@ -2295,7 +2338,7 @@ mod tests {
     /// that lets the wrong span type's samples through fails loudly.
     #[test]
     fn span_filter_keeps_only_matching_span_types_frames() {
-        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::decode::ResolvedSample;
         use crate::ingest::parquet_writer::{write_samples, write_stacks_dict};
 
         let type_a = [0xAAu8; 16];
@@ -2307,7 +2350,7 @@ mod tests {
         let frames_a = vec!["frame_A_only".to_string(), "shared_root".to_string()];
         let frames_b = vec!["frame_B_only".to_string(), "shared_root".to_string()];
 
-        let sample = |stack_id: [u8; 16], type_uid: [u8; 16], ts: u64| ResolvedSample {
+        let sample = |stack_id: [u8; 16], span_idx: u32, ts: u64| ResolvedSample {
             timestamp_ns: ts,
             stack_id,
             worker_id: Some(1),
@@ -2318,24 +2361,23 @@ mod tests {
             date: "2026-06-19".to_string(),
             poll_duration_ns: None,
             spawn_location: None,
-            enclosing_spans: vec![EnclosingSpanSummary {
-                span_uid: [1u8; 16],
-                span_type_uid: type_uid,
-                elapsed_ns: 5_000_000,
-                details_complete: true,
-            }],
+            enclosing_spans: vec![span_idx],
         };
 
+        let spans = vec![
+            membership_span(type_a, 5_000_000),
+            membership_span(type_b, 5_000_000),
+        ];
         // 3 samples enclosed by type A (frame_A_only), 2 by type B (frame_B_only).
         let samples = vec![
-            sample(stack_a, type_a, 1000),
-            sample(stack_a, type_a, 1001),
-            sample(stack_a, type_a, 1002),
-            sample(stack_b, type_b, 1003),
-            sample(stack_b, type_b, 1004),
+            sample(stack_a, 0, 1000),
+            sample(stack_a, 0, 1001),
+            sample(stack_a, 0, 1002),
+            sample(stack_b, 1, 1003),
+            sample(stack_b, 1, 1004),
         ];
         let mut samples_buf = Vec::new();
-        write_samples(&mut samples_buf, &samples, &HashMap::new()).unwrap();
+        write_samples(&mut samples_buf, &samples, &spans, &HashMap::new()).unwrap();
 
         let mut dict = HashMap::new();
         dict.insert(stack_a, frames_a.clone());
@@ -2419,7 +2461,7 @@ mod tests {
             enclosing_spans: Vec::new(),
         };
         let mut samples_buf = Vec::new();
-        write_samples(&mut samples_buf, &[sample], &HashMap::new()).unwrap();
+        write_samples(&mut samples_buf, &[sample], &[], &HashMap::new()).unwrap();
 
         // A valid dict: the merge should succeed.
         let filter = SampleFilter {
