@@ -397,7 +397,7 @@ describe("viewer deep-link reconstruction", () => {
       spanPctFilter: 99,
       timeMode: "abs",
       tz: "local",
-      stacksAsFlamegraph: true,
+      stacksAsFlamegraph: false,
     });
     source.update("view", {
       fieldCharts: [
@@ -551,7 +551,7 @@ describe("viewer deep-link reconstruction", () => {
     store.update("uiPrefs", {
       spanFilter: "request_id",
       timeMode: "abs",
-      stacksAsFlamegraph: true,
+      stacksAsFlamegraph: false,
     });
     store.update("view", {
       inspectorTab: "related",
@@ -606,7 +606,7 @@ describe("viewer deep-link reconstruction", () => {
     expect(state.uiPrefs).toMatchObject({
       spanFilter: "request_id",
       timeMode: "abs",
-      stacksAsFlamegraph: true,
+      stacksAsFlamegraph: false,
     });
     expect(state.view).toEqual({
       fieldCharts: [],
@@ -661,7 +661,7 @@ describe("viewer deep-link reconstruction", () => {
     expect(query.get("rail")).toBe("tasks");
     expect(query.get("task-sort")).toBe("lifetime,asc");
     expect(query.get("span-filter")).toBe("request_id");
-    expect(query.get("stack-view")).toBe("flame");
+    expect(query.get("stack-view")).toBe("list");
     expect(query.get("analysis")).toBe("heap");
     expect(query.get("heap-weight")).toBe("count");
     expect(query.get("blocking-group")).toBe("full");

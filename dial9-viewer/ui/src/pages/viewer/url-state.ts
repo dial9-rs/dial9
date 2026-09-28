@@ -389,7 +389,7 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
     vs.lanesHeight = state.uiPrefs.lanesViewportHeight;
   }
   if (state.uiPrefs.lanesScrollTop > 0) vs.lanesScrollTop = state.uiPrefs.lanesScrollTop;
-  if (state.uiPrefs.stacksAsFlamegraph) vs.stackView = "flame";
+  if (!state.uiPrefs.stacksAsFlamegraph) vs.stackView = "list";
 
   const view = state.view;
   // The tab the selection would auto-activate on load; omitted when it matches.

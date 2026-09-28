@@ -91,9 +91,9 @@ export function initialViewerState(): StoreState {
       // these; the time-axis track reads them.
       timeMode: "rel",
       tz: "utc",
-      // Stack lists start as lists; the toggle in the poll/blocking views flips
-      // this and it persists across selections.
-      stacksAsFlamegraph: false,
+      // Stack samples start as flamegraphs; the toggle in the poll/blocking
+      // views flips this and it persists across selections.
+      stacksAsFlamegraph: true,
     },
     view: {
       fieldCharts: [],
