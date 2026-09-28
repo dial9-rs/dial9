@@ -132,6 +132,13 @@ The analyzer reports:
 | **Queue depth** | High global queue = workers can't keep up |
 | **Kernel scheduling** | High kernel wait = noisy neighbors or CPU contention |
 
+When you report findings, link each one to its sample in the viewer, as
+"Linking analysis findings" in `references/viewer-urls.md` describes.
+`dial9 serve --bucket BUCKET` serves the viewer together with the bucket's
+objects, so a link can load a trace straight from S3;
+`dial9 serve --local-dir /tmp/d9-traces` does the same for the files you
+downloaded.
+
 ### When to use other skills
 
 After running the automated analysis:

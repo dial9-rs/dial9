@@ -32,8 +32,8 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 
 Any skill or agent output that links into the viewer UI (viewer, flamegraph,
 trace browser) must follow the URL contract:
-`dial9-viewer/ui/URL_CONTRACT.md`, which skills reach through the
-`dial9-zoom-window` skill's `references/viewer-urls.md` symlink.
+`dial9-viewer/ui/URL_CONTRACT.md`, which every skill that builds viewer links
+carries as a `references/viewer-urls.md` symlink.
 It documents every stable query param and hash key, the additive-only
 stability promise, and ready-made deep-link recipes. Do not invent params:
 unknown ones are silently ignored.

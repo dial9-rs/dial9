@@ -129,20 +129,14 @@ const end = Math.round(trace.minTs + (centerMs + halfMs) * 1e6);
 console.log(`viewer.html?trace=<TRACE_URL>&start=${start}&end=${end}`);
 ```
 
-`<TRACE_URL>` is wherever the trace is served over HTTP; the viewer cannot
-fetch `file://` paths. `dial9 serve --local-dir <dir>` serves both: the viewer
-at `http://localhost:3000/viewer.html` and each trace at
-`/api/object?key=<path relative to dir>` (against S3, the `/api/object?...`
-URLs its trace browser opens). Such a URL carries its own `?` and `&`, so
-percent-encode it (`encodeURIComponent`) before putting it in `trace=`. The
-`dial9` binary comes from `cargo install dial9 --features cli` or
-`cargo binstall dial9`; installing the skills does not install it. The same
-`start`/`end` params work on `flamegraph.html` as parse-time bounds for a
-CPU-profile view of the window.
-Normally leave the viewer's `data-start`/`data-end` unset so the reader can zoom
-back out; add them only when the link must discard data outside the window. Do
-not invent `?worker=` or `?source=`; `references/viewer-urls.md` lists the
-supported selection fields such as `?task=`.
+`<TRACE_URL>` is the trace served over HTTP, percent-encoded: the viewer cannot
+fetch `file://` paths. "Building a link" in `references/viewer-urls.md` covers
+serving it with `dial9 serve`. The same `start`/`end` params work on
+`flamegraph.html` as parse-time bounds for a CPU-profile view of the window.
+When the window explains a finding, link the sample itself too (the dominant
+poll, its task, a blocking-call analysis of the window), as "Linking analysis
+findings" there describes. Do not invent `?worker=` or `?source=`; the
+reference lists every param the pages honor.
 
 ## From window back to cause
 

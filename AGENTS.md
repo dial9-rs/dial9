@@ -222,8 +222,8 @@ binary (`agents skills` unpack, embedded by `build.rs`), and the `dial9` crate
 package (Symposium's serving edge) through the `dial9/skills` symlink. Inside
 the toolkit, `trace_parser.js`, `trace_analysis.js` and `decode.js` are
 symlinks to the viewer UI modules and the trace-format JS decoder, so the
-agent runs the same code as the viewer. Likewise
-`dial9-zoom-window/references/viewer-urls.md` links to the viewer's URL
+agent runs the same code as the viewer. Likewise every skill that builds
+viewer links carries `references/viewer-urls.md`, a link to the viewer's URL
 contract (`ui/URL_CONTRACT.md`), so agents read the list the contract tests
 pin. Edit under `dial9-viewer/skills/` or the linked sources; never add a
 second copy. `cargo package` materializes every link as a real file (CI

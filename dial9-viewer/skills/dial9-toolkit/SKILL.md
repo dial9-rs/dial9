@@ -46,6 +46,7 @@ node scripts/analyze.js trace.bin --force          # ignore cached results
 3. Base initial findings on the aggregate result: long polls, worker spans, scheduling delays, CPU/off-CPU groups, queue depth, task lifecycle counts, and span summaries.
 4. Then use `parseTrace()` or lower-level helpers only to confirm assumptions, inspect raw events, or follow a specific task/wake/span chronology.
 5. When the aggregate pass flags a specific moment — a long poll, a queue spike, a latency outlier — stop averaging and zoom in: use `dial9-zoom-window` to reconstruct that instant, and `dial9-diagnose-long-poll` to root-cause *why* a poll was long (on-CPU work vs off-CPU wait, and who held it up even when no scheduling samples were captured).
+6. When you report findings to a person, link each one to its sample in the viewer (the poll, task or span behind it) rather than describing where to look. "Linking analysis findings" in `references/viewer-urls.md` says which link fits which finding and how to build it.
 
 ## Setup diagnostic
 

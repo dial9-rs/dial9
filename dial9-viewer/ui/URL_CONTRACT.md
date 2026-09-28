@@ -10,15 +10,77 @@ the pages silently ignore unknown params, so do not invent any (there is no
 **Stability:** a documented param never changes meaning and is never removed.
 New capability only adds params, so a link keeps working.
 
-`dial9 serve` serves every page, by default at `http://localhost:3000/`: the
-trace browser (`index.html`), `viewer.html` and `flamegraph.html`. A page
-fetches its trace over HTTP from its own origin, so `file://` paths do not
-work; with `dial9 serve --local-dir <dir>`, a trace is at
-`/api/object?key=<path relative to dir>`. The `dial9` binary comes from
-`cargo install dial9 --features cli` or `cargo binstall dial9`.
-
 The query string holds what to load plus state each page owns; the hash
 (`#v=1&...`) holds versioned view state and never reaches the server.
+
+## Building a link
+
+1. **Serve the trace.** A page fetches its trace over HTTP from its own
+   origin, so `file://` paths do not work. `dial9 serve` serves every page, by
+   default at `http://localhost:3000/`: the trace browser (`index.html`),
+   `viewer.html` and `flamegraph.html`. With `dial9 serve --local-dir <dir>`,
+   a trace file is at `/api/object?key=<path relative to dir>`; with
+   `dial9 serve --bucket <bucket>`, an S3 object is at
+   `/api/object?bucket=<bucket>&key=<key>`. The `dial9` binary comes from
+   `cargo install dial9 --features cli` or `cargo binstall dial9`; installing
+   the skills does not install it.
+2. **Name the trace.** Put that URL in `trace=`, percent-encoded
+   (`encodeURIComponent`), since it carries its own `?` and `&`. A trace split
+   across files takes one `trace=` per file.
+3. **Use absolute times.** Every time value is absolute monotonic
+   nanoseconds. The analysis tools print times relative to the trace start
+   ("at 224.7ms", "+5.45ms"); convert with `minTs + ms * 1e6`, where `minTs`
+   comes from `analyzeTraces()` or `parseTrace()`. Timestamps are plain
+   Numbers: adding a BigInt such as `3_900_000_000n` to one throws.
+4. **Anchor on exact values.** A selection anchor (`poll`, `span-focus`,
+   `task`) that does not match the trace is dropped, and printed times are
+   rounded. Take a poll's `start` and `taskId`, and a span's `spanId` (a
+   string: pass it as is), from the toolkit's data.
+
+For example, with `node -e` in the toolkit's `scripts/` directory (a file
+saved elsewhere resolves `./analyze.js` against its own location), while
+`dial9 serve --local-dir <dir>` serves the analyzed files:
+
+```javascript
+const { analyzeTraces } = require('./analyze.js');
+
+(async () => {
+  const r = await analyzeTraces('<trace.bin or directory>');
+  const viewer = 'http://localhost:3000/viewer.html';
+  const pad = 5e6; // 5ms of context on each side
+  for (const { poll, dur, file } of r.longPolls.slice(0, 5)) {
+    const query = [
+      `trace=${encodeURIComponent(`/api/object?key=${file}`)}`,
+      `start=${poll.start - pad}`,
+      `end=${poll.end + pad}`,
+      `poll=${poll.start}:${poll.taskId}`,
+      'inspector=poll',
+    ].join('&');
+    console.log(`${(dur / 1e6).toFixed(2)}ms poll, task ${poll.taskId}: ${viewer}?${query}`);
+  }
+})();
+```
+
+`file` is the file's base name; for a file in a subdirectory of `<dir>`, use
+its path relative to `<dir>`.
+
+## Linking analysis findings
+
+When you report a finding to a person, give them a link that opens the viewer
+on the sample that shows it, not only on the trace. Build it as above, from
+the finding's own values:
+
+| Finding | Link |
+|---------|------|
+| A long poll (`long-poll`, `analyzeTraces().longPolls`), or one with many spans (`many-spans-per-poll`) | `poll=<start>:<taskId>&inspector=poll`, with `start`/`end` around it. Every long poll: `issue=long-poll`. |
+| A wake-to-poll delay (`sched-delay`, `analyzeTraces().schedDelays`) | The delayed poll, from the entry's `poll`, linked as above. Every such delay: `issue=wake-delay`. |
+| Kernel scheduling wait (`kernel-sched-wait`) | `issue=sched`. |
+| Workers descheduled while active (`cpu-contention`) | `issue=off-cpu-active`. |
+| Blocking calls in a window (`blocking-calls`) | `region=<a>-<b>&analysis=blocking&inspector=stack`; `analysis=cpu` for on-CPU time instead. |
+| A task (`task-leak`, a top allocator) | `task=<id>`. Every task from one spawn location: `task-scope=<spawn location>&rail=tasks`. |
+| A slow span (`span-duration-outlier`) | `span-focus=<spanId>&inspector=span`, with `start`/`end` around it. |
+| A moment (`queue-depth`, `worker-imbalance`, a zoomed window) | `start=<a>&end=<b>`. |
+| Where CPU time went in a window | `flamegraph.html?trace=<...>&start=<a>&end=<b>`. |
 
 ## Query params - viewer.html and flamegraph.html (exact mode)
 
@@ -74,7 +136,7 @@ list escaping. Previously emitted comma/pre-encoded list values remain readable.
 | `region` | `<startNs>-<endNs>` | Retained analysis region. |
 | `highlight` | `<startNs>-<endNs>[@worker]` | Marked region; `@worker` bounds the box to one lane. |
 | `spawned` | `<startNs>-<endNs>` | Queue-track spawned-task range. |
-| `issue` | POI detector id | Issues filter. |
+| `issue` | `sched` \| `long-poll` \| `cpu-sampled` \| `wake-delay` \| `uninstrumented` \| `spawn-delay` \| `off-cpu-active` | Issues filter: the rail lists that detector's worst points. |
 | `issue-sort` | `<worker\|kind\|time\|duration>,<asc\|desc>` | Issues ordering. |
 | `issue-threshold` | non-negative integer (microseconds) | Severity floor for the spawn-to-first-poll delay detector. Omitted at its default. |
 | `issue-worst` | `10` \| `50` \| `200` | How many of the worst points the issues rail lists. The detectors rank by severity, so this resizes the list rather than filtering it. Omitted at its default. |

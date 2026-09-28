@@ -31,6 +31,7 @@ import {
 } from "./view-state.js";
 import { FLAMEGRAPH_LEGACY_PARAMS } from "./legacy-params.fixture.js";
 import { VIEWER_VIEW_QUERY_PARAMS } from "../../pages/viewer/url-state.js";
+import { POI_FILTERS } from "../../pages/viewer/poi.js";
 
 const require = createRequire(import.meta.url);
 const uiDir = fileURLToPath(new URL("../../../", import.meta.url));
@@ -136,6 +137,17 @@ describe("URL contract: contract tables match the recorded fixtures", () => {
       section("Query params - viewer.html durable view state"),
     );
     expect(sorted(documented)).toEqual(sorted(VIEWER_VIEW_QUERY_PARAMS));
+  });
+
+  it("issue values = the viewer's issue detectors", () => {
+    // Agents build `issue=` links from this list, so it must name exactly the
+    // detectors the rail accepts.
+    const row = section("Query params - viewer.html durable view state")
+      .split("\n")
+      .find((l) => l.startsWith("| `issue` |"));
+    expect(row, "the durable-state table must document `issue`").toBeDefined();
+    const [, ...values] = [...row!.matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+    expect(sorted(values)).toEqual(sorted(POI_FILTERS));
   });
 
   it("hash table = v + live/defined codec keys + reserved keys", () => {

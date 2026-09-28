@@ -128,3 +128,11 @@ Then read the result:
 > timestamps (gaps ≈ 10ms) confirm continuous execution. Never judge "busy vs
 > idle" from the *aggregate* inter-sample gap (it is large on an idle box simply
 > because few threads are on-CPU); always reason **per tid**.
+
+## Link the poll
+
+End the diagnosis with a link that opens the viewer on the poll itself, so the
+reader can check the verdict: `poll=<start>:<taskId>&inspector=poll`, with a
+`start`/`end` window around it. The script prints the poll's task and a rounded
+relative window; take the exact start from `analyzeTraces().longPolls`.
+`references/viewer-urls.md` covers serving the trace and building the URL.

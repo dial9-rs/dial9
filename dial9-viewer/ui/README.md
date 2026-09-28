@@ -150,9 +150,9 @@ The pages' URLs are an API, for humans sharing links and for agents driving
 the UI without a browser (issue #303): a skill or a `curl`-style script can
 construct a URL and know the page will honor it. The normative contract, with
 every param table, the hash-key registry and the deep-link recipes, is
-[`URL_CONTRACT.md`](URL_CONTRACT.md). It ships with the agent skills
-(`../skills/dial9-zoom-window/references/viewer-urls.md` is a symlink to it),
-so it is written for readers outside this repository: keep repository paths,
+[`URL_CONTRACT.md`](URL_CONTRACT.md). It ships with the agent skills (each
+skill that builds viewer links carries it as a `references/viewer-urls.md`
+symlink), so it is written for readers outside this repository: keep repository paths,
 ticket ids and inventory row ids out of it and record them here instead.
 
 **Stability promise (architecture NFR N10): old params stay valid forever.**
