@@ -137,8 +137,8 @@ fn is_lock_held(namespace_dir: &Path) -> bool {
 }
 
 /// Whether a file is one this crate creates and may therefore delete: the
-/// `.lock` or any `{stem}.{index}.bin[.gz|.active]` segment artifact, for any
-/// stem.
+/// `.lock` or any `{stem}.{index}.bin[.gz|.active]` segment artifact, including
+/// write-back temporary files, for any stem.
 fn is_recognized_artifact(name: &str) -> bool {
     if name == ".lock" {
         return true;
@@ -146,7 +146,15 @@ fn is_recognized_artifact(name: &str) -> bool {
     let Some((head, tail)) = name.split_once(".bin") else {
         return false;
     };
-    if !tail.is_empty() && tail != ".gz" && tail != ".active" {
+    let temporary_id = tail
+        .strip_prefix(".gz.")
+        .or_else(|| tail.strip_prefix('.'))
+        .and_then(|suffix| suffix.strip_suffix(".partial"));
+    if !tail.is_empty()
+        && tail != ".gz"
+        && tail != ".active"
+        && !temporary_id.is_some_and(|id| id.parse::<ulid::Ulid>().is_ok())
+    {
         return false;
     }
     // `head` is `{stem}.{index}` — require a trailing `.{digits}` index.
@@ -282,6 +290,11 @@ mod tests {
         assert!(is_recognized_artifact("trace.0.bin.gz"));
         assert!(is_recognized_artifact("my-app.42.bin"));
         assert!(is_recognized_artifact("some.other.stem.7.bin.gz"));
+        let id = ulid::Ulid::new();
+        assert!(is_recognized_artifact(&format!("trace.0.bin.{id}.partial")));
+        assert!(is_recognized_artifact(&format!(
+            "trace.0.bin.gz.{id}.partial"
+        )));
     }
 
     #[test]
@@ -292,6 +305,7 @@ mod tests {
         assert!(!is_recognized_artifact("trace.bin")); // no index
         assert!(!is_recognized_artifact("trace.x.bin")); // non-numeric index
         assert!(!is_recognized_artifact("trace.0.bin.tmp")); // unknown suffix
+        assert!(!is_recognized_artifact("trace.0.bin.gz.invalid.partial"));
     }
 
     #[cfg(unix)]
@@ -412,6 +426,11 @@ mod tests {
         std::fs::write(dead_ns.join(".lock"), b"").unwrap();
         std::fs::write(dead_ns.join("trace.0.bin"), b"data").unwrap();
         std::fs::write(dead_ns.join("trace.0.bin.gz"), b"data").unwrap();
+        std::fs::write(
+            dead_ns.join(format!("trace.1.bin.gz.{}.partial", ulid::Ulid::new())),
+            b"incomplete",
+        )
+        .unwrap();
 
         gc_dead_namespaces(dir.path(), "live-1234");
 

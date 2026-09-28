@@ -4,9 +4,56 @@ use crate::payload::Payload;
 use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
 use crate::rate_limit::rate_limited;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
+
+struct RemoveTemporary(PathBuf);
+
+impl Drop for RemoveTemporary {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(path = %self.0.display(), ?error, "could not remove temporary trace");
+            });
+        }
+    }
+}
+
+fn write_payload_atomically(dest_path: &Path, payload: &Payload) -> std::io::Result<()> {
+    write_payload_atomically_with(dest_path, payload, |_| {})
+}
+
+// The hook lets tests inspect the file just before its final name becomes visible.
+pub(super) fn write_payload_atomically_with(
+    dest_path: &Path,
+    payload: &Payload,
+    before_publish: impl FnOnce(&Path),
+) -> std::io::Result<()> {
+    use std::io::{BufWriter, Write};
+
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut temp_name = dest_path.as_os_str().to_owned();
+    temp_name.push(format!(".{}.partial", ulid::Ulid::new()));
+    let temporary = PathBuf::from(temp_name);
+    let _cleanup = RemoveTemporary(temporary.clone());
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let mut writer = BufWriter::new(file);
+    for chunk in payload.chunks() {
+        writer.write_all(chunk)?;
+    }
+    writer.flush()?;
+    drop(writer);
+    before_publish(&temporary);
+    std::fs::rename(&temporary, dest_path)
+}
 
 /// Gzips the segment payload in-memory. Sets the `content_encoding` and
 /// `write_back_extension` metadata keys so downstream stages know the
@@ -63,7 +110,8 @@ impl SegmentProcessor for GzipCompressor {
 
 /// Writes the current payload bytes back to disk. If a
 /// `write_back_extension` metadata key is present, the bytes are written to
-/// `{original}{extension}` and the original segment file is removed.
+/// `{original}{extension}` through a temporary file and atomic rename, then
+/// the original segment file is removed.
 /// When `dir` is set, the file is written to that directory instead of
 /// alongside the original.
 #[derive(Debug, Default)]
@@ -116,15 +164,7 @@ impl SegmentProcessor for WriteBackProcessor {
             let payload = data.payload().clone();
             let write_dest = dest_path.clone();
             let result = tokio::task::spawn_blocking(move || {
-                use std::io::{BufWriter, Write};
-                if let Some(parent) = write_dest.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let mut f = BufWriter::new(std::fs::File::create(&write_dest)?);
-                for chunk in payload.chunks() {
-                    f.write_all(chunk)?;
-                }
-                f.flush()
+                write_payload_atomically(&write_dest, &payload)
             })
             .await;
             match result {

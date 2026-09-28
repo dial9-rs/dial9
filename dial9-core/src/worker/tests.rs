@@ -670,7 +670,9 @@ mod worker_pipeline_tests {
     use crate::payload::Payload;
     use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
     use crate::sealed;
-    use crate::worker::processors::{GzipCompressor, WriteBackProcessor};
+    use crate::worker::processors::{
+        GzipCompressor, WriteBackProcessor, write_payload_atomically_with,
+    };
     use crate::worker::{BackgroundTaskConfig, WorkerLoop, run_background_task};
     use assert2::check;
     use std::collections::HashMap;
@@ -874,6 +876,34 @@ mod worker_pipeline_tests {
         let captured = output_bytes.lock().unwrap();
         check!(captured.len() == 1);
         check!(captured[0].as_slice() == gzip_data.as_slice());
+    }
+
+    #[test]
+    fn write_back_publishes_only_after_the_payload_is_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("trace.0.bin.gz");
+        let payload = Payload::from(b"complete payload");
+
+        for previous in [None, Some(b"old payload".as_slice())] {
+            if let Some(bytes) = previous {
+                std::fs::write(&dest, bytes).unwrap();
+            }
+            write_payload_atomically_with(&dest, &payload, |temporary| {
+                check!(std::fs::read(temporary).unwrap() == b"complete payload");
+                match previous {
+                    Some(bytes) => {
+                        check!(std::fs::read(&dest).unwrap() == bytes);
+                    }
+                    None => {
+                        check!(!dest.exists());
+                    }
+                }
+            })
+            .unwrap();
+            check!(std::fs::read(&dest).unwrap() == b"complete payload");
+            check!(std::fs::read_dir(dir.path()).unwrap().count() == 1);
+            std::fs::remove_file(&dest).unwrap();
+        }
     }
 
     /// WriteBackProcessor writes to a new path when `write_back_extension` is
