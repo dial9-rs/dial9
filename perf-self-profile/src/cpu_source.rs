@@ -271,6 +271,27 @@ impl SchedEventConfig {
 
 // ── CpuProfiler ─────────────────────────────────────────────────────────────
 
+/// CPU profiling backend a [`CpuProfiler`] runs on, after `Auto` resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActiveCpuBackend {
+    /// `perf_event_open`: samples every thread descended from the one that
+    /// started the profiler.
+    Perf,
+    /// Per-thread CPU timers: samples only threads dial9 tracks.
+    Ctimer,
+}
+
+impl ActiveCpuBackend {
+    /// `"perf"` or `"ctimer"`, as written to segment metadata.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Perf => "perf",
+            Self::Ctimer => "ctimer",
+        }
+    }
+}
+
 /// Process-wide CPU profiler. Registers a `perf_event_open` sampler and
 /// drains raw stack traces into the trace stream on each flush cycle.
 ///
@@ -282,13 +303,18 @@ pub struct CpuProfiler {
     /// OS tid → thread name, eagerly cached at drain time so short-lived
     /// threads are captured before they exit and their `comm` file disappears.
     tid_to_name: HashMap<u32, ThreadName>,
+    /// Tracked threads that stopped. Their names leave `tid_to_name` after
+    /// the next drain: their last samples keep the name, and a thread that
+    /// later reuses the tid reads its own.
+    stopped_tids: Vec<u32>,
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
     /// The effective backend that was selected after Auto resolution.
-    /// "perf" or "ctimer" — never "auto".
-    effective_backend: &'static str,
+    effective_backend: ActiveCpuBackend,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
+    /// Samples drained since start, for liveness checks.
+    samples_seen: u64,
 }
 
 impl std::fmt::Debug for CpuProfiler {
@@ -316,7 +342,11 @@ impl CpuProfiler {
                         .include_kernel(config.include_kernel),
                 )?;
                 // After Auto resolution, check which backend was actually selected.
-                let backend = if is_ctimer_active() { "ctimer" } else { "perf" };
+                let backend = if is_ctimer_active() {
+                    ActiveCpuBackend::Ctimer
+                } else {
+                    ActiveCpuBackend::Perf
+                };
                 (s, backend)
             }
             CpuBackend::Perf => {
@@ -326,7 +356,7 @@ impl CpuProfiler {
                         .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
                         .include_kernel(config.include_kernel),
                 )?;
-                (s, "perf")
+                (s, ActiveCpuBackend::Perf)
             }
             CpuBackend::Ctimer => {
                 let s = PerfSampler::start_ctimer_only(
@@ -334,17 +364,30 @@ impl CpuProfiler {
                         .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
                         .include_kernel(false),
                 )?;
-                (s, "ctimer")
+                (s, ActiveCpuBackend::Ctimer)
             }
         };
         Ok(Self {
             sampler,
             pid: std::process::id(),
             tid_to_name: HashMap::new(),
+            stopped_tids: Vec::new(),
             config,
             effective_backend,
             metadata_emitted: false,
+            samples_seen: 0,
         })
+    }
+
+    /// Backend selected at start; `Auto` resolves to one of them.
+    pub fn effective_backend(&self) -> ActiveCpuBackend {
+        self.effective_backend
+    }
+
+    /// Samples drained into the trace since start. Advances on the flush
+    /// thread, so a reader sees new samples at most one flush cycle late.
+    pub fn samples_seen(&self) -> u64 {
+        self.samples_seen
     }
 
     /// Drain all pending perf samples as raw (tid, callchain) tuples.
@@ -357,6 +400,7 @@ impl CpuProfiler {
             if sample.pid != pid {
                 return;
             }
+            self.samples_seen += 1;
             if !self.tid_to_name.contains_key(&sample.tid)
                 && let Some(name) = read_thread_name(sample.tid)
             {
@@ -374,6 +418,9 @@ impl CpuProfiler {
                 thread_name,
             );
         });
+        for tid in self.stopped_tids.drain(..) {
+            self.tid_to_name.remove(&tid);
+        }
     }
 }
 
@@ -400,6 +447,7 @@ impl Source for CpuProfiler {
 
     fn on_thread_stop(&mut self) {
         crate::unregister_current_thread();
+        self.stopped_tids.push(dial9_core::thread::current_tid());
     }
 
     fn name(&self) -> &'static str {
@@ -426,14 +474,14 @@ impl Source for CpuProfiler {
         // captures the actual selection.
         out.push((
             "cpu.profile.backend".to_string(),
-            self.effective_backend.to_string(),
+            self.effective_backend.as_str().to_string(),
         ));
         out.extend(sys::system_metadata());
         // When ctimer is the effective backend, it always samples thread CPU time
         // (CLOCK_THREAD_CPUTIME_ID), regardless of what EventSource was
         // originally requested. Report the *effective* source honestly.
         #[allow(unreachable_patterns)]
-        let event_source_name = if self.effective_backend == "ctimer" {
+        let event_source_name = if self.effective_backend == ActiveCpuBackend::Ctimer {
             "sw_cpu_clock"
         } else {
             match self.config.event_source {
@@ -621,6 +669,67 @@ mod cpu_sample_round_trip_tests {
 mod metadata_tests {
     use super::*;
     use dial9_core::source::Source;
+
+    /// A forced ctimer backend reports itself, not perf.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forced_ctimer_reports_ctimer() {
+        let profiler = CpuProfiler::start(CpuProfilingConfig::with_ctimer_backend())
+            .expect("ctimer needs no perf access");
+        assert_eq!(profiler.effective_backend(), ActiveCpuBackend::Ctimer);
+    }
+
+    /// `samples_seen` counts what `drain` hands out. ctimer, so no perf
+    /// access is needed: it samples the thread tracked here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn samples_seen_advances_as_samples_drain() {
+        let mut profiler = CpuProfiler::start(CpuProfilingConfig::with_ctimer_backend())
+            .expect("ctimer needs no perf access");
+        profiler.on_thread_start().expect("track this thread");
+        assert_eq!(profiler.samples_seen(), 0);
+        let start = std::time::Instant::now();
+        let mut x = 0u64;
+        while start.elapsed() < std::time::Duration::from_millis(200) {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+        let mut drained = 0u64;
+        profiler.drain(|_, _| drained += 1);
+        profiler.on_thread_stop();
+        assert!(drained > 0, "200ms of CPU at 99Hz produced no samples");
+        assert_eq!(profiler.samples_seen(), drained);
+    }
+
+    /// A stopped thread's cached name survives one drain, for its last
+    /// samples, then goes, so a thread reusing the tid reads its own name.
+    #[test]
+    fn stopped_thread_name_is_evicted_after_the_next_drain() {
+        let Ok(mut profiler) = CpuProfiler::start(CpuProfilingConfig::default()) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        let tid = std::thread::scope(|s| {
+            s.spawn(|| {
+                let tid = dial9_core::thread::current_tid();
+                profiler
+                    .tid_to_name
+                    .insert(tid, ThreadName::new("dial9-smoke".into()));
+                profiler.on_thread_stop();
+                tid
+            })
+            .join()
+            .unwrap()
+        });
+        assert!(
+            profiler.tid_to_name.contains_key(&tid),
+            "kept until drained"
+        );
+        profiler.drain(|_, _| {});
+        assert!(
+            !profiler.tid_to_name.contains_key(&tid),
+            "evicted after drain"
+        );
+    }
 
     /// CpuProfiler::segment_metadata must report the effective backend
     /// ("perf" or "ctimer"), never "auto", even when CpuBackend::Auto was
