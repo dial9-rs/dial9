@@ -210,6 +210,21 @@ impl<M: BufferMode> RecorderBuilder<M> {
         self
     }
 
+    /// Run `f` against the registered [`Source`] of type `T`, registering the
+    /// one `make` builds if there is none yet. Lets several builder calls share
+    /// one source, where [`source`](Self::source) would add a second.
+    pub fn source_or_insert<T: Source>(
+        mut self,
+        make: impl FnOnce() -> T,
+        f: impl FnOnce(&mut T),
+    ) -> Self {
+        if crate::handle::find_source::<T>(&mut self.sources).is_none() {
+            self.sources.push(Box::new(make()));
+        }
+        f(crate::handle::find_source::<T>(&mut self.sources).expect("just registered"));
+        self
+    }
+
     /// Names of the registered sources, in registration order.
     pub fn source_names(&self) -> impl Iterator<Item = &str> + '_ {
         self.sources.iter().map(|s| s.name())
@@ -326,6 +341,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         let worker = if processors.is_empty() {
             None
         } else {
+            let stages = processors.iter().map(|p| p.name()).collect();
             let poll = self
                 .worker_poll_interval
                 .unwrap_or(crate::worker::DEFAULT_POLL_INTERVAL);
@@ -341,10 +357,18 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 .metrics_sink(metrics)
                 .maybe_trigger(self.trigger)
                 .build();
+            let state = Arc::new(crate::worker::state::PipelineState::new(stages));
+            let mut config = config;
+            config.set_state(state.clone());
             let (tx, rx) = tokio::sync::oneshot::channel();
             let hook = self.thread_init.clone();
-            crate::worker::spawn(&writer, config, rx, move || hook())
-                .map(|wt| crate::recording::WorkerHandle::new(tx, wt))
+            let worker = crate::worker::spawn(&writer, config, rx, move || hook())
+                .map(|wt| crate::recording::WorkerHandle::new(tx, wt));
+            // No worker, no status: `pipeline_status()` stays `None`.
+            if worker.is_some() {
+                shared.set_pipeline_state(state);
+            }
+            worker
         };
 
         let hook = self.thread_init.clone();
@@ -572,6 +596,36 @@ mod tests {
             decoded_test_values(&bytes).contains(&7),
             "the source's event should round-trip through the trace file"
         );
+    }
+
+    /// Counts what builder calls added to it; records nothing.
+    #[derive(Default)]
+    struct Tally(Vec<u32>);
+
+    impl Source for Tally {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {}
+        fn name(&self) -> &'static str {
+            "tally"
+        }
+    }
+
+    /// Several `source_or_insert` calls share one source.
+    #[test]
+    fn source_or_insert_shares_one_source() {
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
+        let recorder = recorder(writer)
+            .source_or_insert(Tally::default, |t| t.0.push(1))
+            .source_or_insert(Tally::default, |t| t.0.push(2))
+            .build();
+        let seen = recorder.handle().with_source(|t: &mut Tally| t.0.clone());
+        assert_eq!(seen, Some(vec![1, 2]));
+        let tallies = recorder
+            .shared()
+            .expect("enabled recorder")
+            .with_sources_mut(|sources| sources.iter().filter(|s| s.name() == "tally").count())
+            .expect("sources lock");
+        assert_eq!(tallies, 1);
+        recorder.graceful_shutdown(Duration::from_secs(5));
     }
 
     /// `build()` starts recording.
