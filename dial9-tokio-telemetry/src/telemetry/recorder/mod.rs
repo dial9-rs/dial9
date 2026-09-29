@@ -8,6 +8,8 @@ pub(crate) use dial9_core::source;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
+#[cfg(feature = "cpu-profiling")]
+pub(crate) use runtime_context::on_attached_runtime;
 #[cfg(any(feature = "taskdump", test))]
 pub(crate) use runtime_context::poll_start_ts_monotonic;
 

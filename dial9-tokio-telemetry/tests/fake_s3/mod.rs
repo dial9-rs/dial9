@@ -478,3 +478,69 @@ pub fn wait_for_uploaded_segment(
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// s3s wrapper counting `PutObject`s of smoke-test markers, and denying them
+/// when `fail` is set.
+struct CountingMarkersS3<S> {
+    inner: S,
+    markers: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl<S: s3s::S3 + Send + Sync> s3s::S3 for CountingMarkersS3<S> {
+    async fn head_bucket(
+        &self,
+        req: s3s::S3Request<s3s::dto::HeadBucketInput>,
+    ) -> s3s::S3Result<s3s::S3Response<s3s::dto::HeadBucketOutput>> {
+        self.inner.head_bucket(req).await
+    }
+
+    async fn put_object(
+        &self,
+        req: s3s::S3Request<s3s::dto::PutObjectInput>,
+    ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
+        if req.input.key.contains("smoke-test/") {
+            self.markers
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(s3s::S3Error::with_message(
+                    s3s::S3ErrorCode::AccessDenied,
+                    "injected deny for smoke test",
+                ));
+            }
+        }
+        self.inner.put_object(req).await
+    }
+}
+
+/// A fake S3 client, and the number of smoke-test markers put through it.
+/// With `fail`, every marker `PutObject` is denied with 403.
+pub fn fake_s3_client_counting_markers(
+    fs_root: &std::path::Path,
+    fail: bool,
+) -> (
+    aws_sdk_s3::Client,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    let markers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+    let counting = CountingMarkersS3 {
+        inner: fs,
+        markers: markers.clone(),
+        fail,
+    };
+    let mut builder = s3s::service::S3ServiceBuilder::new(counting);
+    builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+    let s3_client: s3s_aws::Client = builder.build().into();
+    let s3_config = aws_sdk_s3::Config::builder()
+        .behavior_version_latest()
+        .credentials_provider(aws_sdk_s3::config::Credentials::new(
+            "test", "test", None, None, "test",
+        ))
+        .region(aws_sdk_s3::config::Region::new("us-east-1"))
+        .http_client(s3_client)
+        .force_path_style(true)
+        .build();
+    (aws_sdk_s3::Client::from_conf(s3_config), markers)
+}
