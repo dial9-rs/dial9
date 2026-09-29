@@ -5,7 +5,7 @@
 
 use crate::connection;
 pub use crate::instance_metadata::InstanceIdentity;
-use crate::segment_object_key::format_v1_segment_object_key;
+use crate::segment_object_key::{format_v1_segment_object_key, hive_escape};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
@@ -246,6 +246,189 @@ impl S3Config {
             None => format!("dumps/{dump_id}.json"),
         }
     }
+
+    /// Key of the smoke-test marker:
+    /// `{prefix}/smoke-test/service={service}/instance={instance}.txt`.
+    ///
+    /// Outside the `version=1/` segment tree, and not `.bin`, so trace
+    /// discovery never lists it. One object per instance: reruns overwrite
+    /// it. Ignores a custom [`key_fn`](S3ConfigBuilder::key_fn).
+    #[doc(hidden)]
+    pub fn smoke_test_key(&self) -> String {
+        let suffix = format!(
+            "smoke-test/service={}/instance={}.txt",
+            hive_escape(&self.service_name),
+            hive_escape(self.instance_path.as_str()),
+        );
+        match &self.prefix {
+            Some(p) => format!("{p}/{suffix}"),
+            None => suffix,
+        }
+    }
+
+    /// Upload the smoke-test marker at [`smoke_test_key`](Self::smoke_test_key)
+    /// with `client`, giving up within `time_left`.
+    ///
+    /// The call overrides timeouts and retries for this request only, so the
+    /// SDK gives up before the caller's own deadline and its last error is
+    /// reported. The override merges with the client's settings field by
+    /// field; the per-attempt timeout is set too, since the client's would
+    /// leave no room for a retry.
+    #[doc(hidden)]
+    pub async fn upload_smoke_marker(
+        &self,
+        client: &Client,
+        time_left: Duration,
+    ) -> Result<S3SmokeTestOutcome, S3SmokeTestError> {
+        use aws_sdk_s3::config::retry::RetryConfig;
+        use aws_sdk_s3::config::timeout::TimeoutConfig;
+
+        let key = self.smoke_test_key();
+        let unix_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or_else(
+                |e| format!("clock before epoch: {e}"),
+                |d| d.as_secs().to_string(),
+            );
+        let body = format!(
+            "dial9 smoke test\nboot_id={}\nunix_time={unix_time}\n",
+            self.boot_id
+        );
+        let this_call = aws_sdk_s3::config::Builder::new()
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_timeout(time_left * 8 / 10)
+                    .operation_attempt_timeout(time_left * 4 / 10)
+                    .build(),
+            )
+            .retry_config(RetryConfig::standard().with_max_attempts(2));
+        put_request(client, self, &key, "text/plain")
+            .metadata("service", &self.service_name)
+            .metadata("boot-id", &self.boot_id)
+            .body(aws_sdk_s3::primitives::ByteStream::from(body.into_bytes()))
+            .customize()
+            .config_override(this_call)
+            .send()
+            .await
+            .map(|_| S3SmokeTestOutcome {})
+            .map_err(|e| S3SmokeTestError {
+                bucket: self.bucket.clone(),
+                detail: put_error_detail(&e),
+                key,
+            })
+    }
+}
+
+/// Start a `PutObject` for `key` in the configured bucket. The segment
+/// upload, the dump manifest and the smoke-test marker all build their
+/// request here, so a bucket-wide setting (SSE, ACL, checksum) applies to all
+/// three.
+fn put_request(
+    client: &Client,
+    config: &S3Config,
+    key: &str,
+    content_type: &str,
+) -> aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder {
+    client
+        .put_object()
+        .bucket(&config.bucket)
+        .key(key)
+        .content_type(content_type)
+}
+
+/// A successful [`S3Config::upload_smoke_marker`].
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct S3SmokeTestOutcome {}
+
+/// A failed [`S3Config::upload_smoke_marker`].
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct S3SmokeTestError {
+    bucket: String,
+    key: String,
+    detail: String,
+}
+
+impl S3SmokeTestError {
+    /// Bucket the marker was written to.
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    /// Key the marker was written to.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The SDK's error: `HTTP {status} {code}: {message}` for a service
+    /// error, else its kind and source chain.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl std::fmt::Display for S3SmokeTestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PutObject s3://{}/{}: {}",
+            self.bucket, self.key, self.detail
+        )
+    }
+}
+
+impl std::error::Error for S3SmokeTestError {}
+
+/// Describe a `PutObject` failure. `SdkError`'s `Display` prints only
+/// "service error", so read the code and message off the response instead.
+fn put_error_detail(e: &SdkError<PutObjectError>) -> String {
+    use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata};
+    let kind = match e {
+        SdkError::ServiceError(ctx) => {
+            let err = ctx.err();
+            return format!(
+                "HTTP {} {}: {}",
+                ctx.raw().status().as_u16(),
+                err.code().unwrap_or("<no error code>"),
+                err.message().unwrap_or("<no error message>"),
+            );
+        }
+        SdkError::TimeoutError(_) => "timeout",
+        SdkError::DispatchFailure(_) => "dispatch failure",
+        SdkError::ResponseError(_) => "unparseable response",
+        SdkError::ConstructionFailure(_) => "request construction failed",
+        _ => "SDK error",
+    };
+    format!("{kind}: {}", DisplayErrorContext(e))
+}
+
+/// The client an [`S3PipelineUploader`] resolved in `initialize()`,
+/// region-corrected and with the pipeline's credentials. Filled once the
+/// pipeline worker initializes the uploader; empty before.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct S3ClientSlot(Arc<std::sync::Mutex<Option<Client>>>);
+
+impl S3ClientSlot {
+    /// The published client, or `None` before the uploader initialized.
+    pub fn get(&self) -> Option<Client> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, client: Client) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
+    }
+}
+
+impl std::fmt::Debug for S3ClientSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3ClientSlot")
+            .field("filled", &self.get().is_some())
+            .finish()
+    }
 }
 
 /// JSON document written at `{prefix}/dumps/{dump_id}.json` when a dump
@@ -383,12 +566,7 @@ impl S3Uploader {
             "application/octet-stream"
         };
 
-        let mut req = self
-            .client
-            .put_object()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .content_type(content_type)
+        let mut req = put_request(&self.client, &self.config, &key, content_type)
             .metadata("service", &self.config.service_name)
             .metadata("boot-id", &self.config.boot_id)
             .metadata("segment-index", segment.index().to_string())
@@ -456,11 +634,7 @@ impl S3Uploader {
         key: &str,
         body: Vec<u8>,
     ) -> Result<(), ProcessErrorKind> {
-        self.client
-            .put_object()
-            .bucket(&self.config.bucket)
-            .key(key)
-            .content_type("application/json")
+        put_request(&self.client, &self.config, key, "application/json")
             .body(aws_sdk_s3::primitives::ByteStream::from(body))
             .send()
             .await
@@ -480,6 +654,8 @@ pub struct S3PipelineUploader {
     /// A key appears under several ids when forward windows overlap.
     /// `pub(crate)` so the finalize tests can seed and inspect it.
     pub(crate) dump_keys: HashMap<String, Vec<String>>,
+    /// Filled with the resolved client in `initialize()`.
+    client_slot: S3ClientSlot,
 }
 
 type BoxedS3ClientFuture = Pin<Box<dyn Future<Output = aws_sdk_s3::Client> + Send + 'static>>;
@@ -553,7 +729,15 @@ impl S3PipelineUploader {
                 client_source,
             },
             dump_keys: HashMap::new(),
+            client_slot: S3ClientSlot::default(),
         }
+    }
+
+    /// Where this uploader publishes the client it resolves in
+    /// `initialize()`, for the smoke test to upload with.
+    #[doc(hidden)]
+    pub fn client_slot(&self) -> S3ClientSlot {
+        self.client_slot.clone()
     }
 
     /// Construct the S3 client asynchronously when the pipeline worker starts.
@@ -636,6 +820,7 @@ impl S3PipelineUploader {
                 circuit_breaker,
             },
             dump_keys: HashMap::new(),
+            client_slot: S3ClientSlot::default(),
         }
     }
 
@@ -684,6 +869,7 @@ impl S3PipelineUploader {
         };
 
         let (uploader, circuit_breaker) = Self::build_uploader(s3_config, bootstrap_client).await;
+        self.client_slot.set(uploader.client.clone());
         self.state = S3UploaderState::Ready {
             uploader,
             circuit_breaker,
@@ -1795,5 +1981,125 @@ mod worker_integration_tests {
             uploaded == payload,
             "uploaded body must match seal'd bytes (snapshot survived retries)",
         );
+    }
+
+    // === Smoke test ===
+
+    /// s3s wrapper that denies every `PutObject` with 403 AccessDenied, the
+    /// shape of a missing `s3:PutObject` grant.
+    struct DenyPutS3<S> {
+        inner: S,
+    }
+
+    #[async_trait::async_trait]
+    impl<S: s3s::S3 + Send + Sync> s3s::S3 for DenyPutS3<S> {
+        async fn head_bucket(
+            &self,
+            req: s3s::S3Request<s3s::dto::HeadBucketInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::HeadBucketOutput>> {
+            self.inner.head_bucket(req).await
+        }
+
+        async fn put_object(
+            &self,
+            _req: s3s::S3Request<s3s::dto::PutObjectInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
+            Err(s3s::S3Error::with_message(
+                s3s::S3ErrorCode::AccessDenied,
+                "injected deny for smoke test",
+            ))
+        }
+    }
+
+    fn deny_put_client(fs_root: &Path) -> aws_sdk_s3::Client {
+        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+        let mut svc = s3s::service::S3ServiceBuilder::new(DenyPutS3 { inner: fs });
+        svc.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_client: s3s_aws::Client = svc.build().into();
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        aws_sdk_s3::Client::from_conf(sdk_config)
+    }
+
+    fn smoke_config() -> s3::S3Config {
+        s3::S3Config::builder()
+            .bucket("test-bucket")
+            .prefix("traces")
+            .service_name("checkout api")
+            .instance_path("us-east-1/i-0abc")
+            .build()
+    }
+
+    const TIME_LEFT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn smoke_test_key_sits_outside_the_segment_tree() {
+        let key = smoke_config().smoke_test_key();
+        check!(key == "traces/smoke-test/service=checkout api/instance=us-east-1%2Fi-0abc.txt");
+        check!(!key.contains("version=1/"));
+    }
+
+    /// One object at the marker key, and a rerun overwrites it.
+    #[tokio::test]
+    async fn marker_upload_writes_one_object_and_reruns_overwrite() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+        let config = smoke_config();
+        let client = fake_s3_client(s3_root.path());
+        for _ in 0..2 {
+            config
+                .upload_smoke_marker(&client, TIME_LEFT)
+                .await
+                .expect("marker upload");
+        }
+        // Panics unless exactly one object exists.
+        let body = String::from_utf8(read_only_object(s3_root.path())).unwrap();
+        check!(body.starts_with("dial9 smoke test\n"));
+        let key_path = s3_root
+            .path()
+            .join("test-bucket")
+            .join(config.smoke_test_key());
+        check!(key_path.exists(), "marker at {}", key_path.display());
+    }
+
+    #[tokio::test]
+    async fn denied_marker_upload_reports_code_and_message() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+        let config = smoke_config();
+        let err = config
+            .upload_smoke_marker(&deny_put_client(s3_root.path()), TIME_LEFT)
+            .await
+            .expect_err("denied PutObject must fail");
+        check!(err.key() == config.smoke_test_key());
+        check!(
+            err.detail() == "HTTP 403 AccessDenied: injected deny for smoke test",
+            "{err}"
+        );
+    }
+
+    /// `initialize()` publishes the region-corrected client, which uploads.
+    #[tokio::test]
+    async fn initialize_publishes_the_client() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+        let config = smoke_config();
+        let mut uploader =
+            S3PipelineUploader::new(config.clone(), Some(fake_s3_client(s3_root.path())));
+        let slot = uploader.client_slot();
+        check!(slot.get().is_none(), "empty before initialize()");
+        uploader.initialize().await.unwrap();
+        let client = slot.get().expect("filled by initialize()");
+        config
+            .upload_smoke_marker(&client, TIME_LEFT)
+            .await
+            .expect("upload with the published client");
     }
 }
