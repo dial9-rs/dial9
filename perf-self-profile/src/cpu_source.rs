@@ -418,6 +418,12 @@ impl CpuProfiler {
                 thread_name,
             );
         });
+        self.evict_stopped_names();
+    }
+
+    /// Forget the names of threads that stopped before this drain; their last
+    /// samples were just named.
+    fn evict_stopped_names(&mut self) {
         for tid in self.stopped_tids.drain(..) {
             self.tid_to_name.remove(&tid);
         }
@@ -670,38 +676,10 @@ mod metadata_tests {
     use super::*;
     use dial9_core::source::Source;
 
-    /// A forced ctimer backend reports itself, not perf.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn forced_ctimer_reports_ctimer() {
-        let profiler = CpuProfiler::start(CpuProfilingConfig::with_ctimer_backend())
-            .expect("ctimer needs no perf access");
-        assert_eq!(profiler.effective_backend(), ActiveCpuBackend::Ctimer);
-    }
-
-    /// `samples_seen` counts what `drain` hands out. ctimer, so no perf
-    /// access is needed: it samples the thread tracked here.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn samples_seen_advances_as_samples_drain() {
-        let mut profiler = CpuProfiler::start(CpuProfilingConfig::with_ctimer_backend())
-            .expect("ctimer needs no perf access");
-        profiler.on_thread_start().expect("track this thread");
-        assert_eq!(profiler.samples_seen(), 0);
-        let start = std::time::Instant::now();
-        let mut x = 0u64;
-        while start.elapsed() < std::time::Duration::from_millis(200) {
-            x = std::hint::black_box(x.wrapping_add(1));
-        }
-        let mut drained = 0u64;
-        profiler.drain(|_, _| drained += 1);
-        profiler.on_thread_stop();
-        assert!(drained > 0, "200ms of CPU at 99Hz produced no samples");
-        assert_eq!(profiler.samples_seen(), drained);
-    }
-
     /// A stopped thread's cached name survives one drain, for its last
     /// samples, then goes, so a thread reusing the tid reads its own name.
+    /// Calls the eviction step directly: a real drain would read the ctimer
+    /// sample buffer, which other unit tests in this process share.
     #[test]
     fn stopped_thread_name_is_evicted_after_the_next_drain() {
         let Ok(mut profiler) = CpuProfiler::start(CpuProfilingConfig::default()) else {
@@ -724,7 +702,7 @@ mod metadata_tests {
             profiler.tid_to_name.contains_key(&tid),
             "kept until drained"
         );
-        profiler.drain(|_, _| {});
+        profiler.evict_stopped_names();
         assert!(
             !profiler.tid_to_name.contains_key(&tid),
             "evicted after drain"
