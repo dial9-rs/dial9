@@ -985,12 +985,11 @@ mod sampling {
         if got {
             return working();
         }
-        match backend {
-            // ctimer samples only tracked threads.
-            Some(CpuBackend::Ctimer) if let Some(e) = &stimulus.enroll_error => {
-                return CheckStatus::failed(format!("could not enroll the stimulus thread: {e}"));
-            }
-            _ => {}
+        // ctimer samples only tracked threads.
+        if backend == Some(CpuBackend::Ctimer)
+            && let Some(e) = &stimulus.enroll_error
+        {
+            return CheckStatus::failed(format!("could not enroll the stimulus thread: {e}"));
         }
         if stimulus.spent < settings.stimulus_cpu_time {
             return CheckStatus::unverified(

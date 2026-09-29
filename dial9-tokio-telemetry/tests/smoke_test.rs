@@ -524,13 +524,12 @@ async fn built_without_cpu_profiling_is_not_compiled() {
     recorder.graceful_shutdown(Duration::from_secs(5));
 }
 
-#[cfg(feature = "cpu-profiling")]
-mod sampling {
+#[cfg(all(feature = "cpu-profiling", not(target_os = "linux")))]
+mod unsupported {
     use super::*;
     use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, RecorderPerfExt};
 
     /// Off Linux the profiler can't start: `Disabled`, with the reason.
-    #[cfg(not(target_os = "linux"))]
     #[test]
     fn unsupported_platform_reports_why() {
         let recorder = recorder(MemoryBuffer::new(1 << 20).unwrap())
