@@ -47,6 +47,9 @@ pub(crate) use dial9_destinations_s3::S3PipelineUploader;
 #[must_use]
 pub struct PipelineBuilder<Mode: BufferMode = Disk> {
     processors: Vec<Box<dyn SegmentProcessor>>,
+    /// Each S3 stage, for the smoke test.
+    #[cfg(feature = "worker-s3")]
+    s3_targets: Vec<crate::telemetry::smoke_test::S3Target>,
     _marker: PhantomData<Mode>,
 }
 
@@ -54,12 +57,37 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     pub(crate) fn new() -> Self {
         Self {
             processors: Vec::new(),
+            #[cfg(feature = "worker-s3")]
+            s3_targets: Vec::new(),
             _marker: PhantomData,
         }
     }
 
+    /// The processors, and the S3 stages among them for the smoke test.
+    #[cfg(feature = "worker-s3")]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<Box<dyn SegmentProcessor>>,
+        Vec<crate::telemetry::smoke_test::S3Target>,
+    ) {
+        (self.processors, self.s3_targets)
+    }
+
+    #[cfg(not(feature = "worker-s3"))]
     pub(crate) fn into_processors(self) -> Vec<Box<dyn SegmentProcessor>> {
         self.processors
+    }
+
+    /// Append a dial9 S3 stage, remembering its config and client slot.
+    #[cfg(feature = "worker-s3")]
+    fn push_s3(&mut self, config: dial9_destinations_s3::S3Config, uploader: S3PipelineUploader) {
+        self.s3_targets
+            .push(crate::telemetry::smoke_test::S3Target::new(
+                config,
+                uploader.client_slot(),
+            ));
+        self.processors.push(Box::new(uploader));
     }
 
     /// Append a user-supplied [`SegmentProcessor`] to the pipeline.
@@ -100,8 +128,8 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     /// [`s3_with_client`]: Self::s3_with_client
     #[cfg(feature = "worker-s3")]
     pub fn s3(mut self, config: dial9_destinations_s3::S3Config) -> Self {
-        self.processors
-            .push(Box::new(S3PipelineUploader::new(config, None)));
+        let uploader = S3PipelineUploader::new(config.clone(), None);
+        self.push_s3(config, uploader);
         self
     }
 
@@ -114,8 +142,8 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
         config: dial9_destinations_s3::S3Config,
         client: aws_sdk_s3::Client,
     ) -> Self {
-        self.processors
-            .push(Box::new(S3PipelineUploader::new(config, Some(client))));
+        let uploader = S3PipelineUploader::new(config.clone(), Some(client));
+        self.push_s3(config, uploader);
         self
     }
 
@@ -132,9 +160,9 @@ impl<Mode: BufferMode> PipelineBuilder<Mode> {
     where
         F: std::future::Future<Output = aws_sdk_s3::Client> + Send + 'static,
     {
-        self.processors.push(Box::new(
-            S3PipelineUploader::new(config, None).with_client_future(client_future),
-        ));
+        let uploader =
+            S3PipelineUploader::new(config.clone(), None).with_client_future(client_future);
+        self.push_s3(config, uploader);
         self
     }
 }

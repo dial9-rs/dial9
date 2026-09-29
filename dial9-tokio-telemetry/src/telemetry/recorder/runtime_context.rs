@@ -296,6 +296,26 @@ pub(crate) fn register_runtime_metrics(
     }
 }
 
+/// Whether the calling task runs on a Tokio runtime attached to the recorder
+/// behind `handle`.
+#[cfg(feature = "cpu-profiling")]
+pub(crate) fn on_attached_runtime(handle: &Dial9Handle) -> bool {
+    let Ok(current) = tokio::runtime::Handle::try_current() else {
+        return false;
+    };
+    let id = current.id();
+    handle
+        .with_source(|source: &mut TokioRuntimesSource| {
+            source
+                .contexts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|ctx| ctx.runtime_id.get() == Some(&id))
+        })
+        .unwrap_or(false)
+}
+
 impl Source for TokioRuntimesSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
         if self.last_sample.elapsed() < self.sample_interval {

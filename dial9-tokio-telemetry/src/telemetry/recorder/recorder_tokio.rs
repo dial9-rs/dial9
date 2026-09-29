@@ -109,8 +109,23 @@ impl<M: BufferMode> RecorderPipelineExt<M> for RecorderBuilder<M> {
             crate::background_task::PipelineBuilder<M>,
         ) -> crate::background_task::PipelineBuilder<M>,
     {
-        let processors = build(crate::background_task::PipelineBuilder::new()).into_processors();
-        self.processors(processors)
+        let pipeline = build(crate::background_task::PipelineBuilder::new());
+        #[cfg(feature = "worker-s3")]
+        {
+            let (processors, targets) = pipeline.into_parts();
+            let builder = self.processors(processors);
+            // Every S3 path adds to one source: `with_source` finds only the
+            // first of a type.
+            match targets.is_empty() {
+                true => builder,
+                false => builder.source_or_insert(
+                    crate::telemetry::smoke_test::PipelineS3Targets::default,
+                    |t| t.extend(targets),
+                ),
+            }
+        }
+        #[cfg(not(feature = "worker-s3"))]
+        self.processors(pipeline.into_processors())
     }
 
     #[cfg(feature = "worker-s3")]
@@ -168,13 +183,21 @@ fn apply_s3_uploader<M: BufferMode>(
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let boot_id = builder.writer_boot_id().map(str::to_owned);
+    // The smoke test's copy, with the boot id the uploader writes.
+    let mut target_config = config.clone();
     let uploader = crate::background_task::S3PipelineUploader::new(config, None);
     let mut uploader = configure(uploader);
     if let Some(boot_id) = boot_id {
+        target_config.set_boot_id(boot_id.clone());
         uploader.set_boot_id(boot_id);
     }
+    let target = crate::telemetry::smoke_test::S3Target::new(target_config, uploader.client_slot());
     builder
         .segment_metadata(metadata)
+        .source_or_insert(
+            crate::telemetry::smoke_test::PipelineS3Targets::default,
+            |t| t.extend([target]),
+        )
         .terminal_processor(uploader)
 }
 
@@ -338,6 +361,26 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
         builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime>;
+
+    /// [`SmokeTester`](crate::telemetry::smoke_test::SmokeTester) for the
+    /// recorder behind this handle. Every setting has a default, so
+    /// `.build()` alone checks everything the recorder has configured.
+    ///
+    /// Build it once and keep it: the tester owns the cache that stops
+    /// repeated or concurrent runs from each burning CPU and uploading.
+    ///
+    /// ```no_run
+    /// # async fn f(handle: dial9_core::handle::Dial9Handle) {
+    /// use dial9_tokio_telemetry::telemetry::Dial9HandleTokioExt;
+    ///
+    /// let tester = handle.smoke_tester().build();
+    /// let report = tester.run().await;
+    /// if !report.is_healthy() {
+    ///     tracing::error!("dial9 smoke test failed:\n{report}");
+    /// }
+    /// # }
+    /// ```
+    fn smoke_tester(&self) -> crate::telemetry::smoke_test::SmokeTesterBuilder;
 }
 
 mod dial9_handle_tokio_ext_sealed {
@@ -348,6 +391,10 @@ mod dial9_handle_tokio_ext_sealed {
 }
 
 impl Dial9HandleTokioExt for Dial9Handle {
+    fn smoke_tester(&self) -> crate::telemetry::smoke_test::SmokeTesterBuilder {
+        crate::telemetry::smoke_test::SmokeTester::builder(self.clone())
+    }
+
     fn attach_tokio_runtime(
         &self,
         mut builder: tokio::runtime::Builder,
