@@ -87,7 +87,7 @@ pub fn record_event(event: impl Encodable) {
 pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::{
-    TracedFuture, block_on, block_on_local, spawn, spawn_in, spawn_local,
+    TracedFuture, block_on, block_on_local, spawn, spawn_in, spawn_local, spawn_local_in,
 };
 
 #[cfg(all(feature = "tokio", feature = "worker-s3"))]

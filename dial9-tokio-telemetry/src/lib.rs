@@ -28,4 +28,6 @@ pub(crate) mod traced;
 #[cfg(feature = "taskdump")]
 pub(crate) mod unwind;
 
-pub use telemetry::{TracedFuture, block_on, block_on_local, spawn, spawn_in, spawn_local};
+pub use telemetry::{
+    TracedFuture, block_on, block_on_local, spawn, spawn_in, spawn_local, spawn_local_in,
+};

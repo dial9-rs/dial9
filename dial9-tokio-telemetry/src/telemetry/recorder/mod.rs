@@ -13,7 +13,9 @@ pub(crate) use runtime_context::poll_start_ts_monotonic;
 
 pub use dial9_core::handle::Dial9Handle;
 pub(crate) use handle::traced_runtime_handle;
-pub use handle::{Dial9TokioHandle, block_on, block_on_local, spawn, spawn_in, spawn_local};
+pub use handle::{
+    Dial9TokioHandle, block_on, block_on_local, spawn, spawn_in, spawn_local, spawn_local_in,
+};
 pub use join_set::JoinSetExt;
 
 mod tokio_hooks;
@@ -2039,6 +2041,66 @@ mod tests {
         assert!(
             recorded_wake,
             "spawn_in task's polls should be instrumented via lazy resolution, \
+             but no WakeEvent for {expected:?} was recorded"
+        );
+    }
+
+    /// `spawn_local_in` instruments a `!Send` task spawned onto a `LocalSet`
+    /// from outside the set's context, the same lazy resolution as `spawn_in`.
+    #[test]
+    fn spawn_local_in_from_outside_local_set_records_wakes() {
+        use crate::telemetry::task_metadata::TaskId;
+        use std::rc::Rc;
+
+        let (capture, data) = CapturingProcessor::new();
+        let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+            .pipe(capture)
+            .build();
+
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let rt = rec
+            .handle()
+            .attach_tokio_runtime(
+                builder,
+                TokioAttachOptions::builder()
+                    .task_tracking_enabled(true)
+                    .build(),
+            )
+            .unwrap();
+
+        let spawned_id = Rc::new(std::cell::Cell::new(None::<TaskId>));
+        let spawned_write = spawned_id.clone();
+
+        // Spawned before the set is driven and outside its context.
+        let set = tokio::task::LocalSet::new();
+        let join = spawn_local_in(&set, async move {
+            spawned_write.set(tokio::task::try_id().map(TaskId::from));
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+        });
+        rt.block_on(set.run_until(async move { join.await.unwrap() }));
+
+        drop(set);
+        drop(rt);
+        rec.graceful_shutdown(Duration::from_secs(1));
+
+        let raw = data.lock().unwrap();
+        let events = decode_captured(&raw);
+        let expected = spawned_id
+            .get()
+            .expect("spawn_local_in task should have run and recorded its id");
+        let recorded_wake = events.iter().any(|e| {
+            matches!(
+                e,
+                crate::telemetry::analysis_events::Dial9Event::WakeEvent(w)
+                    if TaskId(w.woken_task_id) == expected
+            )
+        });
+        assert!(
+            recorded_wake,
+            "spawn_local_in task's polls should be instrumented via lazy resolution, \
              but no WakeEvent for {expected:?} was recorded"
         );
     }
