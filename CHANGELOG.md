@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Experimental `TaskSamplingConfig` for per-worker sampling before async stack capture.
+- Experimental per-worker task sampling reduces async stack capture overhead (`unstable-task-sampling`).
 
 ## [0.5.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.1...dial9-v0.5.2) - 2026-09-22
 

@@ -14,5 +14,5 @@ dial9-utils = { path = "../../dial9-utils", features = ["span"] }
 dial9 = { path = "../../dial9", default-features = false, features = [
     "tokio",
     "cpu-profiling",
-    "taskdump",
+    "unstable-task-sampling",
 ] }

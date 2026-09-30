@@ -1,8 +1,9 @@
 //! Experimental sampling of async stacks before capture, with a budget per worker.
 //!
-//! Requires the `taskdump` feature and the same Linux/Tokio support as
-//! [`TaskDumpConfig`](super::TaskDumpConfig). Only Dial9-instrumented futures
-//! participate. Configure this through [`TokioAttachOptions`](super::TokioAttachOptions).
+//! Requires `unstable-task-sampling` and the same
+//! Linux/Tokio support as [`TaskDumpConfig`](super::TaskDumpConfig).
+//! Only Dial9-instrumented futures participate. Configure this through
+//! [`TokioAttachOptions`](super::TokioAttachOptions).
 
 /// Experimental alternative to [`TaskDumpConfig`](super::TaskDumpConfig).
 ///

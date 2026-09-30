@@ -3,8 +3,8 @@
 //!
 //! This wrapper is intentionally separate from the wake-event wrapper: wake
 //! capture runs on every instrumented spawn regardless of the `taskdump`
-//! feature, while task-dump capture is gated behind the `taskdump` feature and
-//! its own runtime toggle. Typical stacking is `WakeTraced<TaskSampled<F>>`.
+//! feature, while sampled capture requires `unstable-task-sampling` and its
+//! own runtime toggle. Typical stacking is `WakeTraced<TaskSampled<F>>`.
 //!
 //! # Sampling model
 //!

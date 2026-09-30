@@ -113,7 +113,9 @@ fn register_hooks(
         tokio_hooks.on_before_task_poll,
         |meta| {
             #[cfg(feature = "taskdump")]
-            crate::task_dump::set_capture_config(c3.task_dump_config, c3.task_sampling_config.is_some());
+            crate::task_dump::set_capture_config(c3.task_dump_config);
+            #[cfg(feature = "unstable-task-sampling")]
+            crate::task_dump::set_sampling_enabled(c3.task_sampling_config.is_some());
             c3.record_poll_start(meta.spawned_at(), TaskId::from(meta.id()))
         }
     );
@@ -193,8 +195,10 @@ fn register_hooks(
         runtime_context::clear_thread_traced();
 
         #[cfg(feature = "taskdump")]
+        crate::task_dump::clear_taskdump_config();
+        #[cfg(feature = "unstable-task-sampling")]
         {
-            crate::task_dump::set_capture_config(None, false);
+            crate::task_dump::set_sampling_enabled(false);
             crate::task_dump::clear_worker_sampler();
         }
 
@@ -222,6 +226,9 @@ fn register_runtime_hooks(
     #[cfg(feature = "taskdump")]
     {
         ctx.task_dump_config = options.task_dump_config;
+    }
+    #[cfg(feature = "unstable-task-sampling")]
+    {
         ctx.task_sampling_config = options.task_sampling_config;
     }
     let ctx = Arc::new(ctx);
@@ -252,6 +259,7 @@ mod tests {
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
 
+    #[cfg(feature = "unstable-task-sampling")]
     #[test]
     fn task_dump_and_sampling_configs_are_mutually_exclusive() {
         let rec = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap()).build();

@@ -53,8 +53,10 @@ use super::register_runtime_hooks;
 use super::runtime_context::RuntimeContext;
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource, WorkerIdCounter};
 use crate::primitives::sync::{Arc, Mutex};
+use crate::telemetry::TaskDumpConfig;
+#[cfg(feature = "unstable-task-sampling")]
+use crate::telemetry::TaskSamplingConfig;
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
-use crate::telemetry::{TaskDumpConfig, TaskSamplingConfig};
 use dial9_core::buffer::BufferMode;
 use dial9_core::handle::{Dial9Handle, set_tl_handle};
 use dial9_core::recorder::RecorderBuilder;
@@ -207,9 +209,11 @@ pub struct TokioAttachOptions {
     /// not produce task dumps.
     ///
     /// </div>
+    #[cfg_attr(not(feature = "taskdump"), allow(dead_code))]
     pub(super) task_dump_config: Option<TaskDumpConfig>,
-    /// Experimental sampling before stack capture (requires `taskdump`).
+    /// Experimental sampling before stack capture (requires `unstable-task-sampling`).
     /// Mutually exclusive with `task_dump_config`; attaching both returns an error.
+    #[cfg(feature = "unstable-task-sampling")]
     pub(super) task_sampling_config: Option<TaskSamplingConfig>,
     /// User-composed Tokio hooks, run after dial9's own.
     #[builder(default)]
@@ -367,6 +371,7 @@ impl Dial9HandleTokioExt for Dial9Handle {
         if !options.tokio_instrumentation_enabled {
             return builder.build();
         }
+        #[cfg(feature = "unstable-task-sampling")]
         if options.task_dump_config.is_some() && options.task_sampling_config.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

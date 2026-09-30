@@ -227,7 +227,7 @@ pub(crate) struct TaskDumpEvent {
 /// selected by the worker's capture sampler.
 #[derive(TraceEvent)]
 #[traceevent(wire_slot)]
-#[cfg(any(feature = "taskdump", test))]
+#[cfg(any(feature = "unstable-task-sampling", test))]
 pub(crate) struct TaskSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,

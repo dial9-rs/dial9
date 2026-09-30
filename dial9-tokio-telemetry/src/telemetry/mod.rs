@@ -16,6 +16,7 @@ pub(crate) mod format;
 pub(crate) mod recorder;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
+#[cfg(any(feature = "unstable-task-sampling", test))]
 pub mod task_sampling_config;
 pub(crate) use dial9_core::buffer;
 
@@ -57,4 +58,5 @@ pub use recorder::{
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
+#[cfg(any(feature = "unstable-task-sampling", test))]
 pub use task_sampling_config::TaskSamplingConfig;

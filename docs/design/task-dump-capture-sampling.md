@@ -37,7 +37,8 @@ weighting can correct.
 
 Task scope applies only to the first mixed-flamegraph view. Capture itself is
 not restricted to one task: every task wrapped by dial9 instrumentation on
-every attached runtime worker participates in that worker's sampler.
+every runtime worker configured with `TaskSamplingConfig` participates in that
+worker's sampler.
 
 ## Goals
 
@@ -66,7 +67,7 @@ every attached runtime worker participates in that worker's sampler.
 
 ## Public API
 
-The preferred configuration is:
+With the `unstable-task-sampling` Cargo feature enabled:
 
 ```rust
 use dial9::{TaskSamplingConfig, TokioAttachOptions};
@@ -90,9 +91,10 @@ deterministic tests.
 ### Compatibility
 
 `TaskDumpConfig`, `idle_threshold`, and the existing `DIAL9_TASK_DUMP_*`
-variables retain their behavior. `TaskSamplingConfig` is a separate opt-in under
-the same `taskdump` Cargo feature; the two configs cannot be enabled on the
-same runtime. Different runtimes may use different modes.
+variables retain their behavior. `TaskSamplingConfig` requires the opt-in
+`unstable-task-sampling` Cargo feature, which enables `taskdump`. Its API and
+behavior may change. The two configs cannot be enabled on the same runtime;
+different runtimes may use different modes.
 
 `DIAL9_TASK_SAMPLING_ENABLED` enables the experimental mode;
 `DIAL9_TASK_SAMPLING_PER_WORKER_HZ` sets its target rate (default: 10).
@@ -172,7 +174,7 @@ This per-transition cost is not included in the estimate above.
 
 An eligible item is an instrumented task poll that:
 
-1. is running on a worker whose attached runtime has task dumps enabled;
+1. is running on a worker whose attached runtime has `TaskSamplingConfig` enabled;
 2. returns `Poll::Pending`;
 3. is not the immediate synthetic re-poll caused by the previous task-dump
    capture.
@@ -203,7 +205,7 @@ worker; it is not assigned to a fixed subset of tasks. `TaskDumped<F>` wraps
 every future created through dial9's instrumented spawn path, and each pending
 transition consults the sampler on the worker currently polling it. Therefore:
 
-- every attached runtime worker has its own sampler;
+- every worker in a runtime configured with `TaskSamplingConfig` has its own sampler;
 - every eligible transition from every dial9-instrumented task has a nonzero
   inclusion probability after calibration;
 - task migration is naturally handled by consulting the destination worker's
@@ -362,9 +364,9 @@ omitted. The ordering is normative:
    the selected transition's probability; and
 6. clear the reusable frame buffer.
 
-Emission happens in the same selected path. The implementation no longer
-retains a captured stack until a later poll and no longer applies an idle-time
-emission decision.
+Emission happens in the same selected path. The experimental policy does not
+retain a captured stack until a later poll or apply an idle-time emission
+decision.
 
 The existing `just_captured` suppression remains necessary. The `trace_with`
 re-poll can cause an immediate wake; that synthetic follow-up poll must not

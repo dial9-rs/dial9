@@ -21,7 +21,7 @@ run_shuttle_tests dial9-core \
 
 telemetry_features=_shuttle
 if [[ "$(uname -s)" == Linux ]]; then
-  telemetry_features+=,taskdump
+  telemetry_features+=,unstable-task-sampling
 fi
 
 run_shuttle_tests dial9-tokio-telemetry \

@@ -15,8 +15,11 @@ use std::time::Duration;
 use dial9_core::buffer::{Disk, DiskBuffer, SegmentWriter};
 use dial9_core::recording::Recorder;
 use dial9_tokio_telemetry::telemetry::{
-    AttachedRuntime, Dial9HandleTokioExt, TaskDumpConfig, TaskSamplingConfig, TokioAttachOptions,
+    AttachedRuntime, Dial9HandleTokioExt, TaskDumpConfig, TokioAttachOptions,
 };
+
+#[cfg(feature = "unstable-task-sampling")]
+use dial9_tokio_telemetry::telemetry::TaskSamplingConfig;
 
 #[cfg(feature = "worker-s3")]
 use dial9_tokio_telemetry::telemetry::RecorderPipelineExt;
@@ -46,7 +49,9 @@ const ENV_DIAL9_SCHEDULE_PROFILE_ENABLED: &str = "DIAL9_SCHEDULE_PROFILE_ENABLED
 const ENV_DIAL9_MEMORY_PROFILE_ENABLED: &str = "DIAL9_MEMORY_PROFILE_ENABLED";
 const ENV_DIAL9_MEMORY_SAMPLE_RATE_BYTES: &str = "DIAL9_MEMORY_SAMPLE_RATE_BYTES";
 const ENV_DIAL9_MEMORY_TRACK_LIVESET: &str = "DIAL9_MEMORY_TRACK_LIVESET";
+#[cfg(feature = "unstable-task-sampling")]
 const ENV_DIAL9_TASK_SAMPLING_ENABLED: &str = "DIAL9_TASK_SAMPLING_ENABLED";
+#[cfg(feature = "unstable-task-sampling")]
 const ENV_DIAL9_TASK_SAMPLING_PER_WORKER_HZ: &str = "DIAL9_TASK_SAMPLING_PER_WORKER_HZ";
 const ENV_DIAL9_TASK_DUMP_ENABLED: &str = "DIAL9_TASK_DUMP_ENABLED";
 const ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS: &str = "DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS";
@@ -109,7 +114,9 @@ struct ParsedEnvConfig {
     memory_sample_rate_bytes: Option<u64>,
     memory_track_liveset: Option<bool>,
     task_dump_enabled: Option<bool>,
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_enabled: Option<bool>,
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_per_worker_hz: Option<u32>,
     task_dump_idle_threshold: Option<Duration>,
     process_resource_usage_enabled: Option<bool>,
@@ -178,7 +185,9 @@ struct ResolvedEnvConfig {
     memory_profiling: Option<ResolvedMemoryProfilingConfig>,
 
     task_dump_enabled: bool,
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_enabled: bool,
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_per_worker_hz: Option<u32>,
 
     // None means TaskDumpConfig::default() owns the idle threshold.
@@ -207,7 +216,9 @@ struct RuntimeEnvConfig {
     cpu_sample_hz: Option<u64>,
     schedule_profile_enabled: bool,
     task_dump_enabled: bool,
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_enabled: bool,
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_per_worker_hz: Option<u32>,
     task_dump_idle_threshold: Option<Duration>,
     process_resource_usage_enabled: bool,
@@ -254,7 +265,9 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
         memory_sample_rate_bytes: env.get_positive_u64(ENV_DIAL9_MEMORY_SAMPLE_RATE_BYTES),
         memory_track_liveset: env.get_bool(ENV_DIAL9_MEMORY_TRACK_LIVESET),
         task_dump_enabled: env.get_bool(ENV_DIAL9_TASK_DUMP_ENABLED),
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_enabled: env.get_bool(ENV_DIAL9_TASK_SAMPLING_ENABLED),
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_per_worker_hz: env
             .get_positive_u64(ENV_DIAL9_TASK_SAMPLING_PER_WORKER_HZ)
             .and_then(|rate| match u32::try_from(rate) {
@@ -323,7 +336,9 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
             .task_dump_enabled
             .unwrap_or(DEFAULT_TASK_DUMP_ENABLED),
         task_dump_idle_threshold: parsed.task_dump_idle_threshold,
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_enabled: parsed.task_sampling_enabled.unwrap_or(false),
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_per_worker_hz: parsed.task_sampling_per_worker_hz,
         process_resource_usage_enabled: parsed
             .process_resource_usage_enabled
@@ -558,15 +573,15 @@ fn build_s3_config(config: ResolvedS3Config) -> dial9_destinations_s3::S3Config 
 /// | `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
 /// | `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
 ///
-/// Experimental task sampling is a separate opt-in, mutually exclusive with
-/// task dumps on the same runtime:
+/// Experimental task sampling requires `unstable-task-sampling` and is mutually
+/// exclusive with task dumps on the same runtime:
 ///
 /// | Variable | Default | Meaning |
 /// | --- | --- | --- |
 /// | `DIAL9_TASK_SAMPLING_ENABLED` | `false` | Enable experimental sampling before capture. |
 /// | `DIAL9_TASK_SAMPLING_PER_WORKER_HZ` | `10` | Target captures/s/worker; not a cap. |
 ///
-/// See [`TaskDumpConfig`] and [`TaskSamplingConfig`] for configuration details.
+/// See [`TaskDumpConfig`] and `TaskSamplingConfig` for configuration details.
 ///
 /// Missing variables use defaults. Blank, invalid, or non-Unicode values
 /// emit a warning and are treated as missing. With `DIAL9_ENABLED` off, or
@@ -635,7 +650,9 @@ fn env_recorder(resolved: ResolvedEnvConfig) -> (Option<Recorder>, RuntimeEnvCon
         schedule_profile_enabled,
         memory_profiling,
         task_dump_enabled,
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_enabled,
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_per_worker_hz,
         task_dump_idle_threshold,
         process_resource_usage_enabled,
@@ -653,7 +670,9 @@ fn env_recorder(resolved: ResolvedEnvConfig) -> (Option<Recorder>, RuntimeEnvCon
         cpu_sample_hz,
         schedule_profile_enabled,
         task_dump_enabled,
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_enabled,
+        #[cfg(feature = "unstable-task-sampling")]
         task_sampling_per_worker_hz,
         task_dump_idle_threshold,
         process_resource_usage_enabled,
@@ -733,6 +752,7 @@ fn env_task_dump_config(config: &RuntimeEnvConfig) -> Option<TaskDumpConfig> {
         })
 }
 
+#[cfg(feature = "unstable-task-sampling")]
 fn env_task_sampling_config(config: &RuntimeEnvConfig) -> Option<TaskSamplingConfig> {
     config.task_sampling_enabled.then(|| {
         TaskSamplingConfig::builder()
@@ -743,15 +763,17 @@ fn env_task_sampling_config(config: &RuntimeEnvConfig) -> Option<TaskSamplingCon
 
 fn env_tokio_options(config: RuntimeEnvConfig) -> TokioAttachOptions {
     let task_dump_config = env_task_dump_config(&config);
+    #[cfg(feature = "unstable-task-sampling")]
     let task_sampling_config = env_task_sampling_config(&config);
 
-    TokioAttachOptions::builder()
+    let options = TokioAttachOptions::builder()
         .maybe_runtime_name(config.runtime_name)
         .tokio_instrumentation_enabled(config.tokio_instrumentation_enabled.unwrap_or(true))
         .task_tracking_enabled(config.task_tracking_enabled)
-        .maybe_task_dump_config(task_dump_config)
-        .maybe_task_sampling_config(task_sampling_config)
-        .build()
+        .maybe_task_dump_config(task_dump_config);
+    #[cfg(feature = "unstable-task-sampling")]
+    let options = options.maybe_task_sampling_config(task_sampling_config);
+    options.build()
 }
 
 fn build_env_disk_writer(
@@ -1326,6 +1348,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "unstable-task-sampling")]
     #[test]
     fn task_sampling_env_is_independent_of_task_dumps() {
         for (hz, expected) in [

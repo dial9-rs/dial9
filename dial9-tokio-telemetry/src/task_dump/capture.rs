@@ -1,4 +1,6 @@
-use crate::telemetry::format::{TaskDumpEvent, TaskSampleEvent};
+use crate::telemetry::format::TaskDumpEvent;
+#[cfg(feature = "unstable-task-sampling")]
+use crate::telemetry::format::TaskSampleEvent;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::{Encodable, ThreadLocalEncoder};
 use dial9_core::handle::Dial9Handle;
@@ -47,12 +49,12 @@ impl FrameBuf {
         self.chains.clear();
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "unstable-task-sampling"))]
     pub(super) fn capacity(&self) -> usize {
         self.ips.capacity()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "unstable-task-sampling"))]
     pub(super) fn is_empty(&self) -> bool {
         self.ips.is_empty() && self.chains.is_empty()
     }
@@ -74,6 +76,7 @@ impl FrameBuf {
         });
     }
 
+    #[cfg(feature = "unstable-task-sampling")]
     pub(super) fn emit_sample(
         &mut self,
         handle: &Dial9Handle,
@@ -174,6 +177,7 @@ impl Encodable for TaskDumpData<'_> {
 
 /// Borrowed-callchain view of a task-sample event that implements [`Encodable`]
 /// by interning its ips into the batch's stack pool.
+#[cfg(feature = "unstable-task-sampling")]
 pub(crate) struct TaskSampleData<'a> {
     pub(crate) timestamp_ns: u64,
     pub(crate) task_id: TaskId,
@@ -181,6 +185,7 @@ pub(crate) struct TaskSampleData<'a> {
     pub(crate) inclusion_probability: f64,
 }
 
+#[cfg(feature = "unstable-task-sampling")]
 impl Encodable for TaskSampleData<'_> {
     fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
         let interned_callchain = enc.intern_stack_frames(self.callchain);

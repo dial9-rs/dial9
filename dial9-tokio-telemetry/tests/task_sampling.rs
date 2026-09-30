@@ -1,4 +1,4 @@
-#![cfg(feature = "taskdump")]
+#![cfg(feature = "unstable-task-sampling")]
 
 mod common;
 

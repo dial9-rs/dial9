@@ -20,9 +20,11 @@ use clap::Parser;
 #[cfg(target_os = "linux")]
 use dial9::RecorderPerfExt;
 #[cfg(target_os = "linux")]
+use dial9::TaskSamplingConfig;
+#[cfg(target_os = "linux")]
 use dial9::cpu::CpuProfilingConfig;
 use dial9::format::TraceEvent;
-use dial9::{Dial9Handle, Dial9HandleTokioExt, DiskBuffer, TaskSamplingConfig, TokioAttachOptions};
+use dial9::{Dial9Handle, Dial9HandleTokioExt, DiskBuffer, TokioAttachOptions};
 use dial9_utils::dial9_span;
 use dial9_utils::span::{Instrument as _, Span as _};
 use std::hint::black_box;
@@ -106,18 +108,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
     runtime_builder.enable_all().worker_threads(2);
-    let runtime = recorder.handle().attach_tokio_runtime(
-        runtime_builder,
-        TokioAttachOptions::builder()
-            .task_tracking_enabled(true)
-            .task_sampling_config(
-                TaskSamplingConfig::builder()
-                    .captures_per_second_per_worker(1_000)
-                    .rng_seed(1)
-                    .build(),
-            )
+    let options = TokioAttachOptions::builder().task_tracking_enabled(true);
+    #[cfg(target_os = "linux")]
+    let options = options.task_sampling_config(
+        TaskSamplingConfig::builder()
+            .captures_per_second_per_worker(1_000)
+            .rng_seed(1)
             .build(),
-    )?;
+    );
+    let runtime = recorder
+        .handle()
+        .attach_tokio_runtime(runtime_builder, options.build())?;
 
     let handle = recorder.handle().clone();
     runtime.block_on(async move {

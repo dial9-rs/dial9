@@ -1,10 +1,10 @@
 use super::source::{FlushContext, Source};
 #[cfg(not(tokio_unstable))]
 use crate::primitives::sync::Weak;
-#[cfg(feature = "taskdump")]
+#[cfg(feature = "unstable-task-sampling")]
 use crate::primitives::sync::atomic::AtomicU64 as SamplingActivationCount;
 use crate::primitives::sync::{Arc, Mutex};
-#[cfg(feature = "taskdump")]
+#[cfg(feature = "unstable-task-sampling")]
 use crate::task_dump::worker::WorkerSampler;
 use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
@@ -50,13 +50,13 @@ pub(crate) struct RuntimeContext {
     pub worker_ids: Mutex<BTreeSet<u64>>,
     #[cfg(feature = "taskdump")]
     pub(super) task_dump_config: Option<crate::telemetry::TaskDumpConfig>,
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     pub(super) task_sampling_config: Option<crate::telemetry::TaskSamplingConfig>,
     /// Shared by every thread that drives a logical worker. The source reads
     /// activation metadata without locking a worker's sampling decision.
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_workers: Mutex<Box<[Option<Arc<WorkerSampler>>]>>,
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     task_sampling_activations: Arc<SamplingActivationCount>,
 }
 
@@ -392,12 +392,12 @@ impl Source for TokioRuntimesSource {
         // unchanged metadata. Cheap — a few uncontended read locks and no
         // allocation — so it runs every flush cycle.
         let contexts = self.contexts.lock().unwrap();
-        #[cfg(feature = "taskdump")]
+        #[cfg(feature = "unstable-task-sampling")]
         let activated_workers = contexts
             .iter()
             .map(|ctx| ctx.task_sampling_activations.load(Ordering::Acquire) as usize)
             .sum::<usize>();
-        #[cfg(not(feature = "taskdump"))]
+        #[cfg(not(feature = "unstable-task-sampling"))]
         let activated_workers = 0;
         let fingerprint = activated_workers
             + contexts.len()
@@ -412,7 +412,7 @@ impl Source for TokioRuntimesSource {
         // The writer's merge is additive, so emitting the full current snapshot
         // on each change is correct.
         out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
-        #[cfg(feature = "taskdump")]
+        #[cfg(feature = "unstable-task-sampling")]
         for ctx in contexts.iter() {
             ctx.append_task_sampling_metadata(out);
         }
@@ -437,16 +437,16 @@ impl RuntimeContext {
             worker_ids: Mutex::new(BTreeSet::new()),
             #[cfg(feature = "taskdump")]
             task_dump_config: None,
-            #[cfg(feature = "taskdump")]
+            #[cfg(feature = "unstable-task-sampling")]
             task_sampling_config: None,
-            #[cfg(feature = "taskdump")]
+            #[cfg(feature = "unstable-task-sampling")]
             task_sampling_workers: Mutex::new(Box::new([])),
-            #[cfg(feature = "taskdump")]
+            #[cfg(feature = "unstable-task-sampling")]
             task_sampling_activations: Arc::new(SamplingActivationCount::new(0)),
         }
     }
 
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     fn task_sampler(&self, global_id: u64) -> Option<Arc<WorkerSampler>> {
         let config = self.task_sampling_config?;
         let mut workers = self.task_sampling_workers.lock().unwrap();
@@ -478,7 +478,7 @@ impl RuntimeContext {
         )
     }
 
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     fn append_task_sampling_metadata(&self, out: &mut Vec<(String, String)>) {
         let Some(config) = self.task_sampling_config else {
             return;
@@ -646,7 +646,7 @@ impl RuntimeContext {
         // once however many workers resolve at the same moment.
         let base = self.worker_id_base.get_or_init(|| {
             let num_workers = worker_metrics(self, |metrics| metrics.num_workers()) as u64;
-            #[cfg(feature = "taskdump")]
+            #[cfg(feature = "unstable-task-sampling")]
             if self.task_sampling_config.is_some() {
                 *self.task_sampling_workers.lock().unwrap() =
                     vec![None; num_workers as usize].into_boxed_slice();
@@ -672,7 +672,7 @@ fn register_worker_if_needed(ctx: &RuntimeContext, global_id: u64) {
     let key = (ctx.id, global_id);
     WORKER_REGISTERED.with(|cell| {
         if cell.get() != Some(key) {
-            #[cfg(feature = "taskdump")]
+            #[cfg(feature = "unstable-task-sampling")]
             crate::task_dump::set_worker_sampler(ctx.task_sampler(global_id));
             // Publish the worker after its sampler so a source snapshot that
             // sees the worker-count change also sees its capture configuration.
@@ -949,7 +949,7 @@ fn make_worker_unpark(ctx: &RuntimeContext) -> WorkerUnparkEvent {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     #[test]
     fn task_sampler_validates_worker_range_and_reuses_slots() {
         let mut ctx =
@@ -967,9 +967,9 @@ mod tests {
         assert!(ctx.task_sampling_workers.lock().unwrap()[1].is_none());
     }
 
-    #[cfg(feature = "taskdump")]
+    #[cfg(feature = "unstable-task-sampling")]
     #[test]
-    fn task_dump_slots_use_current_runtime_worker_count() {
+    fn task_sampling_slots_use_current_runtime_worker_count() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .build()
@@ -1454,8 +1454,8 @@ mod shuttle_tests {
     }
 }
 
-#[cfg(all(test, shuttle, feature = "taskdump"))]
-mod task_dump_shuttle_tests {
+#[cfg(all(test, shuttle, feature = "unstable-task-sampling"))]
+mod task_sampling_shuttle_tests {
     use super::*;
     use crate::primitives::thread;
 
