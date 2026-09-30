@@ -28,15 +28,15 @@ export interface StreamedParse {
   /** Decompressed byte count (the decompressed bytes are not retained). */
   bytes: number;
   /**
-   * The bytes as they arrived, still compressed, one entry per component.
-   * Absent when nothing asked for them, or when a component arrived
-   * uncompressed.
+   * The bytes as they arrived, before any gunzip, one entry per component.
+   * Absent when nothing asked for them, or when the plain (non-gzip)
+   * components outgrew the capture budget.
    *
    * Kept apart rather than concatenated: a gzip stream of several members
    * decodes on some runtimes and throws "trailing junk" on others, so each
    * component re-parses as its own source.
    */
-  compressed?: Uint8Array[];
+  captured?: Uint8Array[];
 }
 
 /**
@@ -47,8 +47,9 @@ export interface StreamedParse {
  *
  * Chunks are handed to the parser and dropped: retaining the decompressed form
  * costs the whole trace, 1.28 GB at 30M events. Set/Clear Range re-parses the
- * compressed bytes instead, which `streamTrace` captures for a third of that
- * (raw-byte-cache.ts makes the same trade for segments).
+ * bytes as they arrived instead, which `streamTrace` captures: a third of that
+ * for gzip (raw-byte-cache.ts makes the same trade for segments), and plain
+ * bytes only up to a budget.
  */
 export async function parseChunks(
   chunks: AsyncIterable<Uint8Array>,
@@ -68,6 +69,11 @@ export async function parseChunks(
 }
 
 /**
+ * Plain (non-gzip) bytes `streamTrace` keeps for Set/Clear Range.
+ */
+export const PLAIN_CAPTURE_BUDGET_BYTES = 256 * 1024 * 1024;
+
+/**
  * Stream one OR MORE trace URLs: decode chunks as they download so parse
  * time overlaps the download (~max(download, parse) instead of their sum).
  * For multiple URLs a few fetches run at once and the components stream in
@@ -78,26 +84,27 @@ export async function streamTrace(
   urls: readonly string[],
   fetchOpts: FetchOptions,
   parseOpts: ParseOptions,
-  captureCompressed = false
+  capture = false,
+  plainBudgetBytes = PLAIN_CAPTURE_BUDGET_BYTES
 ): Promise<StreamedParse> {
   // Chunks per component, in arrival order; index 0 for the single-URL path,
   // which never reports one. Sized up front: an empty component reports no
   // chunk, and the re-parse needs its entry all the same.
-  let captured: Uint8Array[][] | null = captureCompressed
-    ? Array.from(urls, () => [])
-    : null;
-  const opts: FetchOptions = captureCompressed
+  let parts: Uint8Array[][] | null = capture ? Array.from(urls, () => []) : null;
+  let plainBytes = 0;
+  const opts: FetchOptions = capture
     ? {
         ...fetchOpts,
         onRawChunk: (chunk: Uint8Array, isGzip: boolean, component = 0): void => {
-          if (captured === null) return;
-          // Re-parsing a component means gunzipping it, so a plain one has
-          // nothing to re-parse from and the whole capture goes.
+          if (parts === null) return;
           if (!isGzip) {
-            captured = null;
-            return;
+            plainBytes += chunk.length;
+            if (plainBytes > plainBudgetBytes) {
+              parts = null;
+              return;
+            }
           }
-          (captured[component] ??= []).push(chunk);
+          parts[component]!.push(chunk);
         },
       }
     : fetchOpts;
@@ -106,8 +113,8 @@ export async function streamTrace(
       ? await fetchTraceStream(urls[0]!, opts)
       : fetchTracesStream([...urls], opts);
   const parsed = await parseChunks(stream, parseOpts);
-  if (captured === null) return parsed;
-  const compressed = captured.map((chunks) => {
+  if (parts === null) return parsed;
+  const captured = parts.map((chunks) => {
     let total = 0;
     for (const c of chunks) total += c.length;
     const out = new Uint8Array(total);
@@ -118,5 +125,5 @@ export async function streamTrace(
     }
     return out;
   });
-  return { ...parsed, compressed };
+  return { ...parsed, captured };
 }

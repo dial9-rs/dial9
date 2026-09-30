@@ -93,9 +93,9 @@ export interface LoadedTrace {
   trace: ParsedTrace;
   /** Decompressed byte count (the decompressed bytes are not retained). */
   bytes: number;
-  /** The compressed bytes per component, when the loader kept them for
+  /** The bytes as they arrived, per component, when the loader kept them for
    *  Set/Clear Range. */
-  compressed?: Uint8Array[];
+  captured?: Uint8Array[];
   /**
    * "stream" when download and decode overlapped (canStreamDecode
    * runtimes); "buffered" for the fetch-then-parse fallback. Pages use this
@@ -547,7 +547,7 @@ export function loadTraceOnMainThread(
   const run = async (): Promise<{
     trace: ParsedTrace;
     bytes: number;
-    compressed?: Uint8Array[] | undefined;
+    captured?: Uint8Array[] | undefined;
   }> => {
     if (mode === "stream") {
       emit("parsing", 0, null);
@@ -568,7 +568,7 @@ export function loadTraceOnMainThread(
   };
 
   run()
-    .then(({ trace, bytes, compressed }) => {
+    .then(({ trace, bytes, captured }) => {
       perf.mark("parse-done");
       // Attach the columnar span-event store; buildSpanDataColumnar reads it
       // instead of the (now non-span-only) fat customEvents array.
@@ -614,9 +614,9 @@ export function loadTraceOnMainThread(
           // The page closes its loading view when this resolves, so it waits
           // for the first render over the new trace.
           resolveDone(
-            compressed === undefined
+            captured === undefined
               ? { trace, bytes, mode, timing }
-              : { trace, bytes, mode, timing, compressed },
+              : { trace, bytes, mode, timing, captured },
           );
         };
         if (hasRaf) {

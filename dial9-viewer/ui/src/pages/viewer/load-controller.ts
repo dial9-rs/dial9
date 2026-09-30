@@ -177,9 +177,9 @@ export function loadErrorMessage(
 }
 
 /**
- * What Set/Clear Range re-opens. The compressed bytes are preferred when the
- * loader kept them: re-parsing them is a gunzip, where re-opening a URL is an
- * S3 round trip for the whole trace.
+ * What Set/Clear Range re-opens. The captured bytes are preferred when the
+ * loader kept them: re-parsing them avoids round trips, where re-opening a URL is
+ * an S3 round trip for the whole trace and a File may be gone.
  */
 type ReparseSource =
   | { kind: "bytes"; parts: readonly Uint8Array[] }
@@ -262,10 +262,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
   // Source identity is committed only by a successful, current load. Pending,
   // aborted, failed, and superseded attempts cannot change Copy Link behavior.
   let sourceShareable = false;
-  // What Set/Clear Range re-opens: the URLs the trace came from, or the
-  // dropped File. Holding the decompressed bytes instead would cost 1.28 GB on
-  // a 30M-event trace, and the reparse object URL Blob-copies them again. A
-  // File is disk-backed and URLs re-fetch, usually from cache.
+  // What Set/Clear Range re-opens: the bytes the loader captured, else the URLs
+  // the trace came from or the dropped File.
   let reparseSource: ReparseSource | null = null;
 
   // Parse progress arrives on every ~256 KB drain, and each notification drives
@@ -368,9 +366,9 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     handle.done.then(
       (result: unknown) => {
         const settled = result as
-          | { timing?: TraceWorkerTiming; compressed?: unknown }
+          | { timing?: TraceWorkerTiming; captured?: unknown }
           | undefined;
-        const raw = settled?.compressed;
+        const raw = settled?.captured;
         if (settled?.timing !== undefined) deps.onTiming?.(settled.timing);
         cleanup();
         if (token !== loadToken) return;
@@ -378,8 +376,8 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
           sourceShareable = opts.shareableAfterSuccess;
         }
         if (opts.source !== null) {
-          // Compressed bytes beat whatever source the caller named: same
-          // trace, and re-parsing them is a gunzip rather than a round trip.
+          // Captured bytes beat whatever source the caller named: same trace,
+          // and re-parsing them avoids round trips.
           reparseSource =
             Array.isArray(raw) && raw.length > 0
               ? { kind: "bytes", parts: raw as Uint8Array[] }
