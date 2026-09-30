@@ -655,6 +655,7 @@ mod tests {
                     task_id,
                     spawn_loc,
                     instrumented: true,
+                    worker_id: Some(WorkerId::from(0usize)),
                 });
             });
             shared.flush_context().with_encoder(|enc| {

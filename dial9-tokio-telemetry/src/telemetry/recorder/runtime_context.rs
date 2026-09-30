@@ -442,6 +442,7 @@ impl RuntimeContext {
     ) {
         self.record(|| TaskSpawn {
             timestamp_ns: clock_monotonic_ns(),
+            worker_id: self.spawning_worker_id(),
             task_id,
             location,
             instrumented,
@@ -501,6 +502,22 @@ impl RuntimeContext {
         enroll_thread(self, global_id);
 
         Some(WorkerId::from(global_id as usize))
+    }
+
+    /// Worker that ran this `on_task_spawn` hook, or `None` when the hook ran
+    /// off this runtime's workers.
+    ///
+    /// The hook runs on the spawning thread, which may not be a worker at all
+    /// or may be a worker of a different attached runtime (`spawn_in`). Only a
+    /// thread currently running this runtime as a worker is attributed; the
+    /// cached TLS id would stamp stale ids on a thread that used to be one.
+    #[cfg(tokio_unstable)]
+    fn spawning_worker_id(&self) -> Option<WorkerId> {
+        let current = tokio::runtime::Handle::try_current().ok()?.id();
+        if self.runtime_id.get() != Some(&current) {
+            return None;
+        }
+        self.resolve_worker()
     }
 
     /// Reserve a block of `count` global worker IDs, returning the first.
@@ -659,6 +676,7 @@ impl Encodable for PollStart {
 #[cfg(tokio_unstable)]
 pub(super) struct TaskSpawn {
     pub timestamp_ns: u64,
+    pub worker_id: Option<WorkerId>,
     pub task_id: TaskId,
     pub location: &'static std::panic::Location<'static>,
     pub instrumented: bool,
@@ -673,6 +691,7 @@ impl Encodable for TaskSpawn {
             task_id: self.task_id,
             spawn_loc,
             instrumented: self.instrumented,
+            worker_id: self.worker_id,
         });
     }
 }

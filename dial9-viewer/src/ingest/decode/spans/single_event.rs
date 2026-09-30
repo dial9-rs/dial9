@@ -6,19 +6,19 @@
 
 use rustc_hash::FxHashMap;
 
+use super::super::attribution::AttributionInterval;
 use super::clock::{ClockOffset, MonoNs};
-use super::interval_pairing::{self, MonoInterval};
-use super::legacy::resolve_span_task;
-use super::polls::PollTimeline;
+use super::interval_pairing;
+use super::polls::{PollIndex, PollTimeline};
 use super::span_builder::SpanCandidate;
 use super::{ResolvedSpan, SingleEventSpanEvent};
 
 /// Result of single-event span resolution.
 pub(crate) struct SingleEventResolution {
     pub(crate) spans: Vec<ResolvedSpan>,
-    /// Per synthetic instance id: monotonic active intervals used for sample
-    /// attribution.
-    pub(crate) instance_intervals: FxHashMap<u64, Vec<MonoInterval>>,
+    /// Per synthetic instance id: poll-bounded worker intervals used for
+    /// sample attribution.
+    pub(crate) instance_intervals: FxHashMap<u64, Vec<AttributionInterval>>,
 }
 
 /// Resolve completed annotated events into span rows.
@@ -35,23 +35,7 @@ pub(crate) fn resolve_single_event_spans(
     service: &str,
     date: &str,
 ) -> SingleEventResolution {
-    let polls = poll_timeline.records();
-    let mut polls_by_task: FxHashMap<u64, Vec<MonoInterval>> = FxHashMap::default();
-    let mut polls_by_worker: FxHashMap<u64, Vec<(MonoNs, MonoNs, u64)>> = FxHashMap::default();
-    for poll in polls {
-        if poll.task_id == 0 {
-            continue;
-        }
-        polls_by_task
-            .entry(poll.task_id)
-            .or_default()
-            .push((poll.start, poll.end));
-        polls_by_worker.entry(poll.worker_id).or_default().push((
-            poll.start,
-            poll.end,
-            poll.task_id,
-        ));
-    }
+    let poll_index = PollIndex::new(poll_timeline.records());
 
     let mut spans = Vec::with_capacity(events.len());
     let mut instance_intervals = FxHashMap::default();
@@ -71,22 +55,26 @@ pub(crate) fn resolve_single_event_spans(
                 let tid = tid?;
                 poll_timeline.worker_for_tid_at(tid, start)
             })?;
-            resolve_span_task(polls_by_worker.get(&worker)?, start)
+            poll_index.task_at(worker, start)
         });
 
         let mut intervals = Vec::new();
+        let mut attribution_intervals = Vec::new();
         let mut on_cpu_ns_est = None;
         let mut async_wait_ns = None;
         let mut attribution_flags = 0b1111;
-        if let Some(task_polls) = task_id.and_then(|id| polls_by_task.get(&id)) {
+        if let Some(task_id) = task_id {
             let observable_start = first_clock_sync_mono
                 .map(|boundary| start.max(boundary))
                 .unwrap_or(start)
                 .min(end);
-            let intersections = intersect_lifecycle_with_polls(observable_start, end, task_polls);
-            if !intersections.is_empty() {
-                let on_cpu = interval_pairing::union_interval_duration(&intersections).raw();
-                intervals = intersections;
+            attribution_intervals = poll_index.intersections(task_id, observable_start, end);
+            if !attribution_intervals.is_empty() {
+                intervals = attribution_intervals
+                    .iter()
+                    .map(|interval| (interval.start, interval.end))
+                    .collect();
+                let on_cpu = interval_pairing::union_interval_duration(&intervals).raw();
                 on_cpu_ns_est = Some(on_cpu);
                 async_wait_ns = Some(end.saturating_sub(observable_start).raw() - on_cpu);
                 // The task and its polls provide unambiguous runtime placement.
@@ -125,8 +113,8 @@ pub(crate) fn resolve_single_event_spans(
         };
 
         spans.push(candidate.finalize(clock_offset));
-        if !intervals.is_empty() {
-            instance_intervals.insert(instance_id, intervals);
+        if !attribution_intervals.is_empty() {
+            instance_intervals.insert(instance_id, attribution_intervals);
         }
     }
 
@@ -134,27 +122,6 @@ pub(crate) fn resolve_single_event_spans(
         spans,
         instance_intervals,
     }
-}
-
-/// Intersect one lifecycle with a task's sorted, non-overlapping polls.
-fn intersect_lifecycle_with_polls(
-    start: MonoNs,
-    end: MonoNs,
-    task_polls: &[MonoInterval],
-) -> Vec<MonoInterval> {
-    let mut intersections = Vec::new();
-    let first = task_polls.partition_point(|&(_, poll_end)| poll_end <= start);
-    for &(poll_start, poll_end) in &task_polls[first..] {
-        if poll_start >= end {
-            break;
-        }
-        let overlap_start = poll_start.max(start);
-        let overlap_end = poll_end.min(end);
-        if overlap_end > overlap_start {
-            intersections.push((overlap_start, overlap_end));
-        }
-    }
-    intersections
 }
 
 fn synthetic_instance_id(source_key: &str, event: &SingleEventSpanEvent) -> u64 {
@@ -176,17 +143,54 @@ mod tests {
     use super::*;
     use crate::ingest::decode::TraceEvent;
     use crate::ingest::decode::events::{PollEnd, PollStart, WorkerUnpark};
+    use crate::ingest::decode::polls::PollRecord;
 
     #[test]
     fn lifecycle_intersects_task_polls() {
-        let polls = vec![
-            (MonoNs(50), MonoNs(120)),
-            (MonoNs(180), MonoNs(220)),
-            (MonoNs(300), MonoNs(400)),
+        let polls = [
+            PollRecord {
+                start: MonoNs(50),
+                end: MonoNs(120),
+                worker_id: 1,
+                task_id: 10,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
+            PollRecord {
+                start: MonoNs(180),
+                end: MonoNs(220),
+                worker_id: 2,
+                task_id: 10,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
+            PollRecord {
+                start: MonoNs(300),
+                end: MonoNs(400),
+                worker_id: 3,
+                task_id: 10,
+                spawn_loc: None,
+                readiness: None,
+                task_instrumented: None,
+            },
         ];
+        let poll_index = PollIndex::new(&polls);
         assert_eq!(
-            intersect_lifecycle_with_polls(MonoNs(100), MonoNs(250), &polls),
-            vec![(MonoNs(100), MonoNs(120)), (MonoNs(180), MonoNs(220))]
+            poll_index.intersections(10, MonoNs(100), MonoNs(250)),
+            vec![
+                AttributionInterval {
+                    start: MonoNs(100),
+                    end: MonoNs(120),
+                    worker_id: 1,
+                },
+                AttributionInterval {
+                    start: MonoNs(180),
+                    end: MonoNs(220),
+                    worker_id: 2,
+                },
+            ]
         );
     }
 
@@ -346,7 +350,11 @@ mod tests {
 
         assert_eq!(
             resolution.instance_intervals.values().next().unwrap(),
-            &vec![(MonoNs(310), MonoNs(390))]
+            &vec![AttributionInterval {
+                start: MonoNs(310),
+                end: MonoNs(390),
+                worker_id: 1,
+            }]
         );
         assert_eq!(resolution.spans[0].on_cpu_ns_est, Some(80));
     }

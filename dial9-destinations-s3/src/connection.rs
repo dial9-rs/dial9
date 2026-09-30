@@ -37,6 +37,14 @@ impl CircuitBreaker {
         }
     }
 
+    /// Time remaining before the circuit permits another attempt.
+    pub(crate) fn retry_delay(&self) -> Duration {
+        match self {
+            Self::Closed => Duration::ZERO,
+            Self::Open { next_retry, .. } => next_retry.saturating_duration_since(Instant::now()),
+        }
+    }
+
     /// Record a successful upload. Closes the circuit.
     pub(crate) fn on_success(&mut self) {
         *self = Self::Closed;

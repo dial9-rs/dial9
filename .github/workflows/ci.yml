@@ -496,7 +496,21 @@ jobs:
             -p dial9-macro \
             -p dial9-metrique \
             -p dial9-tokio-telemetry \
-            -p dial9-viewer
+            -p dial9-viewer \
+            -p dial9
+      - name: Verify the skills are packaged as real files
+        # `dial9/skills` and the toolkit libraries are symlinks; cargo must
+        # materialize them. `cargo package --list` cannot show that, the tarball can.
+        run: |
+          for c in dial9 dial9-viewer; do
+            rm -rf "/tmp/pkg-$c" && mkdir -p "/tmp/pkg-$c"
+            tar -xzf target/package/"$c"-[0-9]*.crate -C "/tmp/pkg-$c"
+            test -s "/tmp/pkg-$c"/*/skills/dial9-toolkit/scripts/trace_parser.js \
+              || { echo "$c: toolkit not packaged"; exit 1; }
+            if find "/tmp/pkg-$c" -path '*/skills/*' \( -type l -o -type f -empty \) | grep .; then
+              echo "$c: symlinked or empty skill files in the package (above)"; exit 1
+            fi
+          done
 
   doctests:
     name: Doc tests (dial9)

@@ -10,6 +10,10 @@ capabilities to the dial9 recorder and access this crate's APIs.
 
 See [docs.rs/dial9](https://docs.rs/dial9) and the [repository](https://github.com/dial9-rs/dial9) for setup and the full guide.
 
+The agent skills for analyzing dial9 traces ship with the `dial9` crate. A project
+that declares only `dial9-tokio-telemetry` receives the newest `dial9-viewer`
+skills through Symposium's fallback instead of a version-matched set.
+
 ## License
 
 This project is licensed under the Apache-2.0 License.

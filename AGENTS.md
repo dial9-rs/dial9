@@ -111,12 +111,60 @@ access, and the temporary rollups are removed when the server exits. Open
 background during agent-driven testing.
 
 - Behavior changes should include focused tests that fail without the change; if tests are not practical, state why.
-- For Rust behavior changes, run `cargo nextest run`.
+- For Rust behavior changes, run `cargo nextest run`. This needs `node` on `PATH`: tests that drive the JS trace tooling as a subprocess fail, not skip, without it.
 - For final verification of Rust changes, run `cargo nextest run --stress-duration 20s`. The package is expected to have no flaky tests; report any apparent flake instead of ignoring it.
 - **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the Vitest suites (`npm run test` in `dial9-viewer/ui/`, or a filtered `npx vitest run tests/core/<suite>.test.ts`) and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
 - **Adding a new JS/TS test:** write a Vitest suite — `dial9-viewer/ui/tests/core/*.test.{js,ts}` for suites over the shared core, `src/**/*.test.ts` for TypeScript modules. Vitest auto-discovers them and the `ui` CI job runs `npm run test`. If the suite must ALSO hold against a freshly regenerated demo trace in the DDB environment, add it to the `TRACE_SUITES` list in `scripts/e2e-trace-tests.sh` (run by the `trace-integrity` CI job). Exception: `dial9-viewer/ui/test_parser.js` stays a plain Node script — the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs` invokes it by filename with file arguments. See `dial9-viewer/ui/README.md`.
 - Shuttle tests are NOT included in `cargo nextest run`. They require a separate invocation: `./scripts/test-shuttle.sh`. Always run this when modifying code under `#[cfg(all(test, shuttle))]` or the flush/source paths.
 - **New shuttle scenarios:** use the `shuttle_test!` macro (`dial9-core/src/primitives.rs`) instead of hand-pairing `check_pct`/`check_uncontrolled_nondeterminism`. Its doc comment covers the `should_panic`/`expected=`/`replay=`/`flaky_sigabrt_determinism_only`/`verify_faults_triggered`/`default` modifiers.
+
+### Skill delivery
+
+Check that packaging materializes the skill symlinks as real files (`cargo
+package --list` cannot show this):
+
+```bash
+rm -f target/package/dial9-[0-9]*.crate target/package/dial9-viewer-[0-9]*.crate
+cargo package --allow-dirty --no-verify -p dial9 -p dial9-viewer
+for c in dial9 dial9-viewer; do
+  rm -rf /tmp/pkg-$c && mkdir -p /tmp/pkg-$c && tar -xzf target/package/$c-[0-9]*.crate -C /tmp/pkg-$c
+  find /tmp/pkg-$c -path '*/skills/*' \( -type l -o -type f -empty \)
+done
+# no output: every packaged skill file is a regular, non-empty file
+```
+
+Check the two project shapes against a real Symposium. It needs a `cargo-agents`
+built from symposium-dev/symposium newer than the published `symposium` 0.4.0
+(the registry manifest format postdates it), network, and an isolated
+`SYMPOSIUM_HOME` with the builtin registries off:
+
+```toml
+# $SYMPOSIUM_HOME/config.toml
+[defaults]
+symposium-recommendations = false
+user-plugins = false
+
+[[agent]]
+name = "claude"
+
+[[registry]]
+name = "local"
+path = "/path/to/registry"
+auto-update = false
+```
+
+with the `dial9` entry from symposium-dev/recommendations copied to
+`/path/to/registry/dial9/SYMPOSIUM.toml`. Then, in an empty crate:
+
+- declaring `dial9 = "=X.Y.Z"` (at or above the first release carrying skills),
+  `cargo agents sync` must install that release's set, identical to
+  `~/.cargo/registry/src/*/dial9-X.Y.Z/skills/`;
+- declaring only `dial9-tokio-telemetry = "=X.Y.Z"`, it must install the
+  fallback set from the newest `dial9-viewer`.
+
+A workspace whose members pin different `dial9` versions is seen by Symposium
+as a single version per crate, the lowest one declared, and gets that
+version's skills.
 
 ## Scope
 
@@ -160,9 +208,57 @@ Failing to update it will cause the viewer to fail when loading the demo.
 
 ## Repository management
 
-- Only when explicitly asked to open or manage PRs: do not stack PRs (PR B targeting PR A's branch). The merge queue rewrites commits, so stacked PRs always end up with merge conflicts. Instead, wait for the first PR to merge, then rebase the second onto `main`.
+- Only open or manage PRs when explicitly asked. Stacked PRs are supported:
+  target each dependent PR at the preceding branch, keep every layer independently
+  buildable, and rebase or retarget the remaining stack as lower layers merge.
 
 ## Agent skills
+
+### Where the skills live
+
+The skills are authored once, in `dial9-viewer/skills/`, and ship three ways:
+the `dial9-viewer` package (Symposium's fallback edge), the `dial9-viewer`
+binary (`agents skills` unpack, embedded by `build.rs`), and the `dial9` crate
+package (Symposium's serving edge) through the `dial9/skills` symlink. Inside
+the toolkit, `trace_parser.js`, `trace_analysis.js` and `decode.js` are
+symlinks to the viewer UI modules and the trace-format JS decoder, so the
+agent runs the same code as the viewer. Edit under `dial9-viewer/skills/` or
+the linked sources; never add a second copy. `cargo package` materializes
+every link as a real file (CI checks the tarball).
+
+release-plz attributes a commit to a crate by the git paths under that crate's
+directory that are also in its package file list. A skill edit is a
+`dial9-viewer` change; `dial9` is released alongside because `release-plz.toml`
+folds the viewer's commits into its changelog and version bump
+(`changelog_include`), and it depends on the viewer besides. The viewer's
+`include` lists `ui/trace_parser.js` and `ui/trace_analysis.js` for the same
+reason: without that, a commit touching only them belongs to no crate.
+
+Known limitations:
+
+- Symposium serves version-matched skills only to a project that declares
+  `dial9` at or above the floor. An older pin, a prerelease pin (a `>=X.Y`
+  requirement never matches a prerelease) and a project that declares only
+  `dial9-tokio-telemetry` take the fallback, the newest `dial9-viewer` skills.
+  The fallback fires only while the registry entry keeps `dial9-tokio-telemetry`
+  in its top-level `depends-on`: Symposium gates the entry on that list before
+  evaluating any edge.
+- A source-tree install (a project depending on `dial9` by `path` or `git`)
+  silently drops symlinked files (symposium-dev/symposium#288): every skill
+  installs, the toolkit's three linked libraries are missing, and a re-sync
+  does not repair it. On a Windows checkout without symlink support
+  `dial9/skills` is a text stub, so such an install delivers no skills at all.
+  Installs from crates.io are unaffected.
+- A project that declares both `dial9` and `dial9-viewer` directly and consents
+  to the `dial9-viewer` crate offer receives each skill twice, under
+  hash-suffixed names.
+- Symposium offers the `dial9` crate for consent, since it ships `skills/`.
+  Accepting changes nothing (the registry entry already installs it); declining
+  is not honoured for chained plugins (symposium-dev/symposium#290).
+
+Delivery through Symposium depends on the `dial9` entry of the
+`symposium-recommendations` registry (symposium-dev/recommendations). See
+"Skill delivery" under Testing for how to check it.
 
 ### Trace analysis skills
 

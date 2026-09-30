@@ -22,13 +22,58 @@
 const fs = require("fs");
 const path = require("path");
 
-function resolve(name) {
-  const sibling = path.resolve(__dirname, name);
-  if (fs.existsSync(sibling)) return sibling;
-  const toolkit = path.resolve(__dirname, "..", "..", "dial9-toolkit", "scripts", name);
-  if (fs.existsSync(toolkit)) return toolkit;
-  return path.resolve(__dirname, "..", "..", "..", "ui", name);
+// The shared trace libraries ship inside the toolkit skill, whose installed
+// directory name belongs to the installer (Symposium suffixes a hash on a
+// collision), so the toolkit is located by content, never by name.
+const TOOLKIT_FILES = ["trace_parser.js", "trace_analysis.js", "decode.js"];
+
+function* toolkitCandidates() {
+  yield __dirname;
+  const skillsRoot = path.resolve(__dirname, "..", "..");
+  let siblings = [];
+  try { siblings = fs.readdirSync(skillsRoot).sort(); } catch { /* no skills root above this script */ }
+  for (const entry of siblings) yield path.join(skillsRoot, entry, "scripts");
+  yield path.resolve(__dirname, "..", "..", "..", "ui");
 }
+
+function findToolkitDir() {
+  const searched = [];
+  const found = [];
+  const libraries = new Set();
+  for (const dir of toolkitCandidates()) {
+    if (searched.includes(dir) || found.includes(dir)) continue;
+    if (!TOOLKIT_FILES.every(f => fs.existsSync(path.join(dir, f)))) {
+      searched.push(dir);
+      continue;
+    }
+    // One library reached by two routes is not a conflict: a checkout symlinks
+    // the toolkit's scripts/ at ui/, so both qualify and resolve to one file.
+    const first = path.join(dir, TOOLKIT_FILES[0]);
+    let library;
+    try { library = fs.realpathSync(first); } catch { library = first; }
+    if (libraries.has(library)) continue;
+    libraries.add(library);
+    found.push(dir);
+  }
+  if (found.length > 1) {
+    // Copies can be different versions. Choosing one silently would surface as
+    // a decode failure deep in the parser rather than as a resolution problem.
+    console.warn(
+      `warning: ${found.length} dial9 toolkit copies found, using ${found[0]}\n  also: ` +
+      found.slice(1).join("\n  also: ") +
+      "\n  They may be different versions. Remove the ones you do not want."
+    );
+  }
+  if (found.length > 0) return found[0];
+  throw new Error(
+    `cannot find the dial9 toolkit scripts (${TOOLKIT_FILES.join(", ")}). Searched:\n  ` +
+    searched.join("\n  ") +
+    "\nInstall the dial9-toolkit skill alongside this one, or run from a dial9 checkout."
+  );
+}
+
+const TOOLKIT_DIR = findToolkitDir();
+function resolve(name) { return path.join(TOOLKIT_DIR, name); }
 
 const { parseTrace, EVENT_TYPES, symbolizeChain, formatFrame } = require(resolve("trace_parser.js"));
 const { buildWorkerSpans, attachCpuSamples } = require(resolve("trace_analysis.js"));

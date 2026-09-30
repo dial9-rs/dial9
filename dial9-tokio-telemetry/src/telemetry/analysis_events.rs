@@ -196,6 +196,10 @@ pub struct TaskSpawnEvent {
     /// Whether this spawn was instrumented.
     #[serde(default)]
     pub instrumented: bool,
+    /// Worker that ran the spawn, or `None` when the spawn happened off a
+    /// worker (or the trace predates this field).
+    #[serde(default)]
+    pub worker_id: Option<WorkerId>,
 }
 
 /// A task terminated.
@@ -542,6 +546,7 @@ mod tests {
             task_id: TaskId::from_u32(200),
             spawn_loc: spawn_loc2,
             instrumented: true,
+            worker_id: Some(format::WorkerId::from(2u8)),
         })
         .unwrap();
 
@@ -691,6 +696,7 @@ mod tests {
         assert_eq!(e.task_id, 200);
         assert_eq!(e.spawn_loc, "src/lib.rs:10");
         assert!(e.instrumented);
+        assert_eq!(e.worker_id, Some(WorkerId(2)));
 
         // 7. TaskTerminateEvent
         let Dial9Event::TaskTerminateEvent(ref e) = events[7] else {

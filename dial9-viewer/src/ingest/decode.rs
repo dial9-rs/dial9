@@ -33,12 +33,13 @@ use events::*;
 use lasso::{Rodeo, Spur};
 use rustc_hash::FxHashMap;
 #[cfg(test)]
+use spans::interval_pairing;
+#[cfg(test)]
 use spans::span_builder;
-use spans::{interval_pairing, legacy, single_event};
+use spans::{legacy, single_event};
 
 pub(crate) use types::{
-    DecodeResult, DecodeStats, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan,
-    SchedulingDelayKind,
+    DecodeResult, DecodeStats, ResolvedPoll, ResolvedSample, ResolvedSpan, SchedulingDelayKind,
 };
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
@@ -166,7 +167,7 @@ pub(crate) fn decode_samples_with_stats(
         clock_offset = None;
         first_clock_sync_mono = None;
     }
-    tracing::info!("sorting {} events", events.len());
+    tracing::info!(source_key, events = events.len(), "sorting events");
     // Sort events by timestamp for correct worker_id inference.
     let t_sort = Instant::now();
     events.sort_unstable_by_key(|e| e.timestamp_ns());
@@ -275,14 +276,14 @@ pub(crate) fn decode_samples_with_stats(
     //   don't merge distinct spans into one long-lived row
     // - Synthesize a deterministic instance_id from span_id + first-enter timestamp
     //   to avoid collisions when IDs are recycled
-    // - Pair enter/exit by (span_id, segment), NOT worker_id: async tasks migrate
-    //   workers across .await, so worker_id is not a stable pairing key.
+    // - Pair enter/exit by (span_id, segment, task-or-worker lane), so concurrent
+    //   entries of one span instance cannot cross-pair across tasks.
     // - Parse target/name/file/line from the SpanEnter schema name
     // - Lifecycle start = first observed enter (conservative)
     // - identity_quality = "legacy"; all elapsed remains unknown (no
     //   producer-reported active_ns).
     let mut resolved_spans: Vec<ResolvedSpan> = Vec::new();
-    let mut span_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>> =
+    let mut span_intervals: FxHashMap<u64, Vec<attribution::AttributionInterval>> =
         FxHashMap::default();
 
     let t_spans = Instant::now();
@@ -443,14 +444,14 @@ fn compute_span_type_uid(
 /// (monotonic timestamps) for reuse in sample attribution.
 struct SpanResolution {
     spans: Vec<ResolvedSpan>,
-    /// Per span_instance_id: list of monotonic-clock (enter_ts, exit_ts) intervals.
-    instance_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>>,
+    /// Per span instance: poll-bounded worker intervals for sample attribution.
+    instance_intervals: FxHashMap<u64, Vec<attribution::AttributionInterval>>,
 }
 
 /// Resolve legacy (old-producer) span events into `ResolvedSpan` rows.
 ///
 /// Delegates to the [`legacy`] module which handles:
-/// - Pairing enters/exits by `span_id` alone (not worker_id)
+/// - Pairing enters/exits by span instance and execution lane
 /// - Synthesizing deterministic instance_ids from span_id + first-enter timestamp
 /// - Parsing target/name/file/line from SpanEnter schema names
 /// - Task-based CPU/wait attribution when polls are available
@@ -490,14 +491,22 @@ fn resolve_legacy_spans(
     }
 }
 
-/// Resolve the Tokio task that owns a span. Delegates to [`legacy::resolve_span_task`].
+/// Resolve the Tokio task that owns a span through the shared poll index.
 #[cfg(test)]
 fn resolve_span_task(worker_polls: &[(u64, u64, u64)], enter_ts: u64) -> Option<u64> {
-    let worker_polls: Vec<_> = worker_polls
+    let polls: Vec<_> = worker_polls
         .iter()
-        .map(|&(start, end, task_id)| (clock::MonoNs(start), clock::MonoNs(end), task_id))
+        .map(|&(start, end, task_id)| polls::PollRecord {
+            start: clock::MonoNs(start),
+            end: clock::MonoNs(end),
+            worker_id: 1,
+            task_id,
+            spawn_loc: None,
+            readiness: None,
+            task_instrumented: None,
+        })
         .collect();
-    legacy::resolve_span_task(&worker_polls, clock::MonoNs(enter_ts))
+    polls::PollIndex::new(&polls).task_at(1, clock::MonoNs(enter_ts))
 }
 
 /// Split a span's entered wall time into estimated on-CPU vs async-wait.
@@ -1305,7 +1314,7 @@ mod tests {
                 sample
                     .enclosing_spans
                     .iter()
-                    .any(|span| legacy_uids.contains(&span.span_uid))
+                    .any(|&span_idx| legacy_uids.contains(&spans[span_idx as usize].span_uid))
             })
             .count();
         // With ~9000 CPU samples and ~86k enter/exit pairs, some should be attributed.
@@ -1497,7 +1506,10 @@ mod tests {
             .find(|sample| sample.timestamp_ns == wall_base + 110)
             .unwrap();
         assert_eq!(active_sample.enclosing_spans.len(), 1);
-        assert_eq!(active_sample.enclosing_spans[0].span_uid, span.span_uid);
+        assert_eq!(
+            spans[active_sample.enclosing_spans[0] as usize].span_uid,
+            span.span_uid
+        );
         let waiting_sample = samples
             .iter()
             .find(|sample| sample.timestamp_ns == wall_base + 150)
@@ -2256,8 +2268,21 @@ mod tests {
         enc.write_event(&poll_end_schema, 5100, &[FieldValue::Varint(3)])
             .unwrap();
 
+        // The task is polled again when it resumes and exits the span.
+        enc.write_event(
+            &poll_start_schema,
+            8900,
+            &[
+                FieldValue::Varint(3),
+                FieldValue::Varint(0),
+                FieldValue::Varint(77),
+                FieldValue::String("app::handler".to_string()),
+            ],
+        )
+        .unwrap();
+
         // Exit span_id=42 much later at t=9000: the span was entered across a
-        // long await; the task was only on-CPU during the two polls above.
+        // long await and may claim CPU samples only during task 77's polls.
         enc.write_event(
             &exit_schema,
             9000,
@@ -2268,6 +2293,8 @@ mod tests {
             ],
         )
         .unwrap();
+        enc.write_event(&poll_end_schema, 9100, &[FieldValue::Varint(3)])
+            .unwrap();
 
         let data = enc.into_inner();
         let source_key = "2026-07-15/1714/shale/host/test-boot/0.bin";
@@ -2277,11 +2304,11 @@ mod tests {
         let s = &spans[0];
         // Entered wall = exit - enter = 9000 - 1000 = 8000.
         assert_eq!(s.observed_active_wall_ns, 8000);
-        // On-CPU = overlap of [1000,9000] with task 77's polls [900,1100] and
-        // [5000,5100] = [1000,1100] (100) + [5000,5100] (100) = 200.
-        assert_eq!(s.on_cpu_ns_est, Some(200));
-        // Async wait = entered wall - on_cpu = 8000 - 200 = 7800.
-        assert_eq!(s.async_wait_ns, Some(7800));
+        // On-CPU = overlap of [1000,9000] with task 77's three polls:
+        // [1000,1100] + [5000,5100] + [8900,9000] = 300.
+        assert_eq!(s.on_cpu_ns_est, Some(300));
+        // Async wait = entered wall - on_cpu = 8000 - 300 = 7700.
+        assert_eq!(s.async_wait_ns, Some(7700));
         // Accounting invariant: the five categories sum to elapsed.
         let sum = s.on_cpu_ns_est.unwrap_or(0)
             + s.blocked_ns_est.unwrap_or(0)

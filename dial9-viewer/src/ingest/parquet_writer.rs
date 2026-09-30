@@ -16,6 +16,8 @@ use super::decode::ResolvedPoll;
 use super::decode::ResolvedSample;
 use super::decode::ResolvedSpan;
 
+const SAMPLES_ROW_GROUP_SIZE: usize = 128 * 1024;
+
 /// Write samples to a Parquet file.
 ///
 /// Does NOT include partition columns (service, date, hour, host) — those are
@@ -23,16 +25,31 @@ use super::decode::ResolvedSpan;
 pub fn write_samples<W: Write + Send>(
     writer: W,
     samples: &[ResolvedSample],
+    spans: &[ResolvedSpan],
     metadata: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
     let schema = samples_schema();
     let props = WriterProperties::builder()
         .set_dictionary_enabled(true)
-        .set_max_row_group_size(128 * 1024)
+        .set_max_row_group_size(SAMPLES_ROW_GROUP_SIZE)
         .build();
 
     let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
 
+    for samples in samples.chunks(SAMPLES_ROW_GROUP_SIZE) {
+        let batch = samples_record_batch(samples, spans, metadata, schema.clone())?;
+        arrow_writer.write(&batch)?;
+    }
+    arrow_writer.close()?;
+    Ok(())
+}
+
+fn samples_record_batch(
+    samples: &[ResolvedSample],
+    spans: &[ResolvedSpan],
+    metadata: &HashMap<String, String>,
+    schema: Arc<Schema>,
+) -> anyhow::Result<RecordBatch> {
     // Build arrays
     let n = samples.len();
     let mut ts_builder = arrow::array::Int64Builder::with_capacity(n);
@@ -80,7 +97,13 @@ pub fn write_samples<W: Write + Send>(
 
         // Append enclosing spans list for this row
         let struct_builder = enclosing_spans_builder.values();
-        for es in &sample.enclosing_spans {
+        for &span_idx in &sample.enclosing_spans {
+            let es = spans.get(span_idx as usize).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sample references enclosing span index {span_idx}, but segment has {} spans",
+                    spans.len()
+                )
+            })?;
             struct_builder
                 .field_builder::<FixedSizeBinaryBuilder>(0)
                 .unwrap()
@@ -102,7 +125,7 @@ pub fn write_samples<W: Write + Send>(
         enclosing_spans_builder.append(true);
     }
 
-    let batch = RecordBatch::try_new(
+    Ok(RecordBatch::try_new(
         schema,
         vec![
             Arc::new(ts_builder.finish()) as ArrayRef,
@@ -118,11 +141,7 @@ pub fn write_samples<W: Write + Send>(
             Arc::new(map_builder.finish()) as ArrayRef,
             Arc::new(enclosing_spans_builder.finish()) as ArrayRef,
         ],
-    )?;
-
-    arrow_writer.write(&batch)?;
-    arrow_writer.close()?;
-    Ok(())
+    )?)
 }
 
 /// Write the stacks dictionary to a Parquet file.
@@ -556,7 +575,49 @@ fn build_spans_batch(schema: Arc<Schema>, spans: &[ResolvedSpan]) -> anyhow::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingest::decode::EnclosingSpanSummary;
+
+    fn test_span(
+        span_uid: [u8; 16],
+        span_type_uid: [u8; 16],
+        elapsed_ns: u64,
+        details_complete: bool,
+    ) -> ResolvedSpan {
+        ResolvedSpan {
+            span_uid,
+            span_type_uid,
+            kind: "tracing".to_string(),
+            name: "test".to_string(),
+            target: "test".to_string(),
+            callsite_file: None,
+            callsite_line: None,
+            start_ns: 0,
+            end_ns: elapsed_ns,
+            elapsed_ns,
+            active_ns: Some(elapsed_ns),
+            observed_active_wall_ns: elapsed_ns,
+            detail_coverage_ns: elapsed_ns,
+            details_complete,
+            concurrent: false,
+            parent_span_uid: None,
+            attributes: Vec::new(),
+            on_cpu_ns_est: None,
+            blocked_ns_est: None,
+            async_wait_ns: None,
+            scheduler_delay_ns: None,
+            unknown_ns: elapsed_ns,
+            cpu_sample_count: 0,
+            sched_sample_count: 0,
+            attribution_version: 1,
+            attribution_flags: 0,
+            unbalanced_exits: 0,
+            unbalanced_enters: 0,
+            identity_quality: "metadata",
+            source_key: "test".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+        }
+    }
 
     #[test]
     fn test_write_and_read_samples() {
@@ -571,25 +632,16 @@ mod tests {
             date: "2026-06-19".to_string(),
             poll_duration_ns: Some(5_000_000),
             spawn_location: Some("src/main.rs:42".to_string()),
-            enclosing_spans: vec![
-                EnclosingSpanSummary {
-                    span_uid: [2u8; 16],
-                    span_type_uid: [3u8; 16],
-                    elapsed_ns: 100,
-                    details_complete: true,
-                },
-                EnclosingSpanSummary {
-                    span_uid: [4u8; 16],
-                    span_type_uid: [5u8; 16],
-                    elapsed_ns: 200,
-                    details_complete: false,
-                },
-            ],
+            enclosing_spans: vec![0, 1],
         }];
+        let spans = vec![
+            test_span([2u8; 16], [3u8; 16], 100, true),
+            test_span([4u8; 16], [5u8; 16], 200, false),
+        ];
         let metadata = HashMap::from([("version".to_string(), "1.0".to_string())]);
 
         let mut buf = Vec::new();
-        write_samples(&mut buf, &samples, &metadata).unwrap();
+        write_samples(&mut buf, &samples, &spans, &metadata).unwrap();
 
         // Verify we can read it back
         let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(

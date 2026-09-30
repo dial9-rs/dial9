@@ -243,6 +243,7 @@ struct ActiveDump {
     first_epoch: Option<u64>,
     last_epoch: Option<u64>,
     first_error: Option<ProcessErrorKind>,
+    pipeline_unavailable: bool,
 }
 
 impl ActiveDump {
@@ -277,6 +278,7 @@ impl ActiveDump {
             first_epoch: None,
             last_epoch: None,
             first_error: None,
+            pipeline_unavailable: false,
         }
     }
 
@@ -284,6 +286,12 @@ impl ActiveDump {
     /// forward window, or its deadline elapsed.
     fn due(&self, now: crate::primitives::time::Instant) -> bool {
         self.deadline.is_none_or(|d| now >= d)
+    }
+
+    fn mark_pipeline_unavailable(&mut self) {
+        if self.first_error.is_none() {
+            self.pipeline_unavailable = true;
+        }
     }
 
     /// Actual covered span: the captured segments' epoch extent, or the
@@ -299,7 +307,7 @@ impl ActiveDump {
     /// it through. Drives both the `Err` receipt and the S3 stage skipping
     /// the manifest.
     fn failed(&self) -> bool {
-        self.first_error.is_some() && self.segments_processed == 0
+        (self.first_error.is_some() || self.pipeline_unavailable) && self.segments_processed == 0
     }
 
     /// The completion signal handed to each stage's `finalize_dump`.
@@ -315,7 +323,7 @@ impl ActiveDump {
     }
 
     /// Best-effort policy: `Ok` whenever anything succeeded or nothing
-    /// failed; `Err(Pipeline)` only on total failure.
+    /// failed; an error is reserved for total failure or unavailability.
     fn into_result(
         mut self,
         manifest_key: Option<String>,
@@ -327,9 +335,15 @@ impl ActiveDump {
             .receipt_tx
             .take()
             .expect("receipt_tx only taken at resolution");
-        let result = match (self.failed(), self.first_error.take()) {
-            (true, Some(kind)) => Err(DumpError::Pipeline(kind)),
-            _ => Ok(DumpReceipt {
+        let result = match (
+            self.failed(),
+            self.first_error.take(),
+            self.pipeline_unavailable,
+        ) {
+            (true, Some(kind), _) => Err(DumpError::Pipeline(kind)),
+            (true, None, true) => Err(DumpError::PipelineUnavailable),
+            (true, None, false) => unreachable!("failed dump must have an error"),
+            (false, _, _) => Ok(DumpReceipt {
                 dump_id: self.id,
                 segments_processed: self.segments_processed,
                 finished_at: SystemTime::now(),
@@ -358,6 +372,21 @@ struct PassStats {
     retry_dump_ids: Vec<crate::dump::DumpId>,
     /// Segments that passed window matching and entered the pipeline.
     entered_pipeline: usize,
+    /// Readiness wait ended before another segment could enter the pipeline.
+    interruption: Option<TriggeredPipelineWait>,
+}
+
+#[derive(Default)]
+struct DrainResult {
+    retry_hold: Vec<crate::dump::DumpId>,
+    interruption: Option<TriggeredPipelineWait>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriggeredPipelineWait {
+    Live,
+    Deadline,
+    Stopped,
 }
 
 /// Record a terminal pipeline error against every matched dump that has none
@@ -419,18 +448,71 @@ impl WorkerLoop {
         }
     }
 
+    /// Wait for every stage before taking a segment from storage.
+    async fn wait_until_pipeline_live(&mut self) -> bool {
+        for processor in &mut self.processors {
+            crate::shuttle_select! {
+                biased;
+                _ = processor.wait_until_live() => {}
+                _ = self.stop.cancelled() => return false,
+            }
+        }
+        true
+    }
+
+    /// Wait for processor readiness without letting triggered requests queue
+    /// behind an unavailable pipeline.
+    async fn wait_until_pipeline_live_triggered(
+        &mut self,
+        rx: &mut crate::dump::DumpRx,
+        rx_open: &mut bool,
+        deadline: Option<crate::primitives::time::Instant>,
+    ) -> TriggeredPipelineWait {
+        let live = self.wait_until_pipeline_live();
+        tokio::pin!(live);
+        loop {
+            crate::shuttle_select! {
+                biased;
+                ready = &mut live => {
+                    return if ready {
+                        TriggeredPipelineWait::Live
+                    } else {
+                        TriggeredPipelineWait::Stopped
+                    };
+                }
+                _ = crate::primitives::time::sleep_until(
+                    deadline.unwrap_or_else(crate::primitives::time::now)
+                ), if deadline.is_some() => {
+                    return TriggeredPipelineWait::Deadline;
+                }
+                req = rx.rx.recv(), if *rx_open => {
+                    match req {
+                        Some(req) => req.reject_pipeline_unavailable(),
+                        None => *rx_open = false,
+                    }
+                }
+            }
+        }
+    }
+
     async fn run_continuous(&mut self) {
         loop {
+            if !self.wait_until_pipeline_live().await {
+                return;
+            }
             let taken = self.fs.take_files();
             let dispatched = taken.segments.len() as u64;
             self.emit_cycle_metrics(&taken, dispatched);
-            self.process_segments(taken.segments, &mut []).await;
+            self.process_segments(taken.segments, &mut [], None).await;
 
             if self.stop.is_cancelled() || self.fs.writer_done() {
                 // Drain-to-empty: keep popping until the ring/directory is clear.
                 // Ordering invariant: writer calls mark_writer_done (Release) after
                 // the seal-time queue push, so any late-racing push is visible here.
                 loop {
+                    if !self.wait_until_pipeline_live().await {
+                        return;
+                    }
                     let taken = self.fs.take_files();
                     let dispatched = taken.segments.len() as u64;
                     self.emit_cycle_metrics(&taken, dispatched);
@@ -438,7 +520,7 @@ impl WorkerLoop {
                         tracing::debug!(target: "dial9_worker", "Exiting run loop: drain complete");
                         return;
                     }
-                    self.process_segments(taken.segments, &mut []).await;
+                    self.process_segments(taken.segments, &mut [], None).await;
                 }
             }
 
@@ -455,8 +537,26 @@ impl WorkerLoop {
         let mut rx_open = true;
 
         loop {
+            let mut retry_hold = Vec::new();
             if !dumps.is_empty() {
-                let retry_hold = self.drain_matching(&mut dumps).await;
+                let result = self.drain_matching(&mut dumps, &mut rx, &mut rx_open).await;
+                if result.interruption == Some(TriggeredPipelineWait::Deadline) {
+                    let now = crate::primitives::time::now();
+                    let mut i = 0;
+                    while i < dumps.len() {
+                        if dumps[i].due(now) {
+                            let mut dump = dumps.swap_remove(i);
+                            dump.mark_pipeline_unavailable();
+                            self.resolve_dump(dump).await;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    continue;
+                }
+                if result.interruption != Some(TriggeredPipelineWait::Stopped) {
+                    retry_hold = result.retry_hold;
+                }
                 // Resolve every dump whose forward deadline elapsed (or that
                 // never had one) and that is not held open by a pending
                 // retry. A disk pass covers the whole backlog, so a retry
@@ -482,7 +582,7 @@ impl WorkerLoop {
                 // One final matching pass picks up segments sealed by writer
                 // finalization, then every open dump resolves with a
                 // truncated receipt covering what actually landed.
-                self.drain_matching(&mut dumps).await;
+                self.drain_matching(&mut dumps, &mut rx, &mut rx_open).await;
                 for dump in dumps.drain(..) {
                     self.resolve_dump(dump).await;
                 }
@@ -522,10 +622,25 @@ impl WorkerLoop {
     /// of dumps matched by segments that failed retryably (the caller bails
     /// to its select instead of hot-looping the retry and keeps those dumps
     /// open); empty means the windows quiesced.
-    async fn drain_matching(&mut self, dumps: &mut [ActiveDump]) -> Vec<crate::dump::DumpId> {
+    async fn drain_matching(
+        &mut self,
+        dumps: &mut [ActiveDump],
+        rx: &mut crate::dump::DumpRx,
+        rx_open: &mut bool,
+    ) -> DrainResult {
         loop {
             if dumps.is_empty() {
-                return Vec::new();
+                return DrainResult::default();
+            }
+            let deadline = dumps.iter().filter_map(|d| d.deadline).min();
+            let readiness = self
+                .wait_until_pipeline_live_triggered(rx, rx_open, deadline)
+                .await;
+            if readiness != TriggeredPipelineWait::Live {
+                return DrainResult {
+                    retry_hold: Vec::new(),
+                    interruption: Some(readiness),
+                };
             }
             let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
             let mut taken = self.fs.take_files_matching(&windows);
@@ -539,19 +654,30 @@ impl WorkerLoop {
             }
             if taken.segments.is_empty() {
                 self.emit_cycle_metrics(&taken, 0);
-                return Vec::new();
+                return DrainResult::default();
             }
             let segments = std::mem::take(&mut taken.segments);
-            let stats = self.process_segments(segments, dumps).await;
+            let stats = self
+                .process_segments(segments, dumps, Some((rx, rx_open)))
+                .await;
             // Out-of-window claims are released, not dispatched; only count
             // segments that actually entered the pipeline.
             self.emit_cycle_metrics(&taken, stats.entered_pipeline as u64);
+            if let Some(interruption) = stats.interruption {
+                return DrainResult {
+                    retry_hold: stats.retry_dump_ids,
+                    interruption: Some(interruption),
+                };
+            }
             if !stats.retry_dump_ids.is_empty() {
-                return stats.retry_dump_ids;
+                return DrainResult {
+                    retry_hold: stats.retry_dump_ids,
+                    interruption: None,
+                };
             }
             if stats.matched_done == 0 {
                 // Only out-of-window segments (disk): nothing matching left.
-                return Vec::new();
+                return DrainResult::default();
             }
         }
     }
@@ -628,25 +754,71 @@ impl WorkerLoop {
     // drain-to-empty). This forces one synchronous drain cycle for unit tests.
     #[cfg(test)]
     async fn process_open_segments(&mut self) -> bool {
+        if !self.wait_until_pipeline_live().await {
+            return false;
+        }
         let taken = self.fs.take_files();
         let found = !taken.segments.is_empty();
         let dispatched = taken.segments.len() as u64;
         self.emit_cycle_metrics(&taken, dispatched);
-        self.process_segments(taken.segments, &mut []).await;
+        self.process_segments(taken.segments, &mut [], None).await;
         found
+    }
+
+    fn release_unprocessed(&self, segment: TakenSegment) {
+        match &segment.seg_ref {
+            SegmentRef::Disk(_) => self.fs.release_claim(&segment.seg_ref),
+            SegmentRef::Memory(_) => {
+                let bytes = segment
+                    .original_bytes()
+                    .expect("memory segment must carry its bytes");
+                let retry_count = segment
+                    .retry_count()
+                    .expect("memory segment must carry its retry count");
+                let epochs = segment
+                    .mem_epochs()
+                    .expect("memory segment must carry its epochs");
+                self.fs
+                    .release_for_retry(&segment.seg_ref, bytes, retry_count, epochs);
+            }
+        }
     }
 
     async fn process_segments(
         &mut self,
         segments: Vec<TakenSegment>,
         dumps: &mut [ActiveDump],
+        mut trigger: Option<(&mut crate::dump::DumpRx, &mut bool)>,
     ) -> PassStats {
         let mut stats = PassStats::default();
         if self.processors.is_empty() {
             return stats;
         }
 
-        'next_segment: for (seg_idx, taken) in segments.into_iter().enumerate() {
+        let mut segments = segments.into_iter().enumerate();
+        'next_segment: while let Some((seg_idx, taken)) = segments.next() {
+            let readiness = match trigger.as_mut() {
+                Some((rx, rx_open)) => {
+                    let deadline = dumps.iter().filter_map(|d| d.deadline).min();
+                    self.wait_until_pipeline_live_triggered(rx, rx_open, deadline)
+                        .await
+                }
+                None => {
+                    if self.wait_until_pipeline_live().await {
+                        TriggeredPipelineWait::Live
+                    } else {
+                        TriggeredPipelineWait::Stopped
+                    }
+                }
+            };
+            if readiness != TriggeredPipelineWait::Live {
+                self.release_unprocessed(taken);
+                for (_, pending) in segments {
+                    self.release_unprocessed(pending);
+                }
+                stats.interruption = Some(readiness);
+                break;
+            }
             // Cached-epoch fast path (triggered mode, disk): a segment
             // already inspected and found out-of-window is released without
             // re-reading its file.

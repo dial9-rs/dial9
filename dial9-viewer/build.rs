@@ -124,19 +124,25 @@ fn main() {
     }
     code.push_str("];\n\n");
 
-    // TOOLKIT_FILES: collect scripts from dial9-toolkit skill
-    let toolkit_skill = skills.iter().find(|s| s.name == "dial9-toolkit");
+    // TOOLKIT_FILES: the scripts of the toolkit skill, identified by content
+    // (it is the skill shipping the shared trace parser) so a directory rename
+    // cannot silently empty the `agents toolkit` extraction.
+    let toolkit_skill = skills
+        .iter()
+        .find(|s| {
+            s.files
+                .iter()
+                .any(|(rel, _)| rel == "scripts/trace_parser.js")
+        })
+        .expect("no skill under skills/ ships scripts/trace_parser.js");
     code.push_str("pub const TOOLKIT_FILES: &[(&str, &str)] = &[\n");
-    if let Some(tk) = toolkit_skill {
-        for (rel, src_rel) in &tk.files {
-            if rel.starts_with("scripts/") {
-                let filename = rel.strip_prefix("scripts/").unwrap();
-                code.push_str(&format!(
-                    "    ({:?}, {}),\n",
-                    filename,
-                    rel_ref_include_str(src_rel)
-                ));
-            }
+    for (rel, src_rel) in &toolkit_skill.files {
+        if let Some(filename) = rel.strip_prefix("scripts/") {
+            code.push_str(&format!(
+                "    ({:?}, {}),\n",
+                filename,
+                rel_ref_include_str(src_rel)
+            ));
         }
     }
     code.push_str("];\n");
