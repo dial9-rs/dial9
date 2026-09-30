@@ -417,14 +417,16 @@ mod tests {
         }
     }
 
-    struct HealthyMetadataSource;
+    struct HealthyMetadataSource {
+        name: &'static str,
+    }
     impl Source for HealthyMetadataSource {
         fn flush(&mut self, _ctx: &FlushContext<'_>) {}
         fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
-            out.push(("healthy.key".to_string(), "healthy-value".to_string()));
+            out.push((format!("{}.key", self.name), "healthy-value".to_string()));
         }
         fn name(&self) -> &'static str {
-            "healthy_metadata"
+            self.name
         }
     }
 
@@ -512,17 +514,20 @@ mod tests {
 
     /// A panicking `Source::segment_metadata` must not corrupt sibling
     /// sources' entries for the same cycle, and its own partial push must
-    /// not survive. `flush_loop` now catches the panic and truncates
-    /// `source_entries` back to its pre-call length.
+    /// not survive. Healthy and panicking sources alternate so a panic
+    /// truncates both an empty and a non-empty entry list.
     #[test]
     fn source_panic_during_segment_metadata_skips_only_that_source() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
-        let (source, _calls) = PanickingMetadataSource::new("panicking_metadata");
+        let (panicking_a, _calls_a) = PanickingMetadataSource::new("panicking_a");
+        let (panicking_b, _calls_b) = PanickingMetadataSource::new("panicking_b");
         let recorder = recorder(writer)
-            .source(source)
-            .source(HealthyMetadataSource)
+            .source(panicking_a)
+            .source(HealthyMetadataSource { name: "healthy_a" })
+            .source(panicking_b)
+            .source(HealthyMetadataSource { name: "healthy_b" })
             .build();
         recorder.handle().enable();
         // A trivial marker event: `finalize()` discards a segment that never
@@ -536,22 +541,28 @@ mod tests {
         let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
         let entries = decode_segment_metadata(&bytes);
 
-        assert_eq!(
-            entries.get("healthy.key").map(String::as_str),
-            Some("healthy-value"),
-            "sibling source's metadata must survive a panicking source in the same cycle"
-        );
-        assert!(
-            !entries.contains_key("panicking_metadata.partial"),
-            "a panicking source's partial push must not survive in the cycle's metadata"
-        );
-        assert_eq!(
-            entries
-                .get("dial9.source.panicking_metadata.segment_metadata_panicked")
-                .map(String::as_str),
-            Some("true"),
-            "the trace itself should record which source panicked"
-        );
+        for healthy in ["healthy_a", "healthy_b"] {
+            assert_eq!(
+                entries.get(&format!("{healthy}.key")).map(String::as_str),
+                Some("healthy-value"),
+                "{healthy}'s metadata must survive a panicking source in the same cycle"
+            );
+        }
+        for panicking in ["panicking_a", "panicking_b"] {
+            assert!(
+                !entries.contains_key(&format!("{panicking}.partial")),
+                "{panicking}'s partial push must not survive in the cycle's metadata"
+            );
+            assert_eq!(
+                entries
+                    .get(&format!(
+                        "dial9.source.{panicking}.segment_metadata_panicked"
+                    ))
+                    .map(String::as_str),
+                Some("true"),
+                "the trace itself should record that {panicking} panicked"
+            );
+        }
     }
 
     /// A `flush` panic must also warn of possibly-missing events, not just a
