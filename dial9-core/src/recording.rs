@@ -344,6 +344,40 @@ mod tests {
         }
     }
 
+    /// Panics in `flush` only once armed, counting the armed calls.
+    struct ArmedFlushPanicSource {
+        name: &'static str,
+        armed: Arc<AtomicBool>,
+        armed_calls: Arc<AtomicUsize>,
+    }
+    impl ArmedFlushPanicSource {
+        /// Returns the source, its arm switch, and its armed-call counter.
+        fn new(name: &'static str) -> (Self, Arc<AtomicBool>, Arc<AtomicUsize>) {
+            let armed = Arc::new(AtomicBool::new(false));
+            let armed_calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    name,
+                    armed: armed.clone(),
+                    armed_calls: armed_calls.clone(),
+                },
+                armed,
+                armed_calls,
+            )
+        }
+    }
+    impl Source for ArmedFlushPanicSource {
+        fn flush(&mut self, _ctx: &FlushContext<'_>) {
+            if self.armed.load(Ordering::Relaxed) {
+                self.armed_calls.fetch_add(1, Ordering::Relaxed);
+                panic!("ArmedFlushPanicSource({}) intentionally panics", self.name);
+            }
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
     /// Like [`PanickingFlushSource`], but only panics on its first `flush`
     /// call, so a test can observe a later, non-panicking cycle.
     struct FlushPanicsOnceSource {
@@ -602,41 +636,41 @@ mod tests {
         );
     }
 
-    /// A flush panic on the exit cycle itself has no next cycle to be
-    /// reported into normally; `run_flush_loop`'s exit path must fold it
-    /// into the final segment metadata instead of losing it.
+    /// A flush panic on the exit cycle has no next cycle to report it, so the
+    /// exit path must write it into the final metadata. Retries until only the
+    /// exit cycle's flush panicked: an earlier panic is reported the normal way.
     #[test]
     fn flush_panic_on_exit_cycle_is_recorded_via_teardown() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
+        for _ in 0..10 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
-        let (source, calls) = PanickingFlushSource::new("panicking_on_exit");
-        let recorder = recorder(writer).source(source).build();
-        recorder.handle().enable();
-        recorder
-            .handle()
-            .record_event(MarkerEvent { timestamp_ns: 0 });
+            let (source, armed, armed_calls) = ArmedFlushPanicSource::new("panicking_on_exit");
+            let recorder = recorder(writer).source(source).build();
+            recorder
+                .handle()
+                .record_event(MarkerEvent { timestamp_ns: 0 });
+            armed.store(true, Ordering::Relaxed);
+            recorder.graceful_shutdown(Duration::ZERO);
 
-        // Wait for at least one panic before shutting down: this source
-        // panics on every call, including the exit cycle's own flush,
-        // which is exactly what this test exercises.
-        wait_until(
-            || calls.load(Ordering::Relaxed) >= 1,
-            Duration::from_secs(5),
-        );
-        recorder.graceful_shutdown(Duration::ZERO);
+            if armed_calls.load(Ordering::Relaxed) != 1 {
+                continue;
+            }
 
-        let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
-        let entries = decode_segment_metadata(&bytes);
+            let bytes = std::fs::read(sealed_segment(dir.path())).expect("read segment");
+            let entries = decode_segment_metadata(&bytes);
 
-        assert_eq!(
-            entries
-                .get("dial9.source.panicking_on_exit.flush_panicked")
-                .map(String::as_str),
-            Some("true"),
-            "a flush panic on the exit cycle itself must still reach the trace, \
-             even though there is no next cycle to report it in normally"
-        );
+            assert_eq!(
+                entries
+                    .get("dial9.source.panicking_on_exit.flush_panicked")
+                    .map(String::as_str),
+                Some("true"),
+                "a flush panic on the exit cycle itself must still reach the trace, \
+                 even though there is no next cycle to report it in normally"
+            );
+            return;
+        }
+        panic!("no attempt isolated a flush panic to the exit cycle");
     }
 
     /// Two distinct sources panicking during `flush` in the same cycle must
