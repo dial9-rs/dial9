@@ -471,11 +471,8 @@ mod tests {
 
     // ── Tests ────────────────────────────────────────────────────────
 
-    /// `teardown()` should run even after an uncaught `Source::flush` panic:
-    /// it's the flush thread's own cleanup, unrelated to whichever source
-    /// misbehaved. `flush_sources` now catches and drops a panicking
-    /// source's cycle, so `run_flush_loop` returns normally and `teardown()`
-    /// runs as it would for any clean stop.
+    /// A panicking `Source::flush` doesn't stop `run_flush_loop` from
+    /// returning normally, so `teardown()` runs as it would for any clean stop.
     #[test]
     fn source_panic_does_not_skip_thread_teardown() {
         let teardown_ran = Arc::new(AtomicBool::new(false));
@@ -509,8 +506,7 @@ mod tests {
 
         assert!(
             teardown_ran.load(Ordering::Relaxed),
-            "teardown() should still run even after an uncaught Source panic during flush, \
-             but it was skipped"
+            "teardown() should still run after a Source panic during flush, but it was skipped"
         );
     }
 
