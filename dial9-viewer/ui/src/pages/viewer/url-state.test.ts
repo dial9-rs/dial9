@@ -57,6 +57,7 @@ function mkState(over: {
       spanPctFilter: 0,
       timeMode: "rel",
       tz: "utc",
+      stacksAsFlamegraph: true,
       ...over.uiPrefs,
     },
     poi: {
@@ -451,7 +452,7 @@ describe("viewer URL state: complete durable view", () => {
           issueColWidths: { kind: 120, dot: 14 },
           lanesViewportHeight: 280,
           lanesScrollTop: 96,
-          stacksAsFlamegraph: true,
+          stacksAsFlamegraph: false,
         },
         view: {
           inspectorTab: "related",
@@ -493,7 +494,7 @@ describe("viewer URL state: complete durable view", () => {
       issueColWidths: { dot: 14, kind: 120 },
       lanesHeight: 280,
       lanesScrollTop: 96,
-      stacksAsFlamegraph: true,
+      stacksAsFlamegraph: false,
       inspectorTab: "related",
       pollSection: "sched",
       expandedPollGroups: ["cpu-0", "sched-1"],
@@ -533,6 +534,14 @@ describe("viewer URL state: complete durable view", () => {
   it("omits every durable resting default", () => {
     const { params } = roundTrip(mkState({}));
     expect([...params.keys()]).toEqual([]);
+  });
+
+  it("defaults stack samples to the flamegraph and omits that default from the URL", () => {
+    const store = createViewerStore({ scheduler: () => {} });
+    expect(store.getState().uiPrefs.stacksAsFlamegraph).toBe(true);
+    const { params, out } = roundTrip(store.getState());
+    expect(params.has("stack-view")).toBe(false);
+    expect(out.stacksAsFlamegraph).toBeUndefined();
   });
 
   it("drops malformed enums, paths, ranges, dimensions, and disclosure entries", () => {
@@ -599,7 +608,7 @@ describe("viewer URL state: store hydration", () => {
     const decoded = readViewerUrlState(
       "?rail=tasks&task-sort=lifetime,asc&inspector=stack" +
         "&analysis=cpu&analysis-inspect=tokio%3A%3Apoll" +
-        "&stack-view=flame&inspector-width=444" +
+        "&stack-view=list&inspector-width=444" +
         "&field-chart=fc-1%2CMetric%2Cvalue%2Ccounter",
     );
 
@@ -616,7 +625,7 @@ describe("viewer URL state: store hydration", () => {
     expect(store.getState().uiPrefs).toMatchObject({
       timeMode: "abs",
       tz: "local",
-      stacksAsFlamegraph: true,
+      stacksAsFlamegraph: false,
       sidebarWidth: 444,
     });
     expect(store.getState().view).toMatchObject({

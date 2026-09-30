@@ -148,11 +148,19 @@ pub(crate) struct DumpRequest {
     pub(crate) lookforward: Duration,
     pub(crate) metadata: Vec<(String, String)>,
     pub(crate) receipt_tx: oneshot::Sender<Result<DumpReceipt, DumpError>>,
+    debounce: Option<Arc<Debounce>>,
 }
 
 impl DumpRequest {
     pub(crate) fn elapsed_since_trigger(&self) -> Duration {
         crate::primitives::time::elapsed_since(self.triggered_at)
+    }
+
+    pub(crate) fn reject_pipeline_unavailable(self) {
+        if let Some(debounce) = &self.debounce {
+            debounce.release(self.id);
+        }
+        let _ = self.receipt_tx.send(Err(DumpError::PipelineUnavailable));
     }
 }
 
@@ -172,6 +180,15 @@ impl DumpRequest {
 struct Debounce {
     window: Duration,
     last: crate::primitives::sync::Mutex<Option<(Instant, DumpId)>>,
+}
+
+impl Debounce {
+    fn release(&self, id: DumpId) {
+        let mut last = self.last.lock().expect("debounce mutex poisoned");
+        if last.is_some_and(|(_, reserved)| reserved == id) {
+            *last = None;
+        }
+    }
 }
 
 /// Sending half of the trigger channel.
@@ -257,6 +274,7 @@ impl DumpTrigger {
                 lookforward,
                 metadata: Vec::new(),
                 receipt_tx,
+                debounce: self.debounce.clone(),
             }),
             tx: &self.tx,
             receipt_rx: Some(receipt_rx),
@@ -410,10 +428,10 @@ pub struct DumpCompletion {
     pub segments_processed: usize,
     /// Caller correlation pairs from `with_metadata(...)`.
     pub metadata: Vec<(String, String)>,
-    /// True when the dump resolves with [`DumpError::Pipeline`]: a captured
-    /// segment failed terminally and nothing made it through. Stages still
-    /// get to clear per-dump state, but should skip success artifacts (the
-    /// S3 stage writes no manifest for a failed dump).
+    /// True when the dump resolves with [`DumpError::Pipeline`] or
+    /// [`DumpError::PipelineUnavailable`]. Stages still get to clear per-dump
+    /// state, but should skip success artifacts (the S3 stage writes no
+    /// manifest for a failed dump).
     pub failed: bool,
 }
 
@@ -424,8 +442,8 @@ pub struct DumpCompletion {
 /// [`segments_processed`](Self::segments_processed) counting only the
 /// survivors (the failures are dropped silently, exactly like a segment the
 /// ring evicted before the worker reached it). [`DumpError::Pipeline`] is
-/// reserved for total failure: every captured segment failed and nothing
-/// landed.
+/// reserved for total failure inside a stage; [`DumpError::PipelineUnavailable`]
+/// means no segment could start before the dump's deadline.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct DumpReceipt {
@@ -451,6 +469,8 @@ pub struct DumpReceipt {
 pub enum DumpError {
     /// The worker is shutting down or already stopped.
     WorkerStopped,
+    /// The pipeline was unavailable before this dump could run.
+    PipelineUnavailable,
     /// Every captured segment failed in a pipeline stage.
     Pipeline(ProcessErrorKind),
     /// The trigger was coalesced into an in-flight dump by the debounce gate
@@ -466,6 +486,7 @@ impl std::fmt::Display for DumpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::WorkerStopped => write!(f, "worker is shutting down or already stopped"),
+            Self::PipelineUnavailable => write!(f, "pipeline unavailable"),
             Self::Pipeline(kind) => write!(f, "pipeline stage failed: {kind}"),
             Self::Coalesced { into } => write!(f, "coalesced into dump {into}"),
         }
@@ -475,7 +496,7 @@ impl std::fmt::Display for DumpError {
 impl std::error::Error for DumpError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::WorkerStopped => None,
+            Self::WorkerStopped | Self::PipelineUnavailable => None,
             Self::Pipeline(ProcessErrorKind::Io(e)) => Some(e),
             Self::Pipeline(ProcessErrorKind::Transfer { source, .. }) => Some(source.as_ref()),
             Self::Coalesced { .. } => None,
@@ -607,6 +628,34 @@ mod tests {
         // A clone honors the same gate, so its trigger coalesces too.
         let err = clone.dump_current_data().await.unwrap_err();
         assert!(matches!(err, DumpError::Coalesced { into } if into == first.id));
+    }
+
+    #[tokio::test]
+    async fn unavailable_rejection_releases_debounce_reservation() {
+        use std::future::IntoFuture;
+
+        let (trigger, mut rx) = channel();
+        let trigger = trigger.with_debounce(Duration::from_secs(60));
+
+        let first = trigger.dump_current_data().into_future();
+        rx.rx
+            .try_recv()
+            .expect("first trigger dispatched")
+            .reject_pipeline_unavailable();
+        assert!(matches!(
+            first.await.unwrap_err(),
+            DumpError::PipelineUnavailable
+        ));
+
+        let second = trigger.dump_current_data().into_future();
+        rx.rx
+            .try_recv()
+            .expect("reservation released for next trigger")
+            .reject_pipeline_unavailable();
+        assert!(matches!(
+            second.await.unwrap_err(),
+            DumpError::PipelineUnavailable
+        ));
     }
 
     #[tokio::test]

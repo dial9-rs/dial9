@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Experimental per-worker task sampling reduces async stack capture overhead (`unstable-task-sampling`).
+- `Dial9HandleTokioExt::attach_tokio_local_runtime` attaches a
+  `tokio::runtime::LocalRuntime`. A multi-thread builder returns an error.
+- `spawn_local`, `spawn_local_in` and `block_on_local`, the `!Send`
+  counterparts of `spawn`, `spawn_in` and `block_on`.
 
 ## [0.5.2](https://github.com/dial9-rs/dial9/compare/dial9-v0.5.1...dial9-v0.5.2) - 2026-09-22
 

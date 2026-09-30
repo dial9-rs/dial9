@@ -431,7 +431,7 @@ export interface UiPrefsSlice {
   /**
    * Render stack-frame sample lists (the poll inspector's CPU/sched samples,
    * the region panel's blocking sub-stacks) as a flamegraph instead of a
-   * grouped list. Lives here rather than component-local because the inspector
+   * grouped list. Defaults to true. Lives here rather than component-local because the inspector
    * resets its per-selection expansion state on every new selection - a local
    * toggle would reset with it, so the preference has to outlive the selection.
    */

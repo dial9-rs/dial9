@@ -505,6 +505,8 @@ pub struct DumpReceipt {
 pub enum DumpError {
     /// The worker is shutting down or already stopped.
     WorkerStopped,
+    /// The pipeline was unavailable before this dump could run.
+    PipelineUnavailable,
     /// Every captured segment failed in a pipeline stage (total failure).
     Pipeline(ProcessErrorKind),
     /// The trigger was coalesced into an in-flight dump by the debounce gate.

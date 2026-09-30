@@ -140,6 +140,23 @@ pub trait SegmentProcessor: Send {
     /// Human-readable name for this processor (used in metrics).
     fn name(&self) -> &'static str;
 
+    /// Wait until this processor can accept segment work.
+    ///
+    /// The worker awaits every processor before taking a segment from storage,
+    /// so an unavailable downstream stage prevents upstream work from
+    /// starting.
+    ///
+    /// The returned future may be dropped before completion when the worker
+    /// stops or a triggered dump reaches its deadline. Implementations must be
+    /// cancellation-safe and level-triggered: dropping a wait must not consume
+    /// readiness, and a later call made while the processor is live must
+    /// complete without requiring another state transition.
+    ///
+    /// Default: immediately ready.
+    fn wait_until_live(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+
     /// Initialize this processor on the worker's Tokio runtime before the
     /// pipeline begins processing segments.
     ///
