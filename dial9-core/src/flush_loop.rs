@@ -168,7 +168,7 @@ pub(crate) fn run_flush_loop<M: BufferMode>(
                 if panicked {
                     source_entries.truncate(before);
                     source_entries.push((
-                        format!("dial9.source.{}.panicked", source.name()),
+                        format!("dial9.source.{}.segment_metadata_panicked", source.name()),
                         "true".to_string(),
                     ));
                 }

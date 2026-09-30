@@ -551,7 +551,7 @@ mod tests {
         );
         assert_eq!(
             entries
-                .get("dial9.source.panicking_metadata.panicked")
+                .get("dial9.source.panicking_metadata.segment_metadata_panicked")
                 .map(String::as_str),
             Some("true"),
             "the trace itself should record which source panicked"
