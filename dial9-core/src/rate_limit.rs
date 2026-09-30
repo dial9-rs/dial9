@@ -18,7 +18,7 @@ pub fn next_call_secs(now: Duration, interval: Duration) -> u64 {
 
 /// Evaluate `$call` at most once every `$interval` per call site.
 ///
-/// With `key = $key`, the limit is per distinct `$key`s through the
+/// With `key = $key`, the limit is per distinct `$key` through the
 /// same call site.
 #[macro_export]
 macro_rules! rate_limited {
