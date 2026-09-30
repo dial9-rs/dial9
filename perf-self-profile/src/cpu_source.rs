@@ -282,6 +282,10 @@ pub struct CpuProfiler {
     /// OS tid → thread name, eagerly cached at drain time so short-lived
     /// threads are captured before they exit and their `comm` file disappears.
     tid_to_name: HashMap<u32, ThreadName>,
+    /// Tracked threads that stopped. Their names leave `tid_to_name` after
+    /// the next drain: their last samples keep the name, and a thread that
+    /// later reuses the tid reads its own.
+    stopped_tids: Vec<u32>,
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
     /// The effective backend that was selected after Auto resolution.
@@ -341,6 +345,7 @@ impl CpuProfiler {
             sampler,
             pid: std::process::id(),
             tid_to_name: HashMap::new(),
+            stopped_tids: Vec::new(),
             config,
             effective_backend,
             metadata_emitted: false,
@@ -374,6 +379,15 @@ impl CpuProfiler {
                 thread_name,
             );
         });
+        self.evict_stopped_names();
+    }
+
+    /// Forget the names of threads that stopped before this drain; their last
+    /// samples were just named.
+    fn evict_stopped_names(&mut self) {
+        for tid in self.stopped_tids.drain(..) {
+            self.tid_to_name.remove(&tid);
+        }
     }
 }
 
@@ -400,6 +414,7 @@ impl Source for CpuProfiler {
 
     fn on_thread_stop(&mut self) {
         crate::unregister_current_thread();
+        self.stopped_tids.push(dial9_core::thread::current_tid());
     }
 
     fn name(&self) -> &'static str {
@@ -621,6 +636,39 @@ mod cpu_sample_round_trip_tests {
 mod metadata_tests {
     use super::*;
     use dial9_core::source::Source;
+
+    /// A stopped thread's cached name survives one drain, for its last
+    /// samples, then goes, so a thread reusing the tid reads its own name.
+    /// Calls the eviction step directly: a real drain would read the ctimer
+    /// sample buffer, which other unit tests in this process share.
+    #[test]
+    fn stopped_thread_name_is_evicted_after_the_next_drain() {
+        let Ok(mut profiler) = CpuProfiler::start(CpuProfilingConfig::default()) else {
+            eprintln!("skipping: CpuProfiler::start failed (likely no perf access)");
+            return;
+        };
+        let tid = std::thread::scope(|s| {
+            s.spawn(|| {
+                let tid = dial9_core::thread::current_tid();
+                profiler
+                    .tid_to_name
+                    .insert(tid, ThreadName::new("dial9-smoke".into()));
+                profiler.on_thread_stop();
+                tid
+            })
+            .join()
+            .unwrap()
+        });
+        assert!(
+            profiler.tid_to_name.contains_key(&tid),
+            "kept until drained"
+        );
+        profiler.evict_stopped_names();
+        assert!(
+            !profiler.tid_to_name.contains_key(&tid),
+            "evicted after drain"
+        );
+    }
 
     /// CpuProfiler::segment_metadata must report the effective backend
     /// ("perf" or "ctimer"), never "auto", even when CpuBackend::Auto was
