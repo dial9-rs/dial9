@@ -3,12 +3,9 @@
 //! rate-limited error handling under fs faults. No tokio, no telemetry sources.
 
 use crate::buffer::DiskBuffer;
-use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::recording::Recorder;
-use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
 use crate::test_support::decode_segment_metadata;
 use dial9_trace_format::TraceEvent;
@@ -253,40 +250,46 @@ crate::shuttle_test! {
 /// A Source whose `segment_metadata` pushes a partial entry then panics.
 /// Used to check that the partial push doesn't survive and sibling
 /// sources' metadata isn't corrupted.
-struct PanickingMetadataSource;
+struct PanickingMetadataSource {
+    name: &'static str,
+}
 
 impl Source for PanickingMetadataSource {
     fn flush(&mut self, _ctx: &FlushContext<'_>) {}
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
         out.push((
-            "panicking.partial".to_string(),
+            format!("{}.partial", self.name),
             "should not survive".to_string(),
         ));
         panic!("PanickingMetadataSource intentionally panics for shuttle coverage");
     }
 
     fn name(&self) -> &'static str {
-        "panicking_metadata"
+        self.name
     }
 }
 
-struct HealthyMetadataSource;
+struct HealthyMetadataSource {
+    name: &'static str,
+}
 
 impl Source for HealthyMetadataSource {
     fn flush(&mut self, _ctx: &FlushContext<'_>) {}
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
-        out.push(("healthy.key".to_string(), "healthy-value".to_string()));
+        out.push((format!("{}.key", self.name), "healthy-value".to_string()));
     }
 
     fn name(&self) -> &'static str {
-        "healthy_metadata"
+        self.name
     }
 }
 
 // A panicking `segment_metadata` must not corrupt sibling sources'
 // metadata for the same cycle, and its own partial push must not survive.
+// Healthy and panicking sources alternate so a panic truncates both an
+// empty and a non-empty entry list.
 crate::shuttle_test! {
     num_iters = 500, depth = 3;
     fn test_source_panic_during_segment_metadata_skips_only_that_source() {
@@ -295,8 +298,10 @@ crate::shuttle_test! {
         ));
 
         let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(|b| {
-            b.source(PanickingMetadataSource)
-                .source(HealthyMetadataSource)
+            b.source(PanickingMetadataSource { name: "panicking_a" })
+                .source(HealthyMetadataSource { name: "healthy_a" })
+                .source(PanickingMetadataSource { name: "panicking_b" })
+                .source(HealthyMetadataSource { name: "healthy_b" })
         });
 
         // A trivial marker event: `finalize()` discards a segment that
@@ -316,15 +321,26 @@ crate::shuttle_test! {
             entries.extend(decode_segment_metadata(&bytes));
         });
 
-        assert_eq!(
-            entries.get("healthy.key").map(String::as_str),
-            Some("healthy-value"),
-            "sibling source's metadata must survive a panicking source in the same cycle"
-        );
-        assert!(
-            !entries.contains_key("panicking.partial"),
-            "a panicking source's partial push must not survive in the cycle's metadata"
-        );
+        for healthy in ["healthy_a", "healthy_b"] {
+            assert_eq!(
+                entries.get(&format!("{healthy}.key")).map(String::as_str),
+                Some("healthy-value"),
+                "{healthy}'s metadata must survive a panicking source in the same cycle"
+            );
+        }
+        for panicking in ["panicking_a", "panicking_b"] {
+            assert!(
+                !entries.contains_key(&format!("{panicking}.partial")),
+                "{panicking}'s partial push must not survive in the cycle's metadata"
+            );
+            assert_eq!(
+                entries
+                    .get(&format!("dial9.source.{panicking}.segment_metadata_panicked"))
+                    .map(String::as_str),
+                Some("true"),
+                "the trace itself should record that {panicking} panicked"
+            );
+        }
     }
 }
 
@@ -433,9 +449,10 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let dir = tempfile::tempdir().unwrap();
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
         let _fault = fs::set_fault(fault);
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        let mut recorder = Recorder::start(shared, writer, None, || || {});
-        recorder.handle().enable();
+        // No processors: the flush loop's error paths are under test, not the worker's.
+        let mut recorder = crate::recorder::recorder(writer)
+            .processors(Vec::new())
+            .build();
         let handle = recorder.handle().clone();
 
         let writers: Vec<_> = (0..num_threads)
