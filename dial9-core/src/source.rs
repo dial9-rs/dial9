@@ -68,6 +68,11 @@ impl<'a> FlushContext<'a> {
 /// panic; [`flush`] does not. Events already recorded before the panic
 /// point still reach the trace.
 ///
+/// Each panic is also marked in the trace's segment metadata, as
+/// `dial9.source.<name>.flush_panicked` or
+/// `dial9.source.<name>.segment_metadata_panicked` set to `"true"`, where
+/// `<name>` is [`name`](Self::name).
+///
 /// [`flush`]: Source::flush
 /// [`segment_metadata`]: Source::segment_metadata
 /// [`RecorderBuilder::source`]: crate::recorder::RecorderBuilder::source
