@@ -18,21 +18,16 @@ pub(crate) use pipeline_helpers::*;
 /// they need carry the same `#[cfg]` as the functions using them.
 #[cfg(all(test, shuttle, feature = "pipeline"))]
 mod pipeline_helpers {
-    use crate::buffer::MemoryBuffer;
-    use crate::clock::clock_monotonic_ns;
+    use crate::buffer::{Memory, MemoryBuffer};
     use crate::fs::Fs;
     use crate::primitives::sync::Arc;
+    use crate::recorder::RecorderBuilder;
     use crate::recording::Recorder;
-    use crate::shared_state::SharedState;
-    use crate::source::Source;
 
-    /// Start a `Recorder` over an in-memory writer with `sources` registered.
-    ///
-    /// Drives `Recorder::start`/`SharedState` construction directly, bypassing
-    /// `RecorderBuilder`'s `SoleRecorderGuard` (a process-wide singleton that
-    /// doesn't tolerate a shuttle scenario's many same-process iterations).
+    /// Build and enable a `Recorder` over an in-memory writer, with sources
+    /// registered by `configure`.
     pub(crate) fn start_shuttle_memory_recorder(
-        sources: Vec<Box<dyn Source>>,
+        configure: impl FnOnce(RecorderBuilder<Memory>) -> RecorderBuilder<Memory>,
     ) -> (Recorder, Arc<Fs>) {
         let writer = MemoryBuffer::builder()
             .max_total_size(100 * 1024 * 1024)
@@ -40,12 +35,7 @@ mod pipeline_helpers {
             .build()
             .unwrap();
         let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
-        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        for source in sources {
-            shared.push_source(source);
-        }
-        let recorder = Recorder::start(shared, writer, None, || || {});
-        recorder.handle().enable();
+        let recorder = configure(crate::recorder::recorder(writer)).build();
         (recorder, fs)
     }
 

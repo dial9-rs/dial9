@@ -153,9 +153,9 @@ crate::shuttle_test! {
         // Small segments force frequent rotation: the 100 MiB budget (set by
         // `start_shuttle_memory_recorder`) is far above the test's data, so
         // the ring never evicts before we drain it.
-        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(vec![Box::new(
-            MockSource::new(source_pending.clone()),
-        )]);
+        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(|b| {
+            b.source(MockSource::new(source_pending.clone()))
+        });
         let handle = recorder.handle().clone();
 
         let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -220,10 +220,10 @@ crate::shuttle_test! {
         ));
 
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(vec![
-            Box::new(PanickingSource),
-            Box::new(MockSource::new(source_pending.clone())),
-        ]);
+        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(|b| {
+            b.source(PanickingSource)
+                .source(MockSource::new(source_pending.clone()))
+        });
 
         let healthy_source_event = ValidationEvent {
             timestamp_ns: 1,
@@ -294,10 +294,10 @@ crate::shuttle_test! {
             metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
         ));
 
-        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(vec![
-            Box::new(PanickingMetadataSource),
-            Box::new(HealthyMetadataSource),
-        ]);
+        let (mut recorder, fs) = crate::test_support::start_shuttle_memory_recorder(|b| {
+            b.source(PanickingMetadataSource)
+                .source(HealthyMetadataSource)
+        });
 
         // A trivial marker event: `finalize()` discards a segment that
         // never held a real event, so without this the metadata-only
@@ -338,7 +338,7 @@ crate::shuttle_test! {
         ));
 
         let (mut recorder, fs) =
-            crate::test_support::start_shuttle_memory_recorder(vec![Box::new(PanickingSource)]);
+            crate::test_support::start_shuttle_memory_recorder(|b| b.source(PanickingSource));
         let handle = recorder.handle().clone();
 
         let tl_buffer_event = ValidationEvent {
