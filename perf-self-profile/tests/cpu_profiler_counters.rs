@@ -61,19 +61,24 @@ fn ctimer_reports_its_backend_and_counts_drained_samples() {
     };
     assert_eq!(read(), (ActiveCpuBackend::Ctimer, 0));
 
-    // ctimer samples only tracked threads.
+    // ctimer samples only tracked threads. Burn and drain in rounds: a thread
+    // starved of CPU on a busy host may need more than one.
     let tracking = handle.track_current_thread().expect("track this thread");
-    let start = Instant::now();
-    let mut x = 0u64;
-    while start.elapsed() < Duration::from_millis(200) {
-        x = std::hint::black_box(x.wrapping_add(1));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut batches = Vec::new();
+    while read().1 == 0 && Instant::now() < deadline {
+        let start = Instant::now();
+        let mut x = 0u64;
+        while start.elapsed() < Duration::from_millis(50) {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+        shared.flush_sources();
+        batches.extend(drain_encoded_batches(&shared));
     }
-    shared.flush_sources();
-    let batches = drain_encoded_batches(&shared);
     drop(tracking);
 
     let (_, seen) = read();
-    assert!(seen > 0, "200ms of CPU at 99Hz produced no samples");
+    assert!(seen > 0, "no CPU samples within 5s of burning");
     assert_eq!(seen, cpu_samples(&batches));
     rec.graceful_shutdown(Duration::ZERO);
 }
