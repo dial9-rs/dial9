@@ -137,6 +137,10 @@ impl Dial9Handle {
     /// The pipeline's stages and its worker's state. `None` on a disabled
     /// handle or a recorder without a pipeline worker. Reads shared state;
     /// the worker isn't involved.
+    ///
+    /// A `Recorder` dropped without `graceful_shutdown` doesn't wait for the
+    /// worker, so the worker can still show as running briefly after
+    /// [`is_stopped`](Self::is_stopped) returns `true`.
     #[cfg(feature = "pipeline")]
     pub fn pipeline_status(&self) -> Option<crate::pipeline::PipelineStatus> {
         Some(self.inner.as_ref()?.shared.pipeline_state()?.status())

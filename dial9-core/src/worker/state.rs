@@ -30,10 +30,11 @@ impl PipelineState {
         }
     }
 
-    // Release/Acquire, not Relaxed: a reader that sees `RUNNING` also sees
-    // everything the worker wrote before it, such as state set up during
-    // `initialize()`.
+    // Release/Acquire: a reader that sees `RUNNING` and then reads what a
+    // stage's `initialize()` stored (e.g. the S3 client slot) sees the stored
+    // value. The stage's own lock doesn't order that read after this one.
     pub(crate) fn set_initializing(&self, stage: usize) {
+        debug_assert!(stage < self.stages.len(), "stage index out of range");
         self.phase.store(stage, Ordering::Release);
     }
 
