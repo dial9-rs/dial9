@@ -11,7 +11,9 @@ fn main() -> std::io::Result<()> {
     let recorder = dial9::recorder(MemoryBuffer::new(1 << 20)?).build();
     let tester = recorder.handle().smoke_tester().build();
 
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let report = runtime.block_on(tester.run());
     print!("{report}");
 
