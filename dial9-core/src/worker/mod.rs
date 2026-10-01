@@ -209,9 +209,13 @@ where
     Teardown: FnOnce(),
 {
     let fs = writer.fs_handle()?;
+    // Covers a panic in `thread_init` or the runtime build, before
+    // `run_background_task_inner` sets its own guard.
+    let stopped = config.state.clone().map(state::StoppedOnDrop);
     Some(crate::primitives::thread::spawn_named(
         "dial9-worker",
         move || {
+            let _stopped = stopped;
             let teardown = thread_init();
             run_background_task(config, shutdown, fs);
             teardown();
