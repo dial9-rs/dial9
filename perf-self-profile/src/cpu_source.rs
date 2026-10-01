@@ -678,11 +678,14 @@ mod thread_name_tests {
                     .tid_to_name
                     .insert(tid, ThreadName::new("stopped-thread".into()));
                 profiler.on_thread_stop();
+                // A thread that stops twice is pending once.
+                profiler.on_thread_stop();
                 tid
             })
             .join()
             .unwrap()
         });
+        assert_eq!(profiler.stopped_tids, [tid]);
         assert!(
             profiler.tid_to_name.contains_key(&tid),
             "kept until drained"
