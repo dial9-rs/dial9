@@ -602,18 +602,13 @@ mod tests {
     #[test]
     fn source_or_insert_shares_one_source() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
-        let recorder = recorder(writer)
+        let builder = recorder(writer)
             .source_or_insert(Tally::default, |t| t.0.push(1))
-            .source_or_insert(Tally::default, |t| t.0.push(2))
-            .build();
+            .source_or_insert(Tally::default, |t| t.0.push(2));
+        assert_eq!(builder.source_names().filter(|n| *n == "tally").count(), 1);
+        let recorder = builder.build();
         let seen = recorder.handle().with_source(|t: &mut Tally| t.0.clone());
         assert_eq!(seen, Some(vec![1, 2]));
-        let tallies = recorder
-            .shared()
-            .expect("enabled recorder")
-            .with_sources_mut(|sources| sources.iter().filter(|s| s.name() == "tally").count())
-            .expect("sources lock");
-        assert_eq!(tallies, 1);
         recorder.graceful_shutdown(Duration::from_secs(5));
     }
 
