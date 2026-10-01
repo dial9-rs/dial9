@@ -23,6 +23,10 @@
 //! shuttle-safe too, so the whole function, including
 //! `run_background_task`'s real-runtime wrapper, is drivable under
 //! shuttle; see `shuttle_concurrent_attach` in `dial9-tokio-telemetry`.
+//!
+//! `shuttle_pipeline_state_races_shutdown` also drives
+//! `run_background_task_inner`, checking that the published worker state only
+//! moves forward and ends `Stopped`.
 
 use super::*;
 use crate::pipeline::ProcessError;

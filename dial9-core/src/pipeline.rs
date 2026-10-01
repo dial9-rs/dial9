@@ -335,7 +335,7 @@ pub enum WorkerState {
         /// Name of the stage being initialized.
         stage: Option<&'static str>,
     },
-    /// Every stage initialized; processing segments.
+    /// Every stage initialized; the worker loop is running.
     Running,
     /// Exited by any path: normal exit, initialization error, panic, or
     /// drain timeout.

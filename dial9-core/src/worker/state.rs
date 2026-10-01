@@ -29,6 +29,9 @@ impl PipelineState {
         }
     }
 
+    // Release/Acquire, not Relaxed: a reader that sees `RUNNING` also sees
+    // everything the worker wrote before it, such as state set up during
+    // `initialize()`.
     pub(crate) fn set_initializing(&self, stage: usize) {
         self.phase.store(stage, Ordering::Release);
     }
