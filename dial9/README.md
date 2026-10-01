@@ -191,7 +191,7 @@ See [Task dumps](#task-dumps-linux-only) for setup and usage details.
 
 Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `recorder_from_env` behavior.
 
-## Checking telemetry is live
+## Checking telemetry at startup
 
 `handle.smoke_tester()` builds a check you can run from a startup probe or a
 deploy gate. Build it once and keep it; the report says whether the handle
