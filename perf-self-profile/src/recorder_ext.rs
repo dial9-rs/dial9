@@ -93,11 +93,11 @@ pub trait RecorderPerfExt: recorder_perf_ext_sealed::Sealed + Sized {
         config: crate::cuda::CudaGpuConfig,
     ) -> Result<Self, crate::cuda::CudaGpuStartError>;
 
-    /// Register the process-wide CPU profiler. Warns and skips on start failure.
+    /// Register the process-wide CPU profiler. Warns and registers a [`StartFailed`] placeholder on start failure.
     #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
 
-    /// Register the per-thread scheduler-event profiler. Warns and skips on start failure.
+    /// Register the per-thread scheduler-event profiler. Warns and registers a [`StartFailed`] placeholder on start failure.
     #[cfg(feature = "cpu-profiling")]
     fn with_sched_events(self, config: crate::SchedEventConfig) -> Self;
 
@@ -270,7 +270,10 @@ mod start_failed_tests {
         );
         let mut second = Vec::new();
         failed.segment_metadata(&mut second);
-        assert!(second.is_empty(), "only the first segment carries it");
+        assert!(
+            second.is_empty(),
+            "emitted once; the writer keeps it for later segments"
+        );
     }
 
     /// Off Linux the profiler can't start, so the builder registers the

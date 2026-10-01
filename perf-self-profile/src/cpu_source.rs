@@ -385,7 +385,8 @@ impl CpuProfiler {
     }
 
     /// Samples drained into the trace since start. Advances on the flush
-    /// thread, so a reader sees new samples at most one flush cycle late.
+    /// thread while recording, so a reader sees new samples at most one flush
+    /// cycle late.
     pub fn samples_seen(&self) -> u64 {
         self.samples_seen
     }
