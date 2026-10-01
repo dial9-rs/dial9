@@ -137,10 +137,10 @@ mod tests {
         assert_eq!(wait_for(&rec, WorkerState::Running), WorkerState::Running);
         let handle = rec.handle().clone();
         rec.graceful_shutdown(Duration::from_secs(5));
-        // The recorder may drop its shared state on shutdown.
-        if let Some(status) = handle.pipeline_status() {
-            assert_eq!(status.worker(), WorkerState::Stopped);
-        }
+        assert_eq!(
+            handle.pipeline_status().unwrap().worker(),
+            WorkerState::Stopped
+        );
     }
 
     #[test]
