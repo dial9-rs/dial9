@@ -352,3 +352,56 @@ crate::shuttle_test! {
         worker.join().unwrap();
     }
 }
+
+crate::shuttle_test! {
+    default;
+    // The worker's published state only moves forward (initializing, then
+    // running, then stopped), and shutdown always leaves it stopped, however
+    // the reads interleave with initialization and the exit guard.
+    fn shuttle_pipeline_state_races_shutdown() {
+        use crate::pipeline::WorkerState;
+        use state::PipelineState;
+
+        fn rank(state: WorkerState) -> u8 {
+            match state {
+                WorkerState::Initializing { .. } => 0,
+                WorkerState::Running => 1,
+                WorkerState::Stopped => 2,
+            }
+        }
+
+        let fs = Fs::new_in_memory(1 << 20, 4096).unwrap();
+        let state = crate::primitives::sync::Arc::new(PipelineState::new(vec!["CountingProcessor"]));
+        let mut config = BackgroundTaskConfig::builder()
+            .processors(vec![
+                Box::new(CountingProcessor(Arc::new(AtomicUsize::new(0))))
+                    as Box<dyn SegmentProcessor>,
+            ])
+            .build();
+        config.set_state(state.clone());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let worker = crate::primitives::thread::spawn(move || {
+            shuttle::future::block_on(run_background_task_inner(config, shutdown_rx, fs));
+        });
+        let reader = crate::primitives::thread::spawn({
+            let state = state.clone();
+            move || {
+                let mut last = 0;
+                for _ in 0..4 {
+                    let now = rank(state.status().worker());
+                    assert!(now >= last, "worker state moved backwards: {last} -> {now}");
+                    last = now;
+                }
+            }
+        });
+
+        shutdown_tx
+            .send(Duration::ZERO)
+            .expect("worker holds the shutdown receiver until it exits");
+        worker.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(state.status().worker(), WorkerState::Stopped);
+        assert_eq!(state.status().stages(), ["CountingProcessor"]);
+    }
+}

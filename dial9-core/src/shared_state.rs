@@ -37,6 +37,10 @@ struct SharedState {
     /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
     #[cfg(feature = "pipeline")]
     dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
+    /// Stage order and worker state, set once at build when a pipeline worker
+    /// starts. Read by `Dial9Handle::pipeline_status`.
+    #[cfg(feature = "pipeline")]
+    pipeline_state: std::sync::OnceLock<Arc<crate::worker::state::PipelineState>>,
 }
 }
 
@@ -61,6 +65,8 @@ impl SharedState {
                 sources: Mutex::new(Vec::new()),
                 #[cfg(feature = "pipeline")]
                 dump_trigger: std::sync::OnceLock::new(),
+                #[cfg(feature = "pipeline")]
+                pipeline_state: std::sync::OnceLock::new(),
             }
         }
     }
@@ -156,6 +162,18 @@ impl SharedState {
     #[cfg(feature = "pipeline")]
     pub(crate) fn dump_trigger(&self) -> Option<&crate::dump::DumpTrigger> {
         self.dump_trigger.get()
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn set_pipeline_state(&self, state: Arc<crate::worker::state::PipelineState>) {
+        if self.pipeline_state.set(state).is_err() {
+            tracing::warn!(target: "dial9", "pipeline state installed twice, keeping the first");
+        }
+    }
+
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn pipeline_state(&self) -> Option<&crate::worker::state::PipelineState> {
+        self.pipeline_state.get().map(|s| &**s)
     }
 
     /// Check whether recording is currently enabled.

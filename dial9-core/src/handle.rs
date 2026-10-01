@@ -134,6 +134,14 @@ impl Dial9Handle {
             .and_then(|i| i.shared.dump_trigger().cloned())
     }
 
+    /// The pipeline's stages and its worker's state. `None` on a disabled
+    /// handle or a recorder without a pipeline worker. Reads shared state;
+    /// the worker isn't involved.
+    #[cfg(feature = "pipeline")]
+    pub fn pipeline_status(&self) -> Option<crate::pipeline::PipelineStatus> {
+        Some(self.inner.as_ref()?.shared.pipeline_state()?.status())
+    }
+
     /// Return the [`Dial9Handle`] to record through, resolved in order:
     ///
     /// 1. The handle installed on this thread with [`set_tl_handle`], which
