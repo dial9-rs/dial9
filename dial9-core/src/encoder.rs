@@ -9,7 +9,8 @@
 use crate::collector::CentralCollector;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex, Weak};
-use dial9_trace_format::encoder::{Encoder, FxHashMap};
+use ahash::AHashMap;
+use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::{InternedStackFrames, InternedString};
 use std::panic::Location;
 use std::time::Duration;
@@ -25,7 +26,8 @@ use std::time::Duration;
 /// You don't construct this directly; it's passed to [`Encodable::encode`].
 pub struct ThreadLocalEncoder<'a> {
     encoder: &'a mut Encoder<Vec<u8>>,
-    location_cache: &'a mut FxHashMap<&'static Location<'static>, String>,
+    location_cache: &'a mut AHashMap<usize, CachedLocation>,
+    batch_generation: u64,
     /// Events written through this handle; feeds the buffer's batch count so
     /// callers that decline to write (e.g. the metrique sink dropping an
     /// entry) are not counted.
@@ -95,14 +97,29 @@ impl ThreadLocalEncoder<'_> {
         Ok(())
     }
 
-    /// Intern a `&'static Location` (caching the `to_string()` result).
+    /// Intern a `&'static Location` (caching its string and current-batch pool ID).
     #[doc(hidden)]
     pub fn intern_location(&mut self, location: &'static Location<'static>) -> InternedString {
-        let s = self
-            .location_cache
-            .entry(location)
-            .or_insert_with(|| location.to_string());
-        self.encoder.intern_string_infallible(s)
+        let key = location as *const Location<'static> as usize;
+        if let Some(cached) = self.location_cache.get_mut(&key) {
+            if cached.batch_generation != self.batch_generation {
+                cached.id = self.encoder.intern_string_infallible(&cached.text);
+                cached.batch_generation = self.batch_generation;
+            }
+            return cached.id;
+        }
+
+        let text = location.to_string();
+        let id = self.encoder.intern_string_infallible(&text);
+        self.location_cache.insert(
+            key,
+            CachedLocation {
+                text,
+                id,
+                batch_generation: self.batch_generation,
+            },
+        );
+        id
     }
 }
 
@@ -192,15 +209,22 @@ impl FlushEpoch {
 /// Default maximum encoded batch size before flushing (~1MB).
 const DEFAULT_BATCH_SIZE: usize = 1023 * 1024;
 
+struct CachedLocation {
+    text: String,
+    id: InternedString,
+    batch_generation: u64,
+}
+
 pub(crate) struct ThreadLocalBuffer {
     encoder: Encoder<Vec<u8>>,
     event_count: usize,
     batch_size: usize,
     collector: Option<Arc<CentralCollector>>,
-    /// Caches `Location::to_string()` to avoid re-formatting on every event.
+    /// Caches location strings and their pool IDs for the current batch.
     /// Bounded by the number of `#[track_caller]` call sites in the program,
     /// which is fixed at compile time, so this does not grow unboundedly.
-    location_cache: FxHashMap<&'static Location<'static>, String>,
+    location_cache: AHashMap<usize, CachedLocation>,
+    batch_generation: u64,
     /// Last drain epoch at which this buffer was flushed. Shared with the
     /// flush thread via `TlBufferHandle` so it can skip busy workers.
     pub(crate) flush_epoch: FlushEpoch,
@@ -225,7 +249,8 @@ impl ThreadLocalBuffer {
             event_count: 0,
             batch_size,
             collector: None,
-            location_cache: FxHashMap::default(),
+            location_cache: AHashMap::default(),
+            batch_generation: 0,
             flush_epoch: FlushEpoch::new(),
         }
     }
@@ -245,6 +270,7 @@ impl ThreadLocalBuffer {
         ThreadLocalEncoder {
             encoder: &mut self.encoder,
             location_cache: &mut self.location_cache,
+            batch_generation: self.batch_generation,
             events_written: &mut self.event_count,
         }
     }
@@ -264,6 +290,10 @@ impl ThreadLocalBuffer {
         let encoded_bytes = self
             .encoder
             .reset_to_infallible(Vec::with_capacity(self.batch_size));
+        self.batch_generation = self.batch_generation.wrapping_add(1);
+        if self.batch_generation == 0 {
+            self.location_cache.clear();
+        }
         self.event_count = 0;
         crate::collector::Batch::new(encoded_bytes, event_count)
     }
@@ -494,5 +524,62 @@ mod tests {
         // Main thread can also access it.
         let guard = buf.lock().unwrap();
         assert_eq!(guard.event_count, 1);
+    }
+
+    #[test]
+    fn location_ids_are_refreshed_after_flush() {
+        use dial9_trace_format::decoder::Decoder;
+
+        let first = Location::caller();
+        let second = Location::caller();
+        let mut buffer = ThreadLocalBuffer::with_batch_size(1024);
+
+        for locations in [[first, second], [second, first]] {
+            let ids = {
+                let mut encoder = buffer.thread_local_encoder();
+                [
+                    encoder.intern_location(locations[0]),
+                    encoder.intern_location(locations[1]),
+                ]
+            };
+            let bytes = buffer.flush().into_encoded_bytes();
+            let mut decoder = Decoder::new(&bytes).unwrap();
+            decoder.decode_all();
+            for (&location, &id) in locations.iter().zip(ids.iter()) {
+                assert_eq!(
+                    decoder.string_pool().get(id),
+                    Some(location.to_string().as_str())
+                );
+            }
+        }
+    }
+
+    /// Run with `cargo test --release -p dial9-core --lib bench_location_intern -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_location_intern() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let location = Location::caller();
+        let mut buffer = ThreadLocalBuffer::with_batch_size(1024);
+        const BATCHES: usize = 20;
+        const CALLS_PER_BATCH: usize = 50_000;
+        let start = Instant::now();
+        for _ in 0..BATCHES {
+            {
+                let mut encoder = buffer.thread_local_encoder();
+                for _ in 0..CALLS_PER_BATCH {
+                    black_box(encoder.intern_location(black_box(location)));
+                }
+            }
+            black_box(buffer.flush());
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "intern_location: {:.2} ns/call ({elapsed:?} for {} calls)",
+            elapsed.as_nanos() as f64 / (BATCHES * CALLS_PER_BATCH) as f64,
+            BATCHES * CALLS_PER_BATCH
+        );
     }
 }

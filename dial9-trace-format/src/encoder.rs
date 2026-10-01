@@ -10,6 +10,7 @@ use crate::schema::{SchemaEntry, SchemaRegistry};
 use crate::types::{
     CountingWriter, EncodeState, EventEncoder, InternedStackFrames, InternedString,
 };
+use ahash::AHashMap;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -168,7 +169,7 @@ const DYNAMIC_SCHEMA_CACHE_LIMIT: usize = 1024;
 pub struct Encoder<W: Write = Vec<u8>> {
     state: EncodeState<W>,
     registry: SchemaRegistry,
-    string_pool: FxHashMap<String, u32>,
+    string_pool: AHashMap<String, u32>,
     next_pool_id: u32,
     stack_pool: FxHashMap<Box<[u64]>, u32>,
     next_stack_pool_id: u32,
@@ -207,7 +208,7 @@ impl Encoder<Vec<u8>> {
         Self {
             state: EncodeState::new(buf),
             registry: SchemaRegistry::new(),
-            string_pool: FxHashMap::default(),
+            string_pool: AHashMap::default(),
             next_pool_id: 0,
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
@@ -232,7 +233,7 @@ impl<W: Write> Encoder<W> {
         Ok(Self {
             state: EncodeState::new(writer),
             registry: SchemaRegistry::new(),
-            string_pool: FxHashMap::default(),
+            string_pool: AHashMap::default(),
             next_pool_id: 0,
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
@@ -252,7 +253,7 @@ impl<W: Write> Encoder<W> {
         timestamp_base_ns: u64,
         writer: W,
     ) -> Self {
-        let mut pool = FxHashMap::default();
+        let mut pool = AHashMap::default();
         let mut next_pool_id: u32 = 0;
         for (id, value) in string_pool.0.into_iter() {
             pool.insert(value, id.raw_id());
