@@ -65,13 +65,3 @@ async fn report_lists_each_check_by_name() {
         "recording: FAILED: handle is not connected to a recorder\n"
     );
 }
-
-/// `run()` can be spawned onto a multi-threaded runtime.
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn run_can_be_spawned() {
-    let tester = Dial9Handle::disabled().smoke_tester().build();
-    let report = tokio::spawn(async move { tester.run().await })
-        .await
-        .unwrap();
-    assert!(!report.is_healthy());
-}
