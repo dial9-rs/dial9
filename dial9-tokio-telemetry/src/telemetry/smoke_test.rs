@@ -1,4 +1,4 @@
-//! Pre-flight check that telemetry is live.
+//! Pre-flight check of dial9 telemetry.
 //!
 //! Build a [`SmokeTester`] once with `handle.smoke_tester()` and call
 //! [`run`](SmokeTester::run) where the check belongs, such as a startup probe
@@ -132,8 +132,8 @@ impl fmt::Display for SmokeTestReport {
 /// and keep it.
 pub struct SmokeTester {
     handle: Dial9Handle,
-    // Gives the type now the auto traits the result cache will give it, so
-    // adding the cache isn't a semver break.
+    // Gives the type now the auto traits the result cache will give it (not
+    // `RefUnwindSafe`), so adding the cache isn't a semver break.
     _cache: PhantomData<tokio::sync::Mutex<()>>,
 }
 

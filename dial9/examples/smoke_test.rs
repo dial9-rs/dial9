@@ -1,4 +1,4 @@
-//! Example: check that dial9 telemetry is live, as a startup probe would.
+//! Example: check dial9 telemetry, as a startup probe would.
 //!
 //! ```sh
 //! cargo run --example smoke_test
