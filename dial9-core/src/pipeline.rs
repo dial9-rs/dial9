@@ -320,12 +320,12 @@ impl PipelineStatus {
 
     /// What the pipeline worker is doing.
     pub fn worker(&self) -> WorkerState {
-        self.worker
+        self.worker.clone()
     }
 }
 
 /// Lifecycle of the pipeline worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WorkerState {
     /// Awaiting a stage's [`SegmentProcessor::initialize`], or not started

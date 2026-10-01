@@ -149,7 +149,7 @@ mod tests {
         let want = WorkerState::Initializing {
             stage: Some("Hanging"),
         };
-        assert_eq!(wait_for(&rec, want), want);
+        assert_eq!(wait_for(&rec, want.clone()), want);
         rec.graceful_shutdown(Duration::from_millis(10));
     }
 
