@@ -61,6 +61,7 @@ async fn report_lists_each_check_by_name() {
     let report = Dial9Handle::disabled().smoke_tester().build().run().await;
     let checks: Vec<_> = report.checks().map(|(check, _)| check).collect();
     assert_eq!(checks, [Check::Recording]);
+    assert_eq!(report.to_string().lines().count(), checks.len(), "{report}");
     assert!(
         report
             .to_string()
