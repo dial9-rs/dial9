@@ -284,7 +284,7 @@ pub struct CpuProfiler {
     tid_to_name: FxHashMap<u32, ThreadName>,
     /// Named tracked threads that stopped. Their names leave `tid_to_name`
     /// after the next drain: their last samples keep the name, and a thread
-    /// that later reuses the tid reads its own.
+    /// that reuses the tid after that drain reads its own.
     stopped_tids: Vec<u32>,
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
@@ -383,8 +383,10 @@ impl CpuProfiler {
     }
 
     /// Forget the names of threads that stopped before this drain; their last
-    /// samples were just named. A thread still running after its stop can be
-    /// named again by a later sample; that entry isn't evicted.
+    /// samples were just named. A thread still alive after its stop can end up
+    /// with a name that is never evicted: one first named after its stop, or
+    /// one named again after this eviction. A perf sample taken during the
+    /// thread's exit that misses this drain has no name.
     fn evict_stopped_names(&mut self) {
         for tid in self.stopped_tids.drain(..) {
             self.tid_to_name.remove(&tid);
