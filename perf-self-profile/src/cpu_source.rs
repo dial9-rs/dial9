@@ -6,7 +6,7 @@
 //! - [`CpuProfiler`] — process-wide frequency-based CPU sampling.
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
-use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, is_ctimer_active, sys};
+use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode, sys};
 use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::types::{EventEncoder, FieldType};
@@ -329,39 +329,31 @@ impl CpuProfiler {
 
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let (sampler, effective_backend) = match config.backend {
-            CpuBackend::Auto => {
-                let s = PerfSampler::start(
-                    SamplerConfig::default()
-                        .event_source(config.event_source)
-                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                        .include_kernel(config.include_kernel),
-                )?;
-                // After Auto resolution, check which backend was actually selected.
-                let backend = if is_ctimer_active() {
-                    ActiveCpuBackend::Ctimer
-                } else {
-                    ActiveCpuBackend::Perf
-                };
-                (s, backend)
-            }
-            CpuBackend::Perf => {
-                let s = PerfSampler::start_perf_only(
-                    SamplerConfig::default()
-                        .event_source(config.event_source)
-                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                        .include_kernel(config.include_kernel),
-                )?;
-                (s, ActiveCpuBackend::Perf)
-            }
-            CpuBackend::Ctimer => {
-                let s = PerfSampler::start_ctimer_only(
-                    SamplerConfig::default()
-                        .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                        .include_kernel(false),
-                )?;
-                (s, ActiveCpuBackend::Ctimer)
-            }
+        let sampler = match config.backend {
+            CpuBackend::Auto => PerfSampler::start(
+                SamplerConfig::default()
+                    .event_source(config.event_source)
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(config.include_kernel),
+            )?,
+            CpuBackend::Perf => PerfSampler::start_perf_only(
+                SamplerConfig::default()
+                    .event_source(config.event_source)
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(config.include_kernel),
+            )?,
+            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
+                SamplerConfig::default()
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(false),
+            )?,
+        };
+        // Ask this sampler, not the process-wide ctimer flag: another
+        // profiler's ctimer sets that flag.
+        let effective_backend = if sampler.is_ctimer() {
+            ActiveCpuBackend::Ctimer
+        } else {
+            ActiveCpuBackend::Perf
         };
         Ok(Self {
             sampler,

@@ -38,6 +38,11 @@ impl PerfSampler {
         unsupported()
     }
 
+    #[cfg(feature = "cpu-profiling")]
+    pub(crate) fn is_ctimer(&self) -> bool {
+        false
+    }
+
     pub fn new_per_thread(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }
