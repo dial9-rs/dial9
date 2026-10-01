@@ -27,6 +27,7 @@ import type {
 } from "../../lib/trace/index.js";
 import {
   colVisibility,
+  hiddenColumns,
   type ColumnOverrides,
   type VisibilityInput,
 } from "./columns.js";
@@ -38,6 +39,11 @@ interface Column extends VisibilityInput<Exemplar> {
   /** Menu label; falls back to the id when absent. */
   label?: string;
   cell: (ex: Exemplar, index: number) => TemplateResult;
+}
+
+export interface MoreColumn {
+  id: string;
+  label: string;
 }
 
 /** Everything the table needs beyond the exemplars themselves. */
@@ -299,6 +305,27 @@ function columnMenu(
   </div>`;
 }
 
+/** Inline discovery path for columns hidden by either auto-hide or user choice. */
+export function moreColumnsTemplate(
+  columns: readonly MoreColumn[],
+  onEnable: (id: string) => void,
+): TemplateResult | typeof nothing {
+  if (columns.length === 0) return nothing;
+  return html`<span class="more-columns"
+    >(More columns:
+    ${columns.map(
+      (column, index) =>
+        html`${index > 0 ? ", " : nothing}<button
+            type="button"
+            class="more-column-link"
+            @click=${() => onEnable(column.id)}
+          >
+            ${column.label}</button
+          >`,
+    )})</span
+  >`;
+}
+
 /**
  * The exemplar section. `exemplars` is already band-filtered by the caller.
  * `pending` renders the refreshing notice instead of an empty-set message.
@@ -324,10 +351,20 @@ export function exemplarsTemplate(
   }
 
   const columns = buildColumns(exemplars, ctx);
+  const hidden = hiddenColumns(columns, exemplars, ctx.overrides);
   const visible = columns.filter((c) => !colVisibility(c, exemplars, ctx.overrides).hidden);
   return html`<div class="exemplars">
     <div class="label">${label}</div>
-    ${columnMenu(columns, exemplars, ctx)}
+    <div class="column-controls">
+      ${columnMenu(columns, exemplars, ctx)}
+      ${moreColumnsTemplate(
+        hidden.map((column) => ({
+          id: column.id,
+          label: column.label ?? column.id,
+        })),
+        (id) => ctx.onSetOverride(id, true),
+      )}
+    </div>
     <table class="exemplar-table">
       <thead>
         <tr>

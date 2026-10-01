@@ -48,6 +48,19 @@ export function colVisibility<T>(
   return { hidden: false, auto: false };
 }
 
+/** Every hideable column that is currently absent from the exemplar table. */
+export function hiddenColumns<T, C extends VisibilityInput<T>>(
+  columns: readonly C[],
+  rows: readonly T[],
+  overrides: ColumnOverrides,
+): C[] {
+  return columns.filter(
+    (column) =>
+      column.hideable !== false &&
+      colVisibility(column, rows, overrides).hidden,
+  );
+}
+
 /**
  * Load persisted overrides. Best-effort: any storage or parse failure yields no
  * overrides, i.e. pure automatic behavior.

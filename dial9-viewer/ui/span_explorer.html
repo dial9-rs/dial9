@@ -83,8 +83,10 @@
      exemplar tables); the row itself is not clickable. */
   .exemplars { padding: 8px 0; font-size: 0.8em; color: #aaa; flex-shrink: 0; overflow-x: auto; }
   .exemplars .label { font-weight: 600; margin-bottom: 4px; }
-  /* Column show/hide menu. */
-  .exemplars .col-menu { position: relative; display: inline-block; margin-bottom: 6px; }
+  /* Column show/hide controls. */
+  .exemplars .column-controls { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px;
+    margin-bottom: 6px; }
+  .exemplars .col-menu { position: relative; display: inline-block; }
   .exemplars .col-menu-btn { background: #21262d; color: #adbac7; border: 1px solid #30363d;
     border-radius: 3px; padding: 2px 8px; font-size: 1em; cursor: pointer; }
   .exemplars .col-menu-btn:hover { border-color: #388bfd; }
@@ -100,6 +102,11 @@
     background: transparent; border: none; border-top: 1px solid #21262d; color: #79c0ff;
     cursor: pointer; text-align: left; font-size: 1em; }
   .exemplars .col-menu-reset:hover { color: #adbac7; }
+  .exemplars .more-columns { color: #8b949e; }
+  .exemplars .more-column-link { appearance: none; background: transparent; border: none; padding: 0;
+    color: #79c0ff; cursor: pointer; font: inherit; text-decoration: underline;
+    text-underline-offset: 2px; }
+  .exemplars .more-column-link:hover { color: #adbac7; }
   .exemplars table.exemplar-table { width: auto; min-width: 320px; border-collapse: collapse; font-size: 0.95em; }
   .exemplars table.exemplar-table th { position: static; background: transparent; cursor: default; padding: 3px 12px 3px 0; color: #8b949e; font-weight: 600; text-align: left; }
   .exemplars table.exemplar-table td { padding: 3px 12px 3px 0; border-bottom: 1px solid #21262d; white-space: nowrap; }
