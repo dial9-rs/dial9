@@ -1,8 +1,9 @@
 //! `.with_*` sugar for plugging this crate's profiling `Source`s into a
-//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. Each
-//! method is `.source(<Source>::new(cfg))` that, on a start failure or
-//! unsupported platform, warns and registers a [`StartFailed`] placeholder.
-//! Use `.source(CpuProfiler::start(cfg)?)` to propagate the failure instead.
+//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. On
+//! a start failure or unsupported platform each method warns; the CPU and
+//! scheduler profilers then register a `StartFailed` placeholder, the others
+//! register nothing. Use `.source(CpuProfiler::start(cfg)?)` to propagate the
+//! failure instead.
 
 use dial9_core::buffer::BufferMode;
 use dial9_core::recorder::RecorderBuilder;
