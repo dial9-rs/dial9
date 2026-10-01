@@ -141,12 +141,14 @@ impl fmt::Debug for SmokeTester {
 impl SmokeTester {
     /// Tester for the recorder behind `handle`, reached as
     /// `handle.smoke_tester()` through `Dial9HandleTokioExt`.
+    // `new` stays private: later settings become its parameters, so only the
+    // builder is public API.
     #[builder(
         start_fn(name = builder, vis = "pub(crate)"),
-        finish_fn = build,
-        builder_type = SmokeTesterBuilder
+        finish_fn(name = build, vis = "pub"),
+        builder_type(name = SmokeTesterBuilder, vis = "pub")
     )]
-    pub fn new(#[builder(start_fn)] handle: Dial9Handle) -> Self {
+    fn new(#[builder(start_fn)] handle: Dial9Handle) -> Self {
         Self { handle }
     }
 }
