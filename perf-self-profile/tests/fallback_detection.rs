@@ -189,3 +189,34 @@ fn auto_reports_perf_while_another_profiler_runs_ctimer() {
             .is_ok_and(|p| p.effective_backend() == ActiveCpuBackend::Perf)
     });
 }
+
+/// With perf blocked, `with_cpu_profiling` (perf backend) and
+/// `with_sched_events` register `StartFailed` placeholders.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn failed_profilers_register_placeholders_when_perf_event_open_blocked() {
+    use dial9_core::buffer::MemoryBuffer;
+    use dial9_core::recorder::recorder;
+    use dial9_perf_self_profile::{
+        CpuProfiler, CpuProfilingConfig, RecorderPerfExt, SchedEventConfig, SchedProfiler,
+        StartFailed,
+    };
+
+    in_fork("placeholders not registered", || {
+        install_seccomp_blocking_perf_event_open();
+        let rec = recorder(MemoryBuffer::new(64 * 1024).expect("writer"))
+            .with_cpu_profiling(CpuProfilingConfig::with_perf_backend())
+            .with_sched_events(SchedEventConfig::default())
+            .build();
+        let h = rec.handle();
+        let ok = h
+            .with_source(|_: &mut StartFailed<CpuProfiler>| ())
+            .is_some()
+            && h.with_source(|_: &mut StartFailed<SchedProfiler>| ())
+                .is_some()
+            && h.with_source(|_: &mut CpuProfiler| ()).is_none()
+            && h.with_source(|_: &mut SchedProfiler| ()).is_none();
+        rec.graceful_shutdown(std::time::Duration::ZERO);
+        ok
+    });
+}
