@@ -384,7 +384,7 @@ impl CpuProfiler {
         self.effective_backend
     }
 
-    /// Samples drained into the trace since start. Advances on the flush
+    /// CPU samples drained since start. Advances on the flush
     /// thread while recording, so a reader sees new samples at most one flush
     /// cycle late.
     pub fn samples_seen(&self) -> u64 {
