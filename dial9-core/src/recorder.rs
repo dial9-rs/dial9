@@ -326,6 +326,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         let worker = if processors.is_empty() {
             None
         } else {
+            let stages = processors.iter().map(|p| p.name()).collect();
             let poll = self
                 .worker_poll_interval
                 .unwrap_or(crate::worker::DEFAULT_POLL_INTERVAL);
@@ -341,10 +342,18 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 .metrics_sink(metrics)
                 .maybe_trigger(self.trigger)
                 .build();
+            let state = Arc::new(crate::worker::state::PipelineState::new(stages));
+            let mut config = config;
+            config.set_state(state.clone());
             let (tx, rx) = tokio::sync::oneshot::channel();
             let hook = self.thread_init.clone();
-            crate::worker::spawn(&writer, config, rx, move || hook())
-                .map(|wt| crate::recording::WorkerHandle::new(tx, wt))
+            let worker = crate::worker::spawn(&writer, config, rx, move || hook())
+                .map(|wt| crate::recording::WorkerHandle::new(tx, wt));
+            // No worker, no status: `pipeline_status()` stays `None`.
+            if worker.is_some() {
+                shared.set_pipeline_state(state);
+            }
+            worker
         };
 
         let hook = self.thread_init.clone();
