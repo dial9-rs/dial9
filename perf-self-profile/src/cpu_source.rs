@@ -271,6 +271,27 @@ impl SchedEventConfig {
 
 // ── CpuProfiler ─────────────────────────────────────────────────────────────
 
+/// CPU profiling backend a [`CpuProfiler`] runs on, after `Auto` resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActiveCpuBackend {
+    /// `perf_event_open`: samples every thread descended from the one that
+    /// started the profiler.
+    Perf,
+    /// Per-thread CPU timers: samples only threads dial9 tracks.
+    Ctimer,
+}
+
+impl ActiveCpuBackend {
+    /// `"perf"` or `"ctimer"`, as written to segment metadata.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Perf => "perf",
+            Self::Ctimer => "ctimer",
+        }
+    }
+}
+
 /// Process-wide CPU profiler. Registers a `perf_event_open` sampler and
 /// drains raw stack traces into the trace stream on each flush cycle.
 ///
@@ -289,10 +310,11 @@ pub struct CpuProfiler {
     /// Original config retained for segment metadata emission.
     config: CpuProfilingConfig,
     /// The effective backend that was selected after Auto resolution.
-    /// "perf" or "ctimer" — never "auto".
-    effective_backend: &'static str,
+    effective_backend: ActiveCpuBackend,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
+    /// Samples drained since start, for liveness checks.
+    samples_seen: u64,
 }
 
 impl std::fmt::Debug for CpuProfiler {
@@ -320,7 +342,11 @@ impl CpuProfiler {
                         .include_kernel(config.include_kernel),
                 )?;
                 // After Auto resolution, check which backend was actually selected.
-                let backend = if is_ctimer_active() { "ctimer" } else { "perf" };
+                let backend = if is_ctimer_active() {
+                    ActiveCpuBackend::Ctimer
+                } else {
+                    ActiveCpuBackend::Perf
+                };
                 (s, backend)
             }
             CpuBackend::Perf => {
@@ -330,7 +356,7 @@ impl CpuProfiler {
                         .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
                         .include_kernel(config.include_kernel),
                 )?;
-                (s, "perf")
+                (s, ActiveCpuBackend::Perf)
             }
             CpuBackend::Ctimer => {
                 let s = PerfSampler::start_ctimer_only(
@@ -338,7 +364,7 @@ impl CpuProfiler {
                         .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
                         .include_kernel(false),
                 )?;
-                (s, "ctimer")
+                (s, ActiveCpuBackend::Ctimer)
             }
         };
         Ok(Self {
@@ -349,7 +375,19 @@ impl CpuProfiler {
             config,
             effective_backend,
             metadata_emitted: false,
+            samples_seen: 0,
         })
+    }
+
+    /// Backend selected at start; `Auto` resolves to one of them.
+    pub fn effective_backend(&self) -> ActiveCpuBackend {
+        self.effective_backend
+    }
+
+    /// Samples drained into the trace since start. Advances on the flush
+    /// thread, so a reader sees new samples at most one flush cycle late.
+    pub fn samples_seen(&self) -> u64 {
+        self.samples_seen
     }
 
     /// Drain all pending perf samples as raw (tid, callchain) tuples.
@@ -362,6 +400,7 @@ impl CpuProfiler {
             if sample.pid != pid {
                 return;
             }
+            self.samples_seen += 1;
             if !self.tid_to_name.contains_key(&sample.tid)
                 && let Some(name) = read_thread_name(sample.tid)
             {
@@ -450,14 +489,14 @@ impl Source for CpuProfiler {
         // captures the actual selection.
         out.push((
             "cpu.profile.backend".to_string(),
-            self.effective_backend.to_string(),
+            self.effective_backend.as_str().to_string(),
         ));
         out.extend(sys::system_metadata());
         // When ctimer is the effective backend, it always samples thread CPU time
         // (CLOCK_THREAD_CPUTIME_ID), regardless of what EventSource was
         // originally requested. Report the *effective* source honestly.
         #[allow(unreachable_patterns)]
-        let event_source_name = if self.effective_backend == "ctimer" {
+        let event_source_name = if self.effective_backend == ActiveCpuBackend::Ctimer {
             "sw_cpu_clock"
         } else {
             match self.config.event_source {
