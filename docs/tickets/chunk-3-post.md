@@ -146,8 +146,8 @@ open flamegraph). T19's URL view-state codec IS the mechanism - finish it
 into a documented, stable contract and update the agent skills to emit it.
 
 **Context:** #303; T19 (codec, versioned schema); the skills that produce
-viewer links: `dial9-viewer/skills/dial9-html-report` (viewer deep-links in
-reports), `dial9-zoom-window` (says "zoom in at +6953ms" - could emit a URL);
+viewer links: the HTML report skill (viewer deep-links in reports; removed
+in #913), `dial9-zoom-window` (says "zoom in at +6953ms" - could emit a URL);
 `docs/agents/domain.md` for skill conventions; N10 (old params stay valid).
 
 **Owns:** the deep-link contract doc + skill updates (no inventory rows; adds
@@ -157,7 +157,7 @@ rows for any new param via ledger).
 stability-promised contract, with the split made explicit: QUERY params =
 trace source + legacy window params (`from`/`to` etc., N10 set); HASH =
 T19's versioned view-state (viewport/selection/POI/time mode). Reconcile
-the dial9-html-report skill's `start=`/`end=` params (SKILL.md:94 - not in
+the HTML report skill's `start=`/`end=` params (SKILL.md:94 - not in
 the N10 set) to the documented contract, keeping old links resolving.
 Update the two skills to emit view-state URLs; add a T12 contract test
 pinning the schema version. Closing criterion for #303: read the issue via

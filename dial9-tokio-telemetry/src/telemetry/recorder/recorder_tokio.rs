@@ -3,6 +3,8 @@
 //! [`Dial9HandleTokioExt::attach_tokio_runtime`] registers dial9 hooks on a
 //! `tokio::runtime::Builder`, builds the runtime, and returns it. Call it once
 //! per runtime, all runtimes attached to the same recorder feed one trace.
+//! [`Dial9HandleTokioExt::attach_tokio_local_runtime`] does the same for a
+//! [`tokio::runtime::LocalRuntime`].
 //! `#[dial9::main]` builds on this.
 //!
 //! Attach goes through [`Dial9Handle`], so configure the builder, then hand it
@@ -49,9 +51,9 @@
 //! `#[dial9::main]` does it for you.
 
 use super::register_runtime_hooks;
-#[cfg(not(tokio_unstable))]
-use super::runtime_context::RuntimeContext;
-use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource, WorkerIdCounter};
+use super::runtime_context::{
+    RuntimeContext, RuntimeContextRegistry, TokioRuntimesSource, WorkerIdCounter,
+};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::recorder::runtime_context::register_runtime_metrics;
 use crate::telemetry::task_dump_config::TaskDumpConfig;
@@ -338,6 +340,46 @@ pub trait Dial9HandleTokioExt: dial9_handle_tokio_ext_sealed::Sealed {
         builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime>;
+
+    /// Like [`attach_tokio_runtime`](Self::attach_tokio_runtime), but builds a
+    /// [`tokio::runtime::LocalRuntime`], which can spawn `!Send` futures.
+    ///
+    /// Drive it with [`block_on_local`](crate::block_on_local) and
+    /// [`spawn_local`](crate::spawn_local) so `!Send` tasks are traced
+    /// without `--cfg tokio_unstable`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the builder is multi-thread, if Tokio cannot build the
+    /// runtime, or if the recorder has already shut down.
+    ///
+    /// ```no_run
+    /// use dial9_core::buffer::MemoryBuffer;
+    /// use dial9_core::recorder::recorder;
+    /// use dial9_tokio_telemetry::telemetry::{Dial9HandleTokioExt, TokioAttachOptions};
+    ///
+    /// # fn main() -> std::io::Result<()> {
+    /// let recorder = recorder(MemoryBuffer::new(1 << 20)?).build();
+    ///
+    /// let mut builder = tokio::runtime::Builder::new_current_thread();
+    /// builder.enable_all();
+    /// let runtime = recorder
+    ///     .handle()
+    ///     .attach_tokio_local_runtime(builder, TokioAttachOptions::default())?;
+    ///
+    /// dial9_tokio_telemetry::block_on_local(&runtime, async {
+    ///     let cell = std::rc::Rc::new(1);
+    ///     dial9_tokio_telemetry::spawn_local(async move { *cell }).await.unwrap();
+    /// });
+    /// # let _ = recorder;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn attach_tokio_local_runtime(
+        &self,
+        builder: tokio::runtime::Builder,
+        options: TokioAttachOptions,
+    ) -> io::Result<tokio::runtime::LocalRuntime>;
 }
 
 mod dial9_handle_tokio_ext_sealed {
@@ -350,65 +392,149 @@ mod dial9_handle_tokio_ext_sealed {
 impl Dial9HandleTokioExt for Dial9Handle {
     fn attach_tokio_runtime(
         &self,
-        mut builder: tokio::runtime::Builder,
+        builder: tokio::runtime::Builder,
         options: TokioAttachOptions,
     ) -> io::Result<tokio::runtime::Runtime> {
-        if !self.is_connected() {
-            return builder.build();
-        }
-        if self.is_stopped() {
-            return Err(io::Error::other(
-                "recorder has shut down; attach runtimes before graceful_shutdown",
-            ));
-        }
-        if !options.tokio_instrumentation_enabled {
-            return builder.build();
-        }
-        let Some(state) = tokio_attach_state(self) else {
-            return Err(io::Error::other(
-                "dial9 source registry unavailable; Tokio runtime not attached",
-            ));
-        };
-
-        let task_dump_config = options.task_dump_config;
-        // Capture the runtime name before `options.runtime_name` is moved into
-        // `register_runtime_hooks`, so the metrics registration can tag this
-        // runtime's samples with its identity.
-        let runtime_name = options.runtime_name.clone();
-        let ctx = register_runtime_hooks(
-            &mut builder,
-            options.runtime_name,
-            self,
-            state.worker_ids,
-            options.task_tracking_enabled,
-            options.tokio_hooks,
-            task_dump_config,
-        );
-
-        let runtime = builder.build()?;
-
-        // Publish attach state only after a successful build.
-        // `TokioRuntimesSource` picks the runtime up from the registry on its
-        // next flush.
-        //
-        // Bind first: without tokio's task hooks the polls come from the
-        // `WakeTraced` wrapper, which finds this context by the runtime id it
-        // is running on.
-        ctx.bind_runtime(runtime.handle().id());
-        state.registry.lock().unwrap().push(ctx);
-        // The current-thread driver does not fire `on_thread_start`, so without
-        // this the tracing layer and `dial9::spawn` find no handle until the
-        // first poll.
-        set_tl_handle(self.clone());
-        super::runtime_context::mark_thread_traced();
-        // Same for the task-dump config.
-        #[cfg(feature = "taskdump")]
-        if let Some(config) = task_dump_config {
-            crate::task_dumped::set_taskdump_config(config);
-        }
-        register_runtime_metrics(self, runtime_name, runtime.handle().metrics());
-        Ok(runtime)
+        attach_built_runtime(self, builder, options, |mut builder| builder.build())
     }
+
+    fn attach_tokio_local_runtime(
+        &self,
+        builder: tokio::runtime::Builder,
+        options: TokioAttachOptions,
+    ) -> io::Result<tokio::runtime::LocalRuntime> {
+        attach_built_runtime(self, builder, options, build_local_runtime)
+    }
+}
+
+/// Shared attach path; `build` is the only flavor-specific step.
+fn attach_built_runtime<R>(
+    handle: &Dial9Handle,
+    mut builder: tokio::runtime::Builder,
+    options: TokioAttachOptions,
+    build: impl FnOnce(tokio::runtime::Builder) -> io::Result<R>,
+) -> io::Result<R>
+where
+    R: AttachedTokioRuntime,
+{
+    if !handle.is_connected() {
+        return build(builder);
+    }
+    if handle.is_stopped() {
+        return Err(io::Error::other(
+            "recorder has shut down; attach runtimes before graceful_shutdown",
+        ));
+    }
+    if !options.tokio_instrumentation_enabled {
+        return build(builder);
+    }
+    let Some(state) = tokio_attach_state(handle) else {
+        return Err(io::Error::other(
+            "dial9 source registry unavailable; Tokio runtime not attached",
+        ));
+    };
+
+    let task_dump_config = options.task_dump_config;
+    // Capture the runtime name before `options.runtime_name` is moved into
+    // `register_runtime_hooks`, so the metrics registration can tag this
+    // runtime's samples with its identity.
+    let runtime_name = options.runtime_name.clone();
+    let ctx = register_runtime_hooks(
+        &mut builder,
+        options.runtime_name,
+        handle,
+        state.worker_ids.clone(),
+        options.task_tracking_enabled,
+        options.tokio_hooks,
+        task_dump_config,
+    );
+
+    let runtime = build(builder)?;
+    finalize_attached_runtime(handle, state, ctx, runtime_name, task_dump_config, &runtime);
+    Ok(runtime)
+}
+
+fn build_local_runtime(
+    mut builder: tokio::runtime::Builder,
+) -> io::Result<tokio::runtime::LocalRuntime> {
+    // Tokio panics on `Kind::MultiThread` (`Builder::kind` is private). Convert
+    // that panic to an error; any other panic still unwinds.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        builder.build_local(tokio::runtime::LocalOptions::default())
+    })) {
+        Ok(result) => result,
+        Err(payload) => {
+            // Deref the box: `&payload` would coerce the `Box` itself into the
+            // trait object and downcast to the payload type would never match.
+            let message = panic_payload_str(&*payload);
+            if message.is_some_and(|m| m.contains("multi_thread is not supported for LocalRuntime"))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "attach_tokio_local_runtime requires a current_thread builder; \
+                     multi_thread is not supported for LocalRuntime",
+                ));
+            }
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn panic_payload_str(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+}
+
+/// Runtime handle of a built `Runtime` or `LocalRuntime`.
+trait AttachedTokioRuntime {
+    fn attached_handle(&self) -> &tokio::runtime::Handle;
+}
+
+impl AttachedTokioRuntime for tokio::runtime::Runtime {
+    fn attached_handle(&self) -> &tokio::runtime::Handle {
+        self.handle()
+    }
+}
+
+impl AttachedTokioRuntime for tokio::runtime::LocalRuntime {
+    fn attached_handle(&self) -> &tokio::runtime::Handle {
+        self.handle()
+    }
+}
+
+fn finalize_attached_runtime(
+    handle: &Dial9Handle,
+    state: TokioAttachState,
+    ctx: Arc<RuntimeContext>,
+    runtime_name: Option<String>,
+    #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] task_dump_config: Option<
+        TaskDumpConfig,
+    >,
+    runtime: &impl AttachedTokioRuntime,
+) {
+    let rt_handle = runtime.attached_handle();
+    // Publish attach state only after a successful build.
+    // `TokioRuntimesSource` picks the runtime up from the registry on its
+    // next flush.
+    //
+    // Bind first: without tokio's task hooks the polls come from the
+    // `WakeTraced` wrapper, which finds this context by the runtime id it
+    // is running on.
+    ctx.bind_runtime(rt_handle.id());
+    state.registry.lock().unwrap().push(ctx);
+    // The current-thread driver does not fire `on_thread_start`, so without
+    // this the tracing layer and `dial9::spawn` find no handle until the
+    // first poll.
+    set_tl_handle(handle.clone());
+    super::runtime_context::mark_thread_traced();
+    // Same for the task-dump config.
+    #[cfg(feature = "taskdump")]
+    if let Some(config) = task_dump_config {
+        crate::task_dumped::set_taskdump_config(config);
+    }
+    register_runtime_metrics(handle, runtime_name, rt_handle.metrics());
 }
 
 /// The context instrumenting the tokio runtime this thread is currently

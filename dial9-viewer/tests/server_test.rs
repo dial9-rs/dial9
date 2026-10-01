@@ -2144,6 +2144,31 @@ mod skills_unpack_tests {
         }
     }
 
+    /// The `dial9` and `dial9-viewer` binaries share this CLI, and a reader may
+    /// have installed only one of them, so the `agents` overview must print its
+    /// commands under the name it was run as.
+    #[cfg(unix)]
+    #[test]
+    fn agents_overview_names_the_invoked_binary() {
+        use std::os::unix::process::CommandExt;
+
+        let bin = env!("CARGO_BIN_EXE_dial9-viewer");
+        for name in ["dial9", "dial9-viewer"] {
+            let output = Command::new(bin).arg0(name).arg("agents").output().unwrap();
+            assert!(output.status.success(), "agents failed: {output:?}");
+            let overview = String::from_utf8(output.stdout).unwrap();
+            for command in [
+                "agents toolkit /tmp/d9-toolkit",
+                "agents skills /tmp/d9-skills",
+            ] {
+                assert!(
+                    overview.contains(&format!("\n{name} {command}\n")),
+                    "run as {name}, the overview should say `{name} {command}`:\n{overview}"
+                );
+            }
+        }
+    }
+
     fn unpack_skills() -> tempfile::TempDir {
         let bin = env!("CARGO_BIN_EXE_dial9-viewer");
         let dir = tempfile::tempdir().unwrap();

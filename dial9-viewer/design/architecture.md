@@ -83,7 +83,7 @@ Browser mode is single-file only; directory parsing, caching, and subprocess par
 
 The main process merges partial accumulators via constant-memory streaming merge: summing counts, keeping top-N findings, and feeding values into native histograms for exact percentiles.
 
-See `agents skill analysis` for the full return schema.
+See the `dial9-trace-analysis` skill for the full return schema.
 
 If any file fails to parse or analyze, the entire operation fails immediately rather than skipping the file. This is a known limitation; partial failure tolerance may be added in the future.
 

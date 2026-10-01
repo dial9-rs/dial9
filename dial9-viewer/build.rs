@@ -88,6 +88,9 @@ fn main() {
         "pub const HEADER: &str = {};\n\n",
         env_dir_include_str("OUT_DIR", "header.md")
     ));
+    code.push_str(&format!(
+        "pub const HEADER_BIN_PLACEHOLDER: &str = {HEADER_BIN_PLACEHOLDER:?};\n\n"
+    ));
 
     // Write stripped body files to OUT_DIR for the `skill` command
     for skill in &skills {
@@ -256,6 +259,11 @@ fn strip_frontmatter(content: &str) -> String {
     }
 }
 
+/// Stands for the binary name in the generated header. The CLI replaces it with
+/// the name it was run as, because the `dial9` and `dial9-viewer` binaries
+/// share it and a reader may have only one of them.
+const HEADER_BIN_PLACEHOLDER: &str = "{bin}";
+
 /// Generate the overview header from skill metadata.
 fn generate_header(skills: &[SkillInfo]) -> String {
     let mut out = String::from("# dial9 Trace Analysis Skills\n\n");
@@ -263,10 +271,14 @@ fn generate_header(skills: &[SkillInfo]) -> String {
     out.push_str("## Quick start\n\n");
     out.push_str("```bash\n");
     out.push_str("# Extract the JS analysis toolkit\n");
-    out.push_str("dial9-viewer agents toolkit /tmp/d9-toolkit\n");
+    out.push_str(&format!(
+        "{HEADER_BIN_PLACEHOLDER} agents toolkit /tmp/d9-toolkit\n"
+    ));
     out.push_str("node /tmp/d9-toolkit/analyze.js <trace.bin or directory>\n\n");
     out.push_str("# Unpack all skills as an Agent Skills directory\n");
-    out.push_str("dial9-viewer agents skills /tmp/d9-skills\n");
+    out.push_str(&format!(
+        "{HEADER_BIN_PLACEHOLDER} agents skills /tmp/d9-skills\n"
+    ));
     out.push_str("```\n\n");
     out.push_str("## Available skills\n\n");
     out.push_str("| Skill | Description |\n");
