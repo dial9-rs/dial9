@@ -71,6 +71,7 @@ impl CtimerSampler {
 }
 
 impl SamplerBackend for CtimerSampler {
+    #[cfg(feature = "cpu-profiling")]
     fn is_ctimer(&self) -> bool {
         true
     }

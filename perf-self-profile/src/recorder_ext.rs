@@ -1,8 +1,8 @@
 //! `.with_*` sugar for plugging this crate's profiling `Source`s into a
-//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. On
-//! a start failure or unsupported platform each method warns; the CPU and
-//! scheduler profilers then register a `StartFailed` placeholder, the others
-//! register nothing. Use `.source(CpuProfiler::start(cfg)?)` to propagate the
+//! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. The
+//! CPU and scheduler profilers warn on a start failure and register a
+//! `StartFailed` placeholder. The other methods register nothing on failure;
+//! see each method. Use `.source(CpuProfiler::start(cfg)?)` to propagate the
 //! failure instead.
 
 use dial9_core::buffer::BufferMode;
@@ -11,8 +11,20 @@ use dial9_core::recorder::RecorderBuilder;
 #[cfg(any(feature = "cpu-profiling", feature = "memory-profiling"))]
 use dial9_core::rate_limited;
 
-/// Registered in place of a profiling source `T` that failed to start, so a
-/// later check can tell "configured but failed" apart from "not configured".
+/// Registered in place of a profiling source `T` that failed to start, so
+/// [`Dial9Handle::with_source`](dial9_core::handle::Dial9Handle::with_source)
+/// can tell "configured but failed" apart from "not configured":
+///
+/// ```no_run
+/// # fn f(handle: dial9_core::handle::Dial9Handle) {
+/// use dial9_perf_self_profile::{CpuProfiler, StartFailed};
+///
+/// let error = handle.with_source(|f: &mut StartFailed<CpuProfiler>| f.message().to_string());
+/// if let Some(error) = error {
+///     eprintln!("CPU profiling failed to start: {error}");
+/// }
+/// # }
+/// ```
 ///
 /// Records nothing; it only reports `cpu.profile.start_error` or
 /// `sched.profile.start_error` as segment metadata.
@@ -303,8 +315,18 @@ mod start_failed_tests {
         let mut sched = StartFailed::<crate::SchedProfiler>::new(&error);
         let mut out = Vec::new();
         sched.segment_metadata(&mut out);
-        assert_eq!(out[0].0, "sched.profile.start_error");
-        assert_ne!(sched.name(), StartFailed::<CpuProfiler>::new(&error).name());
+        assert_eq!(
+            out,
+            [(
+                "sched.profile.start_error".to_string(),
+                "denied".to_string()
+            )]
+        );
+        assert_eq!(sched.name(), "sched_start_failed");
+        assert_eq!(
+            StartFailed::<CpuProfiler>::new(&error).name(),
+            "cpu_profile_start_failed"
+        );
     }
 
     /// Off Linux the profiler can't start, so the builder registers the

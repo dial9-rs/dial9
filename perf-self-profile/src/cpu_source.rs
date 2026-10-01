@@ -313,7 +313,7 @@ pub struct CpuProfiler {
     effective_backend: ActiveCpuBackend,
     /// Whether segment metadata has been emitted yet (emit-once).
     metadata_emitted: bool,
-    /// Samples drained since start, for liveness checks.
+    /// CPU samples from this process drained since start.
     samples_seen: u64,
 }
 
@@ -376,8 +376,8 @@ impl CpuProfiler {
         self.effective_backend
     }
 
-    /// CPU samples drained since start. Advances on the flush thread once per
-    /// flush cycle while recording; holds while paused.
+    /// CPU samples from this process drained since start. Updated on the flush
+    /// thread each flush cycle while recording; unchanged while paused.
     pub fn samples_seen(&self) -> u64 {
         self.samples_seen
     }

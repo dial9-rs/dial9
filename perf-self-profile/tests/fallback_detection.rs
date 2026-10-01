@@ -131,30 +131,6 @@ fn falls_back_to_ctimer_when_perf_event_open_blocked() {
     assert_eq!(libc::WEXITSTATUS(status), 0, "fallback did not trigger");
 }
 
-/// The `Auto` backend reports ctimer when perf is blocked: the path production
-/// takes, as opposed to forcing ctimer. Forked like the test above.
-#[cfg(feature = "cpu-profiling")]
-#[test]
-fn auto_backend_reports_ctimer_when_perf_event_open_blocked() {
-    use dial9_perf_self_profile::{ActiveCpuBackend, CpuProfiler, CpuProfilingConfig};
-
-    let pid = unsafe { libc::fork() };
-    assert!(pid >= 0, "fork failed");
-
-    if pid == 0 {
-        install_seccomp_blocking_perf_event_open();
-        let backend =
-            CpuProfiler::start(CpuProfilingConfig::default()).map(|p| p.effective_backend());
-        let ok = matches!(backend, Ok(ActiveCpuBackend::Ctimer));
-        unsafe { libc::_exit(!ok as i32) };
-    }
-
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-    assert!(libc::WIFEXITED(status), "child did not exit normally");
-    assert_eq!(libc::WEXITSTATUS(status), 0, "Auto did not report ctimer");
-}
-
 /// Run `child` in a forked process and assert it returned `true`.
 #[cfg(feature = "cpu-profiling")]
 fn in_fork(what: &str, child: impl FnOnce() -> bool) {
@@ -168,6 +144,20 @@ fn in_fork(what: &str, child: impl FnOnce() -> bool) {
     assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
     assert!(libc::WIFEXITED(status), "child did not exit normally");
     assert_eq!(libc::WEXITSTATUS(status), 0, "{what}");
+}
+
+/// The `Auto` backend reports ctimer when perf is blocked: the path production
+/// takes, as opposed to forcing ctimer.
+#[cfg(feature = "cpu-profiling")]
+#[test]
+fn auto_backend_reports_ctimer_when_perf_event_open_blocked() {
+    use dial9_perf_self_profile::{ActiveCpuBackend, CpuProfiler, CpuProfilingConfig};
+
+    in_fork("Auto did not report ctimer", || {
+        install_seccomp_blocking_perf_event_open();
+        CpuProfiler::start(CpuProfilingConfig::default())
+            .is_ok_and(|p| p.effective_backend() == ActiveCpuBackend::Ctimer)
+    });
 }
 
 /// Another profiler's ctimer doesn't make a perf profiler report ctimer.
