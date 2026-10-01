@@ -53,7 +53,6 @@ export interface DetailModel {
   onClearBand: () => void;
   onToggleFilter: (key: string, value: string) => void;
   onSetOverride: (id: string, value: boolean | undefined) => void;
-  onResetOverrides: () => void;
 }
 
 /** Adapt one span exemplar to the shared viewer-link module. */
@@ -261,7 +260,6 @@ export function renderDetail(detailPanel: HTMLElement, m: DetailModel): void {
     rawMode: m.rawMode,
     onToggleFilter: m.onToggleFilter,
     onSetOverride: m.onSetOverride,
-    onResetOverrides: m.onResetOverrides,
   };
 
   render(

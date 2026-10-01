@@ -182,11 +182,6 @@ function renderDetailNow(): void {
       saveOverrides(overrides);
       renderDetailNow();
     },
-    onResetOverrides: () => {
-      overrides = {};
-      saveOverrides(overrides);
-      renderDetailNow();
-    },
   });
 }
 

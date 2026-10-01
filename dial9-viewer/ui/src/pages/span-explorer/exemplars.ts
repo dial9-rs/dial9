@@ -2,8 +2,8 @@
 //
 // Columns adapt to whatever per-instance metadata the exemplars carry - a Host
 // column, a Composition column when at least one has composition data, and one
-// column PER attribute key present across the set. Any non-core column can be
-// hidden through the Columns menu, and uniform ones hide themselves.
+// column PER attribute key present across the set. Uniform columns hide
+// themselves; visible hideable columns expose a control in their header.
 //
 // A per-row Jump button deep-links to the viewer focused on that exact span;
 // the row itself is deliberately NOT clickable, so the attribute filter/copy
@@ -32,12 +32,19 @@ import {
   type VisibilityInput,
 } from "./columns.js";
 
-/** One exemplar-table column: header, cell, and its visibility inputs. */
-interface Column extends VisibilityInput<Exemplar> {
+/** The header-facing part of an exemplar-table column. */
+export interface ColumnHeader {
+  id: string;
   /** Header content; a template so `%ile` can carry its explanatory title. */
   th: TemplateResult | string;
-  /** Menu label; falls back to the id when absent. */
+  /** Accessible label; falls back to the id when absent. */
   label?: string;
+  /** false for permanent columns that cannot be hidden. */
+  hideable?: boolean;
+}
+
+/** One exemplar-table column: header, cell, and its visibility inputs. */
+interface Column extends ColumnHeader, VisibilityInput<Exemplar> {
   cell: (ex: Exemplar, index: number) => TemplateResult;
 }
 
@@ -56,19 +63,6 @@ export interface ExemplarTableCtx {
   rawMode: boolean;
   onToggleFilter: (key: string, value: string) => void;
   onSetOverride: (id: string, value: boolean | undefined) => void;
-  onResetOverrides: () => void;
-}
-
-/**
- * A coarse signature of an exemplar's composition (rounded per-category
- * percentages), used ONLY to decide whether the composition column is
- * degenerate. Two instances with effectively the same breakdown share a
- * signature; a missing composition yields "" so an all-missing column collapses.
- */
-export function compositionSignature(ex: Exemplar): string {
-  if (ex.composition == null) return "";
-  const comp = computeTimeComposition({ composition: ex.composition }, null);
-  return comp.categories.map((c) => Math.round(c.frac * 100)).join(",");
 }
 
 /** Copy text, flashing the button. Falls back to a prompt without clipboard. */
@@ -232,7 +226,7 @@ function buildColumns(exemplars: readonly Exemplar[], ctx: ExemplarTableCtx): Co
       id: "composition",
       th: "Time composition",
       label: "Time composition",
-      degenValue: compositionSignature,
+      hideable: false,
       cell: (ex) => html`<td>${compositionCell(ex)}</td>`,
     });
   }
@@ -251,58 +245,27 @@ function buildColumns(exemplars: readonly Exemplar[], ctx: ExemplarTableCtx): Co
   return columns;
 }
 
-/** The "Columns ▾" show/hide menu. */
-function columnMenu(
-  columns: readonly Column[],
-  exemplars: readonly Exemplar[],
-  ctx: ExemplarTableCtx,
+/** One table header with an adjacent hide action when the column permits it. */
+export function columnHeaderTemplate(
+  column: ColumnHeader,
+  onHide: (id: string) => void,
 ): TemplateResult {
-  const hideable = columns.filter((c) => c.hideable !== false);
-  const states = hideable.map((c) => ({ col: c, vis: colVisibility(c, exemplars, ctx.overrides) }));
-  const hiddenCount = states.filter((s) => s.vis.hidden).length;
-  const hasOverrides = hideable.some((c) => ctx.overrides[c.id] !== undefined);
-
-  const toggleMenu = (e: Event): void => {
-    const box = (e.currentTarget as HTMLElement).parentElement;
-    const menu = box?.querySelector<HTMLElement>(".col-menu-list");
-    if (!box || !menu) return;
-    e.stopPropagation();
-    const open = menu.style.display !== "none";
-    menu.style.display = open ? "none" : "block";
-    if (open) return;
-    const onDoc = (ev: MouseEvent): void => {
-      if (!box.contains(ev.target as Node)) {
-        menu.style.display = "none";
-        document.removeEventListener("click", onDoc);
-      }
-    };
-    setTimeout(() => document.addEventListener("click", onDoc), 0);
-  };
-
-  return html`<div class="col-menu">
-    <button type="button" class="col-menu-btn" @click=${toggleMenu}>
-      ${hiddenCount > 0 ? `Columns (${hiddenCount} hidden) ▾` : "Columns ▾"}
-    </button>
-    <div class="col-menu-list" style="display:none">
-      ${states.map(
-        ({ col, vis }) => html`<label class="col-menu-item">
-          <input
-            type="checkbox"
-            .checked=${!vis.hidden}
-            @change=${(e: Event) =>
-              ctx.onSetOverride(col.id, (e.target as HTMLInputElement).checked)}
-          />
-          ${col.label ?? col.id}
-          ${vis.auto ? html`<span class="col-menu-auto"> (auto-hidden)</span>` : nothing}
-        </label>`,
-      )}
-      ${hasOverrides
-        ? html`<button type="button" class="col-menu-reset" @click=${ctx.onResetOverrides}>
-            Reset to auto
-          </button>`
-        : nothing}
-    </div>
-  </div>`;
+  const label = column.label ?? column.id;
+  return html`<th>
+    <span class="column-heading"
+      >${column.th}${column.hideable === false
+        ? nothing
+        : html`<button
+            type="button"
+            class="column-hide"
+            title=${`Hide ${label}`}
+            aria-label=${`Hide ${label}`}
+            @click=${() => onHide(column.id)}
+          >
+            ✕</button
+          >`}</span
+    >
+  </th>`;
 }
 
 /** Inline discovery path for columns hidden by either auto-hide or user choice. */
@@ -355,20 +318,19 @@ export function exemplarsTemplate(
   const visible = columns.filter((c) => !colVisibility(c, exemplars, ctx.overrides).hidden);
   return html`<div class="exemplars">
     <div class="label">${label}</div>
-    <div class="column-controls">
-      ${columnMenu(columns, exemplars, ctx)}
-      ${moreColumnsTemplate(
-        hidden.map((column) => ({
-          id: column.id,
-          label: column.label ?? column.id,
-        })),
-        (id) => ctx.onSetOverride(id, true),
-      )}
-    </div>
+    ${moreColumnsTemplate(
+      hidden.map((column) => ({
+        id: column.id,
+        label: column.label ?? column.id,
+      })),
+      (id) => ctx.onSetOverride(id, true),
+    )}
     <table class="exemplar-table">
       <thead>
         <tr>
-          ${visible.map((c) => html`<th>${c.th}</th>`)}
+          ${visible.map((column) =>
+            columnHeaderTemplate(column, (id) => ctx.onSetOverride(id, false)),
+          )}
         </tr>
       </thead>
       <tbody>

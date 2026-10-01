@@ -1,7 +1,10 @@
 import { nothing } from "lit-html";
 import { describe, expect, it, vi } from "vitest";
 import { hiddenColumns } from "./columns.js";
-import { moreColumnsTemplate } from "./exemplars.js";
+import {
+  columnHeaderTemplate,
+  moreColumnsTemplate,
+} from "./exemplars.js";
 
 interface Row {
   host: string;
@@ -53,6 +56,12 @@ describe("Span Explorer hidden-column affordance", () => {
   const columns = [
     { id: "jump", label: "Jump", hideable: false },
     { id: "duration", label: "Duration" },
+    {
+      id: "composition",
+      label: "Time composition",
+      hideable: false,
+      degenValue: () => "same",
+    },
     { id: "host", label: "Host", degenValue: (row: Row) => row.host },
     {
       id: "attr:CacheHit",
@@ -68,6 +77,9 @@ describe("Span Explorer hidden-column affordance", () => {
     ]);
     expect(hiddenColumns(columns, rows, { duration: false }).map((column) => column.id))
       .toEqual(["duration", "host", "attr:CacheHit"]);
+    expect(
+      hiddenColumns(columns, rows, { composition: false }).map((column) => column.id),
+    ).not.toContain("composition");
   });
 
   it("renders hidden column names as actions that enable each column", () => {
@@ -95,5 +107,39 @@ describe("Span Explorer hidden-column affordance", () => {
 
   it("renders nothing when every column is visible", () => {
     expect(moreColumnsTemplate([], vi.fn())).toBe(nothing);
+  });
+
+  it("adds a hide action to hideable headers only", () => {
+    const onHide = vi.fn();
+    const hideable = splitTemplate(
+      columnHeaderTemplate(
+        { id: "attr:CacheHit", th: "CacheHit", label: "CacheHit" },
+        onHide,
+      ),
+    );
+
+    expect(hideable.leaves).toContain("CacheHit");
+    expect(hideable.strings.join("")).toContain("✕");
+    const actions = hideable.leaves.filter(
+      (value): value is () => void => typeof value === "function",
+    );
+    expect(actions).toHaveLength(1);
+    actions[0]!();
+    expect(onHide).toHaveBeenCalledWith("attr:CacheHit");
+
+    const permanent = splitTemplate(
+      columnHeaderTemplate(
+        {
+          id: "composition",
+          th: "Time composition",
+          label: "Time composition",
+          hideable: false,
+        },
+        onHide,
+      ),
+    );
+    expect(permanent.leaves).toContain("Time composition");
+    expect(permanent.strings.join("")).not.toContain("✕");
+    expect(permanent.leaves.filter((value) => typeof value === "function")).toHaveLength(0);
   });
 });
