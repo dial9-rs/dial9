@@ -195,7 +195,7 @@ Missing variables use defaults. Blank, invalid, or non-Unicode values emit a war
 
 `handle.smoke_tester()` builds a check you can run from a startup probe or a
 deploy gate. Build it once and keep it; the report says whether the handle
-reaches a live recorder:
+reaches a recorder that hasn't shut down or been paused:
 
 ```rust,no_run
 use dial9::Dial9HandleTokioExt;
