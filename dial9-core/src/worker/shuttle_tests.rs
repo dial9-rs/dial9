@@ -29,6 +29,10 @@
 //! `initialize()` never resolves, so the worker future can never complete
 //! on its own and `primitives::time::timeout`'s `Elapsed` branch is the
 //! only way the scenario ever returns.
+//!
+//! `shuttle_pipeline_state_races_shutdown` also drives
+//! `run_background_task_inner`, checking that the published worker state only
+//! moves forward and ends `Stopped`.
 
 use super::*;
 use crate::pipeline::ProcessError;
