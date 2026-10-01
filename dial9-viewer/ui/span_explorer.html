@@ -40,7 +40,7 @@
   .kind-tokio_poll { background: #3d2b1f; color: #ffa657; }
 
   /* Detail panel (histogram + composition + flamegraph links) */
-  .detail-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0 16px; }
+  .detail-panel { flex: 1; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; padding: 0 16px; }
   .detail-panel.empty { align-items: center; justify-content: center; color: #666; font-size: 0.9em; }
   .detail-header { padding: 10px 0 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
   .detail-header h2 { font-size: 1em; color: #e0e0e0; }
@@ -49,12 +49,31 @@
   /* Histogram */
   .histogram-wrap { flex-shrink: 0; padding: 6px 0; }
   .histogram-wrap svg { display: block; cursor: crosshair; }
+  .histogram-series-labels { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 16px;
+    max-width: 800px; min-height: 24px; font-size: 0.74em; color: #8b949e; }
+  .histogram-series-label { display: inline-flex; align-items: center; gap: 6px; }
+  .histogram-series-swatch { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+  .histogram-series-name { color: #e6edf3; font-weight: 600; }
+  .histogram-series-meta { color: #8b949e; }
+  .histogram-series-status { color: #8b949e; font-style: italic; }
+  .histogram-help { position: relative; margin-left: auto; }
+  .histogram-help summary { display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border: 1px solid #484f58; border-radius: 50%;
+    background: #161b22; color: #8b949e; font-size: 11px; font-style: italic;
+    font-weight: 700; cursor: pointer; list-style: none; }
+  .histogram-help summary::-webkit-details-marker { display: none; }
+  .histogram-help summary:hover, .histogram-help[open] summary { color: #c9d1d9; border-color: #79c0ff; }
+  .histogram-help summary:focus-visible { outline: 2px solid #79c0ff; outline-offset: 2px; }
+  .histogram-help-body { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5;
+    width: min(300px, calc(100vw - 40px)); padding: 9px 11px; border: 1px solid #30363d;
+    border-radius: 4px; background: #161b22; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    color: #c9d1d9; font-size: 12px; line-height: 1.4; font-style: normal; }
+  .histogram-empty-label { fill: #6e7681; font-size: 11px; font-style: italic; pointer-events: none; }
   .histogram-axis { position: relative; height: 1.2em; margin-top: 2px; font-size: 0.68em; color: #8a8aa0; }
-  .histogram-hint { font-size: 0.66em; color: #6a6a80; margin-top: 2px; }
   /* Percentile guide lines (P50/P90/P99/P99.9) over the duration histogram. */
-  .histogram-wrap svg .pctile-line { stroke: #f0f6fc; stroke-opacity: 0.55; stroke-width: 1;
-    stroke-dasharray: 2 2; pointer-events: none; }
-  .histogram-wrap svg .pctile-label { fill: #c9d1d9; font-size: 8px; font-weight: 600;
+  .histogram-wrap svg .pctile-line { stroke-opacity: 0.7; stroke-width: 1; pointer-events: none; }
+  .histogram-wrap svg .pctile-hit-target { stroke: transparent; stroke-width: 8; pointer-events: stroke; }
+  .histogram-wrap svg .pctile-label { font-size: 8px; font-weight: 600;
     paint-order: stroke; stroke: #0d1117; stroke-width: 2px; pointer-events: none; }
 
   /* Time composition bar */
@@ -117,8 +136,8 @@
   /* Inline time label shown only inside sufficiently wide mini-bar segments. */
   .exemplars .ex-comp-bar .seg-label { font-size: 9px; font-weight: 600; color: #fff; white-space: nowrap;
     padding: 0 2px; text-shadow: 0 0 2px rgba(0,0,0,0.75), 0 0 1px rgba(0,0,0,0.9); pointer-events: none; }
-  /* Attribute columns: one per attribute key. The value toggles a filter on
-     click; a small copy button copies the raw value. */
+  /* Attribute columns: one per attribute key. The value toggles a histogram
+     comparison on click; a small copy button copies the raw value. */
   .exemplars td.attr-cell { color: #adbac7; }
   .exemplars .attr-val { cursor: pointer; border-bottom: 1px dotted #30363d; }
   .exemplars .attr-val:hover { color: #79c0ff; border-bottom-color: #388bfd; }
@@ -130,7 +149,7 @@
   .exemplars .attr-copy:hover { color: #79c0ff; }
   .exemplars .attr-copy.copied { color: #3fb950; }
 
-  /* Active attribute-filter bar. */
+  /* Active histogram-comparison bar. */
   .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
     padding: 6px 16px; background: #0d1117; border-bottom: 1px solid #21262d; font-size: 0.8em; }
   .filter-bar .fb-label { color: #8b949e; font-weight: 600; }
@@ -139,6 +158,10 @@
   .filter-bar .fb-chip b { color: #79c0ff; font-weight: 600; }
   .filter-bar .fb-chip .fb-x { cursor: pointer; color: #8b949e; font-weight: 700; }
   .filter-bar .fb-chip .fb-x:hover { color: #f85149; }
+  .filter-bar .fb-note { color: #6e7681; }
+  .filter-bar .fb-status { display: inline-flex; align-items: center; gap: 4px; color: #8b949e; }
+  .filter-bar .fb-status .spinner { width: 0.8em; height: 0.8em; border-width: 1px; }
+  .filter-bar .fb-status.error-text { color: #f85149; }
   .filter-bar .fb-clear { cursor: pointer; color: #8b949e; text-decoration: underline; }
   .filter-bar .fb-clear:hover { color: #adbac7; }
   /* Clickable max value in the detail header */
@@ -176,7 +199,7 @@
   <button class="secondary" id="btn-copylink">Copy link</button>
 </div>
 
-<!-- Active attribute filters (populated by the module); hidden when none. -->
+<!-- Active histogram comparison (populated by the module); hidden when none. -->
 <div class="filter-bar" id="filter-bar" style="display:none"></div>
 
 <div class="main" id="main">
