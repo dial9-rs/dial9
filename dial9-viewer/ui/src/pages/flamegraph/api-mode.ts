@@ -19,6 +19,7 @@ import {
   nsToPickerUtc,
   openSse,
   pageTitle,
+  hostCountSuffix,
   pickerUtcToNs,
   readPlainSourceScope,
   refinementWorkDepth,
@@ -134,8 +135,9 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // (the box's service; hosts live alongside facetState above).
   const dataDir = params.get("data_dir");
   const scopeService = params.get("service");
-  // Tab title from the URL scope until the backend's resolved service arrives
-  // (renderScopeHeader).
+  // Tab title from the URL scope until the backend's resolved service and
+  // host count arrive (renderScopeHeader). No host count yet: the URL's
+  // `host` params can differ from the hosts that actually match.
   document.title = pageTitle("Flamegraph", scopeService);
   const scopeBucket = source.bucket || params.get("bucket");
   const scopePrefix = params.get("prefix");
@@ -275,7 +277,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   // Render the scope summary in the page header from the backend's resolved
   // scope (service, host(s), time range), so the header reflects backend truth
   // rather than the URL params the client guessed at.
-  function renderScopeHeader(meta: FlamegraphMetadata): void {
+  function renderScopeHeader(meta: FlamegraphMetadata, coverage: Coverage | null | undefined): void {
     const bits: string[] = [];
     // `host_names` is not part of the current wire contract (the server sends
     // `hosts` as a count); read tolerantly for older/other servers, so with the
@@ -289,7 +291,12 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       bits.push(utcRange(meta.min_timestamp_ns, meta.max_timestamp_ns));
     }
     const svc = meta.service || "aggregated";
-    document.title = pageTitle("Flamegraph", meta.service);
+    // Tab host count: the scope's breadth (`hosts_matched`), fixed for the
+    // stream. Omitted without a coverage block: `meta.hosts` only counts hosts
+    // folded SO FAR (it climbs 1 -> 2 -> 3 as snapshots arrive), so it would
+    // understate the scope.
+    const hostCount = coverage?.hosts_matched ?? null;
+    document.title = pageTitle("Flamegraph" + hostCountSuffix(hostCount), meta.service);
     titleEl.textContent = bits.length
       ? `Flamegraph \u2014 ${svc} \u00b7 ${bits.join(" \u00b7 ")}`
       : `Flamegraph \u2014 ${svc}`;
@@ -363,7 +370,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   function renderEvent(resp: FlamegraphResponse): void {
     gotEvent = true;
     const meta = resp.metadata;
-    renderScopeHeader(meta);
+    renderScopeHeader(meta, resp.coverage);
     renderFacets(meta);
 
     // Poll-duration minimap (#663). Guarded so a minimap failure cannot strand

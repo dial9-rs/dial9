@@ -2,7 +2,13 @@
 // unknown-key handling.
 
 import { describe, expect, it } from "vitest";
-import { diffServiceLabel, pageTitle, traceTitleParams } from "./title.js";
+import {
+  countTraceHosts,
+  diffServiceLabel,
+  hostCountSuffix,
+  pageTitle,
+  traceTitleParams,
+} from "./title.js";
 
 describe("diffServiceLabel", () => {
   it("collapses matching sides to one service", () => {
@@ -95,5 +101,49 @@ describe("traceTitleParams", () => {
     const p = traceTitleParams([]);
     expect([...p.keys()]).toEqual(["segs"]);
     expect(p.get("segs")).toBe("0");
+  });
+});
+
+describe("hostCountSuffix", () => {
+  it("formats a singular or plural host count", () => {
+    expect(hostCountSuffix(1)).toBe(" @ (1 host)");
+    expect(hostCountSuffix(250)).toBe(" @ (250 hosts)");
+  });
+
+  it("is empty for an unknown or non-positive count", () => {
+    expect(hostCountSuffix(null)).toBe("");
+    expect(hostCountSuffix(undefined)).toBe("");
+    expect(hostCountSuffix(0)).toBe("");
+  });
+
+  it("composes with pageTitle", () => {
+    expect(pageTitle("Flamegraph" + hostCountSuffix(5), "metrics")).toBe(
+      "metrics | Flamegraph @ (5 hosts)",
+    );
+  });
+});
+
+describe("countTraceHosts", () => {
+  const objectUrl = (key: string) =>
+    "/api/object?bucket=b&key=" + encodeURIComponent(key);
+
+  it("counts distinct hosts from /api/object key params", () => {
+    expect(
+      countTraceHosts([
+        objectUrl(KEY_A_HOST1),
+        objectUrl(KEY_B_HOST1),
+        objectUrl(KEY_C_HOST2),
+      ]),
+    ).toBe(2);
+  });
+
+  it("reads the key from a plain path when there is no key param", () => {
+    expect(countTraceHosts(["/" + KEY_A_HOST1, KEY_C_HOST2])).toBe(2);
+  });
+
+  it("returns null when any key is unrecognized, or there are no URLs", () => {
+    expect(countTraceHosts(["/demo-trace.bin", objectUrl("x/y.bin")])).toBeNull();
+    expect(countTraceHosts([objectUrl(KEY_A_HOST1), "/demo-trace.bin"])).toBeNull();
+    expect(countTraceHosts([])).toBeNull();
   });
 });
