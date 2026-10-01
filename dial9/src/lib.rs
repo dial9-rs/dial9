@@ -98,8 +98,6 @@ pub use dial9_tokio_telemetry::telemetry::{
     TaskDumpConfig, TokioAttachOptions, TokioHooks,
 };
 
-/// Pre-flight check that telemetry is live: start one with
-/// `handle.smoke_tester()` ([`Dial9HandleTokioExt::smoke_tester`]).
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::telemetry::smoke_test;
 
