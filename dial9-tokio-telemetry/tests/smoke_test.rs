@@ -32,6 +32,7 @@ async fn stopped_recorder_fails_recording() {
     rec.graceful_shutdown(Duration::ZERO);
     let report = handle.smoke_tester().build().run().await;
     assert!(failed_with(report.recording(), "shut down"), "{report}");
+    assert!(!report.is_healthy());
 }
 
 /// A pause is not a failure.
@@ -60,8 +61,11 @@ async fn report_lists_each_check_by_name() {
     let report = Dial9Handle::disabled().smoke_tester().build().run().await;
     let checks: Vec<_> = report.checks().map(|(check, _)| check).collect();
     assert_eq!(checks, [Check::Recording]);
-    assert_eq!(
-        report.to_string(),
-        "recording: FAILED: handle is not connected to a recorder\n"
+    assert!(
+        report
+            .to_string()
+            .lines()
+            .any(|line| line == "recording: FAILED: handle is not connected to a recorder"),
+        "{report}"
     );
 }

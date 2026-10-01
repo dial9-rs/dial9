@@ -100,7 +100,8 @@ pub struct SmokeTestReport {
 }
 
 impl SmokeTestReport {
-    /// Whether the handle is connected to a live, unpaused recorder.
+    /// Whether the handle is connected to a recorder that hasn't shut down
+    /// and isn't paused. Doesn't check that the recorder's threads are alive.
     pub fn recording(&self) -> &CheckStatus {
         &self.recording
     }
@@ -168,7 +169,7 @@ const _: fn(&'static SmokeTester) = |t| {
 };
 
 impl SmokeTester {
-    /// Run every check.
+    /// Run every check. Works on any Tokio runtime.
     pub async fn run(&self) -> SmokeTestReport {
         SmokeTestReport {
             recording: check_recording(&self.handle),
