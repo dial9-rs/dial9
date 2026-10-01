@@ -161,6 +161,24 @@ mod tests {
     }
 
     #[test]
+    fn panicking_thread_start_hook_is_stopped() {
+        let rec = recorder(MemoryBuffer::new(1 << 20).unwrap())
+            .processors(vec![Box::new(Stage {
+                name: "Stage",
+                init: Init::Ok,
+            }) as Box<dyn SegmentProcessor>])
+            .on_recording_thread_start(|| {
+                if std::thread::current().name() == Some("dial9-worker") {
+                    panic!("worker thread hook");
+                }
+                || {}
+            })
+            .build();
+        assert_eq!(wait_for(&rec, WorkerState::Stopped), WorkerState::Stopped);
+        rec.graceful_shutdown(Duration::from_secs(5));
+    }
+
+    #[test]
     fn no_pipeline_and_disconnected_have_no_status() {
         let rec = recorder(MemoryBuffer::new(1 << 20).unwrap()).build();
         assert!(rec.handle().pipeline_status().is_none());
