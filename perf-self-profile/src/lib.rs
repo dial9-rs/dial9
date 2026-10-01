@@ -166,6 +166,8 @@ pub use cpu_source::{
     feature = "linux-socket"
 ))]
 pub use recorder_ext::RecorderPerfExt;
+#[cfg(feature = "cpu-profiling")]
+pub use recorder_ext::StartFailed;
 
 #[cfg(all(feature = "process-resource", unix))]
 pub use process_resource::ProcessResourceUsageSource;
